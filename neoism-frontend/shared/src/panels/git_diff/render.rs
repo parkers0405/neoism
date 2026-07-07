@@ -650,7 +650,13 @@ impl GitDiffPanel {
         let stats_right_edge = checkbox_x - 8.0 * s;
 
         for absolute_ix in start..end {
-            let vr = &visual_rows[absolute_ix];
+            // `.get()` rather than a raw index: `start..end` is derived
+            // from spring-scroll math that can momentarily run a row past
+            // the list on an overshoot, and an out-of-bounds index would
+            // panic the whole app instead of just skipping a phantom row.
+            let Some(vr) = visual_rows.get(absolute_ix) else {
+                continue;
+            };
             let row_y = files_body_inner_y
                 + (absolute_ix as f32 * row_h - self.file_scroll)
                 + scroll_offset;
@@ -732,7 +738,12 @@ impl GitDiffPanel {
                 }
                 VisualRowKind::File { file_index } => {
                     let file_index = *file_index;
-                    let f = &files[file_index];
+                    // Defensive `.get()`: the visual rows are rebuilt from
+                    // `files` so the index should always be valid, but a
+                    // raw index would turn any future desync into a panic.
+                    let Some(f) = files.get(file_index) else {
+                        continue;
+                    };
                     self.file_row_rects.push((
                         file_index,
                         Rect {

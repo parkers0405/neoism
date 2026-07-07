@@ -273,13 +273,6 @@ pub fn vim_apply_theme_command(name: &str) -> String {
     )
 }
 
-/// `/`-palette: snapshot the pre-search view so a cancel (Esc) can
-/// restore the cursor + scroll exactly where the user opened `/`.
-/// Fired the instant the search palette opens, before any keystroke.
-pub fn vim_search_begin_command() -> String {
-    String::from("lua pcall(function() require('rio.search').begin() end)")
-}
-
 /// `/`-palette: ask the lua side to enumerate matches for the given
 /// query in the current buffer. Lua replies via `rio_search_matches`.
 pub fn vim_search_query_command(query: &str) -> String {

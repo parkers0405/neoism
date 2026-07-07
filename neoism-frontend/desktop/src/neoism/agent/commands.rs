@@ -19,6 +19,7 @@ use super::pane::{
     NeoismAgentMode, NeoismAgentNoticeLevel, NeoismAgentPane, NeoismAgentStreamingState,
 };
 use super::picker::NeoismAgentPickerOption;
+use super::side_panel::SessionGoal;
 
 impl NeoismAgentPane {
     pub(super) fn execute_slash_text(&mut self, text: &str) {
@@ -145,7 +146,10 @@ impl NeoismAgentPane {
             &format!("/session/{session_id}/goal"),
             Some(&body),
         ) {
-            Ok(_) => self.system_message("Goal", format!("goal set: {text}")),
+            Ok(value) => {
+                self.apply_goal_response(value.as_ref());
+                self.system_message("Goal", format!("goal set: {text}"));
+            }
             Err(error) => self.system_message("Goal", error),
         }
     }
@@ -161,9 +165,33 @@ impl NeoismAgentPane {
             &format!("/session/{session_id}/goal"),
             None,
         ) {
-            Ok(_) => self.system_message("Goal", "goal cleared"),
+            Ok(value) => {
+                self.apply_goal_response(value.as_ref());
+                self.system_message("Goal", "goal cleared");
+            }
             Err(error) => self.system_message("Goal", error),
         }
+    }
+
+    /// Reflect a `/goal` mutation (set / clear / pause / resume) in the side
+    /// panel immediately, instead of waiting for the next incidental
+    /// `SESSION_UPDATED`. The POST/DELETE `/goal` response is authoritative —
+    /// `{ "goal": <goal|null> }` — so a present goal applies with its own
+    /// monotonic `updated` version, and a null goal force-clears the section.
+    /// A refetch is invalidated afterward so any backend-canonical detail (a
+    /// research summary, a normalized status) still lands correctly.
+    fn apply_goal_response(&mut self, value: Option<&Value>) {
+        let goal = value
+            .and_then(|value| value.get("goal"))
+            .and_then(SessionGoal::from_json);
+        match goal {
+            Some(goal) => {
+                let version = goal.updated;
+                self.side_panel.set_session_goal(Some(goal), version);
+            }
+            None => self.side_panel.clear_session_goal_local(),
+        }
+        self.side_panel.invalidate_goal_refresh();
     }
 
     fn set_goal_paused(&mut self, paused: bool) {
@@ -203,14 +231,17 @@ impl NeoismAgentPane {
             &format!("/session/{session_id}/goal"),
             Some(&body),
         ) {
-            Ok(_) => self.system_message(
-                "Goal",
-                if paused {
-                    "goal paused"
-                } else {
-                    "goal resumed"
-                },
-            ),
+            Ok(value) => {
+                self.apply_goal_response(value.as_ref());
+                self.system_message(
+                    "Goal",
+                    if paused {
+                        "goal paused"
+                    } else {
+                        "goal resumed"
+                    },
+                );
+            }
             Err(error) => self.system_message("Goal", error),
         }
     }
@@ -348,7 +379,18 @@ impl NeoismAgentPane {
     /// prompt opens a session in the new directory via `ensure_session`.
     pub(super) fn apply_directory(&mut self, value: String) {
         self.close_picker();
-        let next = (!value.trim().is_empty()).then_some(value);
+        // An empty value is the picker's "no match"/"no subdirectories"
+        // placeholder, not a real target — committing it must not blank the
+        // working directory. Only a non-empty, existing directory re-scopes;
+        // a typed path that isn't a real dir is ignored rather than applied.
+        if value.trim().is_empty() {
+            return;
+        }
+        if !std::path::Path::new(&value).is_dir() {
+            self.system_message("Directory", format!("not a directory: {value}"));
+            return;
+        }
+        let next = Some(value);
         if self.directory == next {
             return;
         }

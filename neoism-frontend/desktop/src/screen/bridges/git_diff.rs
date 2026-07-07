@@ -181,6 +181,18 @@ impl Screen<'_> {
                 self.renderer.git_diff_panel.commit();
                 true
             }
+            // Ctrl+D / Ctrl+U — vim half-page jumps over the file list.
+            // Consuming them here is what keeps Ctrl+D from falling
+            // through to the terminal behind the panel as an EOF (`^D`),
+            // which closes the shell and takes the window down with it.
+            Key::Character(s) if ctrl && s.as_str() == "d" => {
+                self.renderer.git_diff_panel.select_half_page_down();
+                true
+            }
+            Key::Character(s) if ctrl && s.as_str() == "u" => {
+                self.renderer.git_diff_panel.select_half_page_up();
+                true
+            }
             // Branch section: Enter / Space open the branch dropdown.
             Key::Named(NamedKey::Enter) if branch_section => {
                 self.renderer.git_diff_panel.toggle_branch_menu();
@@ -193,10 +205,12 @@ impl Screen<'_> {
             // Files section: Space toggles staging on the selected file;
             // `c` jumps to the commit box.
             Key::Named(NamedKey::Space) if plain => {
+                self.renderer.git_diff_panel.clear_pending();
                 self.renderer.git_diff_panel.toggle_stage_selected();
                 true
             }
             Key::Character(s) if plain && s.as_str() == "c" => {
+                self.renderer.git_diff_panel.clear_pending();
                 self.renderer.git_diff_panel.focus_commit_box(true);
                 true
             }
@@ -218,25 +232,59 @@ impl Screen<'_> {
                 self.renderer.git_diff_panel.scroll_diff_keys(false);
                 true
             }
+            // Files section vim navigation. A numeric count prefix
+            // (`5j`, `12G`) accumulates; `gg` / `$` / `G` jump to the
+            // first / last file; `<count>G` jumps to that file.
+            Key::Character(s)
+                if plain
+                    && !diff_section
+                    && !s.is_empty()
+                    && s.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                for c in s.chars() {
+                    if let Some(d) = c.to_digit(10) {
+                        self.renderer.git_diff_panel.push_count_digit(d);
+                    }
+                }
+                true
+            }
+            Key::Character(s) if plain && !diff_section && s.as_str() == "g" => {
+                if self.renderer.git_diff_panel.note_g() {
+                    self.renderer.git_diff_panel.select_first_file();
+                }
+                true
+            }
+            Key::Character(s) if plain && !diff_section && s.as_str() == "G" => {
+                match self.renderer.git_diff_panel.pending_count() {
+                    Some(n) => self.renderer.git_diff_panel.goto_file(n),
+                    None => self.renderer.git_diff_panel.select_last_file(),
+                }
+                true
+            }
+            Key::Character(s) if plain && !diff_section && s.as_str() == "$" => {
+                self.renderer.git_diff_panel.select_last_file();
+                true
+            }
             // Files section (default): ↑/↓ + j/k move the file selection,
             // scrolling the list to keep the selection visible.
             Key::Named(NamedKey::ArrowDown) if plain => {
-                self.renderer.git_diff_panel.select_next();
+                self.git_diff_panel_move(true);
                 true
             }
             Key::Named(NamedKey::ArrowUp) if plain => {
-                self.renderer.git_diff_panel.select_prev();
+                self.git_diff_panel_move(false);
                 true
             }
             Key::Character(s) if plain && s.as_str() == "j" => {
-                self.renderer.git_diff_panel.select_next();
+                self.git_diff_panel_move(true);
                 true
             }
             Key::Character(s) if plain && s.as_str() == "k" => {
-                self.renderer.git_diff_panel.select_prev();
+                self.git_diff_panel_move(false);
                 true
             }
             Key::Named(NamedKey::Enter) => {
+                self.renderer.git_diff_panel.clear_pending();
                 // When Alt+Right parked focus on the checkbox column,
                 // Enter toggles staging on the selected file. Otherwise
                 // Enter activates the file in the editor.
@@ -264,6 +312,31 @@ impl Screen<'_> {
             // shortcuts and chrome focus navigation.
             Key::Character(_) if plain => true,
             _ => false,
+        }
+    }
+
+    /// Move the git-panel file selection one motion (`j`/`k`/arrows),
+    /// honouring a pending vim count (`5j` steps five files, clamped).
+    /// A plain step keeps the existing edge behaviour (rolling onto the
+    /// diff card past the last/first file).
+    fn git_diff_panel_move(&mut self, down: bool) {
+        match self.renderer.git_diff_panel.pending_count() {
+            Some(_) => {
+                let n = self.renderer.git_diff_panel.take_count();
+                if down {
+                    self.renderer.git_diff_panel.select_next_by(n);
+                } else {
+                    self.renderer.git_diff_panel.select_prev_by(n);
+                }
+            }
+            None => {
+                self.renderer.git_diff_panel.take_count();
+                if down {
+                    self.renderer.git_diff_panel.select_next();
+                } else {
+                    self.renderer.git_diff_panel.select_prev();
+                }
+            }
         }
     }
 

@@ -1,28 +1,31 @@
-//! Incremental in-buffer `/` search for the markdown pane.
+//! Native in-buffer `/` search for the markdown pane, sourcing the
+//! **shared command-palette Search modal** (identical UI to the code
+//! editor's `/`).
 //!
-//! The nvim-backed code editor gets its `/` incsearch from the managed
-//! nvim (`rio.search` lua). Markdown panes run neoism's *own* vim engine
-//! and renderer, so this is the native equivalent: opening `/` snapshots
-//! the view, each keystroke re-scans the buffer and jumps the cursor to
-//! the nearest match (wrapping, like nvim), every occurrence lights up in
-//! the renderer, Enter commits the pattern to the `n`/`N` engine, and Esc
-//! restores the pre-search cursor + scroll.
+//! The nvim-backed code editor answers the palette's Search mode from the
+//! managed nvim (`rio.search` lua). Markdown panes run neoism's own vim
+//! engine, so the host drives the *same* palette modal from here instead:
 //!
-//! The transient input lives in [`VimState::incsearch`] so no `MarkdownPane`
-//! constructor has to change; the committed pattern still lands in
-//! [`VimState::search`] where `n`/`N` already read it.
+//! - `search_begin` snapshots the pre-search view (Esc restores it).
+//! - `search_scan` returns every match as `(lnum, col, text)` so the host
+//!   can populate the palette's `buffer_matches` + `[cur/total]` count,
+//!   ordered nearest-first so the auto-selected row jumps forward from the
+//!   cursor (mirrors the lua `rotate_to_nearest`).
+//! - `search_preview` jumps the cursor to the selected match (highlighted
+//!   in the buffer behind the modal); `search_commit` lands it and hands
+//!   the pattern to the `n`/`N` engine; `search_cancel` restores.
+//!
+//! Transient state lives in [`VimState::incsearch`] so no `MarkdownPane`
+//! constructor changes; the committed pattern lands in [`VimState::search`]
+//! where `n`/`N` already read it.
 
 use super::*;
 
 impl MarkdownPane {
-    /// `true` while the `/` (or `?`) search prompt is capturing input.
+    /// `true` while a `/` search session is live (palette open, matches
+    /// highlighted in the buffer behind it).
     pub fn search_active(&self) -> bool {
         self.vim.incsearch.is_some()
-    }
-
-    /// The pattern typed so far, if the prompt is open.
-    pub fn search_query(&self) -> Option<&str> {
-        self.vim.incsearch.as_ref().map(|s| s.query.as_str())
     }
 
     /// Whether the open session searches backward (`?`).
@@ -34,29 +37,10 @@ impl MarkdownPane {
             .unwrap_or(false)
     }
 
-    /// The cmdline label drawn at the bottom of the pane (`/pattern`).
-    pub fn search_prompt(&self) -> Option<String> {
-        let s = self.vim.incsearch.as_ref()?;
-        let sigil = if s.reverse { '?' } else { '/' };
-        Some(format!("{sigil}{}", s.query))
-    }
-
-    /// `(current, total)` for the `[cur/total]` count. `current` is
-    /// 1-based; `(0, total)` when the pattern matches nothing yet.
-    pub fn search_count(&self) -> Option<(usize, usize)> {
-        let s = self.vim.incsearch.as_ref()?;
-        let total = s.matches.len();
-        let cur = if total == 0 || s.current == usize::MAX {
-            0
-        } else {
-            s.current.min(total - 1) + 1
-        };
-        Some((cur, total))
-    }
-
-    /// Open the `/` (forward) or `?` (backward) incremental search,
-    /// snapshotting the current view so a cancel restores it.
-    pub fn search_open(&mut self, reverse: bool) {
+    /// Open a `/` (forward) or `?` (backward) session, snapshotting the
+    /// current view so a cancel restores it. The palette owns the query
+    /// input; this only tracks the buffer-side origin + highlight state.
+    pub fn search_begin(&mut self, reverse: bool) {
         self.vim.clear_pending();
         self.vim.incsearch = Some(MarkdownIncSearch {
             query: String::new(),
@@ -70,53 +54,130 @@ impl MarkdownPane {
         });
     }
 
-    /// Append a typed character to the pattern and re-run the search.
-    pub fn search_push_char(&mut self, ch: char) {
+    /// Re-scan the buffer for `query` and return every match as
+    /// `(lnum, col, text)` (1-based line/col, nearest-first) for the
+    /// palette's `buffer_matches`. Also records the match positions for
+    /// the in-buffer highlight.
+    pub fn search_scan(&mut self, query: &str) -> Vec<(u64, u64, String)> {
+        if self.vim.incsearch.is_none() {
+            self.search_begin(false);
+        }
+        let (oline, ocol, reverse) = self
+            .vim
+            .incsearch
+            .as_ref()
+            .map(|s| (s.origin_line, s.origin_col, s.reverse))
+            .unwrap_or((self.cursor_line, self.cursor_col, false));
+
+        // Every non-overlapping occurrence, case-sensitive, file order —
+        // consistent with the `*`/`n` engine. `match_indices` keeps byte
+        // offsets on char boundaries.
+        let mut matches: Vec<(usize, usize)> = Vec::new();
+        if !query.is_empty() {
+            'outer: for (li, line) in self.lines.iter().enumerate() {
+                for (col, _) in line.match_indices(query) {
+                    matches.push((li, col));
+                    if matches.len() >= 5000 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        // Rotate so the nearest match (at/after the cursor, or at/before
+        // for `?`) is first — the palette auto-selects row 0, giving the
+        // same forward-jump feel as nvim `/`.
+        if matches.len() > 1 {
+            let pivot = if reverse {
+                nearest_before(&matches, oline, ocol)
+            } else {
+                nearest_after(&matches, oline, ocol)
+            };
+            matches.rotate_left(pivot);
+        }
+
+        let out: Vec<(u64, u64, String)> = matches
+            .iter()
+            .map(|(li, col)| {
+                let text = self
+                    .lines
+                    .get(*li)
+                    .map(|line| display_search_line(line))
+                    .unwrap_or_default();
+                ((*li as u64) + 1, (*col as u64) + 1, text)
+            })
+            .collect();
+
         if let Some(s) = self.vim.incsearch.as_mut() {
-            s.query.push(ch);
-        } else {
-            return;
+            s.query = query.to_string();
+            s.matches = matches;
+            s.current = usize::MAX;
         }
-        self.search_recompute_and_focus();
+        // Emptying the pattern returns the cursor to where the search
+        // started (nvim incsearch behaviour); the scroll stays put.
+        if query.is_empty() {
+            if let Some((line, col)) = self
+                .vim
+                .incsearch
+                .as_ref()
+                .map(|s| (s.origin_line, s.origin_col))
+            {
+                let line = line.min(self.lines.len().saturating_sub(1));
+                self.cursor_line = line;
+                self.cursor_col = col.min(self.lines.get(line).map(String::len).unwrap_or(0));
+                self.follow_cursor = true;
+            }
+        }
+        out
     }
 
-    /// Backspace one character. Emptying the pattern returns the cursor
-    /// to the origin (nvim incsearch behaviour).
-    pub fn search_backspace(&mut self) {
-        let emptied = match self.vim.incsearch.as_mut() {
-            Some(s) => {
-                s.query.pop();
-                s.query.is_empty()
-            }
-            None => return,
-        };
-        if emptied {
-            if let Some(s) = self.vim.incsearch.as_mut() {
-                s.matches.clear();
-                s.current = usize::MAX;
-            }
-            self.search_restore_origin_cursor();
-        } else {
-            self.search_recompute_and_focus();
+    /// Preview the palette-selected match: jump the cursor to it and mark
+    /// it the focused (brighter) highlight. `lnum`/`col` are 1-based, as
+    /// stored in the palette's `buffer_matches`.
+    pub fn search_preview(&mut self, lnum: u64, col: u64) {
+        let line = lnum.saturating_sub(1) as usize;
+        let col0 = col.saturating_sub(1) as usize;
+        if let Some(s) = self.vim.incsearch.as_mut() {
+            s.current = s
+                .matches
+                .iter()
+                .position(|(l, c)| *l == line && *c == col0)
+                .unwrap_or(usize::MAX);
         }
+        let line = line.min(self.lines.len().saturating_sub(1));
+        let col0 = col0.min(self.lines.get(line).map(String::len).unwrap_or(0));
+        self.cursor_line = line;
+        self.cursor_col = col0;
+        self.follow_cursor = true;
     }
 
-    /// Enter: keep the cursor on the focused match, hand the pattern to
-    /// the `n`/`N` engine, and close the prompt.
-    pub fn search_commit(&mut self) {
-        let Some(s) = self.vim.incsearch.take() else {
-            return;
-        };
-        if !s.query.is_empty() && !s.matches.is_empty() {
+    /// Enter: land the cursor on `(lnum, col)`, hand the pattern to the
+    /// `n`/`N` engine, and end the session (highlight clears; `n`/`N`
+    /// keep working off the committed pattern).
+    pub fn search_commit(&mut self, lnum: u64, col: u64) {
+        let (query, reverse) = self
+            .vim
+            .incsearch
+            .as_ref()
+            .map(|s| (s.query.clone(), s.reverse))
+            .unwrap_or_default();
+        let line =
+            (lnum.saturating_sub(1) as usize).min(self.lines.len().saturating_sub(1));
+        let col0 = (col.saturating_sub(1) as usize)
+            .min(self.lines.get(line).map(String::len).unwrap_or(0));
+        self.cursor_line = line;
+        self.cursor_col = col0;
+        self.follow_cursor = true;
+        if !query.is_empty() {
             self.vim.search = Some(VimSearch {
-                pattern: s.query,
-                forward: !s.reverse,
+                pattern: query,
+                forward: !reverse,
                 whole_word: false,
             });
         }
+        self.vim.incsearch = None;
     }
 
-    /// Esc: restore the pre-search cursor + scroll and close the prompt.
+    /// Esc: restore the pre-search cursor + scroll and end the session.
     pub fn search_cancel(&mut self) {
         if self.vim.incsearch.is_none() {
             return;
@@ -125,9 +186,9 @@ impl MarkdownPane {
         self.vim.incsearch = None;
     }
 
-    /// Jump to the next/prev committed match (`n`/`N`). Mirrors the
-    /// nvim-editor `n`/`N`; used by the web mini-handler, which does not
-    /// route through the full `VimAction` engine.
+    /// Jump to the next/prev committed match (`n`/`N`). Used by the web
+    /// mini-handler, which doesn't route through the full `VimAction`
+    /// engine.
     pub fn search_repeat(&mut self, reverse: bool) -> bool {
         let Some(search) = self.vim.search.clone() else {
             return false;
@@ -151,8 +212,9 @@ impl MarkdownPane {
     }
 
     /// Match ranges on `line_ix` for the renderer: `(start_byte, end_byte,
-    /// is_current)`. The focused match reports `true` so it can paint
-    /// brighter (the current-match accent vs. the dimmer all-match wash).
+    /// is_current)`. The focused (selected) match reports `true` so it
+    /// paints brighter (current-match accent vs. the dimmer all-match
+    /// wash) — the same split nvim draws behind the palette.
     pub fn search_matches_for_line(&self, line_ix: usize) -> Vec<(usize, usize, bool)> {
         let Some(s) = self.vim.incsearch.as_ref() else {
             return Vec::new();
@@ -167,19 +229,6 @@ impl MarkdownPane {
             .filter(|(_, (li, _))| *li == line_ix)
             .map(|(ix, (_, col))| (*col, col + qlen, ix == s.current))
             .collect()
-    }
-
-    fn search_restore_origin_cursor(&mut self) {
-        let Some(s) = self.vim.incsearch.as_ref() else {
-            return;
-        };
-        let line = s.origin_line.min(self.lines.len().saturating_sub(1));
-        let col = s
-            .origin_col
-            .min(self.lines.get(line).map(String::len).unwrap_or(0));
-        self.cursor_line = line;
-        self.cursor_col = col;
-        self.follow_cursor = true;
     }
 
     fn search_restore_origin_view(&mut self) {
@@ -200,56 +249,22 @@ impl MarkdownPane {
         // the scroll somewhere else this frame.
         self.follow_cursor = false;
     }
+}
 
-    fn search_recompute_and_focus(&mut self) {
-        let (query, oline, ocol, reverse) = {
-            let Some(s) = self.vim.incsearch.as_ref() else {
-                return;
-            };
-            (s.query.clone(), s.origin_line, s.origin_col, s.reverse)
-        };
-        // Case-sensitive, non-overlapping substring scan in file order —
-        // matches the `*`/`n` engine so the live highlight, the committed
-        // jump, and `n`/`N` all agree. `match_indices` keeps byte offsets
-        // on char boundaries.
-        let mut matches: Vec<(usize, usize)> = Vec::new();
-        if !query.is_empty() {
-            'outer: for (li, line) in self.lines.iter().enumerate() {
-                for (col, _) in line.match_indices(query.as_str()) {
-                    matches.push((li, col));
-                    if matches.len() >= 5000 {
-                        break 'outer;
-                    }
-                }
-            }
+/// Trim/normalise a buffer line for the palette row: tabs → spaces (so the
+/// proportional font aligns) and clamp so a 5kB line doesn't bloat the
+/// list. Mirrors the lua `display_line`.
+fn display_search_line(line: &str) -> String {
+    let mut s = line.replace('\t', "    ");
+    if s.len() > 200 {
+        let mut end = 197;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
         }
-        let current = if matches.is_empty() {
-            usize::MAX
-        } else if reverse {
-            nearest_before(&matches, oline, ocol)
-        } else {
-            nearest_after(&matches, oline, ocol)
-        };
-        if let Some(s) = self.vim.incsearch.as_mut() {
-            s.matches = matches;
-            s.current = current;
-        }
-        if current == usize::MAX {
-            // No match for the current pattern — hold at the origin so the
-            // view doesn't wander while the user keeps typing.
-            self.search_restore_origin_cursor();
-            return;
-        }
-        let (line, col) = self
-            .vim
-            .incsearch
-            .as_ref()
-            .map(|s| s.matches[s.current])
-            .unwrap_or((oline, ocol));
-        self.cursor_line = line.min(self.lines.len().saturating_sub(1));
-        self.cursor_col = col.min(self.lines.get(self.cursor_line).map(String::len).unwrap_or(0));
-        self.follow_cursor = true;
+        s.truncate(end);
+        s.push_str("...");
     }
+    s
 }
 
 /// Index of the first match at/after `(oline, ocol)`, wrapping to the

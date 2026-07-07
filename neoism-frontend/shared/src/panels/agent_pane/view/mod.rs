@@ -68,6 +68,13 @@ pub trait AgentPaneView:
         false
     }
 
+    /// Row floor the open picker reserves (see `NeoismAgentPicker::min_visible_rows`),
+    /// so the occlusion rect matches the constant-height directory popover.
+    /// Defaults to `0` (content-sized).
+    fn picker_min_visible_rows(&self) -> usize {
+        0
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn log_render_perf(
         &mut self,
@@ -96,6 +103,12 @@ impl AgentPaneView for NeoismAgentPane {
         use crate::panels::agent_pane::state::picker::NeoismAgentPickerKind;
         NeoismAgentPane::picker(self)
             .is_some_and(|picker| picker.kind == NeoismAgentPickerKind::Session)
+    }
+
+    fn picker_min_visible_rows(&self) -> usize {
+        NeoismAgentPane::picker(self)
+            .map(|picker| picker.min_visible_rows())
+            .unwrap_or(0)
     }
 }
 
@@ -213,12 +226,14 @@ pub fn render_agent_pane_with<P, D, I>(
     };
     let mut local_occlusions = occlusion_rects.to_vec();
     let picker_has_footer = pane.picker_has_session_footer();
+    let picker_min_visible_rows = pane.picker_min_visible_rows();
     if let Some(picker_rect) = pane.picker_options_len().and_then(|len| {
         crate::widgets::inline_picker::layout(
             len,
             input_rect,
             chrome_scale,
             picker_has_footer,
+            picker_min_visible_rows,
         )
     }) {
         local_occlusions.push(picker_rect);

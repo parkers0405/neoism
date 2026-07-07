@@ -111,6 +111,9 @@ impl GitDiffPanel {
 
     pub fn set_focused(&mut self, f: bool) {
         self.focused = f && self.visible;
+        if !self.focused {
+            self.clear_pending();
+        }
     }
 
     /// Effective panel width in window-logical pixels. Used by the
@@ -191,6 +194,127 @@ impl GitDiffPanel {
                 let _ = self.select_file(prev);
             }
         }
+    }
+
+    /// Move the file selection by `delta` visible leaves, clamped to the
+    /// first/last file. The backbone of the vim count moves + half-page
+    /// jumps. Safe on an empty list.
+    fn move_selection_by(&mut self, delta: i32) {
+        self.rebuild_visual_rows();
+        let leaves = self.visible_leaf_indices();
+        if leaves.is_empty() {
+            return;
+        }
+        let cur = leaves
+            .iter()
+            .position(|&fi| fi == self.selected)
+            .unwrap_or(0) as i32;
+        let last = leaves.len() as i32 - 1;
+        let target = (cur + delta).clamp(0, last) as usize;
+        let _ = self.select_file(leaves[target]);
+    }
+
+    /// Vim `<count>j`: move the selection down `n` files (clamped).
+    pub fn select_next_by(&mut self, n: usize) {
+        self.move_selection_by(n as i32);
+    }
+
+    /// Vim `<count>k`: move the selection up `n` files (clamped).
+    pub fn select_prev_by(&mut self, n: usize) {
+        self.move_selection_by(-(n as i32));
+    }
+
+    /// Number of file rows that fit in the files card body — used to
+    /// size Ctrl+D / Ctrl+U half-page jumps.
+    fn files_visible_rows(&self) -> usize {
+        let row_h = FILE_ROW_HEIGHT * self.scale;
+        if row_h <= 0.0 {
+            return 1;
+        }
+        ((self.files_body_rect.h / row_h).floor() as usize).max(1)
+    }
+
+    /// Ctrl+D — jump the file selection down half a page. Consuming this
+    /// in the panel is also what keeps Ctrl+D from reaching the terminal
+    /// behind it as an EOF that would close the shell.
+    pub fn select_half_page_down(&mut self) {
+        self.select_next_by((self.files_visible_rows() / 2).max(1));
+    }
+
+    /// Ctrl+U — jump the file selection up half a page.
+    pub fn select_half_page_up(&mut self) {
+        self.select_prev_by((self.files_visible_rows() / 2).max(1));
+    }
+
+    /// Vim `gg` / `1` — select the first visible file.
+    pub fn select_first_file(&mut self) {
+        self.clear_pending();
+        self.rebuild_visual_rows();
+        if let Some(&fi) = self.visible_leaf_indices().first() {
+            let _ = self.select_file(fi);
+        }
+    }
+
+    /// Vim `$` / `G` — select the last visible file.
+    pub fn select_last_file(&mut self) {
+        self.clear_pending();
+        self.rebuild_visual_rows();
+        if let Some(&fi) = self.visible_leaf_indices().last() {
+            let _ = self.select_file(fi);
+        }
+    }
+
+    /// Vim `<count>G` — select the `one_based`-th visible file (clamped).
+    pub fn goto_file(&mut self, one_based: usize) {
+        self.clear_pending();
+        self.rebuild_visual_rows();
+        let leaves = self.visible_leaf_indices();
+        if leaves.is_empty() {
+            return;
+        }
+        let ix = one_based.saturating_sub(1).min(leaves.len().saturating_sub(1));
+        let _ = self.select_file(leaves[ix]);
+    }
+
+    /// Feed a typed digit into the pending vim count. A leading `0` with
+    /// no count in progress is ignored. Returns true when absorbed.
+    pub fn push_count_digit(&mut self, digit: u32) -> bool {
+        self.pending_g = false;
+        if self.pending_count.is_none() && digit == 0 {
+            return false;
+        }
+        let acc = self.pending_count.unwrap_or(0);
+        self.pending_count = Some(acc.saturating_mul(10).saturating_add(digit as usize));
+        true
+    }
+
+    /// Consume the pending count, defaulting to 1 when none was typed.
+    pub fn take_count(&mut self) -> usize {
+        self.pending_g = false;
+        self.pending_count.take().unwrap_or(1).max(1)
+    }
+
+    /// Peek at the pending count without consuming it.
+    pub fn pending_count(&self) -> Option<usize> {
+        self.pending_count
+    }
+
+    /// Register a `g` keypress. Returns true when it completes a `gg`.
+    pub fn note_g(&mut self) -> bool {
+        self.pending_count = None;
+        if self.pending_g {
+            self.pending_g = false;
+            true
+        } else {
+            self.pending_g = true;
+            false
+        }
+    }
+
+    /// Drop any half-entered count / `gg`.
+    pub fn clear_pending(&mut self) {
+        self.pending_count = None;
+        self.pending_g = false;
     }
 
     /// Rebuild the cached tree rows from the current file list +
@@ -304,6 +428,7 @@ impl GitDiffPanel {
         self.checkbox_focused = false;
         self.branch_menu_open = false;
         self.branch_filter.clear();
+        self.clear_pending();
         self.refresh(repo_root, branch);
     }
 
@@ -324,6 +449,7 @@ impl GitDiffPanel {
         self.commit_focused = false;
         self.branch_menu_open = false;
         self.open_started_at = None;
+        self.clear_pending();
     }
 
     pub(super) fn open_progress(&self) -> f32 {

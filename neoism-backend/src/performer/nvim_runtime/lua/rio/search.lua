@@ -51,13 +51,6 @@ local function literal_search_pattern(query)
   return case_prefix .. "\\V" .. vim.fn.escape(query, "\\")
 end
 
-local function find_literal(line, query, ignore_case)
-  if ignore_case then
-    return line:lower():find(query, 1, true)
-  end
-  return line:find(query, 1, true)
-end
-
 -- Trim/normalise a buffer line for display in the palette: collapse
 -- tabs to spaces (so the proportional font in the popup doesn't
 -- mis-align), and clamp length so a 5kB line doesn't murder the rpc.
@@ -155,14 +148,27 @@ function M.search(query)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local ignore_case = search_ignores_case(query)
   local needle = ignore_case and query:lower() or query
+  local needle_len = math.max(#needle, 1)
   local matches = {}
   for i, line in ipairs(lines) do
-    local start_col = find_literal(line, needle, ignore_case)
-    if start_col then
+    -- Every (non-overlapping) occurrence on the line, like nvim's
+    -- hlsearch — not just the first — so the count and highlights are
+    -- complete.
+    local haystack = ignore_case and line:lower() or line
+    local from = 1
+    while true do
+      local start_col = haystack:find(needle, from, true)
+      if not start_col then
+        break
+      end
       matches[#matches + 1] = { i, start_col, display_line(line) }
       if #matches >= MAX_MATCHES then
         break
       end
+      from = start_col + needle_len
+    end
+    if #matches >= MAX_MATCHES then
+      break
     end
   end
   matches = rotate_to_nearest(matches, M._origin)

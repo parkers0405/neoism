@@ -636,6 +636,17 @@
             self.goal_loaded = false;
         }
 
+        /// Optimistically clear the displayed goal after a user-driven
+        /// `/goal clear` (or an empty `/goal`). Unlike [`reset_session_goal`]
+        /// this keeps `goal_version`, so a slow in-flight `GET /goal` poll that
+        /// still carries the just-removed goal (same version) is dropped by the
+        /// monotonic guard instead of resurrecting the section — while the
+        /// authoritative clear (a versioned `SESSION_UPDATED`) still applies.
+        pub fn clear_session_goal_local(&mut self) {
+            self.session_goal = None;
+            self.goal_loaded = true;
+        }
+
         /// True when the goal is stale enough to justify a refetch. Loaded
         /// goals refresh slowly (every few seconds) since live edits also
         /// arrive via `SESSION_UPDATED` → `invalidate_goal_refresh`.

@@ -476,10 +476,6 @@ impl Screen<'_> {
                     "intercepted glyph → opening search palette"
                 );
                 self.renderer.command_palette.enter_search_mode();
-                // Snapshot the pre-search view so Esc restores it.
-                self.send_editor_command(
-                    neoism_backend::performer::nvim::vim_search_begin_command(),
-                );
                 self.mark_dirty();
             }
             EditorKeyDispatchPlan::OpenSearchPaletteBackward => {
@@ -491,9 +487,6 @@ impl Screen<'_> {
                     "intercepted glyph → opening backward search palette"
                 );
                 self.renderer.command_palette.enter_search_mode_backward();
-                self.send_editor_command(
-                    neoism_backend::performer::nvim::vim_search_begin_command(),
-                );
                 self.mark_dirty();
             }
             EditorKeyDispatchPlan::StartLeader => {

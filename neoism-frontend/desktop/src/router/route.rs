@@ -294,7 +294,42 @@ impl Route<'_> {
     /// Push the current `/`-search query to the lua side so it can
     /// build the buffer-match list. Empty queries clear the match
     /// list explicitly so the dropdown drops back to recent-history.
+    /// `true` when the open Search-mode palette should be answered from
+    /// the current *markdown* pane (neoism's own engine) rather than the
+    /// nvim editor. The two share the exact same palette modal + preview
+    /// contract; only the match source differs.
+    fn palette_search_is_markdown(&self) -> bool {
+        self.window.screen.renderer.command_palette.is_search_mode()
+            && self
+                .window
+                .screen
+                .context_manager
+                .current()
+                .active_markdown()
+                .is_some()
+    }
+
     fn dispatch_palette_search_query(&mut self, query: &str) {
+        // Markdown pane: scan the buffer locally and push the matches into
+        // the SAME palette `buffer_matches` the nvim path fills, then
+        // preview the auto-selected (nearest) match — no nvim round-trip.
+        if self.palette_search_is_markdown() {
+            let pairs = self
+                .window
+                .screen
+                .context_manager
+                .current_mut()
+                .active_markdown_mut()
+                .map(|md| md.search_scan(query))
+                .unwrap_or_default();
+            self.window
+                .screen
+                .renderer
+                .command_palette
+                .set_buffer_matches(pairs);
+            self.preview_palette_search_match_if_any();
+            return;
+        }
         // No-op when there's no editor pane attached — `send_editor_command`
         // already handles that, but skipping avoids an alloc on terminal-
         // only routes.
@@ -312,6 +347,22 @@ impl Route<'_> {
             .renderer
             .command_palette
             .selected_buffer_match_location();
+        // Markdown: jump + highlight in the markdown buffer behind the modal.
+        if self.palette_search_is_markdown() {
+            if let Some((lnum, col)) = location {
+                if let Some(md) = self
+                    .window
+                    .screen
+                    .context_manager
+                    .current_mut()
+                    .active_markdown_mut()
+                {
+                    md.search_preview(lnum, col);
+                }
+                self.window.screen.mark_dirty();
+            }
+            return;
+        }
         if let Some((lnum, col)) = location {
             let query = self.window.screen.renderer.command_palette.query.clone();
             let cmd = neoism_backend::performer::nvim::vim_search_preview_command(
@@ -695,21 +746,34 @@ impl Route<'_> {
                         tracing::trace!(target: "neoism::input", "command palette closing on Escape");
                         let was_search =
                             self.window.screen.renderer.command_palette.is_search_mode();
+                        let was_markdown_search = self.palette_search_is_markdown();
                         self.window
                             .screen
                             .renderer
                             .command_palette
                             .set_enabled(false);
-                        // Drop the live preview highlight + nvim's
-                        // hlsearch when the user bails out of `/`
-                        // mode without committing — otherwise the
-                        // last-previewed line stays highlighted in
-                        // the buffer behind us.
+                        // Drop the live preview highlight when the user bails
+                        // out of `/` without committing — otherwise the last-
+                        // previewed match stays highlighted behind us. For a
+                        // markdown pane this also restores the pre-search view.
                         if was_search {
-                            self.window.screen.send_editor_command(
-                                neoism_backend::performer::nvim::vim_search_clear_command(
-                                ),
-                            );
+                            if was_markdown_search {
+                                if let Some(md) = self
+                                    .window
+                                    .screen
+                                    .context_manager
+                                    .current_mut()
+                                    .active_markdown_mut()
+                                {
+                                    md.search_cancel();
+                                }
+                                self.window.screen.mark_dirty();
+                            } else {
+                                self.window.screen.send_editor_command(
+                                    neoism_backend::performer::nvim::vim_search_clear_command(
+                                    ),
+                                );
+                            }
                         }
                         self.request_overlay_redraw();
                     }
@@ -787,6 +851,7 @@ impl Route<'_> {
                                     .command_palette
                                     .selected_buffer_match_location();
                                 if let Some(location) = selected_location {
+                                    let is_markdown = self.palette_search_is_markdown();
                                     self.window
                                         .screen
                                         .renderer
@@ -798,14 +863,29 @@ impl Route<'_> {
                                             .renderer
                                             .command_palette
                                             .push_recent_search(typed.clone());
-                                        let cmd = self
-                                            .window
-                                            .screen
-                                            .palette_search_commit_command(
-                                                &typed,
-                                                Some(location),
-                                            );
-                                        self.window.screen.send_editor_command(cmd);
+                                        if is_markdown {
+                                            // Land the cursor on the match +
+                                            // hand the pattern to `n`/`N`.
+                                            if let Some(md) = self
+                                                .window
+                                                .screen
+                                                .context_manager
+                                                .current_mut()
+                                                .active_markdown_mut()
+                                            {
+                                                md.search_commit(location.0, location.1);
+                                            }
+                                            self.window.screen.mark_dirty();
+                                        } else {
+                                            let cmd = self
+                                                .window
+                                                .screen
+                                                .palette_search_commit_command(
+                                                    &typed,
+                                                    Some(location),
+                                                );
+                                            self.window.screen.send_editor_command(cmd);
+                                        }
                                     }
                                     self.request_overlay_redraw();
                                     return true;
@@ -843,6 +923,10 @@ impl Route<'_> {
                             let payload = selected_recent
                                 .or(selected_ex)
                                 .unwrap_or_else(|| typed.clone());
+                            // Capture before `set_enabled(false)` flips the
+                            // palette out of Search mode.
+                            let search_is_markdown =
+                                search && self.palette_search_is_markdown();
                             self.window
                                 .screen
                                 .renderer
@@ -894,17 +978,42 @@ impl Route<'_> {
                                     .renderer
                                     .command_palette
                                     .push_recent_search(payload.clone());
-                                let cmd = self
-                                    .window
-                                    .screen
-                                    .palette_search_commit_command(&payload, None);
-                                tracing::trace!(
-                                    target: "neoism::input",
-                                    mode = "search",
-                                    cmd = %cmd,
-                                    "palette dispatching to nvim"
-                                );
-                                self.window.screen.send_editor_command(cmd);
+                                if search_is_markdown {
+                                    // Recent/no-selection commit on a markdown
+                                    // pane: scan the payload and land on the
+                                    // nearest match (or restore if none).
+                                    if let Some(md) = self
+                                        .window
+                                        .screen
+                                        .context_manager
+                                        .current_mut()
+                                        .active_markdown_mut()
+                                    {
+                                        let first = md
+                                            .search_scan(&payload)
+                                            .first()
+                                            .map(|(lnum, col, _)| (*lnum, *col));
+                                        match first {
+                                            Some((lnum, col)) => {
+                                                md.search_commit(lnum, col)
+                                            }
+                                            None => md.search_cancel(),
+                                        }
+                                    }
+                                    self.window.screen.mark_dirty();
+                                } else {
+                                    let cmd = self
+                                        .window
+                                        .screen
+                                        .palette_search_commit_command(&payload, None);
+                                    tracing::trace!(
+                                        target: "neoism::input",
+                                        mode = "search",
+                                        cmd = %cmd,
+                                        "palette dispatching to nvim"
+                                    );
+                                    self.window.screen.send_editor_command(cmd);
+                                }
                             }
                             self.request_overlay_redraw();
                             return true;

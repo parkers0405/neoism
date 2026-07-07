@@ -145,6 +145,14 @@ pub struct GitDiffPanel {
     /// Per-branch-row hit rects, `(branch_name_index_in_filtered, rect)`
     /// paired with the resolved branch name so a click can switch.
     pub(super) branch_menu_row_rects: Vec<(String, Rect)>,
+
+    // ── Vim-style file-list navigation ───────────────────────────────
+    /// Pending numeric count (`5` then `j` moves 5 files). Accumulated
+    /// by [`push_count_digit`](GitDiffPanel::push_count_digit), consumed
+    /// by the next motion via [`take_count`](GitDiffPanel::take_count).
+    pub(super) pending_count: Option<usize>,
+    /// True after a lone `g`, so the next `g` completes `gg` (top).
+    pub(super) pending_g: bool,
 }
 
 impl Default for GitDiffPanel {
@@ -197,6 +205,8 @@ impl GitDiffPanel {
             branch_menu_rect: Rect::ZERO,
             branch_filter_rect: Rect::ZERO,
             branch_menu_row_rects: Vec::new(),
+            pending_count: None,
+            pending_g: false,
         }
     }
 

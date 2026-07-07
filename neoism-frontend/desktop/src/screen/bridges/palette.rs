@@ -307,6 +307,8 @@ impl Screen<'_> {
                 }
 
                 if self.renderer.command_palette.is_search_mode() {
+                    let is_markdown =
+                        self.context_manager.current().active_markdown().is_some();
                     if let Some(location) = self
                         .renderer
                         .command_palette
@@ -318,9 +320,19 @@ impl Screen<'_> {
                             self.renderer
                                 .command_palette
                                 .push_recent_search(query.clone());
-                            let cmd = self
-                                .palette_search_commit_command(&query, Some(location));
-                            self.send_editor_command(cmd);
+                            if is_markdown {
+                                if let Some(md) =
+                                    self.context_manager.current_mut().active_markdown_mut()
+                                {
+                                    md.search_commit(location.0, location.1);
+                                }
+                            } else {
+                                let cmd = self.palette_search_commit_command(
+                                    &query,
+                                    Some(location),
+                                );
+                                self.send_editor_command(cmd);
+                            }
                         }
                         self.mark_dirty();
                     } else if let Some(term) =
@@ -331,8 +343,26 @@ impl Screen<'_> {
                             self.renderer
                                 .command_palette
                                 .push_recent_search(term.clone());
-                            let cmd = self.palette_search_commit_command(&term, None);
-                            self.send_editor_command(cmd);
+                            if is_markdown {
+                                if let Some(md) =
+                                    self.context_manager.current_mut().active_markdown_mut()
+                                {
+                                    let first = md
+                                        .search_scan(&term)
+                                        .first()
+                                        .map(|(lnum, col, _)| (*lnum, *col));
+                                    match first {
+                                        Some((lnum, col)) => {
+                                            md.search_commit(lnum, col)
+                                        }
+                                        None => md.search_cancel(),
+                                    }
+                                }
+                            } else {
+                                let cmd =
+                                    self.palette_search_commit_command(&term, None);
+                                self.send_editor_command(cmd);
+                            }
                         }
                         self.mark_dirty();
                     }
@@ -649,11 +679,6 @@ impl Screen<'_> {
             PaletteAction::SearchForward => {
                 if self.context_manager.current().editor.is_some() {
                     self.renderer.command_palette.enter_search_mode();
-                    // Snapshot the pre-search view so Esc restores it
-                    // (nvim incsearch cancel).
-                    self.send_editor_command(
-                        neoism_backend::performer::nvim::vim_search_begin_command(),
-                    );
                     self.mark_dirty();
                 } else {
                     self.start_search(Direction::Right);
@@ -662,9 +687,6 @@ impl Screen<'_> {
             PaletteAction::SearchBackward => {
                 if self.context_manager.current().editor.is_some() {
                     self.renderer.command_palette.enter_search_mode_backward();
-                    self.send_editor_command(
-                        neoism_backend::performer::nvim::vim_search_begin_command(),
-                    );
                     self.mark_dirty();
                 } else {
                     self.start_search(Direction::Left);

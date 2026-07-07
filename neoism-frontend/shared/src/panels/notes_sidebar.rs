@@ -66,6 +66,12 @@ pub struct NotesSidebar {
     /// Keyboard caret parked on one of the header action icons (share /
     /// create-menu), reachable with ArrowRight from the vault selector.
     header_action: Option<NotesHeaderAction>,
+    /// Pending vim-style numeric count (e.g. `5` then `j` moves 5 rows).
+    /// Accumulated by [`push_count_digit`](Self::push_count_digit) and
+    /// consumed by the next motion via [`take_count`](Self::take_count).
+    pending_count: Option<usize>,
+    /// True after a lone `g`, so the next `g` completes `gg` (go-to-top).
+    pending_g: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +146,8 @@ impl Default for NotesSidebar {
             workspace_rect: None,
             visualize_rect: None,
             header_action: None,
+            pending_count: None,
+            pending_g: false,
         }
     }
 }
@@ -188,6 +196,7 @@ impl NotesSidebar {
         self.focused = focused;
         if !focused {
             self.header_action = None;
+            self.clear_pending();
         }
     }
 
@@ -407,7 +416,7 @@ impl NotesSidebar {
         self.selector_selected = false;
         self.header_action = None;
         if !self.rows.is_empty() {
-            self.move_selection_to(index.min(self.rows.len() - 1));
+            self.move_selection_to(index.min(self.rows.len().saturating_sub(1)));
         }
     }
 
@@ -418,7 +427,7 @@ impl NotesSidebar {
         if self.rows.is_empty() {
             return;
         }
-        let new_selected = new_selected.min(self.rows.len() - 1);
+        let new_selected = new_selected.min(self.rows.len().saturating_sub(1));
         if new_selected == self.selected_index {
             return;
         }
@@ -450,7 +459,7 @@ impl NotesSidebar {
         if self.rows.is_empty() || self.selected_index + 1 >= self.rows.len() {
             self.selector_selected = true;
         } else {
-            self.set_selected((self.selected_index + 1).min(self.rows.len() - 1));
+            self.set_selected((self.selected_index + 1).min(self.rows.len().saturating_sub(1)));
         }
     }
 
@@ -462,7 +471,7 @@ impl NotesSidebar {
         if self.selector_selected {
             self.selector_selected = false;
             if !self.rows.is_empty() {
-                self.selected_index = self.rows.len() - 1;
+                self.selected_index = self.rows.len().saturating_sub(1);
                 self.clamp_scroll(self.last_panel_height_rows);
             } else {
                 // No notes: the level above the selector is the header icons.
@@ -488,7 +497,7 @@ impl NotesSidebar {
         self.set_selected(
             self.selected_index
                 .saturating_add(n)
-                .min(self.rows.len() - 1),
+                .min(self.rows.len().saturating_sub(1)),
         );
     }
 
@@ -498,6 +507,97 @@ impl NotesSidebar {
             return;
         }
         self.set_selected(self.selected_index.saturating_sub(n));
+    }
+
+    /// Half a visible page, used by Ctrl+D / Ctrl+U. Falls back to a
+    /// single row on a viewport too small to have measured yet.
+    fn half_page(&self) -> usize {
+        (self.last_panel_height_rows / 2).max(1)
+    }
+
+    /// Ctrl+D — jump the selection down half a page. Consuming the key
+    /// here (instead of letting it fall through) is also what stops it
+    /// leaking to the terminal behind the panel as an EOF that would
+    /// close the shell.
+    pub fn select_half_page_down(&mut self) {
+        self.select_next_by(self.half_page());
+    }
+
+    /// Ctrl+U — jump the selection up half a page.
+    pub fn select_half_page_up(&mut self) {
+        self.select_prev_by(self.half_page());
+    }
+
+    /// Jump to the first note row (vim `gg` / `1`).
+    pub fn select_first(&mut self) {
+        self.clear_pending();
+        if !self.rows.is_empty() {
+            self.set_selected(0);
+        }
+    }
+
+    /// Jump to the last note row (vim `$` / `G`).
+    pub fn select_last(&mut self) {
+        self.clear_pending();
+        if !self.rows.is_empty() {
+            self.set_selected(self.rows.len().saturating_sub(1));
+        }
+    }
+
+    /// Jump to a 1-based row (vim `<count>G`). Out-of-range counts clamp
+    /// to the last row; a zero count is treated as the first row.
+    pub fn goto_row(&mut self, one_based: usize) {
+        self.clear_pending();
+        if !self.rows.is_empty() {
+            self.set_selected(one_based.saturating_sub(1));
+        }
+    }
+
+    /// Feed a typed digit into the pending vim count. A leading `0` with
+    /// no count in progress is ignored (matches vim, where `0` is a
+    /// motion). Returns true when the digit was absorbed as a count.
+    pub fn push_count_digit(&mut self, digit: u32) -> bool {
+        self.pending_g = false;
+        if self.pending_count.is_none() && digit == 0 {
+            return false;
+        }
+        let acc = self.pending_count.unwrap_or(0);
+        // Saturate rather than overflow on absurdly long digit runs.
+        self.pending_count = Some(acc.saturating_mul(10).saturating_add(digit as usize));
+        true
+    }
+
+    /// Consume the pending count, defaulting to 1 when none was typed.
+    /// Also clears any half-typed `gg`.
+    pub fn take_count(&mut self) -> usize {
+        self.pending_g = false;
+        self.pending_count.take().unwrap_or(1).max(1)
+    }
+
+    /// Peek at the pending count without consuming it.
+    pub fn pending_count(&self) -> Option<usize> {
+        self.pending_count
+    }
+
+    /// Register a `g` keypress. Returns true when this completes a `gg`
+    /// (the caller should jump to the top); false when it merely arms the
+    /// first `g`.
+    pub fn note_g(&mut self) -> bool {
+        self.pending_count = None;
+        if self.pending_g {
+            self.pending_g = false;
+            true
+        } else {
+            self.pending_g = true;
+            false
+        }
+    }
+
+    /// Drop any half-entered count / `gg`. Called on blur and after any
+    /// non-count key so a stale prefix never applies to a later motion.
+    pub fn clear_pending(&mut self) {
+        self.pending_count = None;
+        self.pending_g = false;
     }
 
     pub fn toggle_selected_dir(&mut self) -> bool {
@@ -1128,7 +1228,7 @@ impl NotesSidebar {
             self.selected_index = 0;
             self.scroll_top = 0;
         } else {
-            self.selected_index = self.selected_index.min(self.rows.len() - 1);
+            self.selected_index = self.selected_index.min(self.rows.len().saturating_sub(1));
             self.scroll_top = self
                 .scroll_top
                 .min(self.max_scroll_top_for(self.last_panel_height_rows));

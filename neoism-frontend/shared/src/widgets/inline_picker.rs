@@ -47,6 +47,11 @@ pub struct InlinePickerView<'a> {
     /// already shows a caret there, so a second one in the search row reads
     /// as a doubled/misplaced cursor.
     pub show_search_caret: bool,
+    /// Minimum number of list rows to reserve, independent of the row count.
+    /// `0` sizes the card to its rows (the default); a positive floor keeps
+    /// the card a constant height as its contents change (the working-
+    /// directory picker uses this so navigating dirs doesn't move the popover).
+    pub min_visible_rows: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -79,11 +84,21 @@ fn truncate_to_pixel_width(
     ellipsis.to_string()
 }
 
+/// Number of list rows the card reserves. Normally the row count (capped at
+/// `MAX_ROWS`), but a picker can raise the floor via `min_visible_rows` so its
+/// height stays constant as the row count changes — the working-directory
+/// picker does this so navigating directories never repositions the popover.
+fn visible_row_count(row_count: usize, min_visible_rows: usize) -> usize {
+    let floor = min_visible_rows.min(MAX_ROWS);
+    row_count.max(floor).min(MAX_ROWS).max(1)
+}
+
 pub fn layout(
     row_count: usize,
     input_rect: [f32; 4],
     scale: f32,
     has_footer: bool,
+    min_visible_rows: usize,
 ) -> Option<[f32; 4]> {
     let s = scale.clamp(0.5, 3.0);
     let row_h = ROW_H * s;
@@ -91,7 +106,7 @@ pub fn layout(
     let footer_h = if has_footer { FOOTER_H * s } else { 0.0 };
     // An empty picker still shows one row ("No results") and stays open, so
     // a filter that matches nothing doesn't make the modal vanish.
-    let visible_rows = row_count.min(MAX_ROWS).max(1);
+    let visible_rows = visible_row_count(row_count, min_visible_rows);
     // Lock to the composer's width and x position so the popover lines up
     // edge-to-edge with the input chrome.
     let width = input_rect[2];
@@ -113,8 +128,9 @@ pub fn render(
     let title_h = TITLE_H * s;
     let has_footer = view.footer_hint.is_some();
     let footer_h = if has_footer { FOOTER_H * s } else { 0.0 };
-    let [x, y, width, height] = layout(view.rows.len(), input_rect, scale, has_footer)?;
-    let visible_rows = view.rows.len().min(MAX_ROWS).max(1);
+    let [x, y, width, height] =
+        layout(view.rows.len(), input_rect, scale, has_footer, view.min_visible_rows)?;
+    let visible_rows = visible_row_count(view.rows.len(), view.min_visible_rows);
     let selected = view.selected.min(view.rows.len().saturating_sub(1));
     let first = view
         .scroll_offset

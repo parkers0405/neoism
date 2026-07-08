@@ -246,6 +246,29 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(remaining, 0);
     }
+
+    #[test]
+    fn replace_all_terminates_when_new_contains_old() {
+        // Regression: `new` contains `old`, so re-scanning from 0 would re-find
+        // the just-inserted text forever (100% CPU hang). Must terminate once.
+        let (updated, count, _) = replace("foo\n", "foo", "foo_bar", true).unwrap();
+        assert_eq!(updated, "foo_bar\n");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn replace_all_terminates_on_multi_occurrence_superset() {
+        // The real freeze: an identical block appears 3× and the replacement is
+        // a superset that still contains the original lines (replaceAll edit).
+        let content = "let x = a\nlet x = a\nlet x = a\n";
+        let (updated, count, _) =
+            replace(content, "let x = a", "let x = a\n    .b()", true).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(
+            updated,
+            "let x = a\n    .b()\nlet x = a\n    .b()\nlet x = a\n    .b()\n"
+        );
+    }
 }
 
 pub(crate) fn replace(
@@ -255,18 +278,25 @@ pub(crate) fn replace(
     replace_all: bool,
 ) -> anyhow::Result<(String, usize, usize)> {
     if replace_all {
-        let mut current = content.to_string();
-        let mut replaced = 0;
-        while let Some(found) = find(&current, old) {
-            current.replace_range(found.range, new);
-            replaced += 1;
-        }
-        if replaced == 0 {
+        // Mirror opencode's edit.ts: run the fuzzy matchers ONCE to discover a
+        // single concrete `search` span, then replace every occurrence of that
+        // concrete string. opencode uses `content.replaceAll(search, new)`;
+        // Rust's `str::replace` is the exact equivalent — it matches the
+        // original (non-overlapping, left-to-right) and never re-scans the text
+        // it just inserted. The old code instead looped `find(&current, old)`,
+        // re-running the fuzzy cascade over the mutated buffer from position 0,
+        // so when `new` contains (or fuzzy-matches) `old` it re-found the
+        // just-inserted replacement forever — a 100% CPU hang on any replaceAll
+        // edit whose replacement is a superset of the target.
+        let found = find(content, old).filter(|found| !found.span.is_empty());
+        let Some(found) = found else {
             anyhow::bail!(
                 "old text was not found — even after fuzzy matching. Re-read the file and supply the exact text you want to replace, including indentation."
             );
-        }
-        return Ok((current, replaced, 0));
+        };
+        let count = content.matches(found.span.as_str()).count();
+        let updated = content.replace(found.span.as_str(), new);
+        return Ok((updated, count, 0));
     }
 
     let found = find(content, old).ok_or_else(|| {

@@ -599,6 +599,18 @@ impl Screen<'_> {
                         latest = Some(n);
                     }
                 }
+                // Keep the frame loop alive while a query reply is still in
+                // flight so the async `rio_search_matches` above is drained
+                // + previewed LIVE (each keystroke), not only on the next
+                // input event. The pump is a bounded self-expiring deadline
+                // and issues no nvim RPC, so it can't reintroduce the
+                // pending-count freeze.
+                if latest.is_some() {
+                    // A reply landed — done pumping for this keystroke.
+                    self.search_reply_pump_until = None;
+                } else if self.search_reply_pump_active() {
+                    self.mark_dirty();
+                }
                 if let Some(n) = latest {
                     let pairs = n
                         .matches
@@ -606,7 +618,21 @@ impl Screen<'_> {
                         .map(|m| (m.lnum, m.col, m.text))
                         .collect();
                     self.renderer.command_palette.set_buffer_matches(pairs);
-                    if let Some((lnum, col)) = self
+                    // The preview is a non-fast `:lua` RPC. Never fire it
+                    // while normal mode has a pending count/operator open:
+                    // nvim defers non-fast RPCs in that state, and stacking
+                    // one is exactly what wedged the input lane (the
+                    // digit-key freeze). `editor_pending_keys` is nvim's own
+                    // `msg_showcmd` tail, so it's the authoritative signal.
+                    let pending_count = !self
+                        .context_manager
+                        .current()
+                        .editor_pending_keys
+                        .is_empty();
+                    if pending_count {
+                        // Skip this tick; the reply for the completed motion
+                        // re-previews. Mirrors the diagnostics-poll gate.
+                    } else if let Some((lnum, col)) = self
                         .renderer
                         .command_palette
                         .selected_buffer_match_location()

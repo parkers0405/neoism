@@ -14,6 +14,31 @@ impl Screen<'_> {
             .set_dirty();
     }
 
+    /// Arm the live-`/`-search redraw pump: keep the frame loop running
+    /// for a short window so an async `rio_search_matches` reply is drained
+    /// + previewed within a frame or two of the keystroke that requested it
+    /// (rather than waiting for the next input event). Pure scheduling — no
+    /// nvim RPC is issued per frame, so this can never wedge input.
+    pub fn arm_search_reply_pump(&mut self) {
+        self.search_reply_pump_until = Some(
+            std::time::Instant::now() + std::time::Duration::from_millis(400),
+        );
+        self.mark_dirty();
+    }
+
+    /// While the pump deadline is live, keep the frame loop alive. Returns
+    /// `true` while pumping so the caller marks dirty; expires itself.
+    pub(crate) fn search_reply_pump_active(&mut self) -> bool {
+        match self.search_reply_pump_until {
+            Some(deadline) if std::time::Instant::now() < deadline => true,
+            Some(_) => {
+                self.search_reply_pump_until = None;
+                false
+            }
+            None => false,
+        }
+    }
+
     pub fn touch_purpose(&mut self) -> &mut TouchPurpose {
         &mut self.touchpurpose
     }

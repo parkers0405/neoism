@@ -632,6 +632,15 @@ pub struct Screen<'screen> {
     /// sidebar with `Welcome/` expanded, gated further by the on-disk
     /// first-run marker. See [`Self::reveal_welcome_notes_first_run`].
     welcome_reveal_pending: bool,
+    /// Live-`/`-search redraw pump. `dispatch_palette_search_query` sets
+    /// this to a short deadline when it fires an async `rio_search_matches`
+    /// query at nvim; the per-frame status-sync loop keeps marking dirty
+    /// until then so the async reply is drained + previewed within a frame
+    /// or two of each keystroke instead of only on the next input event
+    /// (the "search only updates on Enter" bug). Pure redraw scheduling —
+    /// it issues NO nvim RPC per frame, so it can't wedge input on a
+    /// pending count.
+    search_reply_pump_until: Option<std::time::Instant>,
     pending_notebook_executions: Vec<
         std::sync::mpsc::Receiver<(
             std::path::PathBuf,
@@ -1625,6 +1634,7 @@ impl Screen<'_> {
             touchpurpose: TouchPurpose::default(),
             renderer,
             welcome_reveal_pending: true,
+            search_reply_pump_until: None,
             pending_notebook_executions: Vec::new(),
             pending_python_kernel_retry: None,
             notebook_runtime: crate::notebook_runtime::NotebookRuntimeManager::new(),

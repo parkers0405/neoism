@@ -418,6 +418,50 @@ impl NvimSessionHandle {
     }
 
     pub async fn handle(&self, msg: EditorClientMessage) -> Result<(), NvimError> {
+        // A non-fast COMMAND must never pin the session Mutex across its
+        // (possibly deferred) rpc await. nvim defers every non-fast RPC
+        // while normal mode has a pending count/operator (a bare digit
+        // left open); holding the session lock for the whole rpc-timeout
+        // window would block the concurrent `SendKeys` that clears the
+        // count — the digit-key freeze. Do the surface bookkeeping under a
+        // brief lock, clone the rpc handle out, then issue the command
+        // lock-free (mirrors the diagnostics poll's clone-out gate).
+        if let EditorClientMessage::Command {
+            ref command,
+            ref surface_id,
+            ..
+        } = msg
+        {
+            let command = command.clone();
+            let surface_id = surface_id.clone();
+            let nvim = {
+                let mut guard = self.inner.session.lock().await;
+                if let Some(sid) = surface_id.as_deref() {
+                    guard.set_active_surface_id(Some(sid.to_string())).await;
+                }
+                guard.ensure_nvim_on_surface(surface_id.as_deref()).await?;
+                guard.nvim.clone()
+            };
+            // Fast pending-count gate (nvim_get_mode is FUNC_API_FAST, so
+            // it answers even while blocked): while normal mode has a count/
+            // operator open, nvim DEFERS every non-fast command until input
+            // clears it, so issuing one now would hang this await for the
+            // full rpc-timeout window and stall the serial editor-message
+            // loop — blocking the very SendKeys that clears the count (the
+            // digit-key freeze). Skip instead; the client re-sends the
+            // best-effort commands (`/`-search preview/query) on the next
+            // reply/keystroke. Mirrors the diagnostics poll's block gate.
+            if let Some(client) = nvim.lock().await.clone() {
+                if nvim_is_blocked(&client).await {
+                    tracing::trace!(
+                        command = %command,
+                        "skipping client command while nvim is blocked (pending count)"
+                    );
+                    return Ok(());
+                }
+            }
+            return command_rpc(&nvim, &command).await;
+        }
         self.inner.session.lock().await.handle(msg).await
     }
 
@@ -566,8 +610,13 @@ pub(crate) async fn apply_authoritative_text_to_nvim(
     path: &str,
     text: &str,
 ) -> Result<bool, NvimError> {
-    let guard = nvim_slot.lock().await;
-    let nvim = guard.as_ref().ok_or(NvimError::Closed)?;
+    // Clone the rpc handle out instead of holding the `nvim` Mutex across
+    // the exec_lua await: this applier runs as a detached task and its
+    // non-fast exec_lua is deferred whenever normal mode has a pending
+    // count/operator. Holding the Mutex across that deferral would block
+    // `send_keys` on the same slot — freezing input on every pane sharing
+    // this session (the digit-key freeze).
+    let nvim = nvim_slot.lock().await.clone().ok_or(NvimError::Closed)?;
     let lua = r#"
         local path, text = ...
         local target = nil
@@ -1074,43 +1123,16 @@ impl NvimSession {
     }
 
     async fn command(&self, command: &str) -> Result<(), NvimError> {
-        let guard = self.nvim.lock().await;
-        let nvim = guard.as_ref().ok_or(NvimError::Closed)?;
-        let file_open_command =
-            command.contains("vim.cmd.edit") || command.contains("File Open Failed");
-        let cwd_command = command.contains("vim.cmd.cd");
-        if file_open_command || cwd_command {
-            tracing::warn!(
-                target: "neoism::nvim_command",
-                command = %command,
-                file_open_command,
-                cwd_command,
-                "nvim command dispatched"
-            );
-        } else {
-            tracing::trace!(
-                command = %command,
-                "[nvim-trace] Command dispatched to embedded nvim"
-            );
-        }
-        nvim_rpc_timeout("command", nvim.command(command))
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    target: "neoism::nvim_command",
-                    error = %e,
-                    command = %command,
-                    file_open_command,
-                    cwd_command,
-                    "nvim command failed"
-                );
-                e
-            })
+        command_rpc(&self.nvim, command).await
     }
 
     async fn send_keys(&self, bytes: &[u8]) -> Result<(), NvimError> {
-        let guard = self.nvim.lock().await;
-        let nvim = guard.as_ref().ok_or(NvimError::Closed)?;
+        // Clone the rpc handle out rather than holding the `nvim` Mutex
+        // across the await. `nvim_input` is FUNC_API_FAST so it answers
+        // even while a count is pending, but any concurrent non-fast rpc
+        // that (before their own clone-out fix) held this Mutex could
+        // still stall input; cloning out keeps the input lane wait-free.
+        let nvim = self.nvim.lock().await.clone().ok_or(NvimError::Closed)?;
         // nvim_input takes a string; web clients send the literal
         // keysequence bytes (e.g. `"i"`, `"<Esc>"`, etc.) UTF-8 encoded.
         let s = std::str::from_utf8(bytes)
@@ -1128,8 +1150,10 @@ impl NvimSession {
         col: i64,
         count: u32,
     ) -> Result<(), NvimError> {
-        let guard = self.nvim.lock().await;
-        let nvim = guard.as_ref().ok_or(NvimError::Closed)?;
+        // Clone the rpc handle out (see `send_keys`) so the mouse-input
+        // lane never waits on the `nvim` Mutex held by a deferred non-fast
+        // rpc.
+        let nvim = self.nvim.lock().await.clone().ok_or(NvimError::Closed)?;
         for _ in 0..count.max(1) {
             nvim_rpc_timeout(
                 "mouse input",
@@ -1169,6 +1193,48 @@ impl NvimSession {
         }
         Ok(())
     }
+}
+
+/// Dispatch a non-fast `nvim_command` WITHOUT holding the `nvim` Mutex
+/// across the rpc await. The client handle is cloned out first (a cheap
+/// clone that shares the underlying rpc writer), so a command nvim defers
+/// (pending count/operator/prompt) can never hold the Mutex hostage and
+/// wedge a concurrent `send_keys` — the digit-key freeze.
+pub(crate) async fn command_rpc(
+    handle: &Arc<Mutex<Option<Neovim<NeovimWriter>>>>,
+    command: &str,
+) -> Result<(), NvimError> {
+    let nvim = handle.lock().await.clone().ok_or(NvimError::Closed)?;
+    let file_open_command =
+        command.contains("vim.cmd.edit") || command.contains("File Open Failed");
+    let cwd_command = command.contains("vim.cmd.cd");
+    if file_open_command || cwd_command {
+        tracing::warn!(
+            target: "neoism::nvim_command",
+            command = %command,
+            file_open_command,
+            cwd_command,
+            "nvim command dispatched"
+        );
+    } else {
+        tracing::trace!(
+            command = %command,
+            "[nvim-trace] Command dispatched to embedded nvim"
+        );
+    }
+    nvim_rpc_timeout("command", nvim.command(command))
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                target: "neoism::nvim_command",
+                error = %e,
+                command = %command,
+                file_open_command,
+                cwd_command,
+                "nvim command failed"
+            );
+            e
+        })
 }
 
 pub(crate) async fn nvim_rpc_timeout<T, E, F>(label: &'static str, fut: F) -> Result<T, NvimError>

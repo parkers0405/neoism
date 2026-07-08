@@ -335,6 +335,10 @@ impl Route<'_> {
         // only routes.
         let cmd = neoism_backend::performer::nvim::vim_search_query_command(query);
         self.window.screen.send_editor_command(cmd);
+        // nvim answers `rio_search_matches` asynchronously; keep the frame
+        // loop alive so the reply is drained + previewed live (each
+        // keystroke) instead of only on the next input event.
+        self.window.screen.arm_search_reply_pump();
     }
 
     /// Send the lua side a preview-line command for whichever buffer

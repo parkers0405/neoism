@@ -452,6 +452,74 @@
         registry.remove(handle.key()).await;
     }
 
+    /// Regression test for the digit-key freeze via a deferred COMMAND:
+    /// a bare count leaves nvim deferring every non-fast RPC. If
+    /// `handle(Command)` issues that deferred `nvim_command` while holding
+    /// the session Mutex, a concurrent `SendKeys` (the key that would
+    /// clear the count) blocks on the same Mutex for the full 4s rpc
+    /// window — the editor freezes. The fix issues the command WITHOUT
+    /// holding the session lock across the await, so input stays live.
+    #[tokio::test]
+    async fn pending_count_command_does_not_wedge_concurrent_input_when_available() {
+        if which_nvim().is_none() {
+            eprintln!("skipping nvim pending-count command test: `nvim` not found on PATH");
+            return;
+        }
+
+        let registry = NvimSessionRegistry::new();
+        let handle = registry
+            .get_or_spawn("test:count-cmd".into(), &CrdtSyncHub::default())
+            .await
+            .expect("spawn nvim");
+        let mut rx = handle.subscribe_redraw();
+
+        // Bare digit → pending-count state (non-fast RPC now deferred).
+        handle
+            .handle(EditorClientMessage::SendKeys {
+                bytes: b"3".to_vec(),
+                surface_id: Some("test:count-cmd".into()),
+            })
+            .await
+            .expect("send digit");
+
+        // Fire a non-fast COMMAND that nvim will defer until the count
+        // clears (mirrors the `/`-search preview `:lua` the palette sends).
+        let cmd_handle = handle.clone();
+        let cmd_task = tokio::spawn(async move {
+            let _ = cmd_handle
+                .handle(EditorClientMessage::Command {
+                    command: "echo 'deferred'".into(),
+                    surface_id: Some("test:count-cmd".into()),
+                })
+                .await;
+        });
+        // Let the command task acquire the session and start its deferred
+        // await before we race the input against it.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // The clearing keystroke must NOT wait behind the deferred command.
+        // Timing is the deterministic freeze signal: pre-fix this blocked
+        // for the full ~4s rpc-timeout window; post-fix it returns at once.
+        let t0 = std::time::Instant::now();
+        handle
+            .handle(EditorClientMessage::SendKeys {
+                bytes: b"<Esc>".to_vec(),
+                surface_id: Some("test:count-cmd".into()),
+            })
+            .await
+            .expect("keys after digit");
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "input lane wedged behind a deferred command for {elapsed:?} (digit-key freeze)"
+        );
+        let _ = &mut rx;
+
+        let _ = cmd_task.await;
+        let _ = handle.handle(EditorClientMessage::Close).await;
+        registry.remove(handle.key()).await;
+    }
+
     #[tokio::test]
     async fn nvim_lua_print_message_roundtrip_when_available() {
         if which_nvim().is_none() {

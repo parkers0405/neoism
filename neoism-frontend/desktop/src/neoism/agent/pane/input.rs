@@ -83,6 +83,24 @@ impl NeoismAgentPane {
         if text.is_empty() {
             return;
         }
+        // A picker whose input is its own query row (model / connect / the
+        // OAuth-token & API-key entry, etc.) must receive the paste directly.
+        // Otherwise a long value like an OAuth code or JWT trips the
+        // "compact long paste" path below and lands in the composer as a
+        // `[pasted …]` attachment instead of the field the user is looking at.
+        // Only the composer-driven pickers (slash / @file / skill mentions)
+        // intentionally let paste fall through to the composer.
+        if let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) {
+            if !matches!(
+                kind,
+                NeoismAgentPickerKind::Slash
+                    | NeoismAgentPickerKind::FileMention
+                    | NeoismAgentPickerKind::SkillMention
+            ) {
+                self.update_picker_query(&text);
+                return;
+            }
+        }
         if let Some(path) = self.pasted_attachment_path(&text) {
             if self.attach_path(&path) {
                 return;
@@ -231,6 +249,17 @@ impl NeoismAgentPane {
             self.file_mention_anchor = None;
             self.input_attachments.clear();
             self.last_control_c_at = Some(now);
+            return;
+        }
+        // While a run is active (including compaction), a single Esc aborts it
+        // immediately — the composer is empty and there's a live thing to stop,
+        // so "esc to cancel" should just work. When idle, keep the double-press
+        // guard so a stray Esc on an empty composer does nothing surprising.
+        if self.is_streaming() {
+            self.last_control_c_at = Some(now);
+            self.abort_session();
+            self.messages
+                .push(NeoismAgentMessage::subtask("Interrupted", "run stopped"));
             return;
         }
         let double = self
@@ -714,6 +743,31 @@ impl NeoismAgentPane {
     }
 
     pub fn close_picker(&mut self) {
+        // The `/connect` flow is multi-stage: ESC steps back one screen (like
+        // the per-screen "esc" affordance) rather than dismissing everything.
+        if let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) {
+            match kind {
+                NeoismAgentPickerKind::ConnectSecret => {
+                    if let Some(provider_id) =
+                        self.connect.as_ref().and_then(|flow| flow.provider_id())
+                    {
+                        self.enter_connect_auth(&provider_id);
+                        return;
+                    }
+                    self.close_connect();
+                    return;
+                }
+                NeoismAgentPickerKind::ConnectAuth => {
+                    self.reopen_connect_provider_picker();
+                    return;
+                }
+                NeoismAgentPickerKind::Connect => {
+                    self.close_connect();
+                    return;
+                }
+                _ => {}
+            }
+        }
         self.picker = None;
         self.session_rename = None;
         self.file_mention_anchor = None;

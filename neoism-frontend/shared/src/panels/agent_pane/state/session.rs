@@ -27,6 +27,11 @@ impl NeoismAgentPane {
                 self.apply_inline_skill_mention(option)
             }
             NeoismAgentPickerKind::FileMention => self.apply_file_mention(option.value),
+            // `/connect` provider-auth pickers are wired on the desktop host;
+            // the shared/web pane does not open them yet.
+            NeoismAgentPickerKind::Connect
+            | NeoismAgentPickerKind::ConnectAuth
+            | NeoismAgentPickerKind::ConnectSecret => {}
         }
         true
     }

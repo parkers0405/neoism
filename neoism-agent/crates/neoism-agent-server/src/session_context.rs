@@ -5,13 +5,16 @@ use neoism_agent_core::{
     SessionInfo, TextPart, TokenUsage, ToolState, UserMessage,
 };
 use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use tokio_stream::StreamExt;
 
 use crate::agent::AgentCatalog;
 use crate::error::ApiError;
 use crate::model_selection::{default_user_model, user_model_from_model_ref};
-use crate::state::AppState;
+use crate::session_loop::wait_for_cancellation;
+use crate::state::{AppState, SessionRun};
 use crate::{
     ensure_session, instruction, message_model, now_millis, use_apply_patch_for_model,
 };
@@ -83,8 +86,45 @@ async fn compact_session_context_inner(
     session_id: &str,
     reason: &str,
 ) -> Result<SessionInfo, ApiError> {
-    let mut info = ensure_session(state, session_id).await?;
     let started = now_millis();
+    // Register a cancellable run so `/session/{id}/abort` (ESC in the GUI) can
+    // interrupt a long compaction. When compaction fires from inside an active
+    // agent loop (auto-compaction) a run already exists — reuse its cancel flag
+    // so aborting the run also stops the summary. Otherwise (manual `/compact`)
+    // register a transient run we own and tear down when done.
+    let (cancel, owned_run_id) = {
+        let mut runs = state.inner.runs.write().await;
+        match runs.get(session_id) {
+            Some(run) => (run.cancel.clone(), None),
+            None => {
+                let run = SessionRun {
+                    id: Id::ascending(IdKind::Event).to_string(),
+                    started_at: started,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                };
+                let cancel = run.cancel.clone();
+                let run_id = run.id.clone();
+                runs.insert(session_id.to_string(), run);
+                (cancel, Some(run_id))
+            }
+        }
+    };
+    // Always release the transient run afterwards — even if the body returns
+    // early through a `?` — so a mid-compaction error can't wedge the session
+    // in a permanent "already running" state.
+    let result = run_compaction(state, session_id, reason, started, &cancel).await;
+    release_owned_compaction_run(state, session_id, owned_run_id).await;
+    result
+}
+
+async fn run_compaction(
+    state: &AppState,
+    session_id: &str,
+    reason: &str,
+    started: u64,
+    cancel: &Arc<AtomicBool>,
+) -> Result<SessionInfo, ApiError> {
+    let mut info = ensure_session(state, session_id).await?;
     info.time.compacting = Some(started);
     info.time.updated = started;
     state.inner.store.update_session(&info).await?;
@@ -166,12 +206,21 @@ async fn compact_session_context_inner(
         tail_start_message_id.as_deref(),
         &assistant_message_id,
         &assistant_text_part_id,
+        cancel,
     )
     .await
     {
         Some(summary) => summary,
         None => {
-            let message = "model compaction failed".to_string();
+            // Distinguish a user-triggered abort (ESC / `/session/abort`) from a
+            // genuine model failure so the GUI shows the right thing and we
+            // don't leave the session stuck in the "Compacting" state.
+            let aborted = cancel.load(Ordering::SeqCst);
+            let message = if aborted {
+                "compaction cancelled".to_string()
+            } else {
+                "model compaction failed".to_string()
+            };
             fail_compaction_assistant_message(
                 state,
                 session_id,
@@ -180,9 +229,13 @@ async fn compact_session_context_inner(
                 &message,
             )
             .await?;
-            return Err(ApiError::internal(
-                "model compaction failed: no usable summary was produced",
-            ));
+            return Err(if aborted {
+                ApiError::conflict("compaction cancelled")
+            } else {
+                ApiError::internal(
+                    "model compaction failed: no usable summary was produced",
+                )
+            });
         }
     };
     let kind = "model";
@@ -262,6 +315,27 @@ async fn compact_session_context_inner(
     Ok(info)
 }
 
+/// Remove the transient run registered for a manual compaction, but only if it
+/// is still the one we inserted (an abort may have already removed and
+/// cancelled it). Runs reused from an active agent loop (`owned_run_id ==
+/// None`) are owned by that loop and left untouched.
+async fn release_owned_compaction_run(
+    state: &AppState,
+    session_id: &str,
+    owned_run_id: Option<String>,
+) {
+    let Some(run_id) = owned_run_id else {
+        return;
+    };
+    let mut runs = state.inner.runs.write().await;
+    if runs
+        .get(session_id)
+        .is_some_and(|run| run.id == run_id)
+    {
+        runs.remove(session_id);
+    }
+}
+
 pub(crate) fn is_default_session_title(title: &str) -> bool {
     title.starts_with("New session - ") || title.starts_with("Child session - ")
 }
@@ -320,6 +394,7 @@ async fn generate_model_compaction_summary(
     tail_start_message_id: Option<&str>,
     assistant_message_id: &str,
     assistant_text_part_id: &str,
+    cancel: &Arc<AtomicBool>,
 ) -> Option<String> {
     if model_compaction_disabled() || messages.is_empty() {
         return None;
@@ -380,20 +455,31 @@ async fn generate_model_compaction_summary(
         options: metadata.options,
         headers: metadata.headers,
     };
+    if cancel.load(Ordering::SeqCst) {
+        return None;
+    }
     let stream = state.inner.providers.stream(request).ok()?;
     let mut events = stream.events;
     let mut raw = String::new();
     loop {
-        let event = match timeout(
-            Duration::from_secs(model_compaction_timeout_secs()),
-            events.next(),
-        )
-        .await
-        {
-            Ok(Some(Ok(event))) => event,
-            Ok(Some(Err(_))) | Ok(None) => break,
-            Err(_) if raw.trim().is_empty() => return None,
-            Err(_) => break,
+        // A user abort (ESC / `/session/abort`) sets this flag; stop streaming
+        // immediately and discard the partial summary so we don't commit a
+        // half-finished compaction.
+        if cancel.load(Ordering::SeqCst) {
+            return None;
+        }
+        let event = tokio::select! {
+            biased;
+            _ = wait_for_cancellation(cancel.clone()) => return None,
+            result = timeout(
+                Duration::from_secs(model_compaction_timeout_secs()),
+                events.next(),
+            ) => match result {
+                Ok(Some(Ok(event))) => event,
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) if raw.trim().is_empty() => return None,
+                Err(_) => break,
+            },
         };
         match event {
             ProviderStreamEvent::TextDelta { delta, .. } => {

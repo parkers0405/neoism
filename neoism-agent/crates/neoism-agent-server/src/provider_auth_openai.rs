@@ -55,6 +55,7 @@ pub(super) async fn authorize_openai_browser(
     let (sender, receiver) = oneshot::channel();
     start_openai_browser_callback_listener(
         OPENAI_BROWSER_OAUTH_PORT,
+        "/auth/callback".to_string(),
         state.clone(),
         sender,
     )

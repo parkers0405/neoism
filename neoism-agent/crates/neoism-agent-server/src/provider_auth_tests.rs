@@ -106,6 +106,7 @@ fn pkce_challenge_matches_rfc_example() {
 fn openai_browser_callback_validates_state_and_extracts_code() {
     let ok = openai_browser_callback_outcome(
         "/auth/callback?code=abc%20123&state=expected",
+        "/auth/callback",
         "expected",
     );
     assert_eq!(ok.status, "200 OK");
@@ -113,6 +114,7 @@ fn openai_browser_callback_validates_state_and_extracts_code() {
 
     let bad = openai_browser_callback_outcome(
         "/auth/callback?code=abc&state=wrong",
+        "/auth/callback",
         "expected",
     );
     assert_eq!(bad.status, "400 Bad Request");

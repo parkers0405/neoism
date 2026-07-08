@@ -294,23 +294,74 @@ fn from_models_dev_provider(provider: ModelsDevProvider) -> ProviderInfo {
     }
 }
 
+/// Well-known API base URL for a native AI-SDK adapter, used when the catalog
+/// leaves the URL blank (the SDK would otherwise supply it). Only the adapters
+/// neoism can actually stream through are listed; generic
+/// `@ai-sdk/openai-compatible` providers always carry an explicit URL from the
+/// catalog, so they aren't defaulted here.
+/// Env var name that overrides a provider's base URL, e.g. provider `openrouter`
+/// → `NEOISM_AGENT_BASE_URL_OPENROUTER`, `claude-code` → `..._CLAUDE_CODE`.
+fn provider_base_url_env_key(provider_id: &str) -> String {
+    let suffix = provider_id
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_uppercase() } else { '_' })
+        .collect::<String>();
+    format!("NEOISM_AGENT_BASE_URL_{suffix}")
+}
+
+fn default_base_url_for_npm(npm: &str) -> Option<&'static str> {
+    Some(match npm {
+        "@ai-sdk/openai" => "https://api.openai.com/v1",
+        "@ai-sdk/anthropic" => "https://api.anthropic.com/v1",
+        "@ai-sdk/xai" => "https://api.x.ai/v1",
+        "@ai-sdk/groq" => "https://api.groq.com/openai/v1",
+        "@ai-sdk/mistral" => "https://api.mistral.ai/v1",
+        "@ai-sdk/cerebras" => "https://api.cerebras.ai/v1",
+        "@ai-sdk/perplexity" => "https://api.perplexity.ai",
+        "@ai-sdk/deepinfra" => "https://api.deepinfra.com/v1/openai",
+        "@ai-sdk/togetherai" => "https://api.together.xyz/v1",
+        _ => return None,
+    })
+}
+
 fn from_models_dev_model(
     provider: &ModelsDevProvider,
     model: &ModelsDevModel,
     mode: Option<&str>,
 ) -> ModelInfo {
-    let api = model
-        .provider
-        .as_ref()
-        .and_then(|provider| provider.api.clone())
-        .or(provider.api.clone())
-        .unwrap_or_default();
     let npm = model
         .provider
         .as_ref()
         .and_then(|provider| provider.npm.clone())
         .or(provider.npm.clone())
         .unwrap_or_else(|| "@ai-sdk/openai-compatible".to_string());
+    let mut api = model
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.api.clone())
+        .or(provider.api.clone())
+        .unwrap_or_default();
+    // models.dev omits a base URL for native-SDK providers (e.g. xAI, Groq,
+    // Mistral) that rely on the AI SDK's built-in endpoint. neoism's
+    // OpenAI-compatible adapter needs an explicit URL, so fall back to the
+    // provider's well-known endpoint — otherwise the whole provider is dropped
+    // from `/connect` and `/model` for having an "unsupported" (empty-URL) API.
+    if api.trim().is_empty() {
+        if let Some(default_url) = default_base_url_for_npm(&npm) {
+            api = default_url.to_string();
+        }
+    }
+    // Per-provider base-URL override, e.g. `NEOISM_AGENT_BASE_URL_OPENROUTER`
+    // or `NEOISM_AGENT_BASE_URL_CLAUDE_CODE`. Lets a user route a provider
+    // through a gateway/proxy (LiteLLM, Cloudflare AI Gateway) or a self-hosted
+    // OpenAI-compatible server without editing the catalog. Wins over both the
+    // catalog URL and the built-in default.
+    if let Ok(override_url) = std::env::var(provider_base_url_env_key(&provider.id)) {
+        let override_url = override_url.trim();
+        if !override_url.is_empty() {
+            api = override_url.to_string();
+        }
+    }
     let provider_options = model.provider.as_ref();
     ModelInfo {
         id: mode
@@ -440,9 +491,12 @@ pub(crate) fn usable_provider_catalog(
         provider.models.retain(|_, model| {
             model_available_in_picker(model)
                 && model_supported_in_picker(&provider_id, model)
-                && if provider_id == "claude-code" {
-                    true
-                } else if provider_id == "opencode" && !provider_connected {
+                // `claude-code` (routed through the Meridian proxy) is no longer
+                // shown unconditionally — like every other provider it must be
+                // connected first (via `/connect` → "Connect Meridian", which
+                // writes an auth-store marker). `opencode` still exposes its
+                // free models before connecting.
+                && if provider_id == "opencode" && !provider_connected {
                     public_free_model(model)
                 } else {
                     provider_connected
@@ -459,6 +513,17 @@ fn model_available_in_picker(model: &ModelInfo) -> bool {
 
 fn model_supported_in_picker(provider_id: &str, model: &ModelInfo) -> bool {
     provider_id == "openai" || provider_api_supported(&model.api)
+}
+
+/// Whether a provider could ever appear in the `/model` picker — i.e. it has at
+/// least one model neoism can actually stream through (a supported adapter).
+/// Used to gate the `/connect` list: there's no point offering to connect a
+/// provider we can't use (e.g. `google`/Gemini, `amazon-bedrock`).
+pub(crate) fn provider_connectable(provider: &ProviderInfo) -> bool {
+    provider
+        .models
+        .values()
+        .any(|model| model_supported_in_picker(&provider.id, model))
 }
 
 fn public_free_model(model: &ModelInfo) -> bool {

@@ -84,6 +84,20 @@ pub(crate) enum ProviderOAuthPending {
         interval_ms: u64,
         enterprise_url: Option<String>,
     },
+    /// xAI Grok "SuperGrok" OAuth: the browser redirects to
+    /// `127.0.0.1:56121/callback?code=…`; the user copies that `code` and
+    /// pastes it, and we exchange it with the stored PKCE verifier +
+    /// redirect_uri.
+    XaiLoopback {
+        redirect_uri: String,
+        code_verifier: String,
+    },
+    /// xAI Grok headless device-code OAuth: poll the token endpoint until the
+    /// user finishes authorizing on another device.
+    XaiDevice {
+        device_code: String,
+        interval_ms: u64,
+    },
 }
 
 #[derive(Clone)]

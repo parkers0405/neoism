@@ -67,7 +67,17 @@ impl ProviderRuntime for OpenAiRuntime {
         if self.use_oauth_responses && matches!(auth, Some(AuthInfo::OAuth { .. })) {
             return openai_oauth_responses_stream(client, auth_store, auth, request);
         }
+        let provider_id = request.provider_id.clone();
         Box::pin(async_stream::try_stream! {
+            // Refresh an expiring OAuth token (e.g. xAI Grok) before use so a
+            // long-lived session doesn't start failing an hour after sign-in.
+            let auth = crate::provider_auth::refresh_oauth_if_needed(
+                &provider_id,
+                auth,
+                &auth_store,
+                &client.client,
+            )
+            .await?;
             let api_key = openai_key_with_fallback(auth.as_ref(), allow_openai_env_fallback).ok_or_else(|| {
                 anyhow::anyhow!(
                     "OpenAI-compatible provider requested but no API key was found in stored auth or provider environment variables"

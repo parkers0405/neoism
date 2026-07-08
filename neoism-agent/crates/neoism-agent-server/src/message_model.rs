@@ -1,5 +1,5 @@
 use neoism_agent_core::{
-    MessageInfo, MessageWithParts, Part, ProviderAttachment, ProviderMessage,
+    FilePart, MessageInfo, MessageWithParts, Part, ProviderAttachment, ProviderMessage,
     ProviderRole, ProviderToolCall, ToolPart, ToolState,
 };
 use serde_json::Value;
@@ -181,11 +181,40 @@ fn visible_part_text(parts: &[Part]) -> String {
             Part::Subtask(_) => {
                 Some("The following tool was executed by the user".to_string())
             }
-            Part::File(part) => Some(format!("[file: {}] {}", part.mime, part.url)),
+            Part::File(part) => Some(file_part_placeholder(part)),
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A compact text reference for a file part.
+///
+/// The actual file bytes reach the model through the structured
+/// [`ProviderAttachment`] path (image/file blocks), so the text content only
+/// needs a short human-readable marker. Critically, a base64 `data:` URL is
+/// NEVER inlined here: a pasted screenshot is hundreds of KB of base64 that the
+/// model would tokenize as text — sent a second time on top of the real image
+/// block, and re-sent on every subsequent turn (and never stripped by
+/// compaction). That is the entire source of the "images balloon the context"
+/// bug. Real (non-`data:`) URLs stay inline since they are small and useful.
+fn file_part_placeholder(part: &FilePart) -> String {
+    let label = part
+        .filename
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(part.mime.as_str());
+    let kind = if part.mime.starts_with("image/") {
+        "image"
+    } else {
+        "file"
+    };
+    if part.url.starts_with("data:") {
+        format!("[{kind}: {label}]")
+    } else {
+        format!("[{kind}: {label}] {}", part.url)
+    }
 }
 
 fn tool_input(part: &ToolPart) -> Value {
@@ -656,10 +685,10 @@ mod tests {
         }]);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(
-            messages[0].content,
-            "inspect\n[file: image/png] data:image/png;base64,abc"
-        );
+        // The base64 data URL must NOT be inlined into the text content — only
+        // a compact placeholder. The bytes still travel via the structured
+        // attachment below.
+        assert_eq!(messages[0].content, "inspect\n[image: shot.png]");
         assert_eq!(messages[0].attachments.len(), 1);
         assert_eq!(messages[0].attachments[0].mime, "image/png");
         assert_eq!(messages[0].attachments[0].url, "data:image/png;base64,abc");
@@ -707,10 +736,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].attachments.len(), 0);
-        assert_eq!(
-            messages[0].content,
-            "inspect\n[file: image/png] data:image/png;base64,abc"
-        );
+        assert_eq!(messages[0].content, "inspect\n[image: shot.png]");
     }
 
     #[test]

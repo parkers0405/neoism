@@ -18,6 +18,8 @@ mod provider_auth_methods;
 mod provider_auth_openai;
 #[path = "provider_auth_util.rs"]
 mod provider_auth_util;
+#[path = "provider_auth_xai.rs"]
+mod provider_auth_xai;
 
 #[cfg(test)]
 use crate::provider_auth_browser::openai_browser_callback_outcome;
@@ -46,6 +48,16 @@ pub(crate) async fn authorize(
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
 ) -> anyhow::Result<Option<ProviderAuthAuthorization>> {
     let method = select_method(provider_id, method, providers)?;
+    if provider_id == "xai" && matches!(method.kind, ProviderAuthMethodKind::OAuth) {
+        if provider_auth_xai::is_headless_method(&method.label) {
+            return provider_auth_xai::authorize_xai_device(provider_id, pending)
+                .await
+                .map(Some);
+        }
+        return provider_auth_xai::authorize_xai_loopback(provider_id, pending)
+            .await
+            .map(Some);
+    }
     match method.kind {
         ProviderAuthMethodKind::Api => {
             if let Some(key) = inputs.get("key").filter(|key| !key.trim().is_empty()) {
@@ -95,6 +107,18 @@ pub(crate) async fn callback(
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
 ) -> anyhow::Result<()> {
     let method = select_method(provider_id, method, providers)?;
+    if provider_id == "xai" && matches!(method.kind, ProviderAuthMethodKind::OAuth) {
+        let auth = if provider_auth_xai::is_headless_method(&method.label) {
+            provider_auth_xai::poll_xai_device(provider_id, pending).await?
+        } else {
+            let code = code.map(str::trim).filter(|code| !code.is_empty()).ok_or_else(
+                || anyhow::anyhow!("paste the authorization code xAI showed you"),
+            )?;
+            provider_auth_xai::exchange_xai_loopback(provider_id, pending, code).await?
+        };
+        auth_store.set(provider_id, auth)?;
+        return Ok(());
+    }
     match method.kind {
         ProviderAuthMethodKind::Api => {
             let Some(key) = code.filter(|code| !code.trim().is_empty()) else {
@@ -140,6 +164,40 @@ pub(crate) async fn callback(
             }
             anyhow::bail!("OAuth token is required for provider {provider_id}")
         }
+    }
+}
+
+/// Refresh an about-to-expire OAuth access token for providers that need it in
+/// the OpenAI-compatible streaming path (currently xAI Grok). Returns the auth
+/// unchanged for everything else, or when the token is still valid. On refresh
+/// failure the original (expired) token is returned so the request surfaces a
+/// real auth error rather than silently doing nothing.
+pub(crate) async fn refresh_oauth_if_needed(
+    provider_id: &str,
+    auth: Option<AuthInfo>,
+    auth_store: &AuthStore,
+    client: &reqwest::Client,
+) -> anyhow::Result<Option<AuthInfo>> {
+    if provider_id != "xai" {
+        return Ok(auth);
+    }
+    let Some(AuthInfo::OAuth {
+        refresh, expires, ..
+    }) = &auth
+    else {
+        return Ok(auth);
+    };
+    // `expires == 0` means "unknown" (e.g. a pasted token) — leave it alone.
+    if *expires == 0 || *expires > crate::now_millis().saturating_add(60_000) {
+        return Ok(auth);
+    }
+    let refresh = refresh.clone();
+    match provider_auth_xai::refresh_xai_oauth(client, &refresh).await {
+        Ok(refreshed) => {
+            let _ = auth_store.set("xai", refreshed.clone());
+            Ok(Some(refreshed))
+        }
+        Err(_) => Ok(auth),
     }
 }
 

@@ -47,6 +47,10 @@ pub struct InlinePickerView<'a> {
     /// already shows a caret there, so a second one in the search row reads
     /// as a doubled/misplaced cursor.
     pub show_search_caret: bool,
+    /// Muted placeholder shown in the empty search/input row. Defaults to
+    /// "Search" for filter pickers; the `/connect` secret-entry stage passes
+    /// e.g. "API key" so the row reads as a single-field input.
+    pub search_placeholder: &'a str,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -224,7 +228,7 @@ pub fn render(
             sugarloaf.text_mut().draw(
                 x + 14.0 * s + 5.0 * s,
                 y + 31.0 * s,
-                "Search",
+                view.search_placeholder,
                 &DrawOpts {
                     color: theme.u8(theme.muted),
                     ..search_opts

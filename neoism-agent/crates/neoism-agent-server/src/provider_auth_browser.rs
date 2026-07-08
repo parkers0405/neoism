@@ -5,6 +5,7 @@ use tokio::sync::oneshot;
 
 pub(super) async fn start_openai_browser_callback_listener(
     port: u16,
+    callback_path: String,
     expected_state: String,
     sender: oneshot::Sender<Result<String, String>>,
 ) -> anyhow::Result<()> {
@@ -33,7 +34,8 @@ pub(super) async fn start_openai_browser_callback_listener(
                 .next()
                 .and_then(|line| line.split_whitespace().nth(1))
                 .unwrap_or("/");
-            let outcome = openai_browser_callback_outcome(path, &expected_state);
+            let outcome =
+                openai_browser_callback_outcome(path, &callback_path, &expected_state);
             let should_stop = outcome.result.is_some();
             if let Some(result) = outcome.result {
                 if let Some(sender) = sender.take() {
@@ -57,6 +59,7 @@ pub(super) struct BrowserCallbackOutcome {
 
 pub(super) fn openai_browser_callback_outcome(
     path: &str,
+    callback_path: &str,
     expected_state: &str,
 ) -> BrowserCallbackOutcome {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
@@ -67,7 +70,7 @@ pub(super) fn openai_browser_callback_outcome(
             result: Some(Err("Login cancelled".to_string())),
         };
     }
-    if route != "/auth/callback" {
+    if route != callback_path {
         return BrowserCallbackOutcome {
             status: "404 Not Found",
             body: "Not found".to_string(),

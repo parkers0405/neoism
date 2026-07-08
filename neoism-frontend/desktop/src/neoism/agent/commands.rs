@@ -30,6 +30,7 @@ impl NeoismAgentPane {
                 self.apply_model(normalize_model_ref(&model));
             }
             SlashCommandAction::OpenModelPicker => self.open_model_picker(),
+            SlashCommandAction::OpenConnectPicker => self.open_connect_picker(),
             SlashCommandAction::ApplyThinking(value) => {
                 self.apply_thinking(normalize_thinking(&value));
             }
@@ -939,23 +940,46 @@ impl NeoismAgentPane {
             self.system_message(title, "no session has started yet");
             return;
         };
-        match api_request_json(
-            &self.server,
-            "POST",
-            &format!("/api/session/{session_id}/{action}"),
-            None,
-        ) {
-            Ok(_) => match fetch_session_messages(&self.server, &session_id) {
-                Ok(messages) => {
-                    self.messages = messages;
-                    self.invalidate_timeline_layout();
-                    self.hydrate_runtime_status_for_session(&session_id);
-                    self.start_session_updates(&session_id);
-                    self.system_message(title, "session history updated");
-                }
-                Err(error) => self.system_message(title, error),
-            },
-            Err(error) => self.system_message(title, error),
+        // Run the revert POST and the (potentially large) message re-fetch off
+        // the UI thread. Doing them inline blocked the drain loop, freezing the
+        // whole pane — so ESC and any other keystroke were ignored until the
+        // revert finished. The result is applied back via a background update.
+        let server = self.server.clone();
+        let title = title.to_string();
+        let action = action.to_string();
+        let background_tx = self.background_sender();
+        let thread_session = session_id.clone();
+        let thread_title = title.clone();
+        let thread_action = action.clone();
+        if let Err(error) = thread::Builder::new()
+            .name(format!("neoism-agent-{action}-{session_id}"))
+            .spawn(move || {
+                let update = match api_request_json(
+                    &server,
+                    "POST",
+                    &format!("/api/session/{thread_session}/{thread_action}"),
+                    None,
+                )
+                .and_then(|_| fetch_session_messages(&server, &thread_session))
+                {
+                    Ok(messages) => NeoismAgentBackgroundUpdate::SessionHistoryApplied {
+                        session_id: thread_session,
+                        title: thread_title,
+                        messages,
+                    },
+                    Err(error) => NeoismAgentBackgroundUpdate::SessionHistoryFailed {
+                        session_id: thread_session,
+                        title: thread_title,
+                        error,
+                    },
+                };
+                let _ = background_tx.send(update);
+            })
+        {
+            self.system_message(
+                &title,
+                format!("failed to start {action} thread: {error}"),
+            );
         }
     }
 

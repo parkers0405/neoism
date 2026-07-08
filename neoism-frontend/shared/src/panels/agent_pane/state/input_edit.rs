@@ -86,6 +86,22 @@ impl NeoismAgentPane {
         if text.is_empty() {
             return;
         }
+        // Pickers whose input is their own query row (model / connect / secret
+        // entry) receive the paste directly, so a long value (OAuth code, JWT)
+        // fills the field instead of becoming a composer `[pasted …]`
+        // attachment. Composer-driven pickers (slash / @file / skill) fall
+        // through to the composer.
+        if let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) {
+            if !matches!(
+                kind,
+                NeoismAgentPickerKind::Slash
+                    | NeoismAgentPickerKind::FileMention
+                    | NeoismAgentPickerKind::SkillMention
+            ) {
+                self.update_picker_query(&text);
+                return;
+            }
+        }
         if let Some(path) = self.pasted_attachment_path(&text) {
             if self.attach_path(&path) {
                 return;
@@ -173,6 +189,17 @@ impl NeoismAgentPane {
             self.file_mention_anchor = None;
             self.input_attachments.clear();
             self.last_control_c_at = Some(now);
+            return;
+        }
+        // While a run is active (including compaction), a single Esc aborts it
+        // immediately — the composer is empty and there's a live thing to stop,
+        // so "esc to cancel" should just work. When idle, keep the double-press
+        // guard so a stray Esc on an empty composer does nothing surprising.
+        if self.is_streaming() {
+            self.last_control_c_at = Some(now);
+            self.abort_session();
+            self.messages
+                .push(NeoismAgentMessage::subtask("Interrupted", "run stopped"));
             return;
         }
         let double = self.last_control_c_at.is_some_and(|last| {

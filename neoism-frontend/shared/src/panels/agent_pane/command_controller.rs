@@ -12,6 +12,9 @@ pub enum SlashCommandAction {
     ShowHelp,
     ApplyModel(String),
     OpenModelPicker,
+    /// Open the "Connect a provider" flow (provider list → auth method →
+    /// OAuth / API-key entry). Mirrors opencode's `auth login`, but in the GUI.
+    OpenConnectPicker,
     ApplyThinking(String),
     OpenThinkingPicker,
     ApplyAgent(String),
@@ -65,6 +68,7 @@ pub fn plan_slash_command(text: &str) -> SlashCommandAction {
             SlashCommandAction::ApplyModel,
             SlashCommandAction::OpenModelPicker,
         ),
+        "/connect" => SlashCommandAction::OpenConnectPicker,
         "/think" | "/reasoning" => first_arg_or_picker(
             &args,
             SlashCommandAction::ApplyThinking,
@@ -170,6 +174,12 @@ fn slash_option_specs() -> &'static [SlashOptionSpec] {
             description: "Switch model",
             footer: "modal",
             value: "/model",
+        },
+        SlashOptionSpec {
+            title: "/connect",
+            description: "Connect a provider (OAuth or API key)",
+            footer: "modal",
+            value: "/connect",
         },
         SlashOptionSpec {
             title: "/think",

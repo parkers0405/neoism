@@ -19,9 +19,37 @@ impl NeoismAgentPane {
                     let messages = self.compact_inbound_user_texts(messages);
                     let messages = self.merge_pending_user_prompts(messages);
                     let messages = self.preserve_streamed_response_text(messages);
-                    if self.messages != messages {
+                    // These full-transcript snapshots arrive repeatedly around
+                    // each turn. `invalidate_timeline_layout()` here dropped the
+                    // WHOLE layout cache, so the next frame re-measured and
+                    // re-hashed every message in the transcript — an
+                    // O(total history) rebuild that grew with every question and
+                    // made scrolling heavy after a few Q&As. Instead, diff the
+                    // snapshot: when the structure (message count) is unchanged,
+                    // mark only the rows that actually differ dirty so the layout
+                    // patches just those; fall back to a full invalidation only
+                    // on a structural change (count differs / reorder).
+                    let structural = self.messages.len() != messages.len();
+                    let dirty_indices: Vec<usize> = if structural {
+                        Vec::new()
+                    } else {
+                        self.messages
+                            .iter()
+                            .zip(messages.iter())
+                            .enumerate()
+                            .filter(|(_, (old, new))| old != new)
+                            .map(|(index, _)| index)
+                            .collect()
+                    };
+                    if structural || !dirty_indices.is_empty() {
                         self.messages = messages;
-                        self.invalidate_timeline_layout();
+                        if structural {
+                            self.invalidate_timeline_layout();
+                        } else {
+                            for index in dirty_indices {
+                                self.mark_timeline_message_dirty_at(index);
+                            }
+                        }
                         self.clamp_timeline_scroll();
                         changed = true;
                     }
@@ -519,6 +547,50 @@ impl NeoismAgentPane {
                         self.timeline_history.last_requested_session_id = None;
                         self.system_message("History", error);
                     }
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::SessionHistoryApplied {
+                    session_id,
+                    title,
+                    messages,
+                }) => {
+                    // Ignore a revert that finished after the user switched away.
+                    if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        self.messages = messages;
+                        self.invalidate_timeline_layout();
+                        self.hydrate_runtime_status_for_session(&session_id);
+                        self.start_session_updates(&session_id);
+                        self.system_message(&title, "session history updated");
+                    }
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::SessionHistoryFailed {
+                    session_id,
+                    title,
+                    error,
+                }) => {
+                    if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        self.system_message(&title, error);
+                    }
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::ConnectOauthFinished { provider_name }) => {
+                    self.system_message(
+                        "Connected",
+                        format!(
+                            "{provider_name} connected. Open /model to pick one of its models."
+                        ),
+                    );
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::ConnectOauthFailed {
+                    provider_name,
+                    error,
+                }) => {
+                    self.system_message(
+                        &provider_name,
+                        format!("sign-in didn't complete: {error}"),
+                    );
                     changed = true;
                 }
                 Err(TryRecvError::Empty) => break,

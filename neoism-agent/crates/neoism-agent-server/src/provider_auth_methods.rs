@@ -7,6 +7,39 @@ use neoism_agent_core::{
 use serde_json::Value;
 
 pub(super) fn provider_methods(provider: &ProviderInfo) -> Vec<ProviderAuthMethod> {
+    // Claude Code streams through the local Meridian proxy, so the common path
+    // is a one-click "Connect Meridian" (no credential needed). Advanced users
+    // who point the proxy at a real key can enter one instead.
+    if provider.id == "claude-code" {
+        return vec![
+            ProviderAuthMethod {
+                kind: ProviderAuthMethodKind::Api,
+                label: "Connect Meridian".to_string(),
+                prompts: None,
+            },
+            ProviderAuthMethod {
+                kind: ProviderAuthMethodKind::Api,
+                label: "Manually enter API Key".to_string(),
+                prompts: Some(vec![ProviderAuthPrompt::Text {
+                    key: "key".to_string(),
+                    message: "Enter Claude Code API key".to_string(),
+                    placeholder: Some("sk-ant-...".to_string()),
+                    when: None,
+                }]),
+            },
+        ];
+    }
+    if provider.id == "xai" {
+        return vec![
+            oauth_method("xAI Grok OAuth (SuperGrok Subscription)", None),
+            oauth_method("xAI Grok OAuth (Headless / Remote / VPS)", None),
+            ProviderAuthMethod {
+                kind: ProviderAuthMethodKind::Api,
+                label: "Manually enter API Key".to_string(),
+                prompts: Some(api_prompts(provider)),
+            },
+        ];
+    }
     let mut methods = Vec::new();
     if provider.id == "openai" {
         methods.push(oauth_method("ChatGPT Pro/Plus (browser)", None));

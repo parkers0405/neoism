@@ -12,7 +12,8 @@ use serde_json::Value;
 use crate::error::ApiError;
 use crate::provider_auth;
 use crate::provider_catalog::{
-    default_model_ids, effective_provider_catalog, usable_provider_catalog,
+    default_model_ids, effective_provider_catalog, provider_connectable,
+    usable_provider_catalog,
 };
 use crate::state::AppState;
 
@@ -34,7 +35,11 @@ pub(crate) async fn provider_list(
 ) -> Result<Json<ProviderListResult>, ApiError> {
     let providers = state.inner.provider_catalog.providers().await?;
     let connected = state.inner.providers.connected_ids(&providers)?;
-    let providers = effective_provider_catalog(&providers);
+    let mut providers = effective_provider_catalog(&providers);
+    // Only surface providers neoism can actually stream through — there's no
+    // point offering to connect one (e.g. Gemini/`google`, `amazon-bedrock`)
+    // that could never appear in `/model`.
+    providers.retain(provider_connectable);
     Ok(Json(ProviderListResult {
         default: default_model_ids(&providers),
         connected,

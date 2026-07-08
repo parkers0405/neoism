@@ -22,6 +22,16 @@
         Session,
         Subagent,
         Skill,
+        /// `/connect` stage 1 — the "Connect a provider" list (Popular +
+        /// Providers, checkmark for already-connected).
+        Connect,
+        /// `/connect` stage 2 — "Select auth method" for the chosen provider
+        /// (OAuth variants and "Manually enter API Key").
+        ConnectAuth,
+        /// `/connect` stage 3 — a single-line secret entry. The picker `query`
+        /// row IS the input field (API key, or an OAuth token to paste); Enter
+        /// submits it. Carries no selectable rows.
+        ConnectSecret,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +94,10 @@
         pub kind: NeoismAgentPickerKind,
         pub title: String,
         pub query: String,
+        /// Muted placeholder for the empty search/input row. `None` renders the
+        /// default "Search"; the `/connect` secret-entry picker sets e.g.
+        /// "API key" so the row reads as a labelled single-field input.
+        pub search_placeholder: Option<String>,
         pub selected: usize,
         all_options: Vec<NeoismAgentPickerOption>,
         filtered_options: Vec<NeoismAgentPickerOption>,
@@ -119,6 +133,7 @@
                 kind,
                 title: title.to_string(),
                 query: String::new(),
+                search_placeholder: None,
                 selected,
                 filtered_options: options.clone(),
                 all_options: options,

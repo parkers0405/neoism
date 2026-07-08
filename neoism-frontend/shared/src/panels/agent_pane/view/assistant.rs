@@ -83,6 +83,26 @@ pub fn render_assistant_text_with<P: AgentMarkdownPane>(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Strip per-line leading whitespace from reasoning prose so stray indentation
+/// doesn't render as a nested/indented markdown block. Lines inside fenced code
+/// blocks (``` / ~~~) keep their indentation so code stays intact.
+fn dedent_reasoning_prose(text: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut in_fence = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            out.push(trimmed);
+        } else if in_fence {
+            out.push(line);
+        } else {
+            out.push(trimmed);
+        }
+    }
+    out.join("\n")
+}
+
 pub fn render_reasoning_message_with<P, M>(
     sugarloaf: &mut Sugarloaf,
     x: f32,
@@ -141,20 +161,23 @@ where
     let body_y = y + 34.0 * s;
     let body_w = (w - 48.0 * s).max(80.0 * s);
     let body_h = (h - 42.0 * s).max(0.0);
-    let cached_blocks;
-    let blocks = if let Some(blocks) = markdown_blocks {
-        blocks
-    } else {
-        cached_blocks = layout_assistant_markdown_cached(
-            sugarloaf,
-            pane,
-            AgentToolMessage::text(message),
-            body_w,
-            theme,
-            s,
-        );
-        cached_blocks.as_slice()
-    };
+    // Reasoning is inner-monologue prose. Rendering it through the full
+    // markdown parser lets stray leading whitespace (and the model's soft
+    // sub-point indentation) become nested/indented blocks — the "random tab"
+    // the Thinking panel showed. Dedent per line first so it reads as flat
+    // prose. Blocks passed in were laid out from the raw text, so we always
+    // relayout from the dedented copy (still cached by its own text).
+    let _ = markdown_blocks;
+    let reasoning_text = dedent_reasoning_prose(AgentToolMessage::text(message));
+    let cached_blocks = layout_assistant_markdown_cached(
+        sugarloaf,
+        pane,
+        &reasoning_text,
+        body_w,
+        theme,
+        s,
+    );
+    let blocks = cached_blocks.as_slice();
     render_markdown_blocks(
         sugarloaf,
         blocks,

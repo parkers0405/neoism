@@ -5,6 +5,12 @@ impl NeoismAgentPane {
         let Some(picker) = self.picker.take() else {
             return false;
         };
+        // The `/connect` secret stage has no selectable rows — its query row is
+        // the input field, so commit reads the typed query directly.
+        if picker.kind == NeoismAgentPickerKind::ConnectSecret {
+            self.submit_connect_secret(picker.query.clone());
+            return true;
+        }
         let Some(option) = picker.selected_option().cloned() else {
             return true;
         };
@@ -27,6 +33,16 @@ impl NeoismAgentPane {
                 self.apply_inline_skill_mention(option);
             }
             NeoismAgentPickerKind::FileMention => self.apply_file_mention(option.value),
+            NeoismAgentPickerKind::Connect => self.enter_connect_auth(&option.value),
+            NeoismAgentPickerKind::ConnectAuth => {
+                if option.value == super::connect::DISCONNECT_VALUE {
+                    self.disconnect_connect_provider();
+                } else if let Ok(index) = option.value.parse::<usize>() {
+                    self.start_connect_method(index);
+                }
+            }
+            // Handled above (no selectable row).
+            NeoismAgentPickerKind::ConnectSecret => {}
         }
         true
     }

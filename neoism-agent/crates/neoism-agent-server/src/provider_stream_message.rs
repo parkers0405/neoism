@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use neoism_agent_core::{
-    event_type, AssistantMessage, AssistantPath, CompletedTime, EventPayload, Id, IdKind,
-    MessageId, MessageInfo, MessageWithParts, Part, PartTime, ProviderGenerationResponse,
-    StepFinishPart, StepStartPart, TextPart, TokenUsage, UserModel,
+    event_type, AssistantMessage, AssistantPath, AuthInfo, CompletedTime, EventPayload, Id,
+    IdKind, MessageId, MessageInfo, MessageWithParts, Part, PartTime,
+    ProviderGenerationResponse, StepFinishPart, StepStartPart, TextPart, TokenUsage,
+    UserModel,
 };
 use serde_json::json;
 
@@ -19,6 +20,16 @@ async fn calculate_usage_cost(
     model: &UserModel,
     tokens: &TokenUsage,
 ) -> Option<f64> {
+    // Subscription / OAuth accounts (ChatGPT Plus/Pro, SuperGrok, Claude Code
+    // via Meridian, …) are flat-rate, not pay-per-token — a per-token dollar
+    // figure would be misleading, so report zero cost. Token usage / context %
+    // is tracked and shown regardless.
+    if matches!(
+        state.inner.auth_store.get(&model.provider_id),
+        Ok(Some(AuthInfo::OAuth { .. }))
+    ) {
+        return Some(0.0);
+    }
     let providers = state.inner.provider_catalog.providers().await.ok()?;
     let metadata = crate::provider_catalog::generation_metadata(&providers, model);
     let cost = metadata.cost.as_ref()?;

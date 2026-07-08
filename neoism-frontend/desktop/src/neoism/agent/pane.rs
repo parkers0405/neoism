@@ -395,6 +395,28 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         session_id: String,
         error: String,
     },
+    /// An `/undo` or `/redo` completed off the UI thread. Runs on a background
+    /// thread (the revert POST plus a full message re-fetch can be slow on a
+    /// large session, and doing it inline froze the UI so ESC couldn't be
+    /// processed). `title` is "Undo"/"Redo" for the confirmation line.
+    SessionHistoryApplied {
+        session_id: String,
+        title: String,
+        messages: Vec<NeoismAgentMessage>,
+    },
+    /// An `/undo` or `/redo` failed off the UI thread.
+    SessionHistoryFailed {
+        session_id: String,
+        title: String,
+        error: String,
+    },
+    /// An auto-completing OAuth `/connect` flow (e.g. OpenAI, GitHub Copilot)
+    /// finished on a background thread — the browser callback was captured and
+    /// the token exchanged/stored.
+    ConnectOauthFinished { provider_name: String },
+    /// An auto-completing OAuth `/connect` flow failed (timed out, cancelled in
+    /// the browser, or the exchange errored).
+    ConnectOauthFailed { provider_name: String, error: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -450,6 +472,10 @@ pub struct NeoismAgentPane {
     pub(super) directory: Option<String>,
     pub(super) server: String,
     pub(super) picker: Option<NeoismAgentPicker>,
+    /// Active `/connect` provider-auth flow. `Some` while any of the connect
+    /// pickers (provider list / auth method / secret entry) is open, carrying
+    /// the fetched catalog and the in-progress provider/method selection.
+    pub(super) connect: Option<connect::ConnectFlow>,
     /// Active inline rename of a `/sessions` picker row: `(session_id,
     /// buffer)`. `Some` diverts typed keys into the buffer until the user
     /// commits (Enter) or cancels (Esc).
@@ -649,6 +675,7 @@ impl Default for NeoismAgentPane {
             directory: None,
             server: neoism_agent_server(),
             picker: None,
+            connect: None,
             session_rename: None,
             recent_model_options: Vec::new(),
             skill_options: Vec::new(),
@@ -741,6 +768,7 @@ mod ingest;
 mod input;
 mod session;
 mod submit;
+pub(super) mod connect;
 
 fn file_mention_options(
     root: &Path,
@@ -1123,6 +1151,20 @@ fn background_completion_job_id_from_message(
 
 fn running_background_task_count(messages: &[NeoismAgentMessage]) -> usize {
     use std::collections::BTreeSet;
+
+    // Fast path: this runs every frame via `has_status_activity()` (see
+    // `render_timeline_with`). The overwhelmingly common case — no running
+    // background_task tool message — must not allocate. A single cheap scan
+    // decides, and only when a task is actually running do we do the
+    // dedup-with-completions work below.
+    let has_running = messages.iter().any(|message| {
+        message.kind == NeoismAgentMessageKind::Tool
+            && message.tool == "background_task"
+            && message.status == "running"
+    });
+    if !has_running {
+        return 0;
+    }
 
     let completed = messages
         .iter()

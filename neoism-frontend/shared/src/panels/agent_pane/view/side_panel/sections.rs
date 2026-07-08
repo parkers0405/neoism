@@ -5,8 +5,6 @@ use super::draw::{draw_status_dot_text, draw_subagent_spinner, push_provider_ico
 /// Markdown renderer's `heading_level_font_size(3)` (22.5px, on the 17px
 /// markdown body baseline) rescaled to the 14px global text baseline exactly
 /// like `markdown_font`, so the section titles read as a `### ` H3 heading.
-/// Kept in one place so the header itself and the "Directory" chevron that
-/// rides its baseline stay in sync.
 pub(crate) fn section_header_font_size(s: f32) -> f32 {
     const MD_H3_FONT_SIZE: f32 = 22.5;
     const MD_BODY_FONT_SIZE: f32 = 17.0;
@@ -108,12 +106,10 @@ pub(crate) fn render_text_line(
     y + FONT_SIZE * s * 1.5
 }
 
-/// Render the clickable "Directory" section — the drop-cap header with a
-/// trailing `▾` chevron (so it reads as a dropdown) plus the compacted
-/// working-directory path below it. Registers the header+path screen rect
-/// on the side panel so the host's click handler can open the
-/// working-directory picker. Shared by chat mode (`render_session_info`)
-/// and home mode (`render_sessions_list`). Returns the `y` below it.
+/// Render the "Directory" section — the drop-cap H3 header plus the compacted
+/// working-directory path below it. A plain, non-clickable readout. Shared by
+/// chat mode (`render_session_info`) and home mode (`render_sessions_list`).
+/// Returns the `y` below it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_directory_section(
     sugarloaf: &mut Sugarloaf,
@@ -126,32 +122,6 @@ pub(crate) fn render_directory_section(
     clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    let hit_top = y - 3.0 * s;
-
-    // A small down-chevron pinned to the right edge of the header row so the
-    // section reads as a clickable dropdown. Uses the same Font Awesome
-    // chevron glyph the bottom-input agent/model/thinking chips carry.
-    let chevron = "\u{f078}";
-    let chevron_opts = DrawOpts {
-        font_size: FONT_SIZE * s * 0.66,
-        color: theme.u8(theme.muted),
-        clip_rect: Some(clip),
-        ..DrawOpts::default()
-    };
-    let chevron_w = sugarloaf.text_mut().measure(chevron, &chevron_opts);
-    let chevron_font = FONT_SIZE * s * 0.66;
-    draw_text_with_occlusion(
-        sugarloaf,
-        x + width - chevron_w,
-        // Vertically centre the small chevron on the taller H3 header row so
-        // it reads as the header's dropdown affordance rather than floating at
-        // the title's top.
-        y + (section_header_font_size(s) - chevron_font) * 0.5,
-        chevron,
-        &chevron_opts,
-        occlusion_rects,
-    );
-
     let mut y = render_section_header(
         sugarloaf, "Directory", x, y, theme, s, clip, occlusion_rects,
     );
@@ -168,14 +138,6 @@ pub(crate) fn render_directory_section(
         clip,
         occlusion_rects,
     );
-
-    // Register the header+path as one click target, clamped to the visible
-    // content clip so a scrolled-away header isn't clickable.
-    let hit_rect = [x, hit_top, width, (y - hit_top).max(0.0)];
-    match intersect_rect(hit_rect, clip) {
-        Some(visible) => pane.side_panel_mut().set_directory_hit_rect(visible),
-        None => pane.side_panel_mut().clear_directory_hit_rect(),
-    }
     y
 }
 

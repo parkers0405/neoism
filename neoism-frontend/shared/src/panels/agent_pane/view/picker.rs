@@ -49,7 +49,6 @@ pub fn render_picker(
             | NeoismAgentPickerKind::FileMention
             | NeoismAgentPickerKind::SkillMention
     );
-    let min_visible_rows = picker.min_visible_rows();
     let list_scroll_offset = picker.tick_list_scroll();
     let cursor_offset = picker.tick_cursor();
     let rows = picker
@@ -77,7 +76,6 @@ pub fn render_picker(
             footer_hint,
             rename: rename.as_deref(),
             show_search_caret,
-            min_visible_rows,
         },
         input_rect,
         theme,

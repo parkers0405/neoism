@@ -22,9 +22,6 @@
         Session,
         Subagent,
         Skill,
-        /// Working-directory dropdown, opened from the side panel's
-        /// "Directory" header. Selecting a row re-scopes the agent's cwd.
-        Directory,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,28 +138,12 @@
             &self.filtered_options
         }
 
-        /// Row floor the popover reserves regardless of the current option
-        /// count. The working-directory picker pins this to the full visible
-        /// window so its height (and therefore its top anchor above the
-        /// composer) stays constant while the user navigates directories —
-        /// the row count changes every keystroke, but the card doesn't jump.
-        /// Every other picker sizes to its content (floor `0`).
-        pub fn min_visible_rows(&self) -> usize {
-            match self.kind {
-                NeoismAgentPickerKind::Directory => PICKER_VISIBLE_ROWS,
-                _ => 0,
-            }
-        }
-
         /// Number of list rows actually rendered: the option count, capped at
-        /// the visible window and raised to [`min_visible_rows`](Self::min_visible_rows).
-        /// Kept in sync with `inline_picker::visible_row_count` so click
-        /// hit-testing lands on the same rows the renderer draws.
+        /// the visible window. Kept in sync with the renderer's row count so
+        /// click hit-testing lands on the same rows the renderer draws.
         fn visible_rows(&self) -> usize {
-            let floor = self.min_visible_rows().min(PICKER_VISIBLE_ROWS);
             self.filtered_options
                 .len()
-                .max(floor)
                 .min(PICKER_VISIBLE_ROWS)
                 .max(1)
         }

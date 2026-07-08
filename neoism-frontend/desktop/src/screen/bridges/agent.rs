@@ -992,30 +992,21 @@ impl Screen<'_> {
             self.context_manager.current_mut().neoism_agent.as_mut()
         {
             if agent.side_panel().contains_point(mx, my) {
-                // The "Directory" header is a dropdown affordance — open the
-                // working-directory picker (over the composer) instead of
-                // treating the click as a session/branch row selection.
-                if agent.side_panel().directory_hit_contains(mx, my) {
-                    agent.open_directory_picker();
-                    agent.side_panel_mut().set_focused(false);
-                } else {
-                    agent.side_panel_mut().set_focused(true);
-                    let panel_rect = agent.side_panel().last_panel_rect();
-                    if let Some(rect) = panel_rect {
-                        if let Some(row) = agent.side_panel().hit_test_row(mx, my, rect)
-                        {
-                            agent.side_panel_mut().set_selected(row);
-                            let activated = if agent.has_conversation() {
-                                agent.activate_side_panel_subagent()
-                            } else {
-                                agent.activate_side_panel_selection()
-                            };
-                            if activated {
-                                // Hand keyboard focus back to the input bar
-                                // — the user just picked a session, they
-                                // want to type, not keep navigating rows.
-                                agent.side_panel_mut().set_focused(false);
-                            }
+                agent.side_panel_mut().set_focused(true);
+                let panel_rect = agent.side_panel().last_panel_rect();
+                if let Some(rect) = panel_rect {
+                    if let Some(row) = agent.side_panel().hit_test_row(mx, my, rect) {
+                        agent.side_panel_mut().set_selected(row);
+                        let activated = if agent.has_conversation() {
+                            agent.activate_side_panel_subagent()
+                        } else {
+                            agent.activate_side_panel_selection()
+                        };
+                        if activated {
+                            // Hand keyboard focus back to the input bar
+                            // — the user just picked a session, they
+                            // want to type, not keep navigating rows.
+                            agent.side_panel_mut().set_focused(false);
                         }
                     }
                 }

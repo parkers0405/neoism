@@ -413,10 +413,6 @@
         /// the panel owns focus — same pattern file_tree uses so Alt+Right
         /// animates the actual block cursor into the panel.
         selected_cursor_rect: Option<[f32; 4]>,
-        /// Screen rect of the clickable "Directory" header + path, cached
-        /// every frame by the renderer (both home + chat modes). The host's
-        /// click handler hit-tests this to open the directory dropdown.
-        directory_hit_rect: Option<[f32; 4]>,
         /// Flat, unfiltered source list of home-mode sessions (no header
         /// rows). `sessions` is derived from this by
         /// [`rebuild_session_display`](Self::rebuild_session_display) — sorted
@@ -497,7 +493,6 @@
                 last_row_hit_height: ROW_HEIGHT,
                 last_row_origin_y: 0.0,
                 selected_cursor_rect: None,
-                directory_hit_rect: None,
                 all_sessions: Vec::new(),
                 session_query: String::new(),
                 search_focused: false,
@@ -905,25 +900,6 @@
             self.selected_cursor_rect = None;
         }
 
-        /// Cache the clickable "Directory" header/path rect (screen space)
-        /// so the host can hit-test it and open the directory dropdown.
-        pub fn set_directory_hit_rect(&mut self, rect: [f32; 4]) {
-            self.directory_hit_rect = Some(rect);
-        }
-
-        pub fn clear_directory_hit_rect(&mut self) {
-            self.directory_hit_rect = None;
-        }
-
-        /// Whether `(x, y)` falls on the "Directory" header/path — the
-        /// affordance that opens the working-directory dropdown.
-        pub fn directory_hit_contains(&self, x: f32, y: f32) -> bool {
-            let Some([rx, ry, rw, rh]) = self.directory_hit_rect else {
-                return false;
-            };
-            x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
-        }
-
         pub fn contains_point(&self, x: f32, y: f32) -> bool {
             let Some([px, py, pw, ph]) = self.last_panel_rect else {
                 return false;
@@ -1197,24 +1173,6 @@
 
         pub fn mark_refresh_kicked(&mut self) {
             self.last_sessions_refresh = Some(Instant::now());
-        }
-
-        /// Force the next `should_refresh_sessions` to fire and drop the
-        /// currently-cached list — used when the working directory changes
-        /// so the home-mode session list re-fetches for the new directory
-        /// instead of showing the previous directory's stale sessions.
-        pub fn invalidate_sessions_refresh(&mut self) {
-            self.last_sessions_refresh = None;
-            self.sessions_loaded = false;
-            self.all_sessions.clear();
-            self.sessions.clear();
-            self.session_query.clear();
-            self.search_focused = false;
-            self.selected = 0;
-            self.scroll_top = 0;
-            self.scroll_px = 0.0;
-            self.scroll.reset();
-            self.cursor_spring.reset();
         }
 
         pub fn should_refresh_subagents(&self) -> bool {

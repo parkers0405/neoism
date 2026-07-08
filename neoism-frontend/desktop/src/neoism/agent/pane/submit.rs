@@ -27,7 +27,6 @@ impl NeoismAgentPane {
                 self.apply_inline_skill_mention(option);
             }
             NeoismAgentPickerKind::FileMention => self.apply_file_mention(option.value),
-            NeoismAgentPickerKind::Directory => self.apply_directory(option.value),
         }
         true
     }

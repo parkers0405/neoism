@@ -27,13 +27,6 @@ impl NeoismAgentPane {
                 self.apply_inline_skill_mention(option)
             }
             NeoismAgentPickerKind::FileMention => self.apply_file_mention(option.value),
-            NeoismAgentPickerKind::Directory => {
-                // Re-scope the pane to the picked working directory. The web
-                // frontend re-keys its session list off the directory; the
-                // desktop fork drives the richer cwd-change flow itself.
-                self.set_directory(Some(option.value));
-                self.side_panel_mut().invalidate_sessions_refresh();
-            }
         }
         true
     }

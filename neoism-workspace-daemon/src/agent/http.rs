@@ -85,6 +85,36 @@ pub(crate) async fn http_patch_json(
         .map_err(|err| format!("agent-server PATCH {path}: invalid JSON: {err}"))
 }
 
+pub(crate) async fn http_put_json(
+    inner: &AgentInner,
+    path: &str,
+    body: &Value,
+) -> Result<Value, String> {
+    wait_for_local_agent_server(inner).await?;
+    let url = format!("{}{}", inner.agent_server, path);
+    let resp = inner
+        .http
+        .put(&url)
+        .json(body)
+        .send()
+        .await
+        .map_err(|err| format!("agent-server PUT {path}: {err}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(format!("agent-server PUT {path}: HTTP {status}: {detail}"));
+    }
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|err| format!("agent-server PUT {path}: body: {err}"))?;
+    if body.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&body)
+        .map_err(|err| format!("agent-server PUT {path}: invalid JSON: {err}"))
+}
+
 pub(crate) async fn http_delete(inner: &AgentInner, path: &str) -> Result<(), String> {
     wait_for_local_agent_server(inner).await?;
     let url = format!("{}{}", inner.agent_server, path);

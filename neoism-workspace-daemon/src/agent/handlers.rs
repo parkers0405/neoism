@@ -593,6 +593,157 @@ pub(crate) async fn handle_list_providers(inner: Arc<AgentInner>) {
     }
 }
 
+// -- Provider connect / auth flow (`/connect` picker) -----------------------
+
+/// Fetch the provider catalog (`GET /provider`) + per-provider auth methods
+/// (`GET /provider/auth`) and ship both raw JSON blobs back so the shared
+/// pane parses them in one place. Mirrors the desktop pane's
+/// `fetch_connect_flow`. `directory` is accepted for parity but the
+/// agent-server's provider endpoints are global (not directory-scoped), so
+/// it is unused here.
+pub(crate) async fn handle_connect_list_providers(
+    inner: Arc<AgentInner>,
+    _directory: Option<String>,
+) {
+    let providers = match http_get_json(&inner, "/provider").await {
+        Ok(value) => value,
+        Err(err) => {
+            emit_error(&inner.tx, err);
+            return;
+        }
+    };
+    let auth = match http_get_json(&inner, "/provider/auth").await {
+        Ok(value) => value,
+        Err(err) => {
+            emit_error(&inner.tx, err);
+            return;
+        }
+    };
+    let _ = inner
+        .tx
+        .send(AgentServerMessage::ConnectProviderCatalog { providers, auth });
+}
+
+/// Store an API key for a provider: `PUT /auth/{id}` with
+/// `{ "type": "api", "key": <key> }`. Mirrors the desktop pane's API-key /
+/// Meridian one-click store.
+pub(crate) async fn handle_connect_store_api_key(
+    inner: Arc<AgentInner>,
+    provider_id: String,
+    key: String,
+) {
+    let body = json!({ "type": "api", "key": key });
+    match http_put_json(&inner, &format!("/auth/{provider_id}"), &body).await {
+        Ok(_) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
+                provider: provider_id,
+            });
+        }
+        Err(err) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFailed {
+                provider: provider_id,
+                error: err,
+            });
+        }
+    }
+}
+
+/// Remove a provider's stored auth: `DELETE /auth/{id}`.
+pub(crate) async fn handle_connect_disconnect(inner: Arc<AgentInner>, provider_id: String) {
+    match http_delete(&inner, &format!("/auth/{provider_id}")).await {
+        Ok(()) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
+                provider: provider_id,
+            });
+        }
+        Err(err) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFailed {
+                provider: provider_id,
+                error: err,
+            });
+        }
+    }
+}
+
+/// Begin an OAuth method: `POST /provider/{id}/oauth/authorize` with
+/// `{ "method": <index>, "inputs": {} }`. Surfaces the auth URL, whether the
+/// flow auto-completes on a local callback, and any provider instructions.
+pub(crate) async fn handle_connect_oauth_authorize(
+    inner: Arc<AgentInner>,
+    provider_id: String,
+    method_index: usize,
+) {
+    let body = json!({ "method": method_index, "inputs": {} });
+    match http_post_json(
+        &inner,
+        &format!("/provider/{provider_id}/oauth/authorize"),
+        &body,
+    )
+    .await
+    {
+        Ok(value) => {
+            let url = value
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let auto = value.get("method").and_then(Value::as_str) == Some("auto");
+            let instructions = value
+                .get("instructions")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let _ = inner.tx.send(AgentServerMessage::ConnectOauthUrl {
+                url,
+                auto,
+                instructions,
+            });
+        }
+        Err(err) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFailed {
+                provider: provider_id,
+                error: err,
+            });
+        }
+    }
+}
+
+/// Complete an OAuth method: `POST /provider/{id}/oauth/callback`. For an
+/// "auto" flow `code` is `None` and the POST blocks daemon-side until the
+/// browser redirect is captured; for a pasted token it carries
+/// `{ "method", "code" }`. The daemon's HTTP client has no request timeout,
+/// so the long-poll finishes without wedging the connection.
+pub(crate) async fn handle_connect_oauth_callback(
+    inner: Arc<AgentInner>,
+    provider_id: String,
+    method_index: usize,
+    code: Option<String>,
+) {
+    let body = match code {
+        Some(code) => json!({ "method": method_index, "code": code }),
+        None => json!({ "method": method_index }),
+    };
+    match http_post_json(
+        &inner,
+        &format!("/provider/{provider_id}/oauth/callback"),
+        &body,
+    )
+    .await
+    {
+        Ok(_) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
+                provider: provider_id,
+            });
+        }
+        Err(err) => {
+            let _ = inner.tx.send(AgentServerMessage::ConnectFailed {
+                provider: provider_id,
+                error: err,
+            });
+        }
+    }
+}
+
 pub(crate) async fn handle_get_config_defaults(inner: Arc<AgentInner>, directory: Option<String>) {
     let path = match directory {
         Some(dir) => format!("/config?directory={}", percent_encode(&dir)),

@@ -594,6 +594,24 @@ use neoism_ui::Chrome;
                 pane.note_compaction(map_compaction_phase(phase), text, reason);
             }
 
+            // -- Provider connect / auth flow ------------------------
+            AgentServerMessage::ConnectProviderCatalog { providers, auth } => {
+                pane.apply_connect_catalog(providers, auth);
+            }
+            AgentServerMessage::ConnectOauthUrl {
+                url,
+                auto,
+                instructions,
+            } => {
+                pane.apply_connect_oauth_url(url, auto, instructions);
+            }
+            AgentServerMessage::ConnectFinished { provider } => {
+                pane.note_connect_finished(provider);
+            }
+            AgentServerMessage::ConnectFailed { provider, error } => {
+                pane.note_connect_failed(provider, error);
+            }
+
             // -- Maintenance -----------------------------------------
             AgentServerMessage::Pong => {
                 // Connection-health probe — no UI mutation needed.
@@ -639,6 +657,10 @@ use neoism_ui::Chrome;
             | AgentServerMessage::ConfigDefaults { .. }
             | AgentServerMessage::AgentCatalog { .. }
             | AgentServerMessage::SkillCatalog { .. }
+            | AgentServerMessage::ConnectProviderCatalog { .. }
+            | AgentServerMessage::ConnectOauthUrl { .. }
+            | AgentServerMessage::ConnectFinished { .. }
+            | AgentServerMessage::ConnectFailed { .. }
             | AgentServerMessage::Pong => None,
         }
     }

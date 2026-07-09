@@ -149,6 +149,31 @@ impl NeoismAgentPane {
     }
 
     pub fn close_picker(&mut self) {
+        // The `/connect` flow is multi-stage: ESC steps back one screen (like
+        // the per-screen "esc" affordance) rather than dismissing everything.
+        if let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) {
+            match kind {
+                NeoismAgentPickerKind::ConnectSecret => {
+                    if let Some(provider_id) =
+                        self.connect.as_ref().and_then(|flow| flow.provider_id())
+                    {
+                        self.enter_connect_auth(&provider_id);
+                        return;
+                    }
+                    self.close_connect();
+                    return;
+                }
+                NeoismAgentPickerKind::ConnectAuth => {
+                    self.reopen_connect_provider_picker();
+                    return;
+                }
+                NeoismAgentPickerKind::Connect => {
+                    self.close_connect();
+                    return;
+                }
+                _ => {}
+            }
+        }
         self.picker = None;
         self.file_mention_anchor = None;
         if self.input == "/" {

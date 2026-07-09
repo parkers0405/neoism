@@ -12,6 +12,7 @@ mod input_edit;
 mod pickers_state;
 mod streaming;
 mod session;
+mod connect;
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
@@ -491,6 +492,9 @@ pub struct NeoismAgentPane {
     #[allow(dead_code)]
     pub(super) server: String,
     pub(super) picker: Option<NeoismAgentPicker>,
+    /// In-progress `/connect` provider-auth flow (catalog + chosen
+    /// provider/method), held while any connect picker stage is open.
+    connect: Option<connect::ConnectFlow>,
     file_mention_anchor: Option<usize>,
     #[allow(dead_code)]
     event_stream: Option<()>,
@@ -803,6 +807,7 @@ impl Default for NeoismAgentPane {
             directory: None,
             server: String::new(),
             picker: None,
+            connect: None,
             file_mention_anchor: None,
             event_stream: None,
             background_tx,

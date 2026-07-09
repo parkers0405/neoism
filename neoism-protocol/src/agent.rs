@@ -280,6 +280,49 @@ pub enum AgentClientMessage {
     },
     /// Update the session's stored title.
     SetTitle { session_id: String, title: String },
+
+    // -- Provider connect / auth flow (`/connect` picker) --------------
+    //
+    // These mirror the desktop pane's synchronous HTTP calls into the
+    // agent-server's provider-auth surface: `GET /provider` +
+    // `GET /provider/auth`, `PUT`/`DELETE /auth/:id`, and
+    // `POST /provider/:id/oauth/{authorize,callback}`. The web frontend
+    // has no host-side agent process, so the daemon proxies them.
+    /// Fetch the provider catalog (`GET /provider`) + per-provider auth
+    /// methods (`GET /provider/auth`) for the connect picker. Reply is
+    /// [`AgentServerMessage::ConnectProviderCatalog`].
+    ConnectListProviders {
+        #[serde(default)]
+        directory: Option<String>,
+    },
+    /// Store an API key (or the Meridian one-click marker) for a
+    /// provider: `PUT /auth/{provider_id}` with
+    /// `{ "type": "api", "key": <key> }`. Reply is
+    /// [`AgentServerMessage::ConnectFinished`] / `ConnectFailed`.
+    ConnectStoreApiKey { provider_id: String, key: String },
+    /// Remove a provider's stored auth: `DELETE /auth/{provider_id}`.
+    /// Reply is [`AgentServerMessage::ConnectFinished`] / `ConnectFailed`.
+    ConnectDisconnect { provider_id: String },
+    /// Begin an OAuth method — request the authorization URL via
+    /// `POST /provider/{provider_id}/oauth/authorize` with
+    /// `{ "method": <index>, "inputs": {} }`. Reply is
+    /// [`AgentServerMessage::ConnectOauthUrl`].
+    ConnectOauthAuthorize {
+        provider_id: String,
+        method_index: usize,
+    },
+    /// Complete an OAuth method via
+    /// `POST /provider/{provider_id}/oauth/callback`. `code` is `None`
+    /// for "auto" flows (the POST blocks daemon-side until the browser
+    /// redirect is captured) and `Some(token)` for a pasted token.
+    /// Reply is [`AgentServerMessage::ConnectFinished`] / `ConnectFailed`.
+    ConnectOauthCallback {
+        provider_id: String,
+        method_index: usize,
+        #[serde(default)]
+        code: Option<String>,
+    },
+
     /// Lightweight ping — daemon replies with
     /// [`AgentServerMessage::Pong`]. Useful for keep-alives and
     /// connection-health probes.
@@ -546,6 +589,32 @@ pub enum AgentServerMessage {
         #[serde(default)]
         reason: Option<String>,
     },
+
+    // -- Provider connect / auth flow (`/connect` picker) --------------
+    /// Reply to [`AgentClientMessage::ConnectListProviders`]. Carries the
+    /// raw `GET /provider` (`{ all, connected }`) and `GET /provider/auth`
+    /// JSON so the shared pane's `apply_connect_catalog` parses them in
+    /// one place (matching the desktop pane's `fetch_connect_flow`).
+    ConnectProviderCatalog {
+        providers: serde_json::Value,
+        auth: serde_json::Value,
+    },
+    /// Reply to [`AgentClientMessage::ConnectOauthAuthorize`]. `auto`
+    /// flags a flow that finishes on a local browser callback (nothing
+    /// to paste); otherwise the chrome opens the paste-a-token field.
+    ConnectOauthUrl {
+        url: String,
+        #[serde(default)]
+        auto: bool,
+        #[serde(default)]
+        instructions: String,
+    },
+    /// A `/connect` mutation (store key / disconnect / OAuth callback)
+    /// succeeded. `provider` is the provider id it targeted.
+    ConnectFinished { provider: String },
+    /// A `/connect` mutation failed. `provider` is the provider id it
+    /// targeted; `error` is the human-readable reason.
+    ConnectFailed { provider: String, error: String },
 
     // -- Maintenance --------------------------------------------------
     /// Reply to [`AgentClientMessage::Ping`].

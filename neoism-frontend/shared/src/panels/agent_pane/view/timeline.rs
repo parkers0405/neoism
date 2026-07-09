@@ -64,6 +64,16 @@ pub struct TimelineLayoutCache<M> {
     pub content_height: f32,
     pub pages: Vec<TimelineLayoutPage>,
     pub rows: Vec<TimelineLayoutRow<M>>,
+    /// Lazy (viewport-only) measurement bookkeeping: the number of leading
+    /// rows whose heights are cheap *estimates* rather than exact measurements
+    /// (rows `[0..estimated_prefix_rows]`). Always 0 on the eager path. Because
+    /// scroll is distance-from-bottom, an estimated prefix shifts every row's
+    /// `top` and `content_height` by the same cumulative error, which cancels
+    /// in `card_y = y + row.top - scroll_top` — so visible (exact-suffix) rows
+    /// stay put; only the scrollbar thumb is approximate. See the reuse check
+    /// in `timeline_layout` which rebuilds before an estimated row can scroll
+    /// into the viewport.
+    pub estimated_prefix_rows: usize,
 }
 
 #[derive(Default)]
@@ -110,6 +120,14 @@ pub trait AgentTimelineMessage: Clone {
     ) -> Self;
 }
 
+/// Whether viewport-only (lazy) timeline measurement is enabled, read once.
+/// Absent on wasm (where `var_os` returns `None`), so the web pane stays eager.
+pub fn lazy_timeline_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("NEOISM_AGENT_LAZY_TIMELINE").is_some())
+}
+
 pub trait AgentTimelinePane: AgentMarkdownPane {
     type Message: AgentTimelineMessage;
     type MeasureKey;
@@ -143,6 +161,17 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     /// transcript grew, even though drawing itself is already windowed.
     fn uses_virtual_timeline(&self) -> bool {
         false
+    }
+    /// Opt-in (env `NEOISM_AGENT_LAZY_TIMELINE`) viewport-only layout: on a full
+    /// rebuild, measure exactly only the rows from just above the viewport down
+    /// to the end, and cheaply *estimate* the off-screen prefix above. Keeps the
+    /// occasional full rebuild / huge-transcript load proportional to the
+    /// viewport instead of the whole history. Default off (and always off on
+    /// wasm, where the env var is absent) so the low-count scroll feel is
+    /// untouched. Streaming (dirty-tail patch) and pagination (prepend) still
+    /// run exact — only the full rebuild goes windowed.
+    fn timeline_lazy_measurement(&self) -> bool {
+        lazy_timeline_enabled()
     }
     fn virtual_timeline_needs_measurements(
         &self,

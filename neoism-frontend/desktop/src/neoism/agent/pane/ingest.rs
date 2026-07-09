@@ -428,6 +428,16 @@ impl NeoismAgentPane {
                     self.execute_set_title_command(session_id, title);
                     changed = true;
                 }
+                // The desktop pane drives `/connect` through its own
+                // synchronous `connect.rs` methods (blocking HTTP +
+                // background threads) and never enqueues these shared
+                // connect commands; they exist for the web/wasm host. Kept
+                // as no-ops so the exhaustive match stays complete.
+                OutboundAgentCommand::RefreshConnectProviders { .. }
+                | OutboundAgentCommand::ConnectStoreApiKey { .. }
+                | OutboundAgentCommand::ConnectDisconnect { .. }
+                | OutboundAgentCommand::ConnectOauthAuthorize { .. }
+                | OutboundAgentCommand::ConnectOauthCallback { .. } => {}
             }
         }
         changed

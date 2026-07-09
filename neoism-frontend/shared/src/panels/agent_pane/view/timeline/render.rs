@@ -24,7 +24,7 @@ pub fn render_timeline_with<P, D>(
     let gap = 18.0 * s;
     let layout_started = web_time::Instant::now();
     let (layout, did_layout_work) =
-        timeline_layout::<P, D>(sugarloaf, pane, w, theme, s, gap);
+        timeline_layout::<P, D>(sugarloaf, pane, w, theme, s, gap, viewport_h);
     let layout_elapsed_us = web_time::Instant::now()
         .saturating_duration_since(layout_started)
         .as_micros();

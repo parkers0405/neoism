@@ -101,6 +101,7 @@ diff --git a/src/lib.rs b/src/lib.rs
                 tool_diff_sections: Some(sections.clone()),
                 is_edit_tool: true,
             }],
+            estimated_prefix_rows: 0,
         };
 
         let restored = from_state_cache(into_state_cache(cache));

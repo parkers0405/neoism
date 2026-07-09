@@ -212,6 +212,40 @@ pub fn map_outbound_command(
         Cmd::SetTitle { session_id, title } => {
             Mapping::Messages(vec![Msg::SetTitle { session_id, title }])
         }
+        // The `/connect` provider-auth flow maps onto the daemon's
+        // provider-auth WebSocket variants, which the daemon proxies to the
+        // agent-server's HTTP surface (`GET /provider`, `GET /provider/auth`,
+        // `PUT`/`DELETE /auth/:id`, `POST /provider/:id/oauth/…`). Replies
+        // flow back through the pane's `apply_connect_catalog` /
+        // `apply_connect_oauth_url` / `note_connect_finished` /
+        // `note_connect_failed` setters.
+        Cmd::RefreshConnectProviders { directory } => {
+            Mapping::Messages(vec![Msg::ConnectListProviders {
+                directory: directory.or_else(|| context.default_directory.clone()),
+            }])
+        }
+        Cmd::ConnectStoreApiKey { provider_id, key } => {
+            Mapping::Messages(vec![Msg::ConnectStoreApiKey { provider_id, key }])
+        }
+        Cmd::ConnectDisconnect { provider_id } => {
+            Mapping::Messages(vec![Msg::ConnectDisconnect { provider_id }])
+        }
+        Cmd::ConnectOauthAuthorize {
+            provider_id,
+            method_index,
+        } => Mapping::Messages(vec![Msg::ConnectOauthAuthorize {
+            provider_id,
+            method_index,
+        }]),
+        Cmd::ConnectOauthCallback {
+            provider_id,
+            method_index,
+            code,
+        } => Mapping::Messages(vec![Msg::ConnectOauthCallback {
+            provider_id,
+            method_index,
+            code,
+        }]),
     }
 }
 

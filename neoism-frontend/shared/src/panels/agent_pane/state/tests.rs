@@ -1444,3 +1444,126 @@
             responding: false,
         }
     }
+
+    fn sample_connect_catalog() -> (serde_json::Value, serde_json::Value) {
+        let providers = json!({
+            "all": [
+                { "id": "anthropic", "name": "Anthropic" },
+                { "id": "openai", "name": "OpenAI" },
+            ],
+            "connected": ["anthropic"],
+        });
+        let auth = json!({
+            "anthropic": [{ "type": "api", "label": "Manually enter API Key" }],
+            "openai": [{ "type": "oauth", "label": "Sign in with OpenAI" }],
+        });
+        (providers, auth)
+    }
+
+    #[test]
+    fn connect_slash_opens_provider_picker_and_requests_catalog() {
+        let mut pane = NeoismAgentPane::default();
+        pane.execute_slash_text("/connect");
+        let picker = pane.picker().expect("connect picker opens on /connect");
+        assert_eq!(picker.kind, NeoismAgentPickerKind::Connect);
+        // The catalog fetch is queued for the host.
+        assert!(pane.drain_pending_outbound().iter().any(|command| matches!(
+            command,
+            OutboundAgentCommand::RefreshConnectProviders { .. }
+        )));
+    }
+
+    #[test]
+    fn connect_catalog_populates_provider_rows_with_connected_marker() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_connect_picker();
+        let (providers, auth) = sample_connect_catalog();
+        pane.apply_connect_catalog(providers, auth);
+        let picker = pane.picker().expect("connect picker stays open");
+        assert_eq!(picker.kind, NeoismAgentPickerKind::Connect);
+        assert!(picker
+            .options()
+            .iter()
+            .any(|option| option.title == "Popular" && option.is_header));
+        // Connected provider gets the checkmark and a "connected" footer.
+        assert!(picker.options().iter().any(|option| option.value == "anthropic"
+            && option.title.starts_with('✓')
+            && option.footer == "connected"));
+    }
+
+    #[test]
+    fn connect_api_key_path_queues_store_command() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_connect_picker();
+        let (providers, auth) = sample_connect_catalog();
+        pane.apply_connect_catalog(providers, auth);
+        let _ = pane.drain_pending_outbound();
+
+        // Stage 1 → 2: pick Anthropic.
+        assert_eq!(
+            pane.picker()
+                .and_then(|picker| picker.selected_option())
+                .map(|option| option.value.clone()),
+            Some("anthropic".to_string()),
+            "connected popular provider is the default selection"
+        );
+        assert!(pane.commit_picker());
+        let picker = pane.picker().expect("auth-method picker opens");
+        assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectAuth);
+        // First row is the disconnect affordance (Anthropic is connected).
+        assert_eq!(
+            picker.selected_option().map(|option| option.value.clone()),
+            Some(connect::DISCONNECT_VALUE.to_string())
+        );
+
+        // Move to the API-key method row and commit.
+        pane.move_picker_selection(1);
+        assert!(pane.commit_picker());
+        let picker = pane.picker().expect("secret entry opens");
+        assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectSecret);
+        assert_eq!(picker.search_placeholder.as_deref(), Some("API key"));
+
+        // Type a key into the secret row and commit.
+        pane.insert_text("sk-test-123");
+        assert!(pane.commit_picker());
+        let stored = pane.drain_pending_outbound();
+        assert!(stored.iter().any(|command| matches!(
+            command,
+            OutboundAgentCommand::ConnectStoreApiKey { provider_id, key }
+                if provider_id == "anthropic" && key == "sk-test-123"
+        )));
+
+        // Host confirms → flow closes.
+        pane.note_connect_finished("Anthropic".to_string());
+        assert!(pane.picker().is_none());
+    }
+
+    #[test]
+    fn connect_secret_escape_steps_back_to_auth_method() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_connect_picker();
+        let (providers, auth) = sample_connect_catalog();
+        pane.apply_connect_catalog(providers, auth);
+        pane.commit_picker(); // Connect → ConnectAuth (Anthropic)
+        pane.move_picker_selection(1); // API-key method
+        pane.commit_picker(); // ConnectAuth → ConnectSecret
+        assert_eq!(
+            pane.picker().map(|picker| picker.kind),
+            Some(NeoismAgentPickerKind::ConnectSecret)
+        );
+        // ESC steps back to the auth-method stage rather than dismissing.
+        pane.close_picker();
+        assert_eq!(
+            pane.picker().map(|picker| picker.kind),
+            Some(NeoismAgentPickerKind::ConnectAuth)
+        );
+        // ESC again → back to the provider list.
+        pane.close_picker();
+        assert_eq!(
+            pane.picker().map(|picker| picker.kind),
+            Some(NeoismAgentPickerKind::Connect)
+        );
+        // ESC again → dismissed entirely.
+        pane.close_picker();
+        assert!(pane.picker().is_none());
+    }

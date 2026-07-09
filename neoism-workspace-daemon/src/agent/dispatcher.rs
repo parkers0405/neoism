@@ -283,6 +283,42 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_set_title(inner, session_id, title).await;
             });
         }
+
+        // -- Provider connect / auth flow (`/connect` picker) ------
+        AgentClientMessage::ConnectListProviders { directory } => {
+            tokio::spawn(async move {
+                handle_connect_list_providers(inner, directory).await;
+            });
+        }
+        AgentClientMessage::ConnectStoreApiKey { provider_id, key } => {
+            tokio::spawn(async move {
+                handle_connect_store_api_key(inner, provider_id, key).await;
+            });
+        }
+        AgentClientMessage::ConnectDisconnect { provider_id } => {
+            tokio::spawn(async move {
+                handle_connect_disconnect(inner, provider_id).await;
+            });
+        }
+        AgentClientMessage::ConnectOauthAuthorize {
+            provider_id,
+            method_index,
+        } => {
+            tokio::spawn(async move {
+                handle_connect_oauth_authorize(inner, provider_id, method_index).await;
+            });
+        }
+        AgentClientMessage::ConnectOauthCallback {
+            provider_id,
+            method_index,
+            code,
+        } => {
+            tokio::spawn(async move {
+                handle_connect_oauth_callback(inner, provider_id, method_index, code)
+                    .await;
+            });
+        }
+
         AgentClientMessage::Ping => {
             let _ = inner.tx.send(AgentServerMessage::Pong);
         }

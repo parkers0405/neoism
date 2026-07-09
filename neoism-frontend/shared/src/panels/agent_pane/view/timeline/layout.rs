@@ -43,6 +43,9 @@ pub(crate) fn from_state_cache(
                 is_edit_tool: row.is_edit_tool,
             })
             .collect(),
+        // The web/state cache never runs lazy measurement (env flag is
+        // desktop-only); a round-tripped cache is always fully exact.
+        estimated_prefix_rows: 0,
     }
 }
 
@@ -172,6 +175,7 @@ pub(crate) fn timeline_layout<P, D>(
     theme: &IdeTheme,
     s: f32,
     gap: f32,
+    viewport_h: f32,
 ) -> (TimelineLayoutCache<P::Message>, bool)
 where
     P: AgentTimelinePane,
@@ -181,6 +185,7 @@ where
     let scale_bucket = f32_measure_bucket(s);
     let gap_bucket = f32_measure_bucket(gap);
     let epoch = pane.timeline_layout_epoch();
+    let lazy = pane.timeline_lazy_measurement();
     let mut dirty = pane.take_timeline_dirty_marks();
     if pane.any_tool_expand_animating() {
         mark_animating_tool_rows_dirty(pane, &mut dirty);
@@ -192,7 +197,11 @@ where
     // added rather than to total loaded history — without it, every page load
     // re-measured and re-keyed every row already on screen, so pagination got
     // progressively slower with each page.
-    if let Some(delta) = pane.take_timeline_prepend() {
+    // When lazy, still consume the prepend flag but skip the incremental fold:
+    // the newly-prepended (older) messages belong in the estimated prefix, and
+    // a full lazy rebuild that re-estimates them is cheap, so we let it fall
+    // through rather than measure the whole new page exactly.
+    if let Some(delta) = pane.take_timeline_prepend().filter(|_| !lazy) {
         // Always pull the cache out: after a prepend every existing row's
         // source index has shifted, so the normal append-patch path below
         // would mis-target. Either we fold incrementally here, or we drop the
@@ -235,6 +244,7 @@ where
             }
         }
     }
+    let offset = pane.timeline_scroll_offset();
     let cache = pane.take_timeline_layout_cache().filter(|cache| {
         cache.epoch == epoch
             && cache.width_bucket == width_bucket
@@ -242,6 +252,10 @@ where
             && cache.gap_bucket == gap_bucket
             && cache.source_len <= source_len
             && (cache.source_len == 0 || !cache.rows.is_empty())
+            // Lazy: drop the cache (forcing a rebuild with a fresh window) once
+            // the viewport scrolls up toward the estimated prefix, so exact rows
+            // are laid out before they become visible.
+            && (!lazy || lazy_cache_covers_viewport(cache, offset, viewport_h))
     });
 
     if let Some(mut cache) = cache {
@@ -271,9 +285,33 @@ where
             width_bucket,
             scale_bucket,
             gap_bucket,
+            lazy,
+            viewport_h,
+            offset,
         ),
         true,
     )
+}
+
+/// Whether the exact-measured suffix of a lazy cache still comfortably covers
+/// the viewport (kept at least one viewport below the exact region's top). When
+/// it stops covering, the caller rebuilds with a window centered on the new
+/// scroll position. A fully-exact cache (`estimated_prefix_rows == 0`) always
+/// covers.
+fn lazy_cache_covers_viewport<M>(
+    cache: &TimelineLayoutCache<M>,
+    offset: f32,
+    viewport_h: f32,
+) -> bool {
+    if cache.estimated_prefix_rows == 0 {
+        return true;
+    }
+    let Some(first_exact) = cache.rows.get(cache.estimated_prefix_rows) else {
+        return true;
+    };
+    let max_scroll = (cache.content_height - viewport_h).max(0.0);
+    let scroll_top = (max_scroll - offset).clamp(0.0, max_scroll);
+    scroll_top - viewport_h > first_exact.top
 }
 
 fn mark_animating_tool_rows_dirty<P: AgentTimelinePane>(
@@ -299,15 +337,25 @@ fn build_timeline_layout<P, D>(
     width_bucket: i32,
     scale_bucket: i32,
     gap_bucket: i32,
+    lazy: bool,
+    viewport_h: f32,
+    offset: f32,
 ) -> TimelineLayoutCache<P::Message>
 where
     P: AgentTimelinePane,
     D: AgentTimelineDelegate<P>,
 {
     let mut rows: Vec<TimelineLayoutRow<P::Message>> = Vec::new();
-    let content_height = append_timeline_rows::<P, D>(
-        sugarloaf, pane, width, theme, s, gap, 0, 0.0, false, &mut rows,
-    );
+    let (content_height, estimated_prefix_rows) = if lazy {
+        build_lazy_rows::<P, D>(
+            sugarloaf, pane, width, theme, s, gap, viewport_h, offset, &mut rows,
+        )
+    } else {
+        let height = append_timeline_rows::<P, D>(
+            sugarloaf, pane, width, theme, s, gap, 0, 0.0, false, &mut rows,
+        );
+        (height, 0)
+    };
     let pages = build_timeline_layout_pages(&rows, pane.messages().len());
     TimelineLayoutCache {
         epoch,
@@ -318,7 +366,188 @@ where
         content_height,
         pages,
         rows,
+        estimated_prefix_rows,
     }
+}
+
+/// Viewport-only (lazy) layout. Cheaply estimates every row to locate the
+/// window, keeps the off-screen prefix estimated, and rebuilds the on-screen
+/// suffix (from just above the viewport down to the end) EXACTLY via the proven
+/// `append_timeline_rows` path — so grouping/skip/measure behaviour there is
+/// identical to the eager path. Returns `(content_height, estimated_prefix_rows)`.
+#[allow(clippy::too_many_arguments)]
+fn build_lazy_rows<P, D>(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
+    width: f32,
+    theme: &IdeTheme,
+    s: f32,
+    gap: f32,
+    viewport_h: f32,
+    offset: f32,
+    rows: &mut Vec<TimelineLayoutRow<P::Message>>,
+) -> (f32, usize)
+where
+    P: AgentTimelinePane,
+    D: AgentTimelineDelegate<P>,
+{
+    // Pass 1: estimate all rows (no sugarloaf measurement) to place the window.
+    append_estimated_rows::<P>(pane, width, s, gap, rows);
+    let est_content_h = rows.last().map(|row| row.top + row.height).unwrap_or(0.0);
+    if rows.is_empty() {
+        return (0.0, 0);
+    }
+    // Exact region = from ~overscan above the viewport top down to the end. A
+    // generous 2× viewport overscan absorbs estimate error (which only skews
+    // the scrollbar, never visible rows) and leaves ~1 viewport of lead before
+    // the reuse guard rebuilds. Estimates lean low (rich content under-counts),
+    // which only ever grows the exact region — safe.
+    let overscan = (viewport_h * 2.0).max(600.0 * s);
+    let threshold_top = (est_content_h - offset - viewport_h - overscan).max(0.0);
+    let exact_start_row = rows.partition_point(|row| row.top + row.height < threshold_top);
+    if exact_start_row == 0 || exact_start_row >= rows.len() {
+        // Window spans the whole transcript (short history, or scrolled to the
+        // very top): just lay it out fully exact — no estimated prefix.
+        rows.clear();
+        let height = append_timeline_rows::<P, D>(
+            sugarloaf, pane, width, theme, s, gap, 0, 0.0, false, rows,
+        );
+        return (height, 0);
+    }
+    // Capture the boundary from the estimated prefix, drop the estimated suffix,
+    // then rebuild that suffix exactly. `append_timeline_rows` adds the leading
+    // gap itself (rows is non-empty), so hand it the prefix bottom, not the
+    // estimated suffix top.
+    let prev = &rows[exact_start_row - 1];
+    let start_source = prev.source_end_index.saturating_add(1);
+    let content_y = prev.top + prev.height;
+    let previous_visible_was_edit_tool = prev.is_edit_tool;
+    rows.truncate(exact_start_row);
+    let content_height = append_timeline_rows::<P, D>(
+        sugarloaf,
+        pane,
+        width,
+        theme,
+        s,
+        gap,
+        start_source,
+        content_y,
+        previous_visible_was_edit_tool,
+        rows,
+    );
+    (content_height, exact_start_row)
+}
+
+/// Pass-1 estimate loop for lazy layout: mirrors `append_timeline_rows`'
+/// grouping exactly but assigns each row a cheap estimated height (no sugarloaf
+/// measurement, no markdown/diff prep). Only the retained prefix's rows keep
+/// these estimates; the suffix is re-measured exactly by the caller.
+fn append_estimated_rows<P>(
+    pane: &P,
+    width: f32,
+    s: f32,
+    gap: f32,
+    rows: &mut Vec<TimelineLayoutRow<P::Message>>,
+) where
+    P: AgentTimelinePane,
+{
+    let mut content_y = 0.0f32;
+    let mut previous_visible_was_edit_tool = false;
+    let mut appended_any = false;
+    let source_len = pane.messages().len();
+    let mut source_index = 0;
+    while source_index < source_len {
+        let Some(item) =
+            next_timeline_item::<P>(pane, source_index, previous_visible_was_edit_tool)
+        else {
+            source_index += 1;
+            continue;
+        };
+        match item {
+            NextTimelineItem::Group {
+                source_end_exclusive,
+                message: group_message,
+            } => {
+                let height = estimate_message_height(&group_message, width, s);
+                if height > 0.0 {
+                    if appended_any || !rows.is_empty() {
+                        content_y += gap;
+                    }
+                    rows.push(TimelineLayoutRow {
+                        source_index,
+                        source_end_index: source_end_exclusive.saturating_sub(1),
+                        top: content_y,
+                        height,
+                        display_text: None,
+                        display_message: Some(group_message),
+                        markdown_blocks: None,
+                        tool_diff_sections: None,
+                        is_edit_tool: false,
+                    });
+                    content_y += height;
+                    appended_any = true;
+                }
+                previous_visible_was_edit_tool = false;
+                source_index = source_end_exclusive;
+            }
+            NextTimelineItem::Message { message } => {
+                let height = estimate_message_height(&message, width, s);
+                if height <= 0.0 {
+                    source_index += 1;
+                    continue;
+                }
+                if appended_any || !rows.is_empty() {
+                    content_y += gap;
+                }
+                let is_edit_tool = is_edit_tool_message(&message);
+                rows.push(TimelineLayoutRow {
+                    source_index,
+                    source_end_index: source_index,
+                    top: content_y,
+                    height,
+                    display_text: None,
+                    display_message: Some(message),
+                    markdown_blocks: None,
+                    tool_diff_sections: None,
+                    is_edit_tool,
+                });
+                previous_visible_was_edit_tool = is_edit_tool;
+                content_y += height;
+                appended_any = true;
+                source_index += 1;
+            }
+        }
+    }
+}
+
+/// Cheap off-screen height estimate. Deliberately conservative (under-counts
+/// rich content like code/diffs/images) so the exact region only ever grows —
+/// visible rows are always exactly measured; this feeds the scrollbar only.
+fn estimate_message_height<M>(message: &M, width: f32, s: f32) -> f32
+where
+    M: AgentTimelineMessage,
+{
+    if message.kind() == AgentTimelineMessageKind::Tool {
+        return 48.0 * s;
+    }
+    let text = message.text();
+    let base = 34.0 * s;
+    if text.trim().is_empty() {
+        // Mirror the eager path, which skips empty text-kinds (0 height) but
+        // still renders an (empty) user row.
+        return if message.kind() == AgentTimelineMessageKind::User {
+            base
+        } else {
+            0.0
+        };
+    }
+    let line_h = 20.0 * s;
+    let chars_per_line = ((width / (7.0 * s)) as usize).max(24);
+    let mut lines = 0usize;
+    for raw_line in text.split('\n') {
+        lines += raw_line.chars().count() / chars_per_line + 1;
+    }
+    base + lines as f32 * line_h
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -361,6 +590,9 @@ where
         (0, 0.0, false)
     };
     cache.rows.truncate(start_pos);
+    // Rows from here down are re-measured exactly below, so no estimated row
+    // survives at or past the patch start.
+    cache.estimated_prefix_rows = cache.estimated_prefix_rows.min(start_pos);
     cache.content_height = append_timeline_rows::<P, D>(
         sugarloaf,
         pane,

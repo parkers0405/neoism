@@ -214,6 +214,51 @@ pub enum OutboundAgentCommand {
         session_id: String,
         title: String,
     },
+
+    // -- `/connect` provider-auth flow --------------------------------
+    //
+    // These drive the multi-stage connect picker. The host fetches / mutates
+    // the agent-server's provider-auth surface and feeds results back through
+    // the pane's `apply_connect_catalog` / `apply_connect_oauth_url` /
+    // `note_connect_finished` / `note_connect_failed` setters. On desktop
+    // these map to the `GET /provider`, `GET /provider/auth`, `PUT /auth/:id`,
+    // `DELETE /auth/:id`, and `POST /provider/:id/oauth/{authorize,callback}`
+    // endpoints.
+    /// Fetch the provider catalog + per-provider auth methods so the connect
+    /// picker can populate. Result → `apply_connect_catalog`.
+    RefreshConnectProviders {
+        directory: Option<String>,
+    },
+
+    /// Store an API key (or the Meridian one-click marker) for a provider.
+    /// `PUT /auth/{provider_id}` with `{ "type": "api", "key": <key> }`.
+    ConnectStoreApiKey {
+        provider_id: String,
+        key: String,
+    },
+
+    /// Remove a provider's stored auth. `DELETE /auth/{provider_id}`.
+    ConnectDisconnect {
+        provider_id: String,
+    },
+
+    /// Begin an OAuth method: request the authorization URL.
+    /// `POST /provider/{provider_id}/oauth/authorize` with
+    /// `{ "method": <index>, "inputs": {} }`. Result → `apply_connect_oauth_url`.
+    ConnectOauthAuthorize {
+        provider_id: String,
+        method_index: usize,
+    },
+
+    /// Complete an OAuth method. `POST /provider/{provider_id}/oauth/callback`
+    /// with `{ "method": <index> }` for "auto" flows (`code: None`, the host
+    /// awaits the browser callback) or `{ "method": <index>, "code": <code> }`
+    /// for pasted tokens. Result → `note_connect_finished` / `note_connect_failed`.
+    ConnectOauthCallback {
+        provider_id: String,
+        method_index: usize,
+        code: Option<String>,
+    },
 }
 
 #[cfg(test)]

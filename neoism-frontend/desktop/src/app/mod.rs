@@ -127,9 +127,8 @@ impl Application<'_> {
             event_proxy.clone(),
         );
         let scheduler = Scheduler::new(proxy);
-        let home_daemon_endpoint = daemon
-            .as_ref()
-            .map(|daemon| daemon.endpoint().to_string());
+        let home_daemon_endpoint =
+            daemon.as_ref().map(|daemon| daemon.endpoint().to_string());
         event_loop.listen_device_events(DeviceEvents::Never);
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -395,9 +394,20 @@ impl Application<'_> {
         // now on the linked daemon) and the normal adopt attaches its
         // live sessions over the new connection.
         if let Some((window_id, workspace_id)) = self.pending_peer_adopt.clone() {
-            let carried = Self::workspace_summaries_from_message(&message)
-                .iter()
-                .any(|workspace| workspace.id == workspace_id);
+            // Only the full tree from the newly attached daemon may finish a
+            // peer join. Incremental messages can arrive first; accepting one
+            // allowed stale pre-redial summaries to satisfy the adoption.
+            let carried = matches!(
+                &message,
+                WorkspaceServerMessage::HostWorkspaceTree { workspaces, .. }
+                    if workspaces.iter().any(|workspace| {
+                        workspace.id == workspace_id
+                            && workspace
+                                .root_dir
+                                .as_ref()
+                                .is_some_and(|root| root.is_absolute())
+                    })
+            );
             if carried {
                 self.pending_peer_adopt = None;
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
@@ -489,6 +499,9 @@ impl Application<'_> {
         ) {
             Ok(connection) => connection,
             Err(error) => {
+                if self.pending_peer_adopt.is_some() {
+                    self.pending_peer_adopt = None;
+                }
                 tracing::warn!(
                     target: "neoism::desktop_daemon",
                     daemon = daemon_url,
@@ -599,9 +612,7 @@ impl Application<'_> {
             let foreign = self.router.routes.values().next().is_some_and(|route| {
                 let manager = &route.window.screen.context_manager;
                 !manager.workspace_owned_locally(workspace_id)
-                    && manager
-                        .daemon_workspace_host_id(workspace_id)
-                        .is_some()
+                    && manager.daemon_workspace_host_id(workspace_id).is_some()
             });
             if foreign {
                 tracing::info!(

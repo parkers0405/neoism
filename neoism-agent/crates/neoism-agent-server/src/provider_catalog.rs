@@ -304,7 +304,13 @@ fn from_models_dev_provider(provider: ModelsDevProvider) -> ProviderInfo {
 fn provider_base_url_env_key(provider_id: &str) -> String {
     let suffix = provider_id
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_uppercase() } else { '_' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
     format!("NEOISM_AGENT_BASE_URL_{suffix}")
 }

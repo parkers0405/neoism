@@ -64,7 +64,9 @@ impl NeoismAgentPane {
     }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane::state) fn clear_pending_permission_current(&mut self) {
+    pub(in crate::panels::agent_pane::state) fn clear_pending_permission_current(
+        &mut self,
+    ) {
         permission_policy::clear_current_permission(
             &mut self.pending_permission,
             &mut self.pending_permission_queue,
@@ -157,5 +159,4 @@ impl NeoismAgentPane {
         }
         changed
     }
-
 }

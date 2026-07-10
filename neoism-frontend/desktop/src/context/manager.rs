@@ -1,7 +1,5 @@
 use crate::context::title::ContextManagerTitles;
-use crate::daemon_client::tailnet_peers::{
-    PeerWorkspaceTree, TailnetPeersCache,
-};
+use crate::daemon_client::tailnet_peers::{PeerWorkspaceTree, TailnetPeersCache};
 use crate::daemon_client::DaemonClientHandle;
 use crate::layout::ContextGrid;
 use neoism_backend::config::Shell;
@@ -12,17 +10,14 @@ use neoism_protocol::diagnostics::RouteId;
 use neoism_protocol::editor::EditorClientMessage;
 use neoism_protocol::pty::ClientMessage as PtyClientMessage;
 use neoism_protocol::workspace::{
-    HostSummary,
-    PaneLayoutSnapshot, SessionSummary,
-    WorkplacePreferences, WorkspaceClientMessage,
-    WorkspaceSummary, WorkspaceTabSummary,
+    HostSummary, PaneLayoutSnapshot, SessionSummary, WorkplacePreferences,
+    WorkspaceClientMessage, WorkspaceSummary, WorkspaceTabSummary,
 };
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use uuid::Uuid;
-
 
 const DEFAULT_CONTEXT_CAPACITY: usize = 28;
 

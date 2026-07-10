@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -525,26 +524,9 @@ impl Screen<'_> {
     /// Ctrl+Shift+W, but attached to the existing shells — instead of
     /// only flipping the daemon's active-workspace pointer.
     pub(crate) fn open_or_adopt_daemon_workspace(&mut self, workspace_id: String) {
-        if let Some(index) = self
-            .context_manager
-            .grid_index_for_workspace_id(&workspace_id)
-        {
-            if index != self.context_manager.current_index() {
-                self.select_top_level_workspace_at(index);
-            }
-            self.context_manager
-                .switch_daemon_host_workspace(workspace_id);
-            return;
-        }
-
-        // The workspace lives on a tailnet PEER's daemon (it came from
-        // peer discovery, not from the daemon this window is linked
-        // to). Joining means FOLLOWING it: the host owns the daemon,
-        // so queue a redial to the owning host — the app layer swaps
-        // the daemon connection, the fresh tree lands, and the
-        // deferred adopt re-enters here with the workspace now in the
-        // linked daemon's tree (multiplayer: both users are clients of
-        // the same daemon; tab strips stay personal per model rule 3).
+        // Resolve peer ownership before looking at local grids. Workspace ids
+        // are expected to be global, but a collision must never activate or
+        // mutate a local workspace when the selected row belongs to a peer.
         if let Some(daemon_url) = self
             .context_manager
             .peer_workspace_daemon_url(&workspace_id)
@@ -557,6 +539,28 @@ impl Screen<'_> {
             );
             self.pending_peer_workspace_join = Some((workspace_id, daemon_url));
             self.mark_dirty();
+            return;
+        }
+        if self
+            .context_manager
+            .is_discovered_peer_workspace(&workspace_id)
+        {
+            self.file_tree_notify(
+                "Cannot join workspace: its host did not publish a reachable daemon URL",
+                neoism_ui::panels::notifications::NotificationLevel::Error,
+            );
+            return;
+        }
+
+        if let Some(index) = self
+            .context_manager
+            .grid_index_for_workspace_id(&workspace_id)
+        {
+            if index != self.context_manager.current_index() {
+                self.select_top_level_workspace_at(index);
+            }
+            self.context_manager
+                .switch_daemon_host_workspace(workspace_id);
             return;
         }
 
@@ -614,9 +618,17 @@ impl Screen<'_> {
         self.renderer.buffer_tabs.ensure_terminal_tab();
         let adopted_root = self
             .context_manager
-            .daemon_host_workspace_root(&workspace_id);
-        self.active_workspace_root =
-            adopted_root.or_else(|| self.active_pane_workspace_root());
+            .daemon_host_workspace_root(&workspace_id)
+            .filter(|root| root.is_absolute());
+        let Some(adopted_root) = adopted_root else {
+            tracing::error!(
+                target: "neoism::workspaces",
+                workspace_id = %workspace_id,
+                "adopted workspace has no authoritative absolute root"
+            );
+            return;
+        };
+        self.active_workspace_root = Some(adopted_root);
         // Populate INDEPENDENTLY of the chrome-key bookkeeping — the
         // old `(Some(id), Some(root))` tuple silently skipped the tree
         // whenever the freshly adopted grid had no workspace key yet,
@@ -653,5 +665,4 @@ impl Screen<'_> {
             .switch_daemon_host_workspace(workspace_id);
         self.mark_dirty();
     }
-
 }

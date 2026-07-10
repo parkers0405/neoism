@@ -159,4 +159,3 @@ fn test_delete_uppercase_r_frees_image_range() {
         "Image outside range must survive"
     );
 }
-

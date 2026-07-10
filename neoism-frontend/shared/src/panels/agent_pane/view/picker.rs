@@ -76,10 +76,7 @@ pub fn render_picker(
             footer_hint,
             rename: rename.as_deref(),
             show_search_caret,
-            search_placeholder: picker
-                .search_placeholder
-                .as_deref()
-                .unwrap_or("Search"),
+            search_placeholder: picker.search_placeholder.as_deref().unwrap_or("Search"),
         },
         input_rect,
         theme,

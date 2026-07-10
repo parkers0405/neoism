@@ -15,6 +15,7 @@ import {
 import { NvimCanvasLayer } from "../editor/nvim/NvimCanvasLayer";
 import type { NvimGridSnapshot } from "../editor/nvim/NvimGridModel";
 import { MarkdownPresenceOverlay } from "./MarkdownPresenceOverlay";
+import { shouldRefreshFileTree } from "./fileTreeInvalidation";
 import {
   localPresenceIdentity,
   presenceBufferIdForPath,
@@ -1314,6 +1315,7 @@ export class TerminalPanel {
       this.compositionEndHandler,
     );
     this.dismissFileTreeMenu();
+    this.pendingServiceMappers.clear();
     this.mobileKeyboard.dispose();
     if (this.rafHandle !== null) {
       cancelAnimationFrame(this.rafHandle);
@@ -1797,6 +1799,19 @@ export class TerminalPanel {
         this.lastGitChanges = { added, deleted };
         this.wasmAdapter?.setStatusGitChanges?.(added, deleted);
         this.scheduleDraw();
+        return;
+      }
+      if ("Changed" in payload) {
+        const { root } = (
+          payload as { Changed: { root: string; paths: string[] } }
+        ).Changed;
+        // Filesystem pushes are invalidations, not replies to request 0.
+        // Relist only when they belong to the active workspace; delayed
+        // pushes from a previous workspace must not refresh the new tree.
+        if (shouldRefreshFileTree(root, this.options.workspaceRoot)) {
+          this.wasmAdapter?.refreshFileTree?.();
+          this.scheduleDraw();
+        }
         return;
       }
     }

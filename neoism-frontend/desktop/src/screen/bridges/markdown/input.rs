@@ -1,4 +1,3 @@
-
 use super::*;
 use neoism_backend::clipboard::{Clipboard, ClipboardType};
 use neoism_window::event::{ElementState, MouseButton};
@@ -560,98 +559,94 @@ impl Screen<'_> {
                         _ => handled = false,
                     }
                 }
-                crate::editor::markdown::state::MarkdownMode::Normal => match key
-                    .logical_key
-                    .as_ref()
-                {
-                    Key::Named(NamedKey::Escape) => {
-                        handled = markdown.vim.clear_pending();
-                    }
-                    Key::Named(NamedKey::ArrowLeft) => markdown.move_left(),
-                    Key::Named(NamedKey::ArrowRight) => markdown.move_right(),
-                    Key::Named(NamedKey::ArrowUp) => markdown.move_up(),
-                    Key::Named(NamedKey::ArrowDown) => markdown.move_down(),
-                    Key::Named(NamedKey::Home) => markdown.move_line_start(),
-                    Key::Named(NamedKey::End) => markdown.move_line_end(),
-                    Key::Named(NamedKey::Tab)
-                        if !mods.control_key()
-                            && !mods.alt_key()
-                            && !mods.super_key() =>
-                    {
-                        if markdown.move_table_cell(mods.shift_key())
-                            || markdown.indent_list_item(mods.shift_key())
+                crate::editor::markdown::state::MarkdownMode::Normal => {
+                    match key.logical_key.as_ref() {
+                        Key::Named(NamedKey::Escape) => {
+                            handled = markdown.vim.clear_pending();
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => markdown.move_left(),
+                        Key::Named(NamedKey::ArrowRight) => markdown.move_right(),
+                        Key::Named(NamedKey::ArrowUp) => markdown.move_up(),
+                        Key::Named(NamedKey::ArrowDown) => markdown.move_down(),
+                        Key::Named(NamedKey::Home) => markdown.move_line_start(),
+                        Key::Named(NamedKey::End) => markdown.move_line_end(),
+                        Key::Named(NamedKey::Tab)
+                            if !mods.control_key()
+                                && !mods.alt_key()
+                                && !mods.super_key() =>
                         {
-                            snap_cursor = true;
-                        } else if !mods.shift_key() {
-                            markdown.insert_text("  ");
-                            snap_cursor = true;
-                        } else {
-                            handled = false;
+                            if markdown.move_table_cell(mods.shift_key())
+                                || markdown.indent_list_item(mods.shift_key())
+                            {
+                                snap_cursor = true;
+                            } else if !mods.shift_key() {
+                                markdown.insert_text("  ");
+                                snap_cursor = true;
+                            } else {
+                                handled = false;
+                            }
                         }
-                    }
-                    Key::Named(NamedKey::Enter) if mods.shift_key() => {
-                        handled = markdown.insert_table_row(false);
-                        snap_cursor = handled;
-                    }
-                    // Plain Enter in Normal mode toggles the `- [ ]` / `- [x]`
-                    // checkbox on the cursor line (keyboard equivalent of
-                    // clicking the box). Falls through when the line isn't a
-                    // task so Enter stays a no-op elsewhere in Normal mode.
-                    Key::Named(NamedKey::Enter) if plain => {
-                        handled = markdown.toggle_task_at_cursor();
-                    }
-                    Key::Named(NamedKey::PageUp) => {
-                        markdown.scroll_by_content_pixels(-(viewport * 0.86), viewport)
-                    }
-                    Key::Named(NamedKey::PageDown) => {
-                        markdown.scroll_by_content_pixels(viewport * 0.86, viewport)
-                    }
-                    Key::Named(NamedKey::Space) if mods.shift_key() => {
-                        markdown.scroll_by_content_pixels(-(viewport * 0.86), viewport)
-                    }
-                    Key::Named(NamedKey::Space) => {
-                        arm_markdown_leader = true;
-                    }
-                    // `/` and `?` open the SAME command-palette Search modal
-                    // the code editor uses; snapshot the origin here (so Esc
-                    // restores it) and open the palette after the borrow ends.
-                    Key::Character(ch) if plain && ch == "/" => {
-                        markdown.search_begin(false);
-                        open_markdown_search = Some(false);
-                    }
-                    Key::Character(ch) if plain && ch == "?" => {
-                        markdown.search_begin(true);
-                        open_markdown_search = Some(true);
-                    }
-                    Key::Character(ch) if plain && ch.chars().count() == 1 => {
-                        let ch = ch.chars().next().unwrap_or_default();
-                        let feed = markdown.vim.feed(ch, false);
-                        let (vim_handled, vim_snap, vim_message) =
-                            Self::apply_markdown_vim_feed(markdown, clipboard, feed);
-                        handled = vim_handled;
-                        snap_cursor |= vim_snap;
-                        if vim_message.is_some() {
-                            yank_message = vim_message;
+                        Key::Named(NamedKey::Enter) if mods.shift_key() => {
+                            handled = markdown.insert_table_row(false);
+                            snap_cursor = handled;
                         }
+                        // Plain Enter in Normal mode toggles the `- [ ]` / `- [x]`
+                        // checkbox on the cursor line (keyboard equivalent of
+                        // clicking the box). Falls through when the line isn't a
+                        // task so Enter stays a no-op elsewhere in Normal mode.
+                        Key::Named(NamedKey::Enter) if plain => {
+                            handled = markdown.toggle_task_at_cursor();
+                        }
+                        Key::Named(NamedKey::PageUp) => markdown
+                            .scroll_by_content_pixels(-(viewport * 0.86), viewport),
+                        Key::Named(NamedKey::PageDown) => {
+                            markdown.scroll_by_content_pixels(viewport * 0.86, viewport)
+                        }
+                        Key::Named(NamedKey::Space) if mods.shift_key() => markdown
+                            .scroll_by_content_pixels(-(viewport * 0.86), viewport),
+                        Key::Named(NamedKey::Space) => {
+                            arm_markdown_leader = true;
+                        }
+                        // `/` and `?` open the SAME command-palette Search modal
+                        // the code editor uses; snapshot the origin here (so Esc
+                        // restores it) and open the palette after the borrow ends.
+                        Key::Character(ch) if plain && ch == "/" => {
+                            markdown.search_begin(false);
+                            open_markdown_search = Some(false);
+                        }
+                        Key::Character(ch) if plain && ch == "?" => {
+                            markdown.search_begin(true);
+                            open_markdown_search = Some(true);
+                        }
+                        Key::Character(ch) if plain && ch.chars().count() == 1 => {
+                            let ch = ch.chars().next().unwrap_or_default();
+                            let feed = markdown.vim.feed(ch, false);
+                            let (vim_handled, vim_snap, vim_message) =
+                                Self::apply_markdown_vim_feed(markdown, clipboard, feed);
+                            handled = vim_handled;
+                            snap_cursor |= vim_snap;
+                            if vim_message.is_some() {
+                                yank_message = vim_message;
+                            }
+                        }
+                        _ => handled = false,
                     }
-                    _ => handled = false,
-                },
-                crate::editor::markdown::state::MarkdownMode::Visual => match key
-                    .logical_key
-                    .as_ref()
-                {
-                    Key::Named(NamedKey::Escape) => {
-                        markdown.enter_normal();
-                        snap_cursor = true;
-                    }
-                    Key::Named(NamedKey::ArrowLeft) => markdown.move_left(),
-                    Key::Named(NamedKey::ArrowRight) => markdown.move_right(),
-                    Key::Named(NamedKey::ArrowUp) => markdown.move_up(),
-                    Key::Named(NamedKey::ArrowDown) => markdown.move_down(),
-                    Key::Named(NamedKey::Home) => markdown.move_line_start(),
-                    Key::Named(NamedKey::End) => markdown.move_line_end(),
-                    Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
-                        let feed = neoism_ui::editor::markdown::vim::VimKeyFeed::Action(
+                }
+                crate::editor::markdown::state::MarkdownMode::Visual => {
+                    match key.logical_key.as_ref() {
+                        Key::Named(NamedKey::Escape) => {
+                            markdown.enter_normal();
+                            snap_cursor = true;
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => markdown.move_left(),
+                        Key::Named(NamedKey::ArrowRight) => markdown.move_right(),
+                        Key::Named(NamedKey::ArrowUp) => markdown.move_up(),
+                        Key::Named(NamedKey::ArrowDown) => markdown.move_down(),
+                        Key::Named(NamedKey::Home) => markdown.move_line_start(),
+                        Key::Named(NamedKey::End) => markdown.move_line_end(),
+                        Key::Named(NamedKey::Delete)
+                        | Key::Named(NamedKey::Backspace) => {
+                            let feed = neoism_ui::editor::markdown::vim::VimKeyFeed::Action(
                             neoism_ui::editor::markdown::vim::VimAction::Operate {
                                 op: neoism_ui::editor::markdown::vim::VimOperator::Delete,
                                 target:
@@ -659,24 +654,25 @@ impl Screen<'_> {
                                 count: 1,
                             },
                         );
-                        let (vim_handled, vim_snap, _) =
-                            Self::apply_markdown_vim_feed(markdown, clipboard, feed);
-                        handled = vim_handled;
-                        snap_cursor |= vim_snap;
-                    }
-                    Key::Character(ch) if plain && ch.chars().count() == 1 => {
-                        let ch = ch.chars().next().unwrap_or_default();
-                        let feed = markdown.vim.feed(ch, true);
-                        let (vim_handled, vim_snap, vim_message) =
-                            Self::apply_markdown_vim_feed(markdown, clipboard, feed);
-                        handled = vim_handled;
-                        snap_cursor |= vim_snap;
-                        if vim_message.is_some() {
-                            yank_message = vim_message;
+                            let (vim_handled, vim_snap, _) =
+                                Self::apply_markdown_vim_feed(markdown, clipboard, feed);
+                            handled = vim_handled;
+                            snap_cursor |= vim_snap;
                         }
+                        Key::Character(ch) if plain && ch.chars().count() == 1 => {
+                            let ch = ch.chars().next().unwrap_or_default();
+                            let feed = markdown.vim.feed(ch, true);
+                            let (vim_handled, vim_snap, vim_message) =
+                                Self::apply_markdown_vim_feed(markdown, clipboard, feed);
+                            handled = vim_handled;
+                            snap_cursor |= vim_snap;
+                            if vim_message.is_some() {
+                                yank_message = vim_message;
+                            }
+                        }
+                        _ => handled = false,
                     }
-                    _ => handled = false,
-                },
+                }
             }
         }
 

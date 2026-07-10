@@ -1,6 +1,5 @@
 // Auto-split from screen/mod.rs. This file is part of the impl Screen<'_> block.
 
-
 use super::super::*;
 use std::path::{Path, PathBuf};
 

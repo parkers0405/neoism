@@ -1,4 +1,3 @@
-
 use super::*;
 use std::path::{Path, PathBuf};
 
@@ -259,7 +258,9 @@ impl Screen<'_> {
         self.mark_neoism_tags_views_stale(&workspace.root);
     }
 
-    pub(crate) fn file_tree_workspace(&self) -> Option<crate::workspace::config::NeoismWorkspace> {
+    pub(crate) fn file_tree_workspace(
+        &self,
+    ) -> Option<crate::workspace::config::NeoismWorkspace> {
         let root = self
             .renderer
             .file_tree
@@ -269,5 +270,4 @@ impl Screen<'_> {
             .or_else(|| self.active_pane_workspace_root())?;
         crate::workspace::load_workspace(&root).ok().flatten()
     }
-
 }

@@ -224,10 +224,11 @@ impl NeoismAgentPane {
             .map(|(index, _)| index)
     }
 
-    pub(crate) fn ordered_selection_endpoints(&self) -> Option<(SelectionPoint, SelectionPoint)> {
+    pub(crate) fn ordered_selection_endpoints(
+        &self,
+    ) -> Option<(SelectionPoint, SelectionPoint)> {
         let anchor = self.selection_anchor?;
         let focus = self.selection_focus?;
         Some(order_endpoints(anchor, focus))
     }
-
 }

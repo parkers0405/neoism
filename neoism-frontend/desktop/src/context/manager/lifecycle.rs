@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::context::factories::create_dead_context;
 use crate::context::renderable::Cursor;
@@ -9,14 +8,11 @@ use neoism_backend::config::layout::Margin;
 use neoism_backend::error::{RioError, RioErrorLevel, RioErrorType};
 use neoism_backend::event::EventListener;
 use neoism_backend::event::WindowId;
-use neoism_backend::sugarloaf::{
-    font::SugarloafFont, Sugarloaf, SugarloafErrors,
-};
+use neoism_backend::sugarloaf::{font::SugarloafFont, Sugarloaf, SugarloafErrors};
 use neoism_ui::session_layout::close_unfocused_tabs_plan;
 use smallvec::smallvec;
 use std::error::Error;
 use std::time::Instant;
-
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
     #[inline]
@@ -299,5 +295,4 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     pub fn set_last_typing(&mut self) {
         self.current_mut().renderable_content.last_typing = Some(Instant::now());
     }
-
 }

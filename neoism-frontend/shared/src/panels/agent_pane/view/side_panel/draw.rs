@@ -1,5 +1,5 @@
-use super::*;
 use super::sections::{render_directory_section, render_section_header};
+use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_status_dot_text(

@@ -104,7 +104,9 @@ impl NeoismAgentPane {
 
     /// (Re)open stage 1 from the current flow — used on first entry and when
     /// ESC steps back from the auth-method stage.
-    pub(in crate::panels::agent_pane::state) fn reopen_connect_provider_picker(&mut self) {
+    pub(in crate::panels::agent_pane::state) fn reopen_connect_provider_picker(
+        &mut self,
+    ) {
         let options = match self.connect.as_mut() {
             Some(flow) => {
                 flow.provider = None;
@@ -297,10 +299,7 @@ impl NeoismAgentPane {
         self.push_outbound(OutboundAgentCommand::ConnectDisconnect {
             provider_id: provider.id.clone(),
         });
-        self.system_message(
-            "Disconnected",
-            format!("{} disconnected.", provider.name),
-        );
+        self.system_message("Disconnected", format!("{} disconnected.", provider.name));
         // Re-fetch and reopen stage 1 (matches desktop's post-disconnect
         // `open_connect_picker`). The pending catalog refresh arrives via
         // `apply_connect_catalog`.
@@ -309,7 +308,11 @@ impl NeoismAgentPane {
 
     /// Kick off an OAuth method. Requests the authorization URL from the host;
     /// the outcome arrives via [`apply_connect_oauth_url`](Self::apply_connect_oauth_url).
-    fn begin_connect_oauth(&mut self, provider: &ConnectProvider, method: &ConnectMethod) {
+    fn begin_connect_oauth(
+        &mut self,
+        provider: &ConnectProvider,
+        method: &ConnectMethod,
+    ) {
         self.push_outbound(OutboundAgentCommand::ConnectOauthAuthorize {
             provider_id: provider.id.clone(),
             method_index: method.index,
@@ -530,7 +533,9 @@ fn parse_connect_flow(providers_value: Value, auth_value: Value) -> ConnectFlow 
 /// Build the stage-1 picker rows: a "Popular" header + the well-known
 /// providers in [`POPULAR_PROVIDER_IDS`] order, then a "Providers" header +
 /// the rest alphabetically. Connected providers get a leading checkmark.
-fn connect_provider_options(providers: &[ConnectProvider]) -> Vec<NeoismAgentPickerOption> {
+fn connect_provider_options(
+    providers: &[ConnectProvider],
+) -> Vec<NeoismAgentPickerOption> {
     let mut popular: Vec<&ConnectProvider> = Vec::new();
     for id in POPULAR_PROVIDER_IDS {
         if let Some(provider) = providers.iter().find(|provider| provider.id == *id) {

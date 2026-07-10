@@ -237,7 +237,10 @@ impl NeoismAgentPane {
             None,
         ) {
             Ok(_) => {
-                self.system_message("Disconnected", format!("{} disconnected.", provider.name));
+                self.system_message(
+                    "Disconnected",
+                    format!("{} disconnected.", provider.name),
+                );
                 // Re-fetch so the ✓ and /model eligibility reflect the change.
                 self.open_connect_picker();
             }
@@ -252,7 +255,11 @@ impl NeoismAgentPane {
     ///   paste — the user just authorizes and returns.
     /// - `method: "code"` (generic providers) — fall back to pasting a token
     ///   into the secret field.
-    fn begin_connect_oauth(&mut self, provider: &ConnectProvider, method: &ConnectMethod) {
+    fn begin_connect_oauth(
+        &mut self,
+        provider: &ConnectProvider,
+        method: &ConnectMethod,
+    ) {
         let body = json!({ "method": method.index, "inputs": {} });
         let value = match api_request_json(
             &self.server,
@@ -299,7 +306,9 @@ impl NeoismAgentPane {
             } else if !url.is_empty() {
                 self.system_message(
                     &provider.name,
-                    format!("Authorize in your browser, then paste the token below.\n{url}"),
+                    format!(
+                        "Authorize in your browser, then paste the token below.\n{url}"
+                    ),
                 );
             }
             self.open_connect_secret_entry(method);
@@ -504,7 +513,9 @@ fn fetch_connect_flow(server: &str) -> Result<ConnectFlow, String> {
 /// Build the stage-1 picker rows: a "Popular" header + the well-known providers
 /// in [`POPULAR_PROVIDER_IDS`] order, then a "Providers" header + the rest
 /// alphabetically. Connected providers get a leading checkmark.
-fn connect_provider_options(providers: &[ConnectProvider]) -> Vec<NeoismAgentPickerOption> {
+fn connect_provider_options(
+    providers: &[ConnectProvider],
+) -> Vec<NeoismAgentPickerOption> {
     let mut popular: Vec<&ConnectProvider> = Vec::new();
     for id in POPULAR_PROVIDER_IDS {
         if let Some(provider) = providers.iter().find(|provider| provider.id == *id) {

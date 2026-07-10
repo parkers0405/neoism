@@ -569,7 +569,11 @@ impl Route<'_> {
                     .git_diff_panel
                     .branch_menu_is_open()
                 {
-                    self.window.screen.renderer.git_diff_panel.close_branch_menu();
+                    self.window
+                        .screen
+                        .renderer
+                        .git_diff_panel
+                        .close_branch_menu();
                 } else {
                     self.window.screen.close_git_diff_panel();
                 }

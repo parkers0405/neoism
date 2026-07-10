@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::super::*;
 
 impl Screen<'_> {
@@ -130,7 +129,9 @@ impl Screen<'_> {
                     self.renderer.git_diff_panel.branch_filter_insert(" ");
                 }
                 Key::Character(s) if !ctrl && !alt => {
-                    self.renderer.git_diff_panel.branch_filter_insert(s.as_str());
+                    self.renderer
+                        .git_diff_panel
+                        .branch_filter_insert(s.as_str());
                 }
                 _ if !ctrl && !alt => {}
                 _ => return false,

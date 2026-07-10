@@ -37,7 +37,8 @@ const DEFAULT_EXCLUDES: &[&str] = &[
     ".tmp",
 ];
 
-static PICKER_CACHE: OnceLock<Mutex<HashMap<PathBuf, SharedFilePicker>>> = OnceLock::new();
+static PICKER_CACHE: OnceLock<Mutex<HashMap<PathBuf, SharedFilePicker>>> =
+    OnceLock::new();
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -476,9 +477,9 @@ fn with_picker<T>(
     let guard = shared
         .read()
         .map_err(|error| anyhow::anyhow!("FFF picker read lock failed: {error}"))?;
-    let picker = guard
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("FFF picker for {} was dropped", root.display()))?;
+    let picker = guard.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("FFF picker for {} was dropped", root.display())
+    })?;
     Ok(operation(picker))
 }
 

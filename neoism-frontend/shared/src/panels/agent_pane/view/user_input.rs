@@ -710,12 +710,7 @@ pub fn render_input(
                     &usage_opts,
                     occlusion_rects,
                 );
-                pane.register_usage_chip_rect([
-                    usage_x,
-                    usage_y,
-                    usage_chip_w,
-                    usage_h,
-                ]);
+                pane.register_usage_chip_rect([usage_x, usage_y, usage_chip_w, usage_h]);
             }
         }
     }
@@ -1484,13 +1479,7 @@ fn wrap_agent_prompt_ranges(
 
     for (start, end) in token_spans {
         push_wrapped_prompt_segment(
-            sugarloaf,
-            text,
-            cursor,
-            start,
-            max_w,
-            opts,
-            &mut wrap,
+            sugarloaf, text, cursor, start, max_w, opts, &mut wrap,
         );
         let token = &text[start..end];
         let token_w = sugarloaf.text_mut().measure(token, opts);

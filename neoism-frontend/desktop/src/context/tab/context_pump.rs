@@ -872,5 +872,4 @@ impl<T: EventListener> Context<T> {
 
         (n + usize::from(ui_changed), hit_frame_limit)
     }
-
 }

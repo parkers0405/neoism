@@ -189,7 +189,10 @@ impl NeoismAgentPane {
 
     /// Record a pending outbound IO request. Cheap; the host drains the
     /// queue via `drain_pending_outbound` between event cycles.
-    pub(in crate::panels::agent_pane::state) fn push_outbound(&mut self, command: OutboundAgentCommand) {
+    pub(in crate::panels::agent_pane::state) fn push_outbound(
+        &mut self,
+        command: OutboundAgentCommand,
+    ) {
         self.pending_outbound.push_back(command);
     }
 
@@ -214,11 +217,15 @@ impl NeoismAgentPane {
         running_background_task_count(&self.messages)
     }
 
-    pub(in crate::panels::agent_pane::state) fn running_background_task_started_at(&self) -> Option<Instant> {
+    pub(in crate::panels::agent_pane::state) fn running_background_task_started_at(
+        &self,
+    ) -> Option<Instant> {
         self.background_tasks_started_at
     }
 
-    pub(in crate::panels::agent_pane::state) fn refresh_background_task_activity_clock(&mut self) {
+    pub(in crate::panels::agent_pane::state) fn refresh_background_task_activity_clock(
+        &mut self,
+    ) {
         if self.running_background_task_count() > 0 {
             if self.background_tasks_started_at.is_none() {
                 self.background_tasks_started_at = Some(Instant::now());
@@ -253,7 +260,10 @@ impl NeoismAgentPane {
         )
     }
 
-    pub(in crate::panels::agent_pane::state) fn apply_input_buffer(&mut self, buffer: AgentInputBuffer) {
+    pub(in crate::panels::agent_pane::state) fn apply_input_buffer(
+        &mut self,
+        buffer: AgentInputBuffer,
+    ) {
         self.input = buffer.input;
         self.cursor_byte = buffer.cursor_byte;
         self.sent_history = buffer.sent_history;
@@ -273,10 +283,10 @@ impl NeoismAgentPane {
     /// Wrap ranges registered by the renderer, but only if they still
     /// describe the current input (a keystroke can land between edit
     /// and redraw).
-    pub(in crate::panels::agent_pane::state) fn current_input_wrap_ranges(&self) -> Option<&[(usize, usize)]> {
-        (!self.input_wrap_ranges.is_empty()
-            && self.input_wrap_len == self.input.len())
-        .then_some(self.input_wrap_ranges.as_slice())
+    pub(in crate::panels::agent_pane::state) fn current_input_wrap_ranges(
+        &self,
+    ) -> Option<&[(usize, usize)]> {
+        (!self.input_wrap_ranges.is_empty() && self.input_wrap_len == self.input.len())
+            .then_some(self.input_wrap_ranges.as_slice())
     }
-
 }

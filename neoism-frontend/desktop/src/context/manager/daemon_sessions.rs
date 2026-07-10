@@ -1,13 +1,10 @@
-
 use super::*;
 use crate::ansi::CursorShape;
 use crate::app::ime::Ime;
 use crate::app::messenger::Messenger;
 #[cfg(not(target_os = "windows"))]
 use crate::context::factories::neoism_block_shell_for_spawn;
-use crate::context::factories::{
-    create_dead_context, ROUTE_ID_COUNTER,
-};
+use crate::context::factories::{create_dead_context, ROUTE_ID_COUNTER};
 use crate::context::renderable::{Cursor, RenderableContent};
 use crate::context::tab::{Context, EditorBackend};
 use crate::event::sync::FairMutex;
@@ -24,7 +21,8 @@ use neoism_backend::sugarloaf::Sugarloaf;
 use neoism_protocol::editor::EditorClientMessage;
 use neoism_protocol::pty::ClientMessage as PtyClientMessage;
 use neoism_protocol::workspace::{
-    surface_id_for_pane_external_id, PaneLayoutOp, WorkspaceClientMessage, WorkspaceTabSummary,
+    surface_id_for_pane_external_id, PaneLayoutOp, WorkspaceClientMessage,
+    WorkspaceTabSummary,
 };
 use neoism_terminal_core::crosswords::{Crosswords, MIN_COLUMNS, MIN_LINES};
 use std::error::Error;
@@ -91,6 +89,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     pub(crate) fn ensure_daemon_sessions_for_all_routes(&mut self) {
+        if self.daemon.link_is_peer {
+            return;
+        }
         let routes: Vec<usize> = self
             .contexts
             .iter()
@@ -233,7 +234,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
 
     /// The workspace id a grid publishes/answers to: the DAEMON's id
     /// for adopted grids (8C), the derived desktop id otherwise.
-    pub(crate) fn workspace_id_for_grid(&self, grid: &ContextGrid<T>, index: usize) -> String {
+    pub(crate) fn workspace_id_for_grid(
+        &self,
+        grid: &ContextGrid<T>,
+        index: usize,
+    ) -> String {
         if let Some(stable) = grid.workspace_route_id() {
             if let Some(adopted) = self.daemon.cache.adopted_workspaces.get(&stable) {
                 return adopted.clone();
@@ -456,12 +461,18 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .daemon_host_workspaces
             .iter()
             .find(|workspace| workspace.id == workspace_id)
-            .and_then(|workspace| workspace.root_dir.clone());
+            .and_then(|workspace| workspace.root_dir.clone())
+            .filter(|root| root.is_absolute());
+        let Some(root_dir) = root_dir else {
+            tracing::warn!(
+                workspace_id,
+                "workspace not adopted: daemon did not publish an absolute root"
+            );
+            return false;
+        };
 
         let mut cloned_config = self.config.clone();
-        if let Some(root) = root_dir.as_ref() {
-            cloned_config.working_dir = Some(root.to_string_lossy().to_string());
-        }
+        cloned_config.working_dir = Some(root_dir.to_string_lossy().to_string());
 
         let current = self.current();
         let cursor = current.cursor_from_ref();
@@ -684,7 +695,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 editor_default_colors: NvimColors::default(),
                 editor_mode: EditorMode::default(),
                 editor_pending_scroll_lines: 0,
-        editor_predicted_cells: Vec::new(),
+                editor_predicted_cells: Vec::new(),
                 editor_pending_grid_scroll_lines: 0,
                 editor_scroll_reset_pending: false,
                 editor_viewport_topline: 0,
@@ -844,7 +855,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             editor_default_colors: NvimColors::default(),
             editor_mode: EditorMode::default(),
             editor_pending_scroll_lines: 0,
-        editor_predicted_cells: Vec::new(),
+            editor_predicted_cells: Vec::new(),
             editor_pending_grid_scroll_lines: 0,
             editor_scroll_reset_pending: false,
             editor_viewport_topline: 0,
@@ -1037,5 +1048,4 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         }
         None
     }
-
 }

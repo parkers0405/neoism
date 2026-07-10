@@ -971,4 +971,3 @@ pub(crate) fn value_as_f64(v: &Value) -> Option<f64> {
         _ => None,
     }
 }
-

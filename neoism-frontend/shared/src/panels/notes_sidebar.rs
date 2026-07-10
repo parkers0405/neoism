@@ -459,7 +459,9 @@ impl NotesSidebar {
         if self.rows.is_empty() || self.selected_index + 1 >= self.rows.len() {
             self.selector_selected = true;
         } else {
-            self.set_selected((self.selected_index + 1).min(self.rows.len().saturating_sub(1)));
+            self.set_selected(
+                (self.selected_index + 1).min(self.rows.len().saturating_sub(1)),
+            );
         }
     }
 
@@ -1228,7 +1230,8 @@ impl NotesSidebar {
             self.selected_index = 0;
             self.scroll_top = 0;
         } else {
-            self.selected_index = self.selected_index.min(self.rows.len().saturating_sub(1));
+            self.selected_index =
+                self.selected_index.min(self.rows.len().saturating_sub(1));
             self.scroll_top = self
                 .scroll_top
                 .min(self.max_scroll_top_for(self.last_panel_height_rows));

@@ -272,7 +272,9 @@ impl GitDiffPanel {
         if leaves.is_empty() {
             return;
         }
-        let ix = one_based.saturating_sub(1).min(leaves.len().saturating_sub(1));
+        let ix = one_based
+            .saturating_sub(1)
+            .min(leaves.len().saturating_sub(1));
         let _ = self.select_file(leaves[ix]);
     }
 

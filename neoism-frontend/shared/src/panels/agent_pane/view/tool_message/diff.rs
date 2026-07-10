@@ -961,4 +961,3 @@ fn parse_hunk_start(value: &str) -> Option<usize> {
         .next()
         .and_then(|value| value.parse::<usize>().ok())
 }
-

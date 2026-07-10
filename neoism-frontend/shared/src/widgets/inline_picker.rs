@@ -117,8 +117,7 @@ pub fn render(
     let title_h = TITLE_H * s;
     let has_footer = view.footer_hint.is_some();
     let footer_h = if has_footer { FOOTER_H * s } else { 0.0 };
-    let [x, y, width, height] =
-        layout(view.rows.len(), input_rect, scale, has_footer)?;
+    let [x, y, width, height] = layout(view.rows.len(), input_rect, scale, has_footer)?;
     let visible_rows = view.rows.len().min(MAX_ROWS).max(1);
     let selected = view.selected.min(view.rows.len().saturating_sub(1));
     let first = view
@@ -186,9 +185,12 @@ pub fn render(
         ..DrawOpts::default()
     };
     let esc_w = sugarloaf.text_mut().measure("esc", &esc_opts);
-    sugarloaf
-        .text_mut()
-        .draw(x + width - 14.0 * s - esc_w, y + 9.0 * s, "esc", &esc_opts);
+    sugarloaf.text_mut().draw(
+        x + width - 14.0 * s - esc_w,
+        y + 9.0 * s,
+        "esc",
+        &esc_opts,
+    );
     if let Some(rename) = view.rename {
         // Inline rename editor takes over the search row: an accent label
         // plus the live buffer with a trailing caret block.
@@ -236,9 +238,12 @@ pub fn render(
             );
             x + 14.0 * s
         } else {
-            sugarloaf
-                .text_mut()
-                .draw(x + 14.0 * s, y + 31.0 * s, view.query, &search_opts);
+            sugarloaf.text_mut().draw(
+                x + 14.0 * s,
+                y + 31.0 * s,
+                view.query,
+                &search_opts,
+            );
             x + 14.0 * s + sugarloaf.text_mut().measure(view.query, &search_opts)
         };
         if view.show_search_caret {

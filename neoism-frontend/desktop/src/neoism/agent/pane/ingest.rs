@@ -480,7 +480,11 @@ impl NeoismAgentPane {
         self.remove_pending_permission(id)
     }
 
-    pub(crate) fn permission_reply_failed(&mut self, id: &str, error: impl Into<String>) -> bool {
+    pub(crate) fn permission_reply_failed(
+        &mut self,
+        id: &str,
+        error: impl Into<String>,
+    ) -> bool {
         let error = error.into();
         let changed = permission_policy::fail_reply(
             &mut self.pending_permission,
@@ -584,7 +588,9 @@ impl NeoismAgentPane {
                     }
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::ConnectOauthFinished { provider_name }) => {
+                Ok(NeoismAgentBackgroundUpdate::ConnectOauthFinished {
+                    provider_name,
+                }) => {
                     self.system_message(
                         "Connected",
                         format!(
@@ -1128,5 +1134,4 @@ impl NeoismAgentPane {
             self.invalidate_timeline_layout();
         }
     }
-
 }

@@ -166,7 +166,9 @@ impl NeoismAgentPane {
         self.virtual_timeline.last_visible_source_range
     }
 
-    pub(in crate::panels::agent_pane::state) fn virtual_agent_messages(&self) -> Vec<VirtualAgentMessage> {
+    pub(in crate::panels::agent_pane::state) fn virtual_agent_messages(
+        &self,
+    ) -> Vec<VirtualAgentMessage> {
         self.messages
             .iter()
             .map(|message| VirtualAgentMessage {
@@ -594,7 +596,10 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(in crate::panels::agent_pane::state) fn jump_timeline_to_track_y(&mut self, y: f32) {
+    pub(in crate::panels::agent_pane::state) fn jump_timeline_to_track_y(
+        &mut self,
+        y: f32,
+    ) {
         let Some(track) = self.scrollbar_track_rect else {
             return;
         };
@@ -664,7 +669,9 @@ impl NeoismAgentPane {
     }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane::state) fn drain_background_updates(&mut self) -> bool {
+    pub(in crate::panels::agent_pane::state) fn drain_background_updates(
+        &mut self,
+    ) -> bool {
         false
     }
 
@@ -744,17 +751,25 @@ impl NeoismAgentPane {
         self.invalidate_timeline_layout();
     }
 
-    pub(in crate::panels::agent_pane) fn timeline_live_trace_start(&self) -> Option<usize> {
+    pub(in crate::panels::agent_pane) fn timeline_live_trace_start(
+        &self,
+    ) -> Option<usize> {
         self.timeline_live_trace_start
     }
 
-    pub(in crate::panels::agent_pane::state) fn mark_timeline_message_dirty_at(&mut self, index: usize) {
+    pub(in crate::panels::agent_pane::state) fn mark_timeline_message_dirty_at(
+        &mut self,
+        index: usize,
+    ) {
         self.refresh_background_task_activity_clock();
         self.timeline_dirty_message_indices.insert(index);
         self.timeline_content_revision = self.timeline_content_revision.wrapping_add(1);
     }
 
-    pub(in crate::panels::agent_pane::state) fn mark_timeline_message_and_next_dirty_at(&mut self, index: usize) {
+    pub(in crate::panels::agent_pane::state) fn mark_timeline_message_and_next_dirty_at(
+        &mut self,
+        index: usize,
+    ) {
         self.refresh_background_task_activity_clock();
         self.timeline_dirty_message_indices.insert(index);
         self.timeline_dirty_message_indices
@@ -762,11 +777,16 @@ impl NeoismAgentPane {
         self.timeline_content_revision = self.timeline_content_revision.wrapping_add(1);
     }
 
-    pub(in crate::panels::agent_pane::state) fn tool_expansion_is_animating(&self) -> bool {
+    pub(in crate::panels::agent_pane::state) fn tool_expansion_is_animating(
+        &self,
+    ) -> bool {
         self.tool_expand_anims.values().any(|anim| anim.is_active())
     }
 
-    pub(in crate::panels::agent_pane::state) fn apply_timeline_anchor(&mut self, anchor: TimelineAnchor) {
+    pub(in crate::panels::agent_pane::state) fn apply_timeline_anchor(
+        &mut self,
+        anchor: TimelineAnchor,
+    ) {
         let max_scroll = self.max_timeline_scroll();
         if max_scroll <= 0.0 {
             self.timeline_scroll_px = 0.0;
@@ -787,16 +807,26 @@ impl NeoismAgentPane {
     }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane) fn start_session_updates(&mut self, _session_id: &str) {}
+    pub(in crate::panels::agent_pane) fn start_session_updates(
+        &mut self,
+        _session_id: &str,
+    ) {
+    }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane) fn fail_compaction_message(&mut self, error: impl Into<String>) {
+    pub(in crate::panels::agent_pane) fn fail_compaction_message(
+        &mut self,
+        error: impl Into<String>,
+    ) {
         self.finish_compaction_message("", "failed");
         self.note_streaming(NeoismAgentStreamingState::Idle, None);
         self.system_message("Compaction failed", error.into());
     }
 
-    pub(in crate::panels::agent_pane) fn remember_pending_user_prompt(&mut self, text: &str) {
+    pub(in crate::panels::agent_pane) fn remember_pending_user_prompt(
+        &mut self,
+        text: &str,
+    ) {
         if !text.trim().is_empty() {
             self.pending_user_prompts.push(text.to_string());
         }
@@ -831,5 +861,4 @@ impl NeoismAgentPane {
         self.permission_choice_hit_rects.clear();
         self.timeline_live_trace_start = None;
     }
-
 }

@@ -199,7 +199,9 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(in crate::panels::agent_pane::state) fn model_picker_options(&self) -> Vec<NeoismAgentPickerOption> {
+    pub(in crate::panels::agent_pane::state) fn model_picker_options(
+        &self,
+    ) -> Vec<NeoismAgentPickerOption> {
         let mut options = Vec::new();
         options.push(self.current_model_picker_option(&self.model_options));
         if !self.recent_model_options.is_empty() {
@@ -363,7 +365,9 @@ impl NeoismAgentPane {
         None
     }
 
-    pub(in crate::panels::agent_pane::state) fn wordmark_click_is_animating(&self) -> bool {
+    pub(in crate::panels::agent_pane::state) fn wordmark_click_is_animating(
+        &self,
+    ) -> bool {
         self.wordmark.click_started.is_some_and(|started| {
             Instant::now().saturating_duration_since(started) <= WORDMARK_CLICK_ANIMATION
         })
@@ -380,5 +384,4 @@ impl NeoismAgentPane {
     pub fn session_id_str(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
-
 }

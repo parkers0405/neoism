@@ -1,9 +1,6 @@
-
 use super::*;
 use crate::workspace::extensions::{ExtensionEntry, ExtensionStatus};
-use neoism_extensions::{
-    ExtensionManifest, InstalledIndex, ProgressEvent,
-};
+use neoism_extensions::{ExtensionManifest, InstalledIndex, ProgressEvent};
 use neoism_ui::panels::extensions_page::NeoismExtensionsPane;
 use neoism_ui::panels::notifications::NotificationLevel;
 use std::sync::atomic::Ordering;
@@ -721,5 +718,4 @@ impl Screen<'_> {
             }
         }
     }
-
 }

@@ -298,9 +298,8 @@ impl NeoismAgentPane {
     /// describe the current input (a keystroke can land between edit
     /// and redraw).
     pub(crate) fn current_input_wrap_ranges(&self) -> Option<&[(usize, usize)]> {
-        (!self.input_wrap_ranges.is_empty()
-            && self.input_wrap_len == self.input.len())
-        .then_some(self.input_wrap_ranges.as_slice())
+        (!self.input_wrap_ranges.is_empty() && self.input_wrap_len == self.input.len())
+            .then_some(self.input_wrap_ranges.as_slice())
     }
 
     pub fn clear_tool_hit_rects(&mut self) {
@@ -526,5 +525,4 @@ impl NeoismAgentPane {
     pub fn link_hover_active(&self) -> bool {
         self.hover_link_target.is_some()
     }
-
 }

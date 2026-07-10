@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -14,9 +13,7 @@ impl Screen<'_> {
         key: &neoism_window::event::KeyEvent,
         mods: ModifiersState,
     ) -> Option<String> {
-        use neoism_ui::lifecycle_policy::{
-            format_nvim_key_token, LifecycleMods,
-        };
+        use neoism_ui::lifecycle_policy::{format_nvim_key_token, LifecycleMods};
         use neoism_window::keyboard::Key;
 
         // Translate the winit named-key enum to our renderer-neutral
@@ -409,5 +406,4 @@ impl Screen<'_> {
             _ => alt_send_esc && text.chars().count() == 1,
         }
     }
-
 }

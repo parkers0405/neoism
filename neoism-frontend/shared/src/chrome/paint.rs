@@ -1,23 +1,18 @@
 use super::*;
 
-
 use sugarloaf::Sugarloaf;
 
 use crate::event::{LogicalKey, UiEvent};
 use crate::layout::Rect;
 use crate::render_policy::{
-    editor_cursor_output_row,
-    editor_visible_row_sample,
-    EditorScrollGridRenderState, EditorVisibleRowSource,
+    editor_cursor_output_row, editor_visible_row_sample, EditorScrollGridRenderState,
+    EditorVisibleRowSource,
 };
 
-use crate::panels::{
-    StatusPalette,
-};
+use crate::panels::StatusPalette;
 use crate::primitives::IdeTheme;
 use crate::theme::ChromeTheme;
 use crate::theme::RgbTriple;
-
 
 pub(crate) fn rgb_u32(c: RgbTriple) -> u32 {
     ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32

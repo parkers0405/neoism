@@ -322,8 +322,7 @@ impl DaemonEditorBackend {
     ) {
         let (send_tx, mut recv_rx) =
             tokio_mpsc::unbounded_channel::<EditorClientMessage>();
-        let (resize_tx, mut resize_rx) =
-            tokio_watch::channel::<(u32, u32)>((0, 0));
+        let (resize_tx, mut resize_rx) = tokio_watch::channel::<(u32, u32)>((0, 0));
         let worker = async move {
             enum Outbound {
                 Message(EditorClientMessage),

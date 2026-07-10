@@ -34,8 +34,7 @@ static AGENT_SERVER_OVERRIDE: std::sync::RwLock<Option<String>> =
     std::sync::RwLock::new(None);
 
 pub fn set_agent_server_override(url: Option<String>) {
-    let normalized =
-        url.map(|url| url.trim_end_matches('/').to_string());
+    let normalized = url.map(|url| url.trim_end_matches('/').to_string());
     if let Ok(mut slot) = AGENT_SERVER_OVERRIDE.write() {
         if *slot != normalized {
             tracing::info!(
@@ -213,10 +212,7 @@ pub(super) fn fetch_session_entries(
 ) -> Result<Vec<NeoismAgentSessionEntry>, String> {
     let sessions = fetch_sessions_sorted(server, directory)?;
     let _ = current_id;
-    Ok(sessions
-        .iter()
-        .filter_map(session_entry)
-        .collect())
+    Ok(sessions.iter().filter_map(session_entry).collect())
 }
 
 pub(super) fn fetch_subagent_options(
@@ -1239,10 +1235,7 @@ pub(super) fn set_session_pinned(
         &format!("/session/{session_id}/pin"),
         Some(&body),
     )?;
-    Ok(value
-        .as_ref()
-        .map(session_pinned)
-        .unwrap_or(pinned))
+    Ok(value.as_ref().map(session_pinned).unwrap_or(pinned))
 }
 
 /// `DELETE /session/:id` — permanently delete a session.

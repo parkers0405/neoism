@@ -1,18 +1,13 @@
-
 use super::*;
-use crate::daemon_client::tailnet_peers::{
-    PeerWorkspaceTree, TailnetPeer,
-};
+use crate::daemon_client::tailnet_peers::{PeerWorkspaceTree, TailnetPeer};
 use crate::daemon_client::DaemonClientHandle;
 use neoism_backend::event::EventListener;
 use neoism_backend::event::WindowId;
 use neoism_protocol::workspace::{
-    HostSummary,
-    PaneLayoutSnapshot, SessionSummary, WorkspaceClientMessage,
+    HostSummary, PaneLayoutSnapshot, SessionSummary, WorkspaceClientMessage,
     WorkspaceSummary, WorkspaceTabSummary,
 };
 use std::path::PathBuf;
-
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
     pub fn event_proxy(&self) -> T {
@@ -41,8 +36,22 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             handle, runtime, endpoint,
         ));
         self.daemon.link_is_peer = !link_is_home;
-        self.ensure_daemon_sessions_for_all_routes();
-        self.sync_daemon_workspaces();
+        if !link_is_home {
+            // These snapshots belong to the previous daemon. Keeping them
+            // across a peer redial lets incremental messages resolve roots,
+            // tabs, or ownership against the wrong host.
+            self.daemon.cache.daemon_hosts.clear();
+            self.daemon.cache.daemon_host_workspaces.clear();
+            self.daemon.cache.daemon_workspace_tabs.clear();
+            self.daemon.cache.active_session_id = None;
+        }
+        // Peer links are read/adopt-only until the requested workspace is
+        // confirmed by that daemon's authoritative tree. Publishing local
+        // routes here would create their roots and sessions on the peer.
+        if link_is_home {
+            self.ensure_daemon_sessions_for_all_routes();
+            self.sync_daemon_workspaces();
+        }
         // Wave 6A: warm the tailnet peer cache at attach so the first
         // Workspaces-modal open already has discovery data to show.
         self.request_tailnet_peers();
@@ -119,6 +128,22 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .iter()
             .find(|host| host.id == host_id)
             .and_then(|host| host.daemon_url.clone())
+    }
+
+    /// True when the workspace was discovered from a peer tree rather than
+    /// published by the daemon currently attached to this window.
+    pub fn is_discovered_peer_workspace(&self, workspace_id: &str) -> bool {
+        !self
+            .daemon
+            .cache
+            .daemon_host_workspaces
+            .iter()
+            .any(|workspace| workspace.id == workspace_id)
+            && self
+                .peer_workspace_tree()
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == workspace_id)
     }
 
     pub fn peer_workspace_tree(&self) -> PeerWorkspaceTree {
@@ -205,8 +230,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .collect();
         let stable = grid.workspace_route_id();
         for route_id in route_ids {
-            if let Some(session_id) = self.daemon.cache.route_sessions.remove(&route_id)
-            {
+            if let Some(session_id) = self.daemon.cache.route_sessions.remove(&route_id) {
                 self.daemon.cache.session_routes.remove(&session_id);
                 tracing::info!(
                     target: "neoism::workspaces",
@@ -265,10 +289,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// is gone and the daemon connection can re-dial home.
     pub fn has_adopted_grids(&self) -> bool {
         self.contexts.iter().any(|grid| {
-            grid.workspace_route_id()
-                .is_some_and(|stable| {
-                    self.daemon.cache.adopted_workspaces.contains_key(&stable)
-                })
+            grid.workspace_route_id().is_some_and(|stable| {
+                self.daemon.cache.adopted_workspaces.contains_key(&stable)
+            })
         })
     }
 
@@ -484,7 +507,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         }
     }
 
-    pub(crate) fn switch_local_context_to_daemon_workspace(&mut self, workspace_id: &str) {
+    pub(crate) fn switch_local_context_to_daemon_workspace(
+        &mut self,
+        workspace_id: &str,
+    ) {
         // MULTI-USER GUARD: the daemon's active-workspace pointer is
         // per-HOST state. When several desktops share one daemon (a
         // guest joined the host), following pointer flips for
@@ -520,6 +546,12 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// upserts the workspaces/tabs it is currently rendering and tells the
     /// daemon which daemon workspace this client is viewing.
     pub fn sync_daemon_workspaces(&self) {
+        // A peer daemon is authoritative for its own workspace inventory.
+        // Guests must never publish their local grids or host-active pointer
+        // into that control plane.
+        if self.daemon.link_is_peer {
+            return;
+        }
         let Some(link) = self.daemon.link.as_ref() else {
             return;
         };
@@ -702,5 +734,4 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     pub fn cached_active_session_id(&self) -> Option<&str> {
         self.daemon.cache.active_session_id.as_deref()
     }
-
 }

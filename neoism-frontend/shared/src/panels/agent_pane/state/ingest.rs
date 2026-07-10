@@ -220,7 +220,10 @@ impl NeoismAgentPane {
         self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
     }
 
-    pub(in crate::panels::agent_pane::state) fn match_running_tool_part(&self, message: &NeoismAgentMessage) -> Option<usize> {
+    pub(in crate::panels::agent_pane::state) fn match_running_tool_part(
+        &self,
+        message: &NeoismAgentMessage,
+    ) -> Option<usize> {
         if message.kind != NeoismAgentMessageKind::Tool
             || message.status == "running"
             || message.status == "pending"
@@ -260,7 +263,10 @@ impl NeoismAgentPane {
     /// reordering it here is the "finished answer drops below a later
     /// thinking block" bug. We keep insertion order for those and never
     /// move them.
-    pub(in crate::panels::agent_pane::state) fn move_previous_assistant_after_reasoning(&mut self, index: usize) {
+    pub(in crate::panels::agent_pane::state) fn move_previous_assistant_after_reasoning(
+        &mut self,
+        index: usize,
+    ) {
         let turn_start = self.messages[..index]
             .iter()
             .rposition(|message| message.kind == NeoismAgentMessageKind::User)
@@ -295,5 +301,4 @@ impl NeoismAgentPane {
             self.invalidate_timeline_layout();
         }
     }
-
 }

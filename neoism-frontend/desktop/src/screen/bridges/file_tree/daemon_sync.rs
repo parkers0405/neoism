@@ -1,4 +1,3 @@
-
 use super::*;
 use std::path::{Path, PathBuf};
 
@@ -47,9 +46,8 @@ impl Screen<'_> {
         let remote = if self.context_manager.current_workspace_is_remote_joined() {
             let event_proxy = self.context_manager.event_proxy();
             let window_id = self.context_manager.window_id();
-            self.context_manager
-                .daemon_link_handle_and_runtime()
-                .map(|(handle, runtime)| {
+            self.context_manager.daemon_link_handle_and_runtime().map(
+                |(handle, runtime)| {
                     std::sync::Arc::new(
                         crate::daemon_client::remote_files::RemoteFiles::new(
                             handle,
@@ -59,7 +57,8 @@ impl Screen<'_> {
                             window_id,
                         ),
                     )
-                })
+                },
+            )
         } else {
             None
         };
@@ -324,5 +323,4 @@ impl Screen<'_> {
             _ => false,
         }
     }
-
 }

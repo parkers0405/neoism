@@ -2,7 +2,6 @@ use super::*;
 
 use std::collections::BTreeMap;
 
-
 /// Scratch state for lowering a `PaneLayoutSnapshot` into the binary
 /// [`SessionLayout`] node arena.
 #[derive(Default)]

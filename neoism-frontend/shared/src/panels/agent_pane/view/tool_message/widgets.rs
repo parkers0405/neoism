@@ -112,4 +112,3 @@ pub fn draw_tool_title(
     let name_w = sugarloaf.text_mut().measure(name, opts);
     draw_text_clipped(sugarloaf, x + name_w, y, rest, &rest_opts, occlusion_rects);
 }
-

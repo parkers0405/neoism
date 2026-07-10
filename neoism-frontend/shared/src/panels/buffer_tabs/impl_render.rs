@@ -682,7 +682,9 @@ impl<A: Copy> BufferTabs<A> {
                     clip_rect: Some(strip_clip),
                     ..DrawOpts::default()
                 };
-                let gw = sugarloaf.text_mut().measure(consts::NEW_TAB_ICON, &glyph_opts);
+                let gw = sugarloaf
+                    .text_mut()
+                    .measure(consts::NEW_TAB_ICON, &glyph_opts);
                 draw_text_with_occlusion(
                     sugarloaf,
                     btn_x + (btn_w - gw) / 2.0,

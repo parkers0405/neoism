@@ -546,8 +546,8 @@ impl CommandPalette {
                 // (`[230, 240, 255]`). Prefix→service reverse-lookup keeps
                 // `CommandService::icon()` the single icon source.
                 PaletteRow::Command { service, .. } => {
-                    let icon = CommandService::from_prefix(service)
-                        .map(CommandService::icon);
+                    let icon =
+                        CommandService::from_prefix(service).map(CommandService::icon);
                     let color = if is_selected {
                         [230, 240, 255, 255]
                     } else {

@@ -463,5 +463,4 @@ impl NeoismAgentPane {
             .filter_map(|message| message.usage.as_ref())
             .fold(0_u64, |sum, usage| sum.saturating_add(usage.cost_micros))
     }
-
 }

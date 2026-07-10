@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -116,5 +115,4 @@ impl Screen<'_> {
         let mode = self.get_mode();
         mode.intersects(Mode::MOUSE_MODE) && !mode.contains(Mode::VI)
     }
-
 }

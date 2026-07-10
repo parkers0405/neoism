@@ -1,5 +1,8 @@
+use super::draw::{
+    draw_status_dot_text, draw_subagent_spinner, intersect_rect,
+    push_provider_icon_clipped,
+};
 use super::*;
-use super::draw::{draw_status_dot_text, draw_subagent_spinner, push_provider_icon_clipped, intersect_rect};
 
 /// H3-heading font size for the agent side-panel section titles. Mirrors the
 /// Markdown renderer's `heading_level_font_size(3)` (22.5px, on the 17px
@@ -123,7 +126,14 @@ pub(crate) fn render_directory_section(
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
     let mut y = render_section_header(
-        sugarloaf, "Directory", x, y, theme, s, clip, occlusion_rects,
+        sugarloaf,
+        "Directory",
+        x,
+        y,
+        theme,
+        s,
+        clip,
+        occlusion_rects,
     );
     let label = pane.directory_label();
     y = render_text_line(

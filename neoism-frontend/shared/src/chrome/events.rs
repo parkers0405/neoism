@@ -12,12 +12,8 @@ use crate::panels::status_line::STATUS_LINE_HEIGHT;
 
 use crate::panels::git_diff::PanelHit as GitPanelHit;
 use crate::panels::notes_sidebar::NotesSidebarHit;
-use crate::panels::{
-    Panel,
-    PanelContext,
-};
+use crate::panels::{Panel, PanelContext};
 use crate::services::Services;
-
 
 impl<A: Send + Copy + 'static> Chrome<A> {
     /// Recompute every panel's rect against `viewport`. The viewport
@@ -1112,7 +1108,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// Keyboard handling for a focused side panel: arrows move the
     /// selection, Enter activates, Escape closes. Returns true when
     /// the key was consumed.
-    pub(crate) fn handle_side_panel_key(&mut self, key: &crate::event::KeyDescriptor) -> bool {
+    pub(crate) fn handle_side_panel_key(
+        &mut self,
+        key: &crate::event::KeyDescriptor,
+    ) -> bool {
         let plain = !key.modifiers.contains(Modifiers::CTRL)
             && !key.modifiers.contains(Modifiers::ALT)
             && !key.modifiers.contains(Modifiers::META);
@@ -1262,7 +1261,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         None
     }
 
-    pub(crate) fn dispatch_to(&mut self, key: PanelKey, event: &UiEvent, ctx: &mut PanelContext) {
+    pub(crate) fn dispatch_to(
+        &mut self,
+        key: PanelKey,
+        event: &UiEvent,
+        ctx: &mut PanelContext,
+    ) {
         match key {
             PanelKey::StatusLine => self.status_line.handle_event(event, ctx),
             PanelKey::TopBar => self.top_bar.handle_event(event, ctx),

@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -856,5 +855,4 @@ impl Screen<'_> {
         }
         self.mark_dirty();
     }
-
 }

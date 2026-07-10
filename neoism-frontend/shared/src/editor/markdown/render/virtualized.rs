@@ -29,9 +29,8 @@ use super::draw::{
     caret_height, cursor_cell_width, cursor_position_for_text_prefix,
     cursor_y_for_text_line, draw_block_actions, draw_copy_button, draw_drag_ghost,
     draw_if_visible, draw_list_guides, draw_rect_clipped, draw_rounded_rect_clipped,
-    draw_search_matches_for_line, draw_selection_for_line, draw_task_checkbox, draw_wrapped,
-    line_height,
-    list_indent_px, markdown_font, visible_markdown_prefix,
+    draw_search_matches_for_line, draw_selection_for_line, draw_task_checkbox,
+    draw_wrapped, line_height, list_indent_px, markdown_font, visible_markdown_prefix,
 };
 use super::illuminated::{
     draw_illuminated_inline, illuminated_inline_metrics, parse_illuminate_token,

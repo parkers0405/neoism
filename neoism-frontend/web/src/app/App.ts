@@ -38,6 +38,10 @@ const DEFAULT_ROWS = 24;
 const WEB_CONTROLLER_HOST_ID = "web-controller";
 const WORKSPACE_SUBSCRIPTIONS_STORAGE_KEY = "neoism.workspace-subscriptions.v1";
 
+function normalizedDaemonUrl(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
 type WorkspaceStripSnapshot = Array<{
   title: string;
   kind: string;
@@ -68,6 +72,10 @@ export class App {
   /** Set by the Alt+W create-workspace flow; the daemon upsert ack is
    *  followed by an explicit active-workspace switch. */
   private pendingCreateWorkspaceId: string | null = null;
+  /** Workspace selected from a different daemon. The connection is switched
+   * first; adoption completes only after that daemon publishes its tree. */
+  private pendingRemoteWorkspaceId: string | null = null;
+  private pendingRemoteWorkspaceRoot: string | null = null;
   /** The daemon host-workspace this panel currently lives in — the
    *  target for tab publishes. Set on switch/adopt/create. */
   private activeHostWorkspaceId: string | null = null;
@@ -451,10 +459,10 @@ export class App {
     }
     this.activeHostWorkspaceId = tab.workspace_id;
     this.syncCommandPaletteWorkspaceVisibility();
-    this.handlePtyCreated(tab.session_id, tab.cwd ?? null);
     const workspace = tree?.workspaces.find(
       (candidate) => candidate.id === tab.workspace_id,
     );
+    this.handlePtyCreated(tab.session_id, workspace?.root_dir ?? null);
     this.terminalPanel?.applyWorkspaceLayoutSnapshot(workspace?.layout_snapshot);
     this.terminalPanel?.applyWorkspaceTabs(
       tree?.tabs.filter((candidate) => candidate.workspace_id === tab.workspace_id) ?? [],
@@ -465,7 +473,7 @@ export class App {
 
   private handlePtyCreated(
     sessionId: string,
-    workspaceRoot: string | null = null,
+    _rootHint: string | null = null,
   ): void {
     if (!this.client) {
       return;
@@ -475,6 +483,12 @@ export class App {
       return;
     }
     this.activeSessionId = sessionId;
+    const workspaceRoot = this.activeWorkspaceId
+      ? this.workspaceService
+          ?.getHostWorkspaceTree()
+          .workspaces.find((workspace) => workspace.id === this.activeWorkspaceId)
+          ?.root_dir ?? null
+      : null;
     this.connectionScreen?.dispose();
     this.connectionScreen = null;
     this.terminalPanel = new TerminalPanel({
@@ -546,8 +560,10 @@ export class App {
         );
       }
     }
-    this.activeWorkspaceRootPath = workspaceRoot;
-    this.terminalPanel?.setWorkspaceRoot(workspaceRoot);
+    if (workspaceRoot) {
+      this.activeWorkspaceRootPath = workspaceRoot;
+      this.terminalPanel?.setWorkspaceRoot(workspaceRoot);
+    }
     // Establish this connection's project-root workspace on the daemon.
     // The daemon scopes editor-surface binds, pane-layout ops, and
     // session inventory to a per-connection active workspace; without
@@ -652,6 +668,30 @@ export class App {
       }
       if ("HostWorkspaceUpserted" in msg) {
         this.maybeReRootActiveWorkspace();
+      }
+      if ("HostWorkspaceTree" in msg && this.pendingRemoteWorkspaceId) {
+        const workspace = msg.HostWorkspaceTree.workspaces.find(
+          (candidate) =>
+            candidate.id === this.pendingRemoteWorkspaceId &&
+            !!candidate.root_dir &&
+            candidate.root_dir.startsWith("/"),
+        );
+        if (workspace) {
+          const expectedRoot = this.pendingRemoteWorkspaceRoot;
+          if (expectedRoot && workspace.root_dir !== expectedRoot) {
+            console.error("Refusing remote workspace whose root changed during join", {
+              expectedRoot,
+              receivedRoot: workspace.root_dir,
+              workspaceId: workspace.id,
+            });
+            this.pendingRemoteWorkspaceId = null;
+            this.pendingRemoteWorkspaceRoot = null;
+            return;
+          }
+          this.pendingRemoteWorkspaceId = null;
+          this.pendingRemoteWorkspaceRoot = null;
+          this.acceptWorkspaceGate(workspace);
+        }
       }
       if (
         "HostWorkspaceTree" in msg ||
@@ -776,17 +816,36 @@ export class App {
     return { workspaces, peer_hosts };
   }
 
-  /** Workspace pick from the wasm Workspaces modal. Resolves the id
-   *  against the latest tree and reuses the same switch path the DOM
-   *  switcher overlay drives. */
+  /** Workspace pick from the wasm Workspaces modal. Resolve its owning daemon
+   * before issuing workspace/session/file requests. */
   private switchToWorkspaceById(
     workspaceId: string,
     options: { terminalOnly?: boolean } = {},
   ): void {
-    const workspace = this.workspaceService
-      ?.getHostWorkspaceTree()
-      .workspaces.find((candidate) => candidate.id === workspaceId);
+    const tree = this.workspaceService?.getHostWorkspaceTree();
+    const workspace = tree?.workspaces.find(
+      (candidate) => candidate.id === workspaceId,
+    );
     if (!workspace) return;
+    const host = tree?.hosts.find((candidate) => candidate.id === workspace.host_id);
+    const targetUrl = host?.daemon_url ?? null;
+    const activeUrl = this.workplaceService.getActiveUrl();
+    if (
+      targetUrl &&
+      (!activeUrl ||
+        normalizedDaemonUrl(targetUrl) !== normalizedDaemonUrl(activeUrl))
+    ) {
+      const target = this.workplaceService.addWorkplace({
+        id: host?.id ?? workspace.host_id,
+        label: host?.label ?? workspace.host_id,
+        url: targetUrl,
+        transport: "tailscale",
+      });
+          this.pendingRemoteWorkspaceId = workspace.id;
+          this.pendingRemoteWorkspaceRoot = workspace.root_dir ?? null;
+          this.connectViaService(target.id);
+      return;
+    }
     this.switchToWorkspace(workspace, options);
   }
 
@@ -811,19 +870,19 @@ export class App {
     const tab =
       tabs.find((candidate) => candidate.active && candidate.session_id) ??
       tabs.find((candidate) => candidate.session_id);
+    const newRoot = workspace.root_dir ?? null;
+    if (!newRoot || !newRoot.startsWith("/")) {
+      console.error("Refusing to switch workspace without an absolute daemon root", workspace);
+      return;
+    }
+    this.activeWorkspaceRootPath = newRoot;
+    this.terminalPanel?.setWorkspaceRoot(newRoot);
     if (tab?.session_id) {
-      this.handlePtyCreated(tab.session_id, tab.cwd ?? workspace.root_dir ?? null);
+      this.handlePtyCreated(tab.session_id, newRoot);
       this.activeSessionId = tab.session_id;
     }
     // A workspace IS its directory. Root the Explorer at the daemon-owned
-    // root_dir; the main terminal can move that root, but web learns it from
-    // the daemon workspace broadcast instead of guessing from arbitrary PTY
-    // cwd pushes (secondary terminals stay local).
-    const newRoot = workspace.root_dir ?? null;
-    if (newRoot && newRoot.startsWith("/")) {
-      this.activeWorkspaceRootPath = newRoot;
-      this.terminalPanel?.setWorkspaceRoot(newRoot);
-    }
+    // root_dir; PTY cwd is pane-local state and must never redefine it.
     this.terminalPanel?.applyWorkspaceLayoutSnapshot(workspace.layout_snapshot);
     // Daemon tabs are the source of truth on workspace entry/reload. A
     // browser-local strip is only an in-memory fallback for workspaces that
@@ -1201,6 +1260,9 @@ export class App {
     this.diagnosticsService = null;
     this.surfaceRouteIds.clear();
     this.activeWorkspaceId = null;
+    if (!this.pendingRemoteWorkspaceId) {
+      this.pendingRemoteWorkspaceRoot = null;
+    }
     this.initialWorkspaceResolved = false;
     this.workspaceGateSatisfied = false;
   }
@@ -1346,8 +1408,8 @@ export class App {
         this.handleSwitchTo(entry);
       },
       onWorkspaceSwitch: (workspace) => {
-        this.switchToWorkspace(workspace);
         this.hideWorkplaceSwitcherOverlay();
+        this.switchToWorkspaceById(workspace.id);
       },
       onWorkspaceControl: (workspace) => {
         this.noteActiveWorkspace(workspace.id);

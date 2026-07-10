@@ -230,7 +230,10 @@ impl NeoismAgentPane {
         self.active_prefixed_token('@')
     }
 
-    pub(crate) fn active_prefixed_token(&self, trigger_char: char) -> Option<(usize, String)> {
+    pub(crate) fn active_prefixed_token(
+        &self,
+        trigger_char: char,
+    ) -> Option<(usize, String)> {
         let cursor = self.cursor_byte();
         let prefix = &self.input[..cursor];
         let (trigger, _) = prefix
@@ -282,7 +285,10 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(crate) fn file_mention_options(&self, query: &str) -> Vec<NeoismAgentPickerOption> {
+    pub(crate) fn file_mention_options(
+        &self,
+        query: &str,
+    ) -> Vec<NeoismAgentPickerOption> {
         file_mention_options(&self.file_mention_root(), query, FILE_MENTION_LIMIT)
     }
 
@@ -444,7 +450,11 @@ impl NeoismAgentPane {
         })
     }
 
-    pub(crate) fn display_path_for_attachment(&self, path: &Path, is_dir: bool) -> String {
+    pub(crate) fn display_path_for_attachment(
+        &self,
+        path: &Path,
+        is_dir: bool,
+    ) -> String {
         let root = self.file_mention_root();
         let mut display = path
             .strip_prefix(&root)

@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::*;
 use neoism_backend::clipboard::Clipboard;
 use neoism_protocol::workspace::{PaneSplitAxis, PaneSplitPlacement};
@@ -35,13 +34,12 @@ fn strip_ref_to_key(
     }
 }
 
+mod buffer_tabs_input;
+mod close_focus;
+mod cross_window_dnd;
 mod grid_workspace;
 mod open_create;
-mod close_focus;
-mod buffer_tabs_input;
-mod cross_window_dnd;
 mod terminal_exit;
-
 
 /// Thin adapter so the desktop fork's `ContextGrid` plays the
 /// [`neoism_ui::session_layout::ContextGridLike`] trait — letting the

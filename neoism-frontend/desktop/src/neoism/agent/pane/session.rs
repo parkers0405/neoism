@@ -581,7 +581,11 @@ impl NeoismAgentPane {
         self.note_streaming_from_part(kind, &title);
     }
 
-    pub(crate) fn note_streaming_from_part(&mut self, kind: NeoismAgentMessageKind, title: &str) {
+    pub(crate) fn note_streaming_from_part(
+        &mut self,
+        kind: NeoismAgentMessageKind,
+        title: &str,
+    ) {
         if matches!(
             kind,
             NeoismAgentMessageKind::Reasoning
@@ -651,5 +655,4 @@ impl NeoismAgentPane {
         self.streaming_state_changed_at
             .map(|t| t.elapsed().as_secs_f32())
     }
-
 }

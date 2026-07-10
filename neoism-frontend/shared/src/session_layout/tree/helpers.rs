@@ -2,12 +2,14 @@ use super::*;
 
 use std::collections::BTreeSet;
 
-
 // ---------------------------------------------------------------------------
 // Free helpers — kept outside the impl so they can recurse cleanly.
 // ---------------------------------------------------------------------------
 
-pub(crate) fn collect_all_leaves(node: &SessionTreeNode, out: &mut Vec<SessionTreeLeafId>) {
+pub(crate) fn collect_all_leaves(
+    node: &SessionTreeNode,
+    out: &mut Vec<SessionTreeLeafId>,
+) {
     match node {
         SessionTreeNode::Leaf(leaf) => out.push(leaf.id),
         SessionTreeNode::Split { children, .. }
@@ -19,7 +21,10 @@ pub(crate) fn collect_all_leaves(node: &SessionTreeNode, out: &mut Vec<SessionTr
     }
 }
 
-pub(crate) fn collect_visible_leaves(node: &SessionTreeNode, out: &mut Vec<SessionTreeLeafId>) {
+pub(crate) fn collect_visible_leaves(
+    node: &SessionTreeNode,
+    out: &mut Vec<SessionTreeLeafId>,
+) {
     match node {
         SessionTreeNode::Leaf(leaf) => out.push(leaf.id),
         SessionTreeNode::Split { children, .. } => {

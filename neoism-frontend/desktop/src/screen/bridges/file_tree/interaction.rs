@@ -1,4 +1,3 @@
-
 use super::*;
 use std::path::{Path, PathBuf};
 
@@ -635,5 +634,4 @@ impl Screen<'_> {
         );
         self.mark_dirty();
     }
-
 }

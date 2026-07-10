@@ -413,10 +413,15 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
     /// An auto-completing OAuth `/connect` flow (e.g. OpenAI, GitHub Copilot)
     /// finished on a background thread — the browser callback was captured and
     /// the token exchanged/stored.
-    ConnectOauthFinished { provider_name: String },
+    ConnectOauthFinished {
+        provider_name: String,
+    },
     /// An auto-completing OAuth `/connect` flow failed (timed out, cancelled in
     /// the browser, or the exchange errored).
-    ConnectOauthFailed { provider_name: String, error: String },
+    ConnectOauthFailed {
+        provider_name: String,
+        error: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -764,15 +769,15 @@ impl Default for NeoismAgentPane {
     }
 }
 
-mod render_state;
-mod permissions;
-mod selection;
-mod timeline;
+pub(super) mod connect;
 mod ingest;
 mod input;
+mod permissions;
+mod render_state;
+mod selection;
 mod session;
 mod submit;
-pub(super) mod connect;
+mod timeline;
 
 fn file_mention_options(
     root: &Path,

@@ -1,9 +1,9 @@
-use super::*;
 use super::diff::{
-    cached_diff_card_view, cached_edit_diff_sections, diag_footer_height, diag_footer_rows,
-    diff_body_height, diff_link_target, tool_diff_card_width,
+    cached_diff_card_view, cached_edit_diff_sections, diag_footer_height,
+    diag_footer_rows, diff_body_height, diff_link_target, tool_diff_card_width,
 };
 use super::widgets::{draw_checkbox, draw_tool_connector, draw_tool_title};
+use super::*;
 
 fn tool_message_accent(status: &str, theme: &IdeTheme) -> u32 {
     match status {
@@ -850,4 +850,3 @@ pub fn render_tool_todos<Todo: AgentToolTodo>(
         line_y += TODO_ROW_HEIGHT * s;
     }
 }
-

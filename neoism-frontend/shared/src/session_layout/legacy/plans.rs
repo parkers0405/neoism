@@ -2,7 +2,6 @@ use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-
 /// Pure logical-px (x, y, width) for a per-pane tab strip given a pane
 /// rectangle and the grid's chrome alignment metadata.
 ///

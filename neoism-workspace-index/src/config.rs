@@ -400,9 +400,15 @@ fn ensure_note_root_dirs(workspace: &NeoismWorkspace) -> std::io::Result<()> {
 /// Alt+N open onto this folder). Pages are real Markdown files under
 /// `src/welcome/`.
 const WELCOME_PAGES: &[(&str, &str)] = &[
-    ("Getting Started.md", include_str!("welcome/Getting Started.md")),
+    (
+        "Getting Started.md",
+        include_str!("welcome/Getting Started.md"),
+    ),
     ("The Terminal.md", include_str!("welcome/The Terminal.md")),
-    ("The Neoism Agent.md", include_str!("welcome/The Neoism Agent.md")),
+    (
+        "The Neoism Agent.md",
+        include_str!("welcome/The Neoism Agent.md"),
+    ),
     (
         "Notes and Drawings.md",
         include_str!("welcome/Notes and Drawings.md"),

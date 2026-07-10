@@ -111,9 +111,12 @@ pub(crate) async fn callback(
         let auth = if provider_auth_xai::is_headless_method(&method.label) {
             provider_auth_xai::poll_xai_device(provider_id, pending).await?
         } else {
-            let code = code.map(str::trim).filter(|code| !code.is_empty()).ok_or_else(
-                || anyhow::anyhow!("paste the authorization code xAI showed you"),
-            )?;
+            let code = code
+                .map(str::trim)
+                .filter(|code| !code.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("paste the authorization code xAI showed you")
+                })?;
             provider_auth_xai::exchange_xai_loopback(provider_id, pending, code).await?
         };
         auth_store.set(provider_id, auth)?;

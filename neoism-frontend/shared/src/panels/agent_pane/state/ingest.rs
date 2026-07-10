@@ -79,6 +79,9 @@ impl NeoismAgentPane {
         if delta.is_empty() {
             return;
         }
+        if matches!(kind.as_deref(), Some("reasoning" | "thinking")) {
+            self.retain_current_turn_trace();
+        }
         if let Some(message_id) = message_id.as_deref().filter(|id| !id.is_empty()) {
             if let Some(index) = self
                 .messages
@@ -141,6 +144,15 @@ impl NeoismAgentPane {
     }
 
     pub fn upsert_part_message(&mut self, message: NeoismAgentMessage) {
+        if matches!(
+            message.kind,
+            NeoismAgentMessageKind::Reasoning
+                | NeoismAgentMessageKind::Tool
+                | NeoismAgentMessageKind::Subtask
+                | NeoismAgentMessageKind::Compaction
+        ) {
+            self.retain_current_turn_trace();
+        }
         if message.kind == NeoismAgentMessageKind::Assistant
             && message.text.is_empty()
             && !message.id.is_empty()

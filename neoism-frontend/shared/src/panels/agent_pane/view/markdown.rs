@@ -1,9 +1,12 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+use pulldown_cmark::{Event, Options, Parser};
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::neodraw::{render_scene, Camera, Vec2};
 use crate::panels::agent_pane::state::NeoismAgentPane;
@@ -87,6 +90,7 @@ enum MarkdownInlineSegment {
     },
     MarkdownLink {
         label: String,
+        source_target: String,
         target: Option<String>,
     },
     PlainToken {
@@ -311,40 +315,107 @@ fn flush_layout_table(
     blocks.push(AssistantMarkdownBlock::Table(rows));
 }
 
+fn push_layout_prose_block(
+    sugarloaf: &mut Sugarloaf,
+    blocks: &mut Vec<AssistantMarkdownBlock>,
+    raw: &str,
+    width: f32,
+    s: f32,
+    paragraph_opts: &DrawOpts,
+    heading_opts: &DrawOpts,
+) {
+    if let Some((level, heading)) = markdown_heading(raw) {
+        blocks.push(AssistantMarkdownBlock::Heading {
+            level,
+            lines: wrap_inline_aware(sugarloaf, heading, width, heading_opts),
+        });
+    } else if let Some(bullet) = markdown_bullet(raw) {
+        blocks.push(AssistantMarkdownBlock::Bullet(wrap_inline_aware(
+            sugarloaf,
+            bullet,
+            (width - 28.0 * s).max(40.0 * s),
+            paragraph_opts,
+        )));
+    } else if let Some(quote) = markdown_quote(raw) {
+        blocks.push(AssistantMarkdownBlock::Quote(wrap_inline_aware(
+            sugarloaf,
+            quote,
+            (width - 24.0 * s).max(40.0 * s),
+            paragraph_opts,
+        )));
+    } else {
+        blocks.push(AssistantMarkdownBlock::Paragraph(wrap_inline_aware(
+            sugarloaf,
+            raw.trim(),
+            width,
+            paragraph_opts,
+        )));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_pending_table_header(
+    sugarloaf: &mut Sugarloaf,
+    blocks: &mut Vec<AssistantMarkdownBlock>,
+    pending: &mut Option<(String, Vec<String>)>,
+    width: f32,
+    s: f32,
+    paragraph_opts: &DrawOpts,
+    heading_opts: &DrawOpts,
+) {
+    if let Some((raw, _)) = pending.take() {
+        push_layout_prose_block(
+            sugarloaf,
+            blocks,
+            &raw,
+            width,
+            s,
+            paragraph_opts,
+            heading_opts,
+        );
+    }
+}
+
 /// Cached wrapper around [`layout_assistant_markdown`]. Memoises the
 /// parsed + wrapped block list per `(text, width, scale)` on the pane.
 /// Render and measurement share the cache; a stable history of N
 /// messages costs O(visible) lookups per frame instead of O(visible)
 /// markdown reparses.
-/// Wrap a paragraph into pixel-bounded lines without ever splitting an
-/// inline markdown atom (`**bold**`, `` `code` ``, `[label](target)`)
-/// across line boundaries. `wrap_words_simple` only sees whitespace; if a
-/// bold span contains a space and the wrap point lands inside it, the
-/// downstream inline renderer (`draw_markdown_inline_line`) sees two
-/// half-spans on adjacent lines and falls back to raw `**` text — a
-/// visible "lost markdown" bug. This tokenizer treats each inline atom
-/// as one indivisible unit.
+/// Wrap a paragraph at visible-word boundaries while keeping every output
+/// line valid inline Markdown.
+///
+/// A style span is not an indivisible layout atom: browsers happily wrap the
+/// text inside `<strong>`, `<code>`, and `<a>`. Re-open the Markdown style for
+/// each wrapped word so the retained canvas renderer has the same behavior.
+/// Oversized words are split at Unicode grapheme boundaries as a final
+/// `overflow-wrap: anywhere` equivalent, so no model output can escape the
+/// message column.
 fn wrap_inline_aware(
     sugarloaf: &mut Sugarloaf,
     text: &str,
     width: f32,
     opts: &DrawOpts,
 ) -> Vec<String> {
-    let tokens = inline_atoms(text);
+    let tokens = inline_wrap_tokens(text);
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
-    for tok in tokens {
-        let candidate = if current.is_empty() {
-            tok.to_string()
-        } else {
-            format!("{current} {tok}")
-        };
-        if current.is_empty() || measure_text_cached(sugarloaf, &candidate, opts) <= width
-        {
-            current = candidate;
-        } else {
-            lines.push(std::mem::take(&mut current));
-            current = tok.to_string();
+    for token in tokens {
+        for fragment in split_oversized_inline_token(sugarloaf, token, width, opts) {
+            let source = fragment.source();
+            let add_space = fragment.whitespace_before && !current.is_empty();
+            let mut candidate = current.clone();
+            if add_space {
+                candidate.push(' ');
+            }
+            candidate.push_str(&source);
+            if current.is_empty()
+                || measure_markdown_inline_width(sugarloaf, &candidate, opts) <= width
+            {
+                current = candidate;
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current = source;
+            }
         }
     }
     if !current.is_empty() {
@@ -356,55 +427,187 @@ fn wrap_inline_aware(
     lines
 }
 
-/// Split `text` into atomic tokens for wrapping. Each token is either a
-/// whitespace-bounded run, or a complete inline-markdown span. Spans:
-/// - `**bold**`
-/// - `` `code` ``
-/// - `[label](target)`
-/// If an opener isn't closed inside `text`, the token degrades to a
-/// plain whitespace-bounded word so we never hang on a half-open span.
-fn inline_atoms(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    loop {
-        let trimmed = rest.trim_start();
-        if trimmed.is_empty() {
-            break;
-        }
-        rest = trimmed;
-        if let Some(after) = rest.strip_prefix("**") {
-            if let Some(end_rel) = after.find("**") {
-                let total = 2 + end_rel + 2;
-                out.push(&rest[..total]);
-                rest = &rest[total..];
-                continue;
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InlineWrapStyle {
+    Plain,
+    Bold,
+    Strike,
+    Code,
+    MarkdownLink(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InlineWrapToken {
+    text: String,
+    style: InlineWrapStyle,
+    whitespace_before: bool,
+}
+
+impl InlineWrapToken {
+    fn source(&self) -> String {
+        match &self.style {
+            InlineWrapStyle::Plain => self.text.clone(),
+            InlineWrapStyle::Bold => format!("**{}**", self.text),
+            InlineWrapStyle::Strike => format!("~~{}~~", self.text),
+            InlineWrapStyle::Code => format!("`{}`", self.text),
+            InlineWrapStyle::MarkdownLink(target) => {
+                format!("[{}]({target})", self.text)
             }
         }
-        if rest.starts_with('`') {
-            if let Some(end_rel) = rest[1..].find('`') {
-                let total = 1 + end_rel + 1;
-                out.push(&rest[..total]);
-                rest = &rest[total..];
-                continue;
-            }
-        }
-        if rest.starts_with('[') {
-            if let Some(label_end) = rest.find(']') {
-                if rest[label_end + 1..].starts_with('(') {
-                    if let Some(target_end_rel) = rest[label_end + 2..].find(')') {
-                        let total = label_end + 2 + target_end_rel + 1;
-                        out.push(&rest[..total]);
-                        rest = &rest[total..];
-                        continue;
-                    }
-                }
-            }
-        }
-        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        out.push(&rest[..end]);
-        rest = &rest[end..];
     }
-    out
+}
+
+fn inline_wrap_tokens(text: &str) -> Vec<InlineWrapToken> {
+    let segments = parsed_markdown_inline_line(text);
+    let mut tokens = Vec::new();
+    let mut pending_whitespace = false;
+    for segment in segments.iter() {
+        match segment {
+            MarkdownInlineSegment::Text(text) => push_inline_segment_words(
+                text,
+                InlineWrapStyle::Plain,
+                &mut pending_whitespace,
+                &mut tokens,
+            ),
+            MarkdownInlineSegment::Bold(text) => push_inline_segment_words(
+                text,
+                InlineWrapStyle::Bold,
+                &mut pending_whitespace,
+                &mut tokens,
+            ),
+            MarkdownInlineSegment::Strike(text) => push_inline_segment_words(
+                text,
+                InlineWrapStyle::Strike,
+                &mut pending_whitespace,
+                &mut tokens,
+            ),
+            MarkdownInlineSegment::Code { text, .. } => push_inline_segment_words(
+                text,
+                InlineWrapStyle::Code,
+                &mut pending_whitespace,
+                &mut tokens,
+            ),
+            MarkdownInlineSegment::MarkdownLink {
+                label,
+                source_target,
+                ..
+            } => push_inline_segment_words(
+                label,
+                InlineWrapStyle::MarkdownLink(source_target.clone()),
+                &mut pending_whitespace,
+                &mut tokens,
+            ),
+            MarkdownInlineSegment::PlainToken { text, .. } => push_inline_segment_words(
+                text,
+                InlineWrapStyle::Plain,
+                &mut pending_whitespace,
+                &mut tokens,
+            ),
+        }
+    }
+    tokens
+}
+
+fn push_inline_segment_words(
+    text: &str,
+    style: InlineWrapStyle,
+    pending_whitespace: &mut bool,
+    tokens: &mut Vec<InlineWrapToken>,
+) {
+    let mut word = String::new();
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !word.is_empty() {
+                tokens.push(InlineWrapToken {
+                    text: std::mem::take(&mut word),
+                    style: style.clone(),
+                    whitespace_before: std::mem::take(pending_whitespace),
+                });
+            }
+            *pending_whitespace = true;
+        } else {
+            word.push(ch);
+        }
+    }
+    if !word.is_empty() {
+        tokens.push(InlineWrapToken {
+            text: word,
+            style,
+            whitespace_before: std::mem::take(pending_whitespace),
+        });
+    }
+}
+
+fn split_oversized_inline_token(
+    sugarloaf: &mut Sugarloaf,
+    token: InlineWrapToken,
+    width: f32,
+    opts: &DrawOpts,
+) -> Vec<InlineWrapToken> {
+    if measure_markdown_inline_width(sugarloaf, &token.source(), opts) <= width {
+        return vec![token];
+    }
+
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    for grapheme in token.text.graphemes(true) {
+        let mut candidate = current.clone();
+        candidate.push_str(grapheme);
+        let candidate_token = InlineWrapToken {
+            text: candidate.clone(),
+            style: token.style.clone(),
+            whitespace_before: false,
+        };
+        if !current.is_empty()
+            && measure_markdown_inline_width(sugarloaf, &candidate_token.source(), opts)
+                > width
+        {
+            pieces.push(InlineWrapToken {
+                text: std::mem::take(&mut current),
+                style: token.style.clone(),
+                whitespace_before: pieces.is_empty() && token.whitespace_before,
+            });
+            current.push_str(grapheme);
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        pieces.push(InlineWrapToken {
+            text: current,
+            style: token.style,
+            whitespace_before: pieces.is_empty() && token.whitespace_before,
+        });
+    }
+    pieces
+}
+
+fn measure_markdown_inline_width(
+    sugarloaf: &mut Sugarloaf,
+    line: &str,
+    opts: &DrawOpts,
+) -> f32 {
+    parsed_markdown_inline_line(line)
+        .iter()
+        .map(|segment| {
+            let (text, bold) = match segment {
+                MarkdownInlineSegment::Text(text) => (text.as_str(), opts.bold),
+                MarkdownInlineSegment::Bold(text) => (text.as_str(), true),
+                MarkdownInlineSegment::Strike(text) => (text.as_str(), opts.bold),
+                MarkdownInlineSegment::Code { text, .. } => (text.as_str(), true),
+                MarkdownInlineSegment::MarkdownLink { label, .. } => {
+                    (label.as_str(), opts.bold)
+                }
+                MarkdownInlineSegment::PlainToken { text, style, .. } => (
+                    text.as_str(),
+                    style.is_some_and(|style| style.bold) || opts.bold,
+                ),
+            };
+            let mut segment_opts = *opts;
+            segment_opts.bold = bold;
+            measure_text_cached(sugarloaf, text, &segment_opts)
+        })
+        .sum()
 }
 
 pub fn layout_assistant_markdown_cached<P: AgentMarkdownPane>(
@@ -441,6 +644,17 @@ pub fn layout_assistant_markdown(
     theme: &IdeTheme,
     s: f32,
 ) -> Vec<AssistantMarkdownBlock> {
+    // Match the browser client pipeline (CommonMark parser -> HTML
+    // sanitizer) without ever handing raw model HTML to a DOM. The event
+    // parser distinguishes real HTML from lookalikes inside code spans and
+    // fences; the safe-canvas projection below then drops comments and
+    // declarations, removes markup, preserves safe text, and suppresses the
+    // contents of executable/embedded elements.
+    let safe_text = safe_canvas_markdown(text);
+    let text = safe_text.as_ref();
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
     let paragraph_opts = DrawOpts {
         font_size: 13.5 * s,
         color: theme.u8(theme.fg),
@@ -455,6 +669,7 @@ pub fn layout_assistant_markdown(
     let mut blocks = Vec::new();
     let mut code: Option<(String, Vec<String>)> = None;
     let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut pending_table_header: Option<(String, Vec<String>)> = None;
 
     for raw in text.lines() {
         let trimmed = raw.trim();
@@ -462,6 +677,15 @@ pub fn layout_assistant_markdown(
             if let Some((lang, lines)) = code.take() {
                 blocks.push(markdown_code_or_stock_block(lang, lines));
             } else {
+                flush_pending_table_header(
+                    sugarloaf,
+                    &mut blocks,
+                    &mut pending_table_header,
+                    width,
+                    s,
+                    &paragraph_opts,
+                    &heading_opts,
+                );
                 flush_layout_table(
                     sugarloaf,
                     &mut blocks,
@@ -483,6 +707,15 @@ pub fn layout_assistant_markdown(
         for raw in expand_inline_bullets(raw) {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
+                flush_pending_table_header(
+                    sugarloaf,
+                    &mut blocks,
+                    &mut pending_table_header,
+                    width,
+                    s,
+                    &paragraph_opts,
+                    &heading_opts,
+                );
                 flush_layout_table(
                     sugarloaf,
                     &mut blocks,
@@ -497,49 +730,66 @@ pub fn layout_assistant_markdown(
                 continue;
             }
 
-            if let Some(cells) = md::parse_table_row_trimmed(&raw) {
-                if !md::is_table_separator_trimmed(&cells) {
-                    table_rows.push(cells);
+            let parsed_cells = md::parse_table_row_trimmed(&raw);
+
+            // Once a delimiter has confirmed a table, subsequent pipe rows
+            // belong to it. The first non-row ends the table and is handled as
+            // normal Markdown below.
+            if !table_rows.is_empty() {
+                if let Some(cells) = parsed_cells.as_ref() {
+                    if !md::is_table_separator_trimmed(cells) {
+                        table_rows.push(cells.clone());
+                        continue;
+                    }
                 }
-                continue;
+                flush_layout_table(
+                    sugarloaf,
+                    &mut blocks,
+                    &mut table_rows,
+                    width,
+                    s,
+                    &paragraph_opts,
+                );
             }
 
-            flush_layout_table(
+            // A pipe row is only a *candidate* header. It becomes a table when
+            // the immediately following line is a valid, same-width GFM
+            // delimiter. Otherwise the candidate is emitted as ordinary
+            // prose, preserving source order.
+            if let Some((pending_raw, header_cells)) = pending_table_header.take() {
+                if parsed_cells.as_ref().is_some_and(|delimiter| {
+                    md::is_table_delimiter_for_header(&header_cells, delimiter)
+                }) {
+                    table_rows.push(header_cells);
+                    continue;
+                }
+                push_layout_prose_block(
+                    sugarloaf,
+                    &mut blocks,
+                    &pending_raw,
+                    width,
+                    s,
+                    &paragraph_opts,
+                    &heading_opts,
+                );
+            }
+
+            if let Some(cells) = parsed_cells {
+                if !md::is_table_separator_trimmed(&cells) {
+                    pending_table_header = Some((raw, cells));
+                    continue;
+                }
+            }
+
+            push_layout_prose_block(
                 sugarloaf,
                 &mut blocks,
-                &mut table_rows,
+                &raw,
                 width,
                 s,
                 &paragraph_opts,
+                &heading_opts,
             );
-
-            if let Some((level, heading)) = markdown_heading(&raw) {
-                blocks.push(AssistantMarkdownBlock::Heading {
-                    level,
-                    lines: wrap_inline_aware(sugarloaf, heading, width, &heading_opts),
-                });
-            } else if let Some(bullet) = markdown_bullet(&raw) {
-                blocks.push(AssistantMarkdownBlock::Bullet(wrap_inline_aware(
-                    sugarloaf,
-                    bullet,
-                    (width - 28.0 * s).max(40.0 * s),
-                    &paragraph_opts,
-                )));
-            } else if let Some(quote) = markdown_quote(&raw) {
-                blocks.push(AssistantMarkdownBlock::Quote(wrap_inline_aware(
-                    sugarloaf,
-                    quote,
-                    (width - 24.0 * s).max(40.0 * s),
-                    &paragraph_opts,
-                )));
-            } else {
-                blocks.push(AssistantMarkdownBlock::Paragraph(wrap_inline_aware(
-                    sugarloaf,
-                    trimmed,
-                    width,
-                    &paragraph_opts,
-                )));
-            }
         }
     }
 
@@ -547,6 +797,15 @@ pub fn layout_assistant_markdown(
         blocks.push(markdown_code_or_stock_block(lang, lines));
     }
 
+    flush_pending_table_header(
+        sugarloaf,
+        &mut blocks,
+        &mut pending_table_header,
+        width,
+        s,
+        &paragraph_opts,
+        &heading_opts,
+    );
     flush_layout_table(
         sugarloaf,
         &mut blocks,
@@ -556,7 +815,367 @@ pub fn layout_assistant_markdown(
         &paragraph_opts,
     );
 
+    // Blank source lines separate Markdown blocks; they are not visible DOM
+    // nodes of their own. Keep internal paragraph spacing, but never let
+    // leading/trailing blank lines (including those left around a removed HTML
+    // comment) inflate a message card.
+    trim_outer_blank_blocks(&mut blocks);
+
     blocks
+}
+
+fn trim_outer_blank_blocks(blocks: &mut Vec<AssistantMarkdownBlock>) {
+    while matches!(blocks.last(), Some(AssistantMarkdownBlock::Blank)) {
+        blocks.pop();
+    }
+    let leading = blocks
+        .iter()
+        .take_while(|block| matches!(block, AssistantMarkdownBlock::Blank))
+        .count();
+    if leading > 0 {
+        blocks.drain(..leading);
+    }
+}
+
+/// Project CommonMark raw-HTML events into text that the retained canvas
+/// renderer can safely lay out.
+///
+/// OpenCode's browser UI runs `marked` output through DOMPurify. Neoism's
+/// native/wasm canvas has no DOM, so its equivalent policy is:
+///
+/// - HTML comments, declarations, processing instructions, and CDATA do not
+///   produce visible glyphs;
+/// - markup is never executed and tag syntax is not painted;
+/// - text inside ordinary formatting/container tags remains visible;
+/// - `<br>` and block containers retain textual line boundaries; and
+/// - executable or embedded element contents are suppressed entirely.
+///
+/// `pulldown-cmark` supplies the CommonMark classification and source ranges,
+/// which means comment-looking text in inline code, fenced code, or escaped
+/// source is preserved exactly rather than removed by a substring/regex pass.
+pub fn safe_canvas_markdown(markdown: &str) -> Cow<'_, str> {
+    if !markdown.as_bytes().contains(&b'<') {
+        return Cow::Borrowed(markdown);
+    }
+    let mut html_ranges = Vec::<std::ops::Range<usize>>::new();
+    for (event, range) in Parser::new_ext(markdown, Options::empty()).into_offset_iter() {
+        if !matches!(event, Event::Html(_) | Event::InlineHtml(_)) {
+            continue;
+        }
+        // HTML blocks are emitted one event per source line. Fold adjacent
+        // ranges back into one fragment so multi-line comments, raw-content
+        // elements, CDATA, and processing instructions are projected with
+        // their complete delimiters and state.
+        if let Some(previous) = html_ranges.last_mut() {
+            if range.start <= previous.end {
+                previous.end = previous.end.max(range.end);
+                continue;
+            }
+        }
+        html_ranges.push(range);
+    }
+
+    if html_ranges.is_empty() {
+        return Cow::Borrowed(markdown);
+    }
+
+    let mut output = String::with_capacity(markdown.len());
+    let mut cursor = 0usize;
+    let mut suppressed_elements = Vec::<String>::new();
+
+    for range in html_ranges {
+        // Offset events are emitted in source order. Be defensive about any
+        // future parser event that overlaps an earlier HTML range.
+        if range.end <= cursor || range.start > markdown.len() {
+            continue;
+        }
+        let start = range.start.max(cursor);
+        let end = range.end.min(markdown.len());
+        if start > cursor {
+            push_html_text(
+                &mut output,
+                &markdown[cursor..start],
+                !suppressed_elements.is_empty(),
+            );
+        }
+        project_html_fragment(
+            &markdown[start..end],
+            &mut output,
+            &mut suppressed_elements,
+        );
+        cursor = end;
+    }
+
+    if cursor < markdown.len() {
+        push_html_text(
+            &mut output,
+            &markdown[cursor..],
+            !suppressed_elements.is_empty(),
+        );
+    }
+
+    // Source line breaks surrounding an HTML block only delimit CommonMark
+    // blocks; they are not visible nodes. Canonicalize them here so a trailing
+    // comment cannot leave an empty paragraph in downstream layout caches.
+    let trimmed = output.trim_matches(['\r', '\n']);
+    if trimmed.len() == output.len() {
+        Cow::Owned(output)
+    } else {
+        Cow::Owned(trimmed.to_owned())
+    }
+}
+
+fn project_html_fragment(
+    fragment: &str,
+    output: &mut String,
+    suppressed_elements: &mut Vec<String>,
+) {
+    let mut cursor = 0usize;
+    while cursor < fragment.len() {
+        let rest = &fragment[cursor..];
+
+        if rest.starts_with("<!--") {
+            let consumed = rest
+                .find("-->")
+                .map_or(rest.len(), |end| end.saturating_add(3));
+            push_line_breaks(output, &rest[..consumed]);
+            cursor += consumed;
+            continue;
+        }
+        if rest.starts_with("<![CDATA[") {
+            let consumed = rest
+                .find("]]>")
+                .map_or(rest.len(), |end| end.saturating_add(3));
+            push_line_breaks(output, &rest[..consumed]);
+            cursor += consumed;
+            continue;
+        }
+        if rest.starts_with("<?") {
+            let consumed = rest
+                .find("?>")
+                .map_or(rest.len(), |end| end.saturating_add(2));
+            push_line_breaks(output, &rest[..consumed]);
+            cursor += consumed;
+            continue;
+        }
+        if rest.starts_with("<!") {
+            let consumed = html_tag_end(rest).unwrap_or(rest.len());
+            push_line_breaks(output, &rest[..consumed]);
+            cursor += consumed;
+            continue;
+        }
+
+        if rest.starts_with('<') {
+            let consumed = html_tag_end(rest).unwrap_or(rest.len());
+            let raw_tag = &rest[..consumed];
+            if let Some(tag) = parse_html_tag(raw_tag) {
+                project_html_tag(&tag, output, suppressed_elements);
+            } else {
+                push_line_breaks(output, raw_tag);
+            }
+            cursor += consumed;
+            continue;
+        }
+
+        let consumed = rest.find('<').unwrap_or(rest.len());
+        push_html_text(output, &rest[..consumed], !suppressed_elements.is_empty());
+        cursor += consumed;
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SafeHtmlTag {
+    name: String,
+    closing: bool,
+    self_closing: bool,
+}
+
+fn parse_html_tag(raw: &str) -> Option<SafeHtmlTag> {
+    let inner = raw.strip_prefix('<')?.strip_suffix('>')?.trim();
+    let (closing, inner) = inner
+        .strip_prefix('/')
+        .map_or((false, inner), |rest| (true, rest.trim_start()));
+    let self_closing = inner.ends_with('/');
+    let name = inner
+        .trim_end_matches('/')
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == '/')
+        .next()?
+        .trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == ':')
+    {
+        return None;
+    }
+    Some(SafeHtmlTag {
+        name: name.to_ascii_lowercase(),
+        closing,
+        self_closing,
+    })
+}
+
+fn html_tag_end(raw: &str) -> Option<usize> {
+    let mut quote = None;
+    for (index, ch) in raw.char_indices().skip(1) {
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '>' => return Some(index + ch.len_utf8()),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn project_html_tag(
+    tag: &SafeHtmlTag,
+    output: &mut String,
+    suppressed_elements: &mut Vec<String>,
+) {
+    if is_suppressed_html_element(&tag.name) {
+        if tag.closing {
+            if let Some(index) = suppressed_elements
+                .iter()
+                .rposition(|open| open == &tag.name)
+            {
+                suppressed_elements.truncate(index);
+            }
+        } else if !tag.self_closing && !is_void_html_element(&tag.name) {
+            suppressed_elements.push(tag.name.clone());
+        }
+        return;
+    }
+    if !suppressed_elements.is_empty() {
+        return;
+    }
+
+    if tag.name == "br" {
+        output.push('\n');
+        return;
+    }
+    if tag.name == "li" {
+        ensure_line_break(output);
+        if !tag.closing {
+            output.push_str("- ");
+        }
+        return;
+    }
+    if is_block_html_element(&tag.name) {
+        ensure_line_break(output);
+    }
+}
+
+fn is_suppressed_html_element(name: &str) -> bool {
+    matches!(
+        name,
+        "applet"
+            | "audio"
+            | "canvas"
+            | "embed"
+            | "iframe"
+            | "math"
+            | "noscript"
+            | "object"
+            | "script"
+            | "style"
+            | "svg"
+            | "template"
+            | "video"
+    )
+}
+
+fn is_void_html_element(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
+fn is_block_html_element(name: &str) -> bool {
+    matches!(
+        name,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "body"
+            | "dd"
+            | "details"
+            | "dialog"
+            | "div"
+            | "dl"
+            | "dt"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hgroup"
+            | "hr"
+            | "html"
+            | "main"
+            | "menu"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "summary"
+            | "table"
+            | "tbody"
+            | "td"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "tr"
+            | "ul"
+    )
+}
+
+fn push_html_text(output: &mut String, text: &str, suppressed: bool) {
+    if suppressed {
+        push_line_breaks(output, text);
+    } else {
+        output.push_str(text);
+    }
+}
+
+fn push_line_breaks(output: &mut String, text: &str) {
+    for ch in text.chars().filter(|ch| *ch == '\n') {
+        output.push(ch);
+    }
+}
+
+fn ensure_line_break(output: &mut String) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
 }
 
 fn markdown_code_or_stock_block(
@@ -674,6 +1293,9 @@ pub fn measure_markdown_blocks<P: AgentMarkdownPane>(
     pane: &P,
     s: f32,
 ) -> f32 {
+    if blocks.is_empty() {
+        return 0.0;
+    }
     let mut height = 8.0 * s;
     for block in blocks {
         height += markdown_block_height(block, width, pane, s) + 6.0 * s;
@@ -1368,7 +1990,7 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                     );
                 }
             }
-            MarkdownInlineSegment::MarkdownLink { label, target } => {
+            MarkdownInlineSegment::MarkdownLink { label, target, .. } => {
                 let mut link_opts = *opts;
                 link_opts.color = theme.u8(if target.is_some() {
                     theme.blue

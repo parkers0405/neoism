@@ -89,7 +89,11 @@ fn operation_supported(spec: &LanguageSpec, operation: LspOperation) -> bool {
     }
 }
 
-fn server_status(root: &Path, scan: &WorkspaceScan, spec: &LanguageSpec) -> LspStatus {
+pub(super) fn server_status(
+    root: &Path,
+    scan: &WorkspaceScan,
+    spec: &LanguageSpec,
+) -> LspStatus {
     let raw_command: Vec<String> = spec
         .command
         .iter()

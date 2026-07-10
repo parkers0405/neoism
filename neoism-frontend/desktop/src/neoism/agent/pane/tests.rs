@@ -21,17 +21,27 @@
     }
 
     #[test]
-    fn idle_streaming_state_clears_status_label() {
+    fn idle_clears_status_but_keeps_trace_until_session_reset() {
         let mut pane = NeoismAgentPane::default();
+        pane.messages.push(NeoismAgentMessage::user("question"));
 
         pane.note_streaming(NeoismAgentStreamingState::Generating, None);
         assert!(pane.is_streaming());
         assert_eq!(pane.streaming_label(), "Crafting");
 
+        pane.upsert_part_message(
+            NeoismAgentMessage::reasoning("working").with_id("reasoning-1"),
+        );
+        assert_eq!(pane.timeline_live_trace_start, Some(1));
+
         pane.note_streaming(NeoismAgentStreamingState::Idle, None);
         assert!(!pane.is_streaming());
         assert_eq!(pane.streaming_label(), "");
         assert_eq!(pane.streaming_elapsed_seconds(), None);
+        assert_eq!(pane.timeline_live_trace_start, Some(1));
+
+        pane.reset_session_runtime_ui();
+        assert_eq!(pane.timeline_live_trace_start, None);
     }
 
     #[test]
@@ -1233,9 +1243,11 @@
     #[test]
     fn timeline_prepend_count_accumulates_and_invalidation_clears_it() {
         let mut pane = NeoismAgentPane::default();
+        pane.timeline_live_trace_start = Some(10);
         pane.note_timeline_prepend(3);
         pane.note_timeline_prepend(2);
         assert_eq!(pane.pending_timeline_prepend_count, Some(5));
+        assert_eq!(pane.timeline_live_trace_start, Some(15));
 
         // A full invalidation makes the incremental fold moot.
         pane.invalidate_timeline_layout();

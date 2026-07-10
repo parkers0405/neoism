@@ -305,6 +305,13 @@ impl WgpuGridRenderer {
         self.needs_full_rebuild = false;
     }
 
+    pub fn clear_glyph_atlas(&mut self) {
+        self.atlas_grayscale.clear();
+        self.atlas_color.clear();
+        self.needs_full_rebuild = true;
+        self.fg_dirty = true;
+    }
+
     pub fn resize(&mut self, cols: u32, rows: u32) {
         if cols == self.cols && rows == self.rows {
             return;

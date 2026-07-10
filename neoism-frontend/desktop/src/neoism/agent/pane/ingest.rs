@@ -672,6 +672,19 @@ impl NeoismAgentPane {
         *self.timeline_layout_cache.borrow_mut() = None;
     }
 
+    pub(crate) fn retain_current_turn_trace(&mut self) {
+        if self.timeline_live_trace_start.is_some() {
+            return;
+        }
+        self.timeline_live_trace_start = Some(
+            self.messages
+                .iter()
+                .rposition(|message| message.kind == NeoismAgentMessageKind::User)
+                .map_or(0, |index| index + 1),
+        );
+        self.invalidate_timeline_layout();
+    }
+
     pub(crate) fn mark_timeline_message_dirty_at(&mut self, index: usize) {
         self.ensure_background_task_activity_clock();
         self.timeline_dirty_message_indices.insert(index);
@@ -852,6 +865,7 @@ impl NeoismAgentPane {
         self.pending_permission = None;
         self.pending_permission_queue.clear();
         self.permission_choice_hit_rects.clear();
+        self.timeline_live_trace_start = None;
     }
 
     pub(crate) fn merge_pending_user_prompts(
@@ -930,6 +944,9 @@ impl NeoismAgentPane {
         if delta.is_empty() {
             return;
         }
+        if matches!(kind.as_deref(), Some("reasoning" | "thinking")) {
+            self.retain_current_turn_trace();
+        }
         if let Some(message_id) = message_id.as_deref().filter(|id| !id.is_empty()) {
             if let Some(index) = self
                 .messages
@@ -992,6 +1009,15 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn upsert_part_message(&mut self, mut message: NeoismAgentMessage) {
+        if matches!(
+            message.kind,
+            NeoismAgentMessageKind::Reasoning
+                | NeoismAgentMessageKind::Tool
+                | NeoismAgentMessageKind::Subtask
+                | NeoismAgentMessageKind::Compaction
+        ) {
+            self.retain_current_turn_trace();
+        }
         if message.kind == NeoismAgentMessageKind::User {
             if let Some(echo) = self.compact_user_prompt_text(&message.text) {
                 message.text = echo;

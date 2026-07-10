@@ -23,6 +23,54 @@ pub struct WorkspaceChromeMargins {
     pub bottom: f32,
 }
 
+/// Physical editor-row geometry after all surrounding chrome has been
+/// accounted for. `cell_height` is a pane-local pitch: glyph metrics stay
+/// unchanged, but the row origins share any otherwise-unused pixels so the
+/// last complete row lands exactly on the pane/status boundary.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EditorRowFit {
+    pub rows: u16,
+    pub cell_height: f32,
+    pub usable_height: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EditorRowFitInput {
+    pub scaled_margin_top: f32,
+    pub layout_top: f32,
+    pub layout_height: f32,
+    pub window_height: f32,
+    pub status_line_height: f32,
+    pub nominal_cell_height: f32,
+}
+
+/// Fit only complete editor rows into the exact physical surface between the
+/// pane's top chrome and either its own bottom edge or the global status bar.
+///
+/// The row count remains conservative (`floor` at the nominal font pitch),
+/// while the sub-row remainder is distributed across those rows. This avoids
+/// both failure modes of the old policy: an extra clipped nvim row and a solid
+/// remainder band below the last row.
+pub fn fit_editor_rows(input: EditorRowFitInput) -> EditorRowFit {
+    let pane_top = (input.scaled_margin_top + input.layout_top).round();
+    let layout_bottom = (pane_top + input.layout_height.max(0.0)).round();
+    let status_top = (input.window_height - input.status_line_height.max(0.0)).round();
+    let pane_bottom = layout_bottom.min(status_top).max(pane_top);
+    let usable_height = (pane_bottom - pane_top).round().max(1.0);
+    let nominal_cell_height = input.nominal_cell_height.round().max(1.0);
+    let rows = (usable_height / nominal_cell_height)
+        .floor()
+        .max(1.0)
+        .min(u16::MAX as f32) as u16;
+    let cell_height = usable_height / f32::from(rows);
+
+    EditorRowFit {
+        rows,
+        cell_height,
+        usable_height,
+    }
+}
+
 /// Extra logical pixels that `resize_top_or_bottom_line` must add on
 /// top of `padding_top_from_config` to make room for the chrome bands
 /// above the active context (buffer tabs, breadcrumbs, terminal pad).
@@ -87,11 +135,7 @@ pub struct EditorChromeMaskInput {
     pub panel_left: f32,
     pub panel_width: f32,
     pub pane_top: f32,
-    pub pane_bottom: f32,
-    pub panel_bottom: f32,
     pub chrome_height: f32,
-    pub status_line_height: f32,
-    pub window_height: f32,
 }
 
 /// A logical rect that should be painted with the active background color.
@@ -103,12 +147,13 @@ pub struct EditorChromeMaskRect {
     pub height: f32,
 }
 
-/// Compute editor seam masks that cover hidden grid buffer rows without
-/// painting over real sibling panes.
+/// Compute the editor's top safety mask. Bottom masking is deliberately not
+/// part of this policy: fitted rows now meet the pane/status boundary exactly,
+/// and the grid clip owns protection from hidden bottom buffer rows.
 pub fn editor_chrome_mask_rects(
     input: EditorChromeMaskInput,
 ) -> Vec<EditorChromeMaskRect> {
-    let mut rects = Vec::with_capacity(2);
+    let mut rects = Vec::with_capacity(1);
 
     let top_height = input.pane_top.min(input.chrome_height).max(0.0);
     if top_height > 0.0 {
@@ -117,17 +162,6 @@ pub fn editor_chrome_mask_rects(
             y: 0.0,
             width: input.panel_width,
             height: top_height,
-        });
-    }
-
-    let status_top = (input.window_height - input.status_line_height).max(0.0);
-    let bottom_end = status_top.min(input.panel_bottom);
-    if bottom_end > input.pane_bottom {
-        rects.push(EditorChromeMaskRect {
-            x: input.panel_left,
-            y: input.pane_bottom,
-            width: input.panel_width,
-            height: bottom_end - input.pane_bottom,
         });
     }
 
@@ -184,10 +218,17 @@ pub fn grid_panel_chrome_geometry(
     } else {
         input.terminal_buffer_above as f32 * input.cell_height
     };
-    let panel_top = (input.scaled_margin_top + input.layout_top
-        - editor_buffer_offset_phys
-        - terminal_buffer_offset_phys)
-        .round();
+    let panel_top = if input.is_editor {
+        // Keep the visible editor origin exactly on the rounded pane top.
+        // A fitted row pitch may be fractional; rounding after subtracting
+        // the hidden buffer would re-add a fractional offset when the buffer
+        // height is added below, moving both the first and last row off their
+        // chrome boundaries.
+        panel_clip_top - editor_buffer_offset_phys
+    } else {
+        (input.scaled_margin_top + input.layout_top - terminal_buffer_offset_phys)
+            .round()
+    };
 
     let clip_rect = if input.is_editor {
         let visible_grid_top =
@@ -734,83 +775,88 @@ mod tests {
     }
 
     #[test]
-    fn editor_chrome_masks_top_and_bottom_bleed_inside_panel() {
+    fn editor_chrome_masks_only_hidden_top_buffer() {
         let masks = editor_chrome_mask_rects(EditorChromeMaskInput {
             panel_left: 10.0,
             panel_width: 80.0,
             pane_top: 24.0,
-            pane_bottom: 180.0,
-            panel_bottom: 220.0,
             chrome_height: 40.0,
-            status_line_height: 20.0,
-            window_height: 240.0,
         });
 
         assert_eq!(
             masks,
-            vec![
-                EditorChromeMaskRect {
-                    x: 10.0,
-                    y: 0.0,
-                    width: 80.0,
-                    height: 24.0,
-                },
-                EditorChromeMaskRect {
-                    x: 10.0,
-                    y: 180.0,
-                    width: 80.0,
-                    height: 40.0,
-                },
-            ]
+            vec![EditorChromeMaskRect {
+                x: 10.0,
+                y: 0.0,
+                width: 80.0,
+                height: 24.0,
+            }]
         );
     }
 
     #[test]
-    fn editor_chrome_mask_does_not_cover_sibling_below_panel() {
+    fn editor_chrome_top_mask_stops_at_chrome_height() {
         let masks = editor_chrome_mask_rects(EditorChromeMaskInput {
             panel_left: 0.0,
             panel_width: 100.0,
             pane_top: 60.0,
-            pane_bottom: 140.0,
-            panel_bottom: 150.0,
             chrome_height: 30.0,
-            status_line_height: 20.0,
-            window_height: 240.0,
         });
 
         assert_eq!(
             masks,
-            vec![
-                EditorChromeMaskRect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 100.0,
-                    height: 30.0,
-                },
-                EditorChromeMaskRect {
-                    x: 0.0,
-                    y: 140.0,
-                    width: 100.0,
-                    height: 10.0,
-                },
-            ]
+            vec![EditorChromeMaskRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 30.0,
+            }]
         );
     }
 
     #[test]
-    fn editor_chrome_mask_skips_bottom_when_status_starts_above_pane_end() {
+    fn editor_chrome_top_mask_skips_pane_at_window_top() {
         let masks = editor_chrome_mask_rects(EditorChromeMaskInput {
             panel_left: 0.0,
             panel_width: 100.0,
             pane_top: 0.0,
-            pane_bottom: 220.0,
-            panel_bottom: 240.0,
             chrome_height: 30.0,
-            status_line_height: 40.0,
-            window_height: 240.0,
         });
 
         assert!(masks.is_empty());
+    }
+
+    #[test]
+    fn editor_rows_fit_exactly_between_breadcrumbs_and_status() {
+        let fit = fit_editor_rows(EditorRowFitInput {
+            scaled_margin_top: 110.0,
+            layout_top: 0.0,
+            layout_height: 613.7143,
+            window_height: 752.0,
+            status_line_height: 47.142857,
+            nominal_cell_height: 35.0,
+        });
+
+        assert_eq!(fit.rows, 17);
+        assert_eq!(fit.usable_height, 595.0);
+        assert_eq!(fit.cell_height, 35.0);
+    }
+
+    #[test]
+    fn editor_rows_distribute_fractional_remainder_instead_of_leaving_band() {
+        let fit = fit_editor_rows(EditorRowFitInput {
+            scaled_margin_top: 140.0,
+            layout_top: 0.0,
+            layout_height: 564.0,
+            window_height: 752.0,
+            status_line_height: 47.0,
+            nominal_cell_height: 35.0,
+        });
+
+        assert_eq!(fit.rows, 16);
+        assert_eq!(fit.usable_height, 564.0);
+        assert_eq!(fit.cell_height, 35.25);
+        assert_eq!(f32::from(fit.rows) * fit.cell_height, fit.usable_height);
     }
 
     #[test]

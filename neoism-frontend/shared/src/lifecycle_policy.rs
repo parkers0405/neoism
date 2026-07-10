@@ -384,6 +384,38 @@ pub enum FontSizeAction {
     Reset,
 }
 
+/// Resolve one workspace-wide zoom step without consulting whichever pane
+/// happens to be active.
+///
+/// Keeping this value canonical is important: a newly-created rich-text
+/// surface starts at the configured font size, which must not make the next
+/// Ctrl/Cmd-minus jump every existing pane back toward that default.
+pub fn font_size_after_action(
+    current_font_size: f32,
+    configured_font_size: f32,
+    action: FontSizeAction,
+) -> f32 {
+    const MIN_FONT_SIZE: f32 = 6.0;
+    const MAX_FONT_SIZE: f32 = 100.0;
+
+    let configured = if configured_font_size.is_finite() {
+        configured_font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+    } else {
+        14.0
+    };
+    let current = if current_font_size.is_finite() {
+        current_font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+    } else {
+        configured
+    };
+
+    match action {
+        FontSizeAction::Increase => (current + 1.0).min(MAX_FONT_SIZE),
+        FontSizeAction::Decrease => (current - 1.0).max(MIN_FONT_SIZE),
+        FontSizeAction::Reset => configured,
+    }
+}
+
 /// POD input for the font-size key gate. Callers fill from their
 /// platform key event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -788,6 +820,38 @@ mod tests {
         };
         let mods = LifecycleMods::new(false, true, true, false);
         assert_eq!(font_size_action_decide(input, mods), None);
+    }
+
+    #[test]
+    fn font_size_step_uses_canonical_zoom_not_a_new_pane_default() {
+        assert_eq!(
+            font_size_after_action(52.0, 14.0, FontSizeAction::Decrease),
+            51.0
+        );
+        assert_eq!(
+            font_size_after_action(51.0, 14.0, FontSizeAction::Increase),
+            52.0
+        );
+        assert_eq!(
+            font_size_after_action(52.0, 14.0, FontSizeAction::Reset),
+            14.0
+        );
+    }
+
+    #[test]
+    fn font_size_step_clamps_and_recovers_from_non_finite_state() {
+        assert_eq!(
+            font_size_after_action(100.0, 14.0, FontSizeAction::Increase),
+            100.0
+        );
+        assert_eq!(
+            font_size_after_action(6.0, 14.0, FontSizeAction::Decrease),
+            6.0
+        );
+        assert_eq!(
+            font_size_after_action(f32::NAN, 16.0, FontSizeAction::Decrease),
+            15.0
+        );
     }
 
     #[test]

@@ -58,7 +58,7 @@ use async_trait::async_trait;
 use nvim_rs::{Handler, Neovim, UiAttachOptions};
 use rmpv::Value;
 use tokio::process::Command as TokioCommand;
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::{mpsc as tokio_mpsc, watch as tokio_watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::clipboard::ClipboardType;

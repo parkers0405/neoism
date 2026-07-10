@@ -2,18 +2,20 @@
 // (`terminal_splash::splash_bytes`) reserves three vertical
 // bands of blank rows; this module paints, in order:
 //
-//   1. A multi-pass glow render of the rasterised wordmark PNG
+//   1. An opaque pane backdrop that prevents shell startup output
+//      from bleeding through the launch screen.
+//   2. A multi-pass glow render of the rasterised wordmark PNG
 //      — base image at full alpha plus several offset copies
 //      at low alpha to make the wordmark *itself* breathe (the
 //      transparent PNG background means the glow stays masked
 //      to the white pixels — no rectangle washing the bg).
-//   2. The "neoism · terminal" tagline, rendered via sugarloaf
+//   3. The "neoism · terminal" tagline, rendered via sugarloaf
 //      text inside the tagline band.
-//   3. Four rounded-rect menu buttons (Open file tree / Neoism Agent
+//   4. Four rounded-rect menu buttons (Open file tree / Neoism Agent
 //      / Search / Command palette) inside the menu band, each with hover
 //      + click states and click-to-shortcut wired through the
 //      input layer.
-//   4. The opencode-style click "fidget" on the wordmark — a
+//   5. The opencode-style click "fidget" on the wordmark — a
 //      brief image squash, staggered expanding rings, and a
 //      soft white burst at the click point.
 //
@@ -116,6 +118,7 @@ const BREATH_HALO_MIN: f32 = 0.05;
 const BREATH_HALO_MAX: f32 = 0.18;
 
 const ORDER: u8 = 7;
+const BACKDROP_ORDER: u8 = ORDER - 1;
 const DEPTH: f32 = 0.0;
 
 const MENU: [MenuSpec; 5] = [
@@ -360,6 +363,26 @@ impl SplashOverlay {
         let dismiss_alpha = 1.0 - dismiss_eased;
         let dismiss_scale = 1.0 - (1.0 - DISMISS_SCALE_END) * dismiss_eased;
         let dismiss_rise = 0.0; // computed below once band height known
+
+        // The launch screen is a real surface, not transparent chrome over
+        // a live shell. In particular, macOS login shells can print
+        // "Last login ..." before the splash injection lands; covering the
+        // complete terminal pane here prevents those cells (and cleared
+        // commands from a restored PTY) from showing through. When a modal
+        // is present we retain the old below-modal composition instead of
+        // allowing the splash wordmark's above-quad image pass to cover it.
+        if occlusion_rects.is_empty() {
+            sugarloaf.rect(
+                None,
+                pane_origin.0,
+                pane_origin.1,
+                pane_size.0,
+                pane_size.1,
+                theme.f32(theme.bg),
+                DEPTH,
+                BACKDROP_ORDER,
+            );
+        }
 
         // Compute the reserved bands (in logical pixels) from
         // the cell row anchor. Sizes come from the injection,
@@ -1003,11 +1026,11 @@ fn rect_contains_rect(outer: [f32; 4], inner: [f32; 4]) -> bool {
 }
 
 fn splash_wordmark_z_index(occlusion_rects: &[[f32; 4]]) -> i32 {
-    if cfg!(target_os = "macos") && occlusion_rects.is_empty() {
-        // Metal's below-text image pass can be hidden by subsequent UI quads;
-        // on the empty splash screen there is nothing to occlude, so keep the
-        // wordmark in the above-text image pass. Linux/Vulkan keeps the old
-        // below-modal layering.
+    if occlusion_rects.is_empty() {
+        // The opaque backdrop is a rich-text quad. Keep the wordmark in the
+        // above-quad image pass on an unobstructed splash, then let the UI
+        // text pass paint its labels over both. If a modal is present, move
+        // the image below the quad pass so the modal remains authoritative.
         1
     } else {
         -1

@@ -290,10 +290,6 @@ pub(crate) enum NvimCommand {
     /// tree wants to swap the buffer in an existing editor pane rather
     /// than spawn a new one.
     Command(String),
-    Resize {
-        cols: u64,
-        rows: u64,
-    },
     Shutdown,
 }
 /// Discriminator for what kind of process drives a pane. `Pty` keeps

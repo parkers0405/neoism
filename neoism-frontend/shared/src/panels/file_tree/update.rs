@@ -194,9 +194,7 @@ impl FileTree {
             .entries
             .iter()
             .filter(|entry| matches!(entry.kind, NodeKind::Dir { open: true }))
-            .filter_map(|entry| {
-                entry.path.clone().map(|path| (path, entry.depth))
-            })
+            .filter_map(|entry| entry.path.clone().map(|path| (path, entry.depth)))
             .collect();
         match ctx.services.files.list_dir(&root) {
             Err(IoError::Pending(id)) => {
@@ -214,12 +212,7 @@ impl FileTree {
         for (path, depth) in open_dirs {
             match ctx.services.files.list_dir(&path) {
                 Err(IoError::Pending(id)) => {
-                    self.track_pending_dir(
-                        id,
-                        path,
-                        depth + 1,
-                        PendingDirKind::Expand,
-                    );
+                    self.track_pending_dir(id, path, depth + 1, PendingDirKind::Expand);
                 }
                 // Synchronous listings were already covered by the
                 // refresh above; other errors degrade to "keep what we
@@ -282,9 +275,7 @@ impl FileTree {
                 let open_dirs: std::collections::HashSet<PathBuf> = self
                     .entries
                     .iter()
-                    .filter(|entry| {
-                        matches!(entry.kind, NodeKind::Dir { open: true })
-                    })
+                    .filter(|entry| matches!(entry.kind, NodeKind::Dir { open: true }))
                     .filter_map(|entry| entry.path.clone())
                     .collect();
                 if open_dirs.is_empty() {
@@ -313,14 +304,12 @@ impl FileTree {
                                 {
                                     end += 1;
                                 }
-                                merged
-                                    .extend(self.entries[ix + 1..end].iter().cloned());
+                                merged.extend(self.entries[ix + 1..end].iter().cloned());
                             }
                         }
                     }
                 }
-                let selected_path =
-                    self.selected().and_then(|entry| entry.path.clone());
+                let selected_path = self.selected().and_then(|entry| entry.path.clone());
                 self.set_entries_preserve_scroll(merged);
                 // Row indices shift when the host adds/removes files —
                 // keep the SELECTION on the same path, not the same
@@ -368,12 +357,21 @@ impl FileTree {
     /// tree degrades to "empty panel" rather than refusing to render.
     pub fn populate_from_dir(&mut self, root: &Path, ctx: &PanelContext) {
         let root = normalize_path(root);
-        if self.root.as_deref() != Some(root.as_path()) {
+        let root_changed = self.root.as_deref() != Some(root.as_path());
+        if root_changed {
             self.selected = 0;
             self.scroll_top = 0;
             self.reveal_flash = None;
+            // Statuses are absolute paths. Never let badges from the old
+            // workspace appear while the new root's worker is running.
+            self.git_statuses.clear();
         }
-        self.git_statuses = git_statuses_for(&root, ctx.services.git);
+        // Deliberately do not call `git_statuses_for` here. Native Git can
+        // spend minutes enumerating untracked files in a large repository;
+        // the desktop bridge immediately launches `git_refresh_request` on
+        // its bounded worker and applies the result back to this tree. Keep
+        // cached statuses when repopulating the same root so badges do not
+        // flicker while that refresh is in flight.
         self.root = Some(root.clone());
         match scan_dir_result(&root, 0, &self.git_statuses, ctx.services.files) {
             Ok(_) => {

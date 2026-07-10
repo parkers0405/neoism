@@ -1,10 +1,11 @@
 use super::lsp_parse::{parse_completion, parse_diagnostics, parse_workspace_symbols};
+use super::lsp_query::language_id_for_path as protocol_language_id_for_path;
 use super::*;
 use std::{
     env,
     fs::{self, File},
     io::Cursor,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -74,6 +75,41 @@ fn detects_multiple_languages_and_skips_ignored_directories() {
     assert!(ids.contains(&"javascript"));
     assert!(ids.contains(&"python"));
     assert!(!ids.contains(&"go"));
+}
+
+#[test]
+fn file_scoped_status_does_not_scan_or_report_unrelated_languages() {
+    let workspace = TempWorkspace::new("file-scoped-status");
+    workspace.touch("Cargo.toml");
+    workspace.touch("src/main.rs");
+    workspace.touch("package.json");
+    workspace.touch("src/index.ts");
+    workspace.touch("data/large.json");
+
+    let file = workspace.path.join("data/large.json");
+    let scan = workspace_scan_for_file(&workspace.path, &file);
+    assert_eq!(scan.files, 0, "known extensions bypass workspace scans");
+
+    let statuses = status_for_file(&workspace.path, &file);
+    assert_eq!(
+        statuses
+            .iter()
+            .map(|status| status.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["json"]
+    );
+}
+
+#[test]
+fn shared_typescript_server_opens_javascript_with_javascript_language_id() {
+    assert_eq!(
+        protocol_language_id_for_path("typescript", Path::new("src/app.js")),
+        "javascript"
+    );
+    assert_eq!(
+        protocol_language_id_for_path("typescript", Path::new("src/app.ts")),
+        "typescript"
+    );
 }
 
 #[test]

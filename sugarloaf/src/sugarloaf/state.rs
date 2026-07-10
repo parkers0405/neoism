@@ -11,6 +11,10 @@ use crate::{Content, TextDimensions};
 
 pub struct SugarState {
     pub style: RootStyle,
+    /// Font size inherited by newly-created persistent rich-text surfaces.
+    /// This follows the host's live workspace zoom while `style.font_size`
+    /// remains the configured baseline used by reset and transient UI text.
+    pub default_persistent_font_size: f32,
     pub content: Content,
     pub visual_bell_overlay: Option<crate::sugarloaf::primitives::Rect>,
 }
@@ -27,6 +31,7 @@ impl SugarState {
 
         SugarState {
             content,
+            default_persistent_font_size: style.font_size,
             style,
             visual_bell_overlay: None,
         }

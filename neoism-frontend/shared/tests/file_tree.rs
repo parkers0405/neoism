@@ -7,16 +7,19 @@
 //! - `open_dir` against a pending `FilesService` parks the request
 //!   in `pending`; the subsequent `UiEvent::ServiceReply` with the
 //!   matching request id applies the listing under the right path.
+//! - Initial population never performs Git I/O; the explicit refresh
+//!   request does it later and rejects results for a superseded root.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use neoism_ui::event::{
     KeyDescriptor, KeyState, LogicalKey, Modifiers, NamedKey, PhysicalKey, UiEvent,
 };
-use neoism_ui::panels::file_tree::NodeKind;
+use neoism_ui::panels::file_tree::{GitStatus as TreeGitStatus, NodeKind};
 use neoism_ui::panels::{FileTree, Panel, PanelContext};
 use neoism_ui::services::{
     ClipboardService, ClockService, CommandError, CommandService, DirEntry, FilesService,
@@ -107,6 +110,40 @@ impl GitService for NullGit {
     }
 }
 
+struct CountingGit {
+    porcelain_calls: AtomicUsize,
+}
+
+impl CountingGit {
+    fn new() -> Self {
+        Self {
+            porcelain_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl GitService for CountingGit {
+    fn status(&self, _repo: &Path) -> Result<GitStatus, IoError> {
+        Ok(GitStatus {
+            branch: Some("main".to_string()),
+            dirty: true,
+        })
+    }
+
+    fn diff(&self, _repo: &Path, _path: Option<&Path>) -> Result<String, IoError> {
+        Ok(String::new())
+    }
+
+    fn status_porcelain(&self, _repo: &Path) -> Result<Vec<u8>, IoError> {
+        self.porcelain_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(b" M README.md\0".to_vec())
+    }
+
+    fn repo_root(&self, cwd: &Path) -> Option<PathBuf> {
+        Some(cwd.to_path_buf())
+    }
+}
+
 struct FixedClock;
 impl ClockService for FixedClock {
     fn now_monotonic(&self) -> Duration {
@@ -139,11 +176,19 @@ impl<F: FilesService> Harness<F> {
     }
 
     fn run<R>(&self, f: impl FnOnce(&mut PanelContext) -> R) -> R {
+        self.run_with_git(&self.git, f)
+    }
+
+    fn run_with_git<R>(
+        &self,
+        git: &dyn GitService,
+        f: impl FnOnce(&mut PanelContext) -> R,
+    ) -> R {
         let services = Services {
             files: &self.files,
             clipboard: &self.clipboard,
             commands: &self.commands,
-            git: &self.git,
+            git,
             clock: &self.clock,
             search: &neoism_ui::services::NullSearchService,
             notifications: &neoism_ui::services::NullNotificationService,
@@ -372,6 +417,52 @@ fn name_and_focus_defaults() {
     let tree = FileTree::new(PathBuf::from("/workspace"));
     assert_eq!(tree.name(), "file_tree");
     assert!(!tree.wants_focus());
+}
+
+#[test]
+fn initial_population_defers_git_status_to_explicit_refresh() {
+    let root = PathBuf::from("/workspace");
+    let mut tree = FileTree::empty();
+    let git = CountingGit::new();
+    let harness = Harness::new(CannedFiles {
+        listing: vec![entry("README.md", false)],
+    });
+
+    harness.run_with_git(&git, |ctx| tree.populate_from_dir(&root, ctx));
+    assert_eq!(
+        git.porcelain_calls.load(Ordering::SeqCst),
+        0,
+        "opening the tree must not run git status on the UI thread"
+    );
+    assert_eq!(tree.entries()[0].git_status, TreeGitStatus::None);
+
+    let request = tree.git_refresh_request().unwrap();
+    let result =
+        harness.run_with_git(&git, |ctx| FileTree::run_git_refresh_request(request, ctx));
+    assert_eq!(git.porcelain_calls.load(Ordering::SeqCst), 1);
+    assert!(tree.apply_git_refresh_result(result));
+    assert_eq!(tree.entries()[0].git_status, TreeGitStatus::Modified);
+}
+
+#[test]
+fn stale_git_refresh_result_cannot_cross_workspace_roots() {
+    let first_root = PathBuf::from("/workspace-a");
+    let second_root = PathBuf::from("/workspace-b");
+    let mut tree = FileTree::empty();
+    let git = CountingGit::new();
+    let harness = Harness::new(CannedFiles {
+        listing: vec![entry("README.md", false)],
+    });
+
+    harness.run_with_git(&git, |ctx| tree.populate_from_dir(&first_root, ctx));
+    let request = tree.git_refresh_request().unwrap();
+    let stale =
+        harness.run_with_git(&git, |ctx| FileTree::run_git_refresh_request(request, ctx));
+
+    harness.run_with_git(&git, |ctx| tree.populate_from_dir(&second_root, ctx));
+    assert!(!tree.apply_git_refresh_result(stale));
+    assert_eq!(tree.root(), Some(second_root.as_path()));
+    assert_eq!(tree.entries()[0].git_status, TreeGitStatus::None);
 }
 
 // Held to keep `RefCell` in scope for future harness extensions.

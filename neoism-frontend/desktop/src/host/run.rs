@@ -866,10 +866,10 @@ impl Renderer {
                 self.agent_icons_registered = agent_icon::register_agent_icons(sugarloaf);
             }
 
-            // Detection costs a tcgetpgrp + two /proc reads per terminal,
-            // so throttle and only probe when the buffer-tab strip is
-            // visible. Scan every terminal in the active workspace so an
-            // agent started in a normal/root terminal still gives that
+            // Detection costs a tcgetpgrp plus native process metadata reads
+            // per terminal, so throttle and only probe when the buffer-tab
+            // strip is visible. Scan every terminal in the active workspace
+            // so an agent started in a normal/root terminal still gives that
             // tab its provider logo after the user switches away.
             if self.buffer_tabs.is_visible()
                 && self.buffer_tabs.terminal_index().is_some()
@@ -879,7 +879,7 @@ impl Renderer {
                     .map(|t| t.elapsed() >= AGENT_DETECT_INTERVAL)
                     .unwrap_or(true);
                 if due {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     {
                         let current_route = context_manager.current().route_id;
                         let grid = context_manager.current_grid();

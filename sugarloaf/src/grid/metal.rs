@@ -369,6 +369,19 @@ impl MetalGridRenderer {
         self.needs_full_rebuild = false;
     }
 
+    /// Recycle both atlas allocators for the current font-size generation.
+    /// Waiting on an empty command buffer drains prior draws before new
+    /// `replace_region` calls are allowed to reuse their texels.
+    pub fn clear_glyph_atlas(&mut self) {
+        let barrier = self.command_queue.new_command_buffer();
+        barrier.commit();
+        barrier.wait_until_completed();
+        self.atlas_grayscale.clear();
+        self.atlas_color.clear();
+        self.needs_full_rebuild = true;
+        self.fg_dirty = true;
+    }
+
     /// Lookup a glyph in the grayscale atlas.
     pub fn lookup_glyph(&self, key: GlyphKey) -> Option<AtlasSlot> {
         self.atlas_grayscale.lookup(key)

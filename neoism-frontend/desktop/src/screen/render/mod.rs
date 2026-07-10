@@ -2,7 +2,6 @@
 // welcome-screen renderer lives in the `welcome` submodule. Part of the
 // `impl Screen<'_>` block — see `screen/mod.rs` for the struct itself.
 
-
 pub mod welcome;
 
 use super::*;
@@ -15,8 +14,8 @@ use neoism_ui::chrome_policy::{
 use neoism_ui::render_policy::{
     block_cursor_uniforms, editor_cursor_grid_row, editor_edge_slot_actions,
     editor_edge_slot_source_y, editor_scroll_frame_plan, terminal_cursor_visible,
-    terminal_edge_slot_actions, EditorScrollSourcePlan,
-    TerminalCursorVisibilityInput, TerminalEdgeSlotAction,
+    terminal_edge_slot_actions, EditorScrollSourcePlan, TerminalCursorVisibilityInput,
+    TerminalEdgeSlotAction,
 };
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -55,146 +54,145 @@ mod status_sync;
 mod terminal_compose;
 
 pub(crate) struct PanelFrame {
-                route_id: usize,
-                /// rich_text_id used to look up per-pane scroll offset
-                /// (editor_scroll spring or terminal_scroll direct).
-                /// Panel grids each carry one rich_text id; the scroll
-                /// modules key everything off it.
-                #[allow(dead_code)]
-                rich_text_id: usize,
-                /// Editor scroll spring position in signed rows. This
-                /// feeds Neovide/Ghostty's floor(position)+row source
-                /// lookup; the fractional remainder becomes the pixel
-                /// offset applied uniformly to the grid.
-                editor_scroll_position_lines: f32,
-                /// Elastic rubber-band offset in physical pixels. Kept
-                /// separate from `editor_scroll_position_lines` because
-                /// only the real scrollback spring participates in
-                /// Neovide's row/fraction source lookup.
-                editor_elastic_offset_y: f32,
-                /// Terminal smooth-scroll residual in physical pixels.
-                /// Unlike the old whole-grid shift, this now feeds the
-                /// per-grid uniform path so hidden edge rows can slide
-                /// partially into view like the editor/tree.
-                terminal_scroll_offset_y: f32,
-                /// Rows reserved at the bottom for the off-grid command
-                /// composer. Terminal output must clip above this band.
-                terminal_reserved_bottom_rows: u32,
-                /// `true` for nvim editor panes — drives the buffer-
-                /// row allocation and snapshot-row write loop. Other
-                /// panes treat this as `false` and skip the buffer.
-                is_editor: bool,
-                /// Neovide-style 2x viewport scrollback ring for nvim
-                /// editor panes. During scroll animation, visible and
-                /// edge rows are sampled from this single coherent
-                /// buffer using signed floor-based row indices.
-                editor_scrollback: Option<(
-                    Vec<
-                        Option<
-                            neoism_terminal_core::crosswords::grid::row::Row<
-                                neoism_terminal_core::crosswords::square::Square,
-                            >,
-                        >,
-                    >,
-                    isize,
-                )>,
-                /// Logical origin of the editor scrollback ring. This
-                /// is cheap to carry even when `editor_scrollback` is
-                /// not cloned for drawing, and it must stay available
-                /// so row-shift planning compares against the same
-                /// persistent ring base Neovide uses.
-                editor_scrollback_origin: Option<isize>,
-                editor_viewport_topline: u64,
-                editor_viewport_botline: u64,
-                editor_viewport_line_count: u64,
-                /// One hidden row above the visible terminal viewport.
-                /// Used for fractional smooth scroll; `None` for
-                /// editor panes and when no older row exists.
-                terminal_snapshot_above: Option<
-                    neoism_terminal_core::crosswords::grid::row::Row<
-                        neoism_terminal_core::crosswords::square::Square,
-                    >,
+    route_id: usize,
+    /// rich_text_id used to look up per-pane scroll offset
+    /// (editor_scroll spring or terminal_scroll direct).
+    /// Panel grids each carry one rich_text id; the scroll
+    /// modules key everything off it.
+    #[allow(dead_code)]
+    rich_text_id: usize,
+    /// Editor scroll spring position in signed rows. This
+    /// feeds Neovide/Ghostty's floor(position)+row source
+    /// lookup; the fractional remainder becomes the pixel
+    /// offset applied uniformly to the grid.
+    editor_scroll_position_lines: f32,
+    /// Elastic rubber-band offset in physical pixels. Kept
+    /// separate from `editor_scroll_position_lines` because
+    /// only the real scrollback spring participates in
+    /// Neovide's row/fraction source lookup.
+    editor_elastic_offset_y: f32,
+    /// Terminal smooth-scroll residual in physical pixels.
+    /// Unlike the old whole-grid shift, this now feeds the
+    /// per-grid uniform path so hidden edge rows can slide
+    /// partially into view like the editor/tree.
+    terminal_scroll_offset_y: f32,
+    /// Rows reserved at the bottom for the off-grid command
+    /// composer. Terminal output must clip above this band.
+    terminal_reserved_bottom_rows: u32,
+    /// `true` for nvim editor panes — drives the buffer-
+    /// row allocation and snapshot-row write loop. Other
+    /// panes treat this as `false` and skip the buffer.
+    is_editor: bool,
+    /// Neovide-style 2x viewport scrollback ring for nvim
+    /// editor panes. During scroll animation, visible and
+    /// edge rows are sampled from this single coherent
+    /// buffer using signed floor-based row indices.
+    editor_scrollback: Option<(
+        Vec<
+            Option<
+                neoism_terminal_core::crosswords::grid::row::Row<
+                    neoism_terminal_core::crosswords::square::Square,
                 >,
-                /// One hidden row below the visible terminal viewport.
-                /// Used for fractional smooth scroll; `None` for
-                /// editor panes and when no newer row exists.
-                terminal_snapshot_below: Option<
-                    neoism_terminal_core::crosswords::grid::row::Row<
-                        neoism_terminal_core::crosswords::square::Square,
-                    >,
-                >,
-                layout_rect: [f32; 4],
-                cols: u32,
-                rows: u32,
-                cell_w: f32,
-                cell_h: f32,
-                font_px: f32,
-                visible_rows: Vec<
-                    neoism_terminal_core::crosswords::grid::row::Row<
-                        neoism_terminal_core::crosswords::square::Square,
-                    >,
-                >,
-                source_row_indices: Vec<Option<usize>>,
-                style_set: neoism_terminal_core::crosswords::style::StyleSet,
-                term_colors: neoism_terminal_core::colors::term::TermColors,
-                cursor_col: u16,
-                cursor_row: u16,
-                cursor_visible: bool,
-                /// Terminal-side cursor shape (block / underline /
-                /// beam / hidden). Driven by DECSCUSR + the
-                /// configured default. Mapped to a render style
-                /// inside the rebuild loop.
-                cursor_shape: neoism_terminal_core::ansi::CursorShape,
-                /// `true` when the terminal has cursor blink
-                /// enabled (DECTCEM blink mode or SGR cursor blink).
-                cursor_blinking: bool,
-                /// `true` for the visible half of the blink cycle.
-                /// Always `true` when blink isn't enabled. Driven
-                /// by `Renderer::run`'s blink toggler.
-                cursor_blink_visible: bool,
-                /// `true` while an IME pre-edit string is active —
-                /// forces a block cursor regardless of the
-                /// configured shape so the user can tell IME is
-                /// taking input.
-                cursor_preedit: bool,
-                /// Resolved cursor color: OSC 12 wins, then config /
-                /// theme `cursor`.
-                /// `state.colors.cursor → config.cursor_color`
-                /// resolution. Per-panel
-                /// because each terminal can issue its own OSC 12.
-                cursor_color: neoism_backend::config::colors::ColorArray,
-                is_active: bool,
-                damage: neoism_terminal_core::damage::TerminalDamage,
-                /// Selection is per-context (`renderable_content`), not
-                /// per-terminal. Grabbed alongside the grid snapshot so
-                /// `build_row_bg`/`build_row_fg` can tint selected cells.
-                selection: Option<neoism_terminal_core::selection::SelectionRange>,
-                /// `i - display_offset = absolute Line` for the
-                /// per-row selection interval check. Snapshotted at
-                /// the same lock as `visible_rows` to stay consistent.
-                display_offset: i32,
-                /// Search-hint matches for this panel. `None` when
-                /// search is inactive. Consumed alongside `selection`
-                /// inside `build_row_bg` / `build_row_fg` to apply
-                /// `search_match_background` / `_foreground`. Mirrors
-                /// `row_data.highlights` at
-                /// `ghostty/src/renderer/generic.zig:1317`.
-                hint_matches:
-                    Option<Vec<neoism_terminal_core::crosswords::search::Match>>,
-                /// Currently-focused search match (↑/↓ navigation).
-                /// Rendered with `search_focused_match_background` /
-                /// `_foreground` — `.search_selected`
-                /// highlight tag.
-                focused_match: Option<neoism_terminal_core::crosswords::search::Match>,
-                /// (start, end) of the currently-hovered hyperlink /
-                /// regex hint. Only populated for the active panel.
-                /// Triggers the forced underline in `emit_underlines`;
-                /// no bg / fg color change.
-                hovered_hyperlink: Option<(
-                    neoism_terminal_core::crosswords::pos::Pos,
-                    neoism_terminal_core::crosswords::pos::Pos,
-                )>,
-            }
+            >,
+        >,
+        isize,
+    )>,
+    /// Logical origin of the editor scrollback ring. This
+    /// is cheap to carry even when `editor_scrollback` is
+    /// not cloned for drawing, and it must stay available
+    /// so row-shift planning compares against the same
+    /// persistent ring base Neovide uses.
+    editor_scrollback_origin: Option<isize>,
+    editor_viewport_topline: u64,
+    editor_viewport_botline: u64,
+    editor_viewport_line_count: u64,
+    /// One hidden row above the visible terminal viewport.
+    /// Used for fractional smooth scroll; `None` for
+    /// editor panes and when no older row exists.
+    terminal_snapshot_above: Option<
+        neoism_terminal_core::crosswords::grid::row::Row<
+            neoism_terminal_core::crosswords::square::Square,
+        >,
+    >,
+    /// One hidden row below the visible terminal viewport.
+    /// Used for fractional smooth scroll; `None` for
+    /// editor panes and when no newer row exists.
+    terminal_snapshot_below: Option<
+        neoism_terminal_core::crosswords::grid::row::Row<
+            neoism_terminal_core::crosswords::square::Square,
+        >,
+    >,
+    layout_rect: [f32; 4],
+    cols: u32,
+    rows: u32,
+    cell_w: f32,
+    cell_h: f32,
+    font_px: f32,
+    visible_rows: Vec<
+        neoism_terminal_core::crosswords::grid::row::Row<
+            neoism_terminal_core::crosswords::square::Square,
+        >,
+    >,
+    source_row_indices: Vec<Option<usize>>,
+    style_set: neoism_terminal_core::crosswords::style::StyleSet,
+    term_colors: neoism_terminal_core::colors::term::TermColors,
+    cursor_col: u16,
+    cursor_row: u16,
+    cursor_visible: bool,
+    /// Terminal-side cursor shape (block / underline /
+    /// beam / hidden). Driven by DECSCUSR + the
+    /// configured default. Mapped to a render style
+    /// inside the rebuild loop.
+    cursor_shape: neoism_terminal_core::ansi::CursorShape,
+    /// `true` when the terminal has cursor blink
+    /// enabled (DECTCEM blink mode or SGR cursor blink).
+    cursor_blinking: bool,
+    /// `true` for the visible half of the blink cycle.
+    /// Always `true` when blink isn't enabled. Driven
+    /// by `Renderer::run`'s blink toggler.
+    cursor_blink_visible: bool,
+    /// `true` while an IME pre-edit string is active —
+    /// forces a block cursor regardless of the
+    /// configured shape so the user can tell IME is
+    /// taking input.
+    cursor_preedit: bool,
+    /// Resolved cursor color: OSC 12 wins, then config /
+    /// theme `cursor`.
+    /// `state.colors.cursor → config.cursor_color`
+    /// resolution. Per-panel
+    /// because each terminal can issue its own OSC 12.
+    cursor_color: neoism_backend::config::colors::ColorArray,
+    is_active: bool,
+    damage: neoism_terminal_core::damage::TerminalDamage,
+    /// Selection is per-context (`renderable_content`), not
+    /// per-terminal. Grabbed alongside the grid snapshot so
+    /// `build_row_bg`/`build_row_fg` can tint selected cells.
+    selection: Option<neoism_terminal_core::selection::SelectionRange>,
+    /// `i - display_offset = absolute Line` for the
+    /// per-row selection interval check. Snapshotted at
+    /// the same lock as `visible_rows` to stay consistent.
+    display_offset: i32,
+    /// Search-hint matches for this panel. `None` when
+    /// search is inactive. Consumed alongside `selection`
+    /// inside `build_row_bg` / `build_row_fg` to apply
+    /// `search_match_background` / `_foreground`. Mirrors
+    /// `row_data.highlights` at
+    /// `ghostty/src/renderer/generic.zig:1317`.
+    hint_matches: Option<Vec<neoism_terminal_core::crosswords::search::Match>>,
+    /// Currently-focused search match (↑/↓ navigation).
+    /// Rendered with `search_focused_match_background` /
+    /// `_foreground` — `.search_selected`
+    /// highlight tag.
+    focused_match: Option<neoism_terminal_core::crosswords::search::Match>,
+    /// (start, end) of the currently-hovered hyperlink /
+    /// regex hint. Only populated for the active panel.
+    /// Triggers the forced underline in `emit_underlines`;
+    /// no bg / fg color change.
+    hovered_hyperlink: Option<(
+        neoism_terminal_core::crosswords::pos::Pos,
+        neoism_terminal_core::crosswords::pos::Pos,
+    )>,
+}
 
 /// Per-frame scratch that carries locals across the extracted
 /// `render()` phase methods. Built once at the top of `render()`;
@@ -369,7 +367,7 @@ impl Screen<'_> {
             self.context_manager.pump_editor_redraws();
 
         if self.context_manager.current().pending_terminal_resize {
-            let current_editor_rows_override = {
+            let current_editor_row_fit = {
                 let current_grid = self.context_manager.current_grid();
                 current_grid.current_item().and_then(|item| {
                     item.val.editor.as_ref().and_then(|_| {
@@ -385,7 +383,7 @@ impl Screen<'_> {
                 })
             };
             let current = self.context_manager.current_mut();
-            if !Self::apply_context_resize(current, current_editor_rows_override) {
+            if !Self::apply_context_resize(current, current_editor_row_fit) {
                 crate::app::freeze_watchdog::mark_render_stage(
                     window_id,
                     "screen.render.skip_pending_resize_busy",
@@ -481,7 +479,8 @@ impl Screen<'_> {
         }
         self.render_neoism_agent_panels();
 
-        frame_ctx.editor_scroll_was_animating = self.step_editor_scroll_for_frame(animation_dt);
+        frame_ctx.editor_scroll_was_animating =
+            self.step_editor_scroll_for_frame(animation_dt);
 
         let (window_update, any_panel_dirty) = self.renderer.run(
             &mut self.sugarloaf,
@@ -540,10 +539,16 @@ impl Screen<'_> {
         // the timing covers everything the FPS log fps number is paced
         // against — including the swapchain acquire fence wait and the
         // queue_present call that interacts with vsync.
-        self.last_full_render_us =
-            frame_ctx.render_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        self.last_full_render_us = frame_ctx
+            .render_started
+            .elapsed()
+            .as_micros()
+            .min(u64::MAX as u128) as u64;
 
-        crate::app::freeze_watchdog::mark_render_stage(frame_ctx.window_id, "screen.render.return");
+        crate::app::freeze_watchdog::mark_render_stage(
+            frame_ctx.window_id,
+            "screen.render.return",
+        );
         frame_ctx.window_update
     }
 }

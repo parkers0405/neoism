@@ -33,7 +33,10 @@ pub fn cached_diagnostics(
 
 /// Return the Rust-owned LSP runtime status for a workspace.
 pub fn status(directory: impl AsRef<Path>, _file: Option<&Path>) -> Vec<LspStatus> {
-    crate::lsp::status(directory)
+    match _file {
+        Some(file) => crate::lsp::status_for_file(directory, file),
+        None => crate::lsp::status(directory),
+    }
 }
 
 /// The built-in language id whose server handles `file`'s extension.

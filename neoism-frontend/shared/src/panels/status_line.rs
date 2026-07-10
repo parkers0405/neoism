@@ -358,15 +358,24 @@ fn draw_thick(
     ui.draw(x + FAUX_BOLD_OFFSET * scale, y, text, opts);
 }
 
-/// Vertical position for ICON glyphs. The web font stack resolves the
-/// Nerd-Font/FA glyphs through a fallback whose ascent sits higher
-/// than the desktop's patched font, so icons rode visibly above the
-/// pill text. Native is untouched.
+/// Vertical position for icon glyphs. Both the web fallback font and
+/// CoreText's patched-font metrics place Nerd Font / Font Awesome
+/// glyphs a little higher than the surrounding status text. Keep the
+/// correction proportional to the live chrome zoom so Retina and
+/// non-Retina displays share the same logical baseline.
 fn icon_baseline_y(y: f32, font_size: f32) -> f32 {
-    if cfg!(target_arch = "wasm32") {
-        y + font_size * 0.12
+    y + font_size
+        * icon_baseline_shift_em(cfg!(target_arch = "wasm32"), cfg!(target_os = "macos"))
+}
+
+fn icon_baseline_shift_em(is_web: bool, is_macos: bool) -> f32 {
+    if is_web {
+        0.12
+    } else if is_macos {
+        // 0.96 logical px at the status line's 12 px baseline.
+        0.08
     } else {
-        y
+        0.0
     }
 }
 
@@ -1767,5 +1776,18 @@ impl Panel for StatusLine {
 
     fn name(&self) -> &str {
         "status_line"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::icon_baseline_shift_em;
+
+    #[test]
+    fn status_icons_use_platform_font_metric_corrections() {
+        assert_eq!(icon_baseline_shift_em(false, false), 0.0);
+        assert_eq!(icon_baseline_shift_em(false, true), 0.08);
+        assert_eq!(icon_baseline_shift_em(true, false), 0.12);
+        assert_eq!(icon_baseline_shift_em(true, true), 0.12);
     }
 }

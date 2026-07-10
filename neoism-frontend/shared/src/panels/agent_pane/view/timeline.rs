@@ -136,6 +136,9 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     fn timeline_scroll_offset(&self) -> f32;
     fn has_active_selection(&self) -> bool;
     fn has_status_activity(&self) -> bool;
+    /// First source row observed live during this visit to the session. `None`
+    /// means the transcript is a reloaded, settled history projection.
+    fn timeline_live_trace_start(&self) -> Option<usize>;
     fn queued_prompt_count(&self) -> usize;
     fn set_timeline_metrics(
         &mut self,
@@ -433,6 +436,10 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
 
             fn has_status_activity(&self) -> bool {
                 <$pane>::has_status_activity(self)
+            }
+
+            fn timeline_live_trace_start(&self) -> Option<usize> {
+                <$pane>::timeline_live_trace_start(self)
             }
 
             fn queued_prompt_count(&self) -> usize {

@@ -905,7 +905,7 @@ async fn snapshot(
     session: &NvimSessionHandle,
     workspace_root: &Path,
 ) -> Option<RustLspSnapshot> {
-    let buffer = match session.read_active_buffer().await {
+    let buffer = match session.poll_active_buffer().await {
         Ok(Some(buffer)) => buffer,
         Ok(None) => return None,
         Err(error) => {
@@ -917,13 +917,20 @@ async fn snapshot(
         return None;
     }
 
-    // Light didOpen/didChange (no save + no diagnostics wait) so the server
-    // re-analyzes and PUSHES diagnostics on the bus — event-driven, and far
-    // less likely to destabilize the client than the old touch (open+save+
-    // pull each tick, which flickered the pill). Read the cache (kept fresh by
-    // the push) for the web-channel fetch.
-    rust_lsp::sync_document(workspace_root, &buffer.path, Some(&buffer.text));
-    let diagnostics = rust_lsp::cached_diagnostics(workspace_root, &buffer.path);
+    // The probe only includes text when nvim's changedtick advanced. Idle
+    // polls therefore do not clone/hash/serialize the whole buffer. Large
+    // documents stay in editor-only mode and never become full-text LSP
+    // payloads.
+    if !buffer.too_large {
+        if let Some(text) = buffer.text.as_deref() {
+            rust_lsp::sync_document(workspace_root, &buffer.path, Some(text));
+        }
+    }
+    let diagnostics = if buffer.too_large {
+        Vec::new()
+    } else {
+        rust_lsp::cached_diagnostics(workspace_root, &buffer.path)
+    };
     let statuses = rust_lsp::status(workspace_root, Some(buffer.path.as_path()));
     let filetype = rust_lsp::language_id_for_path(&buffer.path)
         .unwrap_or_default()
@@ -938,19 +945,32 @@ async fn snapshot(
         .iter()
         .map(|status| (status.id.clone(), map_lsp_state(status.status.clone())))
         .collect();
-    let servers: Vec<LspSnapshotServer> = statuses
+    let mut servers: Vec<LspSnapshotServer> = statuses
         .iter()
         .filter(|status| filetype.is_empty() || status.language == filetype)
         .map(|status| map_snapshot_server(status, live.contains(&status.language)))
         .collect();
+    if buffer.too_large {
+        let limit_mib = crate::nvim::MAX_LSP_DOCUMENT_BYTES / (1024 * 1024);
+        let size_mib = buffer.byte_len as f64 / (1024.0 * 1024.0);
+        for server in &mut servers {
+            server.state = "disabled".to_string();
+            server.message = Some(format!(
+                "Large-file mode: {:.1} MiB document exceeds the {limit_mib} MiB LSP limit",
+                size_mib
+            ));
+        }
+    }
 
     let diagnostics: Vec<DiagnosticItem> =
         diagnostics.into_iter().map(map_diagnostic).collect();
     if std::env::var_os("NEOISM_LSP_LOG").is_some() {
         eprintln!(
-            "neoism::lsp snapshot: file={} filetype={} servers={} live={:?} diagnostics={} states={:?}",
+            "neoism::lsp snapshot: file={} filetype={} bytes={} large={} servers={} live={:?} diagnostics={} states={:?}",
             buffer.path.display(),
             filetype,
+            buffer.byte_len,
+            buffer.too_large,
             servers.len(),
             live,
             diagnostics.len(),

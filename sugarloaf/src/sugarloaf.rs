@@ -493,6 +493,16 @@ impl Sugarloaf<'_> {
         self.state.set_fonts(font_library, &mut self.renderer);
     }
 
+    /// Begin a new immediate-mode text atlas generation.
+    ///
+    /// Call this when logical font sizes change so transient zoom sizes do
+    /// not accumulate forever in the finite UI atlases. Both normal and late
+    /// overlay text own independent atlases and must advance together.
+    pub fn clear_ui_glyph_caches(&mut self) {
+        self.text.clear_glyph_cache();
+        self.overlay_text.clear_glyph_cache();
+    }
+
     /// Look up a single glyph in the font cache without performing
     /// a fallback walk. Returns `None` if the entry is missing.
     /// Use this in the first pass of a multi-cell layout to identify
@@ -628,6 +638,16 @@ impl Sugarloaf<'_> {
     #[inline]
     pub fn style_mut(&mut self) -> &mut RootStyle {
         &mut self.state.style
+    }
+
+    /// Set the live font size inherited by future persistent text content.
+    /// Existing content is intentionally unchanged; the host synchronizes it
+    /// as a batch before laying out the next frame.
+    #[inline]
+    pub fn set_default_persistent_font_size(&mut self, font_size: f32) {
+        if font_size.is_finite() {
+            self.state.default_persistent_font_size = font_size.clamp(6.0, 100.0);
+        }
     }
 
     /// Update text font size based on action (0=reset, 1=decrease, 2=increase)
@@ -899,8 +919,9 @@ impl Sugarloaf<'_> {
                 // Check if text already exists
                 if self.state.content.get_text_by_id(text_id).is_none() {
                     // Create new text with default layout
-                    let default_layout =
+                    let mut default_layout =
                         TextLayout::from_default_layout(&self.state.style);
+                    default_layout.font_size = self.state.default_persistent_font_size;
                     self.state.content.set_text(text_id, &default_layout);
                 }
                 text_id

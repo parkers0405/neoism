@@ -20,11 +20,13 @@ bitflags = { workspace = true, features = ["serde"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 unicode-width = { workspace = true }
+unicode-segmentation = "1.13.2"
 rustc-hash = "2.1.2"
 web-time = "1.1"
 image_rs = { workspace = true }
 lru = "0.16.0"
 base64 = { workspace = true }
+pulldown-cmark = { version = "0.13.4", default-features = false }
 # `sync` keeps the Yrs `UndoManager` (Wave 7D per-user undo) Send+Sync
 # so the daemon can hold `CrdtTextBuffer`s across threads.
 yrs = { version = "0.26", features = ["sync"] }

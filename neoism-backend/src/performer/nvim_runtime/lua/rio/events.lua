@@ -54,6 +54,9 @@ end
 local function current_winbar_symbol()
   local symbol = ""
   pcall(function()
+    if require("rio.large_file").is_large(vim.api.nvim_get_current_buf()) then
+      return
+    end
     local ok, node = pcall(vim.treesitter.get_node)
     if ok and node then
       local cur = node

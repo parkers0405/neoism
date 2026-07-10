@@ -7,10 +7,11 @@ impl EditorBackend {
         runtime: Option<tokio::runtime::Handle>,
         config: NvimSpawnConfig,
     ) -> Self {
-        let send_tx = DaemonEditorBackend::spawn_send_worker(
+        let (send_tx, resize_tx) = DaemonEditorBackend::spawn_send_worker(
             handle.clone(),
             runtime.clone(),
             config.cwd.clone(),
+            surface_id.clone(),
         );
         Self::Daemon(DaemonEditorBackend {
             surface_id,
@@ -18,6 +19,7 @@ impl EditorBackend {
             runtime,
             config,
             send_tx,
+            resize_tx,
         })
     }
 
@@ -123,11 +125,10 @@ impl EditorBackend {
     pub fn resize(&self, cols: u64, rows: u64) {
         match self {
             Self::Local(editor) => editor.resize(cols, rows),
-            Self::Daemon(editor) => editor.send(EditorClientMessage::Resize {
-                width: cols.min(u64::from(u32::MAX)) as u32,
-                height: rows.min(u64::from(u32::MAX)) as u32,
-                surface_id: Some(editor.surface_id.clone()),
-            }),
+            Self::Daemon(editor) => editor.resize(
+                cols.min(u64::from(u32::MAX)) as u32,
+                rows.min(u64::from(u32::MAX)) as u32,
+            ),
         }
     }
 
@@ -314,11 +315,63 @@ impl DaemonEditorBackend {
         handle: DaemonClientHandle,
         runtime: Option<tokio::runtime::Handle>,
         workspace_root: Option<std::path::PathBuf>,
-    ) -> Option<tokio_mpsc::UnboundedSender<EditorClientMessage>> {
+        surface_id: String,
+    ) -> (
+        Option<tokio_mpsc::UnboundedSender<EditorClientMessage>>,
+        Option<tokio_watch::Sender<(u32, u32)>>,
+    ) {
         let (send_tx, mut recv_rx) =
             tokio_mpsc::unbounded_channel::<EditorClientMessage>();
+        let (resize_tx, mut resize_rx) =
+            tokio_watch::channel::<(u32, u32)>((0, 0));
         let worker = async move {
-            while let Some(message) = recv_rx.recv().await {
+            enum Outbound {
+                Message(EditorClientMessage),
+                Resize(u32, u32),
+            }
+
+            let mut messages_open = true;
+            let mut resize_open = true;
+            while messages_open || resize_open {
+                let outbound = tokio::select! {
+                    message = recv_rx.recv(), if messages_open => {
+                        match message {
+                            Some(message) => Some(Outbound::Message(message)),
+                            None => {
+                                messages_open = false;
+                                None
+                            }
+                        }
+                    }
+                    changed = resize_rx.changed(), if resize_open => {
+                        match changed {
+                            Ok(()) => {
+                                // One frame of coalescing keeps a fast window
+                                // drag from being serialized into the socket.
+                                // Changes during this wait remain one watch
+                                // value, so only the newest dimensions leave.
+                                tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+                                let (width, height) = *resize_rx.borrow_and_update();
+                                Some(Outbound::Resize(width, height))
+                            }
+                            Err(_) => {
+                                resize_open = false;
+                                None
+                            }
+                        }
+                    }
+                };
+                let Some(outbound) = outbound else {
+                    continue;
+                };
+                let message = match outbound {
+                    Outbound::Message(message) => message,
+                    Outbound::Resize(width, height) => EditorClientMessage::Resize {
+                        width,
+                        height,
+                        surface_id: Some(surface_id.clone()),
+                    },
+                };
                 if let Err(error) = handle
                     .send_editor_with_workspace_root(message, workspace_root.clone())
                     .await
@@ -333,13 +386,28 @@ impl DaemonEditorBackend {
         };
         if let Some(runtime) = runtime {
             runtime.spawn(worker);
-            return Some(send_tx);
+            return (Some(send_tx), Some(resize_tx));
         }
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(worker);
-            return Some(send_tx);
+            return (Some(send_tx), Some(resize_tx));
         }
-        None
+        (None, None)
+    }
+
+    fn resize(&self, width: u32, height: u32) {
+        let next = (width.max(1), height.max(1));
+        if let Some(tx) = &self.resize_tx {
+            if *tx.borrow() != next {
+                let _ = tx.send(next);
+            }
+            return;
+        }
+        self.send(EditorClientMessage::Resize {
+            width: next.0,
+            height: next.1,
+            surface_id: Some(self.surface_id.clone()),
+        });
     }
 
     fn send(&self, message: EditorClientMessage) {

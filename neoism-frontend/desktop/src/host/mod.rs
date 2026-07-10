@@ -8,8 +8,7 @@ pub mod tabs;
 
 use neoism_ui::panels::{
     breadcrumbs, buffer_tabs, chrome_topbar, command_composer, command_palette,
-    completion_menu, context_menu, diagnostics_popup, editor_scroll,
-    finder,
+    completion_menu, context_menu, diagnostics_popup, editor_scroll, finder,
     inline_diagnostics, minimap, notes_sidebar, notifications, search, status_line,
     trail_cursor, yank_flash,
 };
@@ -229,15 +228,19 @@ pub struct Renderer {
     /// to whatever font.size the user has configured AND to the live
     /// zoom level — both compose into the same scalar.
     pub(super) chrome_scale: f32,
+    /// Canonical live font size for every terminal/editor surface in this
+    /// window. It deliberately lives outside any individual context so a new
+    /// tab or workspace cannot reset the next zoom step to its own default.
+    pub(super) zoom_font_size: f32,
     /// True once the embedded agent-icon PNGs have been uploaded to
     /// sugarloaf's image store. Gated behind a flag so we register on
     /// the first `run` call (when sugarloaf is in scope) and never
     /// again. False until that first frame.
     pub(super) agent_icons_registered: bool,
     /// Cached "agent currently running in the terminal tab" — refreshed
-    /// at most every `AGENT_DETECT_INTERVAL` to avoid hammering /proc
-    /// each frame. `None` means the foreground program is a plain
-    /// shell (or not detectable), so the generic terminal glyph
+    /// at most every `AGENT_DETECT_INTERVAL` to avoid querying native
+    /// process metadata each frame. `None` means the foreground program is
+    /// a plain shell (or not detectable), so the generic terminal glyph
     /// renders.
     pub(super) last_agent: Option<agent_icon::AgentKind>,
     pub(super) last_agent_check: Option<std::time::Instant>,
@@ -311,15 +314,17 @@ impl Renderer {
         };
         let top_bar = chrome_topbar::ChromeTopBar::new();
         #[cfg(target_os = "macos")]
-        let macos_traffic_light_inset = if config.window.decorations != Decorations::Buttonless {
-            let traffic_light_x = config
-                .window
-                .macos_traffic_light_position_x
-                .unwrap_or(crate::constants::TRAFFIC_LIGHT_PADDING) as f32;
-            traffic_light_x + 68.0
-        } else {
-            0.0
-        };
+        let macos_traffic_light_inset =
+            if config.window.decorations != Decorations::Buttonless {
+                let traffic_light_x = config
+                    .window
+                    .macos_traffic_light_position_x
+                    .unwrap_or(crate::constants::TRAFFIC_LIGHT_PADDING)
+                    as f32;
+                traffic_light_x + 68.0
+            } else {
+                0.0
+            };
 
         Renderer {
             unfocused_split_opacity: config.navigation.unfocused_split_opacity,
@@ -416,6 +421,7 @@ impl Renderer {
             // stay at the 14pt baseline regardless of user config and
             // look tiny next to a large editor font.
             chrome_scale: (config.fonts.size / CHROME_BASELINE_FONT_SIZE).clamp(0.5, 3.0),
+            zoom_font_size: config.fonts.size.clamp(6.0, 100.0),
             agent_icons_registered: false,
             last_agent: None,
             last_agent_check: None,

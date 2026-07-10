@@ -4642,6 +4642,7 @@ dependencies = [
  "neoism-protocol",
  "neoism-terminal-core",
  "neoism-workspace-index",
+ "pulldown-cmark",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
@@ -4655,6 +4656,7 @@ dependencies = [
  "tree-sitter-language",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "unicode-segmentation",
  "unicode-width-16",
  "wasm-bindgen",
  "web-sys",
@@ -4765,6 +4767,7 @@ dependencies = [
 name = "neoism-workspace-index"
 version = "0.6.4"
 dependencies = [
+ "dirs 6.0.0",
  "notify 8.2.0",
  "serde",
  "serde_json",
@@ -5911,6 +5914,17 @@ name = "profiling"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eb8486b569e12e2c32ad3e204dbaba5e4b5b216e9367044f25f1dba42341773"
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.11.0",
+ "memchr",
+ "unicase",
+]
 
 [[package]]
 name = "pxfm"
@@ -8193,6 +8207,12 @@ dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-bidi"

@@ -715,18 +715,17 @@ function M.apply(name)
     end
   end
 
-  vim.schedule(function()
-    -- Disabled with rio.hlchunk setup while testing held-arrow smooth scroll.
-    -- pcall(function()
-    --   require("rio.hlchunk").refresh()
-    -- end)
-
-    if vim.api.nvim__redraw then
-      pcall(vim.api.nvim__redraw, { valid = false, flush = true })
-    else
-      pcall(vim.cmd, "redraw!")
-    end
-  end)
+  -- Force the external line-grid to republish every visible cell before
+  -- this RPC returns. Neoism stores resolved StyleIds in its GPU grid; an
+  -- hl_attr_define by itself cannot recolor cells that already reference
+  -- the previous definition. This therefore has to be synchronous with
+  -- the theme command, not a scheduled callback that may run after the
+  -- Rust side has already consumed its one-shot full-damage marker.
+  if vim.api.nvim__redraw then
+    vim.api.nvim__redraw({ valid = false, flush = true })
+  else
+    vim.cmd("redraw!")
+  end
 end
 
 function M.palette()

@@ -9,6 +9,22 @@ impl Renderer {
         self.chrome_scale
     }
 
+    /// Window-wide live terminal/editor font size.
+    pub fn zoom_font_size(&self) -> f32 {
+        self.zoom_font_size
+    }
+
+    /// Update the canonical text zoom and its proportional chrome scale.
+    pub fn set_zoom_font_size(&mut self, font_size: f32) {
+        let font_size = if font_size.is_finite() {
+            font_size.clamp(6.0, 100.0)
+        } else {
+            CHROME_BASELINE_FONT_SIZE
+        };
+        self.zoom_font_size = font_size;
+        self.set_chrome_scale(font_size / CHROME_BASELINE_FONT_SIZE);
+    }
+
     pub fn set_ide_theme(&mut self, theme: IdeTheme) {
         let previous_alpha = self.dynamic_background.1.a;
         let mut window_bg = theme.sugar(theme.bg);

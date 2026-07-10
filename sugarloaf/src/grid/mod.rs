@@ -112,6 +112,22 @@ impl GridRenderer {
         }
     }
 
+    /// Start a fresh glyph-atlas generation without reallocating the backing
+    /// textures. Used by font zoom: retaining every intermediate raster size
+    /// eventually fills a finite atlas and makes later glyph inserts vanish.
+    pub fn clear_glyph_atlas(&mut self) {
+        match self {
+            #[cfg(target_os = "macos")]
+            GridRenderer::Metal(r) => r.clear_glyph_atlas(),
+            #[cfg(feature = "wgpu")]
+            GridRenderer::Wgpu(r) => r.clear_glyph_atlas(),
+            #[cfg(target_os = "linux")]
+            GridRenderer::Vulkan(r) => r.clear_glyph_atlas(),
+            #[cfg(not(target_arch = "wasm32"))]
+            GridRenderer::Cpu(r) => r.clear_glyph_atlas(),
+        }
+    }
+
     /// Overwrite `row`'s background + foreground cells. `bg` must have
     /// exactly `cols` entries; `fg` is variable length (base glyph +
     /// decorations). Callers that want to clear a row should use

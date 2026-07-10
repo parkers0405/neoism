@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::*;
 use neoism_ui::chrome_policy::{workspace_chrome_margins, WorkspaceChromeMetrics};
 
@@ -20,9 +19,8 @@ impl Screen<'_> {
     /// (rather than waiting for the next input event). Pure scheduling — no
     /// nvim RPC is issued per frame, so this can never wedge input.
     pub fn arm_search_reply_pump(&mut self) {
-        self.search_reply_pump_until = Some(
-            std::time::Instant::now() + std::time::Duration::from_millis(400),
-        );
+        self.search_reply_pump_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
         self.mark_dirty();
     }
 
@@ -55,6 +53,8 @@ impl Screen<'_> {
         let s = self.sugarloaf.style_mut();
         s.font_size = config.fonts.size;
         s.line_height = config.line_height;
+        self.sugarloaf
+            .set_default_persistent_font_size(config.fonts.size);
 
         #[cfg(feature = "wgpu")]
         self.sugarloaf
@@ -130,12 +130,6 @@ impl Screen<'_> {
                     let context = item.context_mut();
                     context.renderable_content.background =
                         Some(crate::context::renderable::BackgroundState::Reset);
-                    context
-                        .renderable_content
-                        .pending_update
-                        .set_terminal_damage(
-                            neoism_terminal_core::damage::TerminalDamage::Full,
-                        );
 
                     let mut terminal = context.terminal.lock();
                     terminal.colors =
@@ -143,7 +137,19 @@ impl Screen<'_> {
                     drop(terminal);
 
                     if let Some(editor) = context.editor.as_ref() {
+                        // `rio.theme.apply` synchronously invalidates and
+                        // flushes nvim's external line-grid. Let those fresh
+                        // grid_line events drive damage; repainting here
+                        // races ahead with the old resolved StyleIds and is
+                        // exactly how chrome changed while code stayed black.
                         editor.command(cmd.clone());
+                    } else {
+                        context
+                            .renderable_content
+                            .pending_update
+                            .set_terminal_damage(
+                                neoism_terminal_core::damage::TerminalDamage::Full,
+                            );
                     }
                 }
             }
@@ -240,22 +246,55 @@ impl Screen<'_> {
     }
 
     pub fn change_font_size(&mut self, action: FontSizeAction) {
-        let action: u8 = match action {
-            FontSizeAction::Increase => 2,
-            FontSizeAction::Decrease => 1,
-            FontSizeAction::Reset => 0,
+        let policy_action = match action {
+            FontSizeAction::Increase => {
+                neoism_ui::lifecycle_policy::FontSizeAction::Increase
+            }
+            FontSizeAction::Decrease => {
+                neoism_ui::lifecycle_policy::FontSizeAction::Decrease
+            }
+            FontSizeAction::Reset => neoism_ui::lifecycle_policy::FontSizeAction::Reset,
         };
 
-        // Apply the font-size action to EVERY context's rich_text —
+        // Zoom is a property of the window, not of whichever rich-text
+        // context happens to be focused. New tabs start from the configured
+        // default, so deriving a decrement from the active context could turn
+        // one Ctrl-minus into a jump from (say) 52pt back to 13pt. Resolve a
+        // single canonical target and set every context to that exact value.
+        let base_font_size = self.sugarloaf.style().font_size;
+        let current_font_size = self.renderer.zoom_font_size();
+        let target_font_size = neoism_ui::lifecycle_policy::font_size_after_action(
+            current_font_size,
+            base_font_size,
+            policy_action,
+        );
+        if (target_font_size - current_font_size).abs() < f32::EPSILON {
+            return;
+        }
+        self.renderer.set_zoom_font_size(target_font_size);
+        // Any persistent rich-text surface created after this point inherits
+        // the same live zoom before its first dimension/layout calculation.
+        self.sugarloaf
+            .set_default_persistent_font_size(target_font_size);
+
+        // Apply the exact font size to EVERY context's rich_text —
         // not just the focused one — so terminal panes and nvim editor
-        // panes in other grids/splits zoom in lock-step with the chrome.
-        // Without this loop, only the active pane grew while everything
-        // else stayed at the original size.
+        // panes in other tabs/workspaces/splits remain in lock-step.
         for context_grid in self.context_manager.contexts_mut() {
             for item in context_grid.contexts_mut().values_mut() {
                 self.sugarloaf
-                    .set_text_font_size_action(&item.context().rich_text_id, action);
+                    .set_text_font_size(&item.context().rich_text_id, target_font_size);
             }
+        }
+
+        // A glyph atlas is finite and keys include raster size. Retaining all
+        // intermediate sizes while the user holds Ctrl+= eventually fills it;
+        // subsequent inserts then fail and labels lose random characters even
+        // after Ctrl+0. Advance every text path to a fresh atlas generation and
+        // force panel grids to rebuild against the new coordinates.
+        self.sugarloaf.clear_ui_glyph_caches();
+        for grid in self.grids.values_mut() {
+            grid.clear_glyph_atlas();
         }
 
         // Mirror the editor-body zoom into the chrome scale so the
@@ -266,22 +305,10 @@ impl Screen<'_> {
         // set font.size=18 sees chrome at 18/14=1.286× even before
         // any zoom; pressing Ctrl+= bumps current_font_size to 19
         // (scale 19/14=1.357), still proportional to terminal text.
-        // Reset (action=0) returns to the config-baseline scale, NOT
+        // Reset returns to the config-baseline scale, NOT
         // 1.0 — that way reset doesn't shrink chrome below what the
         // user's config implies.
-        let base_font_size = self.sugarloaf.style().font_size;
-        let active_rich_text_id = self.context_manager.current().rich_text_id;
-        let current_font_size = if action == 0 {
-            base_font_size
-        } else {
-            self.sugarloaf
-                .text_scaled_font_size(&active_rich_text_id)
-                .map(|fp| fp / self.sugarloaf.scale_factor())
-                .unwrap_or(base_font_size)
-        };
-        let new_scale =
-            (current_font_size / crate::host::CHROME_BASELINE_FONT_SIZE).clamp(0.5, 3.0);
-        self.renderer.set_chrome_scale(new_scale);
+        let new_scale = self.renderer.chrome_scale();
         for tabs in self.workspace_buffer_tabs.values_mut() {
             tabs.set_scale(new_scale);
         }
@@ -384,6 +411,23 @@ impl Screen<'_> {
         {
             self.clear_selection();
         }
+        // Geometry changes invalidate every animation value expressed in
+        // pixels or rows. Keeping the previous spring/trail destination while
+        // the pane origin moves is how a detached cursor could briefly paint
+        // in the buffer-tabs/breadcrumbs band after a violent resize.
+        self.renderer.terminal_scroll.reset_all();
+        self.renderer.editor_scroll.reset_all();
+        self.renderer.trail_cursor.reset();
+        self.last_editor_trail_cursor_cell = None;
+        self.editor_scroll_grid_states.clear();
+        for grid in self.context_manager.contexts_mut() {
+            for item in grid.contexts_mut().values_mut() {
+                let context = item.context_mut();
+                context.editor_pending_scroll_lines = 0;
+                context.editor_pending_grid_scroll_lines = 0;
+                context.editor_scroll_reset_pending = false;
+            }
+        }
         {
             let _span = crate::app::freeze_watchdog::global_span(
                 "screen.resize.sugarloaf_resize",
@@ -401,7 +445,10 @@ impl Screen<'_> {
             );
             self.context_manager
                 .resize_all_grids(width, height, &mut self.sugarloaf);
-            self.resize_all_contexts();
+            // The canonical grid layout already resized every terminal/editor.
+            // A second `resize_all_contexts` here used to enqueue the same
+            // Neovim resize twice for every single OS resize event.
+            self.apply_pane_chrome_offsets();
         }
         self.mark_dirty();
 
@@ -470,31 +517,26 @@ impl Screen<'_> {
         dimension: ContextDimension,
         window_height_phys: f32,
         bottom_chrome_height_phys: f32,
-    ) -> Option<u16> {
-        // For editor (nvim) panes only: ask nvim to render one MORE
-        // row than `border.rs` reports (which is now `floor`). That
-        // extra row's bottom overshoots into the status-line band
-        // where the status-line bg paints over it, so the visible
-        // result is "nvim sits flush against the status bar" with no
-        // sub-pixel gap. The override is wrapped in
-        // `editor.as_ref().and_then(|_| …)` at the call site so this
-        // ONLY applies to editor contexts; terminal panes keep the
-        // conservative `floor` count from `border.rs::compute` and
-        // never lose a row of shell output.
-        let _ = (
-            layout_rect,
-            scaled_margin,
-            window_height_phys,
-            bottom_chrome_height_phys,
-        );
-        let base = dimension.lines.max(1);
-        Some(crate::bridges::utils::editor_rows_for_dimension_lines(base) as u16)
+    ) -> Option<neoism_ui::chrome_policy::EditorRowFit> {
+        Some(neoism_ui::chrome_policy::fit_editor_rows(
+            neoism_ui::chrome_policy::EditorRowFitInput {
+                scaled_margin_top: scaled_margin.top,
+                layout_top: layout_rect[1],
+                layout_height: layout_rect[3],
+                window_height: window_height_phys,
+                status_line_height: bottom_chrome_height_phys,
+                nominal_cell_height: dimension.base_cell_height(),
+            },
+        ))
     }
 
     pub(crate) fn apply_context_resize(
         ctx: &mut context::Context<EventProxy>,
-        editor_rows_override: Option<u16>,
+        editor_row_fit: Option<neoism_ui::chrome_policy::EditorRowFit>,
     ) -> bool {
+        if let Some(fit) = editor_row_fit {
+            ctx.dimension.apply_editor_row_fit(fit);
+        }
         let Some(mut terminal) = ctx.terminal.try_lock_unfair() else {
             ctx.pending_terminal_resize = true;
             ctx.renderable_content.pending_update.set_dirty();
@@ -505,7 +547,8 @@ impl Screen<'_> {
         let cols = winsize.cols;
         let rows = winsize.rows;
         let editor_rows = ctx.editor.as_ref().map(|_| {
-            editor_rows_override
+            editor_row_fit
+                .map(|fit| fit.rows)
                 .unwrap_or_else(|| {
                     crate::bridges::utils::editor_rows_for_terminal_rows(rows)
                 })
@@ -538,18 +581,17 @@ impl Screen<'_> {
         for context_grid in self.context_manager.contexts_mut() {
             let scaled_margin = context_grid.get_scaled_margin();
             for context in context_grid.contexts_mut().values_mut() {
-                let editor_rows_override =
-                    context.context().editor.as_ref().and_then(|_| {
-                        Self::editor_rows_above_bottom_chrome(
-                            context.layout_rect,
-                            scaled_margin,
-                            context.context().dimension,
-                            window_height_phys,
-                            bottom_chrome_height_phys,
-                        )
-                    });
+                let editor_row_fit = context.context().editor.as_ref().and_then(|_| {
+                    Self::editor_rows_above_bottom_chrome(
+                        context.layout_rect,
+                        scaled_margin,
+                        context.context().dimension,
+                        window_height_phys,
+                        bottom_chrome_height_phys,
+                    )
+                });
                 let ctx = context.context_mut();
-                Self::apply_context_resize(ctx, editor_rows_override);
+                Self::apply_context_resize(ctx, editor_row_fit);
             }
         }
     }
@@ -654,6 +696,64 @@ impl Screen<'_> {
         })
     }
 
+    fn chrome_layout_signature(&self) -> ChromeLayoutSignature {
+        let current = self.context_manager.current();
+        let reserves_editor_chrome = current.editor.is_some()
+            || current.markdown.is_some()
+            || current.notebook.is_some()
+            || current.draw.is_some();
+        let margins = self.workspace_chrome_margins();
+
+        ChromeLayoutSignature {
+            route_id: current.route_id,
+            reserves_editor_chrome,
+            editor_top_bits: margins.editor_top.to_bits(),
+            terminal_top_bits: margins.terminal_top.to_bits(),
+            bottom_bits: margins.bottom.to_bits(),
+            buffer_tabs_present: !self.renderer.buffer_tabs.tabs().is_empty(),
+            pane_tab_strip_count: self.renderer.pane_tabs.len(),
+            pane_breadcrumb_count: self.renderer.pane_breadcrumbs.len(),
+        }
+    }
+
+    /// Reflow before paint when asynchronous pane/chrome state no longer
+    /// matches the geometry last applied to the grids. The margin comparison
+    /// also repairs paths that changed a grid in place without changing the
+    /// active route id.
+    pub(crate) fn repair_chrome_layout_if_stale(&mut self) {
+        let signature = self.chrome_layout_signature();
+        let signature_changed = self.last_chrome_layout_signature != Some(signature);
+        let margins = self.workspace_chrome_margins();
+        let scale = self.sugarloaf.scale_factor();
+        let margin_stale = self.context_manager.all_grids().iter().any(|grid| {
+            let current = grid.current();
+            let reserves_editor_chrome = current.editor.is_some()
+                || current.markdown.is_some()
+                || current.notebook.is_some()
+                || current.draw.is_some();
+            let expected_top = if reserves_editor_chrome {
+                margins.editor_top
+            } else {
+                margins.terminal_top
+            } * scale;
+            let actual = grid.get_scaled_margin();
+            (actual.top - expected_top).abs() > 0.25
+                || (actual.bottom - margins.bottom * scale).abs() > 0.25
+        });
+
+        if signature_changed || margin_stale {
+            tracing::debug!(
+                target: "neoism::chrome_layout",
+                ?signature,
+                signature_changed,
+                margin_stale,
+                "repairing stale chrome geometry before paint"
+            );
+            self.reapply_chrome_layout();
+            self.mark_dirty();
+        }
+    }
+
     pub(crate) fn reapply_chrome_layout(&mut self) {
         let started_at = std::time::Instant::now();
         let scale = self.sugarloaf.scale_factor();
@@ -715,6 +815,7 @@ impl Screen<'_> {
         self.apply_pane_chrome_offsets();
 
         self.sync_current_workspace_buffer_files();
+        self.last_chrome_layout_signature = Some(self.chrome_layout_signature());
         let total_ms = started_at.elapsed().as_millis();
         if total_ms >= 50 {
             tracing::warn!(
@@ -759,6 +860,7 @@ impl Screen<'_> {
             return;
         }
         let scale = self.sugarloaf.scale_factor();
+        let window_height = self.sugarloaf.window_size().height as f32;
         let min_top = self.current_grid_min_pane_top();
 
         let routes: Vec<usize> = self.renderer.pane_tabs.keys().copied().collect();
@@ -841,7 +943,8 @@ impl Screen<'_> {
                 continue;
             }
             let x_logical = (rect[0] + scaled_margin.left) / scale;
-            let y_logical = (rect[1] + scaled_margin.top + chrome_h_scaled) / scale;
+            let body_top = rect[1] + chrome_h_scaled;
+            let y_logical = (body_top + scaled_margin.top) / scale;
             let new_height = (rect[3] - chrome_h_scaled).max(0.0);
 
             for (node, visible) in nodes {
@@ -855,17 +958,43 @@ impl Screen<'_> {
                 };
                 self.sugarloaf
                     .set_position(item.val.rich_text_id, x_logical, y_logical);
+                self.sugarloaf.set_bounds(
+                    item.val.rich_text_id,
+                    Some([
+                        rect[0] + scaled_margin.left,
+                        body_top + scaled_margin.top,
+                        rect[2],
+                        new_height,
+                    ]),
+                );
 
+                // Keep the canonical pane rectangle aligned with the actual
+                // editor body, not the chrome-inclusive slot. Cursor overlays,
+                // hit testing, clipping, and row fitting all consume this
+                // rectangle; only moving Sugarloaf's text origin left those
+                // consumers one breadcrumbs row above the real grid.
+                item.layout_rect[1] = body_top;
+                item.layout_rect[3] = new_height;
+                item.val.dimension.restore_nominal_cell_height();
                 item.val.dimension.update_height(new_height);
+                if item.val.editor.is_some() {
+                    let fit = neoism_ui::chrome_policy::fit_editor_rows(
+                        neoism_ui::chrome_policy::EditorRowFitInput {
+                            scaled_margin_top: scaled_margin.top,
+                            layout_top: body_top,
+                            layout_height: new_height,
+                            window_height,
+                            status_line_height: scaled_margin.bottom,
+                            nominal_cell_height: item.val.dimension.base_cell_height(),
+                        },
+                    );
+                    item.val.dimension.apply_editor_row_fit(fit);
+                }
                 let winsize =
                     crate::bridges::utils::terminal_dimensions(&item.val.dimension);
                 let cols = winsize.cols;
                 let rows = winsize.rows;
-                let terminal_rows = if item.val.editor.is_some() {
-                    crate::bridges::utils::editor_rows_for_terminal_rows(rows)
-                } else {
-                    rows
-                };
+                let terminal_rows = rows;
                 {
                     let mut terminal = item.val.terminal.lock();
                     terminal.resize(crate::bridges::utils::resize_dimensions(
@@ -955,12 +1084,6 @@ impl Screen<'_> {
                 let context = context_item.context_mut();
                 context.renderable_content.background =
                     Some(crate::context::renderable::BackgroundState::Reset);
-                context
-                    .renderable_content
-                    .pending_update
-                    .set_terminal_damage(
-                        neoism_terminal_core::damage::TerminalDamage::Full,
-                    );
 
                 let mut terminal = context.terminal.lock();
                 terminal.colors =
@@ -968,8 +1091,18 @@ impl Screen<'_> {
                 drop(terminal);
 
                 if let Some(editor) = context.editor.as_ref() {
+                    // The managed Lua command performs a synchronous forced
+                    // redraw. Its new grid_line payload is the authoritative
+                    // repaint point for resolved nvim StyleIds.
                     editor.command(apply_theme_cmd.clone());
                     themed_editors += 1;
+                } else {
+                    context
+                        .renderable_content
+                        .pending_update
+                        .set_terminal_damage(
+                            neoism_terminal_core::damage::TerminalDamage::Full,
+                        );
                 }
             }
         }

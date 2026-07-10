@@ -729,6 +729,25 @@ impl NeoismAgentPane {
         *self.timeline_layout_cache.borrow_mut() = None;
     }
 
+    pub(in crate::panels::agent_pane::state) fn retain_current_turn_trace(&mut self) {
+        if self.timeline_live_trace_start.is_some() {
+            return;
+        }
+        self.timeline_live_trace_start = Some(
+            self.messages
+                .iter()
+                .rposition(|message| message.kind == NeoismAgentMessageKind::User)
+                .map_or(0, |index| index + 1),
+        );
+        // Rows hidden in the settled projection may now be visible, including
+        // progress text that arrived before the first tool/reasoning item.
+        self.invalidate_timeline_layout();
+    }
+
+    pub(in crate::panels::agent_pane) fn timeline_live_trace_start(&self) -> Option<usize> {
+        self.timeline_live_trace_start
+    }
+
     pub(in crate::panels::agent_pane::state) fn mark_timeline_message_dirty_at(&mut self, index: usize) {
         self.refresh_background_task_activity_clock();
         self.timeline_dirty_message_indices.insert(index);
@@ -810,6 +829,7 @@ impl NeoismAgentPane {
         self.pending_permission = None;
         self.pending_permission_queue.clear();
         self.permission_choice_hit_rects.clear();
+        self.timeline_live_trace_start = None;
     }
 
 }

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::workspace::{self as neo_workspace, notes::WorkspaceNoteIndex};
 use std::path::{Path, PathBuf};
@@ -265,10 +264,6 @@ impl Screen<'_> {
             .or_else(|| self.active_workspace_root.clone())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        active_notes_workspace_for_root(&root)
-            .filter(|workspace| workspace.config.notes.enabled)
-            .map(|workspace| workspace.notes_workspace_dir())
-            .unwrap_or(root)
+        notes_workspace_for_root_or_default(&root).notes_workspace_dir()
     }
-
 }

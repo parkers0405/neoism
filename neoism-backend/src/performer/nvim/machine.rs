@@ -8,6 +8,13 @@ pub struct NvimEmbedMachine {
     /// Sender into the runtime thread — clone-safe via `Mutex` so
     /// `&mut self` methods can fire commands without taking ownership.
     cmd_tx: Mutex<Option<tokio_mpsc::UnboundedSender<NvimCommand>>>,
+    /// Latest requested UI size. A watch channel is deliberately used
+    /// instead of the command FIFO: window managers can emit hundreds of
+    /// intermediate sizes during one drag, and only the newest geometry is
+    /// useful. Neovim redraws every accepted `ui_try_resize`, so queueing
+    /// obsolete sizes creates a redraw storm that can leave the visible grid
+    /// minutes behind the actual window.
+    resize_tx: tokio_watch::Sender<(u64, u64)>,
     /// Receiver for redraw events — Phase 2c will pull from this in
     /// the mio loop and apply to `Crosswords`.
     redraw_rx: Mutex<Option<std_mpsc::Receiver<RedrawNotification>>>,
@@ -97,6 +104,18 @@ impl NvimEmbedMachine {
         T: EventListener + Clone + Send + Sync + 'static,
     {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<NvimCommand>();
+        let initial_cols = if config.initial_cols == 0 {
+            80
+        } else {
+            config.initial_cols
+        };
+        let initial_rows = if config.initial_rows == 0 {
+            24
+        } else {
+            config.initial_rows
+        };
+        let (resize_tx, resize_rx) =
+            tokio_watch::channel::<(u64, u64)>((initial_cols, initial_rows));
         let (redraw_tx, redraw_rx) = std_mpsc::channel::<RedrawNotification>();
         let (buf_mod_tx, buf_mod_rx) = std_mpsc::channel::<BufModifiedNotification>();
         let (buf_enter_tx, buf_enter_rx) = std_mpsc::channel::<BufEnterNotification>();
@@ -131,6 +150,7 @@ impl NvimEmbedMachine {
                 run_nvim_runtime(
                     cfg,
                     cmd_rx,
+                    resize_rx,
                     redraw_tx,
                     buf_mod_tx,
                     buf_enter_tx,
@@ -168,6 +188,7 @@ impl NvimEmbedMachine {
         Ok(Self {
             config,
             cmd_tx: Mutex::new(Some(cmd_tx)),
+            resize_tx,
             redraw_rx: Mutex::new(Some(redraw_rx)),
             buf_mod_rx: Mutex::new(Some(buf_mod_rx)),
             buf_enter_rx: Mutex::new(Some(buf_enter_rx)),
@@ -286,12 +307,21 @@ impl NvimEmbedMachine {
     /// Inform nvim of a viewport resize.
     pub fn resize(&self, cols: u64, rows: u64) {
         tracing::trace!(target: "neoism_backend::nvim", cols, rows, "queueing nvim resize");
-        if let Some(tx) = self.cmd_tx.lock().unwrap().as_ref() {
-            if let Err(err) = tx.send(NvimCommand::Resize { cols, rows }) {
-                tracing::warn!(target: "neoism_backend::nvim", "failed to queue nvim resize: {err:?}");
-            }
-        } else {
-            tracing::trace!(target: "neoism_backend::nvim", cols, rows, "dropped nvim resize: command channel closed");
+        let next = (cols.max(1), rows.max(1));
+        // `resize_all_grids` and the terminal reconciliation pass can both
+        // observe the same final geometry. Avoid waking the runtime for an
+        // identical value, and let `watch` collapse every genuinely distinct
+        // intermediate value to the newest one while an RPC is in flight.
+        if *self.resize_tx.borrow() == next {
+            return;
+        }
+        if let Err(err) = self.resize_tx.send(next) {
+            tracing::trace!(
+                target: "neoism_backend::nvim",
+                cols = next.0,
+                rows = next.1,
+                "dropped nvim resize: runtime channel closed ({err})"
+            );
         }
     }
 

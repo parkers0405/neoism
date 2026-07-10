@@ -73,13 +73,18 @@ impl LspService {
         &self,
         root: &Path,
     ) -> std::collections::BTreeSet<String> {
-        self.clients
-            .lock()
-            .expect("lsp client map lock poisoned")
-            .keys()
-            .filter(|key| key.root == root)
-            .map(|key| key.language.clone())
-            .collect()
+        let clients = self.clients.lock().expect("lsp client map lock poisoned");
+        let mut languages = std::collections::BTreeSet::new();
+        for key in clients.keys().filter(|key| key.root == root) {
+            languages.insert(key.language.clone());
+            // typescript-language-server is one workspace server for both
+            // TS and JS. Expose both aliases so either filetype's status pill
+            // reports the shared client as attached.
+            if key.language == "typescript" {
+                languages.insert("javascript".to_string());
+            }
+        }
+        languages
     }
 
     pub(super) fn workspace_symbols(
@@ -786,9 +791,19 @@ impl LspClientKey {
 }
 
 fn launch_config(root: &Path, spec: &LanguageSpec) -> LspLaunchConfig {
+    // JavaScript and TypeScript are protocols of the same
+    // typescript-language-server process. Canonicalizing the built-in key
+    // prevents one workspace from spawning two servers (and two tsserver
+    // trees) merely because the user opened one `.js` and one `.ts` file.
+    // Explicit per-language config below still gets its own id/key.
+    let builtin_family = if spec.id == "javascript" {
+        "typescript"
+    } else {
+        spec.id
+    };
     let mut launch = LspLaunchConfig {
-        id: spec.id.to_string(),
-        language: spec.id.to_string(),
+        id: builtin_family.to_string(),
+        language: builtin_family.to_string(),
         command: spec
             .command
             .iter()

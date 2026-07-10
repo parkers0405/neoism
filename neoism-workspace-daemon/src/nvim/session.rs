@@ -97,6 +97,10 @@ pub(crate) struct ManagedNvimSession {
     session: Mutex<NvimSession>,
     redraw_tx: broadcast::Sender<EditorServerMessage>,
     cursor_overlay_tx: broadcast::Sender<CursorOverlayServerMessage>,
+    /// Latest requested grid size. The dedicated worker never holds the
+    /// session mutex across `ui_try_resize`, so a slow resize cannot block
+    /// `SendKeys`, and watch semantics discard obsolete drag intermediates.
+    resize_tx: watch::Sender<(u64, u64, Option<String>)>,
     fanout_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -144,6 +148,13 @@ impl NvimSessionRegistry {
         let (cursor_overlay_tx, _) = broadcast::channel(1024);
         let redraw_forward_tx = redraw_tx.clone();
         let cursor_forward_tx = cursor_overlay_tx.clone();
+        let resize_nvim = session.nvim.clone();
+        let resize_surface = session.active_surface_id.clone();
+        let (resize_tx, mut resize_rx) = watch::channel::<(u64, u64, Option<String>)>((
+            DEFAULT_WIDTH,
+            DEFAULT_HEIGHT,
+            None,
+        ));
         let mut fanout_tasks = vec![
             tokio::spawn(async move {
                 while let Some(message) = redraw_rx.recv().await {
@@ -153,6 +164,53 @@ impl NvimSessionRegistry {
             tokio::spawn(async move {
                 while let Some(message) = cursor_overlay_rx.recv().await {
                     let _ = cursor_forward_tx.send(message);
+                }
+            }),
+            tokio::spawn(async move {
+                let mut last_size = (DEFAULT_WIDTH, DEFAULT_HEIGHT);
+                while resize_rx.changed().await.is_ok() {
+                    // Collapse one display frame of resize traffic. The watch
+                    // receiver retains only the last value while this timer or
+                    // an RPC is pending.
+                    tokio::time::sleep(Duration::from_millis(16)).await;
+                    let (width, height, surface_id) =
+                        resize_rx.borrow_and_update().clone();
+                    let next = (width.max(1), height.max(1));
+                    // Surface routing is independent of geometry. A newly
+                    // attached view can legitimately report the same initial
+                    // size as the previous one and still must become active.
+                    *resize_surface.lock().await = surface_id;
+                    if next == last_size {
+                        continue;
+                    }
+                    let client = resize_nvim.lock().await.clone();
+                    let Some(client) = client else {
+                        break;
+                    };
+                    match nvim_rpc_timeout(
+                        "ui_try_resize",
+                        client.ui_try_resize(next.0 as i64, next.1 as i64),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            last_size = next;
+                            let page_rows =
+                                ((next.1 as f32) * 0.66).round().max(1.0) as u64;
+                            let scroll_command = format!("set scroll={page_rows}");
+                            let _ = nvim_rpc_timeout(
+                                "set scroll",
+                                client.command(&scroll_command),
+                            )
+                            .await;
+                        }
+                        Err(error) => tracing::warn!(
+                            error = %error,
+                            width = next.0,
+                            height = next.1,
+                            "coalesced nvim resize failed"
+                        ),
+                    }
                 }
             }),
         ];
@@ -362,6 +420,7 @@ impl NvimSessionRegistry {
             session: Mutex::new(session),
             redraw_tx,
             cursor_overlay_tx,
+            resize_tx,
             fanout_tasks,
         });
 
@@ -418,6 +477,25 @@ impl NvimSessionHandle {
     }
 
     pub async fn handle(&self, msg: EditorClientMessage) -> Result<(), NvimError> {
+        if let EditorClientMessage::Resize {
+            width,
+            height,
+            surface_id,
+            ..
+        } = &msg
+        {
+            let next = (
+                u64::from((*width).max(1)),
+                u64::from((*height).max(1)),
+                surface_id.clone(),
+            );
+            let current = self.inner.resize_tx.borrow().clone();
+            if current != next {
+                let _ = self.inner.resize_tx.send(next);
+            }
+            return Ok(());
+        }
+
         // A non-fast COMMAND must never pin the session Mutex across its
         // (possibly deferred) rpc await. nvim defers every non-fast RPC
         // while normal mode has a pending count/operator (a bare digit
@@ -495,20 +573,40 @@ impl NvimSessionHandle {
     /// (scratch / no file backing) so we never seed a CRDT replica with a
     /// bogus key. This does NOT touch the redraw path.
     pub async fn read_active_buffer(&self) -> Result<Option<BufferText>, NvimError> {
-        // The ~400ms rust-LSP buffer poll (rust_lsp.rs) drives this. Holding
-        // the outer `session` Mutex across the (non-fast, count-deferrable)
-        // buffer-read exec_lua is exactly what wedged `handle()`/SendKeys
-        // while normal mode had a pending count/operator — the digit-key
-        // freeze. Skip the read while nvim is blocked (checked off a cloned
-        // handle, no lock held), so the poll never takes the session lock
-        // into a deferred read while a count is open.
+        // Holding the outer `session` Mutex across this non-fast,
+        // count-deferrable read would wedge `handle()`/SendKeys while normal
+        // mode has a pending operator. Check from a cloned handle, then keep
+        // both mutexes out of the actual RPC await below.
         let nvim = self.inner.session.lock().await.nvim.clone();
         if let Some(client) = nvim.lock().await.clone() {
             if nvim_is_blocked(&client).await {
                 return Ok(None);
             }
         }
-        self.inner.session.lock().await.read_active_buffer().await
+        // CRDT seeding and explicit LSP actions share this read. Keep the
+        // outer session mutex out of the RPC await so input can always clear a
+        // pending operator, and refuse whole-document copies in large-file
+        // mode before Lua materializes the line array.
+        read_active_buffer_rpc(&nvim, MAX_BACKGROUND_DOCUMENT_BYTES).await
+    }
+
+    /// Cheap periodic LSP probe. Neovim returns full text only when the
+    /// buffer's `changedtick` advanced; idle polls carry a few scalar fields.
+    /// Large buffers never cross the RPC boundary as one giant string.
+    pub(crate) async fn poll_active_buffer(
+        &self,
+    ) -> Result<Option<LspBufferPoll>, NvimError> {
+        let nvim = self.inner.session.lock().await.nvim.clone();
+        if let Some(client) = nvim.lock().await.clone() {
+            if nvim_is_blocked(&client).await {
+                return Ok(None);
+            }
+        }
+        // Do not reacquire the outer session lock for the RPC. Even with the
+        // fast blocked-mode gate above, nvim can enter a pending operator in
+        // the gap before `exec_lua`; keeping this lock would then prevent the
+        // concurrent SendKeys message that unblocks nvim.
+        poll_active_buffer_rpc(&nvim).await
     }
 
     /// Attach the Wave 6C `on_lines` → CRDT bridge to the CURRENT nvim
@@ -551,6 +649,18 @@ pub struct BufferText {
     pub cursor_line: u32,
     /// Cursor character in LSP coordinates (0-based; nvim byte column today).
     pub cursor_col: u32,
+}
+
+/// Revision-aware buffer snapshot used by the periodic Rust-LSP bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LspBufferPoll {
+    pub path: PathBuf,
+    /// `Some` only on the first poll or after `changedtick` advances.
+    pub text: Option<String>,
+    pub cursor_line: u32,
+    pub cursor_col: u32,
+    pub byte_len: u64,
+    pub too_large: bool,
 }
 
 /// One incremental nvim buffer change, as reported by the lua
@@ -1003,68 +1113,6 @@ impl NvimSession {
         Ok(())
     }
 
-    /// Read the active buffer's text + path in a single nvim round trip.
-    ///
-    /// Returns `Ok(None)` for an unnamed/scratch buffer. The text is the
-    /// buffer's lines joined with `\n` (matching nvim's internal model),
-    /// which is exactly what the daemon CRDT replica wants to seed from.
-    async fn read_active_buffer(&self) -> Result<Option<BufferText>, NvimError> {
-        // Clone the rpc client out so the exec_lua below never holds the
-        // `nvim` Mutex (send_keys waits on it) across a count-deferred read.
-        let nvim = self.nvim.lock().await.clone().ok_or(NvimError::Closed)?;
-        let nvim = &nvim;
-        // One lua call returns `{ path, lines }`. `nvim_buf_get_lines`
-        // with `false` strict_indexing on a fresh buffer yields the full
-        // line range; we join with "\n" to mirror nvim's text model.
-        let lua = r#"
-            local path = vim.api.nvim_buf_get_name(0)
-            local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-            local cursor = vim.api.nvim_win_get_cursor(0)
-            return {
-                path = path,
-                text = table.concat(lines, "\n"),
-                cursor_line = math.max((cursor[1] or 1) - 1, 0),
-                cursor_col = cursor[2] or 0,
-            }
-        "#;
-        let value = nvim_rpc_timeout("read active buffer", nvim.exec_lua(lua, vec![]))
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    error = %e,
-                    "[nvim-trace] read_active_buffer lua failed"
-                );
-                e
-            })?;
-
-        let path = value
-            .as_map()
-            .and_then(|map| map_get_str(map, "path"))
-            .unwrap_or_default();
-        if path.is_empty() {
-            // Unnamed buffer (scratch/no file) — nothing authoritative to seed.
-            return Ok(None);
-        }
-        let text = value
-            .as_map()
-            .and_then(|map| map_get_str(map, "text"))
-            .unwrap_or_default();
-        let cursor_line = value
-            .as_map()
-            .and_then(|map| map_get_u64(map, "cursor_line"))
-            .unwrap_or(0) as u32;
-        let cursor_col = value
-            .as_map()
-            .and_then(|map| map_get_u64(map, "cursor_col"))
-            .unwrap_or(0) as u32;
-        Ok(Some(BufferText {
-            path: PathBuf::from(path),
-            text,
-            cursor_line,
-            cursor_col,
-        }))
-    }
-
     /// Attach the `on_lines` → `neoism_crdt_lines` rpc bridge to the
     /// CURRENT buffer (Wave 6C nvim→CRDT direction). Idempotent per
     /// buffer via `b:neoism_crdt_attached`; the flag is cleared again in
@@ -1252,7 +1300,154 @@ pub(crate) async fn command_rpc(
         })
 }
 
-pub(crate) async fn nvim_rpc_timeout<T, E, F>(label: &'static str, fut: F) -> Result<T, NvimError>
+/// Read the active buffer in one RPC, but inspect its byte length before Lua
+/// allocates a line array or joins a multi-megabyte string. This is shared by
+/// CRDT seeding and explicit LSP actions; both enter large-file mode at the
+/// same limit instead of freezing Neovim's event loop.
+async fn read_active_buffer_rpc(
+    handle: &Arc<Mutex<Option<Neovim<NeovimWriter>>>>,
+    max_bytes: u64,
+) -> Result<Option<BufferText>, NvimError> {
+    let nvim = handle.lock().await.clone().ok_or(NvimError::Closed)?;
+    let lua = r#"
+        local max_bytes = ...
+        local buf = vim.api.nvim_get_current_buf()
+        local path = vim.api.nvim_buf_get_name(buf)
+        local cursor = vim.api.nvim_win_get_cursor(0)
+        local line_count = vim.api.nvim_buf_line_count(buf)
+        local byte_len = vim.api.nvim_buf_get_offset(buf, line_count)
+        if byte_len == nil or byte_len < 0 then byte_len = 0 end
+        if byte_len > max_bytes then
+            return {
+                path = path,
+                cursor_line = math.max((cursor[1] or 1) - 1, 0),
+                cursor_col = cursor[2] or 0,
+                byte_len = byte_len,
+                too_large = true,
+            }
+        end
+        return {
+            path = path,
+            text = table.concat(
+                vim.api.nvim_buf_get_lines(buf, 0, -1, false),
+                "\n"
+            ),
+            cursor_line = math.max((cursor[1] or 1) - 1, 0),
+            cursor_col = cursor[2] or 0,
+            byte_len = byte_len,
+            too_large = false,
+        }
+    "#;
+    let value = nvim_rpc_timeout(
+        "read active buffer",
+        nvim.exec_lua(lua, vec![Value::from(max_bytes)]),
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(
+            error = %error,
+            "[nvim-trace] read_active_buffer lua failed"
+        );
+        error
+    })?;
+    let Some(map) = value.as_map() else {
+        return Ok(None);
+    };
+    let path = map_get_str(map, "path").unwrap_or_default();
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let byte_len = map_get_u64(map, "byte_len").unwrap_or(0);
+    let too_large = map
+        .iter()
+        .find(|(key, _)| key.as_str() == Some("too_large"))
+        .and_then(|(_, value)| value.as_bool())
+        .unwrap_or(false);
+    if too_large {
+        return Err(NvimError::Rpc(format!(
+            "large-file mode: {} is {:.1} MiB (background document limit is {:.0} MiB)",
+            path,
+            byte_len as f64 / (1024.0 * 1024.0),
+            max_bytes as f64 / (1024.0 * 1024.0),
+        )));
+    }
+    Ok(Some(BufferText {
+        path: PathBuf::from(path),
+        text: map_get_str(map, "text").unwrap_or_default(),
+        cursor_line: map_get_u64(map, "cursor_line").unwrap_or(0) as u32,
+        cursor_col: map_get_u64(map, "cursor_col").unwrap_or(0) as u32,
+    }))
+}
+
+/// Revision-aware active-buffer probe used by the periodic LSP bridge.
+/// The rpc handle is cloned before awaiting so this never owns either the
+/// managed-session mutex or the nvim-slot mutex while Neovim executes Lua.
+async fn poll_active_buffer_rpc(
+    handle: &Arc<Mutex<Option<Neovim<NeovimWriter>>>>,
+) -> Result<Option<LspBufferPoll>, NvimError> {
+    let nvim = handle.lock().await.clone().ok_or(NvimError::Closed)?;
+    // `b:neoism_lsp_polled_tick` is buffer-local, so switching between
+    // files with equal changedtick values still performs one full sync for
+    // each file. Byte length is computed by Neovim without materializing
+    // every line into msgpack.
+    let lua = r#"
+        local buf = vim.api.nvim_get_current_buf()
+        local path = vim.api.nvim_buf_get_name(buf)
+        local cursor = vim.api.nvim_win_get_cursor(0)
+        local changedtick = vim.api.nvim_buf_get_changedtick(buf)
+        local line_count = vim.api.nvim_buf_line_count(buf)
+        local byte_len = vim.api.nvim_buf_get_offset(buf, line_count)
+        if byte_len == nil or byte_len < 0 then
+            byte_len = 0
+        end
+        local max_bytes = ...
+        local too_large = byte_len > max_bytes
+        local changed = vim.b[buf].neoism_lsp_polled_tick ~= changedtick
+        vim.b[buf].neoism_lsp_polled_tick = changedtick
+        local text = nil
+        if changed and not too_large then
+            text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+        end
+        return {
+            path = path,
+            text = text,
+            cursor_line = math.max((cursor[1] or 1) - 1, 0),
+            cursor_col = cursor[2] or 0,
+            byte_len = byte_len,
+            too_large = too_large,
+        }
+    "#;
+    let value = nvim_rpc_timeout(
+        "poll active buffer",
+        nvim.exec_lua(lua, vec![Value::from(MAX_LSP_DOCUMENT_BYTES)]),
+    )
+    .await?;
+    let Some(map) = value.as_map() else {
+        return Ok(None);
+    };
+    let path = map_get_str(map, "path").unwrap_or_default();
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let too_large = map
+        .iter()
+        .find(|(key, _)| key.as_str() == Some("too_large"))
+        .and_then(|(_, value)| value.as_bool())
+        .unwrap_or(false);
+    Ok(Some(LspBufferPoll {
+        path: PathBuf::from(path),
+        text: map_get_str(map, "text"),
+        cursor_line: map_get_u64(map, "cursor_line").unwrap_or(0) as u32,
+        cursor_col: map_get_u64(map, "cursor_col").unwrap_or(0) as u32,
+        byte_len: map_get_u64(map, "byte_len").unwrap_or(0),
+        too_large,
+    }))
+}
+
+pub(crate) async fn nvim_rpc_timeout<T, E, F>(
+    label: &'static str,
+    fut: F,
+) -> Result<T, NvimError>
 where
     E: std::fmt::Display,
     F: std::future::Future<Output = Result<T, E>>,
@@ -1295,7 +1490,9 @@ pub(crate) fn which_nvim() -> Option<PathBuf> {
     None
 }
 
-pub(crate) async fn apply_ide_defaults(nvim: &Neovim<NeovimWriter>) -> Result<(), NvimError> {
+pub(crate) async fn apply_ide_defaults(
+    nvim: &Neovim<NeovimWriter>,
+) -> Result<(), NvimError> {
     for command in neoism_backend::performer::nvim::ide_init_commands() {
         nvim.command(&command)
             .await
@@ -1347,4 +1544,3 @@ pub(crate) async fn install_buf_modified_autocmd(
     tracing::info!("[nvim-trace] installed BufModifiedSet rpc bridge");
     Ok(())
 }
-

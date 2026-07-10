@@ -314,20 +314,110 @@ pub fn parse_table_row_trimmed(line: &str) -> Option<Vec<String>> {
     if !trimmed.contains('|') {
         return None;
     }
-    let trimmed = trimmed.trim_matches('|');
-    let cells = trimmed
-        .split('|')
-        .map(|cell| cell.trim().to_string())
-        .collect::<Vec<_>>();
-    (cells.len() >= 2).then_some(cells)
+
+    // A pipe is a cell delimiter only outside code spans and when it is not
+    // backslash-escaped. This matches GFM's table tokenizer closely enough for
+    // the retained renderer while avoiding the classic false-table case:
+    // ordinary prose containing `` `left | right` ``.
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut delimiter_count = 0usize;
+    let mut code_ticks = 0usize;
+    let mut explicit_leading_pipe = false;
+    let mut explicit_trailing_pipe = false;
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' if index + 1 < chars.len() => {
+                cell.push(chars[index]);
+                cell.push(chars[index + 1]);
+                index += 2;
+            }
+            '`' => {
+                let start = index;
+                while index < chars.len() && chars[index] == '`' {
+                    cell.push('`');
+                    index += 1;
+                }
+                let run = index - start;
+                if code_ticks == 0 {
+                    if has_closing_backtick_run(&chars, index, run) {
+                        code_ticks = run;
+                    }
+                } else if code_ticks == run {
+                    code_ticks = 0;
+                }
+            }
+            '|' if code_ticks == 0 => {
+                explicit_leading_pipe |= index == 0;
+                explicit_trailing_pipe = index + 1 == chars.len();
+                cells.push(clean_table_cell(&cell));
+                cell.clear();
+                delimiter_count += 1;
+                index += 1;
+            }
+            ch => {
+                cell.push(ch);
+                index += 1;
+            }
+        }
+    }
+    cells.push(clean_table_cell(&cell));
+
+    if delimiter_count == 0 {
+        return None;
+    }
+    if explicit_leading_pipe && cells.first().is_some_and(String::is_empty) {
+        cells.remove(0);
+    }
+    if explicit_trailing_pipe && cells.last().is_some_and(String::is_empty) {
+        cells.pop();
+    }
+    (cells.len() >= 2
+        || (cells.len() == 1 && (explicit_leading_pipe || explicit_trailing_pipe)))
+        .then_some(cells)
+}
+
+fn clean_table_cell(cell: &str) -> String {
+    cell.trim().replace("\\|", "|")
+}
+
+fn has_closing_backtick_run(chars: &[char], mut index: usize, expected: usize) -> bool {
+    while index < chars.len() {
+        if chars[index] == '\\' {
+            index = (index + 2).min(chars.len());
+            continue;
+        }
+        if chars[index] != '`' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && chars[index] == '`' {
+            index += 1;
+        }
+        if index - start == expected {
+            return true;
+        }
+    }
+    false
 }
 
 /// `true` if `cells` is the `---|---|---` separator row of a GFM table.
 pub fn is_table_separator_trimmed(cells: &[String]) -> bool {
     cells.iter().all(|cell| {
         let cell = cell.trim();
-        !cell.is_empty() && cell.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
+        let core = cell.strip_prefix(':').unwrap_or(cell);
+        let core = core.strip_suffix(':').unwrap_or(core);
+        !core.is_empty() && core.chars().all(|ch| ch == '-')
     })
+}
+
+/// A GFM table starts only when a pipe-delimited header is immediately
+/// followed by a delimiter row with the same number of columns.
+pub fn is_table_delimiter_for_header(header: &[String], delimiter: &[String]) -> bool {
+    header.len() == delimiter.len() && is_table_separator_trimmed(delimiter)
 }
 
 // ---------------------------------------------------------------------------
@@ -759,5 +849,40 @@ mod tests {
             "---".to_string(),
             ":--:".to_string()
         ]));
+    }
+
+    #[test]
+    fn table_row_ignores_pipes_inside_code_and_escaped_pipes() {
+        assert_eq!(
+            parse_table_row_trimmed("ordinary prose with `` `left | right` ``"),
+            None
+        );
+        assert_eq!(
+            parse_table_row_trimmed("| `left | right` | a \\| b |"),
+            Some(vec!["`left | right`".into(), "a | b".into()])
+        );
+        assert_eq!(
+            parse_table_row_trimmed("unclosed ` code | still a delimiter"),
+            Some(vec!["unclosed ` code".into(), "still a delimiter".into()])
+        );
+    }
+
+    #[test]
+    fn table_delimiter_must_match_header_width_and_contain_dashes() {
+        let header = parse_table_row_trimmed("| one | two |").unwrap();
+        let valid = parse_table_row_trimmed("| :--- | ---: |").unwrap();
+        let too_short = parse_table_row_trimmed("| --- |").unwrap_or_default();
+        let colon_only = vec![":".into(), ":".into()];
+
+        assert!(is_table_delimiter_for_header(&header, &valid));
+        assert!(!is_table_delimiter_for_header(&header, &too_short));
+        assert!(!is_table_delimiter_for_header(&header, &colon_only));
+
+        let one_column_header = parse_table_row_trimmed("| one |").unwrap();
+        let one_column_delimiter = parse_table_row_trimmed("| --- |").unwrap();
+        assert!(is_table_delimiter_for_header(
+            &one_column_header,
+            &one_column_delimiter
+        ));
     }
 }

@@ -20,6 +20,19 @@
     }
 
     #[test]
+    fn theme_command_surfaces_failures_and_quotes_the_name() {
+        let cmd = vim_apply_theme_command(r#"tokyo"night"#);
+        assert_eq!(
+            cmd,
+            r#"lua require('rio.theme').apply("tokyo\"night")"#
+        );
+        assert!(
+            !cmd.contains("pcall"),
+            "theme failures must reach the managed RPC error log"
+        );
+    }
+
+    #[test]
     fn build_command_uses_nvim_by_default() {
         let cfg = NvimSpawnConfig::default();
         let cmd = build_nvim_command(&cfg);
@@ -29,6 +42,23 @@
         let dbg = format!("{cmd:?}");
         assert!(dbg.contains("nvim"));
         assert!(dbg.contains("--embed"));
+    }
+
+    #[test]
+    fn resize_watch_channel_keeps_only_the_latest_geometry() {
+        let (tx, mut rx) = tokio_watch::channel((80_u64, 24_u64));
+        tx.send((100, 30)).unwrap();
+        tx.send((120, 36)).unwrap();
+        tx.send((160, 48)).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            rx.changed().await.unwrap();
+            assert_eq!(*rx.borrow_and_update(), (160, 48));
+        });
     }
 
     #[test]

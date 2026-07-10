@@ -12,6 +12,8 @@ pub const DEFAULT_NOTES_VAULTS_DIR: &str = "Neoism/Vaults";
 pub const DEFAULT_NOTES_INDEX: &str = "Getting Started.md";
 pub const WELCOME_DIR: &str = "Welcome";
 pub const PROJECT_METADATA_FILE: &str = "project.toml";
+const DEFAULT_NOTES_WORKSPACE_ID: &str = "neoism-notes-default-v1";
+const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v1";
 
 #[derive(Debug, Clone)]
 pub struct NeoismWorkspace {
@@ -32,7 +34,7 @@ pub struct WorkspaceConfig {
 pub struct NotesConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_notes_workspace")]
+    #[serde(default = "default_notes_workspace_name")]
     pub workspace: String,
     #[serde(default = "default_note_ignores")]
     pub ignore: Vec<String>,
@@ -58,7 +60,7 @@ impl Default for NotesConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            workspace: default_notes_workspace(),
+            workspace: default_notes_workspace_name(),
             ignore: default_note_ignores(),
         }
     }
@@ -184,6 +186,23 @@ pub fn init_workspace(root: impl AsRef<Path>) -> std::io::Result<NeoismWorkspace
     Ok(workspace)
 }
 
+/// The global notes workspace used when the user has not explicitly linked
+/// the active code directory to a vault. This is intentionally virtual: it
+/// never writes a `.neoism/workspace.toml` into the process cwd (which may be
+/// `/` for a packaged macOS app) and has a stable identity for graph/cache
+/// paths across launches.
+pub fn default_notes_workspace() -> NeoismWorkspace {
+    NeoismWorkspace {
+        root: notes_workspace_dir(DEFAULT_NOTES_WORKSPACE),
+        config: WorkspaceConfig {
+            version: CURRENT_WORKSPACE_CONFIG_VERSION,
+            id: DEFAULT_NOTES_WORKSPACE_ID.to_string(),
+            name: DEFAULT_NOTES_WORKSPACE.to_string(),
+            notes: NotesConfig::default(),
+        },
+    }
+}
+
 pub fn normalize_root(root: &Path) -> std::io::Result<PathBuf> {
     if root.exists() {
         root.canonicalize()
@@ -198,7 +217,7 @@ fn default_true() -> bool {
     true
 }
 
-fn default_notes_workspace() -> String {
+fn default_notes_workspace_name() -> String {
     DEFAULT_NOTES_WORKSPACE.to_string()
 }
 
@@ -228,7 +247,7 @@ fn default_note_ignores() -> Vec<String> {
 fn migrate_workspace_config(config: &mut WorkspaceConfig) {
     if config.version < CURRENT_WORKSPACE_CONFIG_VERSION {
         if config.notes.workspace.trim().is_empty() {
-            config.notes.workspace = default_notes_workspace();
+            config.notes.workspace = default_notes_workspace_name();
         }
         config.version = CURRENT_WORKSPACE_CONFIG_VERSION;
     }
@@ -413,8 +432,9 @@ const WELCOME_PAGES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Seed the `Welcome/` getting-started folder into the vault. Each page is
-/// written only if missing, so user edits and deletions are preserved.
+/// Seed the `Welcome/` getting-started folder into the vault once. A marker
+/// records that the initial bundle was installed so later user edits and
+/// deletions remain authoritative.
 fn ensure_welcome_docs(workspace: &NeoismWorkspace) -> std::io::Result<()> {
     if !workspace.config.notes.enabled {
         return Ok(());
@@ -422,16 +442,37 @@ fn ensure_welcome_docs(workspace: &NeoismWorkspace) -> std::io::Result<()> {
     // The bundled getting-started docs always live in the DEFAULT vault,
     // not per-project/linked vaults, so there is one canonical home for
     // them regardless of which workspace is open.
-    let welcome = notes_workspace_dir(DEFAULT_NOTES_WORKSPACE).join(WELCOME_DIR);
-    for (name, body) in WELCOME_PAGES {
-        let page = welcome.join(name);
-        if let Some(parent) = page.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        if !page.exists() {
-            fs::write(page, body)?;
+    seed_welcome_docs(&notes_workspace_dir(DEFAULT_NOTES_WORKSPACE))
+}
+
+fn seed_welcome_docs(default_vault: &Path) -> std::io::Result<()> {
+    let marker = default_vault.join(WELCOME_SEEDED_MARKER);
+    if marker.is_file() {
+        return Ok(());
+    }
+
+    let welcome = default_vault.join(WELCOME_DIR);
+    // Older installs predate the marker. If their Welcome directory already
+    // contains anything, treat it as initialized and preserve missing pages
+    // as deliberate deletions instead of silently restoring them.
+    let existing_welcome = welcome
+        .read_dir()
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if !existing_welcome {
+        for (name, body) in WELCOME_PAGES {
+            let page = welcome.join(name);
+            if let Some(parent) = page.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if !page.exists() {
+                fs::write(page, body)?;
+            }
         }
     }
+
+    fs::create_dir_all(default_vault)?;
+    fs::write(marker, b"seeded\n")?;
     Ok(())
 }
 
@@ -458,6 +499,7 @@ pub fn notes_vaults_dir() -> PathBuf {
                 .map(PathBuf::from)
                 .map(|home| home.join(DEFAULT_NOTES_VAULTS_DIR))
         })
+        .or_else(|| dirs::home_dir().map(|home| home.join(DEFAULT_NOTES_VAULTS_DIR)))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_NOTES_VAULTS_DIR))
 }
 
@@ -474,9 +516,9 @@ pub fn global_cache_dir() -> PathBuf {
                 .map(PathBuf::from)
                 .map(|home| home.join(".cache").join("neoism"))
         })
+        .or_else(|| dirs::cache_dir().map(|cache| cache.join("neoism")))
         .unwrap_or_else(|| PathBuf::from(".neoism-cache"))
 }
-
 
 fn path_components(path: &Path) -> String {
     path.components()
@@ -588,5 +630,29 @@ mod tests {
         assert!(metadata.contains("kind = \"dir\""));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(notes_home);
+    }
+
+    #[test]
+    fn welcome_seed_respects_deleted_pages() {
+        let root = temp_root("welcome-delete");
+        seed_welcome_docs(&root).unwrap();
+        let getting_started = root.join(WELCOME_DIR).join(DEFAULT_NOTES_INDEX);
+        assert!(getting_started.is_file());
+
+        fs::remove_file(&getting_started).unwrap();
+        seed_welcome_docs(&root).unwrap();
+        assert!(!getting_started.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn default_notes_workspace_has_stable_global_identity() {
+        let first = default_notes_workspace();
+        let second = default_notes_workspace();
+        assert_eq!(first.config.id, DEFAULT_NOTES_WORKSPACE_ID);
+        assert_eq!(first.config.id, second.config.id);
+        assert_eq!(first.config.notes.workspace, DEFAULT_NOTES_WORKSPACE);
+        assert_eq!(first.notes_workspace_dir(), second.notes_workspace_dir());
     }
 }

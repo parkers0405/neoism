@@ -243,6 +243,21 @@ impl VulkanGlyphAtlas {
         self.slots.get(&key).copied()
     }
 
+    /// Forget every packed glyph while keeping the Vulkan image and its
+    /// descriptor binding alive.  The next inserts reuse the atlas from the
+    /// origin and `flush_uploads` performs the normal cross-frame fence wait
+    /// before overwriting those texels.
+    ///
+    /// This is intentionally a metadata reset rather than an image rebuild:
+    /// zooming through many font sizes must not permanently exhaust the
+    /// atlas, and rebuilding the image would also require replacing every
+    /// descriptor set which references it.
+    pub fn clear(&mut self) {
+        self.allocator.clear();
+        self.slots.clear();
+        self.pending.clear();
+    }
+
     /// Image view bound to this atlas. Used by callers to wire the
     /// atlas into their text-pipeline descriptor sets.
     #[inline]
@@ -485,6 +500,14 @@ impl VulkanGridRenderer {
     #[inline]
     pub fn mark_full_rebuild_done(&mut self) {
         self.needs_full_rebuild = false;
+    }
+
+    /// Recycle glyph storage after a font-size generation change.
+    pub fn clear_glyph_atlas(&mut self) {
+        self.atlas_grayscale.clear();
+        self.atlas_color.clear();
+        self.needs_full_rebuild = true;
+        self.fg_dirty = [true; FRAMES_IN_FLIGHT];
     }
 
     pub fn resize(&mut self, cols: u32, rows: u32) {

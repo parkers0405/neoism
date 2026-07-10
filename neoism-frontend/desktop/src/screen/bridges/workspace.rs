@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::super::*;
 use crate::workspace::{self as neo_workspace, notes::WorkspaceNoteIndex};
 use std::collections::{BTreeMap, HashMap};
@@ -483,6 +482,17 @@ fn active_notes_workspace_for_root(
         return Some(workspace);
     }
     neo_workspace::load_workspace(root).ok().flatten()
+}
+
+/// Resolve an explicitly linked/project vault when one exists; otherwise use
+/// the global Default notes vault. Merely opening Notes must never initialize
+/// the process cwd as a code workspace.
+fn notes_workspace_for_root_or_default(
+    root: &Path,
+) -> neo_workspace::config::NeoismWorkspace {
+    active_notes_workspace_for_root(root)
+        .filter(|workspace| workspace.config.notes.enabled)
+        .unwrap_or_else(neo_workspace::default_notes_workspace)
 }
 
 fn notes_sidebar_workspace_name(

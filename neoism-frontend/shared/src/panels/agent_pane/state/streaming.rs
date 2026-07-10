@@ -343,6 +343,14 @@ impl NeoismAgentPane {
 
     #[allow(dead_code)]
     pub(in crate::panels::agent_pane::state) fn note_streaming_from_part(&mut self, kind: NeoismAgentMessageKind, title: &str) {
+        if matches!(
+            kind,
+            NeoismAgentMessageKind::Reasoning
+                | NeoismAgentMessageKind::Tool
+                | NeoismAgentMessageKind::Subtask
+        ) {
+            self.retain_current_turn_trace();
+        }
         match kind {
             NeoismAgentMessageKind::Reasoning => {
                 self.note_streaming(NeoismAgentStreamingState::Thinking, None);
@@ -366,6 +374,9 @@ impl NeoismAgentPane {
         state: NeoismAgentStreamingState,
         tool: Option<String>,
     ) {
+        if state == NeoismAgentStreamingState::Compacting {
+            self.retain_current_turn_trace();
+        }
         if state == NeoismAgentStreamingState::Idle {
             self.streaming_state = state;
             self.streaming_started_at = None;

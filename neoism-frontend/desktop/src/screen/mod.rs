@@ -616,6 +616,22 @@ pub(crate) struct DrawOverNote {
     pub pane: crate::editor::neodraw::DrawPane,
 }
 
+/// Inputs whose transition requires a full chrome/grid reflow. Keeping this
+/// signature at the screen boundary repairs async pane-type changes (terminal
+/// -> editor) even when the code path that completed the transition did not
+/// originate from a resize event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChromeLayoutSignature {
+    route_id: usize,
+    reserves_editor_chrome: bool,
+    editor_top_bits: u32,
+    terminal_top_bits: u32,
+    bottom_bits: u32,
+    buffer_tabs_present: bool,
+    pane_tab_strip_count: usize,
+    pane_breadcrumb_count: usize,
+}
+
 pub struct Screen<'screen> {
     bindings: crate::bindings::KeyBindings,
     mouse_bindings: Vec<MouseBinding>,
@@ -625,6 +641,10 @@ pub struct Screen<'screen> {
     pub search_state: SearchState,
     pub hint_state: HintState,
     pub renderer: Renderer,
+    /// Last chrome state that completed a full grid reflow. Breadcrumb and
+    /// editor activation can finish asynchronously; a mismatch is repaired
+    /// in status sync before the grid is painted.
+    last_chrome_layout_signature: Option<ChromeLayoutSignature>,
     /// One-shot guard for the first-run welcome reveal. `Screen::new`
     /// returns an inline `Ok(Screen { .. })` so there is no `self` to call
     /// a startup method on; instead we flip this on the first `render`
@@ -1633,6 +1653,7 @@ impl Screen<'_> {
             mouse: Mouse::new(config.scroll.multiplier, config.scroll.divider),
             touchpurpose: TouchPurpose::default(),
             renderer,
+            last_chrome_layout_signature: None,
             welcome_reveal_pending: true,
             search_reply_pump_until: None,
             pending_notebook_executions: Vec::new(),

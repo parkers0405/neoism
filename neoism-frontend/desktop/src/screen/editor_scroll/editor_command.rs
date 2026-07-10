@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -691,12 +690,17 @@ impl Screen<'_> {
         // spring glides over the current viewport instead of replaying
         // stale rows.
         if self.context_manager.current().editor.is_some() {
-            // `height` from sugarloaf layout is the cell height in
-            // PHYSICAL pixels (already scaled). The spring tracks
-            // pixels in the same physical-coord system that
-            // `grid_padding` (the GPU uniform anchoring the cell grid)
-            // uses, so no conversion needed.
-            let cell_height = height.round().max(1.0) as f32;
+            // The editor may distribute a fractional pane remainder
+            // across its complete rows. Use that fitted physical pitch,
+            // not sugarloaf's nominal font cell height, so wheel commits
+            // and the GPU grid advance in the same units.
+            let cell_height = self
+                .context_manager
+                .current()
+                .dimension
+                .dimension
+                .height
+                .max(1.0);
             let rich_text_id = self.context_manager.current().rich_text_id;
 
             // Edge resistance must use the raw pixel delta, not only

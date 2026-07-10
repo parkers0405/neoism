@@ -50,7 +50,7 @@ use neoism_protocol::editor::{
 use nvim_rs::{Handler, Neovim, UiAttachOptions};
 use rmpv::Value;
 use tokio::process::Command as TokioCommand;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio::time::{timeout, Duration};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -62,6 +62,12 @@ pub type NeovimWriter = Box<dyn futures::AsyncWrite + Send + Unpin + 'static>;
 /// `OpenBuffer`.
 pub const DEFAULT_WIDTH: u64 = 80;
 pub const DEFAULT_HEIGHT: u64 = 24;
+/// Background features that require a whole-document copy (LSP and CRDT
+/// seeding) are intentionally disabled above this size. Repeatedly
+/// serializing multi-megabyte data files can monopolize both Neovim and its
+/// consumers. The core editor stays usable in large-file mode.
+pub const MAX_BACKGROUND_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
+pub const MAX_LSP_DOCUMENT_BYTES: u64 = MAX_BACKGROUND_DOCUMENT_BYTES;
 const NVIM_RPC_TIMEOUT: Duration = Duration::from_secs(4);
 pub const DEFAULT_SESSION_KEY: &str = "__default_editor__";
 

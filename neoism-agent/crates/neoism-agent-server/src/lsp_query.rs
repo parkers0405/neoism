@@ -503,7 +503,10 @@ pub(super) fn language_id_for_path(language: &str, file: &Path) -> &'static str 
             _ => "cpp",
         },
         "csharp" => "csharp",
-        "typescript" => "typescript",
+        "typescript" => match file.extension().and_then(OsStr::to_str) {
+            Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => "javascript",
+            _ => "typescript",
+        },
         "javascript" => "javascript",
         "python" => "python",
         "rust" => "rust",

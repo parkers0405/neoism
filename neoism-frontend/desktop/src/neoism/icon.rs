@@ -6,8 +6,8 @@
 // live in the shared crate so the web frontend can speak the same
 // agent vocabulary without dragging desktop-only dependencies in.
 // This file owns the asset bytes, `image_rs` decode, `sugarloaf` image
-// upload, and Linux `/proc` foreground-process detection — none of
-// which the web build needs or could compile.
+// upload, and native foreground-process detection — none of which the
+// web build needs or could compile.
 
 use neoism_backend::sugarloaf::{
     ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay, Sugarloaf,
@@ -149,39 +149,131 @@ pub fn detect_agent(
         std::fs::read(format!("/proc/{pgid}/cmdline")).unwrap_or_default();
     let cmdline = String::from_utf8_lossy(&cmdline_bytes);
 
-    if comm == "claude"
-        || cmdline_arg_is(&cmdline, "claude")
-        || cmdline.contains("/claude\0")
+    detect_agent_from_process_identity(&comm, &cmdline)
+}
+
+/// macOS has no `/proc`, but the foreground process-group contract is the
+/// same. Query every member of the foreground group through `ps`; this still
+/// works when an `npx`/shell wrapper is the group leader and Node is the child.
+/// `-ww` matters because the identifying package path is often near the end
+/// of the command line.
+#[cfg(target_os = "macos")]
+pub fn detect_agent(
+    main_fd: std::os::unix::io::RawFd,
+    _shell_pid: u32,
+) -> Option<AgentKind> {
+    use std::os::raw::c_int;
+
+    let pgid: c_int = unsafe { libc::tcgetpgrp(main_fd) };
+    if pgid <= 0 {
+        return None;
+    }
+
+    let pgid = pgid.to_string();
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-ww", "-g", &pgid, "-o", "comm=", "-o", "args="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let identity = String::from_utf8_lossy(&output.stdout);
+    detect_agent_from_process_identity("", &identity)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn detect_agent(_main_fd: i32, _shell_pid: u32) -> Option<AgentKind> {
+    None
+}
+
+fn detect_agent_from_process_identity(comm: &str, command: &str) -> Option<AgentKind> {
+    let comm = comm.trim().to_ascii_lowercase();
+    let command = command.to_ascii_lowercase();
+
+    if process_name_is(&comm, "claude")
+        || command_args_contain_process(&command, "claude")
+        || command.contains("@anthropic-ai/claude-code")
     {
         return Some(AgentKind::Claude);
     }
-    if comm == "opencode"
-        || cmdline_arg_is(&cmdline, "opencode")
-        || cmdline.contains("/opencode\0")
+    if process_name_is(&comm, "opencode")
+        || command_args_contain_process(&command, "opencode")
     {
         return Some(AgentKind::OpenCode);
     }
-    if comm == "codex"
-        || cmdline_arg_is(&cmdline, "codex")
-        || cmdline.contains("/codex\0")
-        || cmdline.contains("@openai/codex")
+    if process_name_is(&comm, "codex")
+        || command_args_contain_process(&command, "codex")
+        || command.contains("@openai/codex")
     {
         return Some(AgentKind::Codex);
     }
     None
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn detect_agent(_main_fd: i32, _shell_pid: u32) -> Option<AgentKind> {
-    None
+fn command_args_contain_process(command: &str, name: &str) -> bool {
+    command
+        .split(|ch: char| ch == '\0' || ch.is_whitespace())
+        .any(|arg| process_name_is(arg, name))
 }
 
-/// Returns true if any NUL-separated arg in `cmdline` (or its basename)
-/// equals `name`.
-#[cfg(target_os = "linux")]
-fn cmdline_arg_is(cmdline: &str, name: &str) -> bool {
-    cmdline.split('\0').any(|arg| {
-        let basename = arg.rsplit('/').next().unwrap_or(arg);
-        basename == name
-    })
+fn process_name_is(value: &str, name: &str) -> bool {
+    let value = value.trim_matches(|ch: char| {
+        matches!(ch, '\'' | '"' | '(' | ')' | '[' | ']' | ',' | ';')
+    });
+    let basename = value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .trim_end_matches(".exe");
+    basename == name || basename == format!("{name}.js")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detect_agent_from_process_identity, AgentKind};
+
+    #[test]
+    fn classifies_direct_agent_processes() {
+        assert_eq!(
+            detect_agent_from_process_identity("claude", "claude"),
+            Some(AgentKind::Claude)
+        );
+        assert_eq!(
+            detect_agent_from_process_identity("opencode", "/opt/homebrew/bin/opencode"),
+            Some(AgentKind::OpenCode)
+        );
+        assert_eq!(
+            detect_agent_from_process_identity("codex", "/usr/local/bin/codex"),
+            Some(AgentKind::Codex)
+        );
+    }
+
+    #[test]
+    fn classifies_node_package_agent_processes() {
+        assert_eq!(
+            detect_agent_from_process_identity(
+                "node",
+                "node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+            ),
+            Some(AgentKind::Claude)
+        );
+        assert_eq!(
+            detect_agent_from_process_identity(
+                "node",
+                "node /opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js"
+            ),
+            Some(AgentKind::Codex)
+        );
+    }
+
+    #[test]
+    fn does_not_match_agent_words_inside_unrelated_names() {
+        assert_eq!(
+            detect_agent_from_process_identity(
+                "node",
+                "node /tmp/my-codex-notes/server.js"
+            ),
+            None
+        );
+    }
 }

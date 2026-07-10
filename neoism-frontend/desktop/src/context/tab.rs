@@ -38,7 +38,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::{mpsc as tokio_mpsc, watch as tokio_watch};
 
 const MAX_EDITOR_REDRAW_NOTIFICATIONS_PER_FRAME: usize = 96;
 const MAX_EDITOR_REDRAW_EVENTS_PER_FRAME: usize = 4096;
@@ -379,6 +379,10 @@ pub struct DaemonEditorBackend {
     runtime: Option<tokio::runtime::Handle>,
     config: NvimSpawnConfig,
     send_tx: Option<tokio_mpsc::UnboundedSender<EditorClientMessage>>,
+    /// Resize traffic is latest-wins and separate from input/commands. A
+    /// window-edge drag must never fill the ordered command queue (or the
+    /// websocket) with dimensions that are obsolete before they are sent.
+    resize_tx: Option<tokio_watch::Sender<(u32, u32)>>,
 }
 
 

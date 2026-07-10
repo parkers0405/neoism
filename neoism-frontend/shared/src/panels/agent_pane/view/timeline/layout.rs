@@ -455,10 +455,18 @@ fn append_estimated_rows<P>(
     let mut previous_visible_was_edit_tool = false;
     let mut appended_any = false;
     let source_len = pane.messages().len();
+    let visibility = timeline_message_visibility(
+        pane.messages(),
+        pane.timeline_live_trace_start(),
+    );
     let mut source_index = 0;
     while source_index < source_len {
-        let Some(item) =
-            next_timeline_item::<P>(pane, source_index, previous_visible_was_edit_tool)
+        let Some(item) = next_timeline_item::<P>(
+            pane,
+            &visibility,
+            source_index,
+            previous_visible_was_edit_tool,
+        )
         else {
             source_index += 1;
             continue;
@@ -716,6 +724,10 @@ where
     let mut previous_visible_was_edit_tool = false;
     let mut source_index = 0usize;
     let mut converge: Option<(usize, f32)> = None;
+    let visibility = timeline_message_visibility(
+        pane.messages(),
+        pane.timeline_live_trace_start(),
+    );
 
     while source_index < source_len {
         // Once we reach previously-laid-out territory, try to converge: if the
@@ -730,8 +742,12 @@ where
             }
         }
 
-        let Some(item) =
-            next_timeline_item::<P>(pane, source_index, previous_visible_was_edit_tool)
+        let Some(item) = next_timeline_item::<P>(
+            pane,
+            &visibility,
+            source_index,
+            previous_visible_was_edit_tool,
+        )
         else {
             source_index += 1;
             continue;
@@ -893,10 +909,18 @@ where
 {
     let mut appended_any = false;
     let source_len = pane.messages().len();
+    let visibility = timeline_message_visibility(
+        pane.messages(),
+        pane.timeline_live_trace_start(),
+    );
     let mut source_index = start_index;
     while source_index < source_len {
-        let Some(item) =
-            next_timeline_item::<P>(pane, source_index, previous_visible_was_edit_tool)
+        let Some(item) = next_timeline_item::<P>(
+            pane,
+            &visibility,
+            source_index,
+            previous_visible_was_edit_tool,
+        )
         else {
             source_index += 1;
             continue;
@@ -994,6 +1018,7 @@ enum NextTimelineItem<M> {
 
 fn next_timeline_item<P>(
     pane: &P,
+    visibility: &[bool],
     source_index: usize,
     previous_visible_was_edit_tool: bool,
 ) -> Option<NextTimelineItem<P::Message>>
@@ -1001,6 +1026,11 @@ where
     P: AgentTimelinePane,
 {
     let messages = pane.messages();
+    // Filter before grouping. Otherwise an archived read-tool run could enter
+    // through the group fast path even though its typed rows are hidden.
+    if !visibility.get(source_index).copied().unwrap_or(false) {
+        return None;
+    }
     if let Some((source_end_exclusive, group_message)) =
         read_tool_group_at(messages, source_index)
     {
@@ -1012,6 +1042,50 @@ where
     let message = messages.get(source_index)?;
     display_timeline_message(message, previous_visible_was_edit_tool)
         .map(|message| NextTimelineItem::Message { message })
+}
+
+/// Build a presentation mask without mutating the persisted transcript.
+///
+/// Trace observed during the current session visit remains visible even after
+/// the turn settles. Earlier/reloaded turns hide reasoning, tools, subtasks,
+/// and compaction, plus assistant progress text preceding later trace work.
+/// Every trailing assistant text part remains visible so a final answer split
+/// across several parts is never truncated.
+pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
+    messages: &[M],
+    live_trace_start: Option<usize>,
+) -> Vec<bool> {
+    let mut visible = vec![false; messages.len()];
+    let live_start = live_trace_start.unwrap_or(messages.len()).min(messages.len());
+
+    for (index, message) in messages[live_start..].iter().enumerate() {
+        visible[live_start + index] =
+            message.kind() != AgentTimelineMessageKind::System;
+    }
+
+    // In reverse order, an assistant part is final iff no later trace item
+    // exists before the next user boundary.
+    let mut later_trace_in_turn = false;
+    for index in (0..live_start).rev() {
+        match messages[index].kind() {
+            AgentTimelineMessageKind::User => {
+                visible[index] = true;
+                later_trace_in_turn = false;
+            }
+            AgentTimelineMessageKind::Assistant => {
+                visible[index] = !later_trace_in_turn;
+            }
+            AgentTimelineMessageKind::Reasoning
+            | AgentTimelineMessageKind::Tool
+            | AgentTimelineMessageKind::Subtask
+            | AgentTimelineMessageKind::Compaction => {
+                later_trace_in_turn = true;
+            }
+            AgentTimelineMessageKind::System => {}
+        }
+    }
+
+    visible
 }
 
 fn build_timeline_layout_pages<M>(

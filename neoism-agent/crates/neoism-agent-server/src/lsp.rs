@@ -30,7 +30,7 @@ mod lsp_service;
 mod lsp_uri;
 #[cfg(test)]
 use lsp_client::read_lsp_message;
-use lsp_languages::{LspOperation, LANGUAGE_SPECS};
+use lsp_languages::{LspOperation, WorkspaceScan, LANGUAGE_SPECS};
 #[cfg(test)]
 use lsp_query::query_workspace_symbols_with_command;
 use lsp_query::{
@@ -41,7 +41,7 @@ use lsp_query::{
 };
 use lsp_scan::{
     command_available, detected_servers, file_query_specs, language_detected,
-    normalized_file, normalized_root, scan_workspace,
+    normalized_file, normalized_root, scan_workspace, server_status,
 };
 use lsp_uri::path_to_file_uri;
 
@@ -252,6 +252,68 @@ pub fn status(directory: impl AsRef<Path>) -> Vec<LspStatus> {
             .filter(|status| !seen.contains(&status.id)),
     );
     statuses
+}
+
+/// Status narrowed to the language(s) that can handle one concrete file.
+/// This intentionally avoids recursively scanning the whole workspace; the
+/// file extension is stronger evidence and this path runs in the editor's
+/// periodic status refresh.
+pub fn status_for_file(
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+) -> Vec<LspStatus> {
+    let root = normalized_root(directory.as_ref());
+    let file = normalized_file(&root, file.as_ref());
+    let Some(extension) = file
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+    else {
+        return status(root);
+    };
+
+    let matching_specs = LANGUAGE_SPECS
+        .iter()
+        .filter(|spec| spec.extensions.contains(&extension.as_str()))
+        .collect::<Vec<_>>();
+    if matching_specs.is_empty() {
+        return status(root);
+    }
+
+    let mut evidence = WorkspaceScan {
+        files: 1,
+        ..WorkspaceScan::default()
+    };
+    evidence.extensions.insert(extension.clone(), 1);
+    let mut statuses = matching_specs
+        .iter()
+        .map(|spec| server_status(&root, &evidence, spec))
+        .collect::<Vec<_>>();
+    let builtin_languages = matching_specs
+        .iter()
+        .map(|spec| spec.id)
+        .collect::<BTreeSet<_>>();
+    let seen = statuses
+        .iter()
+        .map(|status| status.id.clone())
+        .collect::<BTreeSet<_>>();
+    statuses.extend(configured_servers(&root).into_iter().filter(|status| {
+        !seen.contains(&status.id)
+            && (builtin_languages.contains(status.language.as_str())
+                || status.detected.extensions.contains_key(&extension))
+    }));
+    statuses
+}
+
+/// File-scoped operations do not need a recursive workspace scan when a
+/// built-in language claims the extension. Unknown/extensionless files retain
+/// marker-based detection as a fallback.
+fn workspace_scan_for_file(root: &Path, file: &Path) -> WorkspaceScan {
+    if language_id_for_path(file).is_some() {
+        WorkspaceScan::default()
+    } else {
+        scan_workspace(root)
+    }
 }
 
 /// The built-in language id whose server handles `file`'s extension, if
@@ -658,7 +720,7 @@ pub fn hover(
 ) -> Vec<LspHover> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -710,7 +772,7 @@ pub fn completion(
 ) -> Vec<LspCompletionItem> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     for spec in file_query_specs(&scan, &file, LspOperation::Completion) {
         match lsp_service::service().completion(&root, &file, line, character, text, spec)
         {
@@ -733,7 +795,7 @@ pub fn completion_trigger_characters(
 ) -> Vec<String> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     for spec in file_query_specs(&scan, &file, LspOperation::Completion) {
         if let Ok(chars) =
             lsp_service::service().completion_trigger_characters(&root, spec)
@@ -754,7 +816,7 @@ pub fn definitions(
 ) -> Vec<LspLocation> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -801,7 +863,7 @@ pub fn references(
 ) -> Vec<LspLocation> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -843,7 +905,7 @@ pub fn implementations(
 ) -> Vec<LspLocation> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -885,7 +947,7 @@ pub fn prepare_call_hierarchy(
 ) -> Vec<LspCallHierarchyItem> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -947,7 +1009,7 @@ fn call_hierarchy_calls(
 ) -> Vec<LspCallHierarchyCall> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -998,7 +1060,7 @@ pub fn diagnostics(
 ) -> Vec<LspDiagnostic> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -1085,7 +1147,7 @@ pub fn document_symbols(
 ) -> Vec<LspDocumentSymbol> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
 
     for spec in file_query_specs(&scan, &file, LspOperation::DocumentSymbols) {
@@ -1117,7 +1179,7 @@ pub fn document_symbols(
 pub fn formatting(directory: impl AsRef<Path>, file: impl AsRef<Path>) -> Vec<Value> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
 
     for spec in file_query_specs(&scan, &file, LspOperation::Formatting) {
@@ -1152,7 +1214,7 @@ pub fn code_actions(
 ) -> Vec<Value> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
 
     for spec in file_query_specs(&scan, &file, LspOperation::CodeActions) {
@@ -1186,7 +1248,7 @@ pub fn resolve_code_action(
 ) -> Option<Value> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
 
     for spec in file_query_specs(&scan, &file, LspOperation::Rename) {
         match lsp_service::service().resolve_code_action(&root, spec, action.clone()) {
@@ -1212,7 +1274,7 @@ pub fn execute_command(
 ) -> Option<Value> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
 
     for spec in file_query_specs(&scan, &file, LspOperation::CodeActions) {
         match lsp_service::service().execute_command(&root, spec, command.clone()) {
@@ -1240,7 +1302,7 @@ pub fn rename(
 ) -> Vec<Value> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
 
     for spec in file_query_specs(&scan, &file, LspOperation::Rename) {
@@ -1292,7 +1354,7 @@ pub fn touch_document_diagnostics(
 ) -> Vec<(String, PathBuf, Vec<LspDiagnostic>)> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut results = Vec::new();
 
     for spec in file_query_specs(&scan, &file, LspOperation::Diagnostics) {
@@ -1329,7 +1391,7 @@ pub fn sync_document(
 ) -> Vec<String> {
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
-    let scan = scan_workspace(&root);
+    let scan = workspace_scan_for_file(&root, &file);
     let mut synced = Vec::new();
     for spec in file_query_specs(&scan, &file, LspOperation::Diagnostics) {
         match lsp_service::service().sync(&root, &file, text, spec) {

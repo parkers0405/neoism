@@ -572,6 +572,9 @@ pub struct NeoismAgentPane {
     timeline_layout_cache: RefCell<Option<TimelineLayoutCache>>,
     timeline_dirty_message_ids: BTreeSet<String>,
     timeline_dirty_message_indices: BTreeSet<usize>,
+    /// First source row whose trace was observed live during this visit to the
+    /// session. It is cleared on session navigation, never persisted.
+    timeline_live_trace_start: Option<usize>,
     pub(super) timeline_history: AgentTimelineHistoryState,
     scrollbar_thumb_rect: Option<[f32; 4]>,
     scrollbar_track_rect: Option<[f32; 4]>,
@@ -737,6 +740,7 @@ impl Default for NeoismAgentPane {
             timeline_layout_cache: RefCell::new(None),
             timeline_dirty_message_ids: BTreeSet::new(),
             timeline_dirty_message_indices: BTreeSet::new(),
+            timeline_live_trace_start: None,
             timeline_history: AgentTimelineHistoryState::default(),
             scrollbar_thumb_rect: None,
             scrollbar_track_rect: None,

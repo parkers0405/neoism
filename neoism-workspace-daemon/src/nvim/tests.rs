@@ -95,6 +95,20 @@
     }
 
     #[tokio::test]
+    async fn resize_mailbox_keeps_only_latest_geometry_and_surface() {
+        let (tx, mut rx) = watch::channel((80_u64, 24_u64, None::<String>));
+        tx.send((100, 30, Some("pane:a".into()))).unwrap();
+        tx.send((120, 36, Some("pane:a".into()))).unwrap();
+        tx.send((160, 48, Some("pane:b".into()))).unwrap();
+
+        rx.changed().await.unwrap();
+        assert_eq!(
+            rx.borrow_and_update().clone(),
+            (160, 48, Some("pane:b".into()))
+        );
+    }
+
+    #[tokio::test]
     async fn redraw_handler_stamps_active_surface_id_on_grid_resize() {
         let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<EditorServerMessage>();
         let (cursor_overlay_tx, _cursor_overlay_rx) =

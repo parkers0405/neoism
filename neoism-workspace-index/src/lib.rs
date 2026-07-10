@@ -13,9 +13,10 @@ pub mod registry;
 pub mod watcher;
 
 pub use config::{
-    ensure_notes_workspace, init_workspace, link_code_dir_to_workspace_vault,
-    link_workspace_to_vault_project, linked_project_for_code_dir, load_workspace,
-    notes_vaults_dir, save_workspace, vault_project_links,
+    default_notes_workspace, ensure_notes_workspace, init_workspace,
+    link_code_dir_to_workspace_vault, link_workspace_to_vault_project,
+    linked_project_for_code_dir, load_workspace, notes_vaults_dir, save_workspace,
+    vault_project_links,
 };
 pub use graph_db::{
     rebuild_note_graph, remove_note_graph_file, replace_note_graph_file,

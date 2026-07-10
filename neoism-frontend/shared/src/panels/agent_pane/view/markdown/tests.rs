@@ -181,3 +181,67 @@
             }
         ));
     }
+
+    #[test]
+    fn styled_inline_spans_expose_word_wrap_opportunities() {
+        let tokens = inline_wrap_tokens(
+            "Something **The universe is wide** and ~~still styled~~ with [a long label](file.rs)",
+        );
+        let sources: Vec<String> = tokens.iter().map(InlineWrapToken::source).collect();
+
+        assert_eq!(
+            sources,
+            vec![
+                "Something",
+                "**The**",
+                "**universe**",
+                "**is**",
+                "**wide**",
+                "and",
+                "~~still~~",
+                "~~styled~~",
+                "with",
+                "[a](file.rs)",
+                "[long](file.rs)",
+                "[label](file.rs)",
+            ]
+        );
+        assert!(!tokens[0].whitespace_before);
+        assert!(tokens.iter().skip(1).all(|token| token.whitespace_before));
+    }
+
+    #[test]
+    fn adjacent_inline_styles_do_not_invent_whitespace() {
+        let tokens = inline_wrap_tokens("left**bold words**right");
+        let rendered: Vec<(String, bool)> = tokens
+            .iter()
+            .map(|token| (token.source(), token.whitespace_before))
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                ("left".into(), false),
+                ("**bold**".into(), false),
+                ("**words**".into(), true),
+                ("right".into(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn outer_blank_blocks_never_inflate_a_message_card() {
+        let mut blocks = vec![
+            AssistantMarkdownBlock::Blank,
+            AssistantMarkdownBlock::Paragraph(vec!["visible".into()]),
+            AssistantMarkdownBlock::Blank,
+        ];
+
+        trim_outer_blank_blocks(&mut blocks);
+
+        assert!(matches!(
+            blocks.as_slice(),
+            [AssistantMarkdownBlock::Paragraph(lines)]
+                if lines.len() == 1 && lines[0] == "visible"
+        ));
+    }

@@ -71,9 +71,10 @@ pub(crate) fn compute(
     // `.floor()` so terminal panes get the conservative row count
     // (every row fully visible — the shell prints to all `lines`
     // rows, so a partial row at the bottom would cut off the last
-    // line of output). Editor (nvim) contexts get the extra "render
-    // one more row" treatment via `editor_rows_above_bottom_chrome`
-    // so nvim still sits flush against the status line.
+    // line of output). Editor (nvim) contexts keep this conservative
+    // count, then distribute the fractional remainder across those
+    // complete rows once tabs, breadcrumbs, splits, and status geometry
+    // are known.
     let cell_height = dimensions.height.round().max(1.0);
     let lines = (available_height / cell_height).floor();
     let visible_lines = std::cmp::max(lines as usize, MIN_LINES);

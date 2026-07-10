@@ -370,6 +370,7 @@ impl NeoismAgentPane {
         self.parent_session_id = None;
         self.clear_pending_user_prompts();
         self.messages.clear();
+        self.reset_session_runtime_ui();
         self.invalidate_timeline_layout();
     }
 
@@ -380,6 +381,7 @@ impl NeoismAgentPane {
         }
         self.session_id = Some(trimmed.clone());
         self.messages.clear();
+        self.reset_session_runtime_ui();
         self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
         self.push_outbound(OutboundAgentCommand::SwitchSession {
             session_id: trimmed,
@@ -401,6 +403,7 @@ impl NeoismAgentPane {
             // -- pure in-memory ----------------------------------------
             "/clear" => {
                 self.messages.clear();
+                self.timeline_live_trace_start = None;
                 self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
             }
             "/exit" => self.request_close_tab(),

@@ -284,6 +284,12 @@ local function recompute(buf)
     changes_by_buf[buf] = nil
     return
   end
+  if require("rio.large_file").is_large(buf) then
+    baselines[buf] = nil
+    changes_by_buf[buf] = nil
+    clear_signs(buf)
+    return
+  end
   local baseline = baselines[buf]
   if baseline == nil then
     -- No baseline yet → nothing to compare against. The first
@@ -316,6 +322,12 @@ local function recompute(buf)
 end
 
 local function schedule_recompute(buf, delay_ms)
+  if require("rio.large_file").is_large(buf) then
+    clear_pending(buf)
+    changes_by_buf[buf] = nil
+    clear_signs(buf)
+    return
+  end
   clear_pending(buf)
   pending[buf] = vim.defer_fn(function()
     pending[buf] = nil
@@ -329,6 +341,12 @@ end
 
 local function capture_baseline(buf, baseline)
   if not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  if require("rio.large_file").is_large(buf) then
+    baselines[buf] = nil
+    changes_by_buf[buf] = nil
+    clear_signs(buf)
     return
   end
   -- Only track real on-disk buffers — special buftypes (terminal,

@@ -100,6 +100,10 @@ impl AgentTimelinePane for NeoismAgentPane {
         NeoismAgentPane::has_status_activity(self)
     }
 
+    fn timeline_live_trace_start(&self) -> Option<usize> {
+        NeoismAgentPane::timeline_live_trace_start(self)
+    }
+
     fn queued_prompt_count(&self) -> usize {
         NeoismAgentPane::queued_prompt_count(self)
     }

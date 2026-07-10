@@ -124,6 +124,10 @@ function M.start_for_buffer(buf)
   if not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_buf_is_loaded(buf) then
     return
   end
+  if require("rio.large_file").is_large(buf) then
+    pcall(vim.treesitter.stop, buf)
+    return
+  end
 
   local ft = vim.bo[buf].filetype
   local candidates = filetypes[ft]

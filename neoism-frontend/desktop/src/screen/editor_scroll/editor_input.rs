@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -34,7 +33,7 @@ impl Screen<'_> {
                 // sugarloaf's font/Metrics path), so DON'T multiply
                 // again — that's a 1.2-1.4x over-shoot of the lag
                 // amount and makes the spring decay overshoot.
-                let cell_h = ctx.dimension.dimension.height.round().max(1.0);
+                let cell_h = ctx.dimension.dimension.height.max(1.0);
                 let viewport_rows = ctx
                     .terminal
                     .try_lock_unfair()
@@ -67,7 +66,7 @@ impl Screen<'_> {
                 if ctx.editor.is_none() {
                     continue;
                 }
-                let cell_h = ctx.dimension.dimension.height.round().max(1.0);
+                let cell_h = ctx.dimension.dimension.height.max(1.0);
                 let committed = self
                     .renderer
                     .editor_scroll
@@ -850,5 +849,4 @@ impl Screen<'_> {
         }
         drop(terminal);
     }
-
 }

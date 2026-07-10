@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::workspace::{self as neo_workspace};
 use std::path::PathBuf;
@@ -101,12 +100,18 @@ impl Screen<'_> {
             .or_else(|| self.active_pane_workspace_root())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let note_dir = active_notes_workspace_for_root(&root)
-            .filter(|workspace| workspace.config.notes.enabled)
-            .map(|workspace| workspace.notes_workspace_dir())
-            .unwrap_or(root.clone());
+        let workspace = notes_workspace_for_root_or_default(&root);
+        if let Err(err) = neo_workspace::ensure_notes_workspace(&workspace) {
+            self.renderer.notifications.push(
+                format!("Could not prepare Neoism notes: {err}"),
+                NotificationLevel::Error,
+            );
+            self.mark_dirty();
+            return;
+        }
+        let note_dir = workspace.notes_workspace_dir();
 
-        let graph = match neo_workspace::NoteGraph::open(&root) {
+        let graph = match neo_workspace::NoteGraph::from_workspace(workspace) {
             Ok(graph) => graph,
             Err(err) => {
                 self.renderer.notifications.push(
@@ -117,8 +122,8 @@ impl Screen<'_> {
                 return;
             }
         };
-        // Reindex first so freshly-saved `[[wiki links]]` show up as edges.
-        let _ = graph.reindex();
+        // `from_workspace` reindexes first so freshly-saved `[[wiki links]]`
+        // show up as edges.
         let summary = match graph.graph(neo_workspace::NoteQueryLimit(2000)) {
             Ok(summary) => summary,
             Err(err) => {
@@ -188,24 +193,10 @@ impl Screen<'_> {
             .or_else(|| self.active_pane_workspace_root())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let workspace = match active_notes_workspace_for_root(&root) {
-            Some(workspace) => workspace,
-            None => match neo_workspace::init_workspace(&root) {
-                Ok(workspace) => workspace,
-                Err(err) => {
-                    self.renderer.notifications.push(
-                        format!("Could not initialize Neoism notes: {err}"),
-                        NotificationLevel::Error,
-                    );
-                    self.mark_dirty();
-                    return;
-                }
-            },
-        };
-        // Seed the vault (note dirs + bundled `Welcome/` getting-started
-        // docs) even when the workspace config already existed — the
-        // `Some(workspace)` branch above skips `init_workspace`, so an
-        // existing project would otherwise open onto an empty vault.
+        let workspace = notes_workspace_for_root_or_default(&root);
+        // Seed the selected vault plus the bundled Default/Welcome docs.
+        // This is safe for both linked projects and the virtual Default
+        // workspace: it never creates project metadata in the active cwd.
         if let Err(err) = neo_workspace::ensure_notes_workspace(&workspace) {
             self.renderer.notifications.push(
                 format!("Could not prepare Neoism notes: {err}"),
@@ -237,8 +228,8 @@ impl Screen<'_> {
     pub(crate) fn reveal_welcome_notes_first_run(&mut self) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
-        let marker = neoism_backend::config::config_dir_path()
-            .join(".notes-welcome-pending");
+        let marker =
+            neoism_backend::config::config_dir_path().join(".notes-welcome-pending");
         if !marker.exists() {
             return;
         }
@@ -249,23 +240,7 @@ impl Screen<'_> {
             .or_else(|| self.active_pane_workspace_root())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let workspace = match active_notes_workspace_for_root(&root) {
-            Some(workspace) => workspace,
-            None => match neo_workspace::init_workspace(&root) {
-                Ok(workspace) => workspace,
-                Err(err) => {
-                    self.renderer.notifications.push(
-                        format!("Could not initialize Neoism notes: {err}"),
-                        NotificationLevel::Error,
-                    );
-                    // Drop the marker even on failure so we don't retry
-                    // the reveal every frame for the rest of the session.
-                    let _ = std::fs::remove_file(&marker);
-                    self.mark_dirty();
-                    return;
-                }
-            },
-        };
+        let workspace = notes_workspace_for_root_or_default(&root);
         // Seed the vault (note dirs + bundled `Welcome/` getting-started
         // docs) — same as the manual open path.
         if let Err(err) = neo_workspace::ensure_notes_workspace(&workspace) {

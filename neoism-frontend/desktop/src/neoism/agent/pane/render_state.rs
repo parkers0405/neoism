@@ -143,6 +143,10 @@ impl NeoismAgentPane {
         self.timeline_layout_epoch
     }
 
+    pub(crate) fn timeline_live_trace_start(&self) -> Option<usize> {
+        self.timeline_live_trace_start
+    }
+
     pub(crate) fn take_timeline_layout_cache(&self) -> Option<TimelineLayoutCache> {
         self.timeline_layout_cache.borrow_mut().take()
     }
@@ -162,6 +166,9 @@ impl NeoismAgentPane {
     pub(crate) fn note_timeline_prepend(&mut self, count: usize) {
         if count == 0 {
             return;
+        }
+        if let Some(start) = &mut self.timeline_live_trace_start {
+            *start = start.saturating_add(count);
         }
         self.pending_timeline_prepend_count =
             Some(self.pending_timeline_prepend_count.unwrap_or(0) + count);

@@ -1311,6 +1311,13 @@ impl Screen<'_> {
             self.sync_current_workspace_chrome_snapshot();
         }
 
+        // Editor activation and breadcrumb data arrive from asynchronous nvim
+        // notifications. Enforce the chrome/grid geometry invariant after
+        // those notifications have been applied, before this frame paints.
+        // This replaces the accidental "Ctrl+/- fixes line 1" recovery with
+        // the same full reflow at the actual state transition.
+        self.repair_chrome_layout_if_stale();
+
         if is_search_active {
             // Update search hints in renderable content
             let mut search_terminal_busy = false;

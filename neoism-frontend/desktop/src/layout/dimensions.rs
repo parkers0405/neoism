@@ -10,6 +10,9 @@ pub struct ContextDimension {
     pub columns: usize,
     pub lines: usize,
     pub dimension: TextDimensions,
+    /// Font-derived cell height before an editor pane distributes its
+    /// fractional vertical remainder across complete rows.
+    pub nominal_cell_height: f32,
     pub margin: Margin,
     pub line_height: f32,
 }
@@ -23,6 +26,7 @@ impl Default for ContextDimension {
             lines: MIN_LINES,
             line_height: 1.,
             dimension: TextDimensions::default(),
+            nominal_cell_height: 0.0,
             margin: Margin::default(),
         }
     }
@@ -43,6 +47,7 @@ impl ContextDimension {
             columns,
             lines,
             dimension,
+            nominal_cell_height: dimension.height,
             margin,
             line_height,
         }
@@ -69,6 +74,30 @@ impl ContextDimension {
     #[inline]
     pub fn update_dimensions(&mut self, dimensions: TextDimensions) {
         self.dimension = dimensions;
+        self.nominal_cell_height = dimensions.height;
+        self.update();
+    }
+
+    #[inline]
+    pub fn base_cell_height(&self) -> f32 {
+        if self.nominal_cell_height > 0.0 {
+            self.nominal_cell_height
+        } else {
+            self.dimension.height
+        }
+    }
+
+    /// Apply a pane-local editor row fit calculated after tabs,
+    /// breadcrumbs, splits, and status chrome are known.
+    #[inline]
+    pub fn apply_editor_row_fit(&mut self, fit: neoism_ui::chrome_policy::EditorRowFit) {
+        self.lines = usize::from(fit.rows).max(1);
+        self.dimension.height = fit.cell_height.max(1.0);
+    }
+
+    #[inline]
+    pub fn restore_nominal_cell_height(&mut self) {
+        self.dimension.height = self.base_cell_height().max(1.0);
         self.update();
     }
 

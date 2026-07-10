@@ -169,6 +169,14 @@ impl CpuGridAtlas {
     pub fn side(&self) -> u16 {
         self.side
     }
+
+    /// Reuse the existing pixel allocation for a fresh glyph generation.
+    /// Old pixels do not need clearing: no slot references them after this
+    /// metadata reset, and every newly allocated rectangle is overwritten.
+    pub fn clear(&mut self) {
+        self.allocator.clear();
+        self.slots.clear();
+    }
 }
 
 pub struct CpuGridRenderer {
@@ -448,6 +456,12 @@ impl CpuGridRenderer {
     #[inline]
     pub fn mark_full_rebuild_done(&mut self) {
         self.needs_full_rebuild = false;
+    }
+
+    pub fn clear_glyph_atlas(&mut self) {
+        self.atlas_grayscale.clear();
+        self.atlas_color.clear();
+        self.needs_full_rebuild = true;
     }
 
     /// Hash all state that affects what `render` will paint. The CPU
@@ -855,5 +869,58 @@ fn blit_color(
             let idx = buf_row + (dst_x as usize);
             buf[idx] = blend_over(src, buf[idx]);
         }
+    }
+}
+
+#[cfg(test)]
+mod atlas_tests {
+    use super::CpuGridAtlas;
+    use crate::grid::{GlyphKey, RasterizedGlyph};
+
+    #[test]
+    fn clear_reclaims_space_and_forgets_old_size_generation() {
+        let mut atlas = CpuGridAtlas::new_grayscale();
+        let old_key = GlyphKey {
+            font_id: 1,
+            glyph_id: 65,
+            size_bucket: 400,
+        };
+        let pixels = vec![255; 128 * 128];
+        let old_slot = atlas
+            .insert(
+                old_key,
+                RasterizedGlyph {
+                    width: 128,
+                    height: 128,
+                    bearing_x: 0,
+                    bearing_y: 0,
+                    bytes: &pixels,
+                },
+            )
+            .expect("large zoom glyph should fit in an empty atlas");
+
+        atlas.clear();
+        assert!(atlas.lookup(old_key).is_none());
+
+        let normal_key = GlyphKey {
+            font_id: 1,
+            glyph_id: 65,
+            size_bucket: 56,
+        };
+        let normal_pixels = vec![255; 16 * 16];
+        let normal_slot = atlas
+            .insert(
+                normal_key,
+                RasterizedGlyph {
+                    width: 16,
+                    height: 16,
+                    bearing_x: 0,
+                    bearing_y: 0,
+                    bytes: &normal_pixels,
+                },
+            )
+            .expect("normal-size glyph must fit after an atlas generation reset");
+
+        assert_eq!((normal_slot.x, normal_slot.y), (old_slot.x, old_slot.y));
     }
 }

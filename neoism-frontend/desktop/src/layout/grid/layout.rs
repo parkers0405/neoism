@@ -183,6 +183,9 @@ impl<T: EventListener> ContextGrid<T> {
         let active_stacked_by_parent = self.active_stacked_by_parent.clone();
         let root = self.root;
         let splits_hidden = self.splits_hidden;
+        let window_height = self.height;
+        let scaled_margin_top = self.scaled_margin.top;
+        let status_line_height = self.scaled_margin.bottom;
 
         for (&node, item) in self.inner.iter_mut() {
             let [abs_x, abs_y, width, height] = item.layout_rect;
@@ -219,19 +222,29 @@ impl<T: EventListener> ContextGrid<T> {
 
             // Clear margin since Taffy layout already accounts for spacing
             item.val.dimension.margin = Margin::all(0.0);
+            item.val.dimension.restore_nominal_cell_height();
             item.val.dimension.update_width(width);
             item.val.dimension.update_height(height);
+            if item.val.editor.is_some() {
+                let fit = neoism_ui::chrome_policy::fit_editor_rows(
+                    neoism_ui::chrome_policy::EditorRowFitInput {
+                        scaled_margin_top,
+                        layout_top: abs_y,
+                        layout_height: height,
+                        window_height,
+                        status_line_height,
+                        nominal_cell_height: item.val.dimension.base_cell_height(),
+                    },
+                );
+                item.val.dimension.apply_editor_row_fit(fit);
+            }
             let winsize = crate::bridges::utils::terminal_dimensions(&item.val.dimension);
             let cols = winsize.cols;
             let rows = winsize.rows;
-            let terminal_rows = if item.val.editor.is_some() {
-                crate::bridges::utils::editor_rows_for_terminal_rows(rows)
-            } else {
-                rows
-            };
-            // Update terminal size. Editor panes mirror nvim's actual
-            // `rows + 1` grid so the renderer never drops the bottom row
-            // while waiting for a grid_resize ack.
+            let terminal_rows = rows;
+            // Editor rows use a pane-local pitch whose complete rows fill
+            // the solved surface exactly. Terminals retain the nominal
+            // fixed font pitch.
             let mut terminal = item.val.terminal.lock();
             terminal.resize(crate::bridges::utils::resize_dimensions(
                 cols,

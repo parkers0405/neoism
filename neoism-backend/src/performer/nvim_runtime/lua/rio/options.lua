@@ -46,6 +46,7 @@ function M.setup()
     -- for that buffer so we still avoid dual-highlighter flicker.
     vim.cmd("syntax enable")
   end)
+  require("rio.large_file").setup()
 end
 
 return M

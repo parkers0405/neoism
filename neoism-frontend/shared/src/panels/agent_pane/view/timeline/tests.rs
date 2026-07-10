@@ -1,5 +1,6 @@
 use super::layout::{
     from_state_cache, into_state_cache, prepared_message_tool_diff_sections,
+    timeline_message_visibility,
     timeline_row_range_for_source_range, timeline_row_range_intersects_viewport,
     visible_timeline_row_range,
 };
@@ -27,6 +28,82 @@ use super::read_group::read_tool_group_at;
             detail: format!("{title} detail"),
             usage: None,
         }
+    }
+
+    fn text_message(
+        id: &str,
+        kind: NeoismAgentMessageKind,
+        text: &str,
+    ) -> NeoismAgentMessage {
+        NeoismAgentMessage {
+            id: id.to_string(),
+            kind,
+            title: String::new(),
+            text: text.to_string(),
+            status: String::new(),
+            tool: String::new(),
+            output_kind: NeoismAgentOutputKind::Text,
+            lang: String::new(),
+            line_offset: None,
+            todos: Vec::new(),
+            detail: String::new(),
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn settled_timeline_keeps_user_and_final_answer_parts_only() {
+        let messages = vec![
+            text_message("u1", NeoismAgentMessageKind::User, "change it"),
+            text_message("r1", NeoismAgentMessageKind::Reasoning, "planning"),
+            text_message(
+                "a-progress",
+                NeoismAgentMessageKind::Assistant,
+                "checking the build",
+            ),
+            tool_message("t1", "read", "Read(src/lib.rs)", "completed"),
+            text_message("a1", NeoismAgentMessageKind::Assistant, "Done."),
+            text_message(
+                "a2",
+                NeoismAgentMessageKind::Assistant,
+                "Tests pass.",
+            ),
+            text_message("u2", NeoismAgentMessageKind::User, "explain"),
+            text_message("a3", NeoismAgentMessageKind::Assistant, "Part one."),
+            text_message("a4", NeoismAgentMessageKind::Assistant, "Part two."),
+        ];
+
+        assert_eq!(
+            timeline_message_visibility(&messages, None),
+            vec![true, false, false, false, true, true, true, true, true]
+        );
+        assert_eq!(
+            timeline_message_visibility(&messages, Some(1)),
+            vec![true, true, true, true, true, true, true, true, true]
+        );
+    }
+
+    #[test]
+    fn visit_trace_boundary_does_not_reveal_older_reasoning() {
+        let messages = vec![
+            text_message("u1", NeoismAgentMessageKind::User, "old question"),
+            text_message("r1", NeoismAgentMessageKind::Reasoning, "old trace"),
+            text_message("a1", NeoismAgentMessageKind::Assistant, "Old answer."),
+            text_message("u2", NeoismAgentMessageKind::User, "new question"),
+            text_message("r2", NeoismAgentMessageKind::Reasoning, "live trace"),
+            tool_message("t2", "read", "Read(src/main.rs)", "running"),
+            text_message(
+                "a2",
+                NeoismAgentMessageKind::Assistant,
+                "live progress",
+            ),
+            text_message("s2", NeoismAgentMessageKind::System, "internal"),
+        ];
+
+        assert_eq!(
+            timeline_message_visibility(&messages, Some(4)),
+            vec![true, false, true, true, true, true, true, false]
+        );
     }
 
     #[test]

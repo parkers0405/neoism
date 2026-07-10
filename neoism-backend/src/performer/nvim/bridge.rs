@@ -1,8 +1,8 @@
 use super::*;
 
 pub(crate) struct ExternalMessage {
-    kind: String,
-    text: String,
+    pub(crate) kind: String,
+    pub(crate) text: String,
 }
 
 /// nvim-rs Handler that forwards `redraw` notifications to Rio.
@@ -642,6 +642,7 @@ fn parse_modal_actions(value: &Value) -> Vec<ModalActionNotification> {
 pub(crate) fn run_nvim_runtime(
     config: NvimSpawnConfig,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<NvimCommand>,
+    mut resize_rx: tokio_watch::Receiver<(u64, u64)>,
     redraw_tx: std_mpsc::Sender<RedrawNotification>,
     buf_mod_tx: std_mpsc::Sender<BufModifiedNotification>,
     buf_enter_tx: std_mpsc::Sender<BufEnterNotification>,
@@ -851,13 +852,51 @@ pub(crate) fn run_nvim_runtime(
         // Split lanes keep input flowing no matter what a command is
         // waiting on; the deferred command completes naturally once
         // input unblocks nvim.
-        let (slow_tx, mut slow_rx) = tokio_mpsc::unbounded_channel::<NvimCommand>();
+        let (slow_tx, mut slow_rx) = tokio_mpsc::unbounded_channel::<String>();
         let slow_neovim = neovim.clone();
         tokio::spawn(async move {
+            enum SlowRequest {
+                Command(String),
+                Resize { cols: u64, rows: u64 },
+            }
+
             let mut lane_degraded = false;
-            while let Some(cmd) = slow_rx.recv().await {
-                match cmd {
-                    NvimCommand::Command(cmd) => {
+            let mut command_lane_open = true;
+            let mut resize_lane_open = true;
+            while command_lane_open || resize_lane_open {
+                // Commands stay ordered, while resize notifications are
+                // latest-wins. If 200 sizes arrive while one RPC is pending,
+                // `borrow_and_update` returns only size 200; sizes 1..199 never
+                // reach Neovim and therefore never generate stale redraws.
+                let request = tokio::select! {
+                    command = slow_rx.recv(), if command_lane_open => {
+                        match command {
+                            Some(command) => Some(SlowRequest::Command(command)),
+                            None => {
+                                command_lane_open = false;
+                                None
+                            }
+                        }
+                    }
+                    changed = resize_rx.changed(), if resize_lane_open => {
+                        match changed {
+                            Ok(()) => {
+                                let (cols, rows) = *resize_rx.borrow_and_update();
+                                Some(SlowRequest::Resize { cols, rows })
+                            }
+                            Err(_) => {
+                                resize_lane_open = false;
+                                None
+                            }
+                        }
+                    }
+                };
+                let Some(request) = request else {
+                    continue;
+                };
+
+                match request {
+                    SlowRequest::Command(cmd) => {
                         let command_timeout = if lane_degraded {
                             DEGRADED_RPC_TIMEOUT
                         } else {
@@ -882,7 +921,7 @@ pub(crate) fn run_nvim_runtime(
                             Ok(Ok(_)) => lane_degraded = false,
                         }
                     }
-                    NvimCommand::Resize { cols, rows } => {
+                    SlowRequest::Resize { cols, rows } => {
                         let resize_timeout = if lane_degraded {
                             DEGRADED_RPC_TIMEOUT
                         } else {
@@ -909,7 +948,6 @@ pub(crate) fn run_nvim_runtime(
                             }
                         }
                     }
-                    _ => {}
                 }
             }
         });
@@ -1006,7 +1044,7 @@ pub(crate) fn run_nvim_runtime(
                         }
                     }
                 }
-                cmd @ (NvimCommand::Command(_) | NvimCommand::Resize { .. }) => {
+                NvimCommand::Command(cmd) => {
                     // Non-fast RPC: hand off to the command lane so a
                     // deferred command can never block the next input.
                     let _ = slow_tx.send(cmd);

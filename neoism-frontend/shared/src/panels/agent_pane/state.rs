@@ -568,6 +568,11 @@ pub struct NeoismAgentPane {
     timeline_layout_cache: RefCell<Option<TimelineLayoutCache>>,
     timeline_dirty_message_ids: BTreeSet<String>,
     timeline_dirty_message_indices: BTreeSet<usize>,
+    /// First source row whose trace was observed live during this visit to the
+    /// session. This is intentionally not persisted: revisiting a session
+    /// presents its settled answer-only history, while the current visit keeps
+    /// reasoning and tools visible even after the foreground turn goes idle.
+    timeline_live_trace_start: Option<usize>,
     /// Bumped on every timeline message mutation, including the
     /// dirty-mark paths that deliberately do NOT bump
     /// `timeline_layout_epoch` (those patch the view's layout cache
@@ -862,6 +867,7 @@ impl Default for NeoismAgentPane {
             timeline_layout_cache: RefCell::new(None),
             timeline_dirty_message_ids: BTreeSet::new(),
             timeline_dirty_message_indices: BTreeSet::new(),
+            timeline_live_trace_start: None,
             timeline_content_revision: 0,
             timeline_history: AgentTimelineHistoryState::default(),
             virtual_timeline: NeoismAgentVirtualTimeline::default(),
@@ -919,7 +925,14 @@ impl NeoismAgentPane {
             self.directory = (!directory.trim().is_empty()).then_some(directory);
         }
         if let Some(session_id) = snapshot.session_id {
-            self.session_id = (!session_id.trim().is_empty()).then_some(session_id);
+            let session_id = (!session_id.trim().is_empty()).then_some(session_id);
+            if matches!(
+                (&self.session_id, &session_id),
+                (Some(current), Some(next)) if current != next
+            ) {
+                self.timeline_live_trace_start = None;
+            }
+            self.session_id = session_id;
         }
         if let Some(streaming_state) = snapshot.streaming_state {
             self.note_streaming(streaming_state, None);
@@ -958,6 +971,8 @@ impl NeoismAgentPane {
     pub fn clear_session_id_if(&mut self, session_id: &str) {
         if self.session_id.as_deref() == Some(session_id) {
             self.session_id = None;
+            self.timeline_live_trace_start = None;
+            self.invalidate_timeline_layout();
         }
     }
 

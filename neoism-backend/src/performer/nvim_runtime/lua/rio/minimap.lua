@@ -115,6 +115,10 @@ local function emit(include_lines)
     rpc("rio_minimap_snapshot", "", 0, 0, 0, 0, 0, 1, false)
     return
   end
+  if require("rio.large_file").is_large(buf) then
+    include_lines = false
+    last_git_changes = {}
+  end
 
   local path = vim.api.nvim_buf_get_name(buf) or ""
   local line_count = math.max(1, vim.api.nvim_buf_line_count(buf))

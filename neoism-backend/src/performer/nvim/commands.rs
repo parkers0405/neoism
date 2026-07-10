@@ -171,6 +171,7 @@ macro_rules! runtime_file {
 const RIO_NVIM_RUNTIME_FILES: &[RuntimeFile] = &[
     runtime_file!("lua/rio/init.lua"),
     runtime_file!("lua/rio/options.lua"),
+    runtime_file!("lua/rio/large_file.lua"),
     runtime_file!("lua/rio/events.lua"),
     runtime_file!("lua/rio/theme.lua"),
     runtime_file!("lua/rio/treesitter.lua"),
@@ -268,7 +269,12 @@ pub fn vim_treesitter_retry_command() -> String {
 
 pub fn vim_apply_theme_command(name: &str) -> String {
     format!(
-        "lua pcall(function() require('rio.theme').apply({}) end)",
+        // Do not hide an editor-theme failure behind `pcall`. The command
+        // runs on the managed nvim RPC lane, whose error path is logged by
+        // the host; surfacing the error there is much better than leaving
+        // chrome on the new palette while the editor silently stays on the
+        // old one.
+        "lua require('rio.theme').apply({})",
         lua_string_literal(name)
     )
 }

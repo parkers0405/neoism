@@ -763,6 +763,9 @@ where
                 theme,
                 s,
             );
+            if markdown_h <= 0.0 {
+                return 0.0;
+            }
             42.0 * s + markdown_h
         }
         AgentMessageCardKind::User => {

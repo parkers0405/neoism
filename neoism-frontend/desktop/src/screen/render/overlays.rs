@@ -271,7 +271,11 @@ impl Screen<'_> {
                     // (line_height − 1) × row_index pixels below the GPU
                     // block — visible as TWO cursors during animation.
                     let cell_width = layout.dimension.width.round().max(1.0);
-                    let cell_height = layout.dimension.height.round().max(1.0);
+                    let cell_height = if current_item.val.editor.is_some() {
+                        layout.dimension.height.max(1.0)
+                    } else {
+                        layout.dimension.height.round().max(1.0)
+                    };
                     let panel_rect = current_item.layout_rect;
 
                     let cursor =
@@ -417,7 +421,7 @@ impl Screen<'_> {
             if let Some(current_item) = current_grid.current_item() {
                 if current_item.val.editor.is_some() {
                     let layout = current_item.val.dimension;
-                    let cell_height = layout.dimension.height.round().max(1.0);
+                    let cell_height = layout.dimension.height.max(1.0);
                     let cell_width = layout.dimension.width.round().max(1.0);
                     let panel_rect = current_item.layout_rect;
 
@@ -501,7 +505,11 @@ impl Screen<'_> {
             if let Some(current_item) = current_grid.current_item() {
                 let layout = current_item.val.dimension;
                 let cell_width = layout.dimension.width.round().max(1.0);
-                let cell_height = layout.dimension.height.round().max(1.0);
+                let cell_height = if current_item.val.editor.is_some() {
+                    layout.dimension.height.max(1.0)
+                } else {
+                    layout.dimension.height.round().max(1.0)
+                };
                 let panel_rect = current_item.layout_rect;
                 let scroll_lines = self
                     .renderer
@@ -551,7 +559,7 @@ impl Screen<'_> {
                 if let Some(current_item) = current_grid.current_item() {
                     let layout = current_item.val.dimension;
                     let cell_width = layout.dimension.width.round().max(1.0);
-                    let cell_height = layout.dimension.height.round().max(1.0);
+                    let cell_height = layout.dimension.height.max(1.0);
                     let panel_rect = current_item.layout_rect;
                     let pane_x = panel_rect[0] + scaled_margin.left;
                     let pane_y = panel_rect[1] + scaled_margin.top;

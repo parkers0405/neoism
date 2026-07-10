@@ -49,6 +49,7 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
                 md::looks_like_file_ref(link.target).then(|| link.target.to_string());
             out.push(MarkdownInlineSegment::MarkdownLink {
                 label: link.label.to_string(),
+                source_target: link.target.to_string(),
                 target,
             });
             rest = &rest[link.consumed..];

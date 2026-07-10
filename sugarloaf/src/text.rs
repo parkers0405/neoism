@@ -307,6 +307,46 @@ impl Text {
         self.instances.clear();
     }
 
+    /// Drop raster-size-specific state and recycle the UI glyph atlases.
+    ///
+    /// Font zoom can visit dozens of size buckets in one session. Keeping all
+    /// of them in a finite atlas eventually makes `insert` return `None`, at
+    /// which point individual labels lose seemingly random letters. UI text
+    /// is immediate-mode, so clearing the current instances and repopulating
+    /// the atlas on the next frame is both complete and cheap.
+    pub fn clear_glyph_cache(&mut self) {
+        self.instances.clear();
+        self.shape_cache.clear();
+        self.ascent_cache.clear();
+
+        #[cfg(target_os = "macos")]
+        if let Some(state) = self.metal.as_mut() {
+            let barrier = state.command_queue.new_command_buffer();
+            barrier.commit();
+            barrier.wait_until_completed();
+            state.atlas_grayscale.clear();
+            state.atlas_color.clear();
+        }
+
+        #[cfg(all(feature = "wgpu", not(target_os = "macos")))]
+        if let Some(state) = self.wgpu.as_mut() {
+            state.atlas_grayscale.clear();
+            state.atlas_color.clear();
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(state) = self.vulkan.as_mut() {
+            state.atlas_grayscale.clear();
+            state.atlas_color.clear();
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(state) = self.cpu.as_mut() {
+            state.atlas_grayscale.clear();
+            state.atlas_color.clear();
+        }
+    }
+
     #[inline]
     pub fn instances(&self) -> &[TextInstance] {
         &self.instances

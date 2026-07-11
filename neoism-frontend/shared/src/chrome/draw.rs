@@ -15,16 +15,12 @@ use crate::panels::splash_overlay::{SplashInjection, SplashOverlay};
 use crate::panels::terminal_splash::adapt_layout;
 use crate::render_policy::{
     editor_cursorline_plan_for_mutated_snapshot,
-    terminal_grid_trail_cursor_destination_for_mutated_snapshot, CursorlinePlanInput, EditorScrollState,
-    GridPanelGeometry, ScaledMargin, TrailCursorPlanInput,
+    terminal_grid_trail_cursor_destination_for_mutated_snapshot, CursorlinePlanInput,
+    EditorScrollState, GridPanelGeometry, ScaledMargin, TrailCursorPlanInput,
 };
 
-use crate::panels::{
-    Panel,
-    PanelContext,
-};
+use crate::panels::{Panel, PanelContext};
 use crate::services::Services;
-
 
 impl<A: Send + Copy + 'static> Chrome<A> {
     /// Paint every visible panel through `sugarloaf` in z-order.

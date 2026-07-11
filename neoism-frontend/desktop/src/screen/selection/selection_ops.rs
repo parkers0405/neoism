@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -317,5 +316,4 @@ impl Screen<'_> {
             had_highlight
         }
     }
-
 }

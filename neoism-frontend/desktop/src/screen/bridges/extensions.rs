@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::super::*;
 use crate::notebook_runtime::managed_python_kernel_env;
 use crate::workspace::extensions::{ExtensionEntry, ExtensionStatus};
@@ -153,7 +152,8 @@ fn lsp_source_label(manifest: &ExtensionManifest) -> Option<String> {
         .filter(|command| !command.is_empty())
         .unwrap_or_else(|| vec![manifest.id.clone()]);
     use neoism_agent_server::rust_lsp::LspCommandSource;
-    let label = match neoism_agent_server::rust_lsp::command_source(&manifest.id, command) {
+    let label = match neoism_agent_server::rust_lsp::command_source(&manifest.id, command)
+    {
         LspCommandSource::Extension => "extension",
         LspCommandSource::Config => "config",
         LspCommandSource::Path => "path",

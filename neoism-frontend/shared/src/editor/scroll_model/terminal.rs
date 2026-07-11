@@ -1,4 +1,3 @@
-
 use crate::terminal_blocks::chrome::COMMAND_BLOCK_CHROME_ROWS;
 use crate::terminal_blocks::command::CommandBlockSnapshot;
 use crate::widgets::scrollbar::PanelScrollState;

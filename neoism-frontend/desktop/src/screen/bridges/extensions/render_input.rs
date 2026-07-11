@@ -1,4 +1,3 @@
-
 use super::*;
 use neoism_ui::panels::extensions_page::{NeoismExtensionsPane, PaneAction};
 use neoism_window::event::MouseButton;
@@ -295,5 +294,4 @@ impl Screen<'_> {
         }
         consumed
     }
-
 }

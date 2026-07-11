@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::*;
 use crate::input::kitty_keyboard::build_key_sequence;
 use neoism_backend::clipboard::{Clipboard, ClipboardType};
@@ -33,10 +32,9 @@ use neoism_ui::paste_policy::{
 use neoism_window::event::{ElementState, Modifiers, MouseButton};
 use neoism_window::keyboard::{Key, ModifiersState, NamedKey};
 
-mod mouse_position;
-mod key_event;
-mod key_bindings;
-mod selection_ops;
-mod hints;
 mod file_link_mouse;
-
+mod hints;
+mod key_bindings;
+mod key_event;
+mod mouse_position;
+mod selection_ops;

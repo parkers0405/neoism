@@ -1414,6 +1414,15 @@ pub(crate) async fn lsp_tool(
     context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
+    tokio::task::spawn_blocking(move || lsp_tool_blocking(context, arguments))
+        .await
+        .context("LSP tool worker failed")?
+}
+
+fn lsp_tool_blocking(
+    context: ToolContext,
+    arguments: Value,
+) -> anyhow::Result<ToolExecutionResult> {
     let operation =
         string_arg_either_many(&arguments, &["operation", "op", "command"])
             .ok_or_else(|| anyhow::anyhow!("tool argument operation is required"))?;

@@ -4,14 +4,13 @@
 //! effects. This module keeps the portable viewport and autoscroll
 //! rules in one place so desktop and web can make identical decisions.
 
-
 mod editor;
-mod terminal;
 mod misc;
+mod terminal;
 
 pub use editor::*;
-pub use terminal::*;
 pub use misc::*;
+pub use terminal::*;
 
 #[cfg(test)]
 mod tests;

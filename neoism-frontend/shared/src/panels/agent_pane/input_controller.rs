@@ -179,8 +179,7 @@ impl AgentInputBuffer {
             Some(0) => self.history_previous(),
             Some(ix) => {
                 let col = visual_col(&self.input, ranges[ix], self.cursor_byte());
-                self.cursor_byte =
-                    byte_for_visual_col(&self.input, ranges[ix - 1], col);
+                self.cursor_byte = byte_for_visual_col(&self.input, ranges[ix - 1], col);
             }
             None => self.move_up_with_history(),
         }
@@ -195,8 +194,7 @@ impl AgentInputBuffer {
         match visual_range_index(ranges, self.cursor_byte()) {
             Some(ix) if ix + 1 < ranges.len() => {
                 let col = visual_col(&self.input, ranges[ix], self.cursor_byte());
-                self.cursor_byte =
-                    byte_for_visual_col(&self.input, ranges[ix + 1], col);
+                self.cursor_byte = byte_for_visual_col(&self.input, ranges[ix + 1], col);
             }
             Some(_) => self.history_next(),
             None => self.move_down_with_history(),
@@ -549,7 +547,10 @@ mod tests {
 
         input.move_up_with_history_visual(&ranges);
         input.move_up_with_history_visual(&ranges);
-        assert_eq!(input.input, "old", "Up on the first visual row recalls history");
+        assert_eq!(
+            input.input, "old",
+            "Up on the first visual row recalls history"
+        );
     }
 
     #[test]

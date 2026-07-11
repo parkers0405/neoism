@@ -3,7 +3,6 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 use web_time::Instant;
 
-
 impl Island {
     /// Toggle the color picker for a given tab index
     pub fn toggle_color_picker(&mut self, tab_index: usize, current_title: &str) {

@@ -1,4 +1,3 @@
-
 use super::*;
 use std::path::Path;
 
@@ -355,5 +354,4 @@ impl Screen<'_> {
         }
         self.file_tree_git_watcher = Some(watcher);
     }
-
 }

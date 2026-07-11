@@ -274,9 +274,11 @@ pub(crate) fn forward_sse_event(
 // Layer 2: agent-server HTTP/SSE proxy.
 // ---------------------------------------------------------------------------
 
-pub(crate) fn emit_error(tx: &UnboundedSender<AgentServerMessage>, message: impl Into<String>) {
+pub(crate) fn emit_error(
+    tx: &UnboundedSender<AgentServerMessage>,
+    message: impl Into<String>,
+) {
     let _ = tx.send(AgentServerMessage::Error {
         message: message.into(),
     });
 }
-

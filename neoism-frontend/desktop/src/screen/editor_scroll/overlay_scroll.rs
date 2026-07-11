@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -587,5 +586,4 @@ impl Screen<'_> {
             });
         self.renderer.lsp_popup.set_buffer_label(label);
     }
-
 }

@@ -175,4 +175,3 @@ pub enum ScrollbarKind {
     Files,
     Diff,
 }
-

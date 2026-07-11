@@ -92,7 +92,9 @@ pub(super) async fn exchange_xai_loopback(
         code_verifier,
     }) = pending.write().await.remove(provider_id)
     else {
-        anyhow::bail!("no pending xAI OAuth flow for provider {provider_id}; start /connect again")
+        anyhow::bail!(
+            "no pending xAI OAuth flow for provider {provider_id}; start /connect again"
+        )
     };
     let code = extract_auth_code(code);
     let token = reqwest::Client::new()

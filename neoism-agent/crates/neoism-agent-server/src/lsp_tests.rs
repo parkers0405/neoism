@@ -1,4 +1,6 @@
-use super::lsp_parse::{parse_completion, parse_diagnostics, parse_workspace_symbols};
+use super::lsp_parse::{
+    parse_completion, parse_diagnostics, parse_hover, parse_workspace_symbols,
+};
 use super::lsp_query::language_id_for_path as protocol_language_id_for_path;
 use super::*;
 use std::{
@@ -422,4 +424,23 @@ fn parse_completion_reads_completion_list_and_maps_fields() {
     assert_eq!(bare[0].insert_text, "foo");
     assert_eq!(bare[0].kind, "variable");
     assert!(!bare[0].preselect);
+}
+
+#[test]
+fn parse_hover_caps_oversized_documentation() {
+    let hover = parse_hover(
+        std::path::Path::new("/workspace"),
+        std::path::Path::new("/workspace/src/lib.rs"),
+        "rust",
+        json!({
+            "contents": {
+                "kind": "markdown",
+                "value": "x".repeat(10_000)
+            }
+        }),
+    )
+    .expect("hover result");
+
+    assert!(hover.contents.len() < 10_000);
+    assert!(hover.contents.ends_with("[hover documentation truncated]"));
 }

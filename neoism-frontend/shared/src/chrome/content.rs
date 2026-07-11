@@ -1,15 +1,11 @@
 use super::*;
 
-
-
 use crate::editor_snapshot::GridScrollEdgeCapture;
 use crate::panels::buffer_tabs::BufferTabTarget;
 use crate::render_policy::{
     editor_grid_hit_cell, editor_scroll_render_offset_for_mutated_snapshot,
     EditorScrollGridRenderState,
 };
-
-
 
 impl<A: Send + Copy + 'static> Chrome<A> {
     /// Recompute the status-line `mode` / `primary_kind` from whatever
@@ -418,7 +414,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         );
     }
 
-    pub(crate) fn editor_grid_render_state(&self, cell_h: f32) -> EditorScrollGridRenderState {
+    pub(crate) fn editor_grid_render_state(
+        &self,
+        cell_h: f32,
+    ) -> EditorScrollGridRenderState {
         let offset = editor_scroll_render_offset_for_mutated_snapshot(
             self.editor_scroll
                 .current_scroll_offset(EDITOR_GRID_SCROLL_ID),
@@ -431,7 +430,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         EditorScrollGridRenderState::new(offset, self.editor_scrollback_origin)
     }
 
-    pub(crate) fn remember_editor_grid_render_state(&mut self, state: EditorScrollGridRenderState) {
+    pub(crate) fn remember_editor_grid_render_state(
+        &mut self,
+        state: EditorScrollGridRenderState,
+    ) {
         self.editor_scroll_render_state = Some(state);
     }
 

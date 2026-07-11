@@ -187,7 +187,10 @@ pub(crate) fn notebook_cell_type_tag(kind: NotebookCellType) -> &'static str {
     }
 }
 
-pub(crate) fn source_from_rendered_cell(lines: &[String], kind: NotebookCellType) -> String {
+pub(crate) fn source_from_rendered_cell(
+    lines: &[String],
+    kind: NotebookCellType,
+) -> String {
     match kind {
         NotebookCellType::Markdown => {
             let body = trim_generated_separators(lines);

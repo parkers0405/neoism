@@ -1,7 +1,5 @@
 use super::*;
 
-
-
 use crate::animation::CriticallyDampedSpring;
 use crate::input::SimpleInputBuffer;
 use crate::layout::{ChromeLayout, Rect};
@@ -29,7 +27,6 @@ use crate::panels::{
 };
 use crate::primitives::IdeTheme;
 use crate::theme::ChromeTheme;
-
 
 impl<A: Send + Copy + 'static> Chrome<A> {
     pub fn new() -> Self {

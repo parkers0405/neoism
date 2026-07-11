@@ -11,7 +11,6 @@ use std::borrow::Cow;
 use sugarloaf::{Attributes, Sugarloaf};
 use web_time::Instant;
 
-
 // TODO(wave-cutover): the desktop fork imports its rich
 // `crate::context::ContextManager`, `neoism_backend::event::EventProxy`,
 // and `neoism_backend::event::{ProgressReport, ProgressState}` to drive

@@ -226,8 +226,7 @@ pub fn grid_panel_chrome_geometry(
         // chrome boundaries.
         panel_clip_top - editor_buffer_offset_phys
     } else {
-        (input.scaled_margin_top + input.layout_top - terminal_buffer_offset_phys)
-            .round()
+        (input.scaled_margin_top + input.layout_top - terminal_buffer_offset_phys).round()
     };
 
     let clip_rect = if input.is_editor {

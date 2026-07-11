@@ -44,8 +44,7 @@ use neoism_protocol::diagnostics::{
     DiagnosticItem as ProtoDiagnosticItem, DiagnosticsServerMessage, LspState, RouteId,
 };
 use neoism_protocol::editor::{
-    EditorClientMessage,
-    EditorServerMessage, GridCell, GridPos, HighlightAttrs,
+    EditorClientMessage, EditorServerMessage, GridCell, GridPos, HighlightAttrs,
 };
 use nvim_rs::{Handler, Neovim, UiAttachOptions};
 use rmpv::Value;
@@ -71,19 +70,19 @@ pub const MAX_LSP_DOCUMENT_BYTES: u64 = MAX_BACKGROUND_DOCUMENT_BYTES;
 const NVIM_RPC_TIMEOUT: Duration = Duration::from_secs(4);
 pub const DEFAULT_SESSION_KEY: &str = "__default_editor__";
 
-pub(crate) mod session;
-pub(crate) mod redraw;
 pub(crate) mod diagnostics;
+pub(crate) mod redraw;
+pub(crate) mod session;
 
-pub(crate) use session::*;
-pub(crate) use redraw::*;
 pub(crate) use diagnostics::*;
+pub(crate) use redraw::*;
+pub(crate) use session::*;
 
+pub use diagnostics::{DiagnosticsFetch, DiagnosticsSubscriptions};
 pub use session::{
     remote_sync_targets_nvim, BufferText, NvimBufferEvent, NvimBufferLinesChange,
     NvimError, NvimSession, NvimSessionHandle, NvimSessionRegistry,
 };
-pub use diagnostics::{DiagnosticsFetch, DiagnosticsSubscriptions};
 
 // -----------------------------------------------------------------------
 // Tests

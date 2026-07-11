@@ -11,7 +11,9 @@ pub(crate) struct DecodedNotebookImageOutput {
     pub(crate) is_opaque: bool,
 }
 
-pub(crate) fn decoded_notebook_image_output(output: &Value) -> Option<DecodedNotebookImageOutput> {
+pub(crate) fn decoded_notebook_image_output(
+    output: &Value,
+) -> Option<DecodedNotebookImageOutput> {
     let data = output.get("data")?.as_object()?;
     let (mime, value) = preferred_bitmap_image_mime(data)?;
     decoded_notebook_bitmap_value(mime, value)
@@ -233,7 +235,10 @@ pub(crate) fn decode_base64_value(value: &Value) -> Option<Vec<u8>> {
     BASE64_STANDARD.decode(compact).ok()
 }
 
-pub(crate) fn image_dimensions_from_header(mime: &str, bytes: &[u8]) -> Option<(u32, u32)> {
+pub(crate) fn image_dimensions_from_header(
+    mime: &str,
+    bytes: &[u8],
+) -> Option<(u32, u32)> {
     match mime {
         "image/png" if bytes.len() >= 24 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") => {
             let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);

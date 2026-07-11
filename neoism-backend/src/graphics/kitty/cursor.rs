@@ -430,4 +430,3 @@ fn test_image_row_occupation_from_middle() {
         final_cursor_row
     );
 }
-

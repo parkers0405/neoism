@@ -299,4 +299,3 @@ fn test_eviction_keeps_active_used_image_when_inactive_available() {
         "Inactive image should be the eviction target"
     );
 }
-

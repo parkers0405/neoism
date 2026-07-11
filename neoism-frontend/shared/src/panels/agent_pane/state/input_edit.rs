@@ -7,13 +7,18 @@ impl NeoismAgentPane {
         self.apply_input_buffer(buffer);
     }
 
-    pub(in crate::panels::agent_pane::state) fn insert_input_token(&mut self, token: &str) {
+    pub(in crate::panels::agent_pane::state) fn insert_input_token(
+        &mut self,
+        token: &str,
+    ) {
         let mut buffer = self.input_buffer();
         buffer.insert_token(token);
         self.apply_input_buffer(buffer);
     }
 
-    pub(in crate::panels::agent_pane::state) fn delete_input_char_before_cursor(&mut self) -> bool {
+    pub(in crate::panels::agent_pane::state) fn delete_input_char_before_cursor(
+        &mut self,
+    ) -> bool {
         let mut buffer = self.input_buffer();
         let deleted = buffer.delete_char_before_cursor();
         self.apply_input_buffer(buffer);
@@ -22,7 +27,9 @@ impl NeoismAgentPane {
 
     /// Backspace that deletes composer tokens (`[pasted N lines]`,
     /// `@file` mentions, skill chips) as single units.
-    pub(in crate::panels::agent_pane::state) fn delete_token_or_char_before_cursor(&mut self) {
+    pub(in crate::panels::agent_pane::state) fn delete_token_or_char_before_cursor(
+        &mut self,
+    ) {
         let tokens: Vec<String> = self
             .input_attachments
             .iter()
@@ -118,7 +125,10 @@ impl NeoismAgentPane {
         false
     }
 
-    pub(in crate::panels::agent_pane::state) fn insert_pasted_text_attachment(&mut self, text: String) {
+    pub(in crate::panels::agent_pane::state) fn insert_pasted_text_attachment(
+        &mut self,
+        text: String,
+    ) {
         let token = self.unique_attachment_token(&input_controller::paste_token(&text));
         self.close_picker();
         self.insert_input_token(&token);
@@ -290,5 +300,4 @@ impl NeoismAgentPane {
         };
         self.apply_agent(next.to_string());
     }
-
 }

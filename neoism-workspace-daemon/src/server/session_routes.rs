@@ -179,7 +179,10 @@ pub(crate) async fn device_revoke(
     }
 }
 
-pub(crate) async fn sessions_list(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub(crate) async fn sessions_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     let bearer = match extract_bearer(&headers) {
         Some(b) => b,
         None => return (StatusCode::UNAUTHORIZED, "missing bearer").into_response(),
@@ -298,4 +301,3 @@ pub(crate) fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     }
     Some(raw[prefix.len()..].trim().to_string())
 }
-

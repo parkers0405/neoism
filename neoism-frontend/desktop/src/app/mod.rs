@@ -127,9 +127,8 @@ impl Application<'_> {
             event_proxy.clone(),
         );
         let scheduler = Scheduler::new(proxy);
-        let home_daemon_endpoint = daemon
-            .as_ref()
-            .map(|daemon| daemon.endpoint().to_string());
+        let home_daemon_endpoint =
+            daemon.as_ref().map(|daemon| daemon.endpoint().to_string());
         event_loop.listen_device_events(DeviceEvents::Never);
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -599,9 +598,7 @@ impl Application<'_> {
             let foreign = self.router.routes.values().next().is_some_and(|route| {
                 let manager = &route.window.screen.context_manager;
                 !manager.workspace_owned_locally(workspace_id)
-                    && manager
-                        .daemon_workspace_host_id(workspace_id)
-                        .is_some()
+                    && manager.daemon_workspace_host_id(workspace_id).is_some()
             });
             if foreign {
                 tracing::info!(

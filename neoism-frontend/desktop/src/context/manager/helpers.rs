@@ -1,16 +1,13 @@
-
 use crate::context::tab::Context;
 use crate::layout::ContextGrid;
 use neoism_backend::event::EventListener;
 use neoism_backend::event::WindowId;
 use neoism_protocol::workspace::PaneLayoutSnapshot;
 use neoism_ui::session_layout::{
-    session_layout_close_focused_route_pair,
-    session_leaf_external_id, SessionLayout, SessionLeafId, SessionLeafKind,
-    SessionLeafSpec, SplitAxis, SplitPlacement,
+    session_layout_close_focused_route_pair, session_leaf_external_id, SessionLayout,
+    SessionLeafId, SessionLeafKind, SessionLeafSpec, SplitAxis, SplitPlacement,
 };
 use std::path::PathBuf;
-
 
 pub(crate) fn session_layout_for_grid<T: EventListener>(
     grid: &ContextGrid<T>,
@@ -23,7 +20,9 @@ pub(crate) fn session_layout_for_grid<T: EventListener>(
 }
 
 #[allow(dead_code)]
-pub(crate) fn first_focused_snapshot_session(snapshot: &PaneLayoutSnapshot) -> Option<String> {
+pub(crate) fn first_focused_snapshot_session(
+    snapshot: &PaneLayoutSnapshot,
+) -> Option<String> {
     snapshot_session_for_external_id(&snapshot.root, snapshot.focused_pane_external_id)
         .or_else(|| first_snapshot_session(&snapshot.root))
 }
@@ -246,6 +245,9 @@ pub(crate) fn session_leaf_spec_for_context<T: EventListener>(
     SessionLeafSpec::new(kind).with_external_id(context.route_id as u64)
 }
 
-pub(crate) fn session_leaf_route(layout: &SessionLayout, leaf: SessionLeafId) -> Option<usize> {
+pub(crate) fn session_leaf_route(
+    layout: &SessionLayout,
+    leaf: SessionLeafId,
+) -> Option<usize> {
     session_leaf_external_id(layout, leaf).map(|route| route as usize)
 }

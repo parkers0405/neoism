@@ -204,11 +204,16 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(in crate::panels::agent_pane::state) fn active_file_mention(&self) -> Option<(usize, String)> {
+    pub(in crate::panels::agent_pane::state) fn active_file_mention(
+        &self,
+    ) -> Option<(usize, String)> {
         self.active_prefixed_token('@')
     }
 
-    pub(in crate::panels::agent_pane::state) fn active_prefixed_token(&self, trigger_char: char) -> Option<(usize, String)> {
+    pub(in crate::panels::agent_pane::state) fn active_prefixed_token(
+        &self,
+        trigger_char: char,
+    ) -> Option<(usize, String)> {
         let cursor = self.cursor_byte();
         let prefix = &self.input[..cursor];
         let (trigger, _) = prefix
@@ -227,7 +232,10 @@ impl NeoismAgentPane {
         (!query.contains(char::is_whitespace)).then(|| (trigger, query.to_string()))
     }
 
-    pub(in crate::panels::agent_pane::state) fn remember_sent_prompt(&mut self, text: &str) {
+    pub(in crate::panels::agent_pane::state) fn remember_sent_prompt(
+        &mut self,
+        text: &str,
+    ) {
         if text.trim().is_empty() {
             return;
         }
@@ -241,7 +249,10 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(in crate::panels::agent_pane::state) fn update_picker_query(&mut self, text: &str) {
+    pub(in crate::panels::agent_pane::state) fn update_picker_query(
+        &mut self,
+        text: &str,
+    ) {
         let mut query = self
             .picker
             .as_ref()
@@ -251,7 +262,10 @@ impl NeoismAgentPane {
         self.set_picker_query(query);
     }
 
-    pub(in crate::panels::agent_pane::state) fn set_picker_query(&mut self, query: String) {
+    pub(in crate::panels::agent_pane::state) fn set_picker_query(
+        &mut self,
+        query: String,
+    ) {
         if let Some(picker) = self.picker.as_mut() {
             if picker.kind == NeoismAgentPickerKind::Slash {
                 self.input = format!("/{query}");
@@ -260,11 +274,16 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(in crate::panels::agent_pane::state) fn file_mention_options(&self, _query: &str) -> Vec<NeoismAgentPickerOption> {
+    pub(in crate::panels::agent_pane::state) fn file_mention_options(
+        &self,
+        _query: &str,
+    ) -> Vec<NeoismAgentPickerOption> {
         Vec::new()
     }
 
-    pub(in crate::panels::agent_pane::state) fn file_mention_root(&self) -> std::path::PathBuf {
+    pub(in crate::panels::agent_pane::state) fn file_mention_root(
+        &self,
+    ) -> std::path::PathBuf {
         self.directory
             .as_deref()
             .map(std::path::PathBuf::from)
@@ -272,7 +291,10 @@ impl NeoismAgentPane {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     }
 
-    pub(in crate::panels::agent_pane::state) fn apply_file_mention(&mut self, value: String) {
+    pub(in crate::panels::agent_pane::state) fn apply_file_mention(
+        &mut self,
+        value: String,
+    ) {
         let Some(anchor) = self.file_mention_anchor.take() else {
             return;
         };
@@ -347,7 +369,10 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(in crate::panels::agent_pane::state) fn set_agent_local(&mut self, value: String) -> String {
+    pub(in crate::panels::agent_pane::state) fn set_agent_local(
+        &mut self,
+        value: String,
+    ) -> String {
         let trimmed = value.trim().to_string();
         if trimmed.is_empty() {
             self.agent = None;
@@ -374,7 +399,10 @@ impl NeoismAgentPane {
         self.invalidate_timeline_layout();
     }
 
-    pub(in crate::panels::agent_pane::state) fn switch_session(&mut self, session_id: String) {
+    pub(in crate::panels::agent_pane::state) fn switch_session(
+        &mut self,
+        session_id: String,
+    ) {
         let trimmed = session_id.trim().to_string();
         if trimmed.is_empty() {
             return;
@@ -388,7 +416,10 @@ impl NeoismAgentPane {
         });
     }
 
-    pub(in crate::panels::agent_pane::state) fn execute_slash_text(&mut self, text: &str) {
+    pub(in crate::panels::agent_pane::state) fn execute_slash_text(
+        &mut self,
+        text: &str,
+    ) {
         // Mirrors the desktop dispatcher in
         // `frontends/neoism/src/neoism/agent/commands.rs` minus the
         // direct HTTP calls. Anything that's purely an in-memory state
@@ -491,11 +522,17 @@ impl NeoismAgentPane {
         self.refresh_model_context_limit();
     }
 
-    pub(in crate::panels::agent_pane::state) fn set_model_local(&mut self, value: String) {
+    pub(in crate::panels::agent_pane::state) fn set_model_local(
+        &mut self,
+        value: String,
+    ) {
         self.model = value;
     }
 
-    pub(in crate::panels::agent_pane::state) fn remember_model_value(&mut self, value: &str) {
+    pub(in crate::panels::agent_pane::state) fn remember_model_value(
+        &mut self,
+        value: &str,
+    ) {
         if value.trim().is_empty() {
             return;
         }
@@ -521,7 +558,10 @@ impl NeoismAgentPane {
         self.remember_model_option(&option);
     }
 
-    pub(in crate::panels::agent_pane::state) fn remember_model_option(&mut self, option: &NeoismAgentPickerOption) {
+    pub(in crate::panels::agent_pane::state) fn remember_model_option(
+        &mut self,
+        option: &NeoismAgentPickerOption,
+    ) {
         if !option.is_selectable() || option.value.trim().is_empty() {
             return;
         }
@@ -548,7 +588,10 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(in crate::panels::agent_pane::state) fn set_thinking_local(&mut self, value: String) -> Option<String> {
+    pub(in crate::panels::agent_pane::state) fn set_thinking_local(
+        &mut self,
+        value: String,
+    ) -> Option<String> {
         let thinking = (!value.trim().is_empty()).then_some(value);
         self.thinking = thinking.clone();
         thinking
@@ -577,11 +620,17 @@ impl NeoismAgentPane {
     }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane) fn insert_skill_mention_by_name(&mut self, name: String) {
+    pub(in crate::panels::agent_pane) fn insert_skill_mention_by_name(
+        &mut self,
+        name: String,
+    ) {
         self.apply_skill_mention(NeoismAgentPickerOption::new(&name, "", "skill", &name));
     }
 
-    pub(in crate::panels::agent_pane::state) fn apply_skill_mention(&mut self, option: NeoismAgentPickerOption) {
+    pub(in crate::panels::agent_pane::state) fn apply_skill_mention(
+        &mut self,
+        option: NeoismAgentPickerOption,
+    ) {
         if self.is_subagent_session() {
             return;
         }
@@ -608,7 +657,10 @@ impl NeoismAgentPane {
         self.sync_input_pickers();
     }
 
-    pub(in crate::panels::agent_pane::state) fn apply_inline_skill_mention(&mut self, option: NeoismAgentPickerOption) {
+    pub(in crate::panels::agent_pane::state) fn apply_inline_skill_mention(
+        &mut self,
+        option: NeoismAgentPickerOption,
+    ) {
         let Some(anchor) = self.file_mention_anchor.take() else {
             self.apply_skill_mention(option);
             return;
@@ -649,7 +701,11 @@ impl NeoismAgentPane {
         self.sync_input_pickers();
     }
 
-    pub(in crate::panels::agent_pane::state) fn remember_file_mention(&mut self, token: &str, value: &str) {
+    pub(in crate::panels::agent_pane::state) fn remember_file_mention(
+        &mut self,
+        token: &str,
+        value: &str,
+    ) {
         let root = self.file_mention_root();
         let path = root.join(value.trim_end_matches('/'));
         if !path.is_file() {
@@ -667,7 +723,10 @@ impl NeoismAgentPane {
             });
     }
 
-    pub(in crate::panels::agent_pane::state) fn pasted_attachment_path(&self, _text: &str) -> Option<std::path::PathBuf> {
+    pub(in crate::panels::agent_pane::state) fn pasted_attachment_path(
+        &self,
+        _text: &str,
+    ) -> Option<std::path::PathBuf> {
         None
     }
 
@@ -690,7 +749,11 @@ impl NeoismAgentPane {
     }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane::state) fn file_attachment_token(&self, path: &std::path::Path, mime: &str) -> String {
+    pub(in crate::panels::agent_pane::state) fn file_attachment_token(
+        &self,
+        path: &std::path::Path,
+        mime: &str,
+    ) -> String {
         let filename = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -710,7 +773,10 @@ impl NeoismAgentPane {
     }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane::state) fn file_attachment_count<F>(&self, mut predicate: F) -> usize
+    pub(in crate::panels::agent_pane::state) fn file_attachment_count<F>(
+        &self,
+        mut predicate: F,
+    ) -> usize
     where
         F: FnMut(&str) -> bool,
     {
@@ -724,7 +790,10 @@ impl NeoismAgentPane {
             .count()
     }
 
-    pub(in crate::panels::agent_pane::state) fn unique_attachment_token(&self, base: &str) -> String {
+    pub(in crate::panels::agent_pane::state) fn unique_attachment_token(
+        &self,
+        base: &str,
+    ) -> String {
         if !self.input.contains(base)
             && !self
                 .input_attachments
@@ -752,7 +821,10 @@ impl NeoismAgentPane {
         base.to_string()
     }
 
-    pub(in crate::panels::agent_pane) fn prompt_parts_for(&self, text: &str) -> Vec<Value> {
+    pub(in crate::panels::agent_pane) fn prompt_parts_for(
+        &self,
+        text: &str,
+    ) -> Vec<Value> {
         let mut parts = vec![json!({ "type": "text", "text": text })];
         let mut seen = BTreeSet::new();
         for attachment in &self.input_attachments {
@@ -777,7 +849,10 @@ impl NeoismAgentPane {
         parts
     }
 
-    pub(in crate::panels::agent_pane) fn prompt_system_for(&self, text: &str) -> Option<String> {
+    pub(in crate::panels::agent_pane) fn prompt_system_for(
+        &self,
+        text: &str,
+    ) -> Option<String> {
         let mut seen = BTreeSet::new();
         let mut output = String::new();
         for attachment in &self.input_attachments {
@@ -810,7 +885,10 @@ impl NeoismAgentPane {
         (!output.is_empty()).then_some(output)
     }
 
-    pub(in crate::panels::agent_pane::state) fn expand_text_attachments(&self, text: &str) -> String {
+    pub(in crate::panels::agent_pane::state) fn expand_text_attachments(
+        &self,
+        text: &str,
+    ) -> String {
         let mut expanded = text.to_string();
         for attachment in &self.input_attachments {
             let NeoismAgentInputAttachment::Text {

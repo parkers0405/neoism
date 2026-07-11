@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::workspace as neo_workspace;
 use std::path::{Path, PathBuf};
@@ -269,5 +268,4 @@ impl Screen<'_> {
             })
             .collect()
     }
-
 }

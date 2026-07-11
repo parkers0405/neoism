@@ -109,10 +109,10 @@ impl Application<'_> {
                 let animation_dt = route.window.animation_frame_delta();
                 let winit_window = &route.window.winit_window;
                 let is_fullscreen = winit_window.fullscreen().is_some();
-                let window_update = route
-                    .window
-                    .screen
-                    .render(animation_dt, is_fullscreen, || winit_window.pre_present_notify());
+                let window_update =
+                    route.window.screen.render(animation_dt, is_fullscreen, || {
+                        winit_window.pre_present_notify()
+                    });
                 crate::app::freeze_watchdog::mark_render_stage(
                     window_id,
                     "screen.render.end",

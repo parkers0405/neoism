@@ -21,7 +21,10 @@ impl NeoismAgentPane {
         index
     }
 
-    pub(in crate::panels::agent_pane::state) fn content_y_for_screen_y(&self, screen_y: f32) -> f32 {
+    pub(in crate::panels::agent_pane::state) fn content_y_for_screen_y(
+        &self,
+        screen_y: f32,
+    ) -> f32 {
         let viewport_y = self.timeline_viewport_rect.map(|r| r[1]).unwrap_or(0.0);
         let max_scroll = self.max_timeline_scroll();
         let scroll_top = (max_scroll - self.timeline_scroll_px).clamp(0.0, max_scroll);
@@ -202,7 +205,11 @@ impl NeoismAgentPane {
         (!joined.trim().is_empty()).then_some(joined)
     }
 
-    pub(in crate::panels::agent_pane::state) fn selectable_line_at(&self, x: f32, y: f32) -> Option<usize> {
+    pub(in crate::panels::agent_pane::state) fn selectable_line_at(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> Option<usize> {
         self.selectable_lines[..self.selectable_lines_len]
             .iter()
             .enumerate()
@@ -215,7 +222,10 @@ impl NeoismAgentPane {
             .map(|(index, _)| index)
     }
 
-    pub(in crate::panels::agent_pane::state) fn nearest_selectable_line(&self, y: f32) -> Option<usize> {
+    pub(in crate::panels::agent_pane::state) fn nearest_selectable_line(
+        &self,
+        y: f32,
+    ) -> Option<usize> {
         if self.selectable_lines_len == 0 {
             return None;
         }
@@ -233,10 +243,11 @@ impl NeoismAgentPane {
             .map(|(index, _)| index)
     }
 
-    pub(in crate::panels::agent_pane::state) fn ordered_selection_endpoints(&self) -> Option<(SelectionPoint, SelectionPoint)> {
+    pub(in crate::panels::agent_pane::state) fn ordered_selection_endpoints(
+        &self,
+    ) -> Option<(SelectionPoint, SelectionPoint)> {
         let anchor = self.selection_anchor?;
         let focus = self.selection_focus?;
         Some(order_endpoints(anchor, focus))
     }
-
 }

@@ -70,7 +70,10 @@ pub(crate) fn char_at_pos(lines: &[String], pos: MarkdownPosition) -> Option<cha
     }
 }
 
-pub(crate) fn next_pos(lines: &[String], pos: MarkdownPosition) -> Option<MarkdownPosition> {
+pub(crate) fn next_pos(
+    lines: &[String],
+    pos: MarkdownPosition,
+) -> Option<MarkdownPosition> {
     let line = lines.get(pos.line)?;
     if pos.col < line.len() {
         Some(MarkdownPosition {
@@ -87,7 +90,10 @@ pub(crate) fn next_pos(lines: &[String], pos: MarkdownPosition) -> Option<Markdo
     }
 }
 
-pub(crate) fn prev_pos(lines: &[String], pos: MarkdownPosition) -> Option<MarkdownPosition> {
+pub(crate) fn prev_pos(
+    lines: &[String],
+    pos: MarkdownPosition,
+) -> Option<MarkdownPosition> {
     if pos.col > 0 {
         let line = lines.get(pos.line)?;
         Some(MarkdownPosition {
@@ -467,8 +473,7 @@ pub(crate) fn vim_word_object(
     }
     if around {
         let mut extended = false;
-        while end < line.len()
-            && char_at(line, end).is_some_and(|ch| ch.is_whitespace())
+        while end < line.len() && char_at(line, end).is_some_and(|ch| ch.is_whitespace())
         {
             end = next_char_boundary(line, end);
             extended = true;
@@ -535,8 +540,7 @@ pub(crate) fn vim_quote_object(
         let mut start = open;
         let mut end = close + quote_len;
         let mut extended = false;
-        while end < line.len()
-            && char_at(line, end).is_some_and(|ch| ch.is_whitespace())
+        while end < line.len() && char_at(line, end).is_some_and(|ch| ch.is_whitespace())
         {
             end = next_char_boundary(line, end);
             extended = true;
@@ -710,7 +714,8 @@ pub(crate) fn vim_search_forward(
         } else {
             line.len()
         };
-        if let Some(col) = find_in_line(line, search_from, limit, pattern, whole_word, false)
+        if let Some(col) =
+            find_in_line(line, search_from, limit, pattern, whole_word, false)
         {
             return Some(MarkdownPosition { line: line_ix, col });
         }
@@ -737,8 +742,13 @@ pub(crate) fn vim_search_backward(
         } else {
             line.len()
         };
-        let search_from = if step == line_count { from.col.min(line.len()) } else { 0 };
-        if let Some(col) = find_in_line(line, search_from, limit, pattern, whole_word, true)
+        let search_from = if step == line_count {
+            from.col.min(line.len())
+        } else {
+            0
+        };
+        if let Some(col) =
+            find_in_line(line, search_from, limit, pattern, whole_word, true)
         {
             return Some(MarkdownPosition { line: line_ix, col });
         }

@@ -6,7 +6,6 @@
 // Render lives in `host/run.rs`; layout sits above the buffer-tabs
 // row (see `Renderer::top_bar_strip_height`).
 
-
 use super::super::*;
 use neoism_ui::panels::chrome_topbar::TopBarAction;
 

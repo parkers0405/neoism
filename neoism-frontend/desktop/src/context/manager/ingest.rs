@@ -1,17 +1,14 @@
-
 use super::*;
 use neoism_backend::event::EventListener;
 use neoism_protocol::diagnostics::RouteId;
 use neoism_protocol::pty::ServerMessage as PtyServerMessage;
 use neoism_protocol::workspace::{
-    PaneLayoutOp,
-    PaneLayoutSnapshot, SessionSummary,
-    WorkplacePreferences, WorkspaceServerMessage,
+    PaneLayoutOp, PaneLayoutSnapshot, SessionSummary, WorkplacePreferences,
+    WorkspaceServerMessage,
 };
 use std::collections::HashMap;
 use std::time::Instant;
 use uuid::Uuid;
-
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
     #[allow(dead_code)]
@@ -386,5 +383,4 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         self.cached_session_id_for_tab(self.current_index)
             .or_else(|| self.daemon.cache.active_session_id.clone())
     }
-
 }

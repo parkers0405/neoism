@@ -1,18 +1,18 @@
 //! Shared non-IO state for the agent pane views.
 
-pub mod picker;
-pub mod side_panel;
 mod caches;
+mod connect;
 mod hit_rects;
-mod permissions;
-mod selection;
-mod timeline;
 mod ingest;
 mod input_edit;
+mod permissions;
+pub mod picker;
 mod pickers_state;
-mod streaming;
+mod selection;
 mod session;
-mod connect;
+pub mod side_panel;
+mod streaming;
+mod timeline;
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;

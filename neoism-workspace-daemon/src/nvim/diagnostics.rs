@@ -34,9 +34,9 @@ impl NvimSession {
 /// FUNC_API_FAST, so it answers even then.
 pub(crate) async fn nvim_is_blocked(nvim: &Neovim<NeovimWriter>) -> bool {
     match nvim_rpc_timeout("get_mode", nvim.get_mode()).await {
-        Ok(pairs) => pairs.iter().any(|(k, v)| {
-            k.as_str() == Some("blocking") && v.as_bool() == Some(true)
-        }),
+        Ok(pairs) => pairs
+            .iter()
+            .any(|(k, v)| k.as_str() == Some("blocking") && v.as_bool() == Some(true)),
         // On timeout/error assume blocked — safer to skip a poll tick
         // than to stack a deferred exec_lua behind it.
         Err(_) => true,

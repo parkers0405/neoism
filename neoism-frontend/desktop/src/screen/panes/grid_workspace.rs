@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -135,9 +134,7 @@ impl Screen<'_> {
         // meaningless or silently None for it.
         if let Some(id) = self.context_manager.current_adopted_workspace_id() {
             if !self.context_manager.workspace_owned_locally(&id) {
-                if let Some(root) =
-                    self.context_manager.daemon_host_workspace_root(&id)
-                {
+                if let Some(root) = self.context_manager.daemon_host_workspace_root(&id) {
                     return Some(root);
                 }
                 tracing::warn!(
@@ -457,10 +454,7 @@ impl Screen<'_> {
                 let outgoing = std::mem::take(&mut self.renderer.file_tree);
                 self.workspace_file_trees.insert(old_id, outgoing);
             }
-            let mut incoming = self
-                .workspace_file_trees
-                .remove(&id)
-                .unwrap_or_default();
+            let mut incoming = self.workspace_file_trees.remove(&id).unwrap_or_default();
             incoming.set_visible(visible);
             incoming.set_focused(focused);
             // Scale and width are WINDOW chrome, not per-workspace
@@ -1035,5 +1029,4 @@ impl Screen<'_> {
             self.set_active_workspace_root(root, true);
         }
     }
-
 }

@@ -218,8 +218,8 @@ async fn execute_stateful_tool_call(
                 .search_messages(query, scope_session, limit)
                 .await
                 .map_err(|error| error.to_string())?;
-            let output = serde_json::to_string_pretty(&hits)
-                .map_err(|error| error.to_string())?;
+            let output =
+                serde_json::to_string_pretty(&hits).map_err(|error| error.to_string())?;
             Ok(Some(tool::ToolExecutionResult {
                 title: format!("{} hits for \"{query}\"", hits.len()),
                 output,

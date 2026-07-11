@@ -87,7 +87,10 @@ pub(crate) async fn update_external_activity(
     Ok(())
 }
 
-pub(crate) async fn touch_session(state: &AppState, session_id: &str) -> Result<(), ApiError> {
+pub(crate) async fn touch_session(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), ApiError> {
     let Some(mut session) = state.inner.store.get_session(session_id).await? else {
         return Ok(());
     };
@@ -100,7 +103,10 @@ pub(crate) async fn touch_session(state: &AppState, session_id: &str) -> Result<
     Ok(())
 }
 
-pub(crate) fn external_session_id(child: &SessionInfo, runtime: ExternalRuntime) -> Option<String> {
+pub(crate) fn external_session_id(
+    child: &SessionInfo,
+    runtime: ExternalRuntime,
+) -> Option<String> {
     let external = child.extra.get("externalAgent")?;
     let provider = external.get("provider").and_then(Value::as_str)?;
     if provider != runtime.provider_id() {

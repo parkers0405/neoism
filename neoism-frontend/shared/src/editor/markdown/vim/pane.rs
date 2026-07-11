@@ -77,7 +77,8 @@ impl MarkdownPane {
             VimAction::VisualSwapEnds => {
                 if let Some(anchor) = self.visual_anchor {
                     self.visual_anchor = Some(self.cursor_position());
-                    self.cursor_line = anchor.line.min(self.lines.len().saturating_sub(1));
+                    self.cursor_line =
+                        anchor.line.min(self.lines.len().saturating_sub(1));
                     self.cursor_col = anchor.col;
                     self.clamp_cursor();
                     self.follow_cursor = true;
@@ -89,7 +90,9 @@ impl MarkdownPane {
             VimAction::VisualTextObject { kind, around } => {
                 self.vim_visual_text_object(*kind, *around)
             }
-            VimAction::Search { reverse, count } => self.vim_apply_search(*reverse, *count),
+            VimAction::Search { reverse, count } => {
+                self.vim_apply_search(*reverse, *count)
+            }
             VimAction::SearchWord { forward, count } => {
                 self.vim_apply_search_word(*forward, *count)
             }
@@ -159,9 +162,8 @@ impl MarkdownPane {
                 self.set_vim_cursor(MarkdownPosition { line, col });
             }
             VimMotion::WordForward { big } => {
-                let target = self.vim_step(count, |lines, pos| {
-                    vim_word_forward(lines, pos, big)
-                });
+                let target =
+                    self.vim_step(count, |lines, pos| vim_word_forward(lines, pos, big));
                 self.set_vim_cursor(target);
             }
             VimMotion::WordBack { big } => {
@@ -175,9 +177,8 @@ impl MarkdownPane {
                 self.set_vim_cursor(target);
             }
             VimMotion::WordEndBack { big } => {
-                let target = self.vim_step(count, |lines, pos| {
-                    vim_word_end_back(lines, pos, big)
-                });
+                let target =
+                    self.vim_step(count, |lines, pos| vim_word_end_back(lines, pos, big));
                 self.set_vim_cursor(target);
             }
             VimMotion::Find { kind, target } => {
@@ -196,7 +197,11 @@ impl MarkdownPane {
                 let Some((kind, target)) = self.vim.last_find else {
                     return VimApplied::noop();
                 };
-                let kind = if reverse { reverse_find_kind(kind) } else { kind };
+                let kind = if reverse {
+                    reverse_find_kind(kind)
+                } else {
+                    kind
+                };
                 let line = &self.lines[self.cursor_line];
                 let Some(col) =
                     vim_find_col(line, self.cursor_col, kind, target, count, true)
@@ -264,7 +269,9 @@ impl MarkdownPane {
         let count = count.max(1);
         let from_visual = matches!(target, VimTarget::Selection);
         let range = match target {
-            VimTarget::Motion(motion) => self.vim_operator_motion_range(op, motion, count),
+            VimTarget::Motion(motion) => {
+                self.vim_operator_motion_range(op, motion, count)
+            }
             VimTarget::Object { kind, around } => {
                 vim_object_range(&self.lines, self.cursor_position(), kind, around)
             }
@@ -283,7 +290,10 @@ impl MarkdownPane {
         };
         // Operators with charwise coverage still act linewise.
         let range = match (op, range) {
-            (VimOperator::Indent | VimOperator::Outdent, VimOpRange::Chars { start, end }) => {
+            (
+                VimOperator::Indent | VimOperator::Outdent,
+                VimOpRange::Chars { start, end },
+            ) => {
                 let mut last = end.line.min(self.lines.len().saturating_sub(1));
                 if end.col == 0 && last > start.line {
                     last -= 1;
@@ -339,7 +349,11 @@ impl MarkdownPane {
         let last_line = self.lines.len().saturating_sub(1);
         let line_len = |ix: usize| self.lines.get(ix).map(String::len).unwrap_or(0);
         let chars = |start: MarkdownPosition, end: MarkdownPosition| {
-            let (start, end) = if start <= end { (start, end) } else { (end, start) };
+            let (start, end) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
             (start < end).then_some(VimOpRange::Chars { start, end })
         };
         let lines = |a: usize, b: usize| {
@@ -358,7 +372,13 @@ impl MarkdownPane {
                     }
                     col = prev_char_boundary(line, col);
                 }
-                chars(MarkdownPosition { line: pos.line, col }, pos)
+                chars(
+                    MarkdownPosition {
+                        line: pos.line,
+                        col,
+                    },
+                    pos,
+                )
             }
             VimMotion::Right => {
                 let line = &self.lines[pos.line];
@@ -369,7 +389,13 @@ impl MarkdownPane {
                     }
                     col = next_char_boundary(line, col);
                 }
-                chars(pos, MarkdownPosition { line: pos.line, col })
+                chars(
+                    pos,
+                    MarkdownPosition {
+                        line: pos.line,
+                        col,
+                    },
+                )
             }
             VimMotion::Up => {
                 (pos.line > 0).then(|| lines(pos.line.saturating_sub(count), pos.line))?
@@ -471,9 +497,8 @@ impl MarkdownPane {
                 )
             }
             VimMotion::WordEndBack { big } => {
-                let target = self.vim_step(count, |lines, pos| {
-                    vim_word_end_back(lines, pos, big)
-                });
+                let target =
+                    self.vim_step(count, |lines, pos| vim_word_end_back(lines, pos, big));
                 let line = &self.lines[pos.line];
                 let end = if pos.col < line.len() {
                     next_char_boundary(line, pos.col)
@@ -493,7 +518,11 @@ impl MarkdownPane {
             }
             VimMotion::RepeatFind { reverse } => {
                 let (kind, target) = self.vim.last_find?;
-                let kind = if reverse { reverse_find_kind(kind) } else { kind };
+                let kind = if reverse {
+                    reverse_find_kind(kind)
+                } else {
+                    kind
+                };
                 self.vim_find_range(pos, kind, target, count, true)
             }
             VimMotion::ParagraphForward => {
@@ -517,7 +546,11 @@ impl MarkdownPane {
             }
             VimMotion::MatchPair => {
                 let (start, end) = vim_matching_bracket(&self.lines, pos)?;
-                let (start, end) = if start <= end { (start, end) } else { (end, start) };
+                let (start, end) = if start <= end {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
                 let line = &self.lines[end.line];
                 chars(
                     start,
@@ -676,7 +709,11 @@ impl MarkdownPane {
         );
         self.follow_cursor = true;
         self.rebuild_blocks();
-        self.commit_local_undo(local_undo, undo_start, self.cursor_line.saturating_add(1));
+        self.commit_local_undo(
+            local_undo,
+            undo_start,
+            self.cursor_line.saturating_add(1),
+        );
         removed
     }
 
@@ -795,7 +832,11 @@ impl MarkdownPane {
                 self.delete_forward();
                 any = true;
             }
-            return if any { VimApplied::edit() } else { VimApplied::noop() };
+            return if any {
+                VimApplied::edit()
+            } else {
+                VimApplied::noop()
+            };
         }
         let pos = self.cursor_position();
         let line = &self.lines[pos.line];
@@ -954,8 +995,7 @@ impl MarkdownPane {
                 self.shift_enter_continuations_for_insert(insert_at);
             }
             let line_count = pasted.len();
-            let byte_delta =
-                pasted.iter().map(String::len).sum::<usize>() + line_count;
+            let byte_delta = pasted.iter().map(String::len).sum::<usize>() + line_count;
             self.lines.splice(insert_at..insert_at, pasted);
             self.adjust_source_len(byte_delta as isize);
             self.pending_line_edit = Some(MarkdownPendingLineEdit::Complex);
@@ -1016,7 +1056,11 @@ impl MarkdownPane {
         self.enter_normal();
         self.follow_cursor = true;
         self.rebuild_blocks();
-        self.commit_local_undo(local_undo, undo_start, self.cursor_line.saturating_add(1));
+        self.commit_local_undo(
+            local_undo,
+            undo_start,
+            self.cursor_line.saturating_add(1),
+        );
         VimApplied::edit()
     }
 
@@ -1055,7 +1099,11 @@ impl MarkdownPane {
         self.enter_normal();
         self.follow_cursor = true;
         self.rebuild_blocks();
-        self.commit_local_undo(local_undo, undo_start, self.cursor_line.saturating_add(1));
+        self.commit_local_undo(
+            local_undo,
+            undo_start,
+            self.cursor_line.saturating_add(1),
+        );
         VimApplied::edit()
     }
 

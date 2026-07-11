@@ -29,18 +29,18 @@ use crate::session_run::{finish_session_run, start_session_run};
 use crate::state::AppState;
 use crate::{ask_permission_for_tool, now_millis, permission, slug, tool};
 
-#[path = "external_agent/runtime.rs"]
-mod runtime;
-#[path = "external_agent/lifecycle.rs"]
-mod lifecycle;
 #[path = "external_agent/acp_run.rs"]
 mod acp_run;
 #[path = "external_agent/events.rs"]
 mod events;
-#[path = "external_agent/requests.rs"]
-mod requests;
 #[path = "external_agent/helpers.rs"]
 mod helpers;
+#[path = "external_agent/lifecycle.rs"]
+mod lifecycle;
+#[path = "external_agent/requests.rs"]
+mod requests;
+#[path = "external_agent/runtime.rs"]
+mod runtime;
 
 pub(crate) use acp_run::*;
 pub(crate) use events::*;

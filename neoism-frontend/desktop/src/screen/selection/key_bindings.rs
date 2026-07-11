@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -907,5 +906,4 @@ impl Screen<'_> {
         );
         ignore_chars.unwrap_or(false)
     }
-
 }

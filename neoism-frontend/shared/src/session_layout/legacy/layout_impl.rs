@@ -2,7 +2,6 @@ use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-
 impl SessionLayout {
     pub fn new(initial: SessionLeafSpec) -> Self {
         let mut nodes = BTreeMap::new();

@@ -1,6 +1,9 @@
 use super::*;
 
-pub(crate) async fn http_get_json(inner: &AgentInner, path: &str) -> Result<Value, String> {
+pub(crate) async fn http_get_json(
+    inner: &AgentInner,
+    path: &str,
+) -> Result<Value, String> {
     wait_for_local_agent_server(inner).await?;
     let url = format!("{}{}", inner.agent_server, path);
     let resp = inner
@@ -133,7 +136,9 @@ pub(crate) async fn http_delete(inner: &AgentInner, path: &str) -> Result<(), St
     Ok(())
 }
 
-pub(crate) async fn wait_for_local_agent_server(inner: &AgentInner) -> Result<(), String> {
+pub(crate) async fn wait_for_local_agent_server(
+    inner: &AgentInner,
+) -> Result<(), String> {
     if local_bind_target(&inner.agent_server).is_none() {
         return Ok(());
     }
@@ -155,7 +160,10 @@ pub(crate) async fn wait_for_local_agent_server(inner: &AgentInner) -> Result<()
     }
 }
 
-pub(crate) async fn post_no_body(inner: &AgentInner, path: &str) -> Result<Value, String> {
+pub(crate) async fn post_no_body(
+    inner: &AgentInner,
+    path: &str,
+) -> Result<Value, String> {
     http_post_json(inner, path, &json!({})).await
 }
 
@@ -179,4 +187,3 @@ pub(crate) fn percent_encode(value: &str) -> String {
     }
     out
 }
-

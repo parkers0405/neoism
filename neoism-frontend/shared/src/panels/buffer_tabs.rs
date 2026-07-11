@@ -1251,7 +1251,14 @@ impl<A: Copy> BufferTabs<A> {
         }
         let theme = crate::chrome::active_ide_theme();
         self.render_with_icons::<NoopAgentIcons<A>>(
-            sugarloaf, bounds.x, bounds.y, bounds.w, &theme, None, None, &[],
+            sugarloaf,
+            bounds.x,
+            bounds.y,
+            bounds.w,
+            &theme,
+            None,
+            None,
+            &[],
         );
     }
 }

@@ -1,18 +1,13 @@
-
 use super::*;
-use crate::daemon_client::tailnet_peers::{
-    PeerWorkspaceTree, TailnetPeer,
-};
+use crate::daemon_client::tailnet_peers::{PeerWorkspaceTree, TailnetPeer};
 use crate::daemon_client::DaemonClientHandle;
 use neoism_backend::event::EventListener;
 use neoism_backend::event::WindowId;
 use neoism_protocol::workspace::{
-    HostSummary,
-    PaneLayoutSnapshot, SessionSummary, WorkspaceClientMessage,
+    HostSummary, PaneLayoutSnapshot, SessionSummary, WorkspaceClientMessage,
     WorkspaceSummary, WorkspaceTabSummary,
 };
 use std::path::PathBuf;
-
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
     pub fn event_proxy(&self) -> T {
@@ -205,8 +200,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .collect();
         let stable = grid.workspace_route_id();
         for route_id in route_ids {
-            if let Some(session_id) = self.daemon.cache.route_sessions.remove(&route_id)
-            {
+            if let Some(session_id) = self.daemon.cache.route_sessions.remove(&route_id) {
                 self.daemon.cache.session_routes.remove(&session_id);
                 tracing::info!(
                     target: "neoism::workspaces",
@@ -265,10 +259,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// is gone and the daemon connection can re-dial home.
     pub fn has_adopted_grids(&self) -> bool {
         self.contexts.iter().any(|grid| {
-            grid.workspace_route_id()
-                .is_some_and(|stable| {
-                    self.daemon.cache.adopted_workspaces.contains_key(&stable)
-                })
+            grid.workspace_route_id().is_some_and(|stable| {
+                self.daemon.cache.adopted_workspaces.contains_key(&stable)
+            })
         })
     }
 
@@ -484,7 +477,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         }
     }
 
-    pub(crate) fn switch_local_context_to_daemon_workspace(&mut self, workspace_id: &str) {
+    pub(crate) fn switch_local_context_to_daemon_workspace(
+        &mut self,
+        workspace_id: &str,
+    ) {
         // MULTI-USER GUARD: the daemon's active-workspace pointer is
         // per-HOST state. When several desktops share one daemon (a
         // guest joined the host), following pointer flips for
@@ -702,5 +698,4 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     pub fn cached_active_session_id(&self) -> Option<&str> {
         self.daemon.cache.active_session_id.as_deref()
     }
-
 }

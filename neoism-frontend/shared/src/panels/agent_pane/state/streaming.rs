@@ -56,7 +56,10 @@ impl NeoismAgentPane {
     pub fn maybe_refresh_side_panel_subagents(&mut self) {}
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane) fn hydrate_runtime_status_for_session(&mut self, _session_id: &str) {
+    pub(in crate::panels::agent_pane) fn hydrate_runtime_status_for_session(
+        &mut self,
+        _session_id: &str,
+    ) {
         self.sync_subagent_waiting_clock();
     }
 
@@ -240,7 +243,9 @@ impl NeoismAgentPane {
     }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane::state) fn reconcile_task_message_statuses(&mut self) {
+    pub(in crate::panels::agent_pane::state) fn reconcile_task_message_statuses(
+        &mut self,
+    ) {
         let active_task_ids = self.active_subagent_ids.clone();
         let explicit_statuses = self
             .side_panel
@@ -290,7 +295,11 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(in crate::panels::agent_pane::state) fn set_task_message_status_at(&mut self, index: usize, status: &str) {
+    pub(in crate::panels::agent_pane::state) fn set_task_message_status_at(
+        &mut self,
+        index: usize,
+        status: &str,
+    ) {
         let normalized = match status {
             "completed" | "error" | "running" => status,
             "stopped" => "error",
@@ -324,7 +333,9 @@ impl NeoismAgentPane {
     }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane::state) fn suppress_streaming_after_abort(&self) -> bool {
+    pub(in crate::panels::agent_pane::state) fn suppress_streaming_after_abort(
+        &self,
+    ) -> bool {
         self.abort_requested_at.is_some_and(|requested| {
             Instant::now().saturating_duration_since(requested)
                 <= ABORT_STREAM_SUPPRESSION
@@ -342,7 +353,11 @@ impl NeoismAgentPane {
     }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane::state) fn note_streaming_from_part(&mut self, kind: NeoismAgentMessageKind, title: &str) {
+    pub(in crate::panels::agent_pane::state) fn note_streaming_from_part(
+        &mut self,
+        kind: NeoismAgentMessageKind,
+        title: &str,
+    ) {
         if matches!(
             kind,
             NeoismAgentMessageKind::Reasoning
@@ -419,5 +434,4 @@ impl NeoismAgentPane {
         self.streaming_state_changed_at
             .map(|t| Instant::now().saturating_duration_since(t).as_secs_f32())
     }
-
 }

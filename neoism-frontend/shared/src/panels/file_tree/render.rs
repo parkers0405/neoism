@@ -168,8 +168,7 @@ impl FileTree {
             const SKELETON_DEPTHS: [f32; SKELETON_ROWS] =
                 [0.0, 0.0, 1.0, 1.0, 2.0, 1.0, 0.0, 1.0, 2.0, 2.0, 0.0, 1.0];
             const SKELETON_WIDTHS: [f32; SKELETON_ROWS] = [
-                0.58, 0.72, 0.46, 0.64, 0.38, 0.55, 0.68, 0.44, 0.52, 0.36, 0.62,
-                0.48,
+                0.58, 0.72, 0.46, 0.64, 0.38, 0.55, 0.68, 0.44, 0.52, 0.36, 0.62, 0.48,
             ];
             let bar_h = (font_size * 0.72).max(4.0);
             let stub_h = icon_size.min(row_h).max(4.0);
@@ -181,9 +180,8 @@ impl FileTree {
                 // Slow sine wave marching down the rows — same clock
                 // family as the splash shimmer, phase-staggered so the
                 // pulse travels instead of blinking in unison.
-                let wave = (elapsed / 1.3 * std::f32::consts::TAU
-                    - i as f32 * 0.55)
-                    .sin();
+                let wave =
+                    (elapsed / 1.3 * std::f32::consts::TAU - i as f32 * 0.55).sin();
                 let alpha = (0.16 + 0.08 * wave).max(0.04) * fade_in;
                 let indent = SKELETON_DEPTHS[i] * indent_px;
                 let stub_x = content_x + row_pad_x + indent + indent_px;

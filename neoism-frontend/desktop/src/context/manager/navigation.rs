@@ -1,28 +1,22 @@
-
 use super::*;
 use crate::context::tab::Context;
-use crate::context::title::{
-    create_title_extra_from_context, update_title,
-};
+use crate::context::title::{create_title_extra_from_context, update_title};
 use crate::event::RioEvent;
 use crate::layout::{ContextGrid, ContextGridItem};
 use neoism_backend::event::EventListener;
-use neoism_backend::sugarloaf::{
-    Object, Sugarloaf,
-};
-use neoism_protocol::workspace::{
-    PaneFocusDir, PaneLayoutOp,
-};
+use neoism_backend::sugarloaf::{Object, Sugarloaf};
+use neoism_protocol::workspace::{PaneFocusDir, PaneLayoutOp};
 use neoism_ui::session_layout::{
-    active_tab_index_after_close, active_tab_move_target, adjacent_tab_index, focused_tab_strip, rebase_tab_index_after_move,
-    rebase_tab_indexed_map_for_move, rebase_tab_indexed_map_for_remove,
+    active_tab_index_after_close, active_tab_move_target, adjacent_tab_index,
+    focused_tab_strip, rebase_tab_index_after_move, rebase_tab_indexed_map_for_move,
+    rebase_tab_indexed_map_for_remove,
     session_layout_first_secondary_route as session_layout_first_secondary_route_policy,
     session_layout_focus_adjacent_route, session_layout_focus_edge_route,
-    session_layout_secondary_routes as session_layout_secondary_routes_policy, SessionLayout, SessionTabStripRef,
+    session_layout_secondary_routes as session_layout_secondary_routes_policy,
+    SessionLayout, SessionTabStripRef,
 };
 use smallvec::SmallVec;
 use std::time::Instant;
-
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
     #[inline]
@@ -746,8 +740,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     #[inline]
     pub fn switch_to_next(&mut self) {
         if self.config.is_native {
-            self.current_index = adjacent_tab_index(self.contexts.len(), self.current_index, false)
-                .expect("current tab index must stay valid");
+            self.current_index =
+                adjacent_tab_index(self.contexts.len(), self.current_index, false)
+                    .expect("current tab index must stay valid");
             self.current_route = self.current().route_id;
             self.sync_daemon_workspaces();
             self.event_proxy
@@ -767,8 +762,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     #[inline]
     pub fn switch_to_prev(&mut self) {
         if self.config.is_native {
-            self.current_index = adjacent_tab_index(self.contexts.len(), self.current_index, true)
-                .expect("current tab index must stay valid");
+            self.current_index =
+                adjacent_tab_index(self.contexts.len(), self.current_index, true)
+                    .expect("current tab index must stay valid");
             self.current_route = self.current().route_id;
             self.sync_daemon_workspaces();
             self.event_proxy
@@ -828,5 +824,4 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         self.contexts.swap(current, target_index);
         self.select_tab(target_index);
     }
-
 }

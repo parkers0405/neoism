@@ -114,10 +114,7 @@ impl neoism_ui::services::FilesService for RemoteFiles {
         Err(neoism_ui::services::IoError::Pending(request_id))
     }
 
-    fn read_file(
-        &self,
-        _path: &Path,
-    ) -> Result<Vec<u8>, neoism_ui::services::IoError> {
+    fn read_file(&self, _path: &Path) -> Result<Vec<u8>, neoism_ui::services::IoError> {
         // Panel flows never read file bytes synchronously; content
         // opens route through daemon editor / CRDT panes instead.
         Err(neoism_ui::services::IoError::Other(

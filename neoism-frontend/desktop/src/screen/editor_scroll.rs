@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::*;
 use neoism_backend::clipboard::{Clipboard, ClipboardType};
 use neoism_ui::editor::scroll_model::{
@@ -125,8 +124,7 @@ fn editor_mode_class(
     }
 }
 
+mod editor_command;
 mod editor_input;
 mod overlay_scroll;
 mod status_minimap;
-mod editor_command;
-

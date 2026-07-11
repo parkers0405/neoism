@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::workspace as neo_workspace;
 use std::path::{Path, PathBuf};
@@ -463,5 +462,4 @@ impl Screen<'_> {
         self.mark_dirty();
         true
     }
-
 }

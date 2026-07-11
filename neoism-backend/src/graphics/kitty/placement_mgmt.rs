@@ -221,4 +221,3 @@ fn test_collect_active_ids_uses_weak_refs() {
         "Stale entry should be cleaned up"
     );
 }
-

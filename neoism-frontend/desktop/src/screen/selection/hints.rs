@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -16,7 +15,9 @@ impl Screen<'_> {
         )
     }
 
-    pub(crate) fn hint_mouse_activations(&self) -> impl Iterator<Item = HintMouseActivation<'_>> {
+    pub(crate) fn hint_mouse_activations(
+        &self,
+    ) -> impl Iterator<Item = HintMouseActivation<'_>> {
         self.hints_config
             .iter()
             .map(|hint_config| HintMouseActivation {
@@ -302,5 +303,4 @@ impl Screen<'_> {
             .selection_range
             .is_none()
     }
-
 }

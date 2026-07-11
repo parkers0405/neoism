@@ -1,10 +1,9 @@
-
 use super::*;
 use crate::context::factories::{
-    create_draw_context, create_markdown_context,
-    create_neoism_agent_context, create_neoism_extensions_context,
-    create_neoism_tags_context, create_notebook_context, ide_init_commands,
-    process_open_url, resolve_editor_file_and_cwd,
+    create_draw_context, create_markdown_context, create_neoism_agent_context,
+    create_neoism_extensions_context, create_neoism_tags_context,
+    create_notebook_context, ide_init_commands, process_open_url,
+    resolve_editor_file_and_cwd,
 };
 use crate::event::RioEvent;
 use crate::layout::ContextGrid;
@@ -12,11 +11,8 @@ use neoism_backend::config::layout::Margin;
 use neoism_backend::event::EventListener;
 use neoism_backend::performer::nvim::ContextSource;
 use neoism_backend::sugarloaf::Sugarloaf;
-use neoism_protocol::workspace::{
-    PaneLayoutOp, PaneSplitAxis, PaneSplitPlacement,
-};
+use neoism_protocol::workspace::{PaneLayoutOp, PaneSplitAxis, PaneSplitPlacement};
 use std::path::PathBuf;
-
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
     pub fn split(

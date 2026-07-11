@@ -1,7 +1,5 @@
 use super::*;
 
-
-
 impl SessionTree {
     /// New tree containing a single leaf which is also the initial focus.
     pub fn new(initial: SessionLeafSpec) -> Self {

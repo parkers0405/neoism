@@ -363,7 +363,10 @@ impl Screen<'_> {
         })
     }
 
-    pub(crate) fn request_pane_layout_op(&mut self, op: PaneLayoutOp) -> WorkspaceClientMessage {
+    pub(crate) fn request_pane_layout_op(
+        &mut self,
+        op: PaneLayoutOp,
+    ) -> WorkspaceClientMessage {
         let pane_external_id = self.current_pane_external_id();
         self.request_pane_layout_op_for(pane_external_id, op)
     }

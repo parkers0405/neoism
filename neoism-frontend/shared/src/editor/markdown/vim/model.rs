@@ -36,12 +36,25 @@ pub enum VimMotion {
     FirstNonBlank,
     LinesDownFirstNonBlank,
     LinesUpFirstNonBlank,
-    WordForward { big: bool },
-    WordBack { big: bool },
-    WordEnd { big: bool },
-    WordEndBack { big: bool },
-    Find { kind: VimFindKind, target: char },
-    RepeatFind { reverse: bool },
+    WordForward {
+        big: bool,
+    },
+    WordBack {
+        big: bool,
+    },
+    WordEnd {
+        big: bool,
+    },
+    WordEndBack {
+        big: bool,
+    },
+    Find {
+        kind: VimFindKind,
+        target: char,
+    },
+    RepeatFind {
+        reverse: bool,
+    },
     /// One-based target line (`5G`, `5gg`, bare `gg`).
     GotoLine(usize),
     /// Bare `G`.
@@ -62,7 +75,10 @@ pub enum VimTextObject {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VimTarget {
     Motion(VimMotion),
-    Object { kind: VimTextObject, around: bool },
+    Object {
+        kind: VimTextObject,
+        around: bool,
+    },
     /// Doubled operators (`dd`, `cc`, `yy`, `>>`, `<<`).
     Lines,
     /// Visual-mode operators; the applier reads the live selection.
@@ -81,23 +97,62 @@ pub enum VimInsertKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum VimAction {
-    Move { motion: VimMotion, count: usize },
-    Operate { op: VimOperator, target: VimTarget, count: usize },
-    DeleteChar { count: usize, before: bool },
-    ReplaceChar { ch: char, count: usize },
-    ToggleCase { count: usize },
-    JoinLines { count: usize },
-    Paste { count: usize, before: bool },
-    Undo { count: usize },
-    EnterInsert { kind: VimInsertKind },
-    EnterVisual { linewise: bool },
+    Move {
+        motion: VimMotion,
+        count: usize,
+    },
+    Operate {
+        op: VimOperator,
+        target: VimTarget,
+        count: usize,
+    },
+    DeleteChar {
+        count: usize,
+        before: bool,
+    },
+    ReplaceChar {
+        ch: char,
+        count: usize,
+    },
+    ToggleCase {
+        count: usize,
+    },
+    JoinLines {
+        count: usize,
+    },
+    Paste {
+        count: usize,
+        before: bool,
+    },
+    Undo {
+        count: usize,
+    },
+    EnterInsert {
+        kind: VimInsertKind,
+    },
+    EnterVisual {
+        linewise: bool,
+    },
     VisualSwapEnds,
     VisualToggleCase,
-    VisualReplace { ch: char },
-    VisualTextObject { kind: VimTextObject, around: bool },
-    Search { reverse: bool, count: usize },
-    SearchWord { forward: bool, count: usize },
-    Repeat { count: Option<usize> },
+    VisualReplace {
+        ch: char,
+    },
+    VisualTextObject {
+        kind: VimTextObject,
+        around: bool,
+    },
+    Search {
+        reverse: bool,
+        count: usize,
+    },
+    SearchWord {
+        forward: bool,
+        count: usize,
+    },
+    Repeat {
+        count: Option<usize>,
+    },
 }
 
 /// Outcome of feeding one key into the resolver.
@@ -285,8 +340,12 @@ impl VimState {
                         };
                         self.finish_motion(VimMotion::GotoLine(line), visual)
                     }
-                    'e' => self.finish_motion(VimMotion::WordEndBack { big: false }, visual),
-                    'E' => self.finish_motion(VimMotion::WordEndBack { big: true }, visual),
+                    'e' => {
+                        self.finish_motion(VimMotion::WordEndBack { big: false }, visual)
+                    }
+                    'E' => {
+                        self.finish_motion(VimMotion::WordEndBack { big: true }, visual)
+                    }
                     _ => {
                         self.clear_pending();
                         VimKeyFeed::Cancelled

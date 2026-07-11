@@ -40,7 +40,10 @@ impl NeoismAgentPane {
         true
     }
 
-    pub(crate) fn enqueue_pending_permission(&mut self, permission: NeoismAgentPendingPermission) {
+    pub(crate) fn enqueue_pending_permission(
+        &mut self,
+        permission: NeoismAgentPendingPermission,
+    ) {
         self.note_permission_branch_status(&permission, BranchStatus::WaitingPermission);
         permission_policy::enqueue_permission(
             &mut self.pending_permission,
@@ -118,5 +121,4 @@ impl NeoismAgentPane {
             }
         }
     }
-
 }

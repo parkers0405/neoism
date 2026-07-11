@@ -854,8 +854,8 @@ fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
 
 fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Public binaries repo (source stays private). Override with NEOISM_REPO.
-    let repo = std::env::var("NEOISM_REPO")
-        .unwrap_or_else(|_| "parkers0405/neoism".to_string());
+    let repo =
+        std::env::var("NEOISM_REPO").unwrap_or_else(|_| "parkers0405/neoism".to_string());
     let repo = repo.as_str();
     const BINS: [&str; 3] = ["neoism", "neoism-workspace-daemon", "neoism-agent"];
 
@@ -1082,8 +1082,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // exactly once this session. Best-effort — a failed marker just
             // means the first-run reveal is skipped; existing users (config
             // already present) never reach this arm and so never get it.
-            let marker = neoism_backend::config::config_dir_path()
-                .join(".notes-welcome-pending");
+            let marker =
+                neoism_backend::config::config_dir_path().join(".notes-welcome-pending");
             if let Some(parent) = marker.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }

@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -760,5 +759,4 @@ impl Screen<'_> {
         self.reapply_chrome_layout();
         self.mark_dirty();
     }
-
 }

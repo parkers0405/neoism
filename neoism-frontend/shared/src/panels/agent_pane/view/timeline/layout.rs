@@ -1,8 +1,9 @@
-use super::*;
-use super::render::{
-    cached_message_height, display_timeline_message, f32_measure_bucket, is_edit_tool_message,
-};
 use super::read_group::read_tool_group_at;
+use super::render::{
+    cached_message_height, display_timeline_message, f32_measure_bucket,
+    is_edit_tool_message,
+};
+use super::*;
 
 pub(crate) fn from_state_cache(
     cache: crate::panels::agent_pane::state::TimelineLayoutCache,
@@ -140,7 +141,10 @@ pub(crate) fn timeline_row_range_intersects_viewport<M>(
     })
 }
 
-pub(crate) fn union_timeline_row_ranges(a: Range<usize>, b: Range<usize>) -> Range<usize> {
+pub(crate) fn union_timeline_row_ranges(
+    a: Range<usize>,
+    b: Range<usize>,
+) -> Range<usize> {
     if a.is_empty() {
         return b;
     }
@@ -404,7 +408,8 @@ where
     // which only ever grows the exact region — safe.
     let overscan = (viewport_h * 2.0).max(600.0 * s);
     let threshold_top = (est_content_h - offset - viewport_h - overscan).max(0.0);
-    let exact_start_row = rows.partition_point(|row| row.top + row.height < threshold_top);
+    let exact_start_row =
+        rows.partition_point(|row| row.top + row.height < threshold_top);
     if exact_start_row == 0 || exact_start_row >= rows.len() {
         // Window spans the whole transcript (short history, or scrolled to the
         // very top): just lay it out fully exact — no estimated prefix.
@@ -455,10 +460,8 @@ fn append_estimated_rows<P>(
     let mut previous_visible_was_edit_tool = false;
     let mut appended_any = false;
     let source_len = pane.messages().len();
-    let visibility = timeline_message_visibility(
-        pane.messages(),
-        pane.timeline_live_trace_start(),
-    );
+    let visibility =
+        timeline_message_visibility(pane.messages(), pane.timeline_live_trace_start());
     let mut source_index = 0;
     while source_index < source_len {
         let Some(item) = next_timeline_item::<P>(
@@ -466,8 +469,7 @@ fn append_estimated_rows<P>(
             &visibility,
             source_index,
             previous_visible_was_edit_tool,
-        )
-        else {
+        ) else {
             source_index += 1;
             continue;
         };
@@ -652,7 +654,9 @@ where
     ))
 }
 
-pub(crate) fn prepared_message_tool_diff_sections<M>(message: &M) -> Option<CachedToolDiffSections>
+pub(crate) fn prepared_message_tool_diff_sections<M>(
+    message: &M,
+) -> Option<CachedToolDiffSections>
 where
     M: AgentTimelineMessage,
 {
@@ -724,10 +728,8 @@ where
     let mut previous_visible_was_edit_tool = false;
     let mut source_index = 0usize;
     let mut converge: Option<(usize, f32)> = None;
-    let visibility = timeline_message_visibility(
-        pane.messages(),
-        pane.timeline_live_trace_start(),
-    );
+    let visibility =
+        timeline_message_visibility(pane.messages(), pane.timeline_live_trace_start());
 
     while source_index < source_len {
         // Once we reach previously-laid-out territory, try to converge: if the
@@ -747,8 +749,7 @@ where
             &visibility,
             source_index,
             previous_visible_was_edit_tool,
-        )
-        else {
+        ) else {
             source_index += 1;
             continue;
         };
@@ -909,10 +910,8 @@ where
 {
     let mut appended_any = false;
     let source_len = pane.messages().len();
-    let visibility = timeline_message_visibility(
-        pane.messages(),
-        pane.timeline_live_trace_start(),
-    );
+    let visibility =
+        timeline_message_visibility(pane.messages(), pane.timeline_live_trace_start());
     let mut source_index = start_index;
     while source_index < source_len {
         let Some(item) = next_timeline_item::<P>(
@@ -920,8 +919,7 @@ where
             &visibility,
             source_index,
             previous_visible_was_edit_tool,
-        )
-        else {
+        ) else {
             source_index += 1;
             continue;
         };
@@ -1056,11 +1054,12 @@ pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
     live_trace_start: Option<usize>,
 ) -> Vec<bool> {
     let mut visible = vec![false; messages.len()];
-    let live_start = live_trace_start.unwrap_or(messages.len()).min(messages.len());
+    let live_start = live_trace_start
+        .unwrap_or(messages.len())
+        .min(messages.len());
 
     for (index, message) in messages[live_start..].iter().enumerate() {
-        visible[live_start + index] =
-            message.kind() != AgentTimelineMessageKind::System;
+        visible[live_start + index] = message.kind() != AgentTimelineMessageKind::System;
     }
 
     // In reverse order, an assistant part is final iff no later trace item

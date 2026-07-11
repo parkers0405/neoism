@@ -324,4 +324,3 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
         }
     }
 }
-

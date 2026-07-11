@@ -1,5 +1,5 @@
-use super::*;
 use super::layout::{from_state_cache, into_state_cache};
+use super::*;
 
 impl AgentTimelineMessage for NeoismAgentMessage {
     fn id(&self) -> &str {

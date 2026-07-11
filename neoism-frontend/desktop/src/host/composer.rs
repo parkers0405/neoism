@@ -422,7 +422,9 @@ impl Renderer {
             cell_h_logical,
             pane_width_logical,
             cell_w_logical,
-            (pane_height_logical / cell_h_logical.max(1.0)).floor().max(0.0) as usize,
+            (pane_height_logical / cell_h_logical.max(1.0))
+                .floor()
+                .max(0.0) as usize,
             input_text,
         );
         // Always-on top inset. The chassis's rounded lip

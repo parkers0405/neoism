@@ -72,7 +72,6 @@ use crate::workspace_provision::{
 };
 use crate::workspace_snapshot::{self, ApplyReport, WorkspaceSnapshot};
 
-
 use crate::crdt::crdt_buffer_id_for_path;
 
 /// Seed (or refresh) the daemon-authoritative CRDT replica from nvim's
@@ -375,22 +374,21 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, "neoism-daemon")
 }
 
-
-pub(crate) mod socket;
-pub(crate) mod workspace_routes;
 pub(crate) mod hosts_routes;
 pub(crate) mod session_routes;
+pub(crate) mod socket;
+pub(crate) mod workspace_routes;
 
-pub(crate) use socket::*;
-pub(crate) use workspace_routes::*;
 pub(crate) use hosts_routes::*;
 pub(crate) use session_routes::*;
+pub(crate) use socket::*;
+pub(crate) use workspace_routes::*;
 
+pub use hosts_routes::HostPairRequest;
+pub use session_routes::PairMintRequest;
 pub use workspace_routes::{
     receive_workspace_blocking, ReceiveWorkspaceRequest, ReceiveWorkspaceResponse,
 };
-pub use hosts_routes::HostPairRequest;
-pub use session_routes::PairMintRequest;
 
 #[cfg(test)]
 mod crdt_seed_tests;

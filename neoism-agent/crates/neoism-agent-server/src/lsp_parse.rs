@@ -9,6 +9,8 @@ use super::{
     MAX_COMPLETIONS, MAX_SYMBOLS,
 };
 
+const MAX_HOVER_CONTENT_CHARS: usize = 8_192;
+
 pub(crate) fn parse_workspace_symbols(
     root: &Path,
     language: &str,
@@ -68,7 +70,7 @@ pub(crate) fn parse_hover(
         return None;
     }
     let contents_value = result.get("contents")?;
-    let contents = hover_contents_to_string(contents_value)?;
+    let contents = truncate_hover_contents(hover_contents_to_string(contents_value)?);
     if contents.trim().is_empty() {
         return None;
     }
@@ -85,6 +87,16 @@ pub(crate) fn parse_hover(
         range,
         language: Some(language.to_string()),
     })
+}
+
+fn truncate_hover_contents(contents: String) -> String {
+    let Some((byte, _)) = contents.char_indices().nth(MAX_HOVER_CONTENT_CHARS) else {
+        return contents;
+    };
+    format!(
+        "{}\n\n[hover documentation truncated]",
+        contents[..byte].trim_end()
+    )
 }
 
 fn hover_contents_to_string(value: &Value) -> Option<String> {

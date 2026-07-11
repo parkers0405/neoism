@@ -1,13 +1,10 @@
-
 use super::*;
 use crate::ansi::CursorShape;
 use crate::app::ime::Ime;
 use crate::app::messenger::Messenger;
 #[cfg(not(target_os = "windows"))]
 use crate::context::factories::neoism_block_shell_for_spawn;
-use crate::context::factories::{
-    create_dead_context, ROUTE_ID_COUNTER,
-};
+use crate::context::factories::{create_dead_context, ROUTE_ID_COUNTER};
 use crate::context::renderable::{Cursor, RenderableContent};
 use crate::context::tab::{Context, EditorBackend};
 use crate::event::sync::FairMutex;
@@ -24,7 +21,8 @@ use neoism_backend::sugarloaf::Sugarloaf;
 use neoism_protocol::editor::EditorClientMessage;
 use neoism_protocol::pty::ClientMessage as PtyClientMessage;
 use neoism_protocol::workspace::{
-    surface_id_for_pane_external_id, PaneLayoutOp, WorkspaceClientMessage, WorkspaceTabSummary,
+    surface_id_for_pane_external_id, PaneLayoutOp, WorkspaceClientMessage,
+    WorkspaceTabSummary,
 };
 use neoism_terminal_core::crosswords::{Crosswords, MIN_COLUMNS, MIN_LINES};
 use std::error::Error;
@@ -233,7 +231,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
 
     /// The workspace id a grid publishes/answers to: the DAEMON's id
     /// for adopted grids (8C), the derived desktop id otherwise.
-    pub(crate) fn workspace_id_for_grid(&self, grid: &ContextGrid<T>, index: usize) -> String {
+    pub(crate) fn workspace_id_for_grid(
+        &self,
+        grid: &ContextGrid<T>,
+        index: usize,
+    ) -> String {
         if let Some(stable) = grid.workspace_route_id() {
             if let Some(adopted) = self.daemon.cache.adopted_workspaces.get(&stable) {
                 return adopted.clone();
@@ -684,7 +686,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 editor_default_colors: NvimColors::default(),
                 editor_mode: EditorMode::default(),
                 editor_pending_scroll_lines: 0,
-        editor_predicted_cells: Vec::new(),
+                editor_predicted_cells: Vec::new(),
                 editor_pending_grid_scroll_lines: 0,
                 editor_scroll_reset_pending: false,
                 editor_viewport_topline: 0,
@@ -844,7 +846,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             editor_default_colors: NvimColors::default(),
             editor_mode: EditorMode::default(),
             editor_pending_scroll_lines: 0,
-        editor_predicted_cells: Vec::new(),
+            editor_predicted_cells: Vec::new(),
             editor_pending_grid_scroll_lines: 0,
             editor_scroll_reset_pending: false,
             editor_viewport_topline: 0,
@@ -1037,5 +1039,4 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         }
         None
     }
-
 }

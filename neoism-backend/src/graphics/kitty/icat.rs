@@ -123,4 +123,3 @@ fn test_explicit_image_id_still_responds() {
     assert!(body.contains("i=42"));
     assert!(body.contains("OK"));
 }
-

@@ -1,6 +1,5 @@
 use super::*;
 
-
 use crate::input::CompletionFlashState;
 
 pub(crate) fn history_suggestion_allowed(text: &str) -> bool {

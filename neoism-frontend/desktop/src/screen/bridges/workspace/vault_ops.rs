@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::workspace::{self as neo_workspace};
 use std::path::{Path, PathBuf};

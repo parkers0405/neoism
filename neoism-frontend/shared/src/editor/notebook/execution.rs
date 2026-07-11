@@ -9,7 +9,9 @@ pub(crate) fn next_execution_count(cells: &[NotebookCell]) -> u32 {
         .saturating_add(1)
 }
 
-pub(crate) fn command_for_language(language: &str) -> Result<std::process::Command, String> {
+pub(crate) fn command_for_language(
+    language: &str,
+) -> Result<std::process::Command, String> {
     let normalized = language.trim().to_ascii_lowercase();
     let command = if is_shell_language(&normalized) {
         let shell = match normalized.as_str() {

@@ -1010,7 +1010,11 @@ impl TerminalInputBuffer {
         Some(true)
     }
 
-    pub(crate) fn history_match_previous(&self, start: usize, prefix: &str) -> Option<usize> {
+    pub(crate) fn history_match_previous(
+        &self,
+        start: usize,
+        prefix: &str,
+    ) -> Option<usize> {
         (0..=start)
             .rev()
             .find(|idx| history_prefix_match(&self.history[*idx], prefix))
@@ -1186,7 +1190,11 @@ impl TerminalInputBuffer {
         };
     }
 
-    pub(crate) fn move_in_visual_ranges(&mut self, ranges: &[(usize, usize)], delta: isize) -> bool {
+    pub(crate) fn move_in_visual_ranges(
+        &mut self,
+        ranges: &[(usize, usize)],
+        delta: isize,
+    ) -> bool {
         if ranges.len() <= 1 {
             return false;
         }

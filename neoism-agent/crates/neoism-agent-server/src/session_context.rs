@@ -328,10 +328,7 @@ async fn release_owned_compaction_run(
         return;
     };
     let mut runs = state.inner.runs.write().await;
-    if runs
-        .get(session_id)
-        .is_some_and(|run| run.id == run_id)
-    {
+    if runs.get(session_id).is_some_and(|run| run.id == run_id) {
         runs.remove(session_id);
     }
 }
@@ -421,11 +418,9 @@ async fn generate_model_compaction_summary(
     let budget =
         crate::session_prompt::compaction_request_token_budget(state, &model).await;
     let prompt = compaction_request_prompt(previous_summary.as_deref());
-    let prompt_tokens =
-        crate::session_prompt::estimated_provider_prompt_tokens(&[ProviderMessage::text(
-            ProviderRole::User,
-            prompt.clone(),
-        )]);
+    let prompt_tokens = crate::session_prompt::estimated_provider_prompt_tokens(&[
+        ProviderMessage::text(ProviderRole::User, prompt.clone()),
+    ]);
     let mut message_tokens = head
         .iter()
         .map(|message| {

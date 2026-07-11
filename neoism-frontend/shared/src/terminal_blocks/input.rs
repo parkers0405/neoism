@@ -18,7 +18,6 @@ use super::shell::{
     PROMPT_BURST_MS,
 };
 
-
 #[derive(Debug, Default)]
 pub struct TerminalInputBuffer {
     text: String,

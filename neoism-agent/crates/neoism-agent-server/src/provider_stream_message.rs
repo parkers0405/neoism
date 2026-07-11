@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use neoism_agent_core::{
-    event_type, AssistantMessage, AssistantPath, AuthInfo, CompletedTime, EventPayload, Id,
-    IdKind, MessageId, MessageInfo, MessageWithParts, Part, PartTime,
+    event_type, AssistantMessage, AssistantPath, AuthInfo, CompletedTime, EventPayload,
+    Id, IdKind, MessageId, MessageInfo, MessageWithParts, Part, PartTime,
     ProviderGenerationResponse, StepFinishPart, StepStartPart, TextPart, TokenUsage,
     UserModel,
 };

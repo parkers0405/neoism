@@ -133,7 +133,10 @@ pub(crate) fn session_list_path(directory: Option<&str>) -> String {
     path
 }
 
-pub(crate) fn thread_summaries_from_sessions(value: &Value, take: usize) -> Vec<ThreadSummary> {
+pub(crate) fn thread_summaries_from_sessions(
+    value: &Value,
+    take: usize,
+) -> Vec<ThreadSummary> {
     value
         .as_array()
         .map(|sessions| {
@@ -366,7 +369,11 @@ pub(crate) async fn handle_submit_prompt(
     }
 }
 
-pub(crate) async fn handle_enqueue_prompt(inner: Arc<AgentInner>, session_id: String, text: String) {
+pub(crate) async fn handle_enqueue_prompt(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    text: String,
+) {
     // The agent-server doesn't expose a typed "push to queue without
     // running" endpoint distinct from `/message`; for now we POST the
     // prompt normally — the runtime will queue it behind any active
@@ -510,7 +517,11 @@ pub(crate) async fn handle_set_model(
     }
 }
 
-pub(crate) async fn handle_set_agent(inner: Arc<AgentInner>, session_id: String, agent: String) {
+pub(crate) async fn handle_set_agent(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    agent: String,
+) {
     let body = json!({ "agent": agent });
     match http_patch_json(&inner, &format!("/session/{session_id}"), &body).await {
         Ok(value) => {
@@ -649,7 +660,10 @@ pub(crate) async fn handle_connect_store_api_key(
 }
 
 /// Remove a provider's stored auth: `DELETE /auth/{id}`.
-pub(crate) async fn handle_connect_disconnect(inner: Arc<AgentInner>, provider_id: String) {
+pub(crate) async fn handle_connect_disconnect(
+    inner: Arc<AgentInner>,
+    provider_id: String,
+) {
     match http_delete(&inner, &format!("/auth/{provider_id}")).await {
         Ok(()) => {
             let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
@@ -744,7 +758,10 @@ pub(crate) async fn handle_connect_oauth_callback(
     }
 }
 
-pub(crate) async fn handle_get_config_defaults(inner: Arc<AgentInner>, directory: Option<String>) {
+pub(crate) async fn handle_get_config_defaults(
+    inner: Arc<AgentInner>,
+    directory: Option<String>,
+) {
     let path = match directory {
         Some(dir) => format!("/config?directory={}", percent_encode(&dir)),
         None => "/config".to_string(),
@@ -818,7 +835,10 @@ pub(crate) fn provider_info_from_value(value: &Value) -> Option<ProviderInfo> {
     Some(ProviderInfo { id, name, models })
 }
 
-pub(crate) async fn handle_list_agents(inner: Arc<AgentInner>, directory: Option<String>) {
+pub(crate) async fn handle_list_agents(
+    inner: Arc<AgentInner>,
+    directory: Option<String>,
+) {
     let path = match directory.as_deref().filter(|d| !d.is_empty()) {
         Some(dir) => format!("/agent?directory={}", percent_encode(dir)),
         None => "/agent".to_string(),
@@ -864,7 +884,10 @@ pub(crate) fn agent_info_from_value(value: &Value) -> Option<AgentInfo> {
     })
 }
 
-pub(crate) async fn handle_list_skills(inner: Arc<AgentInner>, directory: Option<String>) {
+pub(crate) async fn handle_list_skills(
+    inner: Arc<AgentInner>,
+    directory: Option<String>,
+) {
     let path = match directory.as_deref().filter(|d| !d.is_empty()) {
         Some(dir) => format!("/skill?directory={}", percent_encode(dir)),
         None => "/skill".to_string(),
@@ -932,7 +955,11 @@ pub(crate) async fn handle_show_questions(inner: Arc<AgentInner>, session_id: St
     );
 }
 
-pub(crate) async fn handle_slash_command(inner: Arc<AgentInner>, session_id: String, text: String) {
+pub(crate) async fn handle_slash_command(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    text: String,
+) {
     let path = format!("/session/{session_id}/cmd");
     let body = json!({ "command": text });
     emit_command_result(
@@ -996,7 +1023,11 @@ pub(crate) async fn handle_permit(
     );
 }
 
-pub(crate) async fn handle_answer(inner: Arc<AgentInner>, session_id: String, answer: String) {
+pub(crate) async fn handle_answer(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    answer: String,
+) {
     let Some(item) = first_interaction_value(&inner, "/question", &session_id)
         .await
         .unwrap_or_else(|err| {
@@ -1189,7 +1220,11 @@ pub(crate) async fn handle_compact(inner: Arc<AgentInner>, session_id: String) {
     }
 }
 
-pub(crate) async fn handle_set_title(inner: Arc<AgentInner>, session_id: String, title: String) {
+pub(crate) async fn handle_set_title(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    title: String,
+) {
     let body = json!({ "title": title });
     if let Err(err) =
         http_patch_json(&inner, &format!("/session/{session_id}"), &body).await
@@ -1197,4 +1232,3 @@ pub(crate) async fn handle_set_title(inner: Arc<AgentInner>, session_id: String,
         emit_error(&inner.tx, err);
     }
 }
-

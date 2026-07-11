@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::workspace::extensions::ExtensionStatus;
 use neoism_extensions::{
@@ -427,7 +426,6 @@ impl Screen<'_> {
                 }
             }
         }
-
 
         if let Some(pane) = self
             .context_manager

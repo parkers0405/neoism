@@ -3,7 +3,6 @@ use rustc_hash::FxHashMap;
 use web_time::Duration;
 use web_time::Instant;
 
-
 impl Island {
     /// Move the focus cursor one tab left (`previous`) or right, wrapping
     /// at the edges. Mirror of `BufferTabs::move_focused` — moves the

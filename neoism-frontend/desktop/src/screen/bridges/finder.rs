@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::super::*;
 use neoism_backend::clipboard::{Clipboard, ClipboardType};
 use neoism_terminal_core::crosswords::pos::{Boundary, Direction, Line};

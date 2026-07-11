@@ -1,6 +1,5 @@
 // Split from screen/misc.rs. Hosts the welcome-screen render path.
 
-
 use super::super::*;
 
 impl Screen<'_> {

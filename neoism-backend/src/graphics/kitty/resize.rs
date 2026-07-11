@@ -647,4 +647,3 @@ fn test_resize_narrow_with_prompt_after_image() {
         final_dest_row - initial_dest_row
     );
 }
-

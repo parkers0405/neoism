@@ -267,17 +267,16 @@ impl AgentSession {
     }
 }
 
-
 pub(crate) mod dispatcher;
-pub(crate) mod turn;
-pub(crate) mod http;
-pub(crate) mod handlers;
 pub(crate) mod events;
+pub(crate) mod handlers;
+pub(crate) mod http;
+pub(crate) mod turn;
 
-pub(crate) use turn::*;
-pub(crate) use http::*;
-pub(crate) use handlers::*;
 pub(crate) use events::*;
+pub(crate) use handlers::*;
+pub(crate) use http::*;
+pub(crate) use turn::*;
 
 pub use dispatcher::dispatch;
 

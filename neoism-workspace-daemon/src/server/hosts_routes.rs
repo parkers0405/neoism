@@ -1,6 +1,5 @@
 use super::*;
 
-
 // ---------------------------------------------------------------------
 // Wave 6B: automated host pairing + promote target resolution.
 // ---------------------------------------------------------------------
@@ -414,4 +413,3 @@ pub(crate) async fn workspace_demote_route(
 
     (StatusCode::OK, Json(promote_result)).into_response()
 }
-

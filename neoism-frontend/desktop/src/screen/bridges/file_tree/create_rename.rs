@@ -1,4 +1,3 @@
-
 use super::*;
 use std::path::{Path, PathBuf};
 
@@ -259,23 +258,24 @@ impl Screen<'_> {
         // JOINED workspace: rename on the HOST (path math is pure, the
         // existence checks belong to the daemon there).
         if self.renderer.file_tree.is_remote() {
-            let target = match neoism_ui::panels::file_tree::rename_target_for_input(
-                &path, &name,
-            ) {
-                Ok(neoism_ui::panels::file_tree::RenameTarget::Noop) => {
-                    self.renderer.modal.close();
-                    return;
-                }
-                Ok(neoism_ui::panels::file_tree::RenameTarget::Target(target)) => target,
-                Err(message) => {
-                    self.file_tree_notify(message, NotificationLevel::Warn);
-                    return;
-                }
-            };
-            if let (Some(from), Some(to)) = (
-                self.remote_tree_rel(&path),
-                self.remote_tree_rel(&target),
-            ) {
+            let target =
+                match neoism_ui::panels::file_tree::rename_target_for_input(&path, &name)
+                {
+                    Ok(neoism_ui::panels::file_tree::RenameTarget::Noop) => {
+                        self.renderer.modal.close();
+                        return;
+                    }
+                    Ok(neoism_ui::panels::file_tree::RenameTarget::Target(target)) => {
+                        target
+                    }
+                    Err(message) => {
+                        self.file_tree_notify(message, NotificationLevel::Warn);
+                        return;
+                    }
+                };
+            if let (Some(from), Some(to)) =
+                (self.remote_tree_rel(&path), self.remote_tree_rel(&target))
+            {
                 self.send_remote_files_op(
                     neoism_protocol::files::FilesClientMessage::Rename { from, to },
                 );
@@ -330,5 +330,4 @@ impl Screen<'_> {
             ),
         }
     }
-
 }

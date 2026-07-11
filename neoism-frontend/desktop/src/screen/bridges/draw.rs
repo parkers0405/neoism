@@ -2,7 +2,6 @@
 // `bridges/markdown.rs` for the `.neodraw` sketch surface: open a file
 // into a `DrawPane` context, then render every visible draw pane.
 
-
 use super::super::*;
 use neoism_window::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 use neoism_window::keyboard::{Key, ModifiersState, NamedKey};

@@ -72,7 +72,9 @@ mod tests;
 // Re-export the moved public API so external paths
 // (`crate::workspace::Foo`, `neoism_workspace_daemon::workspace::foo`)
 // keep resolving after the god-file was split into child modules.
-pub use clipboard::{clipboard_dir, resolve_clipboard_image_path, sweep_clipboard_dir_on_startup};
+pub use clipboard::{
+    clipboard_dir, resolve_clipboard_image_path, sweep_clipboard_dir_on_startup,
+};
 pub use dispatch::{handle, handle_preauthenticated};
 pub(crate) use shell_ops::{
     cleanup_local_docker_sandbox, export_workspace_snapshot, start_local_docker_sandbox,

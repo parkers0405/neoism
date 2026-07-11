@@ -24,13 +24,12 @@
 //! materialise its panes from a `SessionTree` instead of the current
 //! ad-hoc state.
 
-
 use serde::{Deserialize, Serialize};
 
 pub use super::legacy::{SessionLeafKind, SessionLeafSpec, SplitAxis, SplitPlacement};
 
-mod ops;
 mod helpers;
+mod ops;
 pub use helpers::*;
 
 /// Inclusive minimum ratio for any split gap; mirrors the legacy clamp so

@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -653,5 +652,4 @@ impl Screen<'_> {
             .switch_daemon_host_workspace(workspace_id);
         self.mark_dirty();
     }
-
 }

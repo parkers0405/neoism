@@ -59,7 +59,6 @@
 use std::sync::RwLock;
 use web_time::Duration;
 
-
 use crate::animation::CriticallyDampedSpring;
 use crate::input::SimpleInputBuffer;
 use crate::layout::{ChromeLayout, Rect};
@@ -81,8 +80,8 @@ use crate::render_policy::EditorScrollGridRenderState;
 
 mod config;
 mod content;
-mod events;
 mod draw;
+mod events;
 mod paint;
 pub(crate) use paint::*;
 

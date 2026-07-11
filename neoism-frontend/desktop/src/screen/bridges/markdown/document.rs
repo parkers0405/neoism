@@ -1,4 +1,3 @@
-
 use super::*;
 use std::path::Path;
 
@@ -232,5 +231,4 @@ impl Screen<'_> {
         self.mark_dirty();
         true
     }
-
 }

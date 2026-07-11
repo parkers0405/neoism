@@ -292,10 +292,8 @@ impl<T: neoism_backend::event::EventListener> Drop for Context<T> {
     }
 }
 
-
-mod context_pump;
 mod context_editor;
-
+mod context_pump;
 
 /// One active Rust-engine completion popup. Owned by the frontend so
 /// navigation/accept/dismiss stay snappy (no round trip), with insertion
@@ -369,9 +367,7 @@ pub enum EditorBackend {
     Daemon(DaemonEditorBackend),
 }
 
-
 mod backends;
-
 
 pub struct DaemonEditorBackend {
     surface_id: String,
@@ -384,7 +380,6 @@ pub struct DaemonEditorBackend {
     /// websocket) with dimensions that are obsolete before they are sent.
     resize_tx: Option<tokio_watch::Sender<(u32, u32)>>,
 }
-
 
 fn editor_message_to_redraw_events(message: EditorServerMessage) -> Vec<RedrawEvent> {
     match message {
@@ -689,7 +684,6 @@ fn style_from_highlight_attrs(attrs: HighlightAttrs) -> NvimStyle {
         ..NvimStyle::default()
     }
 }
-
 
 #[cfg(test)]
 mod tests;

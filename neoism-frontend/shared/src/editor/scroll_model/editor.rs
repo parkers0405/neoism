@@ -1,5 +1,3 @@
-
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EditorViewport {
     pub line_count: usize,

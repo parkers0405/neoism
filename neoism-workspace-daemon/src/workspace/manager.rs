@@ -353,7 +353,10 @@ impl WorkspaceManager {
         host
     }
 
-    pub(crate) fn list_host_workspaces(&self, host_id: Option<&str>) -> Vec<WorkspaceSummary> {
+    pub(crate) fn list_host_workspaces(
+        &self,
+        host_id: Option<&str>,
+    ) -> Vec<WorkspaceSummary> {
         let inner = self.inner.lock();
         let mut out: Vec<WorkspaceSummary> = inner
             .host_workspaces
@@ -370,7 +373,10 @@ impl WorkspaceManager {
         out
     }
 
-    pub(crate) fn list_workspace_tabs(&self, workspace_id: &str) -> Vec<WorkspaceTabSummary> {
+    pub(crate) fn list_workspace_tabs(
+        &self,
+        workspace_id: &str,
+    ) -> Vec<WorkspaceTabSummary> {
         let inner = self.inner.lock();
         let mut out: Vec<WorkspaceTabSummary> = inner
             .workspace_tabs
@@ -388,7 +394,10 @@ impl WorkspaceManager {
         out
     }
 
-    pub(crate) fn close_host_workspace(&self, workspace_id: &str) -> Option<WorkspaceSummary> {
+    pub(crate) fn close_host_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Option<WorkspaceSummary> {
         let mut inner = self.inner.lock();
         let removed = inner.host_workspaces.remove(workspace_id)?;
         inner
@@ -512,7 +521,10 @@ impl WorkspaceManager {
         workspace
     }
 
-    pub(crate) fn switch_host_workspace(&self, workspace_id: &str) -> Option<WorkspaceSummary> {
+    pub(crate) fn switch_host_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Option<WorkspaceSummary> {
         let mut inner = self.inner.lock();
         let mut workspace = inner.host_workspaces.get(workspace_id)?.clone();
         workspace.last_active = now_secs();
@@ -747,7 +759,11 @@ impl WorkspaceManager {
 
     /// Replace ONE workspace's tab list. Tab ids are normalized onto the
     /// workspace so a republish always replaces rather than accretes.
-    pub(crate) fn publish_workspace_tabs(&self, workspace_id: &str, tabs: Vec<WorkspaceTabSummary>) {
+    pub(crate) fn publish_workspace_tabs(
+        &self,
+        workspace_id: &str,
+        tabs: Vec<WorkspaceTabSummary>,
+    ) {
         let mut inner = self.inner.lock();
         inner
             .workspace_tabs
@@ -809,7 +825,10 @@ impl WorkspaceManager {
             .collect()
     }
 
-    pub(crate) fn editor_surfaces_for_workspace(&self, ws_id: &str) -> Vec<EditorSurfaceSummary> {
+    pub(crate) fn editor_surfaces_for_workspace(
+        &self,
+        ws_id: &str,
+    ) -> Vec<EditorSurfaceSummary> {
         let inner = self.inner.lock();
         let mut out: Vec<EditorSurfaceSummary> = inner
             .editor_surfaces
@@ -821,7 +840,10 @@ impl WorkspaceManager {
         out
     }
 
-    pub(crate) fn pane_layout_for_workspace(&self, ws_id: &str) -> Option<PaneLayoutSnapshot> {
+    pub(crate) fn pane_layout_for_workspace(
+        &self,
+        ws_id: &str,
+    ) -> Option<PaneLayoutSnapshot> {
         let mut inner = self.inner.lock();
         if let Some(layout) = inner.pane_layouts.get(ws_id) {
             return Some(layout.clone());
@@ -903,7 +925,10 @@ impl WorkspaceManager {
         );
     }
 
-    pub(crate) fn resume_client_state(&self, client_id: Uuid) -> Option<ClientResumeState> {
+    pub(crate) fn resume_client_state(
+        &self,
+        client_id: Uuid,
+    ) -> Option<ClientResumeState> {
         if client_id.is_nil() {
             return None;
         }

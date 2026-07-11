@@ -154,7 +154,9 @@ pub(crate) fn call_tool(
             // Reject near-duplicate memories: if an existing topic file in
             // this root already covers the same fact, point the model at it
             // instead of writing a sibling duplicate.
-            if let Some(existing) = find_similar_memory(&root, &path, &name, &description)? {
+            if let Some(existing) =
+                find_similar_memory(&root, &path, &name, &description)?
+            {
                 let output = json!({
                     "operation": "write",
                     "status": "duplicate",
@@ -384,7 +386,8 @@ fn recall_entries(
         let description = frontmatter_value(&text, "description")
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let haystack = format!("{file_name}\n{description}\n{}", text.to_ascii_lowercase());
+        let haystack =
+            format!("{file_name}\n{description}\n{}", text.to_ascii_lowercase());
         let mut missed = 0usize;
         let mut tier_sum = 0usize;
         let mut first_pos: Option<usize> = None;
@@ -621,7 +624,8 @@ fn find_similar_memory(
             continue;
         };
         let existing_name = frontmatter_value(&text, "name").unwrap_or_default();
-        let existing_description = frontmatter_value(&text, "description").unwrap_or_default();
+        let existing_description =
+            frontmatter_value(&text, "description").unwrap_or_default();
         let existing = overlap_tokens(&format!("{existing_name} {existing_description}"));
         if existing.is_empty() {
             continue;

@@ -7,7 +7,8 @@ pub struct FileTree {
     /// the daemon's files plane (the HOST machine's disk) instead of
     /// local `std::fs`. Set/cleared by the screen whenever the active
     /// workspace root changes.
-    pub(super) remote: Option<std::sync::Arc<crate::daemon_client::remote_files::RemoteFiles>>,
+    pub(super) remote:
+        Option<std::sync::Arc<crate::daemon_client::remote_files::RemoteFiles>>,
 }
 
 impl FileTree {

@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::super::*;
 use neoism_backend::clipboard::{Clipboard, ClipboardType};
 use neoism_terminal_core::crosswords::pos::Direction;
@@ -321,8 +320,10 @@ impl Screen<'_> {
                                 .command_palette
                                 .push_recent_search(query.clone());
                             if is_markdown {
-                                if let Some(md) =
-                                    self.context_manager.current_mut().active_markdown_mut()
+                                if let Some(md) = self
+                                    .context_manager
+                                    .current_mut()
+                                    .active_markdown_mut()
                                 {
                                     md.search_commit(location.0, location.1);
                                 }
@@ -344,23 +345,22 @@ impl Screen<'_> {
                                 .command_palette
                                 .push_recent_search(term.clone());
                             if is_markdown {
-                                if let Some(md) =
-                                    self.context_manager.current_mut().active_markdown_mut()
+                                if let Some(md) = self
+                                    .context_manager
+                                    .current_mut()
+                                    .active_markdown_mut()
                                 {
                                     let first = md
                                         .search_scan(&term)
                                         .first()
                                         .map(|(lnum, col, _)| (*lnum, *col));
                                     match first {
-                                        Some((lnum, col)) => {
-                                            md.search_commit(lnum, col)
-                                        }
+                                        Some((lnum, col)) => md.search_commit(lnum, col),
                                         None => md.search_cancel(),
                                     }
                                 }
                             } else {
-                                let cmd =
-                                    self.palette_search_commit_command(&term, None);
+                                let cmd = self.palette_search_commit_command(&term, None);
                                 self.send_editor_command(cmd);
                             }
                         }
@@ -825,7 +825,11 @@ impl Screen<'_> {
                 // the host's sessions and close the tab (close_tab's
                 // adopted-grid guard keeps the host's shells alive and
                 // re-dials home after the last joined workspace).
-                if self.context_manager.current_adopted_workspace_id().is_some() {
+                if self
+                    .context_manager
+                    .current_adopted_workspace_id()
+                    .is_some()
+                {
                     self.close_tab(clipboard);
                 } else {
                     tracing::info!(

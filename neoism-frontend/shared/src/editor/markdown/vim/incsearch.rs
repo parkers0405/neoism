@@ -123,7 +123,8 @@ impl MarkdownPane {
             {
                 let line = line.min(self.lines.len().saturating_sub(1));
                 self.cursor_line = line;
-                self.cursor_col = col.min(self.lines.get(line).map(String::len).unwrap_or(0));
+                self.cursor_col =
+                    col.min(self.lines.get(line).map(String::len).unwrap_or(0));
                 self.follow_cursor = true;
             }
         }
@@ -204,9 +205,12 @@ impl MarkdownPane {
             return false;
         };
         self.cursor_line = next.line.min(self.lines.len().saturating_sub(1));
-        self.cursor_col = next
-            .col
-            .min(self.lines.get(self.cursor_line).map(String::len).unwrap_or(0));
+        self.cursor_col = next.col.min(
+            self.lines
+                .get(self.cursor_line)
+                .map(String::len)
+                .unwrap_or(0),
+        );
         self.follow_cursor = true;
         true
     }

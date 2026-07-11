@@ -223,5 +223,4 @@ impl NeoismAgentPane {
     pub fn link_hover_active(&self) -> bool {
         self.hover_link_target.is_some()
     }
-
 }

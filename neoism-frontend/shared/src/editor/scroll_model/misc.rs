@@ -1,4 +1,3 @@
-
 use crate::panels::completion_menu::ScrollDelta;
 
 /// Convert a host-neutral wheel delta into vertical pixels for an

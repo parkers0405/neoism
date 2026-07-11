@@ -1,4 +1,3 @@
-
 use super::*;
 
 impl Screen<'_> {
@@ -472,5 +471,4 @@ impl Screen<'_> {
             )
             .is_some()
     }
-
 }

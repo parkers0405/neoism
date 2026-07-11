@@ -623,24 +623,25 @@ impl CommandComposer {
                     ..DrawOpts::default()
                 };
                 let right_edge = send_chip_x - 10.0 * s;
-                let draw_indicator = |sugarloaf: &mut Sugarloaf, label: String, y: f32| {
-                    let w = sugarloaf.text_mut().measure(&label, &indicator_opts);
-                    let x = (right_edge - w).max(inner_left);
-                    let pill_pad = 5.0 * s;
-                    let pill_h = indicator_opts.font_size + 5.0 * s;
-                    sugarloaf.rounded_rect(
-                        None,
-                        x - pill_pad,
-                        y - 2.5 * s,
-                        w + pill_pad * 2.0,
-                        pill_h,
-                        theme.f32_alpha(theme.surface, 0.95),
-                        DEPTH,
-                        pill_h * 0.4,
-                        ORDER_CHIP_BG,
-                    );
-                    sugarloaf.text_mut().draw(x, y, &label, &indicator_opts);
-                };
+                let draw_indicator =
+                    |sugarloaf: &mut Sugarloaf, label: String, y: f32| {
+                        let w = sugarloaf.text_mut().measure(&label, &indicator_opts);
+                        let x = (right_edge - w).max(inner_left);
+                        let pill_pad = 5.0 * s;
+                        let pill_h = indicator_opts.font_size + 5.0 * s;
+                        sugarloaf.rounded_rect(
+                            None,
+                            x - pill_pad,
+                            y - 2.5 * s,
+                            w + pill_pad * 2.0,
+                            pill_h,
+                            theme.f32_alpha(theme.surface, 0.95),
+                            DEPTH,
+                            pill_h * 0.4,
+                            ORDER_CHIP_BG,
+                        );
+                        sugarloaf.text_mut().draw(x, y, &label, &indicator_opts);
+                    };
                 if hidden_above > 0 {
                     // Slot 0 is chrome-only while scrolled, so the
                     // "above" indicator lives there beside the run chip.
@@ -648,8 +649,7 @@ impl CommandComposer {
                 }
                 if hidden_below > 0 {
                     let y = body_y
-                        + (row_slot_offset + visible_line_count.saturating_sub(1))
-                            as f32
+                        + (row_slot_offset + visible_line_count.saturating_sub(1)) as f32
                             * line_step;
                     draw_indicator(sugarloaf, format!("↓ {hidden_below} more"), y);
                 }

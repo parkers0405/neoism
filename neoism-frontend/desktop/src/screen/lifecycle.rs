@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::*;
 use crate::terminal::blocks::input::TerminalInputBufferHostExt;
 use neoism_backend::clipboard::Clipboard;
@@ -10,12 +9,11 @@ use neoism_window::event::ElementState;
 use neoism_window::keyboard::{Key, ModifiersState, NamedKey};
 use std::path::PathBuf;
 
-mod context_menu;
 mod block_overlay;
+mod context_menu;
 mod key_bindings;
 mod modal;
 mod splash_island;
-
 
 /// Compact, readable label for an LSP location row in the picker: the
 /// file's last two path components plus a 1-based line number (e.g.

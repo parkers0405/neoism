@@ -30,7 +30,9 @@ fn editor_surface_id_is_backward_compatible_for_old_client_json() {
         serde_json::from_str(r#"{"OpenBuffer":{"path":"src/lib.rs"}}"#)
             .expect("old OpenBuffer without surface_id still decodes");
     match msg {
-        EditorClientMessage::OpenBuffer { path, surface_id, .. } => {
+        EditorClientMessage::OpenBuffer {
+            path, surface_id, ..
+        } => {
             assert_eq!(path, PathBuf::from("src/lib.rs"));
             assert_eq!(surface_id, None);
         }

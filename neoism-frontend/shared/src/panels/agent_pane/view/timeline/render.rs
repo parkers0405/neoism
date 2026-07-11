@@ -1,8 +1,9 @@
-use super::*;
 use super::layout::{
-    timeline_layout, timeline_row_range_for_source_range, timeline_row_range_intersects_viewport,
-    timeline_virtual_row_measurements, union_timeline_row_ranges, visible_timeline_row_range,
+    timeline_layout, timeline_row_range_for_source_range,
+    timeline_row_range_intersects_viewport, timeline_virtual_row_measurements,
+    union_timeline_row_ranges, visible_timeline_row_range,
 };
+use super::*;
 
 pub fn render_timeline_with<P, D>(
     sugarloaf: &mut Sugarloaf,

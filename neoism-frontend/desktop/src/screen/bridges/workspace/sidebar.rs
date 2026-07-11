@@ -1,4 +1,3 @@
-
 use super::*;
 use std::path::{Path, PathBuf};
 
@@ -126,7 +125,6 @@ impl Screen<'_> {
 
     pub(crate) fn handle_notes_sidebar_click(&mut self) -> bool {
         use neoism_ui::panels::notes_sidebar::NotesSidebarHit;
-        
 
         if !self.renderer.notes_sidebar.is_visible() {
             return false;
@@ -168,9 +166,7 @@ impl Screen<'_> {
     }
 
     pub(crate) fn handle_notes_sidebar_context_click(&mut self) -> bool {
-        
         use neoism_ui::panels::notes_sidebar::NotesSidebarHit;
-        
 
         if !self.renderer.notes_sidebar.is_visible() {
             return false;
@@ -547,5 +543,4 @@ impl Screen<'_> {
         );
         self.mark_dirty();
     }
-
 }

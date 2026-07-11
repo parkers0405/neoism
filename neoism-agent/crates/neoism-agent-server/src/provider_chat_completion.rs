@@ -33,6 +33,9 @@ pub(crate) fn reasoning_effort(value: Option<&str>) -> Option<&'static str> {
         Some("medium") => Some("medium"),
         Some("high") => Some("high"),
         Some("xhigh") | Some("max") => Some("xhigh"),
+        // GPT-5.6's "ultra" is multi-agent orchestration, not an effort level;
+        // surfaces without multi_agent support degrade it to the deepest effort.
+        Some("ultra") => Some("xhigh"),
         _ => None,
     }
 }

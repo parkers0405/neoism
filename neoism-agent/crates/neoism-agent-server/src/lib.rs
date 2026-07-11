@@ -64,6 +64,7 @@ mod pty_routes;
 mod route_query;
 pub mod rust_lsp;
 mod search_routes;
+mod semantic;
 mod server_util;
 mod session_actions;
 mod session_context;
@@ -222,6 +223,7 @@ pub async fn listen(options: ServerOptions) -> anyhow::Result<SocketAddr> {
     );
     let state_started = crate::perf::now();
     let state = AppState::open_default().await?;
+    crate::semantic::spawn_indexer(state.clone());
     tracing::info!(
         target: "neoism_agent::perf",
         listen_addr = %actual,

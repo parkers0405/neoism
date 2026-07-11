@@ -480,7 +480,11 @@ impl NeoismAgentPane {
         self.remove_pending_permission(id)
     }
 
-    pub(crate) fn permission_reply_failed(&mut self, id: &str, error: impl Into<String>) -> bool {
+    pub(crate) fn permission_reply_failed(
+        &mut self,
+        id: &str,
+        error: impl Into<String>,
+    ) -> bool {
         let error = error.into();
         let changed = permission_policy::fail_reply(
             &mut self.pending_permission,
@@ -518,6 +522,27 @@ impl NeoismAgentPane {
                     self.side_panel.set_subagents(subagents);
                     self.reconcile_task_message_statuses();
                     self.sync_subagent_waiting_clock();
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::SemanticSessionHits { query, hits }) => {
+                    self.semantic_in_flight = false;
+                    self.set_semantic_loading_indicators(false);
+                    match hits {
+                        None => self.semantic_unavailable = true,
+                        Some(hits) => {
+                            self.side_panel.set_semantic_results(
+                                query.clone(),
+                                hits.iter().map(|hit| hit.session_id.clone()).collect(),
+                            );
+                            self.apply_semantic_hits_to_session_picker(&query, &hits);
+                        }
+                    }
+                    // A query typed while this fetch was in flight runs now.
+                    if let Some(pending) = self.semantic_pending_query.take() {
+                        if pending != query {
+                            self.kick_semantic_session_search(pending);
+                        }
+                    }
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::SessionGoalRefreshed {
@@ -584,7 +609,9 @@ impl NeoismAgentPane {
                     }
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::ConnectOauthFinished { provider_name }) => {
+                Ok(NeoismAgentBackgroundUpdate::ConnectOauthFinished {
+                    provider_name,
+                }) => {
                     self.system_message(
                         "Connected",
                         format!(
@@ -1128,5 +1155,4 @@ impl NeoismAgentPane {
             self.invalidate_timeline_layout();
         }
     }
-
 }

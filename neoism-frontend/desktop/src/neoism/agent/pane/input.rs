@@ -490,7 +490,7 @@ impl NeoismAgentPane {
     }
 
     pub fn open_thinking_picker(&mut self) {
-        let options = vec![
+        let mut options = vec![
             NeoismAgentPickerOption::new(
                 "none",
                 "Use model default reasoning",
@@ -507,6 +507,16 @@ impl NeoismAgentPane {
             NeoismAgentPickerOption::new("high", "More reasoning", "think", "high"),
             NeoismAgentPickerOption::new("xhigh", "Maximum reasoning", "think", "xhigh"),
         ];
+        // GPT-5.6's ultra mode (Responses API multi-agent orchestration) —
+        // only offered where the server can actually enable it.
+        if self.model.contains("gpt-5.6") {
+            options.push(NeoismAgentPickerOption::new(
+                "ultra",
+                "Multi-agent reasoning (GPT-5.6)",
+                "think",
+                "ultra",
+            ));
+        }
         let selected = options
             .iter()
             .position(|option| option.value == self.thinking.as_deref().unwrap_or(""))
@@ -532,6 +542,7 @@ impl NeoismAgentPane {
                         Some(option.value.as_str()) == self.session_id.as_deref()
                     })
                     .unwrap_or(0);
+                self.session_picker_base = options.clone();
                 self.picker = Some(NeoismAgentPicker::new(
                     NeoismAgentPickerKind::Session,
                     "Sessions",
@@ -565,6 +576,7 @@ impl NeoismAgentPane {
         if let Ok(options) =
             fetch_session_options(&self.server, current.as_deref(), directory.as_deref())
         {
+            self.session_picker_base = options.clone();
             if let Some(picker) = self
                 .picker
                 .as_mut()

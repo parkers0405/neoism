@@ -34,8 +34,7 @@ static AGENT_SERVER_OVERRIDE: std::sync::RwLock<Option<String>> =
     std::sync::RwLock::new(None);
 
 pub fn set_agent_server_override(url: Option<String>) {
-    let normalized =
-        url.map(|url| url.trim_end_matches('/').to_string());
+    let normalized = url.map(|url| url.trim_end_matches('/').to_string());
     if let Ok(mut slot) = AGENT_SERVER_OVERRIDE.write() {
         if *slot != normalized {
             tracing::info!(
@@ -213,10 +212,7 @@ pub(super) fn fetch_session_entries(
 ) -> Result<Vec<NeoismAgentSessionEntry>, String> {
     let sessions = fetch_sessions_sorted(server, directory)?;
     let _ = current_id;
-    Ok(sessions
-        .iter()
-        .filter_map(session_entry)
-        .collect())
+    Ok(sessions.iter().filter_map(session_entry).collect())
 }
 
 pub(super) fn fetch_subagent_options(
@@ -921,6 +917,89 @@ pub(super) fn question_answers(input: &str, count: usize) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// One session surfaced by semantic transcript search, joined with its
+/// title from the session list and deduped to the best (closest) message
+/// hit per session.
+#[derive(Clone, Debug)]
+pub(crate) struct NeoismAgentSemanticSessionHit {
+    pub session_id: String,
+    pub title: String,
+    pub excerpt: String,
+    pub distance: f64,
+}
+
+/// Query the agent server's semantic transcript search (`/search/semantic`)
+/// and join hits with the directory's session list. `Ok(None)` means the
+/// server reports semantic search unavailable (no vector backend or no
+/// embeddings key) — callers should stop asking. Sessions outside this
+/// directory's list are dropped, which also scopes the server's global
+/// search to the current workspace.
+pub(crate) fn fetch_semantic_session_hits(
+    server: &str,
+    query: &str,
+    current_session: Option<&str>,
+    directory: Option<&str>,
+) -> Result<Option<Vec<NeoismAgentSemanticSessionHit>>, String> {
+    let path = format!("/search/semantic?q={}&limit=20", percent_encode(query));
+    let value = api_request_json(server, "GET", &path, None)?
+        .ok_or_else(|| "empty semantic search response".to_string())?;
+    if !value
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let hits = value
+        .get("hits")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if hits.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let entries =
+        fetch_session_entries(server, current_session, directory).unwrap_or_default();
+    let titles: HashMap<&str, &str> = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry.title.as_str()))
+        .collect();
+    let mut best: Vec<NeoismAgentSemanticSessionHit> = Vec::new();
+    for hit in &hits {
+        let Some(session_id) = hit.get("sessionId").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(title) = titles.get(session_id) else {
+            continue;
+        };
+        let distance = hit.get("distance").and_then(Value::as_f64).unwrap_or(1.0);
+        let excerpt = hit
+            .get("excerpt")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        match best
+            .iter_mut()
+            .find(|existing| existing.session_id == session_id)
+        {
+            Some(existing) => {
+                if distance < existing.distance {
+                    existing.distance = distance;
+                    existing.excerpt = excerpt;
+                }
+            }
+            None => best.push(NeoismAgentSemanticSessionHit {
+                session_id: session_id.to_string(),
+                title: (*title).to_string(),
+                excerpt,
+                distance,
+            }),
+        }
+    }
+    best.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+    Ok(Some(best))
+}
+
 pub(super) fn percent_encode(value: &str) -> String {
     let mut out = String::new();
     for byte in value.bytes() {
@@ -1239,10 +1318,7 @@ pub(super) fn set_session_pinned(
         &format!("/session/{session_id}/pin"),
         Some(&body),
     )?;
-    Ok(value
-        .as_ref()
-        .map(session_pinned)
-        .unwrap_or(pinned))
+    Ok(value.as_ref().map(session_pinned).unwrap_or(pinned))
 }
 
 /// `DELETE /session/:id` — permanently delete a session.

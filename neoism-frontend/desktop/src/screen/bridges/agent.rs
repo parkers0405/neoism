@@ -1,7 +1,6 @@
 // Auto-split from screen/mod.rs. See sibling mod.rs for the Screen struct and
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
-
 use super::super::*;
 use neoism_backend::clipboard::{Clipboard, ClipboardType};
 use neoism_window::event::ElementState;
@@ -74,13 +73,9 @@ impl Screen<'_> {
                         agent.backspace_session_rename();
                     }
                     _ => {
-                        if !mods.control_key()
-                            && !mods.alt_key()
-                            && !mods.super_key()
-                        {
+                        if !mods.control_key() && !mods.alt_key() && !mods.super_key() {
                             let text = Self::text_for_key_event(key).to_string();
-                            if !text.is_empty()
-                                && !text.chars().any(|ch| ch.is_control())
+                            if !text.is_empty() && !text.chars().any(|ch| ch.is_control())
                             {
                                 agent.push_session_rename(&text);
                             }
@@ -213,6 +208,8 @@ impl Screen<'_> {
                 }
                 Key::Named(NamedKey::Backspace) => {
                     agent.side_panel_mut().backspace_session_query();
+                    let query = agent.side_panel().session_query().to_string();
+                    agent.kick_semantic_session_search(query);
                     self.mark_dirty();
                     return true;
                 }
@@ -220,6 +217,8 @@ impl Screen<'_> {
                 Key::Character(text) => {
                     let text = text.to_string();
                     agent.side_panel_mut().push_session_query(&text);
+                    let query = agent.side_panel().session_query().to_string();
+                    agent.kick_semantic_session_search(query);
                     self.mark_dirty();
                     return true;
                 }

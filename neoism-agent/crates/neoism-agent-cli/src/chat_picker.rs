@@ -217,6 +217,11 @@ const THINK_OPTIONS: &[(&str, &str, Option<&str>)] = &[
     ("medium", "balanced reasoning", Some("medium")),
     ("high", "deep reasoning", Some("high")),
     ("xhigh", "max reasoning effort", Some("xhigh")),
+    (
+        "ultra",
+        "multi-agent orchestration (GPT-5.6 only)",
+        Some("ultra"),
+    ),
 ];
 
 pub(crate) async fn pick_think(

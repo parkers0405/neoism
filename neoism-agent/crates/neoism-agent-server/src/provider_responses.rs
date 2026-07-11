@@ -46,7 +46,16 @@ pub(crate) fn responses_request_body(
 ) -> Value {
     let model = model.into();
     let model_id = model.clone();
-    let instructions = responses_instructions(messages);
+    let mut instructions = responses_instructions(messages);
+    // Neoism's client-side equivalent of Codex's ultra mode: the backend
+    // gets a plain deep reasoning effort (see responses_reasoning_options)
+    // while subagent orchestration happens on our side — the model is told
+    // to delegate proactively via the `task` tool. Codex does exactly this
+    // (openai/codex core/src/context/multi_agent_mode_instructions.rs); its
+    // ChatGPT backend rejects the platform API's `multi_agent` body param.
+    if variant_is_ultra(variant) && tools.iter().any(|tool| tool.id == "task") {
+        instructions.push_str(ULTRA_DELEGATION_INSTRUCTIONS);
+    }
     let input = responses_input_items(messages);
     let mut body = json!({
         "model": model,
@@ -64,6 +73,18 @@ pub(crate) fn responses_request_body(
         body["reasoning"] = reasoning;
     }
     body
+}
+
+const ULTRA_DELEGATION_INSTRUCTIONS: &str = "\n\nProactive multi-agent delegation is active. Use the task tool to spawn sub-agents whenever parallel work would materially improve speed or quality — fanning out across files, independent subtasks, or broad searches. Do not wait for the user to ask for delegation.";
+
+fn variant_is_ultra(variant: Option<&str>) -> bool {
+    variant.is_some_and(|value| value.trim().eq_ignore_ascii_case("ultra"))
+}
+
+/// GPT-5.6 (sol/terra/luna) introduced the `max` reasoning effort that
+/// ultra rides on; older models reject it.
+fn model_is_gpt_5_6(model_id: &str) -> bool {
+    model_id.to_ascii_lowercase().contains("gpt-5.6")
 }
 
 #[allow(dead_code)]
@@ -532,7 +553,12 @@ fn responses_tools(model_id: &str, tools: &[ToolListItem]) -> Vec<Value> {
 
 fn responses_reasoning_options(model_id: &str, variant: Option<&str>) -> Option<Value> {
     let mut reasoning = serde_json::Map::new();
-    if let Some(effort) = crate::provider::reasoning_effort(variant) {
+    // "ultra" maps to the deepest wire effort, exactly as Codex sends it
+    // (ReasoningEffortConfig::Ultra => Max); the orchestration half of ultra
+    // is client-side delegation instructions, not a request parameter.
+    if variant_is_ultra(variant) && model_is_gpt_5_6(model_id) {
+        reasoning.insert("effort".to_string(), Value::String("max".to_string()));
+    } else if let Some(effort) = crate::provider::reasoning_effort(variant) {
         reasoning.insert("effort".to_string(), Value::String(effort.to_string()));
     } else if responses_model_uses_default_gpt5_reasoning(model_id) {
         reasoning.insert("effort".to_string(), Value::String("medium".to_string()));

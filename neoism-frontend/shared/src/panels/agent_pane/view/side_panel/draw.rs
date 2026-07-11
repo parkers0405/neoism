@@ -1,5 +1,5 @@
-use super::*;
 use super::sections::{render_directory_section, render_section_header};
+use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_status_dot_text(
@@ -324,6 +324,37 @@ pub(crate) fn render_sessions_list(
     }
 
     if pane.side_panel().sessions().is_empty() {
+        // A semantic search may still surface matches for this query — show
+        // a shimmering skeleton instead of prematurely declaring "No results".
+        if !pane.side_panel().session_query().trim().is_empty()
+            && pane.side_panel().semantic_searching()
+        {
+            let elapsed = pane.side_panel().semantic_search_elapsed();
+            let fade_in = (elapsed / 0.18).min(1.0);
+            const SKELETON_WIDTHS: [f32; 3] = [0.62, 0.44, 0.55];
+            let bar_h = 10.0 * s;
+            for (i, frac) in SKELETON_WIDTHS.iter().enumerate() {
+                let bar_y = list_top + i as f32 * row_h + (row_h - bar_h) / 2.0;
+                if bar_y + bar_h > cy + ch {
+                    break;
+                }
+                let wave =
+                    (elapsed / 1.3 * std::f32::consts::TAU - i as f32 * 0.55).sin();
+                let alpha = (0.16 + 0.08 * wave).max(0.04) * fade_in;
+                sugarloaf.rounded_rect(
+                    None,
+                    text_x,
+                    bar_y,
+                    (cw - 32.0 * s).max(0.0) * frac,
+                    bar_h,
+                    theme.f32_alpha(theme.muted, alpha),
+                    DEPTH,
+                    bar_h / 2.0,
+                    ORDER_PANEL + 2,
+                );
+            }
+            return;
+        }
         let opts = DrawOpts {
             font_size: FONT_SIZE * s,
             color: theme.u8(theme.dim),

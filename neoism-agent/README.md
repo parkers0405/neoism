@@ -111,6 +111,15 @@ Use ACP from an editor by pointing it at:
 neoism-agent acp --cwd /path/to/workspace
 ```
 
+## Database Backend
+
+The agent database runs on one of two engines, selected by `NEOISM_AGENT_DB_BACKEND`:
+
+- `turso` (default) — [Turso Database](https://github.com/tursodatabase/turso), the Rust rewrite of SQLite with MVCC concurrent writes. State file: `$XDG_STATE_HOME/neoism/agent.turso.db` (a separate file on purpose: Turso is beta and must never rewrite the SQLite-managed database in place, so switching backends starts with an empty session history). Turso has no FTS5, so transcript search falls back to a bounded case-insensitive LIKE scan — same `>>match<<` excerpt markers, no stemming, recency order instead of bm25. Turso reports `Busy` immediately instead of waiting like SQLite's busy_timeout, so the store wraps every turso operation in a bounded exponential-backoff retry (`turso_busy_retry`) — concurrent writers queue instead of failing.
+- `sqlite` — the bundled SQLite via sqlx, WAL mode, FTS5-backed message search. State file: `$XDG_STATE_HOME/neoism/agent.sqlite3`. Session history recorded before the turso default landed lives here; run with `NEOISM_AGENT_DB_BACKEND=sqlite` to see it.
+
+This is an environment variable rather than a config key because the database opens at server startup, before any global or per-directory config is loaded. Both engines run the identical schema and SQL; every other feature (sessions, events, sync replay, prompt queues, undo) behaves the same on either backend.
+
 ## Config Layout
 
 Neoism uses Neoism-named config paths while matching the same concepts: global agent config from `~/.config/neoism/agent/{config,neoism}.json{,c}`, project config from `neoism.json` / `neoism.jsonc` discovered upward through the git worktree, and config directories from `~/.config/neoism/agent`, project `.neoism` directories, `~/.neoism`, and `NEOISM_AGENT_CONFIG_DIR`.

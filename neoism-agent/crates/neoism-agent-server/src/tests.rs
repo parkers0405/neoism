@@ -1,5 +1,5 @@
 use super::*;
-use crate::state::SessionStore;
+use crate::state::{DbBackend, SessionStore};
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
@@ -433,6 +433,260 @@ async fn sqlite_store_persists_sessions_and_messages() {
     let messages = store.list_messages(session_id.as_str()).await.unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(message_id_of(&messages[0]), user_message_id.to_string());
+    store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+fn store_test_session(
+    session_id: &neoism_agent_core::SessionId,
+    now: u64,
+) -> SessionInfo {
+    SessionInfo {
+        id: session_id.clone(),
+        slug: "store-session".to_string(),
+        project_id: "global".to_string(),
+        workspace_id: None,
+        directory: "/tmp".to_string(),
+        path: None,
+        parent_id: None,
+        title: "Store Session".to_string(),
+        agent: None,
+        model: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        time: TimeInfo {
+            created: now,
+            updated: now,
+            compacting: None,
+            archived: None,
+        },
+        permission: None,
+        extra: BTreeMap::new(),
+    }
+}
+
+fn store_test_message(
+    session_id: &neoism_agent_core::SessionId,
+    now: u64,
+    text: &str,
+) -> MessageWithParts {
+    let message_id = Id::ascending(IdKind::Message);
+    MessageWithParts {
+        info: MessageInfo::User(UserMessage {
+            id: message_id.clone(),
+            session_id: session_id.clone(),
+            time: CreatedTime { created: now },
+            agent: "build".to_string(),
+            model: UserModel {
+                provider_id: "neoism".to_string(),
+                model_id: "stub".to_string(),
+                variant: None,
+            },
+            system: None,
+            tools: None,
+        }),
+        parts: vec![Part::Text(TextPart {
+            id: Id::ascending(IdKind::Part),
+            session_id: session_id.clone(),
+            message_id,
+            text: text.to_string(),
+            synthetic: None,
+            time: None,
+        })],
+    }
+}
+
+#[tokio::test]
+async fn turso_store_persists_sessions_and_search_falls_back_to_like() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+
+    let store = SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
+        .await
+        .unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let now = now_millis();
+    store
+        .insert_session(&store_test_session(&session_id, now))
+        .await
+        .unwrap();
+    for text in ["the quick brown fox jumps", "unrelated transcript entry"] {
+        store
+            .append_message(
+                session_id.as_str(),
+                &store_test_message(&session_id, now, text),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Reopen the same file to prove persistence across handles.
+    drop(store);
+    let store = SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
+        .await
+        .unwrap();
+    assert_eq!(store.list_sessions().await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .list_messages(session_id.as_str())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // No FTS5 on turso: search takes the LIKE fallback, AND-ing all terms.
+    let hits = store.search_messages("quick fox", None, 10).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session_id, session_id.to_string());
+    assert!(
+        hits[0].excerpt.contains(">>quick<<"),
+        "excerpt: {}",
+        hits[0].excerpt
+    );
+    assert!(store
+        .search_messages("quick zebra", None, 10)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // delete_session removes children explicitly (no FK cascade on turso).
+    assert!(store.delete_session(session_id.as_str()).await.unwrap());
+    assert!(store
+        .list_messages(session_id.as_str())
+        .await
+        .unwrap()
+        .is_empty());
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn semantic_store_ranks_by_vector_distance_on_turso() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-sem-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+
+    let store = SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
+        .await
+        .unwrap();
+    assert!(store.semantic_search_supported());
+    let session_id = neoism_agent_core::new_session_id();
+    let now = now_millis();
+    store
+        .insert_session(&store_test_session(&session_id, now))
+        .await
+        .unwrap();
+    for text in ["rust borrow checker", "cooking pasta recipe"] {
+        store
+            .append_message(
+                session_id.as_str(),
+                &store_test_message(&session_id, now, text),
+            )
+            .await
+            .unwrap();
+    }
+    let messages = store.list_messages(session_id.as_str()).await.unwrap();
+    let (first_id, second_id) =
+        (message_id_of(&messages[0]), message_id_of(&messages[1]));
+
+    let pending = store
+        .messages_missing_embeddings("test-model", 10)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 2);
+
+    store
+        .upsert_message_embedding(
+            &first_id,
+            session_id.as_str(),
+            1,
+            "test-model",
+            "[1,0,0]",
+        )
+        .await
+        .unwrap();
+    store
+        .upsert_message_embedding(
+            &second_id,
+            session_id.as_str(),
+            1,
+            "test-model",
+            "[0,1,0]",
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .messages_missing_embeddings("test-model", 10)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Query vector close to the first embedding: it must rank first.
+    let hits = store
+        .semantic_search("[0.9,0.1,0]", "test-model", None, 10)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].message_id, first_id);
+    assert!(hits[0].distance < hits[1].distance);
+    assert!(hits[0].excerpt.contains("rust borrow checker"));
+
+    // A different model's vectors are invisible, and tombstones drop rows
+    // out of the missing set without becoming searchable.
+    assert!(store
+        .semantic_search("[0.9,0.1,0]", "other-model", None, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    store
+        .tombstone_message_embedding(&first_id, session_id.as_str(), 1)
+        .await
+        .unwrap();
+    let hits = store
+        .semantic_search("[0.9,0.1,0]", "test-model", None, 10)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message_id, second_id);
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn search_messages_uses_fts_on_sqlite() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-fts-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+
+    let store = SessionStore::open_with_backend(path.clone(), DbBackend::Sqlite)
+        .await
+        .unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let now = now_millis();
+    store
+        .insert_session(&store_test_session(&session_id, now))
+        .await
+        .unwrap();
+    store
+        .append_message(
+            session_id.as_str(),
+            &store_test_message(&session_id, now, "the quick brown fox jumps"),
+        )
+        .await
+        .unwrap();
+
+    let hits = store.search_messages("quick", None, 10).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(
+        hits[0].excerpt.contains(">>quick<<"),
+        "excerpt: {}",
+        hits[0].excerpt
+    );
     store.close().await;
     cleanup_sqlite_files(&path);
 }

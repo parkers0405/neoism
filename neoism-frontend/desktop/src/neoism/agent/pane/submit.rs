@@ -226,11 +226,99 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Fold semantic transcript-search hits into an open `/sessions`
+    /// picker: the base options are client-filtered like the picker itself
+    /// would, then sessions found only semantically are appended under a
+    /// "Related" header (excerpt as the description). Dropped silently when
+    /// the picker has closed or the user has typed past `query`.
+    pub(crate) fn apply_semantic_hits_to_session_picker(
+        &mut self,
+        query: &str,
+        hits: &[crate::neoism::agent::api::NeoismAgentSemanticSessionHit],
+    ) {
+        let query = query.trim();
+        let picker_matches = self.picker.as_ref().is_some_and(|picker| {
+            picker.kind == NeoismAgentPickerKind::Session && picker.query.trim() == query
+        });
+        if !picker_matches || query.is_empty() {
+            return;
+        }
+
+        // Client-filter the base list with the picker's own semantics:
+        // every query word must appear in some option field; headers are
+        // kept only when a following child matched.
+        let needle = query.to_lowercase();
+        let words: Vec<&str> = needle.split_whitespace().collect();
+        let matches = |option: &NeoismAgentPickerOption| {
+            let haystack = format!(
+                "{} {} {} {} {}",
+                option.title,
+                option.description,
+                option.footer,
+                option.value,
+                option.section
+            )
+            .to_lowercase();
+            words.iter().all(|word| haystack.contains(word))
+        };
+        let mut merged: Vec<NeoismAgentPickerOption> = Vec::new();
+        let mut pending_header: Option<NeoismAgentPickerOption> = None;
+        for option in &self.session_picker_base {
+            if option.is_header {
+                pending_header = Some(option.clone());
+                continue;
+            }
+            if matches(option) {
+                if let Some(header) = pending_header.take() {
+                    merged.push(header);
+                }
+                merged.push(option.clone());
+            }
+        }
+
+        let present: std::collections::HashSet<String> = merged
+            .iter()
+            .filter(|option| !option.is_header)
+            .map(|option| option.value.clone())
+            .collect();
+        let mut extras: Vec<NeoismAgentPickerOption> = Vec::new();
+        for hit in hits {
+            if present.contains(&hit.session_id) {
+                continue;
+            }
+            extras.push(NeoismAgentPickerOption {
+                title: hit.title.clone(),
+                description: hit.excerpt.clone(),
+                footer: String::new(),
+                value: hit.session_id.clone(),
+                section: "Related".to_string(),
+                is_header: false,
+                is_current: Some(hit.session_id.as_str()) == self.session_id.as_deref(),
+                pinned: false,
+            });
+        }
+        if !extras.is_empty() {
+            merged.push(NeoismAgentPickerOption::header("Related"));
+            merged.extend(extras);
+        }
+
+        if let Some(picker) = self
+            .picker
+            .as_mut()
+            .filter(|picker| picker.kind == NeoismAgentPickerKind::Session)
+        {
+            picker.set_pre_filtered_options(query.to_string(), merged);
+        }
+    }
+
     pub(crate) fn active_file_mention(&self) -> Option<(usize, String)> {
         self.active_prefixed_token('@')
     }
 
-    pub(crate) fn active_prefixed_token(&self, trigger_char: char) -> Option<(usize, String)> {
+    pub(crate) fn active_prefixed_token(
+        &self,
+        trigger_char: char,
+    ) -> Option<(usize, String)> {
         let cursor = self.cursor_byte();
         let prefix = &self.input[..cursor];
         let (trigger, _) = prefix
@@ -274,15 +362,23 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn set_picker_query(&mut self, query: String) {
+        let mut kick_semantic = false;
         if let Some(picker) = self.picker.as_mut() {
             if picker.kind == NeoismAgentPickerKind::Slash {
                 self.input = format!("/{query}");
             }
-            picker.set_query(query);
+            kick_semantic = picker.kind == NeoismAgentPickerKind::Session;
+            picker.set_query(query.clone());
+        }
+        if kick_semantic {
+            self.kick_semantic_session_search(query);
         }
     }
 
-    pub(crate) fn file_mention_options(&self, query: &str) -> Vec<NeoismAgentPickerOption> {
+    pub(crate) fn file_mention_options(
+        &self,
+        query: &str,
+    ) -> Vec<NeoismAgentPickerOption> {
         file_mention_options(&self.file_mention_root(), query, FILE_MENTION_LIMIT)
     }
 
@@ -444,7 +540,11 @@ impl NeoismAgentPane {
         })
     }
 
-    pub(crate) fn display_path_for_attachment(&self, path: &Path, is_dir: bool) -> String {
+    pub(crate) fn display_path_for_attachment(
+        &self,
+        path: &Path,
+        is_dir: bool,
+    ) -> String {
         let root = self.file_mention_root();
         let mut display = path
             .strip_prefix(&root)

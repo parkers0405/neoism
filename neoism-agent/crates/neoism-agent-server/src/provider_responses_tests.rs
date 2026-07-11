@@ -369,3 +369,40 @@ fn ignores_unknown_events() {
         .is_empty());
     assert!(parser.push_line(": keep-alive").unwrap().is_empty());
 }
+
+#[test]
+fn responses_request_body_ultra_maps_to_max_effort_on_gpt56() {
+    // GPT-5.6 ultra rides the wire as effort "max" (Codex's Ultra => Max);
+    // no `multi_agent` body param — the codex backend rejects it.
+    let body = responses_request_body("gpt-5.6-sol", Some("ultra"), &[], &[]);
+    assert_eq!(body["reasoning"]["effort"], serde_json::json!("max"));
+    assert!(body.get("multi_agent").is_none());
+
+    // Older models: ultra degrades to the deepest broadly-supported effort.
+    let body = responses_request_body("gpt-5.5", Some("ultra"), &[], &[]);
+    assert!(body.get("multi_agent").is_none());
+    assert_eq!(body["reasoning"]["effort"], serde_json::json!("xhigh"));
+}
+
+#[test]
+fn responses_request_body_ultra_injects_delegation_instructions() {
+    let task_tool = ToolListItem {
+        id: "task".to_string(),
+        description: "spawn a sub-agent".to_string(),
+        parameters: serde_json::json!({"type": "object", "properties": {}}),
+    };
+    let body =
+        responses_request_body("gpt-5.6-sol", Some("ultra"), &[], &[task_tool.clone()]);
+    let instructions = body["instructions"].as_str().unwrap_or_default();
+    assert!(instructions.contains("multi-agent delegation is active"));
+
+    // Without the task tool there is nothing to delegate to — no injection.
+    let body = responses_request_body("gpt-5.6-sol", Some("ultra"), &[], &[]);
+    let instructions = body["instructions"].as_str().unwrap_or_default();
+    assert!(!instructions.contains("multi-agent delegation"));
+
+    // Non-ultra requests are untouched.
+    let body = responses_request_body("gpt-5.6-sol", Some("high"), &[], &[task_tool]);
+    let instructions = body["instructions"].as_str().unwrap_or_default();
+    assert!(!instructions.contains("multi-agent delegation"));
+}

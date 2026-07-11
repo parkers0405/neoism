@@ -171,6 +171,62 @@ impl NeoismAgentPane {
             .ok();
     }
 
+    /// Kick a background semantic transcript search for `query`, coalesced
+    /// to one fetch in flight (the newest query typed meanwhile replaces any
+    /// waiting one). Results land as `SemanticSessionHits` in
+    /// `drain_background_updates` and feed both the side-panel session list
+    /// and an open `/sessions` picker. No-ops once the server has reported
+    /// semantic search unavailable.
+    pub(crate) fn kick_semantic_session_search(&mut self, query: String) {
+        let query = query.trim().to_string();
+        if query.is_empty() || self.semantic_unavailable {
+            self.set_semantic_loading_indicators(false);
+            return;
+        }
+        self.set_semantic_loading_indicators(true);
+        if self.semantic_in_flight {
+            self.semantic_pending_query = Some(query);
+            return;
+        }
+        self.semantic_in_flight = true;
+        let server = self.server.clone();
+        let current = self.session_id.clone();
+        let directory = self.directory.clone();
+        let tx = self.background_tx.clone();
+        std::thread::Builder::new()
+            .name("neoism-agent-semantic".into())
+            .spawn(move || {
+                let hits = match crate::neoism::agent::api::fetch_semantic_session_hits(
+                    &server,
+                    &query,
+                    current.as_deref(),
+                    directory.as_deref(),
+                ) {
+                    Ok(hits) => hits,
+                    // Network hiccups yield "no results" rather than
+                    // latching the feature off.
+                    Err(_) => Some(Vec::new()),
+                };
+                let _ = tx.send(NeoismAgentBackgroundUpdate::SemanticSessionHits {
+                    query,
+                    hits,
+                });
+            })
+            .ok();
+    }
+
+    /// Toggle the searching state that drives the skeleton shimmer in the
+    /// side panel and an open `/sessions` picker while semantic results are
+    /// still in flight.
+    pub(crate) fn set_semantic_loading_indicators(&mut self, loading: bool) {
+        self.side_panel.set_semantic_searching(loading);
+        if let Some(picker) = self.picker.as_mut().filter(|picker| {
+            picker.kind == crate::neoism::agent::picker::NeoismAgentPickerKind::Session
+        }) {
+            picker.set_loading(loading);
+        }
+    }
+
     /// Resume the side-panel's currently selected previous session, if
     /// any. Exposed for the click/Enter handler in `screen::bridges::agent`.
     pub fn activate_side_panel_selection(&mut self) -> bool {
@@ -581,7 +637,11 @@ impl NeoismAgentPane {
         self.note_streaming_from_part(kind, &title);
     }
 
-    pub(crate) fn note_streaming_from_part(&mut self, kind: NeoismAgentMessageKind, title: &str) {
+    pub(crate) fn note_streaming_from_part(
+        &mut self,
+        kind: NeoismAgentMessageKind,
+        title: &str,
+    ) {
         if matches!(
             kind,
             NeoismAgentMessageKind::Reasoning
@@ -651,5 +711,4 @@ impl NeoismAgentPane {
         self.streaming_state_changed_at
             .map(|t| t.elapsed().as_secs_f32())
     }
-
 }

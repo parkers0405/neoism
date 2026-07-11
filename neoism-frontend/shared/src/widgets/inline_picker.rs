@@ -5,7 +5,11 @@ use crate::primitives::IdeTheme;
 
 const DEPTH: f32 = 0.0;
 const ORDER: u8 = 180;
-const ROW_H: f32 = 34.0;
+// Two-line rows: title on the first line, description underneath. Mirrored by
+// PICKER_ROW_HEIGHT in panels/agent_pane/state/picker.rs — keep in sync.
+const ROW_H: f32 = 46.0;
+/// Shimmer placeholder rows drawn while an async search is in flight.
+const SKELETON_ROWS: usize = 3;
 const TITLE_H: f32 = 54.0;
 const MAX_ROWS: usize = 8;
 const RADIUS: f32 = 14.0;
@@ -51,6 +55,11 @@ pub struct InlinePickerView<'a> {
     /// "Search" for filter pickers; the `/connect` secret-entry stage passes
     /// e.g. "API key" so the row reads as a single-field input.
     pub search_placeholder: &'a str,
+    /// Draw shimmering skeleton rows in place of "No results" while an async
+    /// search (e.g. semantic session search) is still in flight.
+    pub loading: bool,
+    /// Seconds since loading began — drives the shimmer phase.
+    pub loading_elapsed: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -117,9 +126,14 @@ pub fn render(
     let title_h = TITLE_H * s;
     let has_footer = view.footer_hint.is_some();
     let footer_h = if has_footer { FOOTER_H * s } else { 0.0 };
-    let [x, y, width, height] =
-        layout(view.rows.len(), input_rect, scale, has_footer)?;
-    let visible_rows = view.rows.len().min(MAX_ROWS).max(1);
+    // While loading with no rows yet, size the card for the skeleton rows.
+    let layout_rows = if view.rows.is_empty() && view.loading {
+        SKELETON_ROWS
+    } else {
+        view.rows.len()
+    };
+    let [x, y, width, height] = layout(layout_rows, input_rect, scale, has_footer)?;
+    let visible_rows = layout_rows.min(MAX_ROWS).max(1);
     let selected = view.selected.min(view.rows.len().saturating_sub(1));
     let first = view
         .scroll_offset
@@ -186,9 +200,12 @@ pub fn render(
         ..DrawOpts::default()
     };
     let esc_w = sugarloaf.text_mut().measure("esc", &esc_opts);
-    sugarloaf
-        .text_mut()
-        .draw(x + width - 14.0 * s - esc_w, y + 9.0 * s, "esc", &esc_opts);
+    sugarloaf.text_mut().draw(
+        x + width - 14.0 * s - esc_w,
+        y + 9.0 * s,
+        "esc",
+        &esc_opts,
+    );
     if let Some(rename) = view.rename {
         // Inline rename editor takes over the search row: an accent label
         // plus the live buffer with a trailing caret block.
@@ -236,9 +253,12 @@ pub fn render(
             );
             x + 14.0 * s
         } else {
-            sugarloaf
-                .text_mut()
-                .draw(x + 14.0 * s, y + 31.0 * s, view.query, &search_opts);
+            sugarloaf.text_mut().draw(
+                x + 14.0 * s,
+                y + 31.0 * s,
+                view.query,
+                &search_opts,
+            );
             x + 14.0 * s + sugarloaf.text_mut().measure(view.query, &search_opts)
         };
         if view.show_search_caret {
@@ -328,7 +348,7 @@ pub fn render(
             );
             sugarloaf.text_mut().draw(
                 title_x,
-                row_y + 10.0 * s,
+                row_y + 16.0 * s,
                 &title_text,
                 &header_opts,
             );
@@ -402,25 +422,32 @@ pub fn render(
         let title_max_w = (footer_x - title_x - 14.0 * s).max(48.0);
         let title_text =
             truncate_to_pixel_width(sugarloaf, row.title, &title_opts, title_max_w);
+        // Two-line rows: title on the first line, description on the line
+        // below. Rows without a description keep the title centered.
+        let title_y = if row.description.is_empty() {
+            row_y + 13.0 * s
+        } else {
+            row_y + 5.0 * s
+        };
         sugarloaf
             .text_mut()
-            .draw(title_x, row_y + 7.0 * s, &title_text, &title_opts);
+            .draw(title_x, title_y, &title_text, &title_opts);
         if !row.description.is_empty() {
-            let desc_x =
-                title_x + sugarloaf.text_mut().measure(row.title, &title_opts) + 14.0 * s;
-            if desc_x < footer_x - 12.0 * s {
-                sugarloaf.text_mut().draw(
-                    desc_x,
-                    row_y + 8.0 * s,
-                    row.description,
-                    &desc_opts,
-                );
-            }
+            let desc_max_w = (footer_x - title_x - 12.0 * s).max(48.0);
+            let desc_text = truncate_to_pixel_width(
+                sugarloaf,
+                row.description,
+                &desc_opts,
+                desc_max_w,
+            );
+            sugarloaf
+                .text_mut()
+                .draw(title_x, row_y + 25.0 * s, &desc_text, &desc_opts);
         }
         if !row.footer.is_empty() {
             sugarloaf.text_mut().draw(
                 footer_x,
-                row_y + 9.0 * s,
+                row_y + 15.0 * s,
                 row.footer,
                 &footer_opts,
             );
@@ -450,17 +477,59 @@ pub fn render(
     // Empty state — keep the modal open and legible instead of collapsing
     // to nothing when a filter (or an empty catalog) yields no rows.
     if view.rows.is_empty() {
-        sugarloaf.text_mut().draw(
-            x + 22.0 * s,
-            list_y + (row_h - 14.0 * s) / 2.0 + 7.0 * s,
-            "No results",
-            &DrawOpts {
-                font_size: 13.0 * s,
-                color: theme.u8(theme.muted),
-                clip_rect: Some(list_clip),
-                ..DrawOpts::default()
-            },
-        );
+        if view.loading {
+            // Shimmering two-bar skeleton rows while the async search runs —
+            // same wave family as the file-tree loading skeleton.
+            let fade_in = (view.loading_elapsed / 0.18).min(1.0);
+            const SKELETON_WIDTHS: [(f32, f32); SKELETON_ROWS] =
+                [(0.42, 0.68), (0.58, 0.46), (0.36, 0.60)];
+            for i in 0..SKELETON_ROWS {
+                let row_y = list_y + i as f32 * row_h;
+                if row_y + row_h > list_bottom + 0.5 {
+                    break;
+                }
+                let wave = (view.loading_elapsed / 1.3 * std::f32::consts::TAU
+                    - i as f32 * 0.55)
+                    .sin();
+                let alpha = (0.16 + 0.08 * wave).max(0.04) * fade_in;
+                let (title_frac, desc_frac) = SKELETON_WIDTHS[i];
+                let avail = (width - 44.0 * s).max(0.0);
+                sugarloaf.rounded_rect(
+                    None,
+                    x + 22.0 * s,
+                    row_y + 8.0 * s,
+                    avail * title_frac,
+                    12.0 * s,
+                    theme.f32_alpha(theme.muted, alpha),
+                    DEPTH,
+                    6.0 * s,
+                    ORDER + 2,
+                );
+                sugarloaf.rounded_rect(
+                    None,
+                    x + 22.0 * s,
+                    row_y + 26.0 * s,
+                    avail * desc_frac,
+                    9.0 * s,
+                    theme.f32_alpha(theme.muted, alpha * 0.7),
+                    DEPTH,
+                    4.5 * s,
+                    ORDER + 2,
+                );
+            }
+        } else {
+            sugarloaf.text_mut().draw(
+                x + 22.0 * s,
+                list_y + (row_h - 14.0 * s) / 2.0 + 7.0 * s,
+                "No results",
+                &DrawOpts {
+                    font_size: 13.0 * s,
+                    color: theme.u8(theme.muted),
+                    clip_rect: Some(list_clip),
+                    ..DrawOpts::default()
+                },
+            );
+        }
     }
     // Footer hint band: a muted key legend under the list, split off by a
     // thin separator. Only the `/sessions` picker supplies one.

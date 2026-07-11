@@ -101,6 +101,8 @@ fn reasoning_effort_value(variant: Option<&str>) -> Option<&'static str> {
         Some("medium") => Some("medium"),
         Some("high") => Some("high"),
         Some("xhigh") | Some("max") => Some("xhigh"),
+        // GPT-5.6 "ultra" (multi-agent) has no equivalent here; use deepest effort.
+        Some("ultra") => Some("xhigh"),
         _ => None,
     }
 }

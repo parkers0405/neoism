@@ -122,6 +122,10 @@ pub fn app(state: AppState) -> Router {
         .route("/find", get(find_text))
         .route("/find/file", get(find_file))
         .route("/find/symbol", get(find_symbol))
+        .route(
+            "/search/semantic",
+            get(crate::semantic::semantic_search_route),
+        )
         .route("/file", get(file_list))
         .route("/file/content", get(file_read))
         .route("/file/status", get(file_status))

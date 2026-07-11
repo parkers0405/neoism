@@ -370,6 +370,13 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
     CompactFailed(String),
     SidePanelSessionsRefreshed(Vec<NeoismAgentSessionEntry>),
     SidePanelSubagentsRefreshed(Vec<NeoismAgentSessionEntry>),
+    /// Semantic session-search results for `query`, fetched off-thread.
+    /// `hits: None` means the server reports semantic search unavailable
+    /// (no vector backend / no embeddings key) — stop asking this run.
+    SemanticSessionHits {
+        query: String,
+        hits: Option<Vec<super::api::NeoismAgentSemanticSessionHit>>,
+    },
     /// The session's persistent goal, refetched in the background. The
     /// `session_id` it was fetched for is carried so a stale result that
     /// landed after a session switch is dropped instead of mislabelling
@@ -413,10 +420,15 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
     /// An auto-completing OAuth `/connect` flow (e.g. OpenAI, GitHub Copilot)
     /// finished on a background thread — the browser callback was captured and
     /// the token exchanged/stored.
-    ConnectOauthFinished { provider_name: String },
+    ConnectOauthFinished {
+        provider_name: String,
+    },
     /// An auto-completing OAuth `/connect` flow failed (timed out, cancelled in
     /// the browser, or the exchange errored).
-    ConnectOauthFailed { provider_name: String, error: String },
+    ConnectOauthFailed {
+        provider_name: String,
+        error: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -487,6 +499,16 @@ pub struct NeoismAgentPane {
     event_stream: Option<AgentSessionEventStream>,
     background_tx: Sender<NeoismAgentBackgroundUpdate>,
     background_rx: Receiver<NeoismAgentBackgroundUpdate>,
+    /// Semantic session-search coalescing: at most one fetch in flight; a
+    /// query typed meanwhile waits in `semantic_pending_query` and is kicked
+    /// when the current fetch lands. `semantic_unavailable` latches once the
+    /// server says the feature is off so we stop asking.
+    pub(crate) semantic_in_flight: bool,
+    pub(crate) semantic_pending_query: Option<String>,
+    pub(crate) semantic_unavailable: bool,
+    /// Ungrouped-into-`picker` copy of the last-fetched `/sessions` picker
+    /// options, kept so semantic hits can be merged in without refetching.
+    pub(crate) session_picker_base: Vec<NeoismAgentPickerOption>,
     cursor_rect: Option<[f32; 4]>,
     cursor_byte: usize,
     /// Byte spans of the input's soft-wrapped visual rows, registered
@@ -687,6 +709,10 @@ impl Default for NeoismAgentPane {
             event_stream: None,
             background_tx,
             background_rx,
+            semantic_in_flight: false,
+            semantic_pending_query: None,
+            semantic_unavailable: false,
+            session_picker_base: Vec::new(),
             cursor_rect: None,
             cursor_byte: 0,
             input_wrap_ranges: Vec::new(),
@@ -764,15 +790,15 @@ impl Default for NeoismAgentPane {
     }
 }
 
-mod render_state;
-mod permissions;
-mod selection;
-mod timeline;
+pub(super) mod connect;
 mod ingest;
 mod input;
+mod permissions;
+mod render_state;
+mod selection;
 mod session;
 mod submit;
-pub(super) mod connect;
+mod timeline;
 
 fn file_mention_options(
     root: &Path,

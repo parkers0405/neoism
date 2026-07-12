@@ -14,15 +14,6 @@ pub(super) fn composer_style(
     }
 }
 
-pub(super) fn composer_rgb(hex: u32) -> [u8; 4] {
-    [
-        ((hex >> 16) & 0xff) as u8,
-        ((hex >> 8) & 0xff) as u8,
-        (hex & 0xff) as u8,
-        255,
-    ]
-}
-
 /// Classify the buffered command string for the composer's
 /// zsh-syntax-style coloring. The palette mirrors the user's zsh config:
 /// command/default blue bold, git green bold, package tools yellow bold,
@@ -46,13 +37,13 @@ pub(super) fn classify_input(
         return command_composer::InputClassification::neutral(fg);
     }
 
-    let alias_green = composer_rgb(0x9fe8c3);
-    let arg_gray = composer_rgb(0xb5bcc9);
-    let purple = composer_rgb(0xc2a2e3);
-    let command_blue = composer_rgb(0x99aee5);
-    let path_blue = composer_rgb(0xb5c3ea);
-    let yellow = composer_rgb(0xfbdf90);
-    let red = composer_rgb(0xef8891);
+    let alias_green = theme.u8(theme.green);
+    let arg_gray = theme.u8(theme.white);
+    let purple = theme.u8(theme.magenta);
+    let command_blue = theme.u8(theme.blue);
+    let path_blue = theme.u8(theme.cyan);
+    let yellow = theme.u8(theme.yellow);
+    let red = theme.u8(theme.red);
 
     // Split on first whitespace.
     let cmd_end = text.find(char::is_whitespace).unwrap_or(text.len());

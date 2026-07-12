@@ -1001,11 +1001,18 @@ fn completion_kind_detail(kind: CompletionKind, word: &str) -> Option<String> {
     })
 }
 
+// Completion icons are deliberately category chips (one glyph for all
+// code files, media, archives …), NOT the per-language file-tree
+// table — merging them would redesign the composer menu. Only the
+// semantics the two tables share (folder / default file) consume the
+// Mash Up Pack override keys.
 fn completion_icon(candidate: &CompletionCandidate) -> &'static str {
     match candidate.kind {
         CompletionKind::App => "\u{f1b2}",
         CompletionKind::Command => "\u{e795}",
-        CompletionKind::Directory => "\u{f07b}",
+        CompletionKind::Directory => {
+            crate::primitives::look::themed_glyph("folder", "\u{f07b}")
+        }
         CompletionKind::File => file_completion_icon(&candidate.label),
         CompletionKind::Favorite => "\u{f005}",
         CompletionKind::Git => "\u{e725}",
@@ -1062,7 +1069,7 @@ fn file_completion_icon(label: &str) -> &'static str {
     }
 
     let Some(extension) = name.rsplit_once('.').map(|(_, extension)| extension) else {
-        return "\u{f15b}";
+        return crate::primitives::look::themed_glyph("file", "\u{f15b}");
     };
     match extension {
         "7z" | "br" | "bz2" | "gz" | "rar" | "tar" | "tgz" | "xz" | "zip" | "zst" => {
@@ -1079,7 +1086,7 @@ fn file_completion_icon(label: &str) -> &'static str {
         "pdf" => "\u{f1c1}",
         "toml" | "json" | "jsonc" | "yaml" | "yml" => "\u{f013}",
         _ if is_code_extension(extension) => "\u{f1c9}",
-        _ => "\u{f15b}",
+        _ => crate::primitives::look::themed_glyph("file", "\u{f15b}"),
     }
 }
 

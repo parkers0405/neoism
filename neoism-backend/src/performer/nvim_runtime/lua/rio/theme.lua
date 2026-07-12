@@ -728,6 +728,17 @@ function M.apply(name)
   end
 end
 
+-- Runtime-registered themes (Mash Up Packs / ide-themes/*.toml on the
+-- Rust side). The host pushes the full palette table because lua has no
+-- copy of custom theme files; once inserted the theme behaves exactly
+-- like a builtin for the rest of this nvim's lifetime.
+function M.apply_custom(name, palette)
+  if type(name) == "string" and type(palette) == "table" then
+    palettes[name] = palette
+  end
+  M.apply(name)
+end
+
 function M.palette()
   return palettes[current_theme]
 end

@@ -1150,6 +1150,15 @@ impl VulkanShaderOverlayBrush {
         self.color_format = color_format;
         unsafe {
             let _ = self.device.device_wait_idle();
+            // Every set in this pool belongs to the images replaced
+            // below, and the pool is sized with zero headroom — without
+            // this reset each resize leaks a full allocation and the
+            // next one dies with ERROR_OUT_OF_POOL_MEMORY (hit on
+            // launch once packs started applying overlays at startup,
+            // when the window immediately fires configure/resize).
+            let _ = self
+                .device
+                .reset_descriptor_pool(self.descriptor_pool, Default::default());
         }
         self.images = std::array::from_fn(|_| {
             create_shader_overlay_image(

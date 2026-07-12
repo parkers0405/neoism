@@ -7,7 +7,9 @@
 pub mod drop_cap;
 pub mod ease;
 pub mod geom;
+pub mod icons;
 pub mod ide_theme;
+pub mod look;
 pub mod text;
 
 pub use drop_cap::maguntia_font_id;

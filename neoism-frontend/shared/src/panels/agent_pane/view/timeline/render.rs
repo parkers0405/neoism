@@ -608,19 +608,23 @@ pub fn render_timeline_scrollbar_with<P: AgentTimelinePane>(
     };
     let [x, y, w, h] = rect;
     let track_h = h.max(0.0);
-    if track_h <= 0.0 {
-        pane.set_scrollbar_geometry(None, None);
-        return;
-    }
-    let thumb_h = (track_h * (viewport_h / content_h))
-        .clamp(scrollbar::SCROLLBAR_MIN_THUMB_HEIGHT * s, track_h);
+    // Offset counts up from the BOTTOM here; the shared helper wants
+    // distance from the top.
     let max_scroll = (content_h - viewport_h).max(1.0);
     let scroll_top = max_scroll - offset.clamp(0.0, max_scroll);
-    let progress = (scroll_top / max_scroll).clamp(0.0, 1.0);
-    let thumb_y = y + (track_h - thumb_h).max(0.0) * progress;
-    let thumb_x =
-        x + w - scrollbar::SCROLLBAR_WIDTH * s - scrollbar::SCROLLBAR_MARGIN * s;
-    let thumb_w = scrollbar::SCROLLBAR_WIDTH * s;
+    let Some((thumb_y, thumb_h)) = scrollbar::compute_thumb_px(
+        viewport_h,
+        content_h,
+        y,
+        track_h,
+        scroll_top,
+        scrollbar::min_thumb_height() * s,
+    ) else {
+        pane.set_scrollbar_geometry(None, None);
+        return;
+    };
+    let thumb_x = x + w - scrollbar::width() * s - scrollbar::SCROLLBAR_MARGIN * s;
+    let thumb_w = scrollbar::width() * s;
     // Hit-test rect is a bit wider than the visible thumb so clicks don't
     // demand pixel-perfect aim. Track rect spans the whole viewport height
     // along the same x band.
@@ -628,14 +632,11 @@ pub fn render_timeline_scrollbar_with<P: AgentTimelinePane>(
     let track_rect = [thumb_x - hit_pad, y, thumb_w + hit_pad * 2.0, track_h];
     let thumb_hit_rect = [thumb_x - hit_pad, thumb_y, thumb_w + hit_pad * 2.0, thumb_h];
     pane.set_scrollbar_geometry(Some(track_rect), Some(thumb_hit_rect));
-    scrollbar::draw_thumb(
-        sugarloaf,
-        thumb_x,
-        thumb_y,
-        thumb_h,
-        opacity,
-        false,
-        DEPTH,
+    scrollbar::draw_track_scaled(
+        sugarloaf, false, thumb_x, y, track_h, s, opacity, DEPTH, ORDER_CARET,
+    );
+    scrollbar::draw_thumb_scaled(
+        sugarloaf, false, thumb_x, thumb_y, thumb_h, s, opacity, false, DEPTH,
         ORDER_CARET,
     );
 }

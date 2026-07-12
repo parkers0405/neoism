@@ -681,7 +681,18 @@ pub fn render_input(
         let caret_x = (text_x + last_w).min(box_x + box_w - 28.0 * s).max(text_x);
         let cursor_w = (16.0 * s * 0.6).max(2.0);
         let cursor_h = 20.0 * s;
-        pane.set_cursor_rect(Some([caret_x, caret_y, cursor_w, cursor_h]));
+        let caret_rect = [caret_x, caret_y, cursor_w, cursor_h];
+        // The trail-cursor overlay paints this rect ABOVE everything,
+        // so when a covering panel (the `/` picker, a modal) occludes
+        // the caret position, publishing it would punch the caret
+        // through that panel. The input text already segments around
+        // these rects; the caret must respect them too.
+        let occluded = occlusion_rects
+            .iter()
+            .any(|rect| crate::primitives::geom::rects_intersect(*rect, caret_rect));
+        if !occluded {
+            pane.set_cursor_rect(Some(caret_rect));
+        }
     }
 
     // Usage chip sits to the LEFT of the square send button.

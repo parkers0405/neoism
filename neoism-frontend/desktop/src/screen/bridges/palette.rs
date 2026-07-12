@@ -208,9 +208,22 @@ impl Screen<'_> {
     }
 
     pub fn open_theme_picker(&mut self) {
+        // Pick up theme files dropped since launch before the spec
+        // snapshots the registry.
+        crate::mashup::sync_custom_ide_themes();
         self.renderer
             .modal
             .open(neoism_ui::panels::command_palette::theme_picker_modal_spec());
+        self.mark_dirty();
+    }
+
+    pub fn open_mashup_picker(&mut self) {
+        crate::mashup::sync_custom_ide_themes();
+        self.renderer.modal.open(
+            neoism_ui::panels::command_palette::mashup_packs_modal_spec(
+                crate::mashup::mashup_palette_entries(),
+            ),
+        );
         self.mark_dirty();
     }
 
@@ -607,6 +620,9 @@ impl Screen<'_> {
             }
             PaletteAction::OpenShaders => {
                 self.open_shader_picker();
+            }
+            PaletteAction::OpenMashupPacks => {
+                self.open_mashup_picker();
             }
             PaletteAction::Copy => {
                 if self.context_manager.current().editor.is_some() {

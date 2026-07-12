@@ -52,6 +52,11 @@ pub enum ModalAction {
     ApplyShaderOverlay {
         path: Option<String>,
     },
+    /// Apply a Mash Up Pack (theme + shader + fonts as one look).
+    /// `None` deactivates the current pack, keeping the theme.
+    ApplyMashupPack {
+        id: Option<String>,
+    },
     RunEditorCommand {
         command: String,
     },
@@ -848,7 +853,7 @@ impl UniversalModal {
             y,
             w,
             h,
-            theme.f32_alpha(theme.black, 0.99),
+            theme.f32_alpha(theme.panel_bg(), 0.99),
             DEPTH_BG,
             radius,
             ORDER,
@@ -912,9 +917,19 @@ impl UniversalModal {
                 body_view_h,
                 self.body_scroll_normalized(),
             ) {
+                let bar_x = text_x + text_w - scrollbar::width();
+                scrollbar::draw_track(
+                    sugarloaf,
+                    bar_x,
+                    body_view_y,
+                    body_view_h,
+                    0.95,
+                    DEPTH_ELEMENT + 0.05,
+                    ORDER + 2,
+                );
                 scrollbar::draw_thumb(
                     sugarloaf,
-                    text_x + text_w - scrollbar::SCROLLBAR_WIDTH,
+                    bar_x,
                     thumb_y,
                     thumb_h,
                     0.95,

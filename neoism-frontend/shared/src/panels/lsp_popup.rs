@@ -400,7 +400,7 @@ impl LspPopup {
             clip_rect: clip,
             ..DrawOpts::default()
         };
-        let glyph = "\u{f0e7}";
+        let glyph = crate::primitives::icons::lsp_glyph();
         sugarloaf
             .overlay_text_mut()
             .draw(x + pad_x, header_y, glyph, &status_opts);
@@ -835,16 +835,24 @@ impl LspPopup {
         let _ = s;
         let track_h = (list_clip[3] - scrollbar::SCROLLBAR_MARGIN * 2.0).max(1.0);
         let ratio = visible_rows as f32 / self.servers.len() as f32;
-        let thumb_h =
-            (track_h * ratio).clamp(scrollbar::SCROLLBAR_MIN_THUMB_HEIGHT, track_h);
+        let thumb_h = (track_h * ratio).clamp(scrollbar::min_thumb_height(), track_h);
         let max_offset = self.max_scroll_offset().max(1);
         let offset_ratio = self.scroll_offset as f32 / max_offset as f32;
         let thumb_y = list_clip[1]
             + scrollbar::SCROLLBAR_MARGIN
             + offset_ratio * (track_h - thumb_h);
-        let thumb_x = list_clip[0] + list_clip[2] - scrollbar::SCROLLBAR_WIDTH - 2.0;
+        let thumb_x = list_clip[0] + list_clip[2] - scrollbar::width() - 2.0;
         let opacity =
             scrollbar::opacity_from_last_scroll(self.last_scroll, false).max(0.55);
+        scrollbar::draw_track_overlay(
+            sugarloaf,
+            thumb_x,
+            list_clip[1] + scrollbar::SCROLLBAR_MARGIN,
+            track_h,
+            opacity,
+            DEPTH_ELEMENT + 0.02,
+            ORDER,
+        );
         scrollbar::draw_thumb_overlay(
             sugarloaf,
             thumb_x,
@@ -872,15 +880,23 @@ impl LspPopup {
         let _ = s;
         let track_h = (rect[3] - scrollbar::SCROLLBAR_MARGIN * 2.0).max(1.0);
         let ratio = visible_lines as f32 / total_lines as f32;
-        let thumb_h =
-            (track_h * ratio).clamp(scrollbar::SCROLLBAR_MIN_THUMB_HEIGHT, track_h);
+        let thumb_h = (track_h * ratio).clamp(scrollbar::min_thumb_height(), track_h);
         let max_offset = total_lines.saturating_sub(visible_lines).max(1);
         let offset_ratio = offset as f32 / max_offset as f32;
         let thumb_y =
             rect[1] + scrollbar::SCROLLBAR_MARGIN + offset_ratio * (track_h - thumb_h);
-        let thumb_x = rect[0] + rect[2] - scrollbar::SCROLLBAR_WIDTH - 2.0;
+        let thumb_x = rect[0] + rect[2] - scrollbar::width() - 2.0;
         let opacity =
             scrollbar::opacity_from_last_scroll(self.detail_last_scroll, false).max(0.55);
+        scrollbar::draw_track_overlay(
+            sugarloaf,
+            thumb_x,
+            rect[1] + scrollbar::SCROLLBAR_MARGIN,
+            track_h,
+            opacity,
+            DEPTH_ELEMENT + 0.02,
+            ORDER,
+        );
         scrollbar::draw_thumb_overlay(
             sugarloaf,
             thumb_x,

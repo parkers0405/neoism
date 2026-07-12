@@ -171,6 +171,17 @@ pub fn active_ide_theme() -> IdeTheme {
         .unwrap_or_default()
 }
 
+/// Publish the process-wide active theme. `Chrome::set_ide_theme`
+/// (web) calls this internally; the DESKTOP renderer must call it from
+/// its own `set_ide_theme` — it doesn't drive a `Chrome`, and without
+/// the publish every `active_ide_theme()` consumer (shims, the agent
+/// wordmark tint) silently renders with pastel_dark defaults.
+pub fn publish_active_ide_theme(theme: IdeTheme) {
+    if let Ok(mut cell) = ACTIVE_IDE_THEME.write() {
+        *cell = Some(theme);
+    }
+}
+
 /// Default width of the file-tree sidebar in logical pixels. The
 /// host may shrink the tree by calling [`Chrome::set_file_tree_width`]
 /// before [`Chrome::set_layout`] re-runs.

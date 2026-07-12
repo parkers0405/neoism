@@ -1,0 +1,28 @@
+# Retro 95 — light-gray nineties desktop: navy title bars, the classic
+# logo colors for accents, square edges, ROADMAP.TXT energy. Pack
+# template notes live in phosphor/pack.toml.
+[pack]
+name = "Retro 95"
+description = "Windows-3.1 era light gray + logo colors"
+
+[scrollbar]
+width = 10
+square = true
+thumb = "#8a8578"
+thumb-drag = "#5f5b52"
+track = "#cdc9bf"
+
+[markdown]
+checkbox = "retro95"
+
+# The NEOISM wordmark letters (splash + agent home) cycle the classic
+# Windows-flag colors: red, green, blue, yellow.
+[wordmark]
+colors = ["#c23327", "#1e8e3e", "#2144c7", "#e8a90c"]
+
+# Individual overrides for any of these live in config.toml under
+# [look.scrollbar] / [look.markdown] / [look.wordmark] / [look.icons]
+# — config wins.
+[icons]
+folder = { color = "#000080" }
+file = { color = "#008080" }

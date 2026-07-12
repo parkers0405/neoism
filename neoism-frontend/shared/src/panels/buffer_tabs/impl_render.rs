@@ -425,7 +425,15 @@ impl<A: Copy> BufferTabs<A> {
             let (icon_glyph, icon_rgb) = if tab.neoism_agent_route_id.is_some() {
                 (NEOISM_AGENT_ICON, theme.u8(theme.accent))
             } else if is_terminal {
-                (consts::TERMINAL_ICON, theme.u8(theme.accent))
+                // Mash-up override for the terminal tab icon; the base
+                // color still runs through the inactive-tab dimming
+                // below, exactly like the file-icon colors do.
+                let over = crate::primitives::look::icon_override("tab.terminal");
+                (
+                    over.and_then(|o| o.glyph).unwrap_or(consts::TERMINAL_ICON),
+                    over.and_then(|o| o.color)
+                        .unwrap_or_else(|| theme.u8(theme.accent)),
+                )
             } else {
                 icon_for_file(icon_label)
             };
@@ -682,14 +690,17 @@ impl<A: Copy> BufferTabs<A> {
                     clip_rect: Some(strip_clip),
                     ..DrawOpts::default()
                 };
-                let gw = sugarloaf
-                    .text_mut()
-                    .measure(consts::NEW_TAB_ICON, &glyph_opts);
+                // Glyph-only mash-up override; the color keeps its
+                // focus/hover accent-vs-muted feedback.
+                let new_tab_glyph = crate::primitives::look::icon_override("tab.new")
+                    .and_then(|o| o.glyph)
+                    .unwrap_or(consts::NEW_TAB_ICON);
+                let gw = sugarloaf.text_mut().measure(new_tab_glyph, &glyph_opts);
                 draw_text_with_occlusion(
                     sugarloaf,
                     btn_x + (btn_w - gw) / 2.0,
                     y_top + (strip_h - glyph_size) / 2.0,
-                    consts::NEW_TAB_ICON,
+                    new_tab_glyph,
                     &glyph_opts,
                     occlusion_rects,
                 );

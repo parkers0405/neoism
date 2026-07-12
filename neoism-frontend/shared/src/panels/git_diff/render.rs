@@ -12,9 +12,9 @@ use super::{
     BRANCH_MENU_MAX_ROWS, CARD_GAP_TOP, CARD_PAD_X, CARD_VGAP, CHECKBOX_SIZE, CLOSE_HIT,
     COMMIT_BUTTON_HEIGHT, COMMIT_FONT_SIZE, COMMIT_INPUT_HEIGHT, COMMIT_INPUT_MAX_LINES,
     DEPTH, FILES_CARD_MAX_VISIBLE_ROWS, FILES_CARD_MIN_VISIBLE_ROWS, FILE_FONT_SIZE,
-    FILE_ROW_HEIGHT, FRAME_RADIUS, FRAME_STROKE, GLYPH_BRANCH, GLYPH_CHECK,
-    GLYPH_CHEVRON_DOWN, GLYPH_CHEVRON_RIGHT, GLYPH_CLOSE, GLYPH_FOLDER,
-    GLYPH_FOLDER_OPEN, HEADER_FONT_SIZE, HEADER_HEIGHT, ORDER_ACCENT, ORDER_FRAME,
+    FILE_ROW_HEIGHT, FRAME_RADIUS, FRAME_STROKE, branch_glyph, check_glyph,
+    chevron_down_glyph, chevron_right_glyph, close_glyph, folder_glyph,
+    folder_open_glyph, HEADER_FONT_SIZE, HEADER_HEIGHT, ORDER_ACCENT, ORDER_FRAME,
     ORDER_INNER, ORDER_LINE_BG, ORDER_MENU_BG, ORDER_MENU_ROW, ORDER_MENU_TEXT,
     ORDER_ROW_BG, ORDER_SCROLL, PADDING_X, SCROLLBAR_HIT_PAD, STATS_FONT_SIZE,
     STATS_HEIGHT, TREE_INDENT,
@@ -156,11 +156,11 @@ impl GitDiffPanel {
             clip_rect: Some([close_x, close_y, close_size, close_size]),
             ..DrawOpts::default()
         };
-        let cw = sugarloaf.text_mut().measure(GLYPH_CLOSE, &close_opts);
+        let cw = sugarloaf.text_mut().measure(close_glyph(), &close_opts);
         sugarloaf.text_mut().draw(
             close_x + (close_size - cw) / 2.0,
             close_y + (close_size - 12.0 * s) / 2.0 - 1.0 * s,
-            GLYPH_CLOSE,
+            close_glyph(),
             &close_opts,
         );
 
@@ -187,8 +187,8 @@ impl GitDiffPanel {
             branch_label.clone()
         };
         let btn_pad_x = 8.0 * s;
-        let icon_w = sugarloaf.text_mut().measure(GLYPH_BRANCH, &icon_opts);
-        let chevron_w = sugarloaf.text_mut().measure(GLYPH_CHEVRON_DOWN, &icon_opts);
+        let icon_w = sugarloaf.text_mut().measure(branch_glyph(), &icon_opts);
+        let chevron_w = sugarloaf.text_mut().measure(chevron_down_glyph(), &icon_opts);
         // Available span: between the title (+ gap) on the left and the
         // close button (− gap) on the right.
         let btn_right = close_x - 8.0 * s;
@@ -248,7 +248,7 @@ impl GitDiffPanel {
         let mut bx = btn_x + btn_pad_x;
         bx += sugarloaf
             .text_mut()
-            .draw(bx, btn_text_y, GLYPH_BRANCH, &icon_opts);
+            .draw(bx, btn_text_y, branch_glyph(), &icon_opts);
         bx += 6.0 * s;
         bx += sugarloaf.text_mut().draw(
             bx,
@@ -259,7 +259,7 @@ impl GitDiffPanel {
         bx += 8.0 * s;
         let _ = sugarloaf
             .text_mut()
-            .draw(bx, btn_text_y, GLYPH_CHEVRON_DOWN, &icon_opts);
+            .draw(bx, btn_text_y, chevron_down_glyph(), &icon_opts);
 
         cursor_y += header_h;
 
@@ -714,14 +714,14 @@ impl GitDiffPanel {
                         },
                     ));
                     let chevron = if *collapsed {
-                        GLYPH_CHEVRON_RIGHT
+                        chevron_right_glyph()
                     } else {
-                        GLYPH_CHEVRON_DOWN
+                        chevron_down_glyph()
                     };
                     let folder_glyph = if *collapsed {
-                        GLYPH_FOLDER
+                        folder_glyph()
                     } else {
-                        GLYPH_FOLDER_OPEN
+                        folder_open_glyph()
                     };
                     let chevron_opts = DrawOpts {
                         font_size: FILE_FONT_SIZE * s * 0.85,
@@ -829,11 +829,11 @@ impl GitDiffPanel {
                                 ..DrawOpts::default()
                             };
                             let cw =
-                                sugarloaf.text_mut().measure(GLYPH_CHECK, &check_opts);
+                                sugarloaf.text_mut().measure(check_glyph(), &check_opts);
                             sugarloaf.text_mut().draw(
                                 checkbox_x + (checkbox_size - cw) / 2.0,
                                 checkbox_y + (checkbox_size - check_fs) / 2.0,
-                                GLYPH_CHECK,
+                                check_glyph(),
                                 &check_opts,
                             );
                         } else {
@@ -998,7 +998,16 @@ impl GitDiffPanel {
                 files_body_h,
                 progress,
             ) {
-                let thumb_x = card_x + card_w - scrollbar::SCROLLBAR_WIDTH - 2.0 * s;
+                let thumb_x = card_x + card_w - scrollbar::width() - 2.0 * s;
+                scrollbar::draw_track(
+                    sugarloaf,
+                    thumb_x,
+                    files_body_y,
+                    files_body_h,
+                    0.95,
+                    DEPTH,
+                    ORDER_SCROLL,
+                );
                 scrollbar::draw_thumb(
                     sugarloaf,
                     thumb_x,
@@ -1012,7 +1021,7 @@ impl GitDiffPanel {
                 self.files_scrollbar_thumb_rect = Rect {
                     x: thumb_x,
                     y: thumb_y,
-                    w: scrollbar::SCROLLBAR_WIDTH,
+                    w: scrollbar::width(),
                     h: thumb_h,
                 };
             }
@@ -1114,7 +1123,16 @@ impl GitDiffPanel {
                     body_capacity_h,
                     progress,
                 ) {
-                    let thumb_x = card_x + card_w - scrollbar::SCROLLBAR_WIDTH - 2.0 * s;
+                    let thumb_x = card_x + card_w - scrollbar::width() - 2.0 * s;
+                    scrollbar::draw_track(
+                        sugarloaf,
+                        thumb_x,
+                        diff_card_y + diff_card::HEADER_HEIGHT * s,
+                        body_capacity_h,
+                        0.95,
+                        DEPTH,
+                        ORDER_SCROLL,
+                    );
                     scrollbar::draw_thumb(
                         sugarloaf,
                         thumb_x,
@@ -1128,7 +1146,7 @@ impl GitDiffPanel {
                     self.diff_scrollbar_thumb_rect = Rect {
                         x: thumb_x,
                         y: thumb_y,
-                        w: scrollbar::SCROLLBAR_WIDTH,
+                        w: scrollbar::width(),
                         h: thumb_h,
                     };
                 }
@@ -1175,7 +1193,7 @@ impl GitDiffPanel {
         bx +=
             sugarloaf
                 .text_mut()
-                .draw(bx, branch_text_y, GLYPH_BRANCH, &branch_icon_opts);
+                .draw(bx, branch_text_y, branch_glyph(), &branch_icon_opts);
         bx += 6.0 * s;
         let branch_line = if branch_label.is_empty() {
             "detached".to_string()
@@ -1651,14 +1669,14 @@ impl GitDiffPanel {
                 rx += sugarloaf.overlay_text_mut().draw(
                     rx,
                     row_text_y,
-                    GLYPH_CHECK,
+                    check_glyph(),
                     &tick_opts,
                 );
                 rx += 6.0 * s;
             } else {
                 rx += sugarloaf
                     .overlay_text_mut()
-                    .measure(GLYPH_CHECK, &name_opts)
+                    .measure(check_glyph(), &name_opts)
                     + 6.0 * s;
             }
             let budget = (menu_x + menu_w - pad - rx).max(0.0);

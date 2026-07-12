@@ -867,7 +867,7 @@ pub fn render(
                         block_rect[1],
                         block_rect[2],
                         block_rect[3],
-                        theme.f32(theme.black),
+                        theme.f32(theme.panel_bg()),
                         DEPTH,
                         ORDER_BG + 1,
                     );

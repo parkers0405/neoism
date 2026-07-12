@@ -358,6 +358,11 @@ fn draw_inline_wrapped_lines(
                     }
                     InlineRunStyle::Code => {
                         run_opts.color = theme.u8(theme.yellow);
+                        // Inline code chips keep the monospace terminal
+                        // font even when a pack overrides the markdown
+                        // body font. Mirrored in `inline_word_width` so
+                        // wrap widths match the drawn advance.
+                        run_opts.font_id = None;
                     }
                     InlineRunStyle::Strike => {
                         run_opts.color = theme.u8(theme.muted);
@@ -721,6 +726,17 @@ fn inline_word_width(
         width += match &run.style {
             InlineRunStyle::Illuminated(token) => {
                 illuminated_inline_metrics(sugarloaf, token, opts).width
+            }
+            // Inline code chips draw in the monospace terminal font
+            // (font_id = None) regardless of the pack's markdown font;
+            // measure them the same way so wrapping matches the drawn
+            // advance. No-op when no override is set.
+            InlineRunStyle::Code if opts.font_id.is_some() => {
+                let code_opts = DrawOpts {
+                    font_id: None,
+                    ..*opts
+                };
+                sugarloaf.text_mut().measure(&run.text, &code_opts)
             }
             _ => sugarloaf.text_mut().measure(&run.text, opts),
         };

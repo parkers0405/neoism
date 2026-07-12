@@ -510,6 +510,13 @@ pub struct NeoismAgentPane {
     /// options, kept so semantic hits can be merged in without refetching.
     pub(crate) session_picker_base: Vec<NeoismAgentPickerOption>,
     cursor_rect: Option<[f32; 4]>,
+    /// Easter-egg skit (`/piss`, `/cuss`): request consumed by the
+    /// next render (which stamps `fx_started` on its animation
+    /// clock); `fx_pending_prompt` is submitted once the skit's
+    /// prompt moment passes.
+    fx_requested: Option<neoism_ui::panels::agent_pane::view::fx::AgentFxKind>,
+    fx_started: Option<(neoism_ui::panels::agent_pane::view::fx::AgentFxKind, f32)>,
+    fx_pending_prompt: Option<String>,
     cursor_byte: usize,
     /// Byte spans of the input's soft-wrapped visual rows, registered
     /// by the renderer each frame (same wrap the caret is placed
@@ -714,6 +721,9 @@ impl Default for NeoismAgentPane {
             semantic_unavailable: false,
             session_picker_base: Vec::new(),
             cursor_rect: None,
+            fx_requested: None,
+            fx_started: None,
+            fx_pending_prompt: None,
             cursor_byte: 0,
             input_wrap_ranges: Vec::new(),
             input_wrap_len: 0,

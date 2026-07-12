@@ -144,17 +144,34 @@ pub(crate) const ORDER_MENU_BG: u8 = 26;
 pub(crate) const ORDER_MENU_ROW: u8 = 27;
 pub(crate) const ORDER_MENU_TEXT: u8 = 28;
 
-pub(crate) const GLYPH_BRANCH: &str = "\u{e725}";
-pub(crate) const GLYPH_CLOSE: &str = "\u{f00d}";
+// Glyphs resolve through `themed_glyph` so Mash Up Pack `[icons]`
+// overrides reach the panel; the literals are the stock defaults.
+// Folder rows share the global "folder" key with the file tree.
+pub(crate) fn branch_glyph() -> &'static str {
+    crate::primitives::look::themed_glyph("git.branch", "\u{e725}")
+}
+pub(crate) fn close_glyph() -> &'static str {
+    crate::primitives::look::themed_glyph("git.close", "\u{f00d}")
+}
 /// fa-check — drawn inside a ticked stage checkbox.
-pub(crate) const GLYPH_CHECK: &str = "\u{f00c}";
+pub(crate) fn check_glyph() -> &'static str {
+    crate::primitives::look::themed_glyph("git.check", "\u{f00c}")
+}
 /// Nerd-font chevrons — matched to the file_tree's tree chevrons so the
 /// branch selector + folder rows read the same as the Alt+E tree.
-pub(crate) const GLYPH_CHEVRON_DOWN: &str = "\u{f078}";
-pub(crate) const GLYPH_CHEVRON_RIGHT: &str = "\u{f054}";
+pub(crate) fn chevron_down_glyph() -> &'static str {
+    crate::primitives::look::themed_glyph("git.chevron-down", "\u{f078}")
+}
+pub(crate) fn chevron_right_glyph() -> &'static str {
+    crate::primitives::look::themed_glyph("git.chevron-right", "\u{f054}")
+}
 /// fa-folder / fa-folder-open — folder group nodes in the tree list.
-pub(crate) const GLYPH_FOLDER: &str = "\u{f07b}";
-pub(crate) const GLYPH_FOLDER_OPEN: &str = "\u{f07c}";
+pub(crate) fn folder_glyph() -> &'static str {
+    crate::primitives::look::themed_glyph("folder", "\u{f07b}")
+}
+pub(crate) fn folder_open_glyph() -> &'static str {
+    crate::primitives::look::themed_glyph("folder", "\u{f07c}")
+}
 /// Per-depth indent for the tree file list (pre-scale).
 pub(crate) const TREE_INDENT: f32 = 12.0;
 /// Max branch-dropdown rows shown before it scrolls (kept simple — the

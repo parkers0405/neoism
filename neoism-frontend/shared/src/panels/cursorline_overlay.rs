@@ -29,12 +29,12 @@ use crate::primitives::IdeTheme;
 const DEPTH: f32 = 0.04;
 const ORDER: u8 = 21;
 
-// Translucent white — matches what plain nvim's `cursorline` reads
-// as on a dark terminal (a soft semi-transparent lift, NOT a flat
-// dark band). The previous flat `#1f1f1f` looked opaque/black because
-// it was the same family as the editor bg; using white at low alpha
-// gives the "see-through" feel the user asked for.
-const TINT_COLOR: u32 = 0xffffff;
+// Translucent foreground tint — matches what plain nvim's
+// `cursorline` reads as (a soft semi-transparent lift, NOT a flat
+// band). The previous flat `#1f1f1f` looked opaque/black because it
+// was the same family as the editor bg; a low-alpha fg tint gives the
+// "see-through" feel the user asked for, and stays visible on light
+// themes (a white tint would vanish on a light bg).
 const TINT_ALPHA: f32 = 0.06;
 
 // Hover animation length — quick enough that the highlight tracks
@@ -189,11 +189,9 @@ impl CursorlineOverlay {
         let w = pane_w * inv;
         let h = cell_h * inv;
 
-        // See-through white at low alpha — matches nvim's default
-        // `cursorline` rendering on a dark terminal (a soft lift over
-        // the bg rather than a flat band). Alpha is the only knob; the
-        // color is pure white so themes don't shift the hue.
-        let color = theme.f32_alpha(TINT_COLOR, TINT_ALPHA);
+        // See-through fg at low alpha — a soft lift over the bg rather
+        // than a flat band, on both dark and light themes.
+        let color = theme.f32_alpha(theme.fg, TINT_ALPHA);
         sugarloaf.rect(None, x, y, w, h, color, DEPTH, ORDER);
     }
 

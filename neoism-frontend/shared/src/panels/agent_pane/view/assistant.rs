@@ -109,7 +109,7 @@ where
     draw_rounded_rect_clipped(
         sugarloaf,
         [x, y, w, h],
-        theme.f32(theme.black),
+        theme.f32(theme.panel_bg()),
         14.0 * s,
         ORDER_PANEL,
         viewport_clip,

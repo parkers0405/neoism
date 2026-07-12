@@ -47,6 +47,21 @@ pub enum SlashCommandAction {
     ResumeGoal,
     UndoSession,
     RedoSession,
+    /// `/piss` — the easter egg: a tiny pixel fella jogs across the
+    /// pane, waters the timeline, and the model gets told about it.
+    PissOnScreen,
+    /// `/cuss` — the fella storms in and cusses the model out,
+    /// grawlix bubble and all; the model hears how mad the user is.
+    CussOnScreen,
+    /// `/glitch` — he unplugs the pane for a second.
+    GlitchOnScreen,
+    /// `/disco` — disco ball, beams, confetti, moonwalk exit.
+    DiscoOnScreen,
+    /// `/gangfight` — cartoon crew shootout; the fella's crew wins.
+    GangFightOnScreen,
+    /// `/praise` — Jesus on the throne, worshipers bowing, notes
+    /// rising; the model is invited to rejoice.
+    PraiseOnScreen,
     AbortSession,
     CreateNewSession,
     RequestCloseTab,
@@ -97,6 +112,12 @@ pub fn plan_slash_command(text: &str) -> SlashCommandAction {
         "/goal" => plan_goal_command(&args),
         "/undo" => SlashCommandAction::UndoSession,
         "/redo" => SlashCommandAction::RedoSession,
+        "/piss" => SlashCommandAction::PissOnScreen,
+        "/cuss" | "/swear" => SlashCommandAction::CussOnScreen,
+        "/glitch" => SlashCommandAction::GlitchOnScreen,
+        "/disco" | "/dance" => SlashCommandAction::DiscoOnScreen,
+        "/gangfight" | "/shootout" => SlashCommandAction::GangFightOnScreen,
+        "/praise" | "/worship" | "/amen" => SlashCommandAction::PraiseOnScreen,
         "/abort" => SlashCommandAction::AbortSession,
         "/new" => SlashCommandAction::CreateNewSession,
         "/exit" => SlashCommandAction::RequestCloseTab,
@@ -216,6 +237,42 @@ fn slash_option_specs() -> &'static [SlashOptionSpec] {
             description: "Restore the reverted session change",
             footer: "session",
             value: "/redo",
+        },
+        SlashOptionSpec {
+            title: "/piss",
+            description: "A tiny visitor waters your session (the model hears about it)",
+            footer: "fun",
+            value: "/piss",
+        },
+        SlashOptionSpec {
+            title: "/cuss",
+            description: "The tiny visitor returns, furious (#$@!) — the model hears about it",
+            footer: "fun",
+            value: "/cuss",
+        },
+        SlashOptionSpec {
+            title: "/glitch",
+            description: "He unplugs your session for a second — the model remembers",
+            footer: "fun",
+            value: "/glitch",
+        },
+        SlashOptionSpec {
+            title: "/disco",
+            description: "Disco ball, beams, confetti — he came to celebrate",
+            footer: "fun",
+            value: "/disco",
+        },
+        SlashOptionSpec {
+            title: "/gangfight",
+            description: "Two crews, one corridor of tracer fire — his side wins",
+            footer: "fun",
+            value: "/gangfight",
+        },
+        SlashOptionSpec {
+            title: "/praise",
+            description: "Jesus on the throne, everyone bowing — a moment of worship",
+            footer: "fun",
+            value: "/praise",
         },
         SlashOptionSpec {
             title: "/sessions",
@@ -359,6 +416,27 @@ mod tests {
     fn plans_undo_redo_commands() {
         assert_eq!(plan_slash_command("/undo"), SlashCommandAction::UndoSession);
         assert_eq!(plan_slash_command("/redo"), SlashCommandAction::RedoSession);
+    }
+
+    #[test]
+    fn plans_the_easter_eggs() {
+        assert_eq!(plan_slash_command("/piss"), SlashCommandAction::PissOnScreen);
+        assert_eq!(plan_slash_command("/cuss"), SlashCommandAction::CussOnScreen);
+        assert_eq!(plan_slash_command("/swear"), SlashCommandAction::CussOnScreen);
+        assert_eq!(
+            plan_slash_command("/glitch"),
+            SlashCommandAction::GlitchOnScreen
+        );
+        assert_eq!(plan_slash_command("/dance"), SlashCommandAction::DiscoOnScreen);
+        assert_eq!(
+            plan_slash_command("/gangfight"),
+            SlashCommandAction::GangFightOnScreen
+        );
+        assert_eq!(
+            plan_slash_command("/praise"),
+            SlashCommandAction::PraiseOnScreen
+        );
+        assert_eq!(plan_slash_command("/amen"), SlashCommandAction::PraiseOnScreen);
     }
 
     #[test]

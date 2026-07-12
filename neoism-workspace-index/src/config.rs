@@ -436,6 +436,10 @@ const WELCOME_PAGES: &[(&str, &str)] = &[
         "Configuration/Shaders.md",
         include_str!("welcome/Configuration/Shaders.md"),
     ),
+    (
+        "Configuration/Mash Up Packs.md",
+        include_str!("welcome/Configuration/Mash Up Packs.md"),
+    ),
 ];
 
 /// Seed the `Welcome/` getting-started folder into the vault once. A marker

@@ -534,6 +534,7 @@ pub enum ModalActionTag {
     InstallTreesitter,
     ApplyTheme,
     ApplyShaderOverlay,
+    ApplyMashupPack,
     RunEditorCommand,
     RunEditorCommandWithInput,
     OpenLspLocation,
@@ -586,6 +587,7 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         | T::InstallTreesitter
         | T::ApplyTheme
         | T::ApplyShaderOverlay
+        | T::ApplyMashupPack
         | T::InstallAgent => D::KeepOpenForBusyAction,
         T::RunEditorCommand
         | T::OpenLspLocation

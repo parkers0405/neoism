@@ -717,15 +717,17 @@ fn draw_rounded_rect_clipped(
     radius: f32,
     order: u8,
 ) {
-    let Some(visible) = intersect_rect([x, y, w, h], clip) else {
-        return;
-    };
-    if same_rect(visible, [x, y, w, h]) {
-        sugarloaf.rounded_rect(id, x, y, w, h, color, depth, radius, order);
-    } else {
-        let [x, y, w, h] = visible;
-        sugarloaf.rect(id, x, y, w, h, color, depth, order);
-    }
+    crate::widgets::quad::rounded_rect_clipped(
+        sugarloaf,
+        clip,
+        id,
+        [x, y, w, h],
+        color,
+        depth,
+        radius,
+        order,
+        0.5,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -804,13 +806,6 @@ fn draw_line_clipped(
         y1 += t0 * dy;
     }
     sugarloaf.line(x1, y1, x2, y2, width, depth, color);
-}
-
-fn same_rect(a: [f32; 4], b: [f32; 4]) -> bool {
-    (a[0] - b[0]).abs() < 0.5
-        && (a[1] - b[1]).abs() < 0.5
-        && (a[2] - b[2]).abs() < 0.5
-        && (a[3] - b[3]).abs() < 0.5
 }
 
 fn sampled_values(points: &[StockPoint]) -> Vec<f64> {

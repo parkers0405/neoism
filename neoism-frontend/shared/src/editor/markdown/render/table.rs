@@ -11,8 +11,9 @@ use crate::editor::markdown::render::draw::{
     caret_height, cursor_cell_width, cursor_position_for_prefix, cursor_y_for_text_line,
     draw_block_chrome, draw_copy_button, draw_if_visible, draw_rect_clipped,
     draw_rounded_rect_clipped, floor_char_boundary, intersect_rect, line_height,
-    markdown_font, point_in_rect, wrap_lines,
+    markdown_font, md_font_id, point_in_rect, wrap_lines,
 };
+use crate::primitives::look::scrollbar_style;
 use crate::editor::markdown::render::inline::{
     clean_inline_with_active_link, draw_inline_links_for_line,
 };
@@ -147,12 +148,14 @@ pub(super) fn render_table_with_source_base(
         color: theme.u8(theme.fg),
         bold: true,
         clip_rect: Some(pane_clip),
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     let body_opts = DrawOpts {
         font_size: markdown_font(15.0, font_scale),
         color: theme.u8_alpha(theme.fg, 0.86),
         clip_rect: Some(pane_clip),
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     let large_table = table.rows.len() > LARGE_TABLE_VIRTUALIZE_ROWS;
@@ -471,11 +474,28 @@ pub(super) fn render_table_with_source_base(
     }
 
     if max_scroll > 0.0 {
-        let thumb_w = (content_w * content_w / table_content_w).clamp(48.0, content_w);
+        // Mash Up Pack scrollbar restyle. This bar is HORIZONTAL, so
+        // `width_or` maps to the thumb's thickness (height, site
+        // default 7px) and `min_thumb_or` to its minimum length
+        // (width, site default 48px). Track thickness stays
+        // proportional (3px at the default 7px thumb) and both stay
+        // vertically co-centered. Defaults reproduce today's bar
+        // exactly.
+        let style = scrollbar_style();
+        let thumb_h = style.width_or(7.0).max(1.0);
+        let track_h = thumb_h * (3.0 / 7.0);
+        let min_thumb_w = style.min_thumb_or(48.0).min(content_w);
+        let thumb_w =
+            (content_w * content_w / table_content_w).clamp(min_thumb_w, content_w);
         let thumb_x =
             content_x + (content_w - thumb_w) * (scroll_x / max_scroll.max(1.0));
-        let track_rect = [content_x, cursor_y + table_h - 1.0, content_w, 13.0];
-        let thumb_rect = [thumb_x, cursor_y + table_h, thumb_w, 7.0];
+        let track_rect = [
+            content_x,
+            cursor_y + table_h - 1.0,
+            content_w,
+            thumb_h + 6.0,
+        ];
+        let thumb_rect = [thumb_x, cursor_y + table_h, thumb_w, thumb_h];
         pane.register_table_scrollbar_rect(
             start_line,
             track_rect,
@@ -483,28 +503,68 @@ pub(super) fn render_table_with_source_base(
             content_w,
             table_content_w,
         );
-        draw_rect_clipped(
-            sugarloaf,
-            pane_clip,
-            content_x,
-            cursor_y + table_h + 2.0,
-            content_w,
-            3.0,
-            theme.f32_alpha(theme.border, 0.28),
-            DEPTH,
-            ORDER_BG + 1,
-        );
-        draw_rect_clipped(
-            sugarloaf,
-            pane_clip,
-            thumb_rect[0],
-            thumb_rect[1],
-            thumb_rect[2],
-            thumb_rect[3],
-            theme.f32_alpha(theme.fg, 0.46),
-            DEPTH,
-            ORDER_BG + 2,
-        );
+        // Rounding applies to the thumb's thickness; the site default is
+        // square, and radius 0 keeps the plain-rect draw call so the
+        // no-override frame stays byte-identical.
+        let radius = style.radius(thumb_h, 0.0);
+        if let Some(track_color) =
+            style.track_or(Some(theme.f32_alpha(theme.border, 0.28)))
+        {
+            let track_y = thumb_rect[1] + (thumb_h - track_h) * 0.5;
+            if radius > 0.0 {
+                draw_rounded_rect_clipped(
+                    sugarloaf,
+                    pane_clip,
+                    content_x,
+                    track_y,
+                    content_w,
+                    track_h,
+                    style.radius(track_h, 0.0),
+                    track_color,
+                    DEPTH,
+                    ORDER_BG + 1,
+                );
+            } else {
+                draw_rect_clipped(
+                    sugarloaf,
+                    pane_clip,
+                    content_x,
+                    track_y,
+                    content_w,
+                    track_h,
+                    track_color,
+                    DEPTH,
+                    ORDER_BG + 1,
+                );
+            }
+        }
+        let thumb_color = style.thumb_or(theme.f32_alpha(theme.fg, 0.46));
+        if radius > 0.0 {
+            draw_rounded_rect_clipped(
+                sugarloaf,
+                pane_clip,
+                thumb_rect[0],
+                thumb_rect[1],
+                thumb_rect[2],
+                thumb_rect[3],
+                radius,
+                thumb_color,
+                DEPTH,
+                ORDER_BG + 2,
+            );
+        } else {
+            draw_rect_clipped(
+                sugarloaf,
+                pane_clip,
+                thumb_rect[0],
+                thumb_rect[1],
+                thumb_rect[2],
+                thumb_rect[3],
+                thumb_color,
+                DEPTH,
+                ORDER_BG + 2,
+            );
+        }
     }
 
     cursor_y + table_h + 18.0
@@ -572,12 +632,14 @@ pub(super) fn measure_table(
         color: theme.u8(theme.fg),
         bold: true,
         clip_rect: Some(clip),
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     let body_opts = DrawOpts {
         font_size: markdown_font(15.0, font_scale),
         color: theme.u8_alpha(theme.fg, 0.86),
         clip_rect: Some(clip),
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     measure_table_with_opts(sugarloaf, table, &header_opts, &body_opts, font_scale)

@@ -138,7 +138,7 @@ pub fn render(
         box_y,
         box_w,
         box_h,
-        theme.f32_alpha(theme.black, 0.97),
+        theme.f32_alpha(theme.panel_bg(), 0.97),
         DEPTH,
         6.0 * s,
         ORDER,

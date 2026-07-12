@@ -1688,7 +1688,7 @@ pub(super) fn render_markdown_code_block(
             (w - 2.0 * border_w).max(0.0),
             (h - 2.0 * border_w).max(0.0),
         ],
-        theme.f32(theme.black),
+        theme.f32(theme.panel_bg()),
         (radius - border_w).max(0.0),
         ORDER_PANEL + 1,
         viewport_clip,

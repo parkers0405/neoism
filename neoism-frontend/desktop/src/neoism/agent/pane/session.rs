@@ -21,6 +21,9 @@ impl NeoismAgentPane {
         if self.wordmark_click_is_animating() {
             return Some("wordmark");
         }
+        if self.fx_active() {
+            return Some("easter_fx");
+        }
         if self
             .picker
             .as_ref()

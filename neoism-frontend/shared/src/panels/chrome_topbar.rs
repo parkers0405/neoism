@@ -521,7 +521,7 @@ impl ChromeTopBar {
             menu.y,
             menu.w,
             menu.h,
-            theme.f32(theme.black),
+            theme.f32(theme.panel_bg()),
             DEPTH,
             radius,
             ORDER_MENU_BG,

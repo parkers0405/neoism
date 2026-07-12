@@ -226,6 +226,13 @@ impl FontLibrary {
         self.inner.read().font_id_for_postscript_name(name)
     }
 
+    /// Resolve an already-loaded font family name (case-insensitive)
+    /// to its Rio `font_id`. A read-lock + map hit — cheap enough to
+    /// call per frame from draw paths. Never loads new fonts.
+    pub fn font_id_for_family(&self, family: &str) -> Option<usize> {
+        self.inner.read().font_id_for_family(family)
+    }
+
     /// Register a bundled static font and return its Sugarloaf `font_id`.
     /// Repeated calls dedupe by PostScript name when the face exposes one.
     pub fn ensure_static_font(&self, data: &'static [u8]) -> Option<usize> {
@@ -499,6 +506,13 @@ pub struct FontLibraryData {
     /// fontconfig-/font-kit-discovered fallback against fonts already
     /// in the registry.
     postscript_to_id: FxHashMap<String, usize>,
+    /// Lowercased family-name → `font_id` lookup, populated on `insert`.
+    /// Backs `font_id_for_family`: style packs name a font by family
+    /// (the same string `[fonts]` config uses) and the draw path
+    /// resolves it to an already-loaded font id per frame, so this is
+    /// a plain map hit — no disk, no name-table reparse. First-inserted
+    /// face wins for a family (regular loads before bold/italic).
+    family_to_id: FxHashMap<String, usize>,
 }
 
 impl Default for FontLibraryData {
@@ -509,6 +523,7 @@ impl Default for FontLibraryData {
             symbol_maps: None,
             primary_metrics_cache: FxHashMap::default(),
             postscript_to_id: FxHashMap::default(),
+            family_to_id: FxHashMap::default(),
         }
     }
 }
@@ -641,6 +656,15 @@ impl FontLibraryData {
                 .entry(ps_name.to_string())
                 .or_insert(id);
         }
+        // Family index for `font_id_for_family`. Case-insensitive the
+        // way config font matching is; first face of a family wins
+        // (the regular weight loads before its bold/italic siblings).
+        if let Some(family) = font_data.family_name() {
+            let key = family.trim().to_lowercase();
+            if !key.is_empty() {
+                self.family_to_id.entry(key).or_insert(id);
+            }
+        }
         self.inner.insert(id, font_data);
     }
 
@@ -667,6 +691,20 @@ impl FontLibraryData {
     /// already in the registry.
     pub fn font_id_for_postscript_name(&self, name: &str) -> Option<usize> {
         self.postscript_to_id.get(name).copied()
+    }
+
+    /// Resolve an ALREADY-LOADED font family name (matched
+    /// case-insensitively, like `[fonts] symbol-map`'s `font-family`)
+    /// to its Rio `font_id`. Returns `None` when no loaded font
+    /// reports that family — this never loads fonts from disk; packs
+    /// get their fonts loaded through the existing `[fonts]`
+    /// additional-dirs/family config.
+    pub fn font_id_for_family(&self, family: &str) -> Option<usize> {
+        let key = family.trim().to_lowercase();
+        if key.is_empty() {
+            return None;
+        }
+        self.family_to_id.get(&key).copied()
     }
 
     #[inline]
@@ -1066,6 +1104,12 @@ pub struct FontData {
     /// fonts where the PS name couldn't be parsed (rare — corrupt
     /// font, or zero-name TTF).
     postscript_name: Option<String>,
+    /// Family name extracted at construction (typographic family, name
+    /// table ID 16, falling back to ID 1; CoreText's family name on the
+    /// macOS handle paths). Backs `font_id_for_family` so feature
+    /// renderers can resolve an already-loaded family (e.g. a style
+    /// pack's markdown font) to its `font_id` without touching disk.
+    family_name: Option<String>,
 }
 
 impl PartialEq for FontData {
@@ -1103,6 +1147,14 @@ impl FontData {
     /// the cross-platform cascade resolver.
     pub fn postscript_name(&self) -> Option<&str> {
         self.postscript_name.as_deref()
+    }
+
+    /// Family name extracted at load time (typographic family, name
+    /// table ID 16, falling back to ID 1). `None` when the name table
+    /// couldn't be parsed. Used by `font_id_for_family` to resolve an
+    /// already-loaded family name back to a Rio `font_id`.
+    pub fn family_name(&self) -> Option<&str> {
+        self.family_name.as_deref()
     }
 
     /// Get font offset
@@ -1233,6 +1285,7 @@ impl FontData {
         let synth = attributes.synthesize(attributes);
         let is_emoji = has_color_tables(&font);
         let postscript_name = parse_postscript_name(&data);
+        let family_name = parse_family_name(&data);
 
         let data = (!evictable).then_some(data);
 
@@ -1257,6 +1310,7 @@ impl FontData {
             #[cfg(target_os = "macos")]
             handle: None,
             postscript_name,
+            family_name,
         })
     }
 
@@ -1288,6 +1342,7 @@ impl FontData {
         };
         let weight = swash::Weight(attrs.weight);
         let postscript_name = Some(handle.postscript_name());
+        let family_name = Some(handle.family_name());
         Self {
             data: None,
             path: None,
@@ -1303,6 +1358,7 @@ impl FontData {
             metrics_cache: FxHashMap::default(),
             handle: Some(handle),
             postscript_name,
+            family_name,
         }
     }
 
@@ -1327,6 +1383,7 @@ impl FontData {
         let should_embolden = font_spec.weight >= Some(700) && attrs.weight < 700;
 
         let postscript_name = Some(handle.postscript_name());
+        let family_name = Some(handle.family_name());
         Ok(Self {
             data: None,
             path: Some(path),
@@ -1342,6 +1399,7 @@ impl FontData {
             metrics_cache: FxHashMap::default(),
             handle: Some(handle),
             postscript_name,
+            family_name,
         })
     }
 
@@ -1365,6 +1423,7 @@ impl FontData {
         let synth = attributes.synthesize(attributes);
         let is_emoji = has_color_tables(&font);
         let postscript_name = parse_postscript_name(data);
+        let family_name = parse_family_name(data);
 
         #[cfg(target_os = "macos")]
         let handle = crate::font::macos::FontHandle::from_static_bytes(data);
@@ -1385,6 +1444,7 @@ impl FontData {
             #[cfg(target_os = "macos")]
             handle,
             postscript_name,
+            family_name,
         })
     }
 
@@ -1404,6 +1464,7 @@ impl FontData {
         let is_emoji = has_color_tables(&font);
 
         let postscript_name = parse_postscript_name(data);
+        let family_name = parse_family_name(data);
         Ok(Self {
             data: Some(SharedData::new(data.to_vec())),
             offset,
@@ -1420,6 +1481,7 @@ impl FontData {
             #[cfg(target_os = "macos")]
             handle: None,
             postscript_name,
+            family_name,
         })
     }
 
@@ -1459,6 +1521,7 @@ impl FontData {
         let synth = attributes.synthesize(attributes);
         let is_emoji = has_color_tables(&font);
         let postscript_name = parse_postscript_name(&data);
+        let family_name = parse_family_name(&data);
 
         Ok(Self {
             data: Some(data),
@@ -1474,6 +1537,7 @@ impl FontData {
             is_emoji,
             metrics_cache: FxHashMap::default(),
             postscript_name,
+            family_name,
         })
     }
 }
@@ -1507,6 +1571,36 @@ fn parse_postscript_name(data: &[u8]) -> Option<String> {
 /// already handle that case.
 #[cfg(target_arch = "wasm32")]
 fn parse_postscript_name(_data: &[u8]) -> Option<String> {
+    None
+}
+
+/// Extract the family name from font bytes: typographic family (`name`
+/// table ID 16) when present — it carries the user-facing family for
+/// styled faces ("Cascadia Code" rather than "Cascadia Code SemiBold")
+/// — falling back to the legacy family (ID 1). Populates
+/// `FontData.family_name` so `font_id_for_family` can resolve a
+/// config-style family name back to an already-loaded font id.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_family_name(data: &[u8]) -> Option<String> {
+    let face = ttf_parser::Face::parse(data, 0).ok()?;
+    face.names()
+        .into_iter()
+        .find(|n| {
+            n.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY && n.is_unicode()
+        })
+        .and_then(|n| n.to_string())
+        .or_else(|| {
+            face.names()
+                .into_iter()
+                .find(|n| n.name_id == ttf_parser::name_id::FAMILY && n.is_unicode())
+                .and_then(|n| n.to_string())
+        })
+}
+
+/// Wasm stub, mirroring [`parse_postscript_name`]'s: no `ttf-parser`
+/// on the web build, and family resolution simply reports "not loaded".
+#[cfg(target_arch = "wasm32")]
+fn parse_family_name(_data: &[u8]) -> Option<String> {
     None
 }
 

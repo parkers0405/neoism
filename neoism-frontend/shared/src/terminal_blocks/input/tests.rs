@@ -7,6 +7,7 @@ use super::*;
 use crate::TerminalShellKind;
 use neoism_terminal_core::crosswords::grid::row::Row;
 use neoism_terminal_core::crosswords::square::Square;
+use neoism_terminal_core::crosswords::ShellPromptState;
 use std::collections::BTreeSet;
 
 #[test]

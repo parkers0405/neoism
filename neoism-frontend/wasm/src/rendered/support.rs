@@ -98,6 +98,7 @@ pub(crate) fn palette_action_name(
         A::ToggleAppearanceTheme => "ToggleAppearanceTheme",
         A::OpenThemePicker => "OpenThemePicker",
         A::OpenShaders => "OpenShaders",
+        A::OpenMashupPacks => "OpenMashupPacks",
         A::Copy => "Copy",
         A::Paste => "Paste",
         A::SaveDocument => "SaveDocument",

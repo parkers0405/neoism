@@ -94,6 +94,25 @@ impl CommandService {
             CommandService::Workspace => "\u{f07b}",
         }
     }
+
+    /// [`Self::icon`] with Mash Up Pack overrides applied (key
+    /// `palette.<prefix>`). Use at draw time; `icon()` stays `const`
+    /// so tables can embed the defaults.
+    pub(crate) fn icon_themed(self) -> &'static str {
+        let key = match self {
+            CommandService::Neoism => "palette.neoism",
+            CommandService::Nvim => "palette.nvim",
+            CommandService::Markdown => "palette.markdown",
+            CommandService::Notebook => "palette.notebook",
+            CommandService::Draw => "palette.draw",
+            CommandService::Agent => "palette.neoism-agent",
+            CommandService::Lsp => "palette.lsp",
+            CommandService::Workspace => "palette.workspace",
+        };
+        crate::primitives::look::icon_override(key)
+            .and_then(|over| over.glyph)
+            .unwrap_or(self.icon())
+    }
 }
 
 pub(crate) struct Command {
@@ -228,6 +247,12 @@ pub(crate) const COMMANDS: &[Command] = &[
         title: "Shaders",
         shortcut: "",
         action: PaletteAction::OpenShaders,
+        service: CommandService::Neoism,
+    },
+    Command {
+        title: "Mash Up Packs",
+        shortcut: "",
+        action: PaletteAction::OpenMashupPacks,
         service: CommandService::Neoism,
     },
     Command {

@@ -548,7 +548,7 @@ where
         theme.f32(accent)
     };
     let surface = match kind {
-        AgentMessageCardKind::Reasoning => theme.black,
+        AgentMessageCardKind::Reasoning => theme.panel_bg(),
         AgentMessageCardKind::Tool | AgentMessageCardKind::Subtask => theme.surface,
         AgentMessageCardKind::System => theme.surface,
         _ => theme.surface,

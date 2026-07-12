@@ -11,6 +11,7 @@ pub mod draw;
 pub mod home;
 pub mod layout;
 pub mod markdown;
+pub mod fx;
 pub mod message_card;
 pub mod picker;
 pub mod side_panel;
@@ -67,6 +68,21 @@ pub trait AgentPaneView:
     fn picker_has_session_footer(&self) -> bool {
         false
     }
+
+    /// Easter-egg skit timer (`/piss`, `/cuss`). `take_fx_request`
+    /// yields the queued skit exactly once so the render loop can
+    /// stamp its start on its own animation clock; `fire_fx_prompt`
+    /// is called once when the skit's prompt moment passes (the host
+    /// submits the pending message there). Hosts without the eggs
+    /// keep the defaults.
+    fn take_fx_request(&mut self) -> Option<fx::AgentFxKind> {
+        None
+    }
+    fn fx_started(&self) -> Option<(fx::AgentFxKind, f32)> {
+        None
+    }
+    fn set_fx_started(&mut self, _at: Option<(fx::AgentFxKind, f32)>) {}
+    fn fire_fx_prompt(&mut self) {}
 
     #[allow(clippy::too_many_arguments)]
     fn log_render_perf(
@@ -287,6 +303,24 @@ pub fn render_agent_pane_with<P, D, I>(
     // pane is active and route the resulting `ToggleRightPanel`
     // action through `agent.side_panel().set_user_hidden(!visible)`.
     picker::render_picker(sugarloaf, pane, input_rect, theme, chrome_scale);
+    if let Some(kind) = pane.take_fx_request() {
+        pane.set_fx_started(Some((kind, now_seconds)));
+    }
+    if let Some((kind, started)) = pane.fx_started() {
+        let elapsed = now_seconds - started;
+        // Negative = the 10k-second animation clock wrapped; clear.
+        if (0.0..=fx::total_seconds(kind)).contains(&elapsed) {
+            if elapsed >= fx::prompt_at(kind) {
+                // Idempotent: the host consumes its pending prompt on
+                // the first call.
+                pane.fire_fx_prompt();
+            }
+            fx::render(kind, sugarloaf, main_rect, elapsed, chrome_scale, theme);
+        } else {
+            pane.fire_fx_prompt();
+            pane.set_fx_started(None);
+        }
+    }
     pane.log_render_perf(
         render_started.elapsed().as_micros(),
         rect,

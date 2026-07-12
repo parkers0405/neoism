@@ -316,6 +316,11 @@ pub(super) struct MarkdownVirtualRenderState {
     /// A zoom (Ctrl+/-) changes glyph sizes, so stale heights overlap —
     /// a bucket change forces a full surface rebuild.
     pub(super) font_scale_bucket: i32,
+    /// Resolved Mash Up Pack markdown font id the measured layouts were
+    /// built with (`None` = primary font). A pack switch changes glyph
+    /// widths, so — like a zoom — a change forces a Layout-dirty sweep
+    /// and drops the measurement cache.
+    pub(super) md_font_id: Option<usize>,
     /// Cursor line the measured layouts were built around. The cursor's line
     /// renders RAW (Live Preview) and can wrap to a different row count than
     /// the rendered view, so the nodes the cursor leaves/enters re-measure.
@@ -357,6 +362,7 @@ impl Default for MarkdownVirtualRenderState {
             source_id: String::new(),
             source_revision: 0,
             font_scale_bucket: i32::MIN,
+            md_font_id: None,
             measured_cursor_line: None,
             last_cursor_change_at: None,
             cursor_reveal_suppressed: false,

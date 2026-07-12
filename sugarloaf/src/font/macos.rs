@@ -296,6 +296,14 @@ impl FontHandle {
     pub fn postscript_name(&self) -> String {
         self.base_font.postscript_name()
     }
+
+    /// User-facing family name (e.g. "Cascadia Mono"), straight from
+    /// CoreText. Populates `FontData.family_name` so
+    /// `font_id_for_family` can match config-style family strings on
+    /// macOS's handle-backed font paths.
+    pub fn family_name(&self) -> String {
+        self.base_font.family_name()
+    }
 }
 
 /// Output of a single glyph rasterization. Mirrors the fields of

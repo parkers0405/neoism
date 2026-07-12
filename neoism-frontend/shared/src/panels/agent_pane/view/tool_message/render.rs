@@ -765,9 +765,20 @@ fn draw_diff_body_scrollbar(
     if thumb_y + thumb_h < clip_top || thumb_y > clip_bottom {
         return;
     }
+    let bar_x = body_x + body_w - scrollbar::width() - 3.0 * s;
+    // Track clipped to the same viewport band as the thumb.
+    scrollbar::draw_track(
+        sugarloaf,
+        bar_x,
+        track_top.max(clip_top),
+        (track_top + track_h).min(clip_bottom) - track_top.max(clip_top),
+        1.0,
+        0.0,
+        ORDER_TEXT + 1,
+    );
     scrollbar::draw_thumb(
         sugarloaf,
-        body_x + body_w - scrollbar::SCROLLBAR_WIDTH - 3.0 * s,
+        bar_x,
         thumb_y.max(clip_top),
         (thumb_y + thumb_h).min(clip_bottom) - thumb_y.max(clip_top),
         1.0,

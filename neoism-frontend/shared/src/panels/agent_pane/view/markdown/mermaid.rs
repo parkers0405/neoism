@@ -25,7 +25,7 @@ pub(crate) fn render_mermaid_block<P: AgentMarkdownPane>(
     draw_rounded_rect_clipped(
         sugarloaf,
         [x, y, w, h],
-        theme.f32(theme.black),
+        theme.f32(theme.panel_bg()),
         10.0 * s,
         ORDER_PANEL,
         viewport_clip,

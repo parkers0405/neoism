@@ -26,6 +26,10 @@ impl Renderer {
     }
 
     pub fn set_ide_theme(&mut self, theme: IdeTheme) {
+        // Keep the process-wide cell in sync — shared code without a
+        // theme reference (chrome shims, the agent wordmark tint)
+        // reads it via `active_ide_theme()`.
+        neoism_ui::chrome::publish_active_ide_theme(theme);
         let previous_alpha = self.dynamic_background.1.a;
         let mut window_bg = theme.sugar(theme.bg);
         if self.dynamic_background.2 && previous_alpha < 1.0 {

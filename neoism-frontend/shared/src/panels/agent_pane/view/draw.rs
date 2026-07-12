@@ -102,16 +102,9 @@ pub fn draw_rounded_rect_clipped(
     order: u8,
     clip: [f32; 4],
 ) {
-    let Some(visible) = intersect_rect(rect, clip) else {
-        return;
-    };
-    if same_rect(visible, rect) {
-        let [x, y, w, h] = rect;
-        sugarloaf.rounded_rect(None, x, y, w, h, color, DEPTH, radius, order);
-    } else {
-        let [x, y, w, h] = visible;
-        sugarloaf.rect(None, x, y, w, h, color, DEPTH, order);
-    }
+    crate::widgets::quad::rounded_rect_clipped(
+        sugarloaf, clip, None, rect, color, DEPTH, radius, order, 0.01,
+    );
 }
 
 pub fn draw_top_rounded_rect_clipped(

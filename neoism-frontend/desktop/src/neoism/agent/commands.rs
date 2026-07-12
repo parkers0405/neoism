@@ -63,6 +63,24 @@ impl NeoismAgentPane {
             SlashCommandAction::CompactSession => self.compact_session(),
             SlashCommandAction::UndoSession => self.undo_session(),
             SlashCommandAction::RedoSession => self.redo_session(),
+            SlashCommandAction::PissOnScreen => self.start_fx_easter_egg(
+                neoism_ui::panels::agent_pane::view::fx::AgentFxKind::Piss,
+            ),
+            SlashCommandAction::CussOnScreen => self.start_fx_easter_egg(
+                neoism_ui::panels::agent_pane::view::fx::AgentFxKind::Cuss,
+            ),
+            SlashCommandAction::GlitchOnScreen => self.start_fx_easter_egg(
+                neoism_ui::panels::agent_pane::view::fx::AgentFxKind::Glitch,
+            ),
+            SlashCommandAction::DiscoOnScreen => self.start_fx_easter_egg(
+                neoism_ui::panels::agent_pane::view::fx::AgentFxKind::Disco,
+            ),
+            SlashCommandAction::GangFightOnScreen => self.start_fx_easter_egg(
+                neoism_ui::panels::agent_pane::view::fx::AgentFxKind::GangFight,
+            ),
+            SlashCommandAction::PraiseOnScreen => self.start_fx_easter_egg(
+                neoism_ui::panels::agent_pane::view::fx::AgentFxKind::Praise,
+            ),
             SlashCommandAction::AbortSession => self.abort_session(),
             SlashCommandAction::CreateNewSession => self.create_new_session(),
             SlashCommandAction::RequestCloseTab => self.request_close_tab(),

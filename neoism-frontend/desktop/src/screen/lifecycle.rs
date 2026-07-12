@@ -60,6 +60,7 @@ fn modal_action_policy_tag(
         A::InstallTreesitter { .. } => Tag::InstallTreesitter,
         A::ApplyTheme { .. } => Tag::ApplyTheme,
         A::ApplyShaderOverlay { .. } => Tag::ApplyShaderOverlay,
+        A::ApplyMashupPack { .. } => Tag::ApplyMashupPack,
         A::RunEditorCommand { .. } => Tag::RunEditorCommand,
         A::RunEditorCommandWithInput { .. } => Tag::RunEditorCommandWithInput,
         A::OpenLspLocation { .. } => Tag::OpenLspLocation,

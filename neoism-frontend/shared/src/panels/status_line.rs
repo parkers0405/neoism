@@ -104,12 +104,20 @@ const GLYPH_HOME: &str = "\u{f015}"; //  (home — unused after cwd pill switche
 #[allow(dead_code)]
 const GLYPH_GITHUB: &str = "\u{f09b}"; //  (FA github — repo pill on right cluster)
 const GLYPH_LINES: &str = "\u{f0c9}"; //  (line index)
-const GLYPH_LSP: &str = "\u{f0e7}"; //  (lightning / "bolt")
+// Severity + LSP glyphs are shared with the diagnostics/LSP popups —
+// single source in `primitives::icons` so the panels never drift.
+const GLYPH_LSP: &str = crate::primitives::icons::GLYPH_LSP;
 const GLYPH_SPLIT: &str = "\u{eb56}"; // codicon split-horizontal
-                                      // NvChad uses these severity glyphs in `nvchad/stl/utils.lua` for the
-                                      // LSP diagnostics segment ( error,  warning,  info,  hint).
-const GLYPH_ERROR: &str = "\u{ea87}";
-const GLYPH_WARN: &str = "\u{f071}";
+const GLYPH_ERROR: &str = crate::primitives::icons::GLYPH_ERROR;
+const GLYPH_WARN: &str = crate::primitives::icons::GLYPH_WARN;
+
+/// Resolve a mash-up pack / user icon override (`[icons]` table) for
+/// one of the status-line glyphs. Glyph only — pill colors stay
+/// theme-driven. With no override registered this returns `default`,
+/// so stock rendering is unchanged.
+fn status_glyph(key: &str, default: &'static str) -> &'static str {
+    crate::primitives::look::themed_glyph(key, default)
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -522,9 +530,9 @@ fn mode_label(mode: Mode) -> &'static str {
 #[allow(dead_code)]
 fn primary_glyph(kind: PrimaryKind) -> &'static str {
     match kind {
-        PrimaryKind::File => GLYPH_FILE,
-        PrimaryKind::Terminal => GLYPH_TERMINAL,
-        PrimaryKind::Agent => GLYPH_MODE,
+        PrimaryKind::File => status_glyph("status.file", GLYPH_FILE),
+        PrimaryKind::Terminal => status_glyph("status.terminal", GLYPH_TERMINAL),
+        PrimaryKind::Agent => status_glyph("status.mode", GLYPH_MODE),
     }
 }
 
@@ -930,8 +938,9 @@ impl StatusLine {
             bold: true,
             ..DrawOpts::default()
         };
+        let glyph_mode = status_glyph("status.mode", GLYPH_MODE);
         let glyph_prefix_w =
-            icon_gap_text_width(sugarloaf, GLYPH_MODE, "", &mode_text_opts);
+            icon_gap_text_width(sugarloaf, glyph_mode, "", &mode_text_opts);
         let label_w = sugarloaf
             .text_mut()
             .measure(&mode_label_text, &mode_text_opts);
@@ -955,6 +964,7 @@ impl StatusLine {
         };
 
         let cwd_label = self.info.cwd_label.as_deref().filter(|s| !s.is_empty());
+        let glyph_folder = status_glyph("status.folder", GLYPH_FOLDER);
         let cwd_text_inset_left = tail_overlap + chain_breather;
         let (cwd_pill_w, cwd_text_section_w, cwd_icon_section_w, cwd_icon_w, cwd_text_w) =
             if let Some(label) = cwd_label {
@@ -973,7 +983,7 @@ impl StatusLine {
                 let (icon_w, text_w) = {
                     let ui = sugarloaf.text_mut();
                     (
-                        ui.measure(GLYPH_FOLDER, &icon_opts),
+                        ui.measure(glyph_folder, &icon_opts),
                         ui.measure(label, &text_opts),
                     )
                 };
@@ -1038,7 +1048,7 @@ impl StatusLine {
                 sugarloaf,
                 cwd_x + cwd_text_section_w + section_pad,
                 icon_baseline_y(body_y, font_size),
-                GLYPH_FOLDER,
+                glyph_folder,
                 &icon_opts,
                 s,
             );
@@ -1114,7 +1124,7 @@ impl StatusLine {
             sugarloaf,
             mode_x + section_pad,
             icon_baseline_y(body_y, font_size),
-            GLYPH_MODE,
+            glyph_mode,
             &mode_text_opts,
             s,
         );
@@ -1152,6 +1162,7 @@ impl StatusLine {
         // without rewiring every offset by hand.
         let mut lsp_inline: Option<(&str, DrawOpts, f32)> = None;
 
+        let glyph_split = status_glyph("status.split", GLYPH_SPLIT);
         let mut split_toggle = self.split_toggle_enabled.then(|| {
             let opts = DrawOpts {
                 font_size,
@@ -1163,7 +1174,7 @@ impl StatusLine {
                 bold: true,
                 ..DrawOpts::default()
             };
-            let icon_w = sugarloaf.text_mut().measure(GLYPH_SPLIT, &opts);
+            let icon_w = sugarloaf.text_mut().measure(glyph_split, &opts);
             let hit_w = icon_w + section_pad * 2.0;
             (opts, icon_w, hit_w)
         });
@@ -1172,7 +1183,7 @@ impl StatusLine {
         if self.info.diagnostics.error > 0 {
             diag_pills.push(DiagPillSpec {
                 kind: DiagnosticPill::Error,
-                glyph: GLYPH_ERROR,
+                glyph: status_glyph("status.error", GLYPH_ERROR),
                 count: self.info.diagnostics.error,
                 bg: palette.f32(palette.red),
                 fg: palette.u8(palette.black),
@@ -1181,7 +1192,7 @@ impl StatusLine {
         if self.info.diagnostics.warn > 0 {
             diag_pills.push(DiagPillSpec {
                 kind: DiagnosticPill::Warn,
-                glyph: GLYPH_WARN,
+                glyph: status_glyph("status.warn", GLYPH_WARN),
                 count: self.info.diagnostics.warn,
                 bg: palette.f32(palette.yellow),
                 fg: palette.u8(palette.black),
@@ -1235,7 +1246,7 @@ impl StatusLine {
                 .filter(|label| !label.is_empty())
                 .unwrap_or("LSP");
             right.push(TwoTonePill {
-                icon_glyph: GLYPH_LSP,
+                icon_glyph: status_glyph("status.lsp", GLYPH_LSP),
                 label: format!(" {label}"),
                 icon_bg,
                 icon_fg: palette.u8(palette.black),
@@ -1245,7 +1256,7 @@ impl StatusLine {
         }
         if let Some((cur, total)) = self.info.tab_position {
             right.push(TwoTonePill {
-                icon_glyph: GLYPH_LINES,
+                icon_glyph: status_glyph("status.lines", GLYPH_LINES),
                 label: format!(" {cur}/{total}"),
                 icon_bg: palette.f32(palette.green),
                 icon_fg: palette.u8(palette.black),
@@ -1254,6 +1265,7 @@ impl StatusLine {
             });
         }
 
+        let glyph_branch = status_glyph("status.branch", GLYPH_BRANCH);
         let mut branch_right_meta: Option<BranchRightMeta> = self
             .info
             .branch
@@ -1308,7 +1320,7 @@ impl StatusLine {
                 let (icon_w, branch_w, added_w, deleted_w) = {
                     let ui = sugarloaf.text_mut();
                     (
-                        ui.measure(GLYPH_BRANCH, &icon_opts),
+                        ui.measure(glyph_branch, &icon_opts),
                         ui.measure(branch, &text_opts),
                         added_str
                             .as_deref()
@@ -1513,7 +1525,7 @@ impl StatusLine {
                     sugarloaf,
                     rx + (*w - *icon_w) / 2.0,
                     icon_baseline_y(body_y, font_size),
-                    GLYPH_SPLIT,
+                    glyph_split,
                     opts,
                     s,
                 );
@@ -1621,7 +1633,7 @@ impl StatusLine {
                     sugarloaf,
                     rx + section_pad,
                     icon_baseline_y(body_y, font_size),
-                    GLYPH_BRANCH,
+                    glyph_branch,
                     &icon_opts,
                     s,
                 );

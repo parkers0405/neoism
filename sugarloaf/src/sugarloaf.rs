@@ -587,6 +587,20 @@ impl Sugarloaf<'_> {
         self.state.content.font_library()
     }
 
+    /// Resolve an ALREADY-LOADED font family name (case-insensitive, the
+    /// way `[fonts] symbol-map` matches `font-family`) to the `font_id`
+    /// text draw calls take. Returns `None` when no loaded font carries
+    /// that family — this never loads font files; packs get their fonts
+    /// loaded via the existing `[fonts]` additional-dirs/family config.
+    /// A read-lock + map hit, so calling it per frame is fine.
+    #[inline]
+    pub fn font_id_for_family(&self, family: &str) -> Option<usize> {
+        self.state
+            .content
+            .font_library()
+            .font_id_for_family(family)
+    }
+
     /// Register a bundled static font and return the `font_id` that can be used
     /// by text draw calls. This keeps feature-specific display fonts out of the
     /// global user font config while still letting renderers opt into them.

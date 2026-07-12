@@ -3,12 +3,15 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::primitives::look;
 use sugarloaf::Sugarloaf;
 use web_time::Instant;
 
 // Layout. Kept `pub` so other UI elements (command palette, future
 // overlays) can render a scrollbar that matches the terminal's exactly
-// without duplicating the numbers.
+// without duplicating the numbers. These are the *defaults*: a Mash Up
+// Pack can override them at runtime, so geometry code should read the
+// resolved `width()` / `min_thumb_height()` instead.
 pub const SCROLLBAR_WIDTH: f32 = 6.0;
 pub const SCROLLBAR_MARGIN: f32 = 2.0;
 pub const SCROLLBAR_MIN_THUMB_HEIGHT: f32 = 20.0;
@@ -28,6 +31,18 @@ pub const SCROLLBAR_DRAG_COLOR: [f32; 4] = [0.7, 0.7, 0.7, 0.7];
 // values via `draw_thumb`'s parameters.
 pub const TERMINAL_DEPTH: f32 = 0.0;
 pub const TERMINAL_ORDER: u8 = 5;
+
+/// Thumb width resolved against the active look (logical px). Sites
+/// that lay out around `SCROLLBAR_WIDTH` must use this instead so
+/// their geometry follows a pack's width override.
+pub fn width() -> f32 {
+    look::scrollbar_style().width_or(SCROLLBAR_WIDTH)
+}
+
+/// Minimum thumb length resolved against the active look (logical px).
+pub fn min_thumb_height() -> f32 {
+    look::scrollbar_style().min_thumb_or(SCROLLBAR_MIN_THUMB_HEIGHT)
+}
 
 /// Fade-in/out opacity for a scrollbar given the timestamp of the most
 /// recent scroll event (`None` = never scrolled). `dragging` pins it to
@@ -83,11 +98,135 @@ pub fn compute_thumb(
         return None;
     }
     let ratio = visible as f32 / total as f32;
-    let thumb_height = (track_height * ratio)
-        .clamp(SCROLLBAR_MIN_THUMB_HEIGHT.min(track_height), track_height);
+    let thumb_height =
+        (track_height * ratio).clamp(min_thumb_height().min(track_height), track_height);
     let scrollable = (track_height - thumb_height).max(0.0);
     let progress = normalized_offset.clamp(0.0, 1.0);
     Some((track_top + scrollable * progress, thumb_height))
+}
+
+/// Pixel-space twin of [`compute_thumb`]: viewport/content extents and
+/// the scroll offset (from the TOP) are in pixels. Returns
+/// `(thumb_y, thumb_height)`. The shape every hand-measured panel
+/// (agent timeline, diff bodies, git panel, popups) was re-deriving.
+pub fn compute_thumb_px(
+    viewport_px: f32,
+    content_px: f32,
+    track_top: f32,
+    track_height: f32,
+    scroll_top_px: f32,
+    min_thumb: f32,
+) -> Option<(f32, f32)> {
+    if content_px <= viewport_px || track_height <= 0.0 {
+        return None;
+    }
+    let thumb_height = (track_height * (viewport_px / content_px))
+        .clamp(min_thumb.min(track_height), track_height);
+    let max_scroll = (content_px - viewport_px).max(1.0);
+    let progress = (scroll_top_px / max_scroll).clamp(0.0, 1.0);
+    Some((
+        track_top + (track_height - thumb_height).max(0.0) * progress,
+        thumb_height,
+    ))
+}
+
+/// The single owner of the square-vs-rounded draw selection for every
+/// scrollbar bar (track or thumb), in either render pass. Callers
+/// resolve width/radius/color per site (defaults × site scale) — this
+/// only turns them into the right sugarloaf call.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_bar(
+    sugarloaf: &mut Sugarloaf,
+    overlay: bool,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: [f32; 4],
+    radius: f32,
+    depth: f32,
+    order: u8,
+) {
+    if width <= 0.0 || height <= 0.0 || color[3] <= 0.0 {
+        return;
+    }
+    match (overlay, radius > 0.0) {
+        (false, true) => {
+            sugarloaf.rounded_rect(None, x, y, width, height, color, depth, radius, order)
+        }
+        (false, false) => sugarloaf.rect(None, x, y, width, height, color, depth, order),
+        (true, true) => {
+            sugarloaf.overlay_rounded_rect(x, y, width, height, color, depth, radius, order)
+        }
+        (true, false) => sugarloaf.overlay_rect(x, y, width, height, color, depth, order),
+    }
+}
+
+/// Style-resolved thumb colors for the gray widget scrollbars,
+/// pre-modulated by `opacity`.
+fn styled_thumb_color(opacity: f32, dragging: bool) -> [f32; 4] {
+    let style = look::scrollbar_style();
+    let base = if dragging {
+        style.thumb_drag_or(SCROLLBAR_DRAG_COLOR)
+    } else {
+        style.thumb_or(SCROLLBAR_COLOR)
+    };
+    [base[0], base[1], base[2], base[3] * opacity]
+}
+
+/// Scale-aware thumb painter: `scale` multiplies the style width and
+/// radius so zoomed chrome (agent pane, git panel) paints the same
+/// band it reserves for hit-testing.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_thumb_scaled(
+    sugarloaf: &mut Sugarloaf,
+    overlay: bool,
+    x: f32,
+    y: f32,
+    height: f32,
+    scale: f32,
+    opacity: f32,
+    dragging: bool,
+    depth: f32,
+    order: u8,
+) {
+    if opacity <= 0.0 {
+        return;
+    }
+    let style = look::scrollbar_style();
+    let width = style.width_or(SCROLLBAR_WIDTH) * scale;
+    let radius = style.radius(width, 0.0);
+    let color = styled_thumb_color(opacity, dragging);
+    draw_bar(sugarloaf, overlay, x, y, width, height, color, radius, depth, order);
+}
+
+/// Scale-aware track painter — a no-op unless the active look sets
+/// `scrollbar.track`. Call right before the matching thumb with the
+/// same depth/order; same-order rects render in submission order, so
+/// the thumb lands on top.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_track_scaled(
+    sugarloaf: &mut Sugarloaf,
+    overlay: bool,
+    x: f32,
+    y: f32,
+    height: f32,
+    scale: f32,
+    opacity: f32,
+    depth: f32,
+    order: u8,
+) {
+    let style = look::scrollbar_style();
+    let Some(base) = style.track_or(None) else {
+        return;
+    };
+    if opacity <= 0.0 {
+        return;
+    }
+    let color = [base[0], base[1], base[2], base[3] * opacity];
+    let width = style.width_or(SCROLLBAR_WIDTH) * scale;
+    let radius = style.radius(width, 0.0);
+    draw_bar(sugarloaf, overlay, x, y, width, height, color, radius, depth, order);
 }
 
 /// Paint a single scrollbar thumb — the one and only way rio renders a
@@ -111,16 +250,9 @@ pub fn draw_thumb(
     depth: f32,
     order: u8,
 ) {
-    if opacity <= 0.0 {
-        return;
-    }
-    let base = if dragging {
-        SCROLLBAR_DRAG_COLOR
-    } else {
-        SCROLLBAR_COLOR
-    };
-    let color = [base[0], base[1], base[2], base[3] * opacity];
-    sugarloaf.rect(None, x, y, SCROLLBAR_WIDTH, height, color, depth, order);
+    draw_thumb_scaled(
+        sugarloaf, false, x, y, height, 1.0, opacity, dragging, depth, order,
+    );
 }
 
 /// Paint a scrollbar thumb in Sugarloaf's late overlay pass. Use this
@@ -136,16 +268,43 @@ pub fn draw_thumb_overlay(
     depth: f32,
     order: u8,
 ) {
-    if opacity <= 0.0 {
-        return;
-    }
-    let base = if dragging {
-        SCROLLBAR_DRAG_COLOR
-    } else {
-        SCROLLBAR_COLOR
-    };
-    let color = [base[0], base[1], base[2], base[3] * opacity];
-    sugarloaf.overlay_rect(x, y, SCROLLBAR_WIDTH, height, color, depth, order);
+    draw_thumb_scaled(
+        sugarloaf, true, x, y, height, 1.0, opacity, dragging, depth, order,
+    );
+}
+
+/// Paint the track band behind a scrollbar thumb, spanning the full
+/// track extent. No site draws a track by default, so this is a no-op
+/// unless the active look sets `scrollbar.track`. Call it right before
+/// the matching `draw_thumb` with the same depth/order — same-order
+/// rects render in submission order, so the thumb lands on top.
+/// `opacity` keeps the track on the thumb's fade envelope.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_track(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    height: f32,
+    opacity: f32,
+    depth: f32,
+    order: u8,
+) {
+    draw_track_scaled(sugarloaf, false, x, y, height, 1.0, opacity, depth, order);
+}
+
+/// Overlay-pass twin of `draw_track`, for sites that draw their thumb
+/// via `draw_thumb_overlay`.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_track_overlay(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    height: f32,
+    opacity: f32,
+    depth: f32,
+    order: u8,
+) {
+    draw_track_scaled(sugarloaf, true, x, y, height, 1.0, opacity, depth, order);
 }
 
 /// Computed geometry of a scrollbar track and thumb in logical pixels.
@@ -275,13 +434,13 @@ impl Scrollbar {
         let panel_width = panel_rect[2] / scale_factor;
         let panel_height = panel_rect[3] / scale_factor;
 
-        let bar_x = panel_x + panel_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
+        let bar_x = panel_x + panel_width - width() - SCROLLBAR_MARGIN;
         let bar_y = panel_y + SCROLLBAR_MARGIN;
         let track_height = panel_height - SCROLLBAR_MARGIN * 2.0;
 
         let thumb_ratio = screen_lines as f32 / total_lines as f32;
         let thumb_height = (track_height * thumb_ratio)
-            .clamp(SCROLLBAR_MIN_THUMB_HEIGHT.min(track_height), track_height);
+            .clamp(min_thumb_height().min(track_height), track_height);
 
         let scroll_ratio = if history_size > 0 {
             display_offset as f32 / history_size as f32
@@ -329,9 +488,10 @@ impl Scrollbar {
             grid_margin,
         );
 
-        // Use wider hit area for easier grabbing
-        let hit_x = geom.bar_x - (SCROLLBAR_HIT_WIDTH - SCROLLBAR_WIDTH) / 2.0;
-        let hit_width = SCROLLBAR_HIT_WIDTH;
+        // Use wider hit area for easier grabbing; a pack's thumb can be
+        // wider than the default hit band, so never shrink below it.
+        let hit_width = SCROLLBAR_HIT_WIDTH.max(width());
+        let hit_x = geom.bar_x - (hit_width - width()) / 2.0;
 
         if mouse_x < hit_x || mouse_x > hit_x + hit_width {
             return None;
@@ -432,6 +592,15 @@ impl Scrollbar {
             .drag_state
             .is_some_and(|d| d.rich_text_id == rich_text_id);
 
+        draw_track(
+            sugarloaf,
+            geom.bar_x,
+            geom.bar_y,
+            geom.track_height,
+            opacity,
+            TERMINAL_DEPTH,
+            TERMINAL_ORDER,
+        );
         draw_thumb(
             sugarloaf,
             geom.bar_x,

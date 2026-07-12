@@ -1500,8 +1500,50 @@ impl Screen<'_> {
             ),
         );
 
+        // Mash Up Packs: seed the examples on first run, make runtime
+        // themes resolvable before Renderer::new reads `[neoism] theme`,
+        // and re-apply the active pack's shader slots (the theme slot is
+        // persisted into `[neoism] theme` at apply time, so it needs no
+        // startup handling — and an individually overridden theme wins).
+        crate::mashup::seed_example_packs();
+        crate::mashup::sync_custom_ide_themes();
+        crate::mashup::publish_active_look(
+            &config.look,
+            config.neoism.mashup_pack.as_deref(),
+        );
+        let startup_pack = config
+            .neoism
+            .mashup_pack
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .and_then(neoism_backend::config::mashup::find_mashup_pack);
+
         #[cfg(feature = "wgpu")]
-        sugarloaf.update_filters(config.renderer.filters.as_slice());
+        {
+            let pack_filters = startup_pack
+                .as_ref()
+                .map(|pack| pack.filters.as_slice())
+                .filter(|filters| !filters.is_empty());
+            sugarloaf.update_filters(
+                pack_filters.unwrap_or(config.renderer.filters.as_slice()),
+            );
+        }
+
+        let mut startup_shader_overlay: Option<String> = None;
+        if let Some(overlay) =
+            startup_pack.as_ref().and_then(|pack| pack.shader_overlay.clone())
+        {
+            let overlay_config =
+                neoism_backend::sugarloaf::ShaderOverlayConfig::new([overlay.clone()]);
+            match sugarloaf.set_shader_overlay(overlay_config) {
+                Ok(()) => startup_shader_overlay = Some(overlay),
+                Err(err) => tracing::warn!(
+                    target: "neoism::mashup",
+                    "failed to apply pack shader overlay at startup: {err}"
+                ),
+            }
+        }
 
         let mut shader_overlay_paths: Vec<String> = BUILTIN_SHADER_OVERLAY_CHOICES
             .iter()
@@ -1516,6 +1558,7 @@ impl Screen<'_> {
         );
 
         let mut renderer = Renderer::new(config);
+        renderer.shader_overlay_active = startup_shader_overlay.is_some();
 
         let bindings = crate::bindings::default_key_bindings(config);
 
@@ -1601,7 +1644,11 @@ impl Screen<'_> {
 
         sugarloaf.set_background_color(Some(renderer.dynamic_background.1));
 
-        if let Some(image) = &config.window.background_image {
+        // Precedence: an explicit `[window] background-image` in config
+        // is the user's individual override and beats the active Mash
+        // Up Pack's wallpaper slot.
+        let pack_wallpaper = startup_pack.as_ref().and_then(|pack| pack.wallpaper.as_ref());
+        if let Some(image) = config.window.background_image.as_ref().or(pack_wallpaper) {
             if let Err(message) = sugarloaf.set_background_image(image) {
                 renderer.assistant.set_error(RioError {
                     level: RioErrorLevel::Warning,
@@ -1674,7 +1721,7 @@ impl Screen<'_> {
             editor_scroll_grid_states: rustc_hash::FxHashMap::default(),
             editor_geometry_log_last: rustc_hash::FxHashMap::default(),
             shader_overlay_paths,
-            active_shader_overlay: None,
+            active_shader_overlay: startup_shader_overlay,
             last_full_render_us: 0,
             leader_pending: None,
             markdown_leader_pending: None,

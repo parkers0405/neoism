@@ -24,6 +24,7 @@ mod host;
 mod input;
 mod ipc;
 mod layout;
+mod mashup;
 mod neoism;
 mod notebook_runtime;
 #[cfg(windows)]

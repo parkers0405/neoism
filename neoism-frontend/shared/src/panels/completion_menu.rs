@@ -349,17 +349,42 @@ impl CompletionMenu {
         }
 
         if menu.items.len() > visible_rows {
+            let style = crate::primitives::look::scrollbar_style();
             let ratio = visible_rows as f32 / menu.items.len() as f32;
-            let thumb_h = (menu_h * ratio).max(row_h);
+            // Site's minimum thumb length is one row, not the shared
+            // 20 px default, so only a pack override replaces it.
+            let min_thumb = style.min_thumb.map_or(row_h, |m| m * self.scale);
+            let thumb_h = (menu_h * ratio).max(min_thumb);
             let max_scroll = (menu.items.len() - visible_rows).max(1) as f32;
             let top_ratio = first as f32 / max_scroll;
             let thumb_y = y + (menu_h - thumb_h) * top_ratio;
-            sugarloaf.overlay_rect(
-                x + menu_w_total - 3.0 * self.scale,
+            let thumb_w = style.width_or(2.0) * self.scale;
+            let bar_x = x + menu_w_total - thumb_w - 1.0 * self.scale;
+            let radius = style.radius(thumb_w, 0.0);
+            if let Some(track) = style.track_or(None) {
+                crate::widgets::scrollbar::draw_bar(
+                    sugarloaf,
+                    true,
+                    bar_x,
+                    y,
+                    thumb_w,
+                    menu_h,
+                    track,
+                    radius,
+                    DEPTH,
+                    ORDER + 2,
+                );
+            }
+            let thumb_color = style.thumb_or(theme.f32_alpha(theme.muted, 0.85));
+            crate::widgets::scrollbar::draw_bar(
+                sugarloaf,
+                true,
+                bar_x,
                 thumb_y,
-                2.0 * self.scale,
+                thumb_w,
                 thumb_h,
-                theme.f32_alpha(theme.muted, 0.85),
+                thumb_color,
+                radius,
                 DEPTH,
                 ORDER + 2,
             );

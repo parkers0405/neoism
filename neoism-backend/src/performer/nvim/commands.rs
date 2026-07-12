@@ -279,6 +279,43 @@ pub fn vim_apply_theme_command(name: &str) -> String {
     )
 }
 
+/// Custom (runtime-registered) theme variant of
+/// [`vim_apply_theme_command`]: pushes the full palette table because
+/// the lua runtime only ships the builtin four. Same no-`pcall`
+/// rationale as above.
+pub fn vim_apply_custom_theme_command(
+    name: &str,
+    palette: &[(&str, String)],
+) -> String {
+    let fields = palette
+        .iter()
+        .map(|(key, value)| format!("{key} = {}", lua_string_literal(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "lua require('rio.theme').apply_custom({}, {{ {fields} }})",
+        lua_string_literal(name)
+    )
+}
+
+#[cfg(test)]
+mod custom_theme_command_tests {
+    #[test]
+    fn apply_custom_builds_a_lua_table() {
+        let cmd = super::vim_apply_custom_theme_command(
+            "phosphor",
+            &[
+                ("bg", "#030f06".to_string()),
+                ("type", "#b8ff45".to_string()),
+            ],
+        );
+        assert_eq!(
+            cmd,
+            "lua require('rio.theme').apply_custom(\"phosphor\", { bg = \"#030f06\", type = \"#b8ff45\" })"
+        );
+    }
+}
+
 /// `/`-palette: ask the lua side to enumerate matches for the given
 /// query in the current buffer. Lua replies via `rio_search_matches`.
 pub fn vim_search_query_command(query: &str) -> String {

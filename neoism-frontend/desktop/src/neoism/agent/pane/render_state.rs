@@ -1,4 +1,5 @@
 use super::*;
+use neoism_ui::panels::agent_pane::view::fx::AgentFxKind;
 
 impl NeoismAgentPane {
     pub fn with_directory(directory: Option<String>) -> Self {
@@ -287,6 +288,91 @@ impl NeoismAgentPane {
 
     pub fn set_cursor_rect(&mut self, rect: Option<[f32; 4]>) {
         self.cursor_rect = rect;
+    }
+
+    /// Easter-egg skits: queue the animation; the follow-up prompt is
+    /// held until the skit's key moment passes (`fire_fx_prompt`), so
+    /// the model reacts to a done deed rather than a play-by-play.
+    pub(crate) fn start_fx_easter_egg(&mut self, kind: AgentFxKind) {
+        self.fx_requested = Some(kind);
+        self.fx_pending_prompt = Some(
+            match kind {
+                AgentFxKind::Piss => "user just pissed on you",
+                AgentFxKind::Cuss => {
+                    "user just cussed you out — he is SO mad at you right now"
+                }
+                AgentFxKind::Glitch => {
+                    "user briefly unplugged you. remember what that felt like"
+                }
+                AgentFxKind::Disco => {
+                    "user is so happy with you he's dancing under a disco ball — celebrate with him"
+                }
+                AgentFxKind::GangFight => {
+                    "a gang shootout just went down in your chat and the user's crew won. he's feeling dangerous"
+                }
+                AgentFxKind::Praise => {
+                    "the user is praising God right now — Jesus on the throne, everyone bowing, a whole worship scene in your chat. rejoice with him. Amen."
+                }
+            }
+            .to_string(),
+        );
+    }
+
+    pub fn take_fx_request(&mut self) -> Option<AgentFxKind> {
+        self.fx_requested.take()
+    }
+
+    pub fn fx_started(&self) -> Option<(AgentFxKind, f32)> {
+        self.fx_started
+    }
+
+    pub fn set_fx_started(&mut self, at: Option<(AgentFxKind, f32)>) {
+        self.fx_started = at;
+    }
+
+    /// Send the held prompt. Mirrors `submit()`'s send path but
+    /// bypasses the input box and picker handling — the user may be
+    /// mid-draft (or have a picker open) when the skit's timer fires,
+    /// and neither must be disturbed. Idempotent — the pending text
+    /// is consumed on the first call.
+    pub fn fire_fx_prompt(&mut self) {
+        let Some(text) = self.fx_pending_prompt.take() else {
+            return;
+        };
+        if self.is_subagent_session() {
+            return;
+        }
+        self.remember_sent_prompt(&text);
+        let was_streaming = self.is_streaming();
+        if !was_streaming {
+            self.messages.push(NeoismAgentMessage::user(text.clone()));
+            self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
+        }
+        self.abort_requested_at = None;
+        if !was_streaming {
+            self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+        }
+        match self.send_prompt(&text, !was_streaming) {
+            Ok(()) if was_streaming => {
+                self.queued_prompt_count =
+                    self.queued_prompt_count.saturating_add(1).max(1);
+                self.queued_prompt_preview.get_or_insert(text);
+            }
+            Ok(()) => {}
+            Err(error) => {
+                self.system_message("Prompt failed", error);
+                if !was_streaming {
+                    self.note_streaming(NeoismAgentStreamingState::Idle, None);
+                }
+            }
+        }
+    }
+
+    /// True while a skit is queued or on screen — keeps the agent
+    /// pane registered as an animation owner so frames flow even when
+    /// no reply is streaming yet.
+    pub(crate) fn fx_active(&self) -> bool {
+        self.fx_requested.is_some() || self.fx_started.is_some()
     }
 
     pub fn set_input_wrap_ranges(&mut self, ranges: Vec<(usize, usize)>) {

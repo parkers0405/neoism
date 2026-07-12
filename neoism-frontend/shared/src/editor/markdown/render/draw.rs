@@ -48,16 +48,20 @@ pub(super) fn draw_rounded_rect_clipped(
     depth: f32,
     order: u8,
 ) {
-    let [clip_x, clip_y, clip_w, clip_h] = clip;
-    let fully_inside = x >= clip_x
-        && y >= clip_y
-        && x + w <= clip_x + clip_w
-        && y + h <= clip_y + clip_h;
-    if fully_inside {
-        sugarloaf.rounded_rect(None, x, y, w, h, color, depth, radius, order);
-    } else {
-        draw_rect_clipped(sugarloaf, clip, x, y, w, h, color, depth, order);
-    }
+    // Historical semantics here were exact fully-inside; sub-epsilon
+    // tolerance matches it (intersect returns exact copies when
+    // contained).
+    crate::widgets::quad::rounded_rect_clipped(
+        sugarloaf,
+        clip,
+        None,
+        [x, y, w, h],
+        color,
+        depth,
+        radius,
+        order,
+        f32::EPSILON,
+    );
 }
 
 pub(super) fn draw_if_visible(
@@ -141,6 +145,21 @@ pub(super) fn markdown_font(size: f32, scale: f32) -> f32 {
         * (GLOBAL_TEXT_BASELINE_FONT_SIZE / MARKDOWN_BODY_FONT_SIZE)
 }
 
+/// Font id for the Mash Up Pack markdown font override
+/// (`[look.markdown] font-family`). `None` — no override configured, or
+/// the family isn't loaded — keeps today's rendering byte-identical
+/// (primary cascade with per-char fallback). `Some` shapes the run in
+/// that one already-loaded family; resolution is a read-lock + map hit
+/// in the font library, so calling this per `DrawOpts` construction is
+/// fine. Measure and draw sites MUST pair on the same value or the
+/// virtual layout heights / caret x drift — thread it through both.
+/// Code blocks, inline code chips, and the illuminated/drop-cap path
+/// keep their own fonts and never take this id.
+pub(super) fn md_font_id(sugarloaf: &Sugarloaf) -> Option<usize> {
+    let family = crate::primitives::look::markdown_font_family()?;
+    sugarloaf.font_id_for_family(&family)
+}
+
 pub(super) fn caret_height(opts: &DrawOpts) -> f32 {
     md::caret_height(opts)
 }
@@ -162,6 +181,11 @@ pub(super) fn draw_task_checkbox(
     theme: &IdeTheme,
     font_scale: f32,
 ) {
+    use crate::primitives::look::{markdown_checkbox_look, CheckboxLook};
+    if markdown_checkbox_look() == CheckboxLook::Retro95 {
+        draw_task_checkbox_retro95(sugarloaf, clip, x, y, checked, theme, font_scale);
+        return;
+    }
     let size = 13.0 * font_scale;
     let stroke = 1.0 * font_scale;
     draw_rect_clipped(
@@ -220,6 +244,62 @@ pub(super) fn draw_task_checkbox(
         let glyph = "✓";
         let glyph_w = sugarloaf.text_mut().measure(glyph, &opts);
         let cx = x + (size - glyph_w) * 0.5;
+        let cy = y + (size - font_size) * 0.5 - font_scale;
+        sugarloaf.text_mut().draw(cx, cy, glyph, &opts);
+    }
+}
+
+/// Windows-3.1 style task checkbox: chunky 2px box strokes in the
+/// text color over a light well, checked = bold X. Same 13px envelope
+/// as the modern style so `list_marker_metrics` / `checkbox_y` /
+/// `register_task_rect` geometry is untouched.
+fn draw_task_checkbox_retro95(
+    sugarloaf: &mut Sugarloaf,
+    clip: [f32; 4],
+    x: f32,
+    y: f32,
+    checked: bool,
+    theme: &IdeTheme,
+    font_scale: f32,
+) {
+    let size = 13.0 * font_scale;
+    let stroke = 2.0 * font_scale;
+    let ink = theme.f32(theme.fg);
+    // Well behind the box — reads as the classic sunken checkbox on
+    // light themes and as a subtle plate on dark ones.
+    draw_rect_clipped(
+        sugarloaf,
+        clip,
+        x,
+        y,
+        size + stroke,
+        size + stroke,
+        theme.f32_alpha(theme.white, 0.25),
+        DEPTH,
+        ORDER_TEXT,
+    );
+    for (rx, ry, rw, rh) in [
+        (x, y, size + stroke, stroke),
+        (x, y + size, size + stroke, stroke),
+        (x, y, stroke, size + stroke),
+        (x + size, y, stroke, size + stroke),
+    ] {
+        draw_rect_clipped(
+            sugarloaf, clip, rx, ry, rw, rh, ink, DEPTH, ORDER_TEXT,
+        );
+    }
+    if checked {
+        let font_size = 11.0 * font_scale;
+        let opts = DrawOpts {
+            font_size,
+            color: theme.u8(theme.fg),
+            bold: true,
+            clip_rect: Some(clip),
+            ..DrawOpts::default()
+        };
+        let glyph = "X";
+        let glyph_w = sugarloaf.text_mut().measure(glyph, &opts);
+        let cx = x + stroke + (size - stroke - glyph_w) * 0.5;
         let cy = y + (size - font_size) * 0.5 - font_scale;
         sugarloaf.text_mut().draw(cx, cy, glyph, &opts);
     }

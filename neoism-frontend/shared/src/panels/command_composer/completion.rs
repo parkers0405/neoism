@@ -200,9 +200,17 @@ impl CommandComposer {
                     self.completion_last_scroll_time,
                     false,
                 );
-                let bar_x = list_x + list_w
-                    - scrollbar::SCROLLBAR_WIDTH
-                    - scrollbar::SCROLLBAR_MARGIN;
+                let bar_x =
+                    list_x + list_w - scrollbar::width() - scrollbar::SCROLLBAR_MARGIN;
+                scrollbar::draw_track(
+                    sugarloaf,
+                    bar_x,
+                    list_y,
+                    list_h,
+                    opacity,
+                    DEPTH + 0.05,
+                    ORDER_STATUS_JOIN + 3,
+                );
                 scrollbar::draw_thumb(
                     sugarloaf,
                     bar_x,

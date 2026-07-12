@@ -39,9 +39,9 @@ pub fn next_rich_text_id() -> usize {
 pub(super) fn ide_init_commands(theme: &str) -> Vec<String> {
     let mut commands = neoism_backend::performer::nvim::ide_init_commands();
     if !theme.trim().is_empty() {
-        commands.push(neoism_backend::performer::nvim::vim_apply_theme_command(
-            theme,
-        ));
+        // Resolves custom (Mash Up Pack) themes to a full-palette
+        // apply — a fresh nvim only knows the builtin palettes.
+        commands.push(crate::mashup::vim_theme_command(theme));
     }
     commands
 }

@@ -59,11 +59,13 @@ impl Severity {
     }
 
     fn glyph(self) -> &'static str {
+        // Shared with the status line's diagnostics pills (and Mash Up
+        // Pack `status.*` icon overrides) via `primitives::icons`.
         match self {
-            Severity::Error => "\u{ea87}",
-            Severity::Warn => "\u{f071}",
-            Severity::Info => "\u{f129}",
-            Severity::Hint => "\u{f0eb}",
+            Severity::Error => crate::primitives::icons::error_glyph(),
+            Severity::Warn => crate::primitives::icons::warn_glyph(),
+            Severity::Info => crate::primitives::icons::info_glyph(),
+            Severity::Hint => crate::primitives::icons::hint_glyph(),
         }
     }
 

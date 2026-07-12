@@ -583,7 +583,7 @@ fn draw_mermaid_code_block(
         block_w,
         block_h,
         10.0,
-        theme.f32(theme.black),
+        theme.f32(theme.panel_bg()),
         DEPTH,
         ORDER_BG,
     );
@@ -1314,6 +1314,10 @@ fn draw_literal_block(
         font_size: markdown_font(15.0, font_scale),
         color: theme.u8(if table { theme.fg } else { theme.muted }),
         clip_rect: Some(clip),
+        // Literal table-text fallback (parse failed) is still table
+        // text; measure_item's Table fallback only takes line_height
+        // (font_size-only), so heights stay paired.
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     let line_h = line_height(&opts);

@@ -155,8 +155,8 @@ mod tests {
 
     #[test]
     fn formats_known_dates() {
-        // 2026-05-19 00:00:00 UTC = 1_779_580_800 s.
-        assert_eq!(format_date_header(1_779_580_800_000), "Tue May 19 2026");
+        // 2026-05-19 00:00:00 UTC = 1_779_148_800 s.
+        assert_eq!(format_date_header(1_779_148_800_000), "Tue May 19 2026");
         // 2026-07-07 = 1_783_382_400 s (a Tuesday).
         assert_eq!(format_date_header(1_783_382_400_000), "Tue Jul 07 2026");
         // Epoch.

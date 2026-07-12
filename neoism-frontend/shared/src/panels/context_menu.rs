@@ -617,7 +617,7 @@ impl ContextMenu {
             self.y,
             w,
             h,
-            theme.f32(theme.black),
+            theme.f32(theme.panel_bg()),
             DEPTH_BG,
             MENU_RADIUS * s,
             ORDER,
@@ -788,9 +788,19 @@ impl ContextMenu {
                 list_clip[3],
                 normalized,
             ) {
+                let bar_x = inner_x + inner_w - scrollbar::width();
+                scrollbar::draw_track(
+                    sugarloaf,
+                    bar_x,
+                    list_clip[1],
+                    list_clip[3],
+                    0.95,
+                    DEPTH_ELEMENT + 0.05,
+                    ORDER + 2,
+                );
                 scrollbar::draw_thumb(
                     sugarloaf,
-                    inner_x + inner_w - scrollbar::SCROLLBAR_WIDTH,
+                    bar_x,
                     thumb_y,
                     thumb_h,
                     0.95,

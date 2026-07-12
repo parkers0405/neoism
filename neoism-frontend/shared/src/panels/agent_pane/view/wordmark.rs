@@ -139,8 +139,24 @@ pub fn format_elapsed(seconds: f32) -> String {
     }
 }
 
+/// Letter tint cycle the wordmark pixels were last uploaded with
+/// (empty = never). The source PNG is a white glyph; tinting to the
+/// pack's `[wordmark] colors` (or the active theme's `fg`) keeps the
+/// agent home legible on light themes — same treatment as the
+/// terminal splash wordmark. Process-wide is fine: the theme/pack is
+/// process-wide, and the per-window `image_data.contains_key` check
+/// below still forces the first upload into each window.
+static WORDMARK_TINT: std::sync::RwLock<Vec<u32>> = std::sync::RwLock::new(Vec::new());
+
 pub fn register_wordmark(sugarloaf: &mut Sugarloaf) -> bool {
-    if sugarloaf.image_data.contains_key(&WORDMARK_IMAGE_ID) {
+    let tint = crate::primitives::look::wordmark_colors_or(
+        crate::chrome::active_ide_theme().fg,
+    );
+    let unchanged = WORDMARK_TINT
+        .read()
+        .map(|last| *last == tint)
+        .unwrap_or(false);
+    if unchanged && sugarloaf.image_data.contains_key(&WORDMARK_IMAGE_ID) {
         return true;
     }
     let img = match image_rs::load_from_memory(WORDMARK_PNG) {
@@ -148,19 +164,31 @@ pub fn register_wordmark(sugarloaf: &mut Sugarloaf) -> bool {
         Err(_) => return false,
     };
     let (width, height) = img.dimensions();
+    let mut pixels = img.into_raw();
+    crate::primitives::look::tint_wordmark_pixels(
+        &mut pixels,
+        width as usize,
+        LETTER_COUNT,
+        &tint,
+    );
     let entry = GraphicDataEntry::from_graphic_data(GraphicData {
         id: GraphicId::new(WORDMARK_IMAGE_ID as u64),
         width: width as usize,
         height: height as usize,
         color_type: ColorType::Rgba,
-        pixels: img.into_raw(),
+        pixels,
         is_opaque: false,
+        // A fresh transmit_time invalidates the cached GPU texture, so
+        // re-tinting on theme change replaces the pixels on screen.
         resize: None,
         display_width: None,
         display_height: None,
         transmit_time: Instant::now(),
     });
     sugarloaf.image_data.insert(WORDMARK_IMAGE_ID, entry);
+    if let Ok(mut last) = WORDMARK_TINT.write() {
+        *last = tint;
+    }
     true
 }
 

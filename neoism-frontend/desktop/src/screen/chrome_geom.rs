@@ -87,6 +87,14 @@ impl Screen<'_> {
         // scratch must not drop the live file tree or terminal/editor tabs.
         let previous_theme = self.renderer.theme;
         let previous_minimap_enabled = self.renderer.minimap.is_enabled();
+        // Fresh theme files (ide-themes/, packs/) must be visible before
+        // the name resolves, or a custom theme reverts to pastel_dark on
+        // config reload.
+        crate::mashup::sync_custom_ide_themes();
+        crate::mashup::publish_active_look(
+            &config.look,
+            config.neoism.mashup_pack.as_deref(),
+        );
         let config_theme =
             neoism_ui::primitives::ide_theme::IdeTheme::by_name(&config.neoism.theme);
         let old_island = self.renderer.island.take();
@@ -131,9 +139,7 @@ impl Screen<'_> {
         }
 
         if previous_theme.name != config_theme.name {
-            let cmd = neoism_backend::performer::nvim::vim_apply_theme_command(
-                config_theme.name.as_str(),
-            );
+            let cmd = crate::mashup::vim_theme_command(config_theme.name.as_str());
             for grid in self.context_manager.contexts_mut() {
                 for item in grid.contexts_mut().values_mut() {
                     let context = item.context_mut();
@@ -240,7 +246,19 @@ impl Screen<'_> {
         self.sugarloaf
             .set_background_color(Some(self.renderer.dynamic_background.1));
 
-        if let Some(image) = &config.window.background_image {
+        // Same precedence as startup: explicit `[window]
+        // background-image` beats the active pack's wallpaper slot.
+        let pack_wallpaper = config
+            .neoism
+            .mashup_pack
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .and_then(neoism_backend::config::mashup::find_mashup_pack)
+            .and_then(|pack| pack.wallpaper);
+        if let Some(image) =
+            config.window.background_image.as_ref().or(pack_wallpaper.as_ref())
+        {
             if let Err(message) = self.sugarloaf.set_background_image(image) {
                 self.renderer.assistant.set_error(RioError {
                     level: RioErrorLevel::Warning,
@@ -1101,14 +1119,17 @@ impl Screen<'_> {
         self.sugarloaf
             .set_background_color(Some(self.renderer.dynamic_background.1));
 
-        if let Err(err) =
-            neoism_backend::config::write_neoism_preferences(Some(theme_name), None)
-        {
+        if let Err(err) = neoism_backend::config::write_neoism_preferences(
+            Some(theme_name),
+            None,
+            None,
+        ) {
             tracing::warn!(target: "neoism::config", "failed to persist theme: {err}");
         }
 
-        let apply_theme_cmd =
-            neoism_backend::performer::nvim::vim_apply_theme_command(theme_name);
+        // Custom (runtime-registered) themes push their whole palette —
+        // the lua runtime only ships the builtin four.
+        let apply_theme_cmd = crate::mashup::vim_theme_command(theme_name);
         let mut themed_editors = 0usize;
 
         for context_grid in self.context_manager.contexts_mut() {
@@ -1146,6 +1167,112 @@ impl Screen<'_> {
         );
         self.renderer.notifications.push(
             format!("Applied theme: {theme_name}"),
+            neoism_ui::panels::notifications::NotificationLevel::Info,
+        );
+        self.renderer.modal.close();
+        self.mark_dirty();
+    }
+
+    /// Apply a Mash Up Pack: every slot the pack ships (theme, shader
+    /// overlay, filters, font family) lands together as one look.
+    /// Slots the pack omits keep the user's current setup — except the
+    /// shader overlay, which is always set to the pack's value so a
+    /// previous pack's glass doesn't linger. `None` deactivates the
+    /// current pack (theme stays; individual pickers still work).
+    pub(crate) fn apply_mashup_pack(&mut self, id: Option<String>) {
+        let Some(id) = id else {
+            self.apply_shader_overlay(None);
+            if let Err(err) =
+                neoism_backend::config::write_neoism_preferences(None, None, Some(""))
+            {
+                tracing::warn!(target: "neoism::config", "failed to persist pack: {err}");
+            }
+            let fresh_config = neoism_backend::config::Config::load();
+            crate::mashup::publish_active_look(&fresh_config.look, None);
+            if let Some(image) = fresh_config.window.background_image.as_ref() {
+                let _ = self.sugarloaf.set_background_image(image);
+            } else {
+                self.sugarloaf.clear_background_image();
+            }
+            self.renderer.notifications.push(
+                "Mash Up Pack deactivated",
+                neoism_ui::panels::notifications::NotificationLevel::Info,
+            );
+            self.renderer.modal.close();
+            self.mark_dirty();
+            return;
+        };
+
+        crate::mashup::sync_custom_ide_themes();
+        let Some(pack) = neoism_backend::config::mashup::find_mashup_pack(&id) else {
+            self.renderer.notifications.push(
+                format!("Mash Up Pack not found: {id}"),
+                neoism_ui::panels::notifications::NotificationLevel::Error,
+            );
+            self.renderer.modal.close();
+            self.mark_dirty();
+            return;
+        };
+
+        if let Some(theme) = pack.theme.as_deref() {
+            // Applies live everywhere and persists `[neoism] theme`,
+            // which is also what startup reads — the pack only re-applies
+            // its shader/filters on launch, never the theme, so a later
+            // individual theme change sticks.
+            self.apply_unified_theme(theme);
+        }
+
+        self.apply_shader_overlay(pack.shader_overlay.clone());
+
+        #[cfg(feature = "wgpu")]
+        if !pack.filters.is_empty() {
+            self.sugarloaf.update_filters(&pack.filters);
+        }
+
+        if let Some(family) = pack.font_family.as_deref() {
+            // Written to config so the file watcher rebuilds the font
+            // library — same path a manual `[fonts]` edit takes.
+            if let Err(err) = neoism_backend::config::write_fonts_family(family) {
+                tracing::warn!(
+                    target: "neoism::config",
+                    "failed to persist pack font family: {err}"
+                );
+            }
+        }
+
+        if let Err(err) =
+            neoism_backend::config::write_neoism_preferences(None, None, Some(&id))
+        {
+            tracing::warn!(target: "neoism::config", "failed to persist pack: {err}");
+        }
+
+        // Publish the pack's look slots immediately (the config-write
+        // hot-reload would get there too, but only after the watcher
+        // debounce). Fresh-load the config so `[look.*]` overrides win.
+        let fresh_config = neoism_backend::config::Config::load();
+        crate::mashup::publish_active_look(&fresh_config.look, Some(&id));
+
+        // Wallpaper slot — the pack's value unless the user pinned an
+        // explicit `[window] background-image`; a pack without a
+        // wallpaper clears a previous pack's.
+        if let Some(image) = fresh_config
+            .window
+            .background_image
+            .as_ref()
+            .or(pack.wallpaper.as_ref())
+        {
+            if let Err(message) = self.sugarloaf.set_background_image(image) {
+                tracing::warn!(
+                    target: "neoism::mashup",
+                    "failed to load pack wallpaper: {message}"
+                );
+            }
+        } else {
+            self.sugarloaf.clear_background_image();
+        }
+
+        self.renderer.notifications.push(
+            format!("Applied Mash Up Pack: {}", pack.name),
             neoism_ui::panels::notifications::NotificationLevel::Info,
         );
         self.renderer.modal.close();

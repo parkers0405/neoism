@@ -36,6 +36,7 @@ pub enum PaletteAction {
     ToggleAppearanceTheme,
     OpenThemePicker,
     OpenShaders,
+    OpenMashupPacks,
     Copy,
     Paste,
     SaveDocument,
@@ -330,6 +331,21 @@ pub fn theme_picker_modal_spec() -> ModalSpec {
             )
         })
         .collect();
+    // Runtime themes (ide-themes/*.toml + Mash Up Pack themes) after
+    // the builtin four, same action.
+    for (name, description) in crate::primitives::ide_theme::custom_ide_theme_entries()
+    {
+        let hint = if description.is_empty() {
+            "Custom theme".to_string()
+        } else {
+            description
+        };
+        buttons.push(ModalButton::new(
+            name.clone(),
+            hint,
+            ModalAction::ApplyTheme { name },
+        ));
+    }
     buttons.push(ModalButton::new("Close", "Esc", ModalAction::Close));
 
     ModalSpec {
@@ -386,6 +402,49 @@ where
         title: "Shaders".to_string(),
         body,
         meta: "Enter applies the selected overlay, None disables it.".to_string(),
+        input: None,
+        buttons,
+        busy: false,
+        blocking: true,
+    }
+}
+
+/// One installed Mash Up Pack, as the host lists it for the picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteMashupEntry {
+    /// Stable id (directory name under `packs/`).
+    pub id: String,
+    /// Display name from the manifest.
+    pub name: String,
+    /// Manifest description plus the slots the pack ships.
+    pub detail: String,
+}
+
+pub fn mashup_packs_modal_spec(packs: Vec<PaletteMashupEntry>) -> ModalSpec {
+    let body = if packs.is_empty() {
+        "No Mash Up Packs installed. Drop a pack folder (pack.toml + theme/shader/fonts) under the config dir's packs/ to see it here.".to_string()
+    } else {
+        "Pick a Mash Up Pack — theme, shader, and fonts applied together as one look. Each slot stays individually changeable afterwards (Theme Picker, Shaders, [fonts]).".to_string()
+    };
+    let mut buttons = Vec::with_capacity(packs.len() + 2);
+    buttons.push(ModalButton::new(
+        "None",
+        "Deactivate pack (keeps current theme, clears its shader)",
+        ModalAction::ApplyMashupPack { id: None },
+    ));
+    buttons.extend(packs.into_iter().map(|pack| {
+        ModalButton::new(
+            pack.name,
+            pack.detail,
+            ModalAction::ApplyMashupPack { id: Some(pack.id) },
+        )
+    }));
+    buttons.push(ModalButton::new("Close", "Esc", ModalAction::Close));
+
+    ModalSpec {
+        title: "Mash Up Packs".to_string(),
+        body,
+        meta: "Enter applies the whole pack, None deactivates.".to_string(),
         input: None,
         buttons,
         busy: false,
@@ -459,6 +518,7 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::ToggleAppearanceTheme
         | PaletteAction::OpenThemePicker
         | PaletteAction::OpenShaders
+        | PaletteAction::OpenMashupPacks
         | PaletteAction::Copy
         | PaletteAction::Paste
         | PaletteAction::SearchFiles

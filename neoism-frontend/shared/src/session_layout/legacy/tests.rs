@@ -1,5 +1,6 @@
 
 use super::*;
+use std::collections::BTreeSet;
 
 #[test]
 fn close_unfocused_tabs_keeps_current_and_removes_others_descending() {

@@ -154,10 +154,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 // Enter handler already applies the selected theme — so
                 // this closes the "hamburger menu modals don't appear on
                 // web" gap for Themes without depending on JS wiring.
-                let themes: Vec<String> = crate::primitives::IdeThemeName::ALL
-                    .iter()
-                    .map(|name| name.as_str().to_string())
-                    .collect();
+                let themes = crate::primitives::ide_theme::all_ide_theme_names();
                 self.command_palette.enter_themes_mode(themes);
                 self.relayout();
             }

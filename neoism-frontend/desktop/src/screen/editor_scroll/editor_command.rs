@@ -148,7 +148,7 @@ impl Screen<'_> {
             );
         }
         if let Err(err) =
-            neoism_backend::config::write_neoism_preferences(None, Some(enabled))
+            neoism_backend::config::write_neoism_preferences(None, Some(enabled), None)
         {
             tracing::warn!(target: "neoism::config", "failed to persist minimap preference: {err}");
         }

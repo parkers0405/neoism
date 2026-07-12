@@ -75,6 +75,9 @@ impl Screen<'_> {
             ModalAction::ApplyShaderOverlay { path } => {
                 self.apply_shader_overlay(path);
             }
+            ModalAction::ApplyMashupPack { id } => {
+                self.apply_mashup_pack(id);
+            }
             ModalAction::RunEditorCommand { command } => {
                 self.renderer.modal.close();
                 self.send_editor_command(command);

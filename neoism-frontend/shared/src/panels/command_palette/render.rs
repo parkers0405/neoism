@@ -276,7 +276,7 @@ impl CommandPalette {
             frame_stroke,
             radius,
             theme.f32(theme.surface),
-            theme.f32(theme.black),
+            theme.f32(theme.panel_bg()),
             DEPTH_BG,
             ORDER,
         );
@@ -541,17 +541,17 @@ impl CommandPalette {
                 _ => 0.0,
             };
             let (row_icon, row_icon_color) = match row {
-                // Per-service nerd-font glyph in the command-sheet's muted
-                // slate (`[205, 215, 235]`), brightened on the active row
-                // (`[230, 240, 255]`). Prefix→service reverse-lookup keeps
-                // `CommandService::icon()` the single icon source.
+                // Per-service nerd-font glyph, muted ink brightened on the
+                // active row. Prefix→service reverse-lookup keeps
+                // `CommandService::icon()` the single icon source (and
+                // `icon_themed` lets a Mash Up Pack re-glyph it).
                 PaletteRow::Command { service, .. } => {
-                    let icon =
-                        CommandService::from_prefix(service).map(CommandService::icon);
+                    let icon = CommandService::from_prefix(service)
+                        .map(CommandService::icon_themed);
                     let color = if is_selected {
-                        [230, 240, 255, 255]
+                        theme.u8(theme.fg)
                     } else {
-                        [205, 215, 235, 255]
+                        theme.u8(theme.dim)
                     };
                     (icon, color)
                 }
@@ -865,14 +865,22 @@ impl CommandPalette {
                 self.last_scroll_time,
                 false, // palette has no drag interaction
             );
-            let bar_x = input_x + input_width
-                - scrollbar::SCROLLBAR_WIDTH
-                - scrollbar::SCROLLBAR_MARGIN;
+            let bar_x =
+                input_x + input_width - scrollbar::width() - scrollbar::SCROLLBAR_MARGIN;
             // Palette backdrop + bg rects use ORDER=20; the terminal
             // scrollbar's default ORDER=5 would land *under* them and
             // be invisible. Piggy-back on the palette's own order, at
             // a depth slightly above the selection highlight so a
             // hovered row doesn't mask the thumb.
+            scrollbar::draw_track_overlay(
+                sugarloaf,
+                bar_x,
+                results_y,
+                track_height,
+                opacity,
+                DEPTH_ELEMENT + 0.05,
+                ORDER,
+            );
             scrollbar::draw_thumb_overlay(
                 sugarloaf,
                 bar_x,

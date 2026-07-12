@@ -23,6 +23,7 @@ pub mod mermaid;
 pub mod modal;
 pub mod overlay;
 pub mod popover;
+pub mod quad;
 pub mod scroll;
 pub mod scrollbar;
 pub mod stock_card;

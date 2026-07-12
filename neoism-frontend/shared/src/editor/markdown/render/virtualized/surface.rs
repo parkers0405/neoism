@@ -32,6 +32,10 @@ pub(super) fn render_virtual(
         color: theme.u8(theme.fg),
         bold: true,
         clip_rect: Some([x, y, w, h]),
+        // Inline note title is heading text — take the pack font.
+        // Layout is unaffected: `title_h` comes from `line_height`,
+        // which only reads `font_size`.
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     let title_h = line_height(&title_opts) + 16.0;
@@ -79,6 +83,27 @@ pub(super) fn render_virtual(
     let scale_bucket = font_scale_fine_bucket(font_scale);
     if pane.virtual_render.font_scale_bucket != scale_bucket {
         pane.virtual_render.font_scale_bucket = scale_bucket;
+        let node_count = pane.virtual_render.surface.nodes().len();
+        if node_count > 0 {
+            let _ = pane
+                .virtual_render
+                .surface
+                .apply(VirtualSurfaceCommand::MarkRangeDirty {
+                    start: 0,
+                    end: node_count,
+                    kind: DirtyKind::Layout,
+                });
+        }
+    }
+    // A Mash Up Pack markdown font override change is a zoom-shaped
+    // event: every measured wrap width was built with the old glyph
+    // metrics. Mirror the scale-bucket sweep and drop the measurement
+    // cache (its key doesn't carry the font). No override ever set →
+    // `None == None`, zero work.
+    let md_font = md_font_id(sugarloaf);
+    if pane.virtual_render.md_font_id != md_font {
+        pane.virtual_render.md_font_id = md_font;
+        pane.virtual_render.measurement_cache.clear();
         let node_count = pane.virtual_render.surface.nodes().len();
         if node_count > 0 {
             let _ = pane

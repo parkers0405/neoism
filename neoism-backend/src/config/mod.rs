@@ -6,6 +6,7 @@ pub mod effects;
 pub mod hints;
 pub mod keyboard;
 pub mod layout;
+pub mod mashup;
 pub mod navigation;
 pub mod platform;
 pub mod renderer;
@@ -101,6 +102,11 @@ pub struct Neoism {
     /// `[neoism] blinking-cursor = true` works on its own.
     #[serde(default, rename = "blinking-cursor")]
     pub blinking_cursor: Option<bool>,
+    /// Active Mash Up Pack id (a directory under `packs/`). Applied on
+    /// startup: the pack's theme wins over `theme` above, and its
+    /// shader overlay / filters are re-applied. Empty/unset = no pack.
+    #[serde(default, rename = "mashup-pack")]
+    pub mashup_pack: Option<String>,
 }
 
 impl Default for Neoism {
@@ -112,6 +118,7 @@ impl Default for Neoism {
             cursor_color: None,
             cursor_style: None,
             blinking_cursor: None,
+            mashup_pack: None,
         }
     }
 }
@@ -205,6 +212,11 @@ pub struct Config {
     pub hints: Hints,
     #[serde(default = "Bell::default")]
     pub bell: Bell,
+    /// Individual look-slot overrides (`[look.scrollbar]`,
+    /// `[look.markdown]`, `[look.icons]`) — win field-by-field over
+    /// the active Mash Up Pack's slots.
+    #[serde(default)]
+    pub look: mashup::LookConfig,
     #[serde(default = "default_bool_true", rename = "enable-scroll-bar")]
     pub enable_scroll_bar: bool,
     #[serde(
@@ -320,6 +332,7 @@ pub fn create_config_file(path: Option<PathBuf>) {
 pub fn write_neoism_preferences(
     theme: Option<&str>,
     minimap: Option<bool>,
+    mashup_pack: Option<&str>,
 ) -> std::io::Result<()> {
     let mut updates = Vec::new();
     if let Some(theme) = theme {
@@ -327,6 +340,11 @@ pub fn write_neoism_preferences(
     }
     if let Some(minimap) = minimap {
         updates.push(("minimap", minimap.to_string()));
+    }
+    if let Some(pack) = mashup_pack {
+        // Empty string persists "no pack" while keeping the key's spot
+        // (and any comment above it) in the file.
+        updates.push(("mashup-pack", toml_string_literal(pack)));
     }
     if updates.is_empty() {
         return Ok(());
@@ -338,6 +356,23 @@ pub fn write_neoism_preferences(
     let content =
         std::fs::read_to_string(&path).unwrap_or_else(|_| config_file_content());
     let content = update_toml_section(&content, "neoism", &updates);
+    std::fs::write(path, content)
+}
+
+/// Persist `[fonts] family` — Mash Up Packs use this so their font
+/// lands the same way a manual config edit would (the config watcher
+/// rebuilds the font library from the write).
+pub fn write_fonts_family(family: &str) -> std::io::Result<()> {
+    let config_dir = config_dir_path();
+    std::fs::create_dir_all(&config_dir)?;
+    let path = config_dir.join("config.toml");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| config_file_content());
+    let content = update_toml_section(
+        &content,
+        "fonts",
+        &[("family", toml_string_literal(family))],
+    );
     std::fs::write(path, content)
 }
 
@@ -807,6 +842,7 @@ impl Default for Config {
             draw_bold_text_with_light_colors: false,
             hints: Hints::default(),
             bell: Bell::default(),
+            look: mashup::LookConfig::default(),
             enable_scroll_bar: true,
             scrollback_history_limit: default_scrollback_history_limit(),
             effects: effects::Effects::default(),

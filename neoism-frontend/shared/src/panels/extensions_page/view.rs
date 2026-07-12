@@ -442,24 +442,32 @@ fn draw_language_dropdown(
     // list region with a thumb whose height/position mirrors the
     // viewport-to-content ratio. No drag wiring yet; wheel only.
     if max_scroll > 0.0 {
-        let track_w = 3.0 * s;
+        let style = crate::primitives::look::scrollbar_style();
+        let track_w = style.width_or(3.0) * s;
         let track_x = panel_x + panel_w - track_w - 3.0 * s;
         let track_rect = [track_x, list_top, track_w, list_h];
-        draw_rounded_rect_clipped(
-            sugarloaf,
-            track_rect,
-            theme.f32_alpha(theme.border, 0.5),
-            track_w * 0.5,
-            ORDER_PROGRESS,
-            panel_rect,
-        );
-        let thumb_h = (list_h * list_h / content_h).max(16.0 * s);
+        let radius = style.radius(track_w, 0.5);
+        // This site draws a themed track by default; overrides keep
+        // its 0.5 alpha so the hairline stays subtle.
+        if let Some(track_color) =
+            style.track_or(Some(theme.f32_alpha(theme.border, 0.5)))
+        {
+            draw_rounded_rect_clipped(
+                sugarloaf,
+                track_rect,
+                track_color,
+                radius,
+                ORDER_PROGRESS,
+                panel_rect,
+            );
+        }
+        let thumb_h = (list_h * list_h / content_h).max(style.min_thumb_or(16.0) * s);
         let thumb_y = list_top + (scroll / max_scroll) * (list_h - thumb_h).max(0.0);
         draw_rounded_rect_clipped(
             sugarloaf,
             [track_x, thumb_y, track_w, thumb_h],
-            theme.f32(theme.muted),
-            track_w * 0.5,
+            style.thumb_or(theme.f32(theme.muted)),
+            radius,
             ORDER_PROGRESS,
             panel_rect,
         );
@@ -1470,22 +1478,9 @@ fn draw_rounded_rect_clipped(
     order: u8,
     clip: [f32; 4],
 ) {
-    let Some(visible) = intersect_rect(rect, clip) else {
-        return;
-    };
-    let same = (visible[0] - rect[0]).abs() < 0.5
-        && (visible[1] - rect[1]).abs() < 0.5
-        && (visible[2] - rect[2]).abs() < 0.5
-        && (visible[3] - rect[3]).abs() < 0.5;
-    if same {
-        sugarloaf.rounded_rect(
-            None, rect[0], rect[1], rect[2], rect[3], color, DEPTH, radius, order,
-        );
-    } else {
-        sugarloaf.rect(
-            None, visible[0], visible[1], visible[2], visible[3], color, DEPTH, order,
-        );
-    }
+    crate::widgets::quad::rounded_rect_clipped(
+        sugarloaf, clip, None, rect, color, DEPTH, radius, order, 0.5,
+    );
 }
 
 /// Draw a rounded rect with a border that FOLLOWS the corner radius. The

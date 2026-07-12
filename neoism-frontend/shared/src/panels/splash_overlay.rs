@@ -34,6 +34,7 @@ use sugarloaf::{
     ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay, Sugarloaf,
 };
 
+use crate::panels::command_palette::commands::CommandService;
 use crate::primitives::IdeTheme;
 
 const WORDMARK_PNG: &[u8] = include_bytes!("../../assets/splash/neoism-wordmark.png");
@@ -121,29 +122,33 @@ const ORDER: u8 = 7;
 const BACKDROP_ORDER: u8 = ORDER - 1;
 const DEPTH: f32 = 0.0;
 
+// Icons resolve through `CommandService::icon_themed()` at draw time
+// so the splash, command sheet, and palette share one canonical glyph
+// per service (and Mash Up Pack `palette.*` overrides reach all
+// three). Search has no owning service — it keeps its own glyph.
 const MENU: [MenuSpec; 5] = [
     MenuSpec {
-        icon: "\u{f07b}",
+        icon: MenuIcon::Service(CommandService::Workspace),
         label: "Open file tree",
         keybind: "Alt + E",
     },
     MenuSpec {
-        icon: "\u{f15c}",
+        icon: MenuIcon::Service(CommandService::Markdown),
         label: "Notes",
         keybind: "Alt + N",
     },
     MenuSpec {
-        icon: "\u{f135}",
+        icon: MenuIcon::Service(CommandService::Agent),
         label: "Neoism Agent",
         keybind: "Alt + A",
     },
     MenuSpec {
-        icon: "\u{f002}",
+        icon: MenuIcon::Glyph("\u{f002}"),
         label: "Search",
         keybind: "Alt + S",
     },
     MenuSpec {
-        icon: "\u{f0c9}",
+        icon: MenuIcon::Service(CommandService::Neoism),
         label: "Command palette",
         keybind: "Alt + P",
     },
@@ -172,6 +177,12 @@ pub struct SplashOverlay {
     started: Option<Instant>,
     click: Option<Click>,
     image_registered: bool,
+    /// Letter tint cycle the wordmark pixels were last uploaded with
+    /// (the pack's `[wordmark] colors`, or `[theme.fg]`). The PNG is a
+    /// white glyph; the tint keeps the splash legible on light themes
+    /// and lets packs paint the letters. A change forces a re-upload —
+    /// the texture cache keys on `transmit_time`.
+    wordmark_tint: Option<Vec<u32>>,
     /// Mouse position from the last hover event, in window-local
     /// logical pixels. Used for menu-button hover state.
     mouse: Option<(f32, f32)>,
@@ -201,9 +212,26 @@ pub struct SplashOverlay {
 
 #[derive(Clone, Copy)]
 struct MenuSpec {
-    icon: &'static str,
+    icon: MenuIcon,
     label: &'static str,
     keybind: &'static str,
+}
+
+#[derive(Clone, Copy)]
+enum MenuIcon {
+    /// Canonical per-service glyph (palette/sheet/splash stay in sync).
+    Service(CommandService),
+    /// A glyph with no owning command service.
+    Glyph(&'static str),
+}
+
+impl MenuIcon {
+    fn resolve(self) -> &'static str {
+        match self {
+            MenuIcon::Service(service) => service.icon_themed(),
+            MenuIcon::Glyph(glyph) => glyph,
+        }
+    }
 }
 
 /// Per-frame, zoom-scaled dimensions for the menu buttons. We
@@ -302,11 +330,13 @@ impl SplashOverlay {
         occlusion_rects: &[[f32; 4]],
     ) {
         let _ = cell_w;
-        if !self.image_registered {
-            self.image_registered = register_wordmark(sugarloaf);
+        let tint = crate::primitives::look::wordmark_colors_or(theme.fg);
+        if !self.image_registered || self.wordmark_tint.as_deref() != Some(&tint) {
+            self.image_registered = register_wordmark(sugarloaf, &tint);
             if !self.image_registered {
                 return;
             }
+            self.wordmark_tint = Some(tint);
         }
 
         // Clear our own image-overlay queue for this panel before
@@ -793,18 +823,18 @@ impl SplashOverlay {
             sugarloaf.rounded_rect(None, x, y, w, h, bg, DEPTH, dims.radius, ORDER);
         }
 
-        let a = (alpha_mul.clamp(0.0, 1.0) * 255.0) as u8;
+        let a = alpha_mul.clamp(0.0, 1.0);
         let icon_color = if hovered {
-            [230, 240, 255, a]
+            theme.u8_alpha(theme.fg, a)
         } else {
-            [205, 215, 235, a]
+            theme.u8_alpha(theme.dim, a)
         };
         let label_color = if hovered {
-            [255, 255, 255, a]
+            theme.u8_alpha(theme.fg, a)
         } else {
-            [225, 225, 235, a]
+            theme.u8_alpha(theme.dim, a)
         };
-        let key_color: [u8; 4] = [165, 230, 170, a];
+        let key_color: [u8; 4] = theme.u8_alpha(theme.green, a);
         // sugarloaf text::draw treats `y` as the TOP of the
         // glyph box, not the baseline. Center each glyph type
         // by subtracting its font_size from the row height.
@@ -823,7 +853,7 @@ impl SplashOverlay {
             sugarloaf,
             x + dims.pad,
             icon_y,
-            spec.icon,
+            spec.icon.resolve(),
             &DrawOpts {
                 font_size: dims.icon_font,
                 color: icon_color,
@@ -1037,16 +1067,24 @@ fn splash_wordmark_z_index(occlusion_rects: &[[f32; 4]]) -> i32 {
     }
 }
 
-fn register_wordmark(sugarloaf: &mut Sugarloaf) -> bool {
-    if sugarloaf.image_data.contains_key(&SPLASH_WORDMARK_IMAGE_ID) {
-        return true;
-    }
+/// Decode + upload the wordmark with the letter tint cycle baked into
+/// its vertical strips (letters render as `source_rect` strips, so
+/// per-letter color needs no draw-side change). The source PNG is a
+/// white glyph on transparency. Callers re-invoke on tint change; the
+/// fresh `transmit_time` below invalidates the cached texture.
+fn register_wordmark(sugarloaf: &mut Sugarloaf, tint: &[u32]) -> bool {
     let img = match image_rs::load_from_memory(WORDMARK_PNG) {
         Ok(i) => i.to_rgba8(),
         Err(_) => return false,
     };
     let (w, h) = img.dimensions();
-    let pixels = img.into_raw();
+    let mut pixels = img.into_raw();
+    crate::primitives::look::tint_wordmark_pixels(
+        &mut pixels,
+        w as usize,
+        LETTER_COUNT,
+        tint,
+    );
     let entry = GraphicDataEntry::from_graphic_data(GraphicData {
         id: GraphicId::new(SPLASH_WORDMARK_IMAGE_ID as u64),
         width: w as usize,

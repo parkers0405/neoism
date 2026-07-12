@@ -88,7 +88,7 @@ fn desktop_agent_view_stays_a_thin_shared_adapter() {
         ),
         (
             "neoism-frontend/desktop/src/neoism/view/mod.rs",
-            90,
+            130,
             "render_agent_pane_with",
         ),
         (

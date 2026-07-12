@@ -1039,7 +1039,12 @@ impl NotesSidebar {
                         FOLDER_CLOSED_ICON
                     }
                 } else if is_markdown_note {
-                    NOTE_DEFAULT_ICON
+                    // Mash-up override for the DEFAULT note glyph only —
+                    // per-note user icons (.neoism-icons.json, painted in
+                    // the `entry.icon` branch below) still win.
+                    crate::primitives::look::icon_override("note")
+                        .and_then(|over| over.glyph)
+                        .unwrap_or(NOTE_DEFAULT_ICON)
                 } else {
                     icon_for_file(&entry.label).0
                 };

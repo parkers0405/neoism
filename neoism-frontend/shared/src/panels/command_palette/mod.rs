@@ -44,10 +44,11 @@ pub mod update;
 mod tests;
 
 pub use actions::{
-    shaders_modal_spec, theme_picker_modal_spec, HostKind, PaletteAction,
-    PaletteBufferEntry, PaletteBufferTarget, PaletteHostEntry, PaletteShaderEntry,
-    PaletteSurface, PaletteWorkspaceEntry, PaletteWorkspaceTarget, WorkspaceHostKind,
-    WorkspaceVisibility, WORKSPACE_ROOT_DETAIL_PREFIX,
+    mashup_packs_modal_spec, shaders_modal_spec, theme_picker_modal_spec, HostKind,
+    PaletteAction, PaletteBufferEntry, PaletteBufferTarget, PaletteHostEntry,
+    PaletteMashupEntry, PaletteShaderEntry, PaletteSurface, PaletteWorkspaceEntry,
+    PaletteWorkspaceTarget, WorkspaceHostKind, WorkspaceVisibility,
+    WORKSPACE_ROOT_DETAIL_PREFIX,
 };
 pub use state::{CommandPalette, WorkspaceMovePhase, WorkspaceMoveStatus};
 

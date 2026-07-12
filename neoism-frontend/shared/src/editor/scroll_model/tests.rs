@@ -1,5 +1,7 @@
 
 use super::*;
+use crate::panels::completion_menu::ScrollDelta;
+use crate::terminal_blocks::CommandBlockSnapshot;
 
 #[test]
 fn selection_autoscroll_is_zero_in_safe_middle() {

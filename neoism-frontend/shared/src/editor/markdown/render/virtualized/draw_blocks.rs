@@ -29,6 +29,7 @@ fn measure_item(
                 color: theme.u8(theme.fg),
                 bold: true,
                 clip_rect: Some(clip),
+                font_id: md_font_id(sugarloaf),
                 ..DrawOpts::default()
             };
             let text = raw.get(marker_len..).unwrap_or_default();
@@ -129,6 +130,7 @@ fn measure_item(
                 font_size: markdown_font(17.0, font_scale),
                 color: theme.u8(theme.fg),
                 clip_rect: Some(clip),
+                font_id: md_font_id(sugarloaf),
                 ..DrawOpts::default()
             };
             let local_lines = virtual_item_lines(&item.text);
@@ -245,6 +247,7 @@ fn measure_item(
                         color: theme.u8(theme.fg),
                         bold: true,
                         clip_rect: Some(clip),
+                        font_id: md_font_id(sugarloaf),
                         ..DrawOpts::default()
                     };
                     height += line_height(&heading_opts);
@@ -605,6 +608,7 @@ fn draw_heading(
         color: theme.u8(theme.fg),
         bold: true,
         clip_rect: Some(clip),
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     let text_y = item.screen_y + 4.0;
@@ -931,6 +935,7 @@ fn draw_markdown_line(
         font_size: markdown_font(17.0, font_scale),
         color: theme.u8(theme.fg),
         clip_rect: Some(clip),
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     let line_h = line_height(&opts);
@@ -1172,6 +1177,7 @@ fn draw_markdown_line(
                 color: theme.u8(theme.fg),
                 bold: true,
                 clip_rect: Some(clip),
+                font_id: md_font_id(sugarloaf),
                 ..DrawOpts::default()
             };
             let heading_h = line_height(&heading_opts);
@@ -1523,6 +1529,7 @@ fn draw_frontmatter_row(
                 color: theme.u8_alpha(theme.muted, 0.95),
                 bold: true,
                 clip_rect: Some(clip),
+                font_id: md_font_id(sugarloaf),
                 ..DrawOpts::default()
             };
             draw_if_visible(
@@ -1578,6 +1585,7 @@ fn draw_frontmatter_row(
             font_size: markdown_font(15.0, font_scale),
             color: theme.u8_alpha(theme.muted, 0.9),
             clip_rect: Some(clip),
+            font_id: md_font_id(sugarloaf),
             ..DrawOpts::default()
         };
         let plain_lines =
@@ -1603,6 +1611,7 @@ fn draw_frontmatter_row(
         font_size: markdown_font(14.0, font_scale),
         color: theme.u8_alpha(theme.muted, 0.95),
         clip_rect: Some(clip),
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     draw_if_visible(
@@ -1624,6 +1633,7 @@ fn draw_frontmatter_row(
             font_size: markdown_font(13.0, font_scale),
             color: theme.u8(theme.green),
             clip_rect: Some(clip),
+            font_id: md_font_id(sugarloaf),
             ..DrawOpts::default()
         };
         let mut chip_x = value_x;
@@ -1670,6 +1680,7 @@ fn draw_frontmatter_row(
             font_size: markdown_font(15.0, font_scale),
             color: theme.u8(theme.fg),
             clip_rect: Some(clip),
+            font_id: md_font_id(sugarloaf),
             ..DrawOpts::default()
         };
         let value_lines =
@@ -1719,6 +1730,7 @@ fn measure_frontmatter_row(
             font_size: markdown_font(14.0, font_scale),
             color: theme.u8_alpha(theme.muted, 0.95),
             clip_rect: Some(clip),
+            font_id: md_font_id(sugarloaf),
             ..DrawOpts::default()
         };
         let key_w = sugarloaf.text_mut().measure(key_label, &key_opts);
@@ -1732,6 +1744,7 @@ fn measure_frontmatter_row(
                 font_size: markdown_font(15.0, font_scale),
                 color: theme.u8(theme.fg),
                 clip_rect: Some(clip),
+                font_id: md_font_id(sugarloaf),
                 ..DrawOpts::default()
             };
             inline_visual_row_count(&inline_wrapped_lines(
@@ -1746,6 +1759,7 @@ fn measure_frontmatter_row(
             font_size: markdown_font(15.0, font_scale),
             color: theme.u8_alpha(theme.muted, 0.9),
             clip_rect: Some(clip),
+            font_id: md_font_id(sugarloaf),
             ..DrawOpts::default()
         };
         inline_visual_row_count(&inline_wrapped_lines_raw(
@@ -1772,6 +1786,7 @@ fn frontmatter_tag_rows(
         font_size: markdown_font(13.0, font_scale),
         color: theme.u8(theme.green),
         clip_rect: Some(clip),
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     let mut rows = 1usize;
@@ -1826,6 +1841,7 @@ fn draw_line_marker<'a>(
         font_size: markdown_font(16.0, font_scale),
         color: theme.u8_alpha(theme.muted, 0.9),
         clip_rect: Some(clip),
+        font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
     // Markers/checkboxes draw at their own 16px display size but must be

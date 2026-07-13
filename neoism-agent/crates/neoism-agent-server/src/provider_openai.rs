@@ -67,6 +67,16 @@ impl ProviderRuntime for OpenAiRuntime {
         if self.use_oauth_responses && matches!(auth, Some(AuthInfo::OAuth { .. })) {
             return openai_oauth_responses_stream(client, auth_store, auth, request);
         }
+        // API-key path for the gpt-5.6 family: chat completions rejects
+        // reasoning_effort together with function tools for these models, so
+        // route them through the platform Responses API instead.
+        if self.use_oauth_responses && request.model_id.contains("gpt-5.6") {
+            if let Some(api_key) =
+                openai_key_with_fallback(auth.as_ref(), allow_openai_env_fallback)
+            {
+                return openai_api_key_responses_stream(client, api_key, request);
+            }
+        }
         let provider_id = request.provider_id.clone();
         Box::pin(async_stream::try_stream! {
             // Refresh an expiring OAuth token (e.g. xAI Grok) before use so a
@@ -360,6 +370,76 @@ mod tests {
         assert_eq!(body["temperature"], 0.7);
         assert_eq!(body["reasoning_effort"], "high");
     }
+}
+
+// Platform Responses API with a plain API key — the wire format the gpt-5.6
+// family requires when combining function tools with reasoning effort.
+fn openai_api_key_responses_stream(
+    client: OpenAiClient,
+    api_key: String,
+    request: ProviderGenerationRequest,
+) -> ProviderEventStream {
+    Box::pin(async_stream::try_stream! {
+        yield ProviderStreamEvent::Start;
+        yield ProviderStreamEvent::StartStep;
+
+        let endpoint = std::env::var("NEOISM_AGENT_OPENAI_RESPONSES_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1/responses".to_string());
+        let mut body = responses_request_body(
+            request.model_id.clone(),
+            request.variant.as_deref(),
+            &request.messages,
+            &request.tools,
+        );
+        merge_provider_options(&mut body, &request.options);
+        let mut request_builder = client
+            .client
+            .post(&endpoint)
+            .bearer_auth(api_key)
+            .header("accept", "text/event-stream")
+            .header("user-agent", neoism_user_agent())
+            .json(&body);
+        for (name, value) in &request.headers {
+            request_builder = request_builder.header(name, value);
+        }
+
+        let response = request_builder
+            .send()
+            .await
+            .context("failed to send OpenAI Responses streaming request")?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let mut response = if status.is_success() {
+            response
+        } else {
+            let body = response.text().await.unwrap_or_default();
+            Err::<reqwest::Response, anyhow::Error>(
+                ProviderError::from_response("OpenAI Responses", status, &headers, body).into(),
+            )?
+        };
+
+        let mut parser = ResponsesSseParser::default();
+        let mut line = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            for byte in chunk {
+                if byte == b'\n' {
+                    let line_text = std::str::from_utf8(&line)?.to_string();
+                    line.clear();
+                    for event in parser.push_line(&line_text)? {
+                        yield event;
+                    }
+                } else {
+                    line.push(byte);
+                }
+            }
+        }
+        if !line.is_empty() {
+            let line_text = std::str::from_utf8(&line)?.to_string();
+            for event in parser.push_line(&line_text)? {
+                yield event;
+            }
+        }
+    })
 }
 
 fn openai_oauth_responses_stream(

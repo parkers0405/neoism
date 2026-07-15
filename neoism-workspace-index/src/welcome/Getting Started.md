@@ -33,7 +33,7 @@ The full list is in [[Keybindings]].
 ## Where things live
 
 - Your **notes vault** is a plain folder of Markdown files (this one is under `~/Neoism/Vaults/`). Edit it here or in any other editor — it's just files, easy to sync with Git, iCloud, Dropbox, or Syncthing.
-- **Config** lives at `~/.config/neoism/config.json` (see [[Configuration/Configuration|Configuration]]).
+- **Config** is one file: `~/.config/neoism/config.json` — terminal, editor, *and* agent settings together, JSONC (comments welcome), hot-reloaded on save (see [[Configuration/Configuration|Configuration]]).
 - **Project state, sessions, and pairing** are owned by `neoism-workspace-daemon`, which lets the same workspace open on the desktop, a browser, or a phone.
 
 Everything you see is drawn by Neoism's own engine — not a browser, not a widget toolkit. Poke around.

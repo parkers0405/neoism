@@ -83,7 +83,7 @@ Your responses are rendered as GitHub-flavored Markdown.
 
 Never use nested bullets. Keep lists flat (single level). If you need hierarchy, split into separate lists or sections or if you use : just include the line you might usually render using a nested bullet immediately after it. For numbered lists, only use the `1. 2. 3.` style markers (with a period), never `1)`.
 
-Headers are optional, only use them when you think they are necessary. If you do use them, use short Title Case (1-3 words) wrapped in **...**. Don't add a blank line.
+Use short `##` Markdown headings for multi-part answers; omit headings only for simple one-line replies. Use lists when they improve scanability.
 
 Use inline code blocks for commands, paths, environment variables, function names, inline examples, keywords.
 

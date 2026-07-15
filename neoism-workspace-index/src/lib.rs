@@ -9,7 +9,6 @@ pub mod graph_db;
 pub mod link_repair;
 pub mod notes;
 pub mod query;
-pub mod registry;
 pub mod watcher;
 
 pub use config::{
@@ -27,5 +26,4 @@ pub use query::{
     NoteGraphSummary, NoteQueryLimit, NoteSearchHit, NoteSummary, PropertySummary,
     TagOccurrenceSummary, TagSummary, TaskSummary,
 };
-pub use registry::{register_workspace, registry_path, touch_workspace};
 pub use watcher::{NoteGraphWatcher, WatcherEvent};

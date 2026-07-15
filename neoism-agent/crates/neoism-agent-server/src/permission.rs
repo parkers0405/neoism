@@ -194,6 +194,29 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_skip_star_rule_allows_asks_but_not_explicit_denies() {
+        // The `dangerouslySkipPermissions` flag injects `"*": "allow"`
+        // into the config permission map. BTreeMap order puts "*"
+        // first, so explicit entries still win (last match wins).
+        let rules = from_config_map(&BTreeMap::from([
+            ("*".to_string(), json!("allow")),
+            ("bash".to_string(), json!("deny")),
+        ]));
+        assert_eq!(
+            evaluate("external_directory", "/anywhere/*", &rules).action,
+            PermissionAction::Allow
+        );
+        assert_eq!(
+            evaluate("edit", "src/main.rs", &rules).action,
+            PermissionAction::Allow
+        );
+        assert_eq!(
+            evaluate("bash", "rm -rf /", &rules).action,
+            PermissionAction::Deny
+        );
+    }
+
+    #[test]
     fn config_map_flattens_shorthand_and_pattern_rules() {
         let rules = from_config_map(&BTreeMap::from([
             ("bash".to_string(), json!("ask")),

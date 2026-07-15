@@ -11,7 +11,12 @@ use crate::session::ModelRef;
 pub struct NeoismConfig {
     #[serde(default, rename = "$schema")]
     pub schema: Option<String>,
-    #[serde(default)]
+    /// Shell for the run tool. Accepts a plain string OR the app
+    /// config's `{ "program": ..., "args": [...] }` table — the agent
+    /// now reads the same `config.json` as the terminal, and `shell`
+    /// is the one key both sides define, so the lenient shape keeps a
+    /// merged config parseable by both.
+    #[serde(default, deserialize_with = "deserialize_shell")]
     pub shell: Option<String>,
     #[serde(default, alias = "disabled_providers")]
     pub disabled_providers: Vec<String>,
@@ -61,6 +66,17 @@ pub struct NeoismConfig {
     pub mcp: BTreeMap<String, McpConfig>,
     #[serde(default)]
     pub permission: BTreeMap<String, Value>,
+    /// `neoism --dangerously-skip-permissions`, as a config key: every
+    /// permission that would ASK is auto-allowed instead (explicit
+    /// `"deny"` rules still deny). Applied by injecting a `"*": "allow"`
+    /// base rule during config normalization. Accepts the kebab-case
+    /// spelling too since it co-lives with the terminal's config keys.
+    #[serde(
+        default,
+        alias = "dangerously_skip_permissions",
+        alias = "dangerously-skip-permissions"
+    )]
+    pub dangerously_skip_permissions: bool,
     #[serde(default)]
     pub tools: BTreeMap<String, bool>,
     #[serde(default)]
@@ -69,6 +85,46 @@ pub struct NeoismConfig {
     pub experimental: ExperimentalConfig,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// `shell` as a plain string ("fish"), or the terminal config's
+/// `{ "program": "/bin/fish", "args": ["--login"] }` table (program +
+/// args joined). Anything else → `None` rather than failing the whole
+/// config decode.
+fn deserialize_shell<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(shell)) => {
+            let shell = shell.trim().to_string();
+            (!shell.is_empty()).then_some(shell)
+        }
+        Some(Value::Object(map)) => map
+            .get("program")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|program| !program.is_empty())
+            .map(|program| {
+                let args = map
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|args| {
+                        args.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                if args.is_empty() {
+                    program.to_string()
+                } else {
+                    format!("{program} {args}")
+                }
+            }),
+        _ => None,
+    })
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -466,6 +522,40 @@ pub struct ConfigProvidersResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shell_accepts_string_and_terminal_config_table() {
+        let string_form: NeoismConfig =
+            serde_json::from_value(json!({ "shell": "fish" })).unwrap();
+        assert_eq!(string_form.shell.as_deref(), Some("fish"));
+
+        // The unified config.json shares `shell` with the terminal,
+        // which writes `{ program, args }` — must parse, not error.
+        let table_form: NeoismConfig = serde_json::from_value(json!({
+            "shell": { "program": "/bin/zsh", "args": ["--login"] },
+            "fonts": { "size": 14.0 },
+            "neoism": { "theme": "pastel_dark" }
+        }))
+        .unwrap();
+        assert_eq!(table_form.shell.as_deref(), Some("/bin/zsh --login"));
+        // App-only sections land in the flatten catch-all, not errors.
+        assert!(table_form.extra.contains_key("fonts"));
+    }
+
+    #[test]
+    fn dangerous_skip_permissions_accepts_all_spellings() {
+        for key in [
+            "dangerouslySkipPermissions",
+            "dangerously_skip_permissions",
+            "dangerously-skip-permissions",
+        ] {
+            let config: NeoismConfig =
+                serde_json::from_value(json!({ key: true })).unwrap();
+            assert!(config.dangerously_skip_permissions, "{key}");
+        }
+        let default: NeoismConfig = serde_json::from_value(json!({})).unwrap();
+        assert!(!default.dangerously_skip_permissions);
+    }
 
     #[test]
     fn plugin_config_accepts_array_and_map_forms() {

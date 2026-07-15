@@ -54,6 +54,9 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 image_rs = { workspace = true }
 unicode-width = { workspace = true }
+# Pure data tables (emoji presentation), wasm-safe — used by the shared
+# `prefers_color_emoji` fallback path on every platform.
+neoism-grapheme-width = { workspace = true }
 web-time = "1.1"
 guillotiere = "0.6.2"
 rustc-hash = { workspace = true }

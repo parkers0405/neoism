@@ -14,6 +14,7 @@ pub mod markdown;
 pub mod fx;
 pub mod message_card;
 pub mod picker;
+pub mod prompt_picker;
 pub mod side_panel;
 pub mod timeline;
 pub mod tool_message;
@@ -302,7 +303,21 @@ pub fn render_agent_pane_with<P, D, I>(
     // `chrome.top_bar.set_right_button_visible(true)` while an agent
     // pane is active and route the resulting `ToggleRightPanel`
     // action through `agent.side_panel().set_user_hidden(!visible)`.
-    picker::render_picker(sugarloaf, pane, input_rect, theme, chrome_scale);
+    // Pending permission / model question takes the picker slot — the
+    // prompt pops out of the input island exactly like the "/" menu.
+    // The regular picker is suppressed while a prompt is pending (the
+    // key bridge closes it anyway on the next keypress).
+    let prompt_rect = prompt_picker::render_prompt_picker(
+        sugarloaf,
+        pane,
+        input_rect,
+        theme,
+        chrome_scale,
+    );
+    pane.set_prompt_picker_rect(prompt_rect);
+    if prompt_rect.is_none() {
+        picker::render_picker(sugarloaf, pane, input_rect, theme, chrome_scale);
+    }
     if let Some(kind) = pane.take_fx_request() {
         pane.set_fx_started(Some((kind, now_seconds)));
     }

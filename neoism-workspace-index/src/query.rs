@@ -11,7 +11,6 @@ use crate::graph_db::{
 };
 use crate::link_repair::{repair_links_for_move, LinkRepairReport};
 use crate::notes::WorkspaceNoteIndex;
-use crate::registry::register_workspace;
 use crate::watcher::NoteGraphWatcher;
 
 #[derive(Debug, Clone, Copy)]
@@ -146,7 +145,6 @@ impl NoteGraph {
 
     pub fn init(root: impl AsRef<Path>) -> std::io::Result<Self> {
         let workspace = init_workspace(root.as_ref())?;
-        register_workspace(&workspace)?;
         let graph = Self { workspace };
         graph.reindex()?;
         Ok(graph)

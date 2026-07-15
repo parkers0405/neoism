@@ -13,6 +13,7 @@ use neoism_ui::panels::agent_pane::input_controller::{self, AgentInputBuffer};
 use neoism_ui::panels::agent_pane::interaction_policy;
 use neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand;
 use neoism_ui::panels::agent_pane::permission_policy::{self, PermissionReplyStart};
+use neoism_ui::panels::agent_pane::question_policy::NeoismAgentPendingQuestion;
 use neoism_ui::panels::agent_pane::state::{
     branch_status_from_runtime, task_message_status_from_runtime,
 };
@@ -545,6 +546,11 @@ pub struct NeoismAgentPane {
     diff_scroll_rects: Vec<(String, [f32; 4], f32)>,
     diff_scroll_offsets: HashMap<String, f32>,
     permission_choice_hit_rects: Vec<(NeoismAgentPermissionChoice, [f32; 4])>,
+    question_option_hit_rects: Vec<(usize, [f32; 4])>,
+    /// Rect of the prompt-picker card (permission / question) drawn last
+    /// frame — folded into `picker_card_rect()` so chrome text occludes
+    /// under it exactly like the "/" picker modal.
+    prompt_picker_rect: Option<[f32; 4]>,
     link_hit_rects: Vec<(String, [f32; 4])>,
     mermaid_raw_blocks: BTreeSet<u64>,
     usage_chip_rect: Option<[f32; 4]>,
@@ -618,6 +624,13 @@ pub struct NeoismAgentPane {
     active_subagent_started_at: HashMap<String, u64>,
     pending_permission: Option<NeoismAgentPendingPermission>,
     pending_permission_queue: VecDeque<NeoismAgentPendingPermission>,
+    /// `/yolo` — while true, every permission request auto-answers
+    /// "Yes" the moment it lands (session-scoped, client-side; the
+    /// config-level `dangerouslySkipPermissions` stops the server
+    /// asking at all).
+    skip_permissions: bool,
+    pending_question: Option<NeoismAgentPendingQuestion>,
+    pending_question_queue: VecDeque<NeoismAgentPendingQuestion>,
     pending_outbound: VecDeque<OutboundAgentCommand>,
     model_context_limit: Option<u64>,
     pub wordmark: NeoismWordmarkState,
@@ -745,6 +758,8 @@ impl Default for NeoismAgentPane {
             diff_scroll_rects: Vec::new(),
             diff_scroll_offsets: HashMap::new(),
             permission_choice_hit_rects: Vec::new(),
+            question_option_hit_rects: Vec::new(),
+            prompt_picker_rect: None,
             link_hit_rects: Vec::new(),
             mermaid_raw_blocks: BTreeSet::new(),
             usage_chip_rect: None,
@@ -791,6 +806,9 @@ impl Default for NeoismAgentPane {
             active_subagent_started_at: HashMap::new(),
             pending_permission: None,
             pending_permission_queue: VecDeque::new(),
+            skip_permissions: false,
+            pending_question: None,
+            pending_question_queue: VecDeque::new(),
             pending_outbound: VecDeque::new(),
             model_context_limit: None,
             wordmark: NeoismWordmarkState::default(),
@@ -804,6 +822,7 @@ pub(super) mod connect;
 mod ingest;
 mod input;
 mod permissions;
+mod questions;
 mod render_state;
 mod selection;
 mod session;

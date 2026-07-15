@@ -286,9 +286,6 @@ impl Screen<'_> {
         if let Some(id) = self.current_workspace_id() {
             self.workspace_roots.insert(id, root.clone());
         }
-        if changed {
-            self.sync_neoism_workspace_for_root(&root);
-        }
 
         let tree_root_changed = self.renderer.file_tree.root() != Some(root.as_path());
         if force_tree_refresh

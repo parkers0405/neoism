@@ -1,5 +1,6 @@
 pub mod composer;
 pub mod finder_search;
+pub mod fps;
 pub mod hint;
 pub mod path_exec;
 pub mod run;
@@ -118,6 +119,11 @@ pub struct Renderer {
     pub custom_mouse_cursor: bool,
     pub trail_cursor_enabled: bool,
     pub trail_cursor: trail_cursor::TrailCursor,
+    /// `[neoism] status-fps` — gates the frame-rate pill on the status
+    /// line's right cluster. The counter ticks regardless so flipping
+    /// the flag on shows a reading within half a second.
+    pub status_fps_enabled: bool,
+    pub fps_counter: fps::FpsCounter,
     pub terminal_block_prompt_animating: bool,
     pub notebook_animating: bool,
     /// True while an animated shader overlay is applied. The overlay
@@ -380,6 +386,8 @@ impl Renderer {
             custom_mouse_cursor: config.effects.custom_mouse_cursor,
             trail_cursor_enabled: config.effects.trail_cursor,
             trail_cursor: trail_cursor::TrailCursor::new(),
+            status_fps_enabled: config.neoism.status_fps,
+            fps_counter: fps::FpsCounter::default(),
             terminal_block_prompt_animating: false,
             notebook_animating: false,
             shader_overlay_active: false,

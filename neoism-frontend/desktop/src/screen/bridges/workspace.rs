@@ -535,11 +535,7 @@ fn build_workspace_note_index(
 > {
     let workspace = match action {
         WorkspaceNoteIndexAction::Init => {
-            let workspace =
-                neo_workspace::init_workspace(&root).map_err(|err| err.to_string())?;
-            neo_workspace::register_workspace(&workspace)
-                .map_err(|err| err.to_string())?;
-            workspace
+            neo_workspace::init_workspace(&root).map_err(|err| err.to_string())?
         }
         WorkspaceNoteIndexAction::Reindex => neo_workspace::load_workspace(&root)
             .map_err(|err| err.to_string())?

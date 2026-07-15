@@ -446,6 +446,12 @@ impl Screen<'_> {
             panels: Vec::new(),
         };
 
+        // Every early-out above skipped the frame, so a tick here
+        // counts only frames that actually reach present. Ticked
+        // before the status sync so this frame's pill shows the
+        // freshest reading.
+        self.renderer.fps_counter.tick();
+
         self.sync_status_and_chrome(&frame_ctx);
 
         // Re-elect primary editor route every frame — handles

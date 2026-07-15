@@ -3,20 +3,6 @@ use crate::workspace::{self as neo_workspace, notes::WorkspaceNoteIndex};
 use std::path::{Path, PathBuf};
 
 impl Screen<'_> {
-    pub(crate) fn sync_neoism_workspace_for_root(&mut self, root: &Path) {
-        let Ok(Some(workspace)) = neo_workspace::load_workspace(root) else {
-            return;
-        };
-        if let Err(err) = neo_workspace::touch_workspace(&workspace) {
-            tracing::warn!(
-                target: "neoism::workspace",
-                root = %workspace.root.display(),
-                error = %err,
-                "failed to register Neoism workspace"
-            );
-        }
-    }
-
     pub(crate) fn rebuild_note_graph_for_root(
         &mut self,
         root: &Path,

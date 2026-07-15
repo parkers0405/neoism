@@ -4,11 +4,15 @@
 //! Disk layout under the config dir (`~/.config/neoism`):
 //!
 //! ```text
-//! ide-themes/<name>.toml          standalone runtime theme
-//! packs/<id>/pack.toml            pack manifest
-//! packs/<id>/theme.toml           optional theme the pack ships
-//! packs/<id>/*.glsl               shader overlays referenced by pack.toml
+//! ide-themes/<name>.json          standalone runtime theme
+//! packs/<id>/pack.json            pack manifest
+//! packs/<id>/theme.json           optional theme the pack ships
+//! packs/<id>/*.glsl               shader overlays referenced by pack.json
 //! ```
+//!
+//! JSON files speak the same JSONC dialect as config.json (comments +
+//! trailing commas). Legacy `.toml` spellings of each file still load,
+//! so packs shared before the JSON cutover keep working.
 //!
 //! This module only reads and resolves files — turning specs into an
 //! `IdeTheme` and applying slots lives in the frontend, which owns the
@@ -237,9 +241,18 @@ pub fn packs_dir() -> PathBuf {
     config_dir_path().join("packs")
 }
 
+/// First existing spelling of a pack-relative file: `<stem>.json`,
+/// `<stem>.jsonc`, then legacy `<stem>.toml`.
+fn existing_variant(dir: &Path, stem: &str) -> Option<PathBuf> {
+    ["json", "jsonc", "toml"]
+        .iter()
+        .map(|ext| dir.join(format!("{stem}.{ext}")))
+        .find(|path| path.is_file())
+}
+
 fn parse_theme_file(path: &Path, fallback_name: &str) -> Option<IdeThemeSpec> {
     let source = std::fs::read_to_string(path).ok()?;
-    let file: IdeThemeFile = match toml::from_str(&source) {
+    let file: IdeThemeFile = match super::parse_config_content(path, &source) {
         Ok(file) => file,
         Err(err) => {
             tracing::warn!(
@@ -280,7 +293,10 @@ pub fn load_ide_theme_specs() -> Vec<IdeThemeSpec> {
         let mut paths: Vec<PathBuf> = entries
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext == "json" || ext == "jsonc" || ext == "toml")
+            })
             .collect();
         paths.sort();
         for path in paths {
@@ -295,10 +311,9 @@ pub fn load_ide_theme_specs() -> Vec<IdeThemeSpec> {
     }
 
     for pack_dir in pack_dirs() {
-        let theme_path = pack_dir.join("theme.toml");
-        if !theme_path.is_file() {
+        let Some(theme_path) = existing_variant(&pack_dir, "theme") else {
             continue;
-        }
+        };
         let id = pack_dir
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
@@ -318,7 +333,7 @@ fn pack_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && path.join("pack.toml").is_file())
+        .filter(|path| path.is_dir() && existing_variant(path, "pack").is_some())
         .collect();
     dirs.sort();
     dirs
@@ -331,15 +346,16 @@ fn resolve_asset(dir: &Path, value: &str) -> String {
     dir.join(value).to_string_lossy().to_string()
 }
 
-/// Every installed pack, sorted by id. A pack with a `theme.toml` but
-/// no explicit `theme = "..."` key applies its bundled theme.
+/// Every installed pack, sorted by id. A pack with a `theme.json` but
+/// no explicit `theme` key applies its bundled theme.
 pub fn load_mashup_packs() -> Vec<MashupPack> {
     pack_dirs()
         .into_iter()
         .filter_map(|dir| {
             let id = dir.file_name()?.to_string_lossy().to_string();
-            let source = std::fs::read_to_string(dir.join("pack.toml")).ok()?;
-            let file: PackFile = match toml::from_str(&source) {
+            let manifest = existing_variant(&dir, "pack")?;
+            let source = std::fs::read_to_string(&manifest).ok()?;
+            let file: PackFile = match super::parse_config_content(&manifest, &source) {
                 Ok(file) => file,
                 Err(err) => {
                     tracing::warn!(
@@ -350,8 +366,8 @@ pub fn load_mashup_packs() -> Vec<MashupPack> {
                 }
             };
             let section = file.pack;
-            let bundled_theme = dir.join("theme.toml").is_file().then(|| {
-                parse_theme_file(&dir.join("theme.toml"), &id)
+            let bundled_theme = existing_variant(&dir, "theme").map(|theme_path| {
+                parse_theme_file(&theme_path, &id)
                     .map(|spec| spec.name)
                     .unwrap_or_else(|| id.clone())
             });
@@ -433,6 +449,43 @@ mod tests {
         // Broken TOML is skipped, not fatal.
         std::fs::write(&path, "[colors\nbg = ").unwrap();
         assert!(parse_theme_file(&path, "phosphor").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_file_parses_jsonc() {
+        let dir = scratch_dir("theme-json");
+        let path = dir.join("phosphor.json");
+        std::fs::write(
+            &path,
+            r##"// CRT green
+{
+    "description": "Green CRT",
+    "extends": "pastel_dark",
+    "colors": { "bg": "#030f06", "fg": "#33ff66", },
+}
+"##,
+        )
+        .unwrap();
+
+        let spec = parse_theme_file(&path, "phosphor").unwrap();
+        assert_eq!(spec.name, "phosphor");
+        assert_eq!(spec.description, "Green CRT");
+        assert!(spec
+            .colors
+            .iter()
+            .any(|(k, v)| k == "fg" && v == "#33ff66"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn existing_variant_prefers_json_over_toml() {
+        let dir = scratch_dir("variant");
+        std::fs::write(dir.join("pack.toml"), "[pack]\n").unwrap();
+        std::fs::write(dir.join("pack.json"), "{}").unwrap();
+        assert_eq!(existing_variant(&dir, "pack"), Some(dir.join("pack.json")));
+        std::fs::remove_file(dir.join("pack.json")).unwrap();
+        assert_eq!(existing_variant(&dir, "pack"), Some(dir.join("pack.toml")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

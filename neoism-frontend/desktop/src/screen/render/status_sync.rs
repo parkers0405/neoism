@@ -985,12 +985,12 @@ impl Screen<'_> {
                                 .map(|n| n.to_string_lossy().into_owned())
                         })
                 });
-            // Status pill on the right shows cursor line / total lines
-            // when editing a buffer (data flows from nvim's CursorMoved
-            // → WinbarNotification.total_lines). For non-editor panes,
-            // fall back to the buffer-tab index so the pill still
-            // conveys "where am I" instead of going blank.
-            let tab_position = if editor_active {
+            // nvim-style ruler pill: cursor line / total lines. Code
+            // buffers flow from nvim's CursorMoved → WinbarNotification;
+            // markdown panes read the shared pane's cursor directly.
+            // Terminals get no pill — a shell has no line position, so
+            // the old buffer-tab fallback ("1/1") just read as noise.
+            let cursor_lines = if editor_active {
                 let cur = self.context_manager.current();
                 if cur.editor_total_lines > 0 {
                     Some((
@@ -1000,15 +1000,14 @@ impl Screen<'_> {
                 } else {
                     None
                 }
+            } else if let Some(markdown) = self.context_manager.current().markdown.as_ref()
+            {
+                let total = markdown.lines.len();
+                (total > 0).then(|| ((markdown.cursor_line + 1).min(total), total))
             } else {
-                let total = self.context_manager.len();
-                if total > 0 {
-                    Some((self.context_manager.current_index() + 1, total))
-                } else {
-                    None
-                }
+                None
             };
-            let workspace = tab_position.map(|(cur, total)| format!("WS {cur}/{total}"));
+            let workspace = cursor_lines.map(|(cur, total)| format!("WS {cur}/{total}"));
             let git_changes = active_path
                 .as_deref()
                 .or(active_cwd.as_deref())
@@ -1183,10 +1182,15 @@ impl Screen<'_> {
                     lsp_status,
                     lsp_label,
                     project,
-                    tab_position,
+                    cursor_lines,
                     diagnostics: diagnostics_counts,
                     cwd_label,
                     pending_keys,
+                    fps: self
+                        .renderer
+                        .status_fps_enabled
+                        .then(|| self.renderer.fps_counter.value())
+                        .flatten(),
                 },
             );
 

@@ -2057,6 +2057,50 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
 }
 
 #[test]
+fn config_merges_standalone_mcp_file() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-mcp-file-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".neoism")).unwrap();
+    // config.json carries one server; the standalone mcp.json carries
+    // another AND overrides the first (merged after, so it wins).
+    std::fs::write(
+        root.join(".neoism/config.json"),
+        r#"{ "mcp": { "alpha": { "type": "local", "command": ["alpha-old"] } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".neoism/mcp.json"),
+        r#"// standalone catalog — wrapped form
+        {
+          "mcp": {
+            "alpha": { "type": "local", "command": ["alpha-new"] },
+            "beta": { "type": "local", "command": ["beta-mcp"] }
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let loaded = config::load(root.to_str().unwrap()).unwrap();
+    assert!(loaded.info.mcp.contains_key("alpha"));
+    assert!(loaded.info.mcp.contains_key("beta"));
+    let alpha = serde_json::to_value(&loaded.info.mcp["alpha"]).unwrap();
+    assert_eq!(alpha["command"][0], "alpha-new");
+
+    // Bare-map form (no "mcp" wrapper) merges the same way.
+    std::fs::write(
+        root.join(".neoism/mcp.json"),
+        r#"{ "gamma": { "type": "local", "command": ["gamma-mcp"] } }"#,
+    )
+    .unwrap();
+    let loaded = config::load(root.to_str().unwrap()).unwrap();
+    assert!(loaded.info.mcp.contains_key("gamma"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn config_loads_project_agents_commands_and_permissions() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-config-{}",

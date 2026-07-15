@@ -813,7 +813,10 @@ impl NeoismAgentPane {
     /// host feeds this into the text-occlusion list so chrome text
     /// (tab-strip labels etc.) never bleeds through the modal.
     pub fn picker_card_rect(&self) -> Option<[f32; 4]> {
-        self.picker.as_ref().and_then(|picker| picker.last_rect)
+        self.picker
+            .as_ref()
+            .and_then(|picker| picker.last_rect)
+            .or(self.prompt_picker_rect)
     }
 
     /// If the click lands on a picker row, move selection there and

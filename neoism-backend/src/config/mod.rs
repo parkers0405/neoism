@@ -28,6 +28,7 @@ use crate::config::window::Window;
 use colors::Colors;
 use neoism_terminal_core::ansi::CursorShape;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::io::Write;
 use std::path::PathBuf;
 use std::{default::Default, fs::File};
@@ -107,6 +108,11 @@ pub struct Neoism {
     /// shader overlay / filters are re-applied. Empty/unset = no pack.
     #[serde(default, rename = "mashup-pack")]
     pub mashup_pack: Option<String>,
+    /// FPS pill on the status line's right cluster — shows the frame
+    /// rate the window is actually rendering at. On by default; set
+    /// `status-fps = false` to hide it.
+    #[serde(default = "default_bool_true", rename = "status-fps")]
+    pub status_fps: bool,
 }
 
 impl Default for Neoism {
@@ -119,6 +125,7 @@ impl Default for Neoism {
             cursor_style: None,
             blinking_cursor: None,
             mashup_pack: None,
+            status_fps: true,
         }
     }
 }
@@ -273,9 +280,148 @@ pub fn config_dir_path() -> PathBuf {
         )
 }
 
+/// Canonical (primary) config file: `config.json`. Supports `//` and
+/// `/* */` comments plus trailing commas (JSONC) — see
+/// [`parse_config_content`].
+#[inline]
+pub fn json_config_file_path() -> PathBuf {
+    config_dir_path().join("config.json")
+}
+
+/// Active config file. JSON is the primary format; a legacy
+/// `config.toml` is still honored when no `config.json` exists, and
+/// fresh installs (neither present) get `config.json`.
 #[inline]
 pub fn config_file_path() -> PathBuf {
-    config_dir_path().join("config.toml")
+    let json = json_config_file_path();
+    if json.exists() {
+        return json;
+    }
+    let toml = config_dir_path().join("config.toml");
+    if toml.exists() {
+        return toml;
+    }
+    json
+}
+
+/// Whether `path` should be parsed (and written) as JSON rather than
+/// TOML. Decided purely by extension so tests and the daemon's
+/// `NEOISM_CONFIG_DIR` runs behave identically.
+fn config_path_is_json(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("json") | Some("jsonc")
+    )
+}
+
+/// Parse config file content by format: JSONC (comments + trailing
+/// commas tolerated) for `.json`/`.jsonc`, TOML otherwise. Shared with
+/// the mashup-pack loader so pack.json / theme.json speak the same
+/// dialect as config.json.
+pub(crate) fn parse_config_content<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    content: &str,
+) -> Result<T, String> {
+    if config_path_is_json(path) {
+        let cleaned = strip_trailing_commas(&strip_json_comments(content));
+        let cleaned = if cleaned.trim().is_empty() {
+            "{}".to_string()
+        } else {
+            cleaned
+        };
+        serde_json::from_str::<T>(&cleaned).map_err(|err| err.to_string())
+    } else {
+        toml::from_str::<T>(content).map_err(|err| err.to_string())
+    }
+}
+
+/// Strip `//` line and `/* */` block comments outside strings so a
+/// hand-commented `config.json` stays loadable (JSONC). Mirrors the
+/// agent server's parser so both readers accept the same file.
+fn strip_json_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if in_string {
+            escaped = ch == '\\' && !escaped;
+            if ch == '"' && !escaped {
+                in_string = false;
+            }
+            if ch != '\\' {
+                escaped = false;
+            }
+            out.push(ch);
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'/') {
+            let _ = chars.next();
+            for next in chars.by_ref() {
+                if next == '\n' {
+                    out.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            let _ = chars.next();
+            let mut previous = '\0';
+            for next in chars.by_ref() {
+                if previous == '*' && next == '/' {
+                    break;
+                }
+                previous = next;
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Drop trailing commas before `}` / `]` outside strings (the other
+/// half of JSONC tolerance).
+fn strip_trailing_commas(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if in_string {
+            escaped = ch == '\\' && !escaped;
+            if ch == '"' && !escaped {
+                in_string = false;
+            }
+            if ch != '\\' {
+                escaped = false;
+            }
+            out.push(ch);
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+        if ch == ',' {
+            let closes_next = chars
+                .clone()
+                .find(|next| !next.is_whitespace())
+                .is_some_and(|next| matches!(next, '}' | ']'));
+            if closes_next {
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[inline]
@@ -334,47 +480,99 @@ pub fn write_neoism_preferences(
     minimap: Option<bool>,
     mashup_pack: Option<&str>,
 ) -> std::io::Result<()> {
-    let mut updates = Vec::new();
+    let mut updates: Vec<(&str, serde_json::Value)> = Vec::new();
     if let Some(theme) = theme {
-        updates.push(("theme", toml_string_literal(theme)));
+        updates.push(("theme", serde_json::Value::String(theme.to_string())));
     }
     if let Some(minimap) = minimap {
-        updates.push(("minimap", minimap.to_string()));
+        updates.push(("minimap", serde_json::Value::Bool(minimap)));
     }
     if let Some(pack) = mashup_pack {
         // Empty string persists "no pack" while keeping the key's spot
-        // (and any comment above it) in the file.
-        updates.push(("mashup-pack", toml_string_literal(pack)));
+        // in the file.
+        updates.push(("mashup-pack", serde_json::Value::String(pack.to_string())));
     }
-    if updates.is_empty() {
-        return Ok(());
-    }
-
-    let config_dir = config_dir_path();
-    std::fs::create_dir_all(&config_dir)?;
-    let path = config_dir.join("config.toml");
-    let content =
-        std::fs::read_to_string(&path).unwrap_or_else(|_| config_file_content());
-    let content = update_toml_section(&content, "neoism", &updates);
-    std::fs::write(path, content)
+    write_config_section("neoism", &updates)
 }
 
 /// Persist `[fonts] family` — Mash Up Packs use this so their font
 /// lands the same way a manual config edit would (the config watcher
 /// rebuilds the font library from the write).
 pub fn write_fonts_family(family: &str) -> std::io::Result<()> {
+    write_config_section(
+        "fonts",
+        &[("family", serde_json::Value::String(family.to_string()))],
+    )
+}
+
+/// Update keys inside one section of the ACTIVE config file — the JSON
+/// object for `config.json` (structure-preserving via serde; comments
+/// in a hand-edited JSONC file are lost on programmatic writes), or a
+/// comment-preserving line edit for a legacy `config.toml`.
+fn write_config_section(
+    section: &str,
+    updates: &[(&str, serde_json::Value)],
+) -> std::io::Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
     let config_dir = config_dir_path();
     std::fs::create_dir_all(&config_dir)?;
-    let path = config_dir.join("config.toml");
-    let content =
-        std::fs::read_to_string(&path).unwrap_or_else(|_| config_file_content());
-    let content = update_toml_section(
-        &content,
-        "fonts",
-        &[("family", toml_string_literal(family))],
-    );
-    std::fs::write(path, content)
+    let path = config_file_path();
+    if config_path_is_json(&path) {
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let cleaned = strip_trailing_commas(&strip_json_comments(&content));
+        let mut root = if cleaned.trim().is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str::<serde_json::Value>(&cleaned).map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("failed to parse {}: {err}", path.display()),
+                )
+            })?
+        };
+        if !root.is_object() {
+            root = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let object = root.as_object_mut().expect("root forced to object above");
+        let entry = object
+            .entry(section.to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !entry.is_object() {
+            *entry = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let section_map = entry.as_object_mut().expect("section forced to object");
+        for (key, value) in updates {
+            section_map.insert((*key).to_string(), value.clone());
+        }
+        let mut out = serde_json::to_string_pretty(&root).map_err(|err| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+        })?;
+        out.push('\n');
+        std::fs::write(path, out)
+    } else {
+        let toml_updates = updates
+            .iter()
+            .map(|(key, value)| {
+                let literal = match value {
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::String(s) => toml_string_literal(s),
+                    other => toml_string_literal(&other.to_string()),
+                };
+                (*key, literal)
+            })
+            .collect::<Vec<_>>();
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| String::from(LEGACY_TOML_HEADER));
+        let content = update_toml_section(&content, section, &toml_updates);
+        std::fs::write(path, content)
+    }
 }
+
+const LEGACY_TOML_HEADER: &str =
+    "# See the full configuration reference: https://neoism.com/docs/config\n";
 
 fn toml_string_literal(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
@@ -448,7 +646,7 @@ impl Config {
         if path.exists() {
             let content = std::fs::read_to_string(path).unwrap();
             let decoded: Config =
-                toml::from_str(&content).unwrap_or_else(|_| Config::default());
+                parse_config_content(path, &content).unwrap_or_else(|_| Config::default());
             decoded
         } else {
             Config::default()
@@ -458,7 +656,7 @@ impl Config {
     fn load_from_path_without_fallback(path: &PathBuf) -> Result<Self, String> {
         if path.exists() {
             let content = std::fs::read_to_string(path).unwrap();
-            match toml::from_str::<Config>(&content) {
+            match parse_config_content::<Config>(path, &content) {
                 Ok(mut decoded) => {
                     let theme = &decoded.theme;
                     if theme.is_empty() {
@@ -539,8 +737,8 @@ impl Config {
         let config_path = config_dir_path();
         let path = config_file_path();
         if path.exists() {
-            let content = std::fs::read_to_string(path).unwrap();
-            match toml::from_str::<Config>(&content) {
+            let content = std::fs::read_to_string(&path).unwrap();
+            match parse_config_content::<Config>(&path, &content) {
                 Ok(mut decoded) => {
                     decoded.apply_neoism_aliases();
                     let theme = &decoded.theme;
@@ -573,8 +771,8 @@ impl Config {
     pub fn try_load() -> Result<Self, ConfigError> {
         let path = config_file_path();
         if path.exists() {
-            match std::fs::read_to_string(path) {
-                Ok(content) => match toml::from_str::<Config>(&content) {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => match parse_config_content::<Config>(&path, &content) {
                     Ok(mut decoded) => {
                         decoded.apply_neoism_aliases();
                         let theme = &decoded.theme;
@@ -888,6 +1086,76 @@ mod tests {
         writeln!(file, "{toml_str}").unwrap();
     }
 
+    fn create_temporary_json_config(prefix: &str, json_str: &str) -> Config {
+        let file_name = tmp_dir().join(format!("test-rio-{prefix}-config.json"));
+        let mut file = std::fs::File::create(&file_name).unwrap();
+        writeln!(file, "{json_str}").unwrap();
+
+        match Config::load_from_path_without_fallback(&file_name) {
+            Ok(config) => config,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    #[test]
+    fn json_config_parses_with_comments_and_trailing_commas() {
+        let config = create_temporary_json_config(
+            "jsonc",
+            r#"
+// unified config — comments are legal
+{
+    /* block comment */
+    "line-height": 1.2,
+    "neoism": {
+        "theme": "tokyo_night",
+        "minimap": true,
+        "status-fps": false,
+    },
+    "fonts": { "size": 16.0 },
+    // agent-server keys co-live in the same file; the app ignores them
+    "mcp": { "fff": { "type": "local", "command": ["fff-mcp"] } },
+    "model": "anthropic/claude-fable-5",
+}
+"#,
+        );
+        assert_eq!(config.line_height, 1.2);
+        assert_eq!(config.neoism.theme, "tokyo_night");
+        assert!(config.neoism.minimap);
+        assert!(!config.neoism.status_fps);
+        assert_eq!(config.fonts.size, 16.0);
+    }
+
+    #[test]
+    fn json_section_writer_updates_and_preserves_other_keys() {
+        // Exercise write_config_section's JSON merge logic directly via
+        // the same primitives (parse → mutate → pretty).
+        let content = "// note\n{ \"fonts\": { \"size\": 14.0 }, \"mcp\": { \"x\": {} } }";
+        let cleaned = strip_trailing_commas(&strip_json_comments(content));
+        let mut root: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
+        let object = root.as_object_mut().unwrap();
+        let entry = object
+            .entry("neoism".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        entry
+            .as_object_mut()
+            .unwrap()
+            .insert("theme".into(), serde_json::Value::String("phosphor".into()));
+        let out = serde_json::to_string_pretty(&root).unwrap();
+        let reparsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(reparsed["neoism"]["theme"], "phosphor");
+        assert_eq!(reparsed["fonts"]["size"], 14.0);
+        assert!(reparsed["mcp"]["x"].is_object());
+    }
+
+    #[test]
+    fn strip_helpers_leave_strings_untouched() {
+        let input = r#"{ "a": "http://not/a//comment", "b": "star /* keep */" }"#;
+        let cleaned = strip_trailing_commas(&strip_json_comments(input));
+        let parsed: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
+        assert_eq!(parsed["a"], "http://not/a//comment");
+        assert_eq!(parsed["b"], "star /* keep */");
+    }
+
     #[test]
     fn neoism_preferences_append_managed_section() {
         let content = "# config\n";
@@ -921,6 +1189,18 @@ mod tests {
         assert!(updated.contains("minimap = false"));
         assert!(updated.contains("# keep me"));
         assert!(updated.contains("[renderer]"));
+    }
+
+    #[test]
+    fn neoism_status_fps_defaults_on_and_toggles_off() {
+        let default = create_temporary_config("status-fps-default", "# empty\n");
+        assert!(default.neoism.status_fps);
+
+        let disabled = create_temporary_config(
+            "status-fps-off",
+            "[neoism]\nstatus-fps = false\n",
+        );
+        assert!(!disabled.neoism.status_fps);
     }
 
     #[test]
@@ -962,7 +1242,10 @@ mod tests {
 
     #[test]
     fn test_if_explicit_defaults_match() {
-        let result = create_temporary_config("defaults", &default_config_file_content());
+        // The default template is JSONC now — parse it through the JSON
+        // path like a real fresh install would.
+        let result =
+            create_temporary_json_config("defaults", &default_config_file_content());
 
         let env_vars: Vec<String> = vec![];
         assert_eq!(result.env_vars, env_vars);

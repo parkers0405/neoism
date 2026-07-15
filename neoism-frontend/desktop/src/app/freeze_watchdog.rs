@@ -80,7 +80,50 @@ pub struct GlobalSpan {
 }
 
 pub fn init() {
+    // Always sweep stale diagnostic logs, even with the watchdog off —
+    // past always-on defaults left hundreds of per-pid files behind.
+    prune_diag_logs();
     let _ = watchdog();
+}
+
+/// Remove old `freeze-watchdog-*` / `editor-grid-*` per-pid logs from
+/// the config log dir. Anything older than 3 days goes; when the
+/// corresponding diagnostic is disabled there's no reason to keep the
+/// family at all, so those are removed regardless of age.
+fn prune_diag_logs() {
+    let dir = neoism_backend::config::config_dir_path().join("log");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    let cutoff = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
+    let watchdog_on = watchdog_enabled();
+    let grid_on = super::editor_grid_diag::enabled();
+    let this_pid = format!("-{}.log", std::process::id());
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let (is_watchdog, is_grid) = (
+            name.starts_with("freeze-watchdog-") && name.ends_with(".log"),
+            name.starts_with("editor-grid-") && name.ends_with(".log"),
+        );
+        if !is_watchdog && !is_grid {
+            continue;
+        }
+        if name.ends_with(&this_pid) {
+            continue;
+        }
+        let family_disabled = (is_watchdog && !watchdog_on) || (is_grid && !grid_on);
+        let too_old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map(|modified| modified < cutoff)
+            .unwrap_or(false);
+        if family_disabled || too_old {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 pub fn mark_global(event: &str, detail: impl Into<String>) {
@@ -278,7 +321,6 @@ fn watchdog() -> Option<Arc<FreezeWatchdog>> {
                     sampled_notes: BTreeMap::new(),
                 }),
             });
-            prune_old_logs(&watchdog.path);
             watchdog.write_line(format_args!(
                 "started pid={} path={}",
                 std::process::id(),
@@ -297,47 +339,14 @@ fn watchdog() -> Option<Arc<FreezeWatchdog>> {
 }
 
 fn watchdog_enabled() -> bool {
-    // ON BY DEFAULT: the recurring editor/nvim freezes were impossible to
-    // diagnose after the fact because nobody had the watchdog enabled when
-    // one struck. The cost is a 1 Hz checker thread and a heartbeat line
-    // every 5s. Opt out with NEOISM_FREEZE_WATCHDOG=0.
-    match std::env::var_os(WATCHDOG_ENV) {
-        Some(raw) => neoism_ui::lifecycle_policy::env_flag_truthy(&raw.to_string_lossy()),
-        None => true,
-    }
-}
-
-/// Best-effort cleanup: with the watchdog on by default, every launch
-/// writes `freeze-watchdog-<pid>.log`. Drop siblings older than 7 days so
-/// the log dir doesn't grow without bound.
-fn prune_old_logs(current: &PathBuf) {
-    let Some(dir) = current.parent() else {
-        return;
-    };
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let cutoff = SystemTime::now() - Duration::from_secs(7 * 24 * 60 * 60);
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path == *current {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.starts_with("freeze-watchdog-") || !name.ends_with(".log") {
-            continue;
-        }
-        let too_old = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .map(|modified| modified < cutoff)
-            .unwrap_or(false);
-        if too_old {
-            let _ = fs::remove_file(&path);
-        }
-    }
+    // OFF BY DEFAULT: it earned its keep diagnosing the (since fixed)
+    // nvim RPC freezes, but always-on it filled `log/` with a
+    // per-launch file of per-frame NOTE lines — tens of MB per long
+    // session. Opt back in with NEOISM_FREEZE_WATCHDOG=1 when chasing
+    // a hang; `init()` still prunes old diagnostic logs either way.
+    std::env::var_os(WATCHDOG_ENV)
+        .map(|raw| neoism_ui::lifecycle_policy::env_flag_truthy(&raw.to_string_lossy()))
+        .unwrap_or(false)
 }
 
 fn log_path() -> PathBuf {

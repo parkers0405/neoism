@@ -1,5 +1,13 @@
 FROM rust:1.92-bookworm AS builder
 
+# The daemon links the sugarloaf renderer: shaderc-sys builds shaderc from
+# source (cmake + python3), and sugarloaf's build.rs shells out to a GLSL →
+# SPIR-V compiler (glslangValidator from glslang-tools).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        cmake python3 ninja-build glslang-tools \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src
 COPY . .
 RUN cargo build --release -p neoism-workspace-daemon

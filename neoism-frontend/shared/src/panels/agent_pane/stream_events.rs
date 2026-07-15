@@ -201,6 +201,15 @@ pub enum SessionEventUpdate {
         request_id: String,
         session_id: Option<String>,
     },
+    /// The model called the `question` tool — the run is parked until
+    /// the user answers (or rejects). Surfaced as a prompt picker card
+    /// anchored to the agent input, same as permissions.
+    QuestionAsked(crate::panels::agent_pane::question_policy::NeoismAgentPendingQuestion),
+    /// The question was answered or rejected (possibly from another
+    /// device) — drop it from the pending queue.
+    QuestionRemoved {
+        request_id: String,
+    },
     /// The main session's persistent goal changed. `goal` is the parsed
     /// `info.extra.goal` when the event carried it (apply live), else
     /// `None` to signal "cleared / refetch to confirm". The consumer also
@@ -573,15 +582,31 @@ pub fn classify_session_event(
                     .map(str::to_string),
             }]
         }
-        "question.asked" => vec![SessionEventUpdate::System {
-            title: "Question".to_string(),
-            body: properties
-                .get("label")
-                .or_else(|| properties.get("title"))
+        "question.asked" => {
+            let pending =
+                crate::panels::agent_pane::question_policy::question_request_from_event(
+                    properties,
+                );
+            if pending.id.is_empty() || pending.questions.is_empty() {
+                Vec::new()
+            } else {
+                vec![SessionEventUpdate::QuestionAsked(pending)]
+            }
+        }
+        "question.replied" | "question.rejected" => {
+            let request_id = properties
+                .get("requestID")
+                .or_else(|| properties.get("requestId"))
+                .or_else(|| properties.get("id"))
                 .and_then(Value::as_str)
-                .unwrap_or("Agent needs an answer. Use /answer <text>.")
-                .to_string(),
-        }],
+                .unwrap_or_default()
+                .to_string();
+            if request_id.is_empty() {
+                Vec::new()
+            } else {
+                vec![SessionEventUpdate::QuestionRemoved { request_id }]
+            }
+        }
         "session.error" => vec![SessionEventUpdate::System {
             title: "Neoism Agent".to_string(),
             body: session_error_message(properties),

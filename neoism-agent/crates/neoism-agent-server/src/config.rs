@@ -64,6 +64,11 @@ pub(crate) fn load(directory: &str) -> anyhow::Result<LoadedConfig> {
         for file in config_files_in_dir(dir) {
             merge_file(&mut raw, &file)?;
         }
+        // Dedicated MCP catalog file (mcp.json / mcp.jsonc), the way
+        // skills get their own home. Merged AFTER the dir's config
+        // files so its entries win over any `mcp` map left in
+        // config.json.
+        merge_mcp_file(&mut raw, dir)?;
         merge_markdown_entries(&mut raw, dir)?;
     }
 
@@ -257,6 +262,30 @@ fn merge_file(raw: &mut Value, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `mcp.json` / `mcp.jsonc` in a config dir — a standalone MCP server
+/// catalog. Accepts either the wrapped form `{ "mcp": { id: {...} } }`
+/// (what the extensions page writes) or a bare `{ id: {...} }` map,
+/// which gets wrapped before merging.
+fn merge_mcp_file(raw: &mut Value, dir: &Path) -> anyhow::Result<()> {
+    for name in ["mcp.json", "mcp.jsonc"] {
+        let path = dir.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read mcp file {}", path.display()))?;
+        let value = parse_jsonc(&text)
+            .with_context(|| format!("failed to parse mcp file {}", path.display()))?;
+        let wrapped = if value.get("mcp").is_some() {
+            value
+        } else {
+            serde_json::json!({ "mcp": value })
+        };
+        merge_value(raw, wrapped);
+    }
+    Ok(())
+}
+
 fn merge_markdown_entries(raw: &mut Value, dir: &Path) -> anyhow::Result<()> {
     for root_name in ["agent", "agents"] {
         let root = dir.join(root_name);
@@ -417,6 +446,16 @@ fn normalize_config(info: &mut NeoismConfig) {
 
     let tool_permissions = permissions_from_tools(&info.tools);
     merge_permission_maps(&mut info.permission, tool_permissions);
+
+    // `dangerouslySkipPermissions` — base allow-everything rule. It
+    // lands FIRST in rule order (BTreeMap: "*" sorts before letters),
+    // so any explicit permission entry the user wrote still overrides
+    // it (last match wins in `permission::evaluate`); everything that
+    // would have ASKED is allowed instead.
+    if info.dangerously_skip_permissions {
+        info.permission
+            .insert("*".to_string(), serde_json::json!("allow"));
+    }
 
     for (name, command) in info.command.iter_mut() {
         if command.name.is_empty() {

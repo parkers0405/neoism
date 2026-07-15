@@ -613,6 +613,29 @@ fn stale_idle_snapshot_keeps_streamed_assistant_text_by_id() {
 }
 
 #[test]
+fn transcript_refresh_rebases_live_trace_to_durable_turn() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("old"),
+        NeoismAgentMessage::user("latest"),
+        NeoismAgentMessage::reasoning("thinking").with_id("reasoning"),
+        NeoismAgentMessage::assistant("tool").with_id("tool"),
+    ];
+    pane.timeline_live_trace_start = Some(2);
+
+    pane.messages = vec![
+        NeoismAgentMessage::user("old"),
+        NeoismAgentMessage::assistant("old answer").with_id("old-answer"),
+        NeoismAgentMessage::user("latest"),
+        NeoismAgentMessage::assistant("durable answer").with_id("answer"),
+    ];
+    pane.rebase_current_turn_trace();
+
+    assert_eq!(pane.timeline_live_trace_start, Some(3));
+    assert_eq!(pane.messages[3].text, "durable answer");
+}
+
+#[test]
 fn stale_idle_snapshot_does_not_append_orphan_streamed_assistant_tail() {
     let mut pane = NeoismAgentPane::default();
     pane.messages = vec![

@@ -37,7 +37,6 @@ pub fn render_timeline_with<P, D>(
     let prep_started = web_time::Instant::now();
     let real_content_h = layout.content_height;
     let row_count = layout.rows.len();
-    let permission_h = D::measure_permission_prompt_height(pane, s);
     let status_h = if pane.has_status_activity() {
         let lines = if pane.queued_prompt_count() > 0 {
             2.0
@@ -49,12 +48,6 @@ pub fn render_timeline_with<P, D>(
         0.0
     };
     let mut content_h = real_content_h;
-    if permission_h > 0.0 {
-        if content_h > 0.0 {
-            content_h += gap;
-        }
-        content_h += permission_h;
-    }
     if status_h > 0.0 {
         if content_h > 0.0 {
             content_h += gap;
@@ -64,7 +57,6 @@ pub fn render_timeline_with<P, D>(
     pane.set_timeline_metrics(rect, content_h, viewport_h);
     let set_metrics_done = web_time::Instant::now();
     pane.clear_tool_hit_rects();
-    pane.clear_permission_choice_hit_rects();
     let metrics_done = web_time::Instant::now();
 
     if viewport_h <= 0.0 {
@@ -310,24 +302,6 @@ pub fn render_timeline_with<P, D>(
     );
 
     let mut content_y = real_content_h;
-    if permission_h > 0.0 {
-        if content_y > 0.0 {
-            content_y += gap;
-        }
-        let row_y = snap_px(y + content_y - render_scroll_top);
-        if row_y + permission_h >= y && row_y <= y + viewport_h {
-            D::render_permission_prompt_row(
-                sugarloaf,
-                pane,
-                [x, row_y, w, permission_h],
-                theme,
-                s,
-                viewport_clip,
-                occlusion_rects,
-            );
-        }
-        content_y += permission_h;
-    }
 
     // Streaming status row lives at the end of the timeline content so it
     // scrolls with the conversation, attached visually to the latest

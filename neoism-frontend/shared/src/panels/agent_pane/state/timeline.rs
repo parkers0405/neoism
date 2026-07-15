@@ -751,6 +751,18 @@ impl NeoismAgentPane {
         self.invalidate_timeline_layout();
     }
 
+    pub(in crate::panels::agent_pane::state) fn rebase_current_turn_trace(&mut self) {
+        if self.timeline_live_trace_start.is_none() {
+            return;
+        }
+        self.timeline_live_trace_start = Some(
+            self.messages
+                .iter()
+                .rposition(|message| message.kind == NeoismAgentMessageKind::User)
+                .map_or(0, |index| index + 1),
+        );
+    }
+
     pub(in crate::panels::agent_pane) fn timeline_live_trace_start(
         &self,
     ) -> Option<usize> {
@@ -859,6 +871,9 @@ impl NeoismAgentPane {
         self.pending_permission = None;
         self.pending_permission_queue.clear();
         self.permission_choice_hit_rects.clear();
+        self.pending_question = None;
+        self.pending_question_queue.clear();
+        self.question_option_hit_rects.clear();
         self.timeline_live_trace_start = None;
     }
 }

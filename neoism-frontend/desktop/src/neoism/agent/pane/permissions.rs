@@ -52,6 +52,37 @@ impl NeoismAgentPane {
             |permission| permission.id.as_str(),
         );
         self.sync_subagent_waiting_clock();
+        self.maybe_auto_respond_permission();
+    }
+
+    /// `/yolo` toggle. Turning it on immediately answers the current
+    /// pending request; the reply-succeeded promotion path keeps
+    /// draining the queue after that.
+    pub fn toggle_skip_permissions(&mut self) {
+        self.skip_permissions = !self.skip_permissions;
+        if self.skip_permissions {
+            self.push_notice(
+                "Permissions: skipping ALL requests (dangerous) — /yolo to turn off"
+                    .to_string(),
+                NeoismAgentNoticeLevel::Warn,
+            );
+            self.maybe_auto_respond_permission();
+        } else {
+            self.push_notice(
+                "Permissions: prompts re-enabled".to_string(),
+                NeoismAgentNoticeLevel::Info,
+            );
+        }
+    }
+
+    pub fn skip_permissions_enabled(&self) -> bool {
+        self.skip_permissions
+    }
+
+    pub(crate) fn maybe_auto_respond_permission(&mut self) {
+        if self.skip_permissions && self.pending_permission.is_some() {
+            self.respond_pending_permission(NeoismAgentPermissionChoice::Once);
+        }
     }
 
     pub(crate) fn remove_pending_permission(&mut self, request_id: &str) -> bool {

@@ -25,7 +25,7 @@ export interface NvimCanvasViewport {
 }
 
 const FONT_FAMILY =
-  '"Geist Mono", "Symbols Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+  '"Geist Mono", "Symbols Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace';
 const MIN_CELL_W = 4;
 const MIN_CELL_H = 8;
 

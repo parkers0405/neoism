@@ -463,14 +463,7 @@ impl Text {
         let (font_id, _is_emoji) = match self.font_resolve.entry((ch, style_flags)) {
             std::collections::hash_map::Entry::Occupied(e) => *e.get(),
             std::collections::hash_map::Entry::Vacant(e) => {
-                #[cfg(target_os = "macos")]
                 let resolved = self.font_library.resolve_font_for_char(ch, style);
-
-                #[cfg(not(target_os = "macos"))]
-                let resolved = {
-                    let lib = self.font_library.inner.read();
-                    lib.find_best_font_match(ch, style).unwrap_or((0, false))
-                };
                 let v = (resolved.0 as u32, resolved.1);
                 e.insert(v);
                 v
@@ -1442,6 +1435,9 @@ fn rasterize_swash_glyph(
     }
 
     let is_color = image.content == Content::Color;
+    if is_color {
+        crate::font::premultiply_color_glyph(&mut image.data);
+    }
     Some(SwashRawGlyph {
         width: image.placement.width,
         height: image.placement.height,

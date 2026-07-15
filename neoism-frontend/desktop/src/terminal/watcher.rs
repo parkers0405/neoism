@@ -23,6 +23,7 @@ fn config_update_paths_match(config_file_path: &Path, paths: &[PathBuf]) -> bool
 
     paths.iter().any(|path| {
         path == config_file_path
+            || path.file_name() == Some(std::ffi::OsStr::new("config.json"))
             || path.file_name() == Some(std::ffi::OsStr::new("config.toml"))
     })
 }
@@ -35,7 +36,9 @@ pub fn configuration_file_updates<
     event_proxy: T,
 ) -> notify::Result<()> {
     let config_dir = path.as_ref().to_path_buf();
-    let config_file_path = config_dir.join("config.toml");
+    // JSON is the primary config; the filename filter below also accepts
+    // a legacy config.toml so either format hot-reloads on save.
+    let config_file_path = config_dir.join("config.json");
 
     std::thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel();

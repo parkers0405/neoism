@@ -77,7 +77,21 @@ fn log_path() -> PathBuf {
         .join(format!("editor-grid-{}.log", std::process::id()))
 }
 
+/// File logging is OPT-IN (`NEOISM_EDITOR_GRID_LOG=1`) — the dropped-
+/// editor wedge this diagnosed is fixed, and always-on left a per-pid
+/// file behind on every launch. The self-heal itself lives in the
+/// context pump and keeps working regardless; this module only records
+/// evidence.
+pub(crate) fn enabled() -> bool {
+    std::env::var_os("NEOISM_EDITOR_GRID_LOG")
+        .map(|raw| neoism_ui::lifecycle_policy::env_flag_truthy(&raw.to_string_lossy()))
+        .unwrap_or(false)
+}
+
 pub fn record(rec: Record<'_>) {
+    if !enabled() {
+        return;
+    }
     // Dedupe per route on the meaningful signature so a sustained wedge
     // doesn't append a line every frame — the last line always reflects
     // the current state.

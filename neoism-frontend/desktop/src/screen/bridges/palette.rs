@@ -576,10 +576,10 @@ impl Screen<'_> {
             }
             PaletteAction::CloseCurrentSplitOrTab => self.close_split_or_tab(clipboard),
             PaletteAction::ConfigEditor => {
-                // Open the real config.toml as a tab in the nvim editor
-                // (create the default file first if it's missing).
-                let config_path =
-                    neoism_backend::config::config_dir_path().join("config.toml");
+                // Open the active config (config.json, or a legacy
+                // config.toml) as a tab in the nvim editor — create the
+                // default file first if neither exists.
+                let config_path = neoism_backend::config::config_file_path();
                 if !config_path.exists() {
                     neoism_backend::config::create_config_file(None);
                 }

@@ -1332,6 +1332,27 @@ fn updated_final_part_does_not_reorder_past_later_tool() {
 }
 
 #[test]
+fn history_refresh_rebases_live_trace_to_durable_turn() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("latest"),
+        NeoismAgentMessage::reasoning("thinking").with_id("reasoning"),
+        NeoismAgentMessage::assistant("tool").with_id("tool"),
+    ];
+    pane.timeline_live_trace_start = Some(1);
+
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("old"),
+        NeoismAgentMessage::assistant("old answer").with_id("old-answer"),
+        NeoismAgentMessage::user("latest"),
+        NeoismAgentMessage::assistant("durable answer").with_id("answer"),
+    ]);
+
+    assert_eq!(pane.timeline_live_trace_start, Some(3));
+    assert_eq!(pane.messages[3].text, "durable answer");
+}
+
+#[test]
 fn tool_expand_preserves_clicked_card_top_when_content_height_changes() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);

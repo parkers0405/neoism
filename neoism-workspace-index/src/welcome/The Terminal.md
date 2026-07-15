@@ -53,6 +53,6 @@ Ctrl+Alt+Arrows    resize the focused split
 
 ## Fonts, scrollback & more
 
-Font, size, scrollback limit, copy-on-select, and the cursor are all set in [[Configuration/Configuration|config.toml]]. Want a retro look? See [[Configuration/Shaders|Shaders]].
+Font, size, scrollback limit, copy-on-select, and the cursor are all set in [[Configuration/Configuration|config.json]]. Want a retro look? See [[Configuration/Shaders|Shaders]].
 
 New tabs open in your active workspace, so shells, project commands, and agents share the same context.

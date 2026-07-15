@@ -111,6 +111,21 @@ pub enum OutboundAgentCommand {
         reply: String,
     },
 
+    /// Reply to a pending model question (`question` tool) with one
+    /// answer list per question in the request. Same responding /
+    /// succeeded / failed lifecycle as `ReplyPermission`, via
+    /// `question_reply_succeeded` / `question_reply_failed`.
+    ReplyQuestion {
+        id: String,
+        answers: Vec<Vec<String>>,
+    },
+
+    /// Reject a pending model question (Esc on the prompt) — the model's
+    /// run resumes with a "rejected" error instead of parking forever.
+    RejectQuestion {
+        id: String,
+    },
+
     /// A slash command the shared pane didn't handle in-memory.
     /// `args` is the raw whitespace-trimmed argument tail (everything
     /// after the leading `/<name>`).

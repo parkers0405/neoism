@@ -6,34 +6,50 @@ use crate::install_runner::InstallError;
 use crate::installed::write_atomic;
 use crate::manifest::ExtensionManifest;
 
-/// `$XDG_CONFIG_HOME/neoism/agent/config.json`, fallback `$HOME/.config/...`.
+/// `$XDG_CONFIG_HOME/neoism/config.json`, fallback `$HOME/.config/...` —
+/// the unified config the terminal AND the agent server both read.
 /// Mirrors `neoism-agent-server::server_util::default_config_dir`.
 pub fn agent_config_path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.config")))
         .unwrap_or_else(|_| ".neoism/config".to_string());
-    PathBuf::from(base).join("neoism/agent/config.json")
+    PathBuf::from(base).join("neoism/config.json")
 }
 
 /// Merge an MCP entry into the user's agent config under `mcp.<id>`.
+/// `$XDG_CONFIG_HOME/neoism/mcp.json` — the standalone MCP catalog the
+/// extensions page writes to (wrapped form: `{ "mcp": { id: {...} } }`).
+/// The agent server merges it AFTER config.json, so entries here win.
+pub fn mcp_config_path() -> PathBuf {
+    agent_config_path().with_file_name("mcp.json")
+}
+
 pub fn install_mcp_entry(
     id: &str,
     manifest: &ExtensionManifest,
     bin_path: &Path,
 ) -> Result<(), InstallError> {
-    install_mcp_entry_at(&agent_config_path(), id, manifest, bin_path)
+    // New installs land in the dedicated mcp.json; drop any same-id
+    // entry still living in config.json so the loader's deep merge
+    // can't blend a stale record into the fresh one.
+    install_mcp_entry_at(&mcp_config_path(), id, manifest, bin_path)?;
+    uninstall_mcp_entry_at(&agent_config_path(), id)
 }
 
-/// Remove `mcp.<id>` from the user's agent config. No-op if absent.
+/// Remove `mcp.<id>` from the user's agent config — the entry may live
+/// in mcp.json (new home) or config.json (legacy/unified), so clean both.
 pub fn uninstall_mcp_entry(id: &str) -> Result<(), InstallError> {
+    uninstall_mcp_entry_at(&mcp_config_path(), id)?;
     uninstall_mcp_entry_at(&agent_config_path(), id)
 }
 
 /// Disable a built-in MCP entry without deleting its config key. The agent
 /// server normalizes missing built-ins back to enabled, so built-in uninstall
-/// needs an explicit `enabled: false` record to persist user intent.
+/// needs an explicit `enabled: false` record to persist user intent. Written
+/// to mcp.json (which merges last and wins); any config.json copy is dropped.
 pub fn disable_builtin_mcp_entry(id: &str) -> Result<(), InstallError> {
-    disable_builtin_mcp_entry_at(&agent_config_path(), id)
+    disable_builtin_mcp_entry_at(&mcp_config_path(), id)?;
+    uninstall_mcp_entry_at(&agent_config_path(), id)
 }
 
 pub fn install_mcp_entry_at(
@@ -145,7 +161,14 @@ fn read_root_object(path: &Path) -> Result<Map<String, Value>, InstallError> {
         }
         return Ok(Map::new());
     }
-    let value: Value = serde_json::from_slice(&bytes)
+    // The unified config is JSONC (comments + trailing commas legal) —
+    // strip before the strict parse so a hand-commented file doesn't
+    // fail MCP installs. Programmatic writes below emit plain pretty
+    // JSON, so comments are lost on the first write; same trade the
+    // in-app preference writers make.
+    let text = String::from_utf8_lossy(&bytes);
+    let cleaned = strip_trailing_commas(&strip_json_comments(&text));
+    let value: Value = serde_json::from_str(&cleaned)
         .map_err(|e| InstallError::ParseManifest(e.to_string()))?;
     match value {
         Value::Object(map) => Ok(map),
@@ -153,6 +176,93 @@ fn read_root_object(path: &Path) -> Result<Map<String, Value>, InstallError> {
             "agent config root must be a JSON object".to_string(),
         )),
     }
+}
+
+/// JSONC comment stripper — mirrors `neoism-agent-server::config_parse`
+/// and `neoism-backend::config` so every reader of the unified
+/// `config.json` accepts the same dialect.
+fn strip_json_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if in_string {
+            escaped = ch == '\\' && !escaped;
+            if ch == '"' && !escaped {
+                in_string = false;
+            }
+            if ch != '\\' {
+                escaped = false;
+            }
+            out.push(ch);
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'/') {
+            let _ = chars.next();
+            for next in chars.by_ref() {
+                if next == '\n' {
+                    out.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            let _ = chars.next();
+            let mut previous = '\0';
+            for next in chars.by_ref() {
+                if previous == '*' && next == '/' {
+                    break;
+                }
+                previous = next;
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn strip_trailing_commas(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if in_string {
+            escaped = ch == '\\' && !escaped;
+            if ch == '"' && !escaped {
+                in_string = false;
+            }
+            if ch != '\\' {
+                escaped = false;
+            }
+            out.push(ch);
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+        if ch == ',' {
+            let closes_next = chars
+                .clone()
+                .find(|next| !next.is_whitespace())
+                .is_some_and(|next| matches!(next, '}' | ']'));
+            if closes_next {
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[cfg(test)]

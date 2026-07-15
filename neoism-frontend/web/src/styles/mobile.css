@@ -120,7 +120,7 @@
     font-size: 13px;
     /* Soft-key fonts should never look fuzzy; pin to system mono. */
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
-      monospace;
+      "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace;
     -webkit-tap-highlight-color: transparent;
     touch-action: manipulation;
     user-select: none;

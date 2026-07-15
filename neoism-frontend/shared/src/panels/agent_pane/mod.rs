@@ -17,6 +17,7 @@ pub mod message_policy;
 pub mod outbound;
 pub mod permission_policy;
 pub mod protocol_mapping;
+pub mod question_policy;
 pub mod resolve_link_path;
 pub mod session_group;
 pub mod state;

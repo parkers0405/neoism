@@ -1,6 +1,6 @@
 # Themes, Cursor & Fonts
 
-All set under `[neoism]`, `[cursor]`, and `[fonts]` in [[Configuration|config.toml]].
+All set under `[neoism]`, `[cursor]`, and `[fonts]` in [[Configuration|config.json]].
 
 ## Themes
 
@@ -11,7 +11,7 @@ One `theme` colors everything — chrome, terminal, and the managed nvim syntax 
 theme = "pastel_dark"
 ```
 
-Built-in themes: `pastel_dark`, `nvchad_one`, `tokyo_night`, `catppuccin_mocha`. You can also switch live from the command palette (search "theme"); your pick is saved back to `config.toml`.
+Built-in themes: `pastel_dark`, `nvchad_one`, `tokyo_night`, `catppuccin_mocha`. You can also switch live from the command palette (search "theme"); your pick is saved back to `config.json`.
 
 ## Cursor
 

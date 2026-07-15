@@ -1,6 +1,6 @@
 # Shaders
 
-Neoism can run GPU post-process effects over the whole surface. Two knobs, both under `[renderer]` in [[Configuration|config.toml]].
+Neoism can run GPU post-process effects over the whole surface. Two knobs, both under `[renderer]` in [[Configuration|config.json]].
 
 ## Built-in filters
 

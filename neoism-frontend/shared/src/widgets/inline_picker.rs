@@ -92,6 +92,20 @@ fn truncate_to_pixel_width(
     ellipsis.to_string()
 }
 
+/// Rect of visible row `visible_ix` inside a rendered card — for hosts
+/// that register their own per-row hit rects (the agent prompt picker's
+/// permission choices / question options) instead of routing clicks
+/// through a `NeoismAgentPicker`.
+pub fn row_rect(card: [f32; 4], visible_ix: usize, scale: f32) -> [f32; 4] {
+    let s = scale.clamp(0.5, 3.0);
+    [
+        card[0],
+        card[1] + TITLE_H * s + visible_ix as f32 * ROW_H * s,
+        card[2],
+        ROW_H * s,
+    ]
+}
+
 pub fn layout(
     row_count: usize,
     input_rect: [f32; 4],

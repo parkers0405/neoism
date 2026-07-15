@@ -122,7 +122,7 @@ fn status_line_constructs() {
         lsp_status: Some(LspStatus::Active),
         lsp_label: None,
         project: Some("neoism".into()),
-        tab_position: Some((1, 4)),
+        cursor_lines: Some((1, 4)),
         diagnostics: DiagnosticCounts {
             error: 2,
             warn: 1,
@@ -131,6 +131,7 @@ fn status_line_constructs() {
         },
         cwd_label: Some("~/proj".into()),
         pending_keys: None,
+        fps: Some(120),
     };
     s.set_info(info);
 

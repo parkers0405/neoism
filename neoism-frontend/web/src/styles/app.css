@@ -75,7 +75,8 @@
   --neoism-success: #9fe8c3;
   --neoism-font-mono:
     "Geist Mono", "Symbols Nerd Font Mono", ui-monospace, SFMono-Regular,
-    Menlo, Consolas, "Liberation Mono", monospace;
+    Menlo, Consolas, "Liberation Mono", "Apple Color Emoji", "Segoe UI Emoji",
+    "Noto Color Emoji", monospace;
   --neoism-cell-h: 18px;
 }
 
@@ -666,7 +667,7 @@ body {
   padding: 24px 32px 40px;
   color: var(--neoism-fg);
   background: var(--neoism-bg);
-  font: 14px/1.6 "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font: 14px/1.6 "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace;
   scrollbar-color: var(--neoism-border-strong) transparent;
 }
 
@@ -855,7 +856,7 @@ body {
   padding: 8px;
   overflow: hidden;
   opacity: 0.94;
-  font: 11px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font: 11px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace;
   white-space: pre;
 }
 
@@ -899,7 +900,7 @@ body {
   overflow: hidden;
   color: var(--neoism-fg);
   background: color-mix(in srgb, var(--neoism-bg) 82%, transparent);
-  font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

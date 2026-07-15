@@ -591,14 +591,13 @@ impl ChromeBridge {
         self.chrome.status_line.set_info(info);
     }
 
-    /// Maps to the panel's `tab_position` field (the only
-    /// position-shaped field on `StatusInfo`). Stored as
+    /// Maps to the panel's `cursor_lines` ruler field. Stored as
     /// `(current, total)`; callers wanting `(line, col)` should
     /// pass `(line, col)` and accept that the right-cluster pill
     /// will render it as "line/col".
     pub fn set_status_position(&mut self, line: u32, col: u32) {
         let mut info = self.chrome.status_line.info().clone();
-        info.tab_position = Some((line as usize, col as usize));
+        info.cursor_lines = Some((line as usize, col as usize));
         self.chrome.status_line.set_info(info);
     }
 }

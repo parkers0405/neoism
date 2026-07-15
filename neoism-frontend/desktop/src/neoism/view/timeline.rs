@@ -24,8 +24,5 @@ neoism_ui::neoism_ui_impl_agent_timeline_delegate!(
     NeoismAgentMessage,
     measure_message_height = super::message_card::measure_message_height,
     render_message_card = super::message_card::render_message_card,
-    measure_permission_prompt_height =
-        super::user_input::measure_permission_prompt_height,
-    render_permission_prompt_row = super::user_input::render_permission_prompt_row,
     render_streaming_status_row = super::user_input::render_streaming_status_row,
 );

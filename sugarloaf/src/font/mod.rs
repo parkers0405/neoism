@@ -278,12 +278,15 @@ impl FontLibrary {
         // Fast path: codepoint is covered by an already-registered
         // font. No locks upgraded, no FFI call. Shared across all
         // platforms — only the cascade-discovery slow path differs.
+        let prefer_emoji = prefers_color_emoji(ch);
         if let Some(found) = self
             .inner
             .read()
             .find_best_font_match_strict(ch, fragment_style)
         {
-            return found;
+            if !prefer_emoji || found.1 {
+                return found;
+            }
         }
 
         self.cascade_discover(ch, fragment_style)
@@ -343,14 +346,17 @@ impl FontLibrary {
         let primary_family = self.primary_family_name()?;
         let want_bold = fragment_style.font_attrs.weight() == swash::Weight::BOLD;
         let want_italic = fragment_style.font_attrs.style() == swash::Style::Italic;
-        // Terminal — always bias toward monospace for consistent cell
-        // widths, even for fallback glyphs.
-        let want_mono = true;
+        // Keep ordinary fallback glyphs aligned to terminal cells. Color
+        // emoji fonts are commonly classified as proportional; a monospace
+        // constraint makes fontconfig prefer icon fonts that render tofu.
+        let prefer_emoji = prefers_color_emoji(ch);
+        let want_mono = !prefer_emoji;
 
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
         let discovered = crate::font::linux::discover_fallback(
             &primary_family,
             ch,
+            prefer_emoji,
             want_mono,
             want_bold,
             want_italic,
@@ -366,8 +372,12 @@ impl FontLibrary {
         )?;
 
         let (path, face_index) = discovered;
+        let discovered_key = format!("{}#{face_index}", path.display());
         let font_data = FontData::from_discovered_path(path, face_index).ok()?;
-        let ps_name = font_data.postscript_name()?.to_string();
+        let ps_name = font_data
+            .postscript_name()
+            .map(str::to_owned)
+            .unwrap_or(discovered_key);
 
         if let Some(found) = self.dedupe_existing(&ps_name) {
             return Some(found);
@@ -473,6 +483,39 @@ impl FontLibrary {
     #[cfg(target_arch = "wasm32")]
     pub fn family_names(&self) -> Vec<String> {
         Vec::new()
+    }
+}
+
+fn prefers_color_emoji(ch: char) -> bool {
+    neoism_grapheme_width::emoji::Presentation::for_char(ch)
+        == neoism_grapheme_width::emoji::Presentation::Emoji
+}
+
+pub fn premultiply_color_glyph(bytes: &mut [u8]) {
+    for pixel in bytes.chunks_exact_mut(4) {
+        let alpha = u16::from(pixel[3]);
+        pixel[0] = ((u16::from(pixel[0]) * alpha + 127) / 255) as u8;
+        pixel[1] = ((u16::from(pixel[1]) * alpha + 127) / 255) as u8;
+        pixel[2] = ((u16::from(pixel[2]) * alpha + 127) / 255) as u8;
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_fallback_tests {
+    use super::{prefers_color_emoji, premultiply_color_glyph};
+
+    #[test]
+    fn color_emoji_fallback_is_not_constrained_to_monospace() {
+        assert!(prefers_color_emoji('\u{1F600}'));
+        assert!(!prefers_color_emoji('\u{6C34}'));
+        assert!(!prefers_color_emoji('\u{2605}'));
+    }
+
+    #[test]
+    fn color_glyph_pixels_are_premultiplied() {
+        let mut pixels = [255, 64, 32, 0, 255, 128, 0, 128, 10, 20, 30, 255];
+        premultiply_color_glyph(&mut pixels);
+        assert_eq!(pixels, [0, 0, 0, 0, 128, 64, 0, 128, 10, 20, 30, 255]);
     }
 }
 

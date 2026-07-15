@@ -47,6 +47,12 @@ pub enum SlashCommandAction {
     ResumeGoal,
     UndoSession,
     RedoSession,
+    /// `/yolo` (`/dangerously-skip-permissions`) — toggle skipping ALL
+    /// permission prompts for this pane: every request auto-answers
+    /// "Yes" the moment it arrives. The config-level equivalent is
+    /// `"dangerouslySkipPermissions": true`, which stops the server
+    /// asking at all.
+    ToggleSkipPermissions,
     /// `/piss` — the easter egg: a tiny pixel fella jogs across the
     /// pane, waters the timeline, and the model gets told about it.
     PissOnScreen,
@@ -106,6 +112,9 @@ pub fn plan_slash_command(text: &str) -> SlashCommandAction {
         "/permissions" => SlashCommandAction::ShowPermissions,
         "/questions" => SlashCommandAction::ShowQuestions,
         "/permit" => SlashCommandAction::HandlePermit(args),
+        "/yolo" | "/dangerously-skip-permissions" | "/skip-permissions" => {
+            SlashCommandAction::ToggleSkipPermissions
+        }
         "/answer" => SlashCommandAction::HandleAnswer(args.join(" ")),
         "/reject" | "/deny" => SlashCommandAction::HandleReject(args.first().cloned()),
         "/compact" | "/compaction" | "/comapction" => SlashCommandAction::CompactSession,
@@ -311,6 +320,12 @@ fn slash_option_specs() -> &'static [SlashOptionSpec] {
             value: "/permissions",
         },
         SlashOptionSpec {
+            title: "/yolo",
+            description: "Skip ALL permission prompts (dangerous) — toggle",
+            footer: "danger",
+            value: "/yolo",
+        },
+        SlashOptionSpec {
             title: "/questions",
             description: "Show pending questions",
             footer: "server",
@@ -416,6 +431,17 @@ mod tests {
     fn plans_undo_redo_commands() {
         assert_eq!(plan_slash_command("/undo"), SlashCommandAction::UndoSession);
         assert_eq!(plan_slash_command("/redo"), SlashCommandAction::RedoSession);
+    }
+
+    #[test]
+    fn plans_skip_permissions_toggle() {
+        for spelling in ["/yolo", "/dangerously-skip-permissions", "/skip-permissions"] {
+            assert_eq!(
+                plan_slash_command(spelling),
+                SlashCommandAction::ToggleSkipPermissions,
+                "{spelling}"
+            );
+        }
     }
 
     #[test]

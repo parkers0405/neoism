@@ -482,6 +482,15 @@ mod tests {
     use super::*;
 
     fn temp_root(name: &str) -> PathBuf {
+        // Pin the GLOBAL config root to an empty temp dir so the real
+        // user's `~/.config/neoism/skills` can't leak into assertions
+        // (skill discovery always unions the global root in).
+        static ISOLATE: std::sync::Once = std::sync::Once::new();
+        ISOLATE.call_once(|| {
+            let global = std::env::temp_dir().join("neoism-agent-skill-tests-global");
+            let _ = std::fs::create_dir_all(&global);
+            std::env::set_var("NEOISM_AGENT_CONFIG_DIR", &global);
+        });
         std::env::temp_dir().join(format!(
             "neoism-agent-skill-{name}-{}",
             neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)

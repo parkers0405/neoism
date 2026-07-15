@@ -7,6 +7,7 @@ mod ingest;
 mod input_edit;
 mod permissions;
 pub mod picker;
+mod questions;
 mod pickers_state;
 mod selection;
 mod session;
@@ -41,6 +42,8 @@ use crate::panels::agent_pane::usage_policy::{
 
 use self::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
 use self::side_panel::{BranchStatus, NeoismAgentSidePanel};
+
+use crate::panels::agent_pane::question_policy::NeoismAgentPendingQuestion;
 
 #[derive(Clone, Debug, Default)]
 pub struct NeoismAgentPaneSnapshot {
@@ -527,6 +530,11 @@ pub struct NeoismAgentPane {
     diff_scroll_rects: Vec<(String, [f32; 4], f32)>,
     diff_scroll_offsets: HashMap<String, f32>,
     permission_choice_hit_rects: Vec<(NeoismAgentPermissionChoice, [f32; 4])>,
+    question_option_hit_rects: Vec<(usize, [f32; 4])>,
+    /// Rect of the prompt-picker card (permission / question) drawn last
+    /// frame — folded into the same occlusion path as the "/" picker so
+    /// chrome text can't bleed through it.
+    prompt_picker_rect: Option<[f32; 4]>,
     link_hit_rects: Vec<(String, [f32; 4])>,
     mermaid_raw_blocks: BTreeSet<u64>,
     usage_chip_rect: Option<[f32; 4]>,
@@ -597,6 +605,11 @@ pub struct NeoismAgentPane {
     active_subagent_started_at: HashMap<String, u64>,
     pending_permission: Option<NeoismAgentPendingPermission>,
     pending_permission_queue: VecDeque<NeoismAgentPendingPermission>,
+    /// `/yolo` — while true, every permission request auto-answers
+    /// "Yes" the moment it lands (session-scoped, client-side).
+    skip_permissions: bool,
+    pending_question: Option<NeoismAgentPendingQuestion>,
+    pending_question_queue: VecDeque<NeoismAgentPendingQuestion>,
     model_context_limit: Option<u64>,
     model_options: Vec<NeoismAgentPickerOption>,
     recent_model_options: Vec<NeoismAgentPickerOption>,
@@ -838,6 +851,8 @@ impl Default for NeoismAgentPane {
             diff_scroll_rects: Vec::new(),
             diff_scroll_offsets: HashMap::new(),
             permission_choice_hit_rects: Vec::new(),
+            question_option_hit_rects: Vec::new(),
+            prompt_picker_rect: None,
             link_hit_rects: Vec::new(),
             mermaid_raw_blocks: BTreeSet::new(),
             usage_chip_rect: None,
@@ -884,6 +899,9 @@ impl Default for NeoismAgentPane {
             active_subagent_started_at: HashMap::new(),
             pending_permission: None,
             pending_permission_queue: VecDeque::new(),
+            skip_permissions: false,
+            pending_question: None,
+            pending_question_queue: VecDeque::new(),
             model_context_limit: None,
             model_options: Vec::new(),
             recent_model_options: Vec::new(),
@@ -1346,6 +1364,7 @@ impl NeoismAgentPane {
             return;
         }
         self.messages = messages;
+        self.rebase_current_turn_trace();
         self.invalidate_timeline_layout();
         self.clamp_timeline_scroll();
     }

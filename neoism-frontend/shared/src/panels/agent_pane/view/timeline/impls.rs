@@ -174,9 +174,6 @@ impl AgentTimelinePane for NeoismAgentPane {
         NeoismAgentPane::clear_tool_hit_rects(self);
     }
 
-    fn clear_permission_choice_hit_rects(&mut self) {
-        NeoismAgentPane::clear_permission_choice_hit_rects(self);
-    }
 
     fn timeline_layout_epoch(&self) -> u64 {
         NeoismAgentPane::timeline_layout_epoch(self)
@@ -371,30 +368,6 @@ impl AgentTimelineDelegate<NeoismAgentPane> for SharedTimelineDelegate {
             viewport_clip,
             occlusion_rects,
         )
-    }
-
-    fn measure_permission_prompt_height(pane: &NeoismAgentPane, s: f32) -> f32 {
-        measure_permission_prompt_height(pane, s)
-    }
-
-    fn render_permission_prompt_row(
-        sugarloaf: &mut Sugarloaf,
-        pane: &mut NeoismAgentPane,
-        rect: [f32; 4],
-        theme: &IdeTheme,
-        s: f32,
-        viewport_clip: [f32; 4],
-        occlusion_rects: &[[f32; 4]],
-    ) {
-        render_permission_prompt_row(
-            sugarloaf,
-            pane,
-            rect,
-            theme,
-            s,
-            viewport_clip,
-            occlusion_rects,
-        );
     }
 
     fn render_streaming_status_row(

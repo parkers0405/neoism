@@ -26,14 +26,14 @@ The full list is in [[Keybindings]].
 
 ## Make it yours
 
-- [[Configuration/Configuration|Configuration]] — the `config.toml` reference.
+- [[Configuration/Configuration|Configuration]] — the `config.json` reference.
 - [[Configuration/Themes, Cursor and Fonts|Themes, Cursor & Fonts]] — pick a theme, set your cursor color, choose a font.
 - [[Configuration/Shaders|Shaders]] — optional CRT and post-process filters.
 
 ## Where things live
 
 - Your **notes vault** is a plain folder of Markdown files (this one is under `~/Neoism/Vaults/`). Edit it here or in any other editor — it's just files, easy to sync with Git, iCloud, Dropbox, or Syncthing.
-- **Config** lives at `~/.config/neoism/config.toml` (see [[Configuration/Configuration|Configuration]]).
+- **Config** lives at `~/.config/neoism/config.json` (see [[Configuration/Configuration|Configuration]]).
 - **Project state, sessions, and pairing** are owned by `neoism-workspace-daemon`, which lets the same workspace open on the desktop, a browser, or a phone.
 
 Everything you see is drawn by Neoism's own engine — not a browser, not a widget toolkit. Poke around.

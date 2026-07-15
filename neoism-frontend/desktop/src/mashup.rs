@@ -248,12 +248,12 @@ const EXAMPLE_PACKS: &[(&str, &[(&str, &[u8])])] = &[
         "phosphor",
         &[
             (
-                "pack.toml",
-                include_bytes!("mashup/seed/phosphor/pack.toml"),
+                "pack.json",
+                include_bytes!("mashup/seed/phosphor/pack.json"),
             ),
             (
-                "theme.toml",
-                include_bytes!("mashup/seed/phosphor/theme.toml"),
+                "theme.json",
+                include_bytes!("mashup/seed/phosphor/theme.json"),
             ),
         ],
     ),
@@ -261,12 +261,12 @@ const EXAMPLE_PACKS: &[(&str, &[(&str, &[u8])])] = &[
         "retro-95",
         &[
             (
-                "pack.toml",
-                include_bytes!("mashup/seed/retro-95/pack.toml"),
+                "pack.json",
+                include_bytes!("mashup/seed/retro-95/pack.json"),
             ),
             (
-                "theme.toml",
-                include_bytes!("mashup/seed/retro-95/theme.toml"),
+                "theme.json",
+                include_bytes!("mashup/seed/retro-95/theme.json"),
             ),
         ],
     ),

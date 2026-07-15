@@ -172,6 +172,9 @@ fn rasterize_glyph_native(
         return None;
     }
     let is_color = image.content == Content::Color;
+    if is_color {
+        neoism_backend::sugarloaf::font::premultiply_color_glyph(&mut image.data);
+    }
     Some(RawGlyph {
         width: image.placement.width,
         height: image.placement.height,

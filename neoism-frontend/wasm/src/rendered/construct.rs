@@ -89,7 +89,7 @@ impl ChromeBridge {
             git_changes: Some(GitChangeSummary::default()),
             lsp_status: None,
             diagnostics: DiagnosticCounts::default(),
-            tab_position: Some((1, 1)),
+            cursor_lines: None,
             ..StatusInfo::default()
         });
         chrome.install_file_tree(FileTree::new(root.clone()));

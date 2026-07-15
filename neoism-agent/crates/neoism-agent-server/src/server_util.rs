@@ -47,10 +47,23 @@ pub(crate) fn default_cache_dir() -> String {
 }
 
 pub(crate) fn default_config_dir() -> String {
+    // Shares `~/.config/neoism` with the app config — the agent reads
+    // its keys from the same `config.json` the terminal reads (each
+    // side ignores the other's keys; `NeoismConfig` has a flatten
+    // catch-all and the app's serde skips unknown fields). Skills live
+    // at `~/.config/neoism/skills`, markdown agent/mode/command
+    // definitions under `~/.config/neoism/{agent,mode,command}/*.md`.
+    // `NEOISM_AGENT_CONFIG_DIR` overrides everything — deployments and
+    // tests use it to pin (or isolate) the global config root.
+    if let Ok(dir) = std::env::var("NEOISM_AGENT_CONFIG_DIR") {
+        if !dir.trim().is_empty() {
+            return dir;
+        }
+    }
     std::env::var("XDG_CONFIG_HOME")
         .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.config")))
-        .map(|base| format!("{base}/neoism/agent"))
-        .unwrap_or_else(|_| ".neoism/config/agent".to_string())
+        .map(|base| format!("{base}/neoism"))
+        .unwrap_or_else(|_| ".neoism/config".to_string())
 }
 
 pub(crate) fn slug() -> String {

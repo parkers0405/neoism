@@ -18,10 +18,7 @@ use super::message_card::{measure_message_height, render_message_card};
 use super::tool_message::{
     cached_edit_diff_sections_for_parts, CachedToolDiffSections, ToolDiffSection,
 };
-use super::user_input::{
-    measure_permission_prompt_height, render_permission_prompt_row,
-    render_streaming_status_row,
-};
+use super::user_input::render_streaming_status_row;
 use super::{DEPTH, ORDER_CARET, STREAMING_STATUS_LINE_H};
 use crate::primitives::ide_theme::IdeTheme;
 use crate::widgets::scrollbar;
@@ -199,7 +196,6 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
         None
     }
     fn clear_tool_hit_rects(&mut self);
-    fn clear_permission_choice_hit_rects(&mut self);
     fn timeline_layout_epoch(&self) -> u64;
     fn take_timeline_dirty_marks(&mut self) -> TimelineDirtyMarks;
     fn take_timeline_layout_cache(&self) -> Option<TimelineLayoutCache<Self::Message>>;
@@ -280,18 +276,6 @@ pub trait AgentTimelineDelegate<P: AgentTimelinePane> {
         viewport_clip: [f32; 4],
         occlusion_rects: &[[f32; 4]],
     ) -> f32;
-
-    fn measure_permission_prompt_height(pane: &P, s: f32) -> f32;
-
-    fn render_permission_prompt_row(
-        sugarloaf: &mut Sugarloaf,
-        pane: &mut P,
-        rect: [f32; 4],
-        theme: &IdeTheme,
-        s: f32,
-        viewport_clip: [f32; 4],
-        occlusion_rects: &[[f32; 4]],
-    );
 
     fn render_streaming_status_row(
         sugarloaf: &mut Sugarloaf,
@@ -462,10 +446,6 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
 
             fn clear_tool_hit_rects(&mut self) {
                 <$pane>::clear_tool_hit_rects(self);
-            }
-
-            fn clear_permission_choice_hit_rects(&mut self) {
-                <$pane>::clear_permission_choice_hit_rects(self);
             }
 
             fn timeline_perf_enabled(&self) -> bool {
@@ -639,8 +619,6 @@ macro_rules! neoism_ui_impl_agent_timeline_delegate {
         $message:ty,
         measure_message_height = $measure_message_height:path,
         render_message_card = $render_message_card:path,
-        measure_permission_prompt_height = $measure_permission_prompt_height:path,
-        render_permission_prompt_row = $render_permission_prompt_row:path,
         render_streaming_status_row = $render_streaming_status_row:path $(,)?
     ) => {
         impl $crate::panels::agent_pane::view::timeline::AgentTimelineDelegate<$pane>
@@ -710,30 +688,6 @@ macro_rules! neoism_ui_impl_agent_timeline_delegate {
                     viewport_clip,
                     occlusion_rects,
                 )
-            }
-
-            fn measure_permission_prompt_height(pane: &$pane, s: f32) -> f32 {
-                $measure_permission_prompt_height(pane, s)
-            }
-
-            fn render_permission_prompt_row(
-                sugarloaf: &mut $crate::sugarloaf::Sugarloaf,
-                pane: &mut $pane,
-                rect: [f32; 4],
-                theme: &$crate::primitives::ide_theme::IdeTheme,
-                s: f32,
-                viewport_clip: [f32; 4],
-                occlusion_rects: &[[f32; 4]],
-            ) {
-                $render_permission_prompt_row(
-                    sugarloaf,
-                    pane,
-                    rect,
-                    theme,
-                    s,
-                    viewport_clip,
-                    occlusion_rects,
-                );
             }
 
             fn render_streaming_status_row(

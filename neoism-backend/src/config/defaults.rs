@@ -189,7 +189,9 @@ pub fn default_ime_cursor_positioning() -> bool {
 }
 
 pub fn default_config_file_content() -> String {
+    // Written to a fresh `config.json`. Comments are legal — the loader
+    // accepts JSONC (`//`, `/* */`, trailing commas).
     String::from(
-        "# See the full configuration reference: https://neoism.com/docs/config\n",
+        "// See the full configuration reference: https://neoism.com/docs/config\n{\n}\n",
     )
 }

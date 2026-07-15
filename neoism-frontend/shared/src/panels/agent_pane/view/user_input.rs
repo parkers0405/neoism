@@ -6,10 +6,7 @@ use crate::panels::agent_pane::state::{
     NeoismAgentStreamingState,
 };
 
-use super::draw::{
-    draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped, opts_with_clip,
-    wrap_text,
-};
+use super::draw::{draw_rect_clipped, draw_text_clipped, opts_with_clip, wrap_text};
 use super::wordmark::{format_elapsed, hsl_to_u8_simple};
 use super::{
     DEPTH, INPUT_LINE_H, MAX_INPUT_LINES, ORDER_PANEL, ORDER_TEXT,
@@ -94,6 +91,20 @@ pub trait AgentUserInputPane {
         choice: AgentPermissionChoice,
         rect: [f32; 4],
     );
+    fn clear_permission_choice_hit_rects(&mut self);
+    /// Pending `question`-tool request shown by the prompt picker. Both
+    /// panes store the shared `question_policy` struct directly, so no
+    /// associated type is needed (unlike permissions, which predate the
+    /// shared-state cutover).
+    fn pending_question(
+        &self,
+    ) -> Option<&crate::panels::agent_pane::question_policy::NeoismAgentPendingQuestion>;
+    fn clear_question_option_rects(&mut self);
+    fn register_question_option_rect(&mut self, index: usize, rect: [f32; 4]);
+    /// Card rect of the prompt picker drawn this frame (permission /
+    /// question), `None` when no prompt is pending — feeds the same
+    /// occlusion path as the "/" picker.
+    fn set_prompt_picker_rect(&mut self, rect: Option<[f32; 4]>);
 }
 
 #[macro_export]
@@ -274,6 +285,30 @@ macro_rules! neoism_ui_impl_agent_user_input {
                 };
                 <$pane>::register_permission_choice_rect(self, choice, rect);
             }
+
+            fn clear_permission_choice_hit_rects(&mut self) {
+                <$pane>::clear_permission_choice_hit_rects(self);
+            }
+
+            fn pending_question(
+                &self,
+            ) -> Option<
+                &$crate::panels::agent_pane::question_policy::NeoismAgentPendingQuestion,
+            > {
+                <$pane>::pending_question(self)
+            }
+
+            fn clear_question_option_rects(&mut self) {
+                <$pane>::clear_question_option_rects(self);
+            }
+
+            fn register_question_option_rect(&mut self, index: usize, rect: [f32; 4]) {
+                <$pane>::register_question_option_rect(self, index, rect);
+            }
+
+            fn set_prompt_picker_rect(&mut self, rect: Option<[f32; 4]>) {
+                <$pane>::set_prompt_picker_rect(self, rect);
+            }
         }
     };
 }
@@ -435,6 +470,29 @@ impl AgentUserInputPane for NeoismAgentPane {
         };
         NeoismAgentPane::register_permission_choice_rect(self, choice, rect);
     }
+
+    fn clear_permission_choice_hit_rects(&mut self) {
+        NeoismAgentPane::clear_permission_choice_hit_rects(self);
+    }
+
+    fn pending_question(
+        &self,
+    ) -> Option<&crate::panels::agent_pane::question_policy::NeoismAgentPendingQuestion>
+    {
+        NeoismAgentPane::pending_question(self)
+    }
+
+    fn clear_question_option_rects(&mut self) {
+        NeoismAgentPane::clear_question_option_rects(self);
+    }
+
+    fn register_question_option_rect(&mut self, index: usize, rect: [f32; 4]) {
+        NeoismAgentPane::register_question_option_rect(self, index, rect);
+    }
+
+    fn set_prompt_picker_rect(&mut self, rect: Option<[f32; 4]>) {
+        NeoismAgentPane::set_prompt_picker_rect(self, rect);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -452,19 +510,11 @@ pub fn render_user_message(
 ) -> f32 {
     let bubble_w = w.max(160.0 * s);
     let bubble_x = x;
-    draw_rounded_rect_clipped(
+    draw_rect_clipped(
         sugarloaf,
         [bubble_x, y, bubble_w, h],
         theme.f32(theme.surface),
-        14.0 * s,
         ORDER_PANEL,
-        viewport_clip,
-    );
-    draw_rect_clipped(
-        sugarloaf,
-        [bubble_x, y + 10.0 * s, 3.0 * s, (h - 20.0 * s).max(0.0)],
-        theme.f32(theme.blue),
-        ORDER_TEXT,
         viewport_clip,
     );
     let Some(opts) = opts_with_clip(
@@ -522,7 +572,7 @@ pub fn render_input(
     // as a smeared bg band around the border, not as depth.
     let corner_radius = if show_status { 18.0 } else { 14.0 } * s;
     let chips_band_h = CHIPS_BAND_H * s;
-    let outer_stroke = (1.0 * s).max(1.0);
+    let outer_stroke = (FRAME_STROKE * s).max(2.0);
     let box_x = x;
     let box_y = y;
     let box_w = w;
@@ -1107,222 +1157,6 @@ pub fn render_streaming_status_row(
         );
     } else {
         pane.clear_background_status_rect();
-    }
-}
-
-pub fn measure_permission_prompt_height(pane: &impl AgentUserInputPane, s: f32) -> f32 {
-    let Some(permission) = pane.pending_permission() else {
-        return 0.0;
-    };
-    let pattern_rows = permission.patterns().len().min(2) as f32;
-    (122.0 + pattern_rows * 16.0 + 60.0) * s
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn render_permission_prompt_row(
-    sugarloaf: &mut Sugarloaf,
-    pane: &mut impl AgentUserInputPane,
-    rect: [f32; 4],
-    theme: &IdeTheme,
-    s: f32,
-    viewport_clip: [f32; 4],
-    occlusion_rects: &[[f32; 4]],
-) {
-    let Some(permission) = pane.pending_permission().cloned() else {
-        return;
-    };
-    let [x, y, w, h] = rect;
-    if w <= 0.0 || h <= 0.0 {
-        return;
-    }
-    draw_rounded_rect_clipped(
-        sugarloaf,
-        [x, y, w, h],
-        theme.f32(theme.surface),
-        10.0 * s,
-        ORDER_PANEL,
-        viewport_clip,
-    );
-    draw_rect_clipped(
-        sugarloaf,
-        [x, y + 10.0 * s, 3.0 * s, (h - 20.0 * s).max(0.0)],
-        theme.f32(theme.yellow),
-        ORDER_TEXT,
-        viewport_clip,
-    );
-
-    let title_opts = DrawOpts {
-        font_size: 12.0 * s,
-        color: theme.u8(theme.yellow),
-        bold: true,
-        clip_rect: Some(viewport_clip),
-        ..DrawOpts::default()
-    };
-    let header = if permission
-        .parent_session_id()
-        .is_some_and(|parent| Some(parent) == pane.session_id_str())
-    {
-        if let Some(agent) = permission.source_agent() {
-            format!("Subagent @{agent} permission")
-        } else {
-            "Subagent permission required".to_string()
-        }
-    } else {
-        "Permission required".to_string()
-    };
-    draw_text_clipped(
-        sugarloaf,
-        x + 18.0 * s,
-        y + 12.0 * s,
-        &header,
-        &title_opts,
-        occlusion_rects,
-    );
-
-    let body_opts = DrawOpts {
-        font_size: 13.5 * s,
-        color: theme.u8(theme.fg),
-        bold: true,
-        clip_rect: Some(viewport_clip),
-        ..DrawOpts::default()
-    };
-    let body = if permission.title().trim().is_empty() {
-        "Allow tool?"
-    } else {
-        permission.title()
-    };
-    draw_text_clipped(
-        sugarloaf,
-        x + 18.0 * s,
-        y + 34.0 * s,
-        body,
-        &body_opts,
-        occlusion_rects,
-    );
-
-    let meta_opts = DrawOpts {
-        font_size: 11.0 * s,
-        color: theme.u8(theme.muted),
-        clip_rect: Some(viewport_clip),
-        ..DrawOpts::default()
-    };
-    let mut meta_y = y + 55.0 * s;
-    let permission_label = if permission.permission().trim().is_empty() {
-        "tool"
-    } else {
-        permission.permission()
-    };
-    draw_text_clipped(
-        sugarloaf,
-        x + 18.0 * s,
-        meta_y,
-        &format!("permission: {permission_label}"),
-        &meta_opts,
-        occlusion_rects,
-    );
-    meta_y += 16.0 * s;
-    for pattern in permission.patterns().iter().take(2) {
-        draw_text_clipped(
-            sugarloaf,
-            x + 18.0 * s,
-            meta_y,
-            pattern,
-            &meta_opts,
-            occlusion_rects,
-        );
-        meta_y += 16.0 * s;
-    }
-
-    // Visual order Always, Yes, No; the second tuple field is the index
-    // into NeoismAgentPendingPermission.selected (0=Yes, 1=Always, 2=No),
-    // which the keyboard handler in screen/bridges/agent.rs depends on.
-    let choices = [
-        ("Always", "a", 1usize),
-        ("Yes", "enter", 0usize),
-        ("No", "n", 2usize),
-    ];
-    let row_h = 30.0 * s;
-    let choice_x = x + 18.0 * s;
-    let first_row_y = y + h - 37.0 * s - row_h * (choices.len() as f32 - 1.0);
-    for (visual_index, (label, hint, selected_index)) in choices.iter().enumerate() {
-        let row_y = first_row_y + row_h * visual_index as f32;
-        let selected =
-            *selected_index == permission.selected() && !permission.responding();
-        let text = if selected {
-            format!("> {label}")
-        } else {
-            format!("  {label}")
-        };
-        let opts = DrawOpts {
-            font_size: 12.0 * s,
-            color: if selected {
-                theme.u8(theme.black)
-            } else if *selected_index == 2 {
-                theme.u8(theme.red)
-            } else {
-                theme.u8(theme.dim)
-            },
-            bold: selected,
-            clip_rect: Some(viewport_clip),
-            ..DrawOpts::default()
-        };
-        let hint_opts = DrawOpts {
-            font_size: 10.5 * s,
-            color: if selected {
-                theme.u8(theme.black)
-            } else {
-                theme.u8(theme.muted)
-            },
-            clip_rect: Some(viewport_clip),
-            ..DrawOpts::default()
-        };
-        let text_w = sugarloaf.text_mut().measure(&text, &opts);
-        let hint_w = sugarloaf.text_mut().measure(hint, &hint_opts);
-        let chip_w = (text_w + hint_w + 24.0 * s).max(58.0 * s);
-        let hit_rect = [choice_x - 8.0 * s, row_y - 6.0 * s, chip_w, 25.0 * s];
-        let choice = match *selected_index {
-            1 => AgentPermissionChoice::Always,
-            2 => AgentPermissionChoice::Reject,
-            _ => AgentPermissionChoice::Once,
-        };
-        pane.register_permission_choice_rect(choice, hit_rect);
-        if selected {
-            draw_rounded_rect_clipped(
-                sugarloaf,
-                hit_rect,
-                theme.f32(theme.yellow),
-                5.0 * s,
-                ORDER_TEXT,
-                viewport_clip,
-            );
-        }
-        draw_text_clipped(sugarloaf, choice_x, row_y, &text, &opts, occlusion_rects);
-        draw_text_clipped(
-            sugarloaf,
-            choice_x + chip_w - hint_w - 12.0 * s,
-            row_y + 1.0 * s,
-            hint,
-            &hint_opts,
-            occlusion_rects,
-        );
-    }
-
-    if permission.responding() {
-        let opts = DrawOpts {
-            font_size: 12.0 * s,
-            color: theme.u8(theme.muted),
-            italic: true,
-            clip_rect: Some(viewport_clip),
-            ..DrawOpts::default()
-        };
-        draw_text_clipped(
-            sugarloaf,
-            x + w - 104.0 * s,
-            y + 13.0 * s,
-            "sending",
-            &opts,
-            occlusion_rects,
-        );
     }
 }
 

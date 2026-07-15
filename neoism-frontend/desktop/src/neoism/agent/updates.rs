@@ -21,6 +21,7 @@ use super::pane::{
 use super::side_panel::SessionGoal;
 
 const CONNECT_HEADER_TIMEOUT: Duration = Duration::from_secs(3);
+const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 pub(super) enum AgentSessionUpdate {
     Messages(Vec<NeoismAgentMessage>),
@@ -79,6 +80,12 @@ pub(super) enum AgentSessionUpdate {
     PermissionReplied {
         request_id: String,
         session_id: Option<String>,
+    },
+    QuestionAsked(
+        neoism_ui::panels::agent_pane::question_policy::NeoismAgentPendingQuestion,
+    ),
+    QuestionRemoved {
+        request_id: String,
     },
     GoalUpdated {
         goal: Option<SessionGoal>,
@@ -150,25 +157,7 @@ pub(super) fn start_session_event_stream(
     if let Err(error) = thread::Builder::new()
         .name(format!("neoism-agent-events-{thread_session_id}"))
         .spawn(move || {
-            match open_event_stream_with_deadline(&server, &thread_session_id) {
-                Ok(connection) => {
-                    read_event_stream(
-                        connection,
-                        server,
-                        thread_session_id,
-                        thread_tx,
-                        stream_stop,
-                    );
-                }
-                Err(error) => {
-                    if !stream_stop.load(Ordering::Relaxed) {
-                        let _ = thread_tx.send(AgentSessionUpdate::System {
-                            title: "Neoism Agent".to_string(),
-                            body: error,
-                        });
-                    }
-                }
-            }
+            run_event_stream(server, thread_session_id, thread_tx, stream_stop);
         })
     {
         let _ = tx.send(AgentSessionUpdate::System {
@@ -183,6 +172,70 @@ pub(super) fn start_session_event_stream(
         stop,
         disconnected: false,
     }
+}
+
+fn run_event_stream(
+    server: String,
+    session_id: String,
+    tx: Sender<AgentSessionUpdate>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut connected_once = false;
+    while !stop.load(Ordering::Relaxed) {
+        match open_event_stream_with_deadline(&server, &session_id) {
+            Ok(connection) => {
+                if connected_once {
+                    // The stream is subscribed before the snapshot is fetched, so live
+                    // events cannot slip between reconnect and reconciliation.
+                    match fetch_session_messages(&server, &session_id) {
+                        Ok(messages) => {
+                            if tx.send(AgentSessionUpdate::Messages(messages)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) if !stop.load(Ordering::Relaxed) => {
+                            let _ = tx.send(AgentSessionUpdate::System {
+                                title: "Neoism Agent".to_string(),
+                                body: error,
+                            });
+                        }
+                        Err(_) => return,
+                    }
+                }
+                connected_once = true;
+                read_event_stream(
+                    connection,
+                    server.clone(),
+                    session_id.clone(),
+                    tx.clone(),
+                    stop.clone(),
+                );
+            }
+            Err(error) if !connected_once && !stop.load(Ordering::Relaxed) => {
+                let _ = tx.send(AgentSessionUpdate::System {
+                    title: "Neoism Agent".to_string(),
+                    body: error,
+                });
+                connected_once = true;
+            }
+            Err(_) => {}
+        }
+
+        if !sleep_until_reconnect(&stop) {
+            return;
+        }
+    }
+}
+
+fn sleep_until_reconnect(stop: &AtomicBool) -> bool {
+    let deadline = Instant::now() + RECONNECT_DELAY;
+    while Instant::now() < deadline {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    true
 }
 
 fn open_event_stream_with_deadline(
@@ -394,6 +447,12 @@ fn send_event_updates(
                 request_id,
                 session_id,
             })?,
+            SessionEventUpdate::QuestionAsked(question) => {
+                tx.send(AgentSessionUpdate::QuestionAsked(question))?;
+            }
+            SessionEventUpdate::QuestionRemoved { request_id } => {
+                tx.send(AgentSessionUpdate::QuestionRemoved { request_id })?;
+            }
             SessionEventUpdate::GoalUpdated { goal, version } => {
                 tx.send(AgentSessionUpdate::GoalUpdated { goal, version })?;
             }

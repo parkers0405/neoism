@@ -57,6 +57,7 @@ impl NeoismAgentPane {
             SlashCommandAction::ShowMcp => self.show_mcp(),
             SlashCommandAction::ShowPermissions => self.show_permissions(),
             SlashCommandAction::ShowQuestions => self.show_questions(),
+            SlashCommandAction::ToggleSkipPermissions => self.toggle_skip_permissions(),
             SlashCommandAction::HandlePermit(args) => self.handle_permit(&args),
             SlashCommandAction::HandleAnswer(answer) => self.handle_answer(&answer),
             SlashCommandAction::HandleReject(id) => self.handle_reject(id.as_deref()),

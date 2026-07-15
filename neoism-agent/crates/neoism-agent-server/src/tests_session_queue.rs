@@ -61,13 +61,28 @@ async fn provider_event_poll_returns_when_cancelled_without_provider_event() {
 
     let poll = tokio::time::timeout(
         Duration::from_secs(1),
-        next_provider_stream_event(&mut events, &cancellation),
+        next_provider_stream_event(&mut events, &cancellation, Duration::from_secs(1)),
     )
     .await
     .expect("provider event poll should observe cancellation");
 
     assert!(matches!(poll, ProviderEventPoll::Cancelled));
     cancel_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_event_poll_times_out_without_provider_event() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (_tx, rx) =
+        tokio::sync::mpsc::unbounded_channel::<anyhow::Result<ProviderStreamEvent>>();
+    let mut events: provider::ProviderEventStream =
+        Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
+
+    let poll =
+        next_provider_stream_event(&mut events, &cancellation, Duration::from_millis(20))
+            .await;
+
+    assert!(matches!(poll, ProviderEventPoll::TimedOut));
 }
 
 #[tokio::test]

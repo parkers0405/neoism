@@ -151,7 +151,6 @@ fn run_workspace_init_command() -> Result<bool, Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
     let workspace = workspace::init_workspace(&root)?;
-    workspace::register_workspace(&workspace)?;
     let index = workspace::notes::WorkspaceNoteIndex::build(&workspace)?;
     workspace::rebuild_note_graph(&workspace, &index)?;
     println!(
@@ -163,7 +162,6 @@ fn run_workspace_init_command() -> Result<bool, Box<dyn std::error::Error>> {
         "Config: {}",
         workspace::config::workspace_config_path(&workspace.root).display()
     );
-    println!("Registry: {}", workspace::registry_path().display());
     println!(
         "Note graph: {}",
         workspace::workspace_graph_db_path(&workspace).display()

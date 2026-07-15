@@ -144,6 +144,15 @@ pub fn map_outbound_command(
             .unwrap_or(Mapping::Unsupported(
                 "permission reply requires an active session",
             )),
+        // The daemon websocket protocol has no question envelopes yet —
+        // desktop answers over HTTP (`/question/{id}/reply`); web will
+        // follow once `AgentClientMessage` grows a question pair.
+        Cmd::ReplyQuestion { .. } => {
+            Mapping::Unsupported("question replies aren't wired over the web bridge yet")
+        }
+        Cmd::RejectQuestion { .. } => {
+            Mapping::Unsupported("question replies aren't wired over the web bridge yet")
+        }
         Cmd::ApplyAgent { session_id, agent } => {
             Mapping::Messages(vec![Msg::SetAgent { session_id, agent }])
         }

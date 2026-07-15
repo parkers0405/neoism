@@ -532,7 +532,7 @@ export class TerminalPanel {
   private currentFontScale = 1.0;
   private activeThemeName: (typeof WEB_IDE_THEMES)[number] = "pastel_dark";
   private fallbackFontFamily =
-    "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace";
+    "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', monospace";
   private activeShaderFilter: string | null = null;
   private paneOverlaySuppressed = false;
   private rafHandle: number | null = null;

@@ -295,6 +295,45 @@ impl Screen<'_> {
             return true;
         }
 
+        // Model question prompt (the `question` tool). Same modal
+        // precedence as permissions: arrows pick an option, typing
+        // filters / free-answers into the prompt picker's search row,
+        // Enter commits, Esc rejects so the run resumes.
+        if agent.pending_question().is_some() {
+            if agent.picker().is_some() {
+                agent.close_picker();
+            }
+            match key.logical_key.as_ref() {
+                Key::Named(NamedKey::Enter) => {
+                    agent.submit_pending_question();
+                }
+                Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+                    let delta = if mods.shift_key() { -1 } else { 1 };
+                    agent.move_question_selection(delta);
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    agent.move_question_selection(-1);
+                }
+                Key::Named(NamedKey::Escape) => {
+                    agent.reject_pending_question();
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    agent.question_backspace();
+                }
+                Key::Named(NamedKey::Space) => {
+                    agent.question_type_str(" ");
+                }
+                Key::Character(text)
+                    if !mods.control_key() && !mods.alt_key() && !mods.super_key() =>
+                {
+                    agent.question_type_str(text);
+                }
+                _ => {}
+            }
+            self.mark_dirty();
+            return true;
+        }
+
         match key.logical_key.as_ref() {
             Key::Named(NamedKey::Enter) => {
                 if mods.shift_key() && agent.picker().is_none() {
@@ -1030,6 +1069,16 @@ impl Screen<'_> {
             .as_mut()
             .is_some_and(|agent| agent.respond_permission_at(mx, my));
         if permission_hit {
+            self.mark_dirty();
+            return true;
+        }
+        let question_hit = self
+            .context_manager
+            .current_mut()
+            .neoism_agent
+            .as_mut()
+            .is_some_and(|agent| agent.respond_question_at(mx, my));
+        if question_hit {
             self.mark_dirty();
             return true;
         }

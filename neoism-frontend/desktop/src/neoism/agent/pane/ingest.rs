@@ -43,6 +43,7 @@ impl NeoismAgentPane {
                     };
                     if structural || !dirty_indices.is_empty() {
                         self.messages = messages;
+                        self.rebase_current_turn_trace();
                         if structural {
                             self.invalidate_timeline_layout();
                         } else {
@@ -198,6 +199,15 @@ impl NeoismAgentPane {
                     }
                     if self.remove_pending_permission(&request_id) {
                         self.sync_subagent_waiting_clock();
+                        changed = true;
+                    }
+                }
+                AgentSessionUpdate::QuestionAsked(question) => {
+                    self.enqueue_pending_question(question);
+                    changed = true;
+                }
+                AgentSessionUpdate::QuestionRemoved { request_id } => {
+                    if self.remove_pending_question(&request_id) {
                         changed = true;
                     }
                 }
@@ -368,6 +378,14 @@ impl NeoismAgentPane {
                     self.execute_reply_permission_command(id, reply);
                     changed = true;
                 }
+                OutboundAgentCommand::ReplyQuestion { id, answers } => {
+                    self.execute_reply_question_command(id, answers);
+                    changed = true;
+                }
+                OutboundAgentCommand::RejectQuestion { id } => {
+                    self.execute_reject_question_command(id);
+                    changed = true;
+                }
                 OutboundAgentCommand::SlashCommand { name, args } => {
                     self.execute_server_command(name, args);
                     changed = true;
@@ -461,6 +479,43 @@ impl NeoismAgentPane {
         }
     }
 
+    pub(crate) fn execute_reply_question_command(
+        &mut self,
+        id: String,
+        answers: Vec<Vec<String>>,
+    ) {
+        let body = json!({ "answers": answers });
+        match api_request_json(
+            &self.server,
+            "POST",
+            &format!("/question/{id}/reply"),
+            Some(&body),
+        ) {
+            Ok(_) => {
+                self.question_reply_succeeded(&id);
+            }
+            Err(error) => {
+                self.question_reply_failed(&id, error);
+            }
+        }
+    }
+
+    pub(crate) fn execute_reject_question_command(&mut self, id: String) {
+        match api_request_json(
+            &self.server,
+            "POST",
+            &format!("/question/{id}/reject"),
+            None,
+        ) {
+            Ok(_) => {
+                self.question_reply_succeeded(&id);
+            }
+            Err(error) => {
+                self.question_reply_failed(&id, error);
+            }
+        }
+    }
+
     pub(crate) fn permission_reply_succeeded(&mut self, id: &str, reply: &str) -> bool {
         if id.is_empty() {
             return false;
@@ -475,6 +530,9 @@ impl NeoismAgentPane {
                 format!("Permission: {id}: {reply}"),
                 NeoismAgentNoticeLevel::Info,
             );
+            // /yolo — the queue promotion made the next request
+            // current; keep auto-answering until the queue drains.
+            self.maybe_auto_respond_permission();
             return true;
         }
         self.remove_pending_permission(id)
@@ -710,6 +768,18 @@ impl NeoismAgentPane {
                 .map_or(0, |index| index + 1),
         );
         self.invalidate_timeline_layout();
+    }
+
+    pub(crate) fn rebase_current_turn_trace(&mut self) {
+        if self.timeline_live_trace_start.is_none() {
+            return;
+        }
+        self.timeline_live_trace_start = Some(
+            self.messages
+                .iter()
+                .rposition(|message| message.kind == NeoismAgentMessageKind::User)
+                .map_or(0, |index| index + 1),
+        );
     }
 
     pub(crate) fn mark_timeline_message_dirty_at(&mut self, index: usize) {

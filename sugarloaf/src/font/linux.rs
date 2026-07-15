@@ -12,6 +12,8 @@ use std::sync::OnceLock;
 // its `[lib]` name is `fontconfig_sys`. Constants (FC_FAMILY, FC_CHARSET,
 // …) live in a `constants` submodule rather than the crate root, so we
 // pull them in explicitly.
+use font_kit::handle::Handle;
+use font_kit::source::SystemSource;
 use fontconfig_sys as fc;
 use fontconfig_sys::constants::{
     FC_CHARSET, FC_FAMILY, FC_FILE, FC_INDEX, FC_LANG, FC_MONO, FC_SLANT,
@@ -57,10 +59,14 @@ fn fc_config() -> *mut fc::FcConfig {
 pub fn discover_fallback(
     primary_family: &str,
     ch: char,
+    prefer_emoji: bool,
     want_mono: bool,
     want_bold: bool,
     want_italic: bool,
 ) -> Option<(PathBuf, u32)> {
+    if prefer_emoji {
+        return discover_color_emoji(ch);
+    }
     let cfg = fc_config();
     if cfg.is_null() {
         return None;
@@ -87,7 +93,11 @@ pub fn discover_fallback(
 
         // Family hint — fontconfig prefers fonts whose family name
         // matches or that have a strong alias to the primary.
-        let family_c = match CString::new(primary_family) {
+        let family_c = match CString::new(if prefer_emoji {
+            "emoji"
+        } else {
+            primary_family
+        }) {
             Ok(s) => s,
             Err(_) => CString::new("monospace").unwrap(),
         };
@@ -171,6 +181,27 @@ pub fn discover_fallback(
 
         answer
     }
+}
+
+fn discover_color_emoji(ch: char) -> Option<(PathBuf, u32)> {
+    let source = SystemSource::new();
+    for family_name in ["Apple Color Emoji", "Noto Color Emoji", "Segoe UI Emoji"] {
+        let Ok(family) = source.select_family_by_name(family_name) else {
+            continue;
+        };
+        for handle in family.fonts() {
+            let Ok(font) = handle.load() else {
+                continue;
+            };
+            if !font.glyph_for_char(ch).is_some() {
+                continue;
+            }
+            if let Handle::Path { path, font_index } = handle {
+                return Some((path.clone(), *font_index));
+            }
+        }
+    }
+    None
 }
 
 /// `true` if the candidate pattern's `FC_CHARSET` contains `ch`. Some

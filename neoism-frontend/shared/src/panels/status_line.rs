@@ -189,7 +189,11 @@ pub struct StatusInfo {
     /// `pyright+1`. When absent, the pill falls back to `LSP`.
     pub lsp_label: Option<String>,
     pub project: Option<String>,
-    pub tab_position: Option<(usize, usize)>,
+    /// nvim-style ruler for the right cluster: cursor line / total
+    /// lines of the active *editor* surface (nvim buffer or markdown
+    /// pane). `None` on terminal panes — a terminal has no meaningful
+    /// line position, so the pill hides entirely.
+    pub cursor_lines: Option<(usize, usize)>,
     pub diagnostics: DiagnosticCounts,
     /// Directory shown in the cwd pill on the left cluster. Populated
     /// for every active-pane kind (editor / markdown / terminal) — the
@@ -202,6 +206,12 @@ pub struct StatusInfo {
     /// label so a pending count reads as "waiting for a motion"
     /// instead of a hang; the UI hides nvim's own cmdline entirely.
     pub pending_keys: Option<String>,
+    /// Measured frames-per-second of the host window's render loop,
+    /// already smoothed by the host. `None` hides the pill (config off
+    /// or no measurement yet). Purely display — the pill never drives
+    /// redraws itself, so an idle window just freezes at the last
+    /// measured burst.
+    pub fps: Option<u32>,
 }
 
 /// Rectangle of one diagnostic pill in window-logical coordinates.
@@ -1254,7 +1264,7 @@ impl StatusLine {
                 text_fg,
             });
         }
-        if let Some((cur, total)) = self.info.tab_position {
+        if let Some((cur, total)) = self.info.cursor_lines {
             right.push(TwoTonePill {
                 icon_glyph: status_glyph("status.lines", GLYPH_LINES),
                 label: format!(" {cur}/{total}"),
@@ -1262,6 +1272,21 @@ impl StatusLine {
                 icon_fg: palette.u8(palette.black),
                 text_bg: palette.f32(palette.surface),
                 text_fg: palette.u8(palette.green),
+            });
+        }
+        // Frame-rate pill. The colored section carries the literal
+        // "FPS" tag (packs can still swap it via the icon key) and the
+        // surface section carries just the number. Last in the vec so
+        // the overflow loop drops it before the tab-position / LSP
+        // pills when width gets tight.
+        if let Some(fps) = self.info.fps {
+            right.push(TwoTonePill {
+                icon_glyph: status_glyph("status.fps", "FPS"),
+                label: format!(" {fps}"),
+                icon_bg: palette.f32(palette.cyan),
+                icon_fg: palette.u8(palette.black),
+                text_bg: palette.f32(palette.surface),
+                text_fg: palette.u8(palette.cyan),
             });
         }
 

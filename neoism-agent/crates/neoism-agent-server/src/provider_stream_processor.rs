@@ -20,7 +20,9 @@ use crate::provider::ProviderStream;
 use crate::provider_stream_message::{
     finish_provider_stream_success, finish_provider_stream_with_error,
 };
-use crate::session_loop::{next_provider_stream_event, ProviderEventPoll};
+use crate::session_loop::{
+    next_provider_stream_event, provider_stream_idle_timeout, ProviderEventPoll,
+};
 use crate::session_retry;
 use crate::state::AppState;
 use crate::tool_runtime::execute_tool_call_with_permission_wait;
@@ -142,28 +144,64 @@ pub(crate) async fn run_provider_stream_step(
         provider_stream.model_id,
     );
     let mut saw_progress = false;
+    let idle_timeout = provider_stream_idle_timeout();
     loop {
-        let event =
-            match next_provider_stream_event(&mut provider_events, cancellation).await {
-                ProviderEventPoll::Event(event) => event,
-                ProviderEventPoll::End => break,
-                ProviderEventPoll::Cancelled => {
-                    finish_provider_stream_with_error(
-                        ctx.state,
-                        ctx.session_id,
-                        ctx.session_id_text,
-                        ctx.run_id,
-                        ctx.text_part_id.as_str(),
-                        ctx.live_message,
-                        "Session aborted".to_string(),
-                    )
-                    .await
-                    .map_err(|error| {
-                        ProviderStreamStepError::unfinalized(error.to_string(), false)
-                    })?;
-                    return Err(ProviderStreamStepError::finalized("Session aborted"));
+        let event = match next_provider_stream_event(
+            &mut provider_events,
+            cancellation,
+            idle_timeout,
+        )
+        .await
+        {
+            ProviderEventPoll::Event(event) => event,
+            ProviderEventPoll::End => break,
+            ProviderEventPoll::Cancelled => {
+                finish_provider_stream_with_error(
+                    ctx.state,
+                    ctx.session_id,
+                    ctx.session_id_text,
+                    ctx.run_id,
+                    ctx.text_part_id.as_str(),
+                    ctx.live_message,
+                    "Session aborted".to_string(),
+                )
+                .await
+                .map_err(|error| {
+                    ProviderStreamStepError::unfinalized(error.to_string(), false)
+                })?;
+                return Err(ProviderStreamStepError::finalized("Session aborted"));
+            }
+            ProviderEventPoll::TimedOut => {
+                let message = format!(
+                    "Provider stream timed out after {} ms without an event",
+                    idle_timeout.as_millis()
+                );
+                tracing::warn!(
+                    session_id = %ctx.session_id,
+                    run_id = ctx.run_id,
+                    timeout_ms = idle_timeout.as_millis(),
+                    saw_progress,
+                    "provider stream idle timeout"
+                );
+                if !saw_progress {
+                    return Err(ProviderStreamStepError::unfinalized(message, true));
                 }
-            };
+                finish_provider_stream_with_error(
+                    ctx.state,
+                    ctx.session_id,
+                    ctx.session_id_text,
+                    ctx.run_id,
+                    ctx.text_part_id.as_str(),
+                    ctx.live_message,
+                    message.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    ProviderStreamStepError::unfinalized(error.to_string(), false)
+                })?;
+                return Err(ProviderStreamStepError::finalized(message));
+            }
+        };
         if cancellation.load(Ordering::SeqCst) {
             finish_provider_stream_with_error(
                 ctx.state,

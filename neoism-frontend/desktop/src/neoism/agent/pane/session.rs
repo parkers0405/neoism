@@ -1,6 +1,17 @@
 use super::*;
 
 impl NeoismAgentPane {
+    pub fn switch_server(&mut self, server: String) {
+        let server = server.trim_end_matches('/').to_string();
+        if self.server == server {
+            return;
+        }
+        let directory = self.directory.clone();
+        *self = Self::default();
+        self.server = server;
+        self.directory = directory;
+    }
+
     pub fn pop_wordmark_click(&mut self, x: f32, y: f32) -> bool {
         let Some([rx, ry, rw, rh]) = self.wordmark.rect else {
             return false;

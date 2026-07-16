@@ -1,40 +1,27 @@
-//! Shell-out operations: Neoism-notes workspace init / reindex / create,
-//! git-backed workspace snapshot export, and the local Docker sandbox
-//! helpers. Pure code-move out of the former monolithic `workspace.rs`.
+//! Shell-out operations: Neoism-notes note create, git-backed workspace
+//! snapshot export, and the local Docker sandbox helpers. Pure code-move
+//! out of the former monolithic `workspace.rs`.
 
 use super::*;
 
-pub(crate) fn init_neoism_workspace(root: &Path) -> Result<String, String> {
-    let workspace = neoism_workspace_index::init_workspace(root).map_err(|e| {
-        format!(
-            "failed to initialize notes workspace {}: {e}",
-            root.display()
-        )
-    })?;
-    Ok(format!(
-        "initialized {} using notes vault {}",
-        workspace.root.display(),
-        workspace.notes_workspace_dir().display()
-    ))
-}
-
-pub(crate) fn reindex_neoism_notes(root: &Path) -> Result<String, String> {
-    let workspace = neoism_workspace_index::load_workspace(root)
-        .map_err(|e| format!("failed to load notes workspace {}: {e}", root.display()))?
-        .ok_or_else(|| "Run Init Neoism Workspace first".to_string())?;
-    let index = WorkspaceNoteIndex::build(&workspace)
-        .map_err(|e| format!("failed to index notes for {}: {e}", root.display()))?;
-    neoism_workspace_index::rebuild_note_graph(&workspace, &index).map_err(|e| {
-        format!("failed to rebuild notes graph for {}: {e}", root.display())
-    })?;
-    let count = index.notes.len();
-    Ok(format!("indexed {count} note{}", plural_suffix(count)))
+/// Resolve the notes vault a note created from `root` should land in,
+/// mirroring the desktop's `notes_workspace_for_root_or_default`: an
+/// explicitly linked project vault wins, then a directory-local
+/// workspace config, and otherwise the global Default vault
+/// (`~/Neoism/Vaults/Default`). Never initializes `root` itself.
+fn notes_workspace_for_root(
+    root: &Path,
+) -> neoism_workspace_index::config::NeoismWorkspace {
+    neoism_workspace_index::linked_project_for_code_dir(root)
+        .ok()
+        .flatten()
+        .or_else(|| neoism_workspace_index::load_workspace(root).ok().flatten())
+        .filter(|workspace| workspace.config.notes.enabled)
+        .unwrap_or_else(neoism_workspace_index::default_notes_workspace)
 }
 
 pub(crate) fn create_neoism_note(root: &Path) -> Result<PathBuf, String> {
-    let workspace = neoism_workspace_index::load_workspace(root)
-        .map_err(|e| format!("failed to load notes workspace {}: {e}", root.display()))?
-        .ok_or_else(|| "Run Init Neoism Workspace first".to_string())?;
+    let workspace = notes_workspace_for_root(root);
     let notes_dir = workspace.notes_workspace_dir();
     std::fs::create_dir_all(&notes_dir)
         .map_err(|e| format!("failed to create {}: {e}", notes_dir.display()))?;
@@ -277,12 +264,4 @@ fn unique_note_path(dir: &Path) -> Result<PathBuf, String> {
         }
     }
     Err(format!("No available note filename in {}", dir.display()))
-}
-
-fn plural_suffix(count: usize) -> &'static str {
-    if count == 1 {
-        ""
-    } else {
-        "s"
-    }
 }

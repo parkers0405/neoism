@@ -298,15 +298,34 @@ impl MarkdownPane {
     /// shown as the note's big inline title (and editable right there in
     /// the metadata section like any other line).
     pub(super) fn frontmatter_title(&self) -> Option<String> {
+        self.frontmatter_property("title")
+    }
+
+    /// A frontmatter property's trimmed value (quotes stripped), when the
+    /// note has a properties block and the key is present and non-empty.
+    pub fn frontmatter_property(&self, key: &str) -> Option<String> {
         let fm = self.frontmatter_range()?;
         self.lines[fm].iter().find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            if !key.trim().eq_ignore_ascii_case("title") {
+            let (k, value) = line.split_once(':')?;
+            if !k.trim().eq_ignore_ascii_case(key) {
                 return None;
             }
-            let value = value.trim();
+            let value = value.trim().trim_matches('"').trim_matches('\'');
             (!value.is_empty()).then(|| value.to_string())
         })
+    }
+
+    /// Notion-style page icon: the `icon:` property (an emoji), rendered
+    /// large above the title.
+    pub fn frontmatter_icon(&self) -> Option<String> {
+        self.frontmatter_property("icon")
+    }
+
+    /// Notion-style cover banner: the `cover:` property — a bundled cover
+    /// name (resolved against the covers directory by the host) or a
+    /// path. Rendered edge-to-edge above the icon/title.
+    pub fn frontmatter_cover(&self) -> Option<String> {
+        self.frontmatter_property("cover")
     }
 
     /// YAML-frontmatter line range: a `---` fence pair starting at line 0,

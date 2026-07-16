@@ -769,8 +769,37 @@ pub(crate) fn find_in_line(
     if from > limit {
         return None;
     }
+    // Vim smartcase: an all-lowercase pattern matches case-insensitively,
+    // any uppercase makes it exact. ASCII lowering preserves byte offsets
+    // so every col below stays valid in the original line.
+    let sensitive = pattern.chars().any(char::is_uppercase);
+    let (hay_buf, pat_buf);
+    let (hay, pat): (&str, &str) = if sensitive {
+        (line, pattern)
+    } else {
+        hay_buf = line.to_ascii_lowercase();
+        pat_buf = pattern.to_ascii_lowercase();
+        (&hay_buf, &pat_buf)
+    };
+    // Multi-word pattern: the line matches when EVERY word appears (any
+    // order); the hit anchors at the first word so `/docker workspace`
+    // finds "workspace ... docker" lines instead of only the exact
+    // sentence.
+    let terms: Vec<&str> = pat.split_whitespace().collect();
+    if terms.len() > 1 {
+        let window = &hay[from..limit];
+        if !terms.iter().all(|term| window.contains(term)) {
+            return None;
+        }
+        let offset = if last {
+            window.rfind(terms[0])?
+        } else {
+            window.find(terms[0])?
+        };
+        return Some(from + offset);
+    }
     let mut found = None;
-    for (offset, _) in line[from..].match_indices(pattern) {
+    for (offset, _) in hay[from..].match_indices(pat) {
         let start = from + offset;
         if start >= limit {
             break;

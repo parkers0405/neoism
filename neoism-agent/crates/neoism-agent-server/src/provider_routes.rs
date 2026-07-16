@@ -35,7 +35,10 @@ pub(crate) async fn provider_list(
 ) -> Result<Json<ProviderListResult>, ApiError> {
     let providers = state.inner.provider_catalog.providers().await?;
     let connected = state.inner.providers.connected_ids(&providers)?;
-    let mut providers = effective_provider_catalog(&providers);
+    let mut providers = effective_provider_catalog(
+        &providers,
+        crate::provider_catalog::openai_codex_oauth(&state.inner.auth_store),
+    );
     // Only surface providers neoism can actually stream through — there's no
     // point offering to connect one (e.g. Gemini/`google`, `amazon-bedrock`)
     // that could never appear in `/model`.
@@ -52,7 +55,11 @@ pub(crate) async fn config_providers(
 ) -> Result<Json<ConfigProvidersResult>, ApiError> {
     let raw_providers = state.inner.provider_catalog.providers().await?;
     let connected = state.inner.providers.connected_ids(&raw_providers)?;
-    let providers = usable_provider_catalog(&raw_providers, &connected);
+    let providers = usable_provider_catalog(
+        &raw_providers,
+        &connected,
+        crate::provider_catalog::openai_codex_oauth(&state.inner.auth_store),
+    );
     Ok(Json(ConfigProvidersResult {
         default: default_model_ids(&providers),
         providers,

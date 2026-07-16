@@ -1,4 +1,3 @@
-
 use super::diff::snapshot_section_from_text;
 use super::*;
 

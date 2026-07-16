@@ -151,6 +151,9 @@ pub struct Renderer {
     pub splash_overlay: splash_overlay::SplashOverlay,
     pub file_tree: file_tree::FileTree,
     pub notes_sidebar: notes_sidebar::NotesSidebar,
+    /// Logical mouse position for the notes sidebar's wordmark hover —
+    /// pushed by the screen each frame (the renderer owns no input).
+    pub notes_sidebar_mouse: Option<(f32, f32)>,
     /// Rect of the agent pane's open inline picker card (/model,
     /// /agents, /sessions, …), refreshed each frame by
     /// `render_neoism_agent_panels`. Folded into
@@ -396,6 +399,7 @@ impl Renderer {
             splash_overlay: splash_overlay::SplashOverlay::new(),
             file_tree: file_tree::FileTree::new(),
             notes_sidebar: notes_sidebar::NotesSidebar::default(),
+            notes_sidebar_mouse: None,
             agent_picker_occlusion: None,
             buffer_tabs: buffer_tabs::BufferTabs::new(),
             pane_tabs: rustc_hash::FxHashMap::default(),

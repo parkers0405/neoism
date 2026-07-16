@@ -1,6 +1,6 @@
 //! Live, animated note-graph simulation — the Obsidian-style view.
 //!
-//! Unlike [`graph_scene`](super::graph::graph_scene) (a static snapshot),
+//! A live force simulation (not a static snapshot):
 //! this steps a force-directed simulation one tick per frame so the graph
 //! visibly settles, nodes can be grabbed and flung, and clicking a node
 //! opens its note. It rides on the neodraw [`Camera`](super::Camera) for

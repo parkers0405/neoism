@@ -336,6 +336,14 @@ impl<T: EventListener> Context<T> {
                 self.editor_buf_enter
                     .push_back(BufEnterNotification { path: path.clone() });
             }
+            EditorServerMessage::CursorLine {
+                line, total_lines, ..
+            } => {
+                self.editor_cursor_line = *line;
+                if *total_lines > 0 {
+                    self.editor_total_lines = *total_lines;
+                }
+            }
             EditorServerMessage::BufferModified { path, modified, .. } => {
                 self.editor_buf_modified.push_back(BufModifiedNotification {
                     path: path.clone(),

@@ -91,9 +91,19 @@ fn render_permission_prompt(
     // Visual order mirrors the old card (and VISUAL_SELECTION_ORDER):
     // Always, Yes, No — with Yes preselected by the state default.
     let rows_data: [(&str, &str, &str, AgentPermissionChoice); 3] = [
-        ("Always", always_desc.as_str(), "a", AgentPermissionChoice::Always),
+        (
+            "Always",
+            always_desc.as_str(),
+            "a",
+            AgentPermissionChoice::Always,
+        ),
         ("Yes", "Allow once", "enter", AgentPermissionChoice::Once),
-        ("No", "Reject this request", "n", AgentPermissionChoice::Reject),
+        (
+            "No",
+            "Reject this request",
+            "n",
+            AgentPermissionChoice::Reject,
+        ),
     ];
     let rows = rows_data
         .iter()

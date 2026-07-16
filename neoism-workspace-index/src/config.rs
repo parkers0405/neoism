@@ -203,6 +203,27 @@ pub fn default_notes_workspace() -> NeoismWorkspace {
     }
 }
 
+/// A virtual workspace for browsing a vault DIRECTLY — sidebar-driven
+/// surfaces (the note graph, tasks/tags views) that must follow the
+/// vault the user is VIEWING rather than whatever vault the active code
+/// workspace links to. Same shape as [`default_notes_workspace`],
+/// pointed at `~/Neoism/Vaults/{name}`; the id is stable per vault so
+/// reindex rows stay consistent across opens.
+pub fn vault_notes_workspace(name: &str) -> NeoismWorkspace {
+    NeoismWorkspace {
+        root: notes_workspace_dir(name),
+        config: WorkspaceConfig {
+            version: CURRENT_WORKSPACE_CONFIG_VERSION,
+            id: format!("vault:{name}"),
+            name: name.to_string(),
+            notes: NotesConfig {
+                workspace: name.to_string(),
+                ..NotesConfig::default()
+            },
+        },
+    }
+}
+
 pub fn normalize_root(root: &Path) -> std::io::Result<PathBuf> {
     if root.exists() {
         root.canonicalize()

@@ -166,11 +166,22 @@ pub fn draw_text_clipped(
     if width <= 0.0 {
         return;
     }
-    let base_clip = opts
-        .clip_rect
-        .unwrap_or([x, y - 4.0, width, opts.font_size * 1.8]);
+    // Rasterized ink can overhang the advance-sum `width` (nerd-font
+    // icons in the patched primary font raster ~1px wider than their
+    // advance, and clip-edge snapping to device pixels eats up to
+    // another) — a synthetic clip cut exactly at `width` shaved the
+    // right diagonal off the chip chevrons (˅) whenever any occlusion
+    // was active. Pad the fallback clip only; explicit `clip_rect`s
+    // stay exact, and occlusion carving below still cuts overlaps.
+    let ink_slack = 2.0;
+    let base_clip = opts.clip_rect.unwrap_or([
+        x - ink_slack,
+        y - 4.0,
+        width + 2.0 * ink_slack,
+        opts.font_size * 1.8,
+    ]);
     let text_h = (opts.font_size * 1.8).max(opts.font_size + 8.0);
-    let text_rect = [x, y - 4.0, width, text_h];
+    let text_rect = [x - ink_slack, y - 4.0, width + 2.0 * ink_slack, text_h];
     let mut intervals = vec![(base_clip[0], base_clip[0] + base_clip[2])];
 
     for rect in occlusion_rects {

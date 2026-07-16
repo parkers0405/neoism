@@ -1,6 +1,5 @@
 use crate::app::bell::{play_audio_bell, send_desktop_notification};
 use crate::app::daemon_pump::DesktopDaemonConnection;
-use crate::app::daemon_rehome::HostHomingTracker;
 use crate::app::scheduler::{Scheduler, TimerId, Topic};
 use crate::app::window_event::touch::on_touch;
 use crate::bridges::utils::apply_theme_to_config;
@@ -10,7 +9,7 @@ use crate::terminal::watcher::configuration_file_updates;
 use neoism_backend::clipboard::Clipboard;
 use neoism_backend::event::{EventPayload, EventProxy, RioEvent, RioEventType};
 use neoism_protocol::workspace::{
-    HostSummary, WorkspaceClientMessage, WorkspaceServerMessage, WorkspaceSummary,
+    WorkspaceClientMessage, WorkspaceServerMessage, WorkspaceSummary,
     WorkspaceWindowSummary,
 };
 #[cfg(target_os = "macos")]
@@ -33,16 +32,28 @@ use neoism_window::platform::macos::WindowExtMacOS;
 use neoism_window::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use neoism_window::window::WindowId;
 use raw_window_handle::HasDisplayHandle;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::error::Error;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+use crate::server_registry::ServerRegistry;
+
+/// Result of an off-thread server-switch dial, completed by the pump.
+struct PendingServerSwitch {
+    window_id: WindowId,
+    daemon_url: String,
+    server_id: Option<String>,
+    result: Result<DesktopDaemonConnection, String>,
+}
 
 const NOTEBOOK_STATUS_TICK_MS: u64 = 500;
 const FRAME_WATCHDOG_NOTE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub mod bell;
 pub mod daemon_pump;
-pub mod daemon_rehome;
 pub mod editor_grid_diag;
 pub mod freeze_watchdog;
 pub mod ime;
@@ -50,28 +61,40 @@ pub mod messenger;
 pub mod scheduler;
 pub mod user_event_dispatch;
 pub mod window_event;
+pub mod window_server_session;
+
+use window_server_session::{ServerConnectionStatus, WindowServerSession};
 
 pub struct Application<'a> {
     config: neoism_backend::config::Config,
     event_proxy: EventProxy,
     router: Router<'a>,
-    daemon: Option<DesktopDaemonConnection>,
-    /// "Follow the workspace to its new home" state (Wave 4D). Caches
-    /// `host_id -> daemon_url` from host-tree pushes and watches each
-    /// workspace's `running_on_host_id` so we can re-dial `daemon` when the
-    /// active workspace is promoted/demoted to a different host. Mirrors the
-    /// web `WorkplaceService` re-home watcher.
-    homing: HostHomingTracker,
-    /// A peer-workspace join waiting for the freshly-dialled daemon's
-    /// tree: `(window, workspace_id)`. Set when a Workspaces pick
-    /// re-dials `daemon` to the workspace's owning host; consumed by
-    /// the first tree push that carries the workspace, which re-enters
-    /// the screen's open/adopt path over the new link.
-    pending_peer_adopt: Option<(WindowId, String)>,
+    bootstrap_daemon: Option<DesktopDaemonConnection>,
+    window_sessions: HashMap<WindowId, WindowServerSession>,
+    /// Monotonic ordinal for window profile ids. Profiles key persisted
+    /// workspace subscriptions in `servers.json`, so they must be STABLE
+    /// across restarts — the Nth window a process creates is always
+    /// `window-N`, and the main window (`window-1`) always re-matches
+    /// its stored subscriptions. A random id here made every stored
+    /// subscription unreachable after a relaunch.
+    window_profile_seq: u64,
     /// The daemon endpoint this desktop started on. Leaving the last
     /// joined peer workspace re-dials back here so the daemon plane
     /// returns home.
     home_daemon_endpoint: Option<String>,
+    server_registry: ServerRegistry,
+    bootstrap_server_id: Option<String>,
+    server_health: HashMap<String, neoism_ui::panels::ServerIndicatorStatus>,
+    server_health_inflight: HashSet<String>,
+    server_health_tx: mpsc::Sender<(String, bool)>,
+    server_health_rx: mpsc::Receiver<(String, bool)>,
+    /// Completed off-thread server-switch connections. Dialling a daemon
+    /// blocks up to the handshake timeout, so `switch_window_server` runs
+    /// it on a thread and the pump finishes the swap here — the UI shows
+    /// "connecting" instead of freezing.
+    server_switch_tx: mpsc::Sender<PendingServerSwitch>,
+    server_switch_rx: mpsc::Receiver<PendingServerSwitch>,
+    server_switch_inflight: HashSet<WindowId>,
     scheduler: Scheduler,
     app_id: Option<String>,
     initial_open_paths: Vec<PathBuf>,
@@ -86,6 +109,9 @@ impl Application<'_> {
         app_id: Option<String>,
         initial_open_paths: Vec<PathBuf>,
         daemon_url: Option<String>,
+        daemon_token: Option<String>,
+        initial_server_id: Option<String>,
+        home_daemon_endpoint: Option<String>,
     ) -> Application<'app> {
         // SAFETY: Since this takes a pointer to the winit event loop, it MUST be dropped first,
         // which is done in `exiting`.
@@ -99,27 +125,24 @@ impl Application<'_> {
 
         let proxy = event_loop.create_proxy();
         let event_proxy = EventProxy::new(proxy.clone());
-        let daemon =
-            daemon_url
-                .as_deref()
-                .and_then(|url| {
-                    match DesktopDaemonConnection::connect(url, event_proxy.clone()) {
-                        Ok(daemon) => Some(daemon),
-                        Err(error) => {
-                            tracing::warn!(
-                                target: "neoism::desktop_daemon",
-                                daemon = url,
-                                %error,
-                                "failed to start desktop daemon protocol pump"
-                            );
-                            None
-                        }
-                    }
-                });
-        if let Some(daemon) = daemon.as_ref() {
-            router.attach_daemon_client(daemon.handle(), daemon.runtime_handle());
-            router.request_window_list();
-        }
+        let daemon = daemon_url.as_deref().and_then(|url| {
+            match DesktopDaemonConnection::connect_with_token(
+                url,
+                daemon_token.clone(),
+                event_proxy.clone(),
+            ) {
+                Ok(daemon) => Some(daemon),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "neoism::desktop_daemon",
+                        daemon = url,
+                        %error,
+                        "failed to start desktop daemon protocol pump"
+                    );
+                    None
+                }
+            }
+        });
         let external_command_listener =
             crate::ipc::listen_for_external_commands(event_proxy.clone());
         let _ = configuration_file_updates(
@@ -127,8 +150,17 @@ impl Application<'_> {
             event_proxy.clone(),
         );
         let scheduler = Scheduler::new(proxy);
-        let home_daemon_endpoint =
-            daemon.as_ref().map(|daemon| daemon.endpoint().to_string());
+        let server_registry =
+            ServerRegistry::load(neoism_backend::config::config_dir_path())
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "failed to load saved server registry");
+                    ServerRegistry::load(
+                        std::env::temp_dir().join("neoism-server-registry-fallback"),
+                    )
+                    .expect("fallback server registry path must be readable")
+                });
+        let (server_health_tx, server_health_rx) = mpsc::channel();
+        let (server_switch_tx, server_switch_rx) = mpsc::channel();
         event_loop.listen_device_events(DeviceEvents::Never);
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -140,10 +172,19 @@ impl Application<'_> {
             config,
             event_proxy,
             router,
-            daemon,
-            homing: HostHomingTracker::new(),
-            pending_peer_adopt: None,
+            bootstrap_daemon: daemon,
+            window_sessions: HashMap::new(),
+            window_profile_seq: 0,
             home_daemon_endpoint,
+            server_registry,
+            bootstrap_server_id: initial_server_id,
+            server_health: HashMap::new(),
+            server_health_inflight: HashSet::new(),
+            server_health_tx,
+            server_health_rx,
+            server_switch_tx,
+            server_switch_rx,
+            server_switch_inflight: HashSet::new(),
             scheduler,
             app_id,
             initial_open_paths,
@@ -151,178 +192,598 @@ impl Application<'_> {
         }
     }
 
-    /// True when the live daemon connection is the one this desktop
-    /// started on (its own daemon), false while dialled into a peer's
-    /// daemon for a joined workspace.
-    fn daemon_is_home(&self) -> bool {
-        match (self.daemon.as_ref(), self.home_daemon_endpoint.as_deref()) {
-            (Some(daemon), Some(home)) => daemon.endpoint() == home,
-            _ => true,
-        }
+    fn next_window_profile_id(&mut self) -> String {
+        self.window_profile_seq += 1;
+        format!("window-{}", self.window_profile_seq)
     }
 
-    fn attach_daemon_to_window(&mut self, window_id: WindowId) {
-        let is_home = self.daemon_is_home();
-        let Some(daemon) = self.daemon.as_ref() else {
+    fn attach_session_to_window(&mut self, window_id: WindowId) {
+        let Some(session) = self.window_sessions.get(&window_id) else {
             return;
         };
+        let is_home = session.is_home(self.home_daemon_endpoint.as_deref());
         if let Some(route) = self.router.routes.get_mut(&window_id) {
             route.window.screen.attach_daemon_client(
-                daemon.handle(),
-                daemon.runtime_handle(),
-                daemon.endpoint().to_string(),
+                session.connection.handle(),
+                session.connection.runtime_handle(),
+                session.connection.endpoint().to_string(),
                 is_home,
             );
         }
     }
 
-    fn pump_daemon(&mut self, event_loop: &ActiveEventLoop) {
-        let messages = self
-            .daemon
-            .as_ref()
-            .map(DesktopDaemonConnection::drain_messages)
-            .unwrap_or_default();
-        for message in messages {
-            match message {
-                DaemonServerMessage::Workspace { message, .. } => {
-                    self.apply_daemon_workspace_message(event_loop, message);
-                }
-                DaemonServerMessage::Editor { message, .. } => {
-                    self.apply_daemon_editor_message(message);
-                }
-                DaemonServerMessage::Pty { message } => {
-                    self.apply_daemon_pty_message(message);
-                }
-                DaemonServerMessage::Crdt { message, .. } => {
-                    self.apply_daemon_crdt_message(message);
-                }
-                DaemonServerMessage::Files {
-                    request_id,
-                    message,
-                } => {
-                    for route in self.router.routes.values_mut() {
-                        if route
-                            .window
-                            .screen
-                            .apply_daemon_files_message(request_id, &message)
-                        {
-                            route.request_redraw();
-                        }
-                    }
-                }
-                DaemonServerMessage::Git {
-                    request_id,
-                    message,
-                } => {
-                    for route in self.router.routes.values_mut() {
-                        if route
-                            .window
-                            .screen
-                            .apply_daemon_git_message(request_id, &message)
-                        {
-                            route.request_redraw();
-                        }
-                    }
-                }
-            }
+    fn attach_bootstrap_session(&mut self, window_id: WindowId) {
+        if self.window_sessions.contains_key(&window_id) {
+            self.attach_session_to_window(window_id);
+            return;
         }
-
-        // Peer-workspace join (Workspaces pick on a tailnet peer's
-        // workspace): re-dial the daemon connection to the owning host
-        // — the host owns the daemon; joining means becoming a client
-        // of it — then adopt once its tree lands (deferred via
-        // `pending_peer_adopt`). When we're ALREADY dialled into that
-        // host, skip the redial and adopt on the next tree push.
-        let mut join_request: Option<(WindowId, String, String)> = None;
-        for (window_id, route) in self.router.routes.iter_mut() {
-            if let Some((workspace_id, daemon_url)) =
-                route.window.screen.take_peer_workspace_join()
-            {
-                join_request = Some((*window_id, workspace_id, daemon_url));
-            }
-        }
-        if let Some((window_id, workspace_id, daemon_url)) = join_request {
-            self.pending_peer_adopt = Some((window_id, workspace_id));
-            let already_connected = self
-                .daemon
-                .as_ref()
-                .is_some_and(|daemon| daemon.endpoint() == daemon_url);
-            if already_connected {
-                // Same daemon — just re-request the tree; its arrival
-                // completes the pending adopt.
-                if let Some(daemon) = self.daemon.as_ref() {
-                    daemon.send(WorkspaceClientMessage::RequestHostWorkspaceTree);
-                }
-            } else {
-                self.redial_daemon(&daemon_url);
-                // Ask the fresh daemon for its tree explicitly — the
-                // pending adopt completes on its arrival.
-                if let Some(daemon) = self.daemon.as_ref() {
-                    daemon.send(WorkspaceClientMessage::RequestHostWorkspaceTree);
-                }
-            }
-        }
-
-        // Left the last joined workspace → return the daemon plane to
-        // the home daemon this desktop started on.
-        let go_home = self
-            .router
-            .routes
-            .values_mut()
-            .any(|route| route.window.screen.take_daemon_go_home());
-        if go_home {
-            if let Some(home) = self.home_daemon_endpoint.clone() {
-                tracing::info!(
-                    target: "neoism::workspaces",
-                    daemon = %home,
-                    "left last joined workspace; re-dialling home daemon"
-                );
-                self.pending_peer_adopt = None;
-                self.redial_daemon(&home);
-                if let Some(daemon) = self.daemon.as_ref() {
-                    daemon.send(WorkspaceClientMessage::RequestHostWorkspaceTree);
-                }
-            }
-        }
-
-        let Some(daemon) = self.daemon.as_ref() else {
+        let Some(connection) = self.bootstrap_daemon.take() else {
             return;
         };
-        let mut outbound = Vec::new();
-        let mut outbound_crdt = Vec::new();
-        for route in self.router.routes.values_mut() {
-            outbound.extend(route.window.screen.drain_daemon_pane_layout_requests());
-            // Wave 7A presence publishes (coalesced cursor updates) +
-            // Wave 7B local-edit choke point: flush markdown pane
-            // mutations into CRDT ops once per pump turn.
-            outbound_crdt.extend(route.window.screen.drain_daemon_presence_messages());
+        let server_id = self.bootstrap_server_id.take();
+        let profile_id = self.next_window_profile_id();
+        self.window_sessions.insert(
+            window_id,
+            WindowServerSession::new(profile_id, connection, server_id),
+        );
+        self.attach_session_to_window(window_id);
+        if let Some(session) = self.window_sessions.get(&window_id) {
+            session.connection.send(WorkspaceClientMessage::ListWindows);
+        }
+    }
+
+    fn ensure_local_session(&mut self, window_id: WindowId) {
+        if self.window_sessions.contains_key(&window_id) {
+            self.attach_session_to_window(window_id);
+            return;
+        }
+        let Some(endpoint) = self.home_daemon_endpoint.clone() else {
+            return;
+        };
+        let connection = match DesktopDaemonConnection::connect_with_token(
+            &endpoint,
+            None,
+            self.event_proxy.clone(),
+        ) {
+            Ok(connection) => connection,
+            Err(error) => {
+                tracing::warn!(?window_id, %error, "failed to attach fresh window to Local Server");
+                return;
+            }
+        };
+        let profile_id = self.next_window_profile_id();
+        self.window_sessions.insert(
+            window_id,
+            WindowServerSession::new(profile_id, connection, None),
+        );
+        self.attach_session_to_window(window_id);
+        self.send_window_message(window_id, WorkspaceClientMessage::ListWindows);
+    }
+
+    fn pump_daemon(&mut self, event_loop: &ActiveEventLoop) {
+        self.drain_server_health_results();
+        self.drain_server_switch_results();
+        let window_ids = self.window_sessions.keys().copied().collect::<Vec<_>>();
+        for window_id in window_ids {
+            if let Some(session) = self.window_sessions.get_mut(&window_id) {
+                session.refresh_status();
+            }
+            if let (Some(session), Some(route)) = (
+                self.window_sessions.get(&window_id),
+                self.router.routes.get_mut(&window_id),
+            ) {
+                let status = match session.status {
+                    ServerConnectionStatus::Online => {
+                        neoism_ui::panels::ServerIndicatorStatus::Online
+                    }
+                    ServerConnectionStatus::Connecting
+                    | ServerConnectionStatus::Reconnecting => {
+                        neoism_ui::panels::ServerIndicatorStatus::Connecting
+                    }
+                    ServerConnectionStatus::Offline => {
+                        neoism_ui::panels::ServerIndicatorStatus::Offline
+                    }
+                };
+                route
+                    .window
+                    .screen
+                    .renderer
+                    .top_bar
+                    .set_server_status(status);
+            }
+            let messages = self
+                .window_sessions
+                .get(&window_id)
+                .map(|session| session.connection.drain_messages())
+                .unwrap_or_default();
+            for message in messages {
+                match message {
+                    DaemonServerMessage::Workspace { message, .. } => {
+                        self.apply_daemon_workspace_message(
+                            window_id, event_loop, message,
+                        );
+                    }
+                    DaemonServerMessage::Editor { message, .. } => {
+                        self.apply_daemon_editor_message(window_id, message);
+                    }
+                    DaemonServerMessage::Pty { message, .. } => {
+                        self.apply_daemon_pty_message(window_id, message);
+                    }
+                    DaemonServerMessage::Crdt { message, .. } => {
+                        self.apply_daemon_crdt_message(window_id, message);
+                    }
+                    DaemonServerMessage::Files {
+                        request_id,
+                        message,
+                    } => {
+                        if let Some(route) = self.router.routes.get_mut(&window_id) {
+                            if route
+                                .window
+                                .screen
+                                .apply_daemon_files_message(request_id, &message)
+                            {
+                                route.request_redraw();
+                            }
+                        }
+                    }
+                    DaemonServerMessage::Search {
+                        request_id,
+                        message,
+                    } => {
+                        if let Some(route) = self.router.routes.get_mut(&window_id) {
+                            if route
+                                .window
+                                .screen
+                                .apply_daemon_search_message(request_id, &message)
+                            {
+                                route.request_redraw();
+                            }
+                        }
+                    }
+                    DaemonServerMessage::Git {
+                        request_id,
+                        message,
+                    } => {
+                        if let Some(route) = self.router.routes.get_mut(&window_id) {
+                            if route
+                                .window
+                                .screen
+                                .apply_daemon_git_message(request_id, &message)
+                            {
+                                route.request_redraw();
+                            }
+                        }
+                    } // Agent HTTP/SSE is rebound separately per window; it is
+                      // not a frame variant on the daemon multiplex today.
+                }
+            }
+            // Frames from a PARKED home connection (this window is visiting
+            // a guest server): pane-scoped traffic only. PTY output and
+            // editor redraws keep the background islands' shells and nvims
+            // current instead of freezing until the user switches home.
+            // Inventory planes (workspace/files/crdt/git) stay dropped —
+            // they describe the HOME daemon and would fight the guest
+            // server's state the screen is attached to; the return-home
+            // resync re-requests them.
+            let parked_messages = self
+                .window_sessions
+                .get(&window_id)
+                .and_then(|session| session.parked_home.as_ref())
+                .map(|connection| connection.drain_messages())
+                .unwrap_or_default();
+            for message in parked_messages {
+                match message {
+                    DaemonServerMessage::Editor { message, .. } => {
+                        self.apply_daemon_editor_message(window_id, message);
+                    }
+                    DaemonServerMessage::Pty { message, .. } => {
+                        self.apply_daemon_pty_message(window_id, message);
+                    }
+                    _ => {}
+                }
+            }
+            self.process_window_server_requests(window_id);
+            self.flush_window_outbound(window_id);
+        }
+    }
+
+    fn drain_server_health_results(&mut self) {
+        while let Ok((server_id, online)) = self.server_health_rx.try_recv() {
+            self.server_health_inflight.remove(&server_id);
+            let status = if online {
+                neoism_ui::panels::ServerIndicatorStatus::Online
+            } else {
+                neoism_ui::panels::ServerIndicatorStatus::Offline
+            };
+            self.server_health.insert(server_id.clone(), status);
+            for route in self.router.routes.values_mut() {
+                if route
+                    .window
+                    .screen
+                    .renderer
+                    .command_palette
+                    .update_server_status(&server_id, status)
+                {
+                    route.request_redraw();
+                }
+            }
+        }
+    }
+
+    fn send_window_message(
+        &self,
+        window_id: WindowId,
+        message: WorkspaceClientMessage,
+    ) -> bool {
+        let Some(session) = self.window_sessions.get(&window_id) else {
+            return false;
+        };
+        session.connection.send(message);
+        true
+    }
+
+    fn process_window_server_requests(&mut self, window_id: WindowId) {
+        let (
+            server_request,
+            add_request,
+            edit_request,
+            edit_submit,
+            remove_request,
+            open_manager,
+            join_request,
+            go_home,
+            workspace_subscription,
+        ) = {
+            let Some(route) = self.router.routes.get_mut(&window_id) else {
+                return;
+            };
+            (
+                route.window.screen.take_server_connect(),
+                route.window.screen.take_server_add(),
+                route.window.screen.take_server_edit(),
+                route.window.screen.take_server_edit_submit(),
+                route.window.screen.take_server_remove(),
+                route.window.screen.take_server_manager_request(),
+                route.window.screen.take_peer_workspace_join(),
+                route.window.screen.take_daemon_go_home(),
+                route.window.screen.take_workspace_subscription(),
+            )
+        };
+
+        if let Some(workspace_id) = workspace_subscription {
+            self.persist_workspace_subscription(window_id, workspace_id);
+        }
+
+        if let Some(server_id) = server_request {
+            if server_id == "local" {
+                if let Some(endpoint) = self.home_daemon_endpoint.clone() {
+                    self.switch_window_server(window_id, &endpoint, None, None);
+                }
+            } else if let Some(server) = self.server_registry.server(&server_id).cloned()
+            {
+                let token = self.server_registry.token(&server_id).map(str::to_string);
+                self.switch_window_server(
+                    window_id,
+                    &server.endpoint,
+                    token,
+                    Some(server_id),
+                );
+            }
+        }
+
+        if let Some((address, name, token)) = add_request {
+            match self
+                .server_registry
+                .add(&address, name.as_deref(), token.as_deref())
+            {
+                Ok(server) => {
+                    let token =
+                        self.server_registry.token(&server.id).map(str::to_string);
+                    self.switch_window_server(
+                        window_id,
+                        &server.endpoint,
+                        token,
+                        Some(server.id),
+                    );
+                }
+                Err(error) => tracing::warn!(%error, "failed to add saved server"),
+            }
+        }
+
+        if let Some(server_id) = edit_request {
+            self.open_edit_server_form(window_id, &server_id);
+        }
+
+        if let Some((server_id, address, name, token)) = edit_submit {
+            match self.server_registry.update(
+                &server_id,
+                &address,
+                name.as_deref(),
+                token.as_deref(),
+            ) {
+                Ok(server) => {
+                    let active = self
+                        .window_sessions
+                        .get(&window_id)
+                        .and_then(|session| session.active_server_id.as_deref())
+                        == Some(server_id.as_str());
+                    if active {
+                        let token =
+                            self.server_registry.token(&server_id).map(str::to_string);
+                        self.switch_window_server(
+                            window_id,
+                            &server.endpoint,
+                            token,
+                            Some(server_id),
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "failed to update saved server"),
+            }
+        }
+
+        if let Some(server_id) = remove_request {
+            let active = self
+                .window_sessions
+                .get(&window_id)
+                .and_then(|session| session.active_server_id.as_deref())
+                == Some(server_id.as_str());
+            if active {
+                if let Some(home) = self.home_daemon_endpoint.clone() {
+                    self.switch_window_server(window_id, &home, None, None);
+                }
+            }
+            if let Err(error) = self.server_registry.remove(&server_id) {
+                tracing::warn!(%error, "failed to remove saved server");
+            }
+            self.open_server_manager(window_id);
+        }
+
+        if open_manager {
+            self.open_server_manager(window_id);
+        }
+
+        if let Some((workspace_id, daemon_url)) = join_request {
+            if let Some(session) = self.window_sessions.get_mut(&window_id) {
+                session.pending_peer_adopt = Some(workspace_id);
+            }
+            let already_connected = self
+                .window_sessions
+                .get(&window_id)
+                .is_some_and(|session| session.connection.endpoint() == daemon_url);
+            if !already_connected {
+                self.switch_window_server(window_id, &daemon_url, None, None);
+            }
+            self.send_window_message(
+                window_id,
+                WorkspaceClientMessage::RequestHostWorkspaceTree,
+            );
+        }
+
+        if go_home {
+            if let Some(home) = self.home_daemon_endpoint.clone() {
+                if let Some(session) = self.window_sessions.get_mut(&window_id) {
+                    session.pending_peer_adopt = None;
+                }
+                self.switch_window_server(window_id, &home, None, None);
+                self.send_window_message(
+                    window_id,
+                    WorkspaceClientMessage::RequestHostWorkspaceTree,
+                );
+            }
+        }
+    }
+
+    fn persist_workspace_subscription(
+        &mut self,
+        window_id: WindowId,
+        workspace_id: String,
+    ) {
+        let Some(session) = self.window_sessions.get(&window_id) else {
+            return;
+        };
+        let profile_id = session.profile_id.clone();
+        let server_id = session
+            .active_server_id
+            .clone()
+            .unwrap_or_else(|| "local".to_string());
+        let mut subscription = self
+            .server_registry
+            .workspace_subscription(&profile_id, &server_id);
+        if !subscription
+            .subscribed_workspace_ids
+            .contains(&workspace_id)
+        {
+            subscription
+                .subscribed_workspace_ids
+                .push(workspace_id.clone());
+        }
+        subscription.last_active_workspace_id = Some(workspace_id);
+        if let Err(error) = self.server_registry.set_workspace_subscription(
+            &profile_id,
+            &server_id,
+            subscription,
+        ) {
+            tracing::warn!(%error, "failed to persist workspace subscription");
+        }
+    }
+
+    fn open_server_manager(&mut self, window_id: WindowId) {
+        // The stripe marks where the CURRENT VIEW lives, not merely which
+        // connection the window holds: a leftover local island viewed
+        // while connected to a guest server still reads as Local.
+        let viewing_connected_workspace = self
+            .router
+            .routes
+            .get(&window_id)
+            .map(|route| {
+                route
+                    .window
+                    .screen
+                    .context_manager
+                    .current_adopted_workspace_id()
+                    .is_some()
+            })
+            .unwrap_or(false);
+        let active_id = self
+            .window_sessions
+            .get(&window_id)
+            .and_then(|session| session.active_server_id.clone())
+            .filter(|_| viewing_connected_workspace);
+        let local_active = active_id.is_none();
+        let active_status = self
+            .window_sessions
+            .get(&window_id)
+            .map(|session| match session.status {
+                ServerConnectionStatus::Online => {
+                    neoism_ui::panels::ServerIndicatorStatus::Online
+                }
+                ServerConnectionStatus::Connecting
+                | ServerConnectionStatus::Reconnecting => {
+                    neoism_ui::panels::ServerIndicatorStatus::Connecting
+                }
+                ServerConnectionStatus::Offline => {
+                    neoism_ui::panels::ServerIndicatorStatus::Offline
+                }
+            })
+            .unwrap_or(neoism_ui::panels::ServerIndicatorStatus::Unknown);
+        let mut entries = vec![neoism_ui::panels::command_palette::PaletteServerEntry {
+            id: "local".to_string(),
+            name: "Local Server".to_string(),
+            address: self
+                .home_daemon_endpoint
+                .clone()
+                .unwrap_or_else(|| "local daemon".to_string()),
+            local: true,
+            status: if local_active {
+                active_status
+            } else {
+                neoism_ui::panels::ServerIndicatorStatus::Unknown
+            },
+            active: local_active,
+        }];
+        entries.extend(self.server_registry.servers().iter().map(|server| {
+            let active = active_id.as_deref() == Some(server.id.as_str());
+            neoism_ui::panels::command_palette::PaletteServerEntry {
+                id: server.id.clone(),
+                name: server.name.clone(),
+                address: server.endpoint.clone(),
+                local: false,
+                status: if active {
+                    active_status
+                } else {
+                    self.server_health
+                        .get(&server.id)
+                        .copied()
+                        .unwrap_or(neoism_ui::panels::ServerIndicatorStatus::Unknown)
+                },
+                active,
+            }
+        }));
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
+            route
+                .window
+                .screen
+                .renderer
+                .command_palette
+                .enter_servers_mode(entries);
+            route.request_redraw();
+        }
+        self.probe_saved_servers(active_id.as_deref());
+    }
+
+    fn probe_saved_servers(&mut self, active_id: Option<&str>) {
+        for server in self.server_registry.servers().to_vec() {
+            if active_id == Some(server.id.as_str())
+                || !self.server_health_inflight.insert(server.id.clone())
+            {
+                continue;
+            }
+            let token = self.server_registry.token(&server.id).map(str::to_string);
+            let tx = self.server_health_tx.clone();
+            let event_proxy = self.event_proxy.clone();
+            std::thread::Builder::new()
+                .name(format!("neoism-server-probe-{}", server.id))
+                .spawn(move || {
+                    let online = DesktopDaemonConnection::connect_with_token(
+                        &server.endpoint,
+                        token,
+                        event_proxy.clone(),
+                    )
+                    .is_ok();
+                    let _ = tx.send((server.id, online));
+                    event_proxy.send_event(RioEventType::Rio(RioEvent::Render), unsafe {
+                        neoism_window::window::WindowId::dummy()
+                    });
+                })
+                .ok();
+        }
+    }
+
+    fn open_edit_server_form(&mut self, window_id: WindowId, server_id: &str) {
+        let Some(server) = self.server_registry.server(server_id).cloned() else {
+            return;
+        };
+        let token = self
+            .server_registry
+            .token(server_id)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
+            route.window.screen.open_edit_server_form(
+                server.id,
+                server.endpoint,
+                server.name,
+                token,
+            );
+            route.request_redraw();
+        }
+    }
+
+    fn flush_window_outbound(&mut self, window_id: WindowId) {
+        let (outbound, outbound_crdt, redraw) = {
+            let Some(route) = self.router.routes.get_mut(&window_id) else {
+                return;
+            };
+            let outbound = route
+                .window
+                .screen
+                .drain_daemon_pane_layout_requests()
+                .collect::<Vec<_>>();
+            let mut outbound_crdt = route.window.screen.drain_daemon_presence_messages();
             let (markdown_crdt_messages, markdown_pane_changed) =
                 route.window.screen.drain_markdown_crdt_messages();
             outbound_crdt.extend(markdown_crdt_messages);
             let (markdown_disk_messages, markdown_disk_changed) =
                 route.window.screen.reload_open_markdown_files_from_disk();
             outbound_crdt.extend(markdown_disk_messages);
-            if markdown_pane_changed || markdown_disk_changed {
-                // Wave 7D: undo/redo intents mutate the pane inside the
-                // drain (CRDT-routed history) — repaint that window.
+            (
+                outbound,
+                outbound_crdt,
+                markdown_pane_changed || markdown_disk_changed,
+            )
+        };
+        if redraw {
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
                 route.request_redraw();
             }
         }
-        for message in outbound {
-            daemon.send(message);
+        if let Some(session) = self.window_sessions.get(&window_id) {
+            for message in outbound {
+                session.connection.send(message);
+            }
+            session.connection.send_crdt_batch(outbound_crdt);
         }
-        daemon.send_crdt_batch(outbound_crdt);
     }
 
-    /// Fan an inbound CRDT message out to every window: the document
-    /// plane (Wave 7B markdown bindings — snapshot seeds + remote syncs)
-    /// and the presence plane (Wave 7A remote-cursor stores). Redraws
+    /// Apply an inbound CRDT message only to the owning window.
     /// windows whose visible state changed.
     fn apply_daemon_crdt_message(
         &mut self,
+        window_id: WindowId,
         message: neoism_protocol::crdt::CrdtServerMessage,
     ) {
-        for route in self.router.routes.values_mut() {
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
             let markdown_changed =
                 route.window.screen.apply_markdown_crdt_message(&message);
             let presence_changed =
@@ -335,35 +796,51 @@ impl Application<'_> {
 
     fn apply_daemon_workspace_message(
         &mut self,
+        source_window_id: WindowId,
         event_loop: &ActiveEventLoop,
         message: WorkspaceServerMessage,
     ) {
+        let hosts = match &message {
+            WorkspaceServerMessage::HostWorkspaceTree { hosts, .. }
+            | WorkspaceServerMessage::HostList { hosts } => hosts.as_slice(),
+            _ => &[],
+        };
+        let workspaces = Self::workspace_summaries_from_message(&message);
+        let rehome_target = self
+            .window_sessions
+            .get_mut(&source_window_id)
+            .and_then(|session| session.observe_rehome(hosts, workspaces));
         // Wave 4D: before fanning the message out to the chrome, watch for
         // the active workspace's home host flipping to a different machine.
         // If it moved to a host that advertises a dialable `daemon_url`, we
         // re-point this desktop's daemon connection there so the workspace
         // keeps showing at its new home. The daemon stays the source of
         // truth — we only re-dial which daemon we talk to.
-        self.maybe_follow_workspace_rehome(&message);
-
         // MULTI-USER GUARD: window summaries only drive native window
         // bind/materialisation when we're dialled into our HOME
         // daemon. A peer's daemon (joined workspace) ships the HOST's
         // window inventory — materialising those spawned phantom OS
         // windows on the guest, and binding could hijack an existing
         // local window's identity.
-        let windows_from_home = self.daemon_is_home();
+        let windows_from_home = self
+            .window_sessions
+            .get(&source_window_id)
+            .is_some_and(|session| session.is_home(self.home_daemon_endpoint.as_deref()));
         match &message {
             WorkspaceServerMessage::WindowList { windows } if windows_from_home => {
                 for window in windows {
-                    self.apply_daemon_window_summary(event_loop, window);
+                    self.apply_daemon_window_summary(
+                        source_window_id,
+                        event_loop,
+                        window,
+                    );
                 }
             }
             WorkspaceServerMessage::WindowOpened { window }
             | WorkspaceServerMessage::WindowChanged { window }
                 if windows_from_home =>
             {
-                self.apply_daemon_window_summary(event_loop, window);
+                self.apply_daemon_window_summary(source_window_id, event_loop, window);
             }
             WorkspaceServerMessage::WindowClosed { window_id } if windows_from_home => {
                 if let Some(native_id) = self.router.unbind_daemon_window(window_id) {
@@ -374,7 +851,7 @@ impl Application<'_> {
             _ => {}
         }
 
-        for route in self.router.routes.values_mut() {
+        if let Some(route) = self.router.routes.get_mut(&source_window_id) {
             let context_changed = route
                 .window
                 .screen
@@ -387,19 +864,90 @@ impl Application<'_> {
             }
         }
 
+        let summaries = Self::workspace_summaries_from_message(&message);
+        if !summaries.is_empty() {
+            let subscription =
+                self.window_sessions.get(&source_window_id).map(|session| {
+                    let server_id =
+                        session.active_server_id.as_deref().unwrap_or("local");
+                    self.server_registry
+                        .workspace_subscription(&session.profile_id, server_id)
+                });
+            if let Some(mut subscription) = subscription {
+                subscription
+                    .subscribed_workspace_ids
+                    .retain(|workspace_id| {
+                        summaries
+                            .iter()
+                            .any(|workspace| workspace.id == *workspace_id)
+                    });
+                if subscription.last_active_workspace_id.as_ref().is_some_and(
+                    |workspace_id| {
+                        !summaries
+                            .iter()
+                            .any(|workspace| workspace.id == *workspace_id)
+                    },
+                ) {
+                    subscription.last_active_workspace_id = None;
+                }
+                let restored_any = !subscription.subscribed_workspace_ids.is_empty()
+                    || subscription.last_active_workspace_id.is_some();
+                if let Some(route) = self.router.routes.get_mut(&source_window_id) {
+                    route.window.screen.restore_subscribed_daemon_workspaces(
+                        &subscription.subscribed_workspace_ids,
+                        subscription.last_active_workspace_id.as_deref(),
+                    );
+                    route.request_redraw();
+                }
+                // A fresh server switch with no subscription to restore
+                // must still land the window IN a workspace on the new
+                // server — otherwise the previous server's panes stay on
+                // screen and file clicks reuse its editor. Adopt the most
+                // recent workspace from the arriving tree (the daemon
+                // sorts them most-recently-active first).
+                let needs_initial = self
+                    .window_sessions
+                    .get_mut(&source_window_id)
+                    .map(|session| {
+                        std::mem::take(&mut session.needs_initial_workspace_adopt)
+                    })
+                    .unwrap_or(false);
+                if needs_initial && !restored_any {
+                    if let Some(workspace_id) =
+                        summaries.first().map(|workspace| workspace.id.clone())
+                    {
+                        if let Some(route) = self.router.routes.get_mut(&source_window_id)
+                        {
+                            route
+                                .window
+                                .screen
+                                .open_or_adopt_daemon_workspace(workspace_id);
+                            route.request_redraw();
+                        }
+                    }
+                }
+            }
+        }
+
         // Peer-workspace join, step 2: the redialled daemon's tree just
         // landed in the manager caches above. If it carries the picked
         // workspace, re-enter the open/adopt path — this time
         // `peer_workspace_daemon_url` resolves None (the workspace is
         // now on the linked daemon) and the normal adopt attaches its
         // live sessions over the new connection.
-        if let Some((window_id, workspace_id)) = self.pending_peer_adopt.clone() {
+        let pending_peer_adopt = self
+            .window_sessions
+            .get(&source_window_id)
+            .and_then(|session| session.pending_peer_adopt.clone());
+        if let Some(workspace_id) = pending_peer_adopt {
             let carried = Self::workspace_summaries_from_message(&message)
                 .iter()
                 .any(|workspace| workspace.id == workspace_id);
             if carried {
-                self.pending_peer_adopt = None;
-                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                if let Some(session) = self.window_sessions.get_mut(&source_window_id) {
+                    session.pending_peer_adopt = None;
+                }
+                if let Some(route) = self.router.routes.get_mut(&source_window_id) {
                     tracing::info!(
                         target: "neoism::workspaces",
                         workspace_id = %workspace_id,
@@ -413,124 +961,219 @@ impl Application<'_> {
                 }
             }
         }
+        if let Some(daemon_url) = rehome_target {
+            self.switch_window_server(source_window_id, &daemon_url, None, None);
+        }
     }
 
-    /// Wave 4D: cache `host_id -> daemon_url` and detect when the workspace
-    /// we're viewing has been re-homed to a different host. On a resolvable
-    /// flip, rebuild the daemon connection against the new host's
-    /// `daemon_url` and swap it into `self.daemon`. Mirrors the web's
-    /// `recordHostDaemonUrls` + `observeWorkspaceHoming` + `switchTo`.
-    fn maybe_follow_workspace_rehome(&mut self, message: &WorkspaceServerMessage) {
-        // Cache every host's advertised daemon_url (Wave 4E) so a re-home can
-        // resolve `running_on_host_id` -> dialable URL directly.
-        let hosts = Self::hosts_from_message(message);
-        if !hosts.is_empty() {
-            self.homing.record_host_daemon_urls(hosts);
-        }
-
-        // The summaries carried by this push (tree / list / control change).
-        let workspaces = Self::workspace_summaries_from_message(message);
-        if workspaces.is_empty() {
-            return;
-        }
-
-        // Only meaningful while a connection exists — the endpoint is both
-        // the loop guard ("don't re-dial the URL we're already on") and the
-        // auth-bearing URL we fall back to.
-        let Some(current_endpoint) = self
-            .daemon
-            .as_ref()
-            .map(|daemon| daemon.endpoint().to_string())
-        else {
-            return;
-        };
-
-        let Some(target) = self
-            .homing
-            .observe_workspace_homing(workspaces, &current_endpoint)
-        else {
-            return;
-        };
-
-        tracing::info!(
-            target: "neoism::desktop_daemon",
-            workspace_id = %target.workspace_id,
-            new_host = %target.new_host_id,
-            from = %current_endpoint,
-            to = %target.daemon_url,
-            "active workspace re-homed; re-dialling daemon to follow it"
-        );
-        self.redial_daemon(&target.daemon_url);
-    }
-
-    /// Rebuild `DesktopDaemonConnection` against `daemon_url`, swap it into
-    /// `self.daemon`, and re-run the fresh-connection bring-up that
-    /// `App::new` does (attach the client to every route + request the
-    /// window list). Auth/token travels in the `daemon_url` itself (the
-    /// daemon advertises a dialable URL with any `?token=` baked in), so no
-    /// separate credential plumbing is needed here. On failure we keep the
-    /// existing connection rather than dropping the user offline.
-    fn redial_daemon(&mut self, daemon_url: &str) {
-        // Loop guard (belt and braces — `observe_workspace_homing` already
-        // skips a no-op move, but guard again in case the live endpoint
-        // changed between observation and here).
+    fn switch_window_server(
+        &mut self,
+        window_id: WindowId,
+        daemon_url: &str,
+        token: Option<String>,
+        server_id: Option<String>,
+    ) {
         if self
-            .daemon
-            .as_ref()
-            .is_some_and(|daemon| daemon.endpoint() == daemon_url)
+            .router
+            .routes
+            .get_mut(&window_id)
+            .is_some_and(|route| route.window.screen.has_unsaved_server_buffers())
         {
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route.window.screen.renderer.notifications.push(
+                    "Save changes before switching servers",
+                    neoism_ui::panels::notifications::NotificationLevel::Warn,
+                );
+                route.request_redraw();
+            }
+            return;
+        }
+        if self.window_sessions.get(&window_id).is_some_and(|session| {
+            session.connection.endpoint() == daemon_url
+                && token.is_none()
+                && server_id == session.active_server_id
+        }) {
             return;
         }
 
-        let connection = match DesktopDaemonConnection::connect(
-            daemon_url,
-            self.event_proxy.clone(),
-        ) {
-            Ok(connection) => connection,
-            Err(error) => {
-                tracing::warn!(
-                    target: "neoism::desktop_daemon",
-                    daemon = daemon_url,
-                    %error,
-                    "failed to re-dial daemon on workspace re-home; keeping current connection"
-                );
-                return;
+        // Returning HOME reuses the parked connection when it is still
+        // open — same daemon-side nvim namespace, so the local editors
+        // survive the round trip — instead of dialling a fresh one.
+        if self.home_daemon_endpoint.as_deref() == Some(daemon_url) {
+            let parked = self
+                .window_sessions
+                .get_mut(&window_id)
+                .and_then(|session| session.parked_home.take());
+            if let Some(connection) = parked {
+                if matches!(
+                    connection.status(),
+                    crate::daemon_client::DaemonClientStatus::Open
+                ) {
+                    self.complete_server_switch(window_id, connection, server_id);
+                    return;
+                }
+                // Stale (daemon restarted while we were away) — dial.
             }
-        };
-
-        // Swap first so the attach below points the chrome at the new client.
-        // Dropping the old `DesktopDaemonConnection` shuts its runtime down.
-        self.daemon = Some(connection);
-
-        // Re-attach exactly like `App::new`: bind the new client+runtime to
-        // every live route's screen, then request the window list so the new
-        // daemon re-ships its window/workspace inventory.
-        let is_home = self.daemon_is_home();
-        if let Some(daemon) = self.daemon.as_ref() {
-            let handle = daemon.handle();
-            let runtime_handle = daemon.runtime_handle();
-            let endpoint = daemon.endpoint().to_string();
-            for route in self.router.routes.values_mut() {
-                route.window.screen.attach_daemon_client(
-                    handle.clone(),
-                    runtime_handle.clone(),
-                    endpoint.clone(),
-                    is_home,
-                );
+        }
+        // Dial off-thread: the handshake blocks up to its timeout, and a
+        // dead endpoint would freeze the UI for the whole wait. The pump
+        // completes the swap in `drain_server_switch_results`.
+        if !self.server_switch_inflight.insert(window_id) {
+            return;
+        }
+        if let Some(id) = server_id.as_deref() {
+            let status = neoism_ui::panels::ServerIndicatorStatus::Connecting;
+            self.server_health.insert(id.to_string(), status);
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route
+                    .window
+                    .screen
+                    .renderer
+                    .command_palette
+                    .update_server_status(id, status);
+                route.request_redraw();
             }
-            self.router
-                .attach_daemon_client(daemon.handle(), daemon.runtime_handle());
-            self.router.request_window_list();
+        }
+        let tx = self.server_switch_tx.clone();
+        let event_proxy = self.event_proxy.clone();
+        let daemon_url = daemon_url.to_string();
+        std::thread::Builder::new()
+            .name(format!("neoism-server-switch-{window_id:?}"))
+            .spawn(move || {
+                let result = DesktopDaemonConnection::connect_with_token(
+                    &daemon_url,
+                    token,
+                    event_proxy.clone(),
+                )
+                .map_err(|error| error.to_string());
+                let _ = tx.send(PendingServerSwitch {
+                    window_id,
+                    daemon_url,
+                    server_id,
+                    result,
+                });
+                event_proxy.send_event(RioEventType::Rio(RioEvent::Render), unsafe {
+                    neoism_window::window::WindowId::dummy()
+                });
+            })
+            .ok();
+    }
+
+    fn drain_server_switch_results(&mut self) {
+        while let Ok(pending) = self.server_switch_rx.try_recv() {
+            let PendingServerSwitch {
+                window_id,
+                daemon_url,
+                server_id,
+                result,
+            } = pending;
+            self.server_switch_inflight.remove(&window_id);
+            let connection = match result {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "neoism::desktop_daemon",
+                        window = ?window_id,
+                        daemon = %daemon_url,
+                        %error,
+                        "failed to switch window server; keeping current connection"
+                    );
+                    if let Some(id) = server_id.as_deref() {
+                        let status = neoism_ui::panels::ServerIndicatorStatus::Offline;
+                        self.server_health.insert(id.to_string(), status);
+                        if let Some(route) = self.router.routes.get_mut(&window_id) {
+                            route
+                                .window
+                                .screen
+                                .renderer
+                                .command_palette
+                                .update_server_status(id, status);
+                        }
+                    }
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        route.window.screen.renderer.notifications.push(
+                            format!(
+                                "Could not connect to {daemon_url}: {error}. Kept the current server."
+                            ),
+                            neoism_ui::panels::notifications::NotificationLevel::Error,
+                        );
+                        route.request_redraw();
+                    }
+                    continue;
+                }
+            };
+            self.complete_server_switch(window_id, connection, server_id);
         }
     }
 
-    /// Hosts carried by a workspace-tree / host-list message — the source of
-    /// `daemon_url` advertisements. Mirrors the web `hostsFromMessage`.
-    fn hosts_from_message(message: &WorkspaceServerMessage) -> &[HostSummary] {
-        match message {
-            WorkspaceServerMessage::HostWorkspaceTree { hosts, .. }
-            | WorkspaceServerMessage::HostList { hosts } => hosts,
-            _ => &[],
+    /// Final phase of a server switch, shared by the async-dial path and
+    /// the parked-home fast path: swap the window's session (parking the
+    /// outgoing HOME connection so its daemon-side nvim namespace stays
+    /// alive), reset server-owned chrome, attach, and request the new
+    /// server's inventory.
+    fn complete_server_switch(
+        &mut self,
+        window_id: WindowId,
+        connection: DesktopDaemonConnection,
+        server_id: Option<String>,
+    ) {
+        // The window may have closed while the dial was in flight.
+        if !self.router.routes.contains_key(&window_id) {
+            return;
+        }
+        if let Some(id) = server_id.as_deref() {
+            let status = neoism_ui::panels::ServerIndicatorStatus::Online;
+            self.server_health.insert(id.to_string(), status);
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route
+                    .window
+                    .screen
+                    .renderer
+                    .command_palette
+                    .update_server_status(id, status);
+            }
+        }
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
+            route.window.screen.reset_server_owned_state();
+        }
+        let outgoing = self.window_sessions.remove(&window_id);
+        let home_endpoint = self.home_daemon_endpoint.clone();
+        let (profile_id, parked_home) = match outgoing {
+            Some(old) => {
+                let profile_id = old.profile_id.clone();
+                // Keep the home daemon's websocket open while away — the
+                // daemon reaps the nvim sessions of a closed connection's
+                // namespace, which executed every local editor on switch.
+                let parked = if old.is_home(home_endpoint.as_deref()) {
+                    Some(old.connection)
+                } else {
+                    old.parked_home
+                };
+                (profile_id, parked)
+            }
+            None => (self.next_window_profile_id(), None),
+        };
+        let mut session = WindowServerSession::new(profile_id, connection, server_id);
+        session.needs_initial_workspace_adopt = true;
+        session.parked_home = parked_home;
+        self.window_sessions.insert(window_id, session);
+        self.attach_session_to_window(window_id);
+        self.send_window_message(window_id, WorkspaceClientMessage::ListWindows);
+        self.send_window_message(
+            window_id,
+            WorkspaceClientMessage::RequestHostWorkspaceTree,
+        );
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
+            // The reset above cleared the visible tree's entries, but
+            // the root pathname often survives the switch unchanged,
+            // so every "already there" guard skips repopulation and
+            // the tree stays blank until closed and reopened. Force
+            // one sync.
+            route
+                .window
+                .screen
+                .sync_file_tree_root_for_current_workspace();
+            route.request_redraw();
         }
     }
 
@@ -552,9 +1195,10 @@ impl Application<'_> {
 
     fn apply_daemon_editor_message(
         &mut self,
+        window_id: WindowId,
         message: neoism_protocol::editor::EditorServerMessage,
     ) {
-        for route in self.router.routes.values_mut() {
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
             if route
                 .window
                 .screen
@@ -565,8 +1209,12 @@ impl Application<'_> {
         }
     }
 
-    fn apply_daemon_pty_message(&mut self, message: neoism_protocol::pty::ServerMessage) {
-        for route in self.router.routes.values_mut() {
+    fn apply_daemon_pty_message(
+        &mut self,
+        window_id: WindowId,
+        message: neoism_protocol::pty::ServerMessage,
+    ) {
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
             if route
                 .window
                 .screen
@@ -580,13 +1228,18 @@ impl Application<'_> {
 
     fn apply_daemon_window_summary(
         &mut self,
+        source_window_id: WindowId,
         event_loop: &ActiveEventLoop,
         window: &WorkspaceWindowSummary,
     ) {
         // Belt-and-braces with the gate in
         // `apply_daemon_workspace_message`: never bind/materialise
         // native windows from a PEER daemon's window inventory.
-        if !self.daemon_is_home() {
+        if !self
+            .window_sessions
+            .get(&source_window_id)
+            .is_some_and(|session| session.is_home(self.home_daemon_endpoint.as_deref()))
+        {
             return;
         }
         // MULTI-CLIENT GUARD: several desktops can share one daemon
@@ -617,7 +1270,7 @@ impl Application<'_> {
             window,
             self.app_id.as_deref(),
         ) {
-            self.attach_daemon_to_window(native_id);
+            self.ensure_local_session(native_id);
             if let Some(route) = self.router.routes.get_mut(&native_id) {
                 route.request_redraw();
             }
@@ -912,7 +1565,6 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             .or(event_loop.system_theme());
         apply_theme_to_config(&mut self.config, theme);
 
-        self.router.request_open_window(None, None);
         let window_id = self.router.create_window(
             event_loop,
             self.event_proxy.clone(),
@@ -920,7 +1572,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             None,
             self.app_id.as_deref(),
         );
-        self.attach_daemon_to_window(window_id);
+        self.attach_bootstrap_session(window_id);
         crate::app::freeze_watchdog::mark_window_event(
             window_id,
             "window_created",
@@ -1292,9 +1944,19 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             #[cfg(target_os = "macos")]
             RioEventType::Rio(RioEvent::CloseWindow) => {
-                self.router.request_close_native_window(window_id);
+                if let Some(daemon_window_id) =
+                    self.router.daemon_window_for_native(window_id)
+                {
+                    self.send_window_message(
+                        window_id,
+                        WorkspaceClientMessage::RequestCloseWindow {
+                            window_id: daemon_window_id.to_string(),
+                        },
+                    );
+                }
                 self.router.unbind_native_window(window_id);
                 self.router.routes.remove(&window_id);
+                self.window_sessions.remove(&window_id);
                 crate::app::freeze_watchdog::unregister_window(window_id);
                 if should_exit_event_loop_after_close_window(
                     self.router.routes.len(),
@@ -1360,7 +2022,6 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     fn open_urls(&mut self, active_event_loop: &ActiveEventLoop, urls: Vec<String>) {
         if !self.config.navigation.is_native() {
             for url in urls {
-                self.router.request_open_window(None, None);
                 let window_id = self.router.create_window(
                     active_event_loop,
                     self.event_proxy.clone(),
@@ -1368,7 +2029,15 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     Some(url),
                     self.app_id.as_deref(),
                 );
-                self.attach_daemon_to_window(window_id);
+                self.attach_bootstrap_session(window_id);
+                self.ensure_local_session(window_id);
+                self.send_window_message(
+                    window_id,
+                    WorkspaceClientMessage::RequestOpenWindow {
+                        workspace_id: None,
+                        title: None,
+                    },
+                );
             }
             return;
         }
@@ -1394,8 +2063,6 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     .get_focused_route()
                     .and_then(|id| self.router.daemon_window_for_native(id))
                     .map(str::to_string);
-                self.router
-                    .request_open_native_tab(None, parent_window_id, None);
                 let window_id = self.router.create_native_tab(
                     active_event_loop,
                     self.event_proxy.clone(),
@@ -1403,7 +2070,16 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     tab_id.as_deref(),
                     Some(url),
                 );
-                self.attach_daemon_to_window(window_id);
+                self.attach_bootstrap_session(window_id);
+                self.ensure_local_session(window_id);
+                self.send_window_message(
+                    window_id,
+                    WorkspaceClientMessage::RequestOpenNativeTab {
+                        workspace_id: None,
+                        parent_window_id,
+                        title: None,
+                    },
+                );
             }
         }
     }
@@ -1525,7 +2201,14 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
         if self.config.navigation.open_config_with_split {
             self.router.open_config_split(&self.config);
         } else {
-            self.router.request_open_config_editor(None);
+            if let Some(window_id) = self.router.get_focused_route() {
+                self.send_window_message(
+                    window_id,
+                    WorkspaceClientMessage::RequestOpenConfigEditor {
+                        workspace_id: None,
+                    },
+                );
+            }
             self.router.open_config_window(
                 event_loop,
                 self.event_proxy.clone(),

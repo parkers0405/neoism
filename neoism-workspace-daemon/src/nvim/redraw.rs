@@ -242,6 +242,24 @@ impl Handler for RedrawHandler {
             .await;
             return;
         }
+        if name == "rio_winbar" {
+            // args = [line, col, symbol, total_lines?] — forward the
+            // cursor position so daemon-backed panes get the status
+            // line's `cur/total` pill (local editors drain this from
+            // the in-process nvim machine instead).
+            let line = args.first().and_then(value_as_u64).unwrap_or(0);
+            let total_lines = args.get(3).and_then(value_as_u64).unwrap_or(0);
+            if line > 0 {
+                let surface_id = self.active_surface_id.lock().await.clone();
+                self.emit_redraw(EditorServerMessage::CursorLine {
+                    surface_id,
+                    line,
+                    total_lines,
+                })
+                .await;
+            }
+            return;
+        }
         if name == "rio_notify" {
             let Some(message) = args.first().and_then(|v| v.as_str()) else {
                 return;

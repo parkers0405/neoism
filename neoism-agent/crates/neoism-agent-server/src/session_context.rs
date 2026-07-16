@@ -403,7 +403,11 @@ async fn generate_model_compaction_summary(
         .providers()
         .await
         .unwrap_or_default();
-    let metadata = crate::provider_catalog::generation_metadata(&providers, &model);
+    let metadata = crate::provider_catalog::generation_metadata(
+        &providers,
+        &model,
+        crate::provider_catalog::openai_codex_oauth(&state.inner.auth_store),
+    );
     // Summarize only the head: messages since the last completed compaction,
     // minus the protected tail (the tail stays raw in post-compaction prompts,
     // so replaying it here is wasted context). Older context is carried by the

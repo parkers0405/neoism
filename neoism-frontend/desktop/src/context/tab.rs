@@ -583,6 +583,7 @@ fn editor_message_to_redraw_events(message: EditorServerMessage) -> Vec<RedrawEv
         }
         EditorServerMessage::Closed { .. } => vec![RedrawEvent::Destroy { grid: 1 }],
         EditorServerMessage::BufferOpened { .. }
+        | EditorServerMessage::CursorLine { .. }
         | EditorServerMessage::BufferModified { .. }
         | EditorServerMessage::Notification { .. }
         | EditorServerMessage::YankFlash { .. }

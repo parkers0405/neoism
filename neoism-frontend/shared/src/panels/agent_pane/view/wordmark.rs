@@ -149,9 +149,8 @@ pub fn format_elapsed(seconds: f32) -> String {
 static WORDMARK_TINT: std::sync::RwLock<Vec<u32>> = std::sync::RwLock::new(Vec::new());
 
 pub fn register_wordmark(sugarloaf: &mut Sugarloaf) -> bool {
-    let tint = crate::primitives::look::wordmark_colors_or(
-        crate::chrome::active_ide_theme().fg,
-    );
+    let tint =
+        crate::primitives::look::wordmark_colors_or(crate::chrome::active_ide_theme().fg);
     let unchanged = WORDMARK_TINT
         .read()
         .map(|last| *last == tint)

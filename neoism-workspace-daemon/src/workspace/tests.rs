@@ -493,8 +493,13 @@ fn editor_surface_requires_session_in_active_workspace() {
 }
 
 #[test]
-fn workspace_actions_init_create_and_reindex() {
+fn workspace_action_create_note_falls_back_to_default_vault() {
     let td = TempDir::new().unwrap();
+    // `create_neoism_note` resolves the global Default vault when the
+    // workspace root has no linked/local notes workspace; point the
+    // vaults home at the tempdir so the test never touches the real
+    // `~/Neoism/Vaults`.
+    std::env::set_var("NEOISM_NOTES_HOME", td.path().join("vaults"));
     let mgr = make_manager(&td);
     let mut conn = ConnectionWorkspace::default();
     handle(
@@ -510,23 +515,6 @@ fn workspace_actions_init_create_and_reindex() {
         &mgr,
         &mut conn,
         WorkspaceClientMessage::RunWorkspaceAction {
-            action: WorkspaceAction::InitNeoismWorkspace,
-        },
-    );
-    assert!(matches!(
-        out.first(),
-        Some(WorkspaceServerMessage::WorkspaceActionCompleted { .. })
-    ));
-    let root = mgr
-        .get_workspace(conn.active_workspace.as_deref().unwrap())
-        .unwrap()
-        .path;
-    assert!(root.join(".neoism/workspace.toml").is_file());
-
-    let out = handle(
-        &mgr,
-        &mut conn,
-        WorkspaceClientMessage::RunWorkspaceAction {
             action: WorkspaceAction::CreateNeoismNote,
         },
     );
@@ -537,22 +525,14 @@ fn workspace_actions_init_create_and_reindex() {
         other => panic!("unexpected reply {other:?}"),
     };
     assert!(note.is_file());
-    assert!(note.starts_with(root.join("Neoism/Vaults/Default")));
-
-    let out = handle(
-        &mgr,
-        &mut conn,
-        WorkspaceClientMessage::RunWorkspaceAction {
-            action: WorkspaceAction::ReindexNeoismNotes,
-        },
-    );
-    assert!(matches!(
-        out.first(),
-        Some(WorkspaceServerMessage::WorkspaceActionCompleted { .. })
-    ));
-    assert!(root
-        .join(".neoism/cache/vaults/Default/graph.json")
-        .is_file());
+    assert!(note.starts_with(td.path().join("vaults").join("Default")));
+    // The legacy per-project init surface is gone: creating a note must
+    // never write a `.neoism/workspace.toml` into the code root.
+    let root = mgr
+        .get_workspace(conn.active_workspace.as_deref().unwrap())
+        .unwrap()
+        .path;
+    assert!(!root.join(".neoism/workspace.toml").exists());
 }
 
 #[test]

@@ -82,10 +82,26 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     fn ensure_daemon_session_for_route(&mut self, route_id: usize) -> bool {
         if self.daemon.cache.route_sessions.contains_key(&route_id)
             || self.daemon.cache.pending_session_routes.contains(&route_id)
+            // A pane whose context already carries a remote-PTY binding is
+            // running against a connection we kept alive (the parked HOME
+            // link across a server round trip). The cache maps were wiped
+            // by the switch reset, but the shell is fine — spawning a
+            // fresh one here would bury the user's running session under
+            // a duplicate.
+            || self.route_has_remote_binding(route_id)
         {
             return false;
         }
         self.request_daemon_pty_for_route(route_id)
+    }
+
+    fn route_has_remote_binding(&self, route_id: usize) -> bool {
+        self.contexts.iter().any(|grid| {
+            grid.contexts().values().any(|item| {
+                let context = item.context();
+                context.route_id == route_id && context.remote_pty.is_some()
+            })
+        })
     }
 
     pub(crate) fn ensure_daemon_sessions_for_all_routes(&mut self) {

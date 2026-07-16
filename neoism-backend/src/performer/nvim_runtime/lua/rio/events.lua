@@ -99,16 +99,46 @@ local function emit_winbar(refresh_symbol)
       cached_winbar_symbol = current_winbar_symbol()
     end
 
-    rpc("rio_winbar", line, col + 1, cached_winbar_symbol)
+    rpc(
+      "rio_winbar",
+      line,
+      col + 1,
+      cached_winbar_symbol,
+      vim.api.nvim_buf_line_count(0)
+    )
   end)
 end
 
+local winbar_last_emit_ms = 0
+local winbar_pending_refresh = false
+
 local function schedule_winbar(refresh_symbol, delay_ms)
-  clear_winbar_timer()
+  -- THROTTLE, not debounce: a held arrow key streams CursorMoved
+  -- faster than any debounce window, so a clear-and-rearm timer never
+  -- fired and the status line's cur/total pill froze until keyup.
+  -- Leading-edge emit + a single trailing timer (never reset by later
+  -- events) keeps it counting live while the key is held.
+  winbar_pending_refresh = winbar_pending_refresh or refresh_symbol
+  local wait = delay_ms or 90
+  local now = (vim.uv or vim.loop).now()
+  if now - winbar_last_emit_ms >= wait then
+    winbar_last_emit_ms = now
+    local refresh = winbar_pending_refresh
+    winbar_pending_refresh = false
+    clear_winbar_timer()
+    emit_winbar(refresh)
+    return
+  end
+  if winbar_timer then
+    return
+  end
   winbar_timer = vim.defer_fn(function()
     winbar_timer = nil
-    emit_winbar(refresh_symbol)
-  end, delay_ms or 90)
+    winbar_last_emit_ms = (vim.uv or vim.loop).now()
+    local refresh = winbar_pending_refresh
+    winbar_pending_refresh = false
+    emit_winbar(refresh)
+  end, wait)
 end
 
 local function emit_cwd()

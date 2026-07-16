@@ -462,6 +462,7 @@ pub(crate) fn default_model_ids(providers: &[ProviderInfo]) -> BTreeMap<String, 
 
 pub(crate) fn effective_provider_catalog(
     providers: &[ProviderInfo],
+    codex_oauth: bool,
 ) -> Vec<ProviderInfo> {
     let mut output = providers.to_vec();
     let snapshot = output.clone();
@@ -476,6 +477,7 @@ pub(crate) fn effective_provider_catalog(
                 model.id.as_str(),
                 &mut model.limit,
                 &mut model.cost,
+                codex_oauth,
             );
         }
     }
@@ -485,12 +487,13 @@ pub(crate) fn effective_provider_catalog(
 pub(crate) fn usable_provider_catalog(
     providers: &[ProviderInfo],
     connected_ids: &[String],
+    codex_oauth: bool,
 ) -> Vec<ProviderInfo> {
     let connected = connected_ids
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let mut output = effective_provider_catalog(providers);
+    let mut output = effective_provider_catalog(providers, codex_oauth);
     for provider in &mut output {
         let provider_connected = connected.contains(provider.id.as_str());
         let provider_id = provider.id.clone();
@@ -539,6 +542,7 @@ fn public_free_model(model: &ModelInfo) -> bool {
 pub(crate) fn generation_metadata(
     providers: &[ProviderInfo],
     model: &UserModel,
+    codex_oauth: bool,
 ) -> GenerationMetadata {
     let Some(provider) = providers
         .iter()
@@ -570,6 +574,7 @@ pub(crate) fn generation_metadata(
         model.model_id.as_str(),
         &mut limit,
         &mut cost,
+        codex_oauth,
     );
     GenerationMetadata {
         api: Some(model_info.api.clone()),
@@ -581,23 +586,55 @@ pub(crate) fn generation_metadata(
     }
 }
 
+/// Whether openai requests will ride the codex (ChatGPT subscription) backend:
+/// `OpenAiRuntime::stream` sends every request over the OAuth Responses path
+/// whenever the stored auth is OAuth, regardless of any API key. Codex enforces
+/// far smaller context windows than the platform API for the same model ids
+/// (gpt-5.6-sol: ~372k vs 1.05M), so limit resolution must follow the same
+/// dispatch rule the runtime uses.
+pub(crate) fn openai_codex_oauth(auth_store: &crate::auth_store::AuthStore) -> bool {
+    matches!(
+        auth_store.get("openai"),
+        Ok(Some(neoism_agent_core::AuthInfo::OAuth { .. }))
+    )
+}
+
 fn apply_codex_openai_effective_metadata(
     providers: &[ProviderInfo],
     provider_id: &str,
     model_id: &str,
     limit: &mut ModelLimit,
     cost: &mut ModelCost,
+    codex_oauth: bool,
 ) {
-    if provider_id != "openai" || !uses_codex_subscription_limits(model_id, limit) {
+    if provider_id != "openai"
+        || !codex_oauth
+        || !uses_codex_subscription_limits(model_id, limit)
+    {
         return;
     }
-    if let Some(codex_limit) = codex_catalog_limit(providers, model_id) {
-        *limit = codex_limit;
-    } else {
-        limit.context = CODEX_OPENAI_CONTEXT_LIMIT;
-        limit.input = Some(CODEX_OPENAI_INPUT_LIMIT);
-        limit.output = CODEX_OPENAI_OUTPUT_LIMIT;
-    }
+    // models.dev advertises the platform-API window (1.05M context / 922k
+    // input) for the gpt-5.6 family under `github-copilot` too, but the codex
+    // backend enforces a far smaller, product-side cap (~372k for gpt-5.6-sol,
+    // and OpenAI has cut it further since — openai/codex#31860, #32806). A
+    // session that grew past it had every request rejected with a context-
+    // overflow error while auto-compaction, keyed off this limit, never fired.
+    // The catalog entry may lower the codex ceiling, never raise it.
+    let catalog_limit = codex_catalog_limit(providers, model_id);
+    let catalog = catalog_limit.as_ref();
+    limit.context = catalog
+        .map(|catalog| catalog.context.min(CODEX_OPENAI_CONTEXT_LIMIT))
+        .unwrap_or(CODEX_OPENAI_CONTEXT_LIMIT);
+    limit.input = Some(
+        catalog
+            .and_then(|catalog| catalog.input)
+            .map(|input| input.min(CODEX_OPENAI_INPUT_LIMIT))
+            .unwrap_or(CODEX_OPENAI_INPUT_LIMIT),
+    );
+    limit.output = catalog
+        .map(|catalog| catalog.output.min(CODEX_OPENAI_OUTPUT_LIMIT))
+        .filter(|output| *output > 0)
+        .unwrap_or(CODEX_OPENAI_OUTPUT_LIMIT);
     *cost = ModelCost::default();
 }
 
@@ -816,7 +853,7 @@ mod tests {
             variant: None,
         };
 
-        let metadata = generation_metadata(&providers, &model);
+        let metadata = generation_metadata(&providers, &model, false);
 
         assert_eq!(
             metadata.api.as_ref().map(|api| api.npm.as_str()),
@@ -842,7 +879,7 @@ mod tests {
             variant: None,
         };
 
-        let metadata = generation_metadata(&providers, &model);
+        let metadata = generation_metadata(&providers, &model, true);
         let limit = metadata.limit.expect("limit");
         let cost = metadata.cost.expect("cost");
 
@@ -857,7 +894,7 @@ mod tests {
 
     #[test]
     fn effective_provider_catalog_uses_copilot_codex_limits_for_ui_models() {
-        let providers = effective_provider_catalog(&parse_codex_limit_fixture());
+        let providers = effective_provider_catalog(&parse_codex_limit_fixture(), true);
         let openai = providers
             .iter()
             .find(|provider| provider.id == "openai")
@@ -873,7 +910,7 @@ mod tests {
 
     #[test]
     fn effective_provider_catalog_treats_gpt_5_6_family_as_codex_subscription_models() {
-        let providers = effective_provider_catalog(&parse_codex_limit_fixture());
+        let providers = effective_provider_catalog(&parse_codex_limit_fixture(), true);
         let openai = providers
             .iter()
             .find(|provider| provider.id == "openai")
@@ -887,6 +924,24 @@ mod tests {
             assert_eq!(model.cost.input, 0.0, "{model_id}");
             assert_eq!(model.cost.output, 0.0, "{model_id}");
         }
+    }
+
+    #[test]
+    fn effective_provider_catalog_keeps_api_limits_without_codex_oauth() {
+        let providers = effective_provider_catalog(&parse_codex_limit_fixture(), false);
+        let openai = providers
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .expect("openai provider");
+        let model = openai.models.get("gpt-5.6-sol").expect("gpt-5.6-sol model");
+
+        // API-key requests ride the platform Responses API, which honors the
+        // full advertised window and bills per token — no codex clamp.
+        assert_eq!(model.limit.context, 1_050_000);
+        assert_eq!(model.limit.input, Some(922_000));
+        assert_eq!(model.limit.output, 128_000);
+        assert_eq!(model.cost.input, 5.0);
+        assert_eq!(model.cost.output, 30.0);
     }
 
     #[test]
@@ -975,6 +1030,7 @@ mod tests {
         let usable = usable_provider_catalog(
             &providers,
             &["openai".to_string(), "google".to_string()],
+            false,
         );
 
         let opencode = usable
@@ -1049,6 +1105,13 @@ mod tests {
                     "name": "GPT-5.5",
                     "release_date": "2026-04-23",
                     "limit": { "context": 400000, "input": 272000, "output": 128000 },
+                    "cost": { "input": 5.0, "output": 30.0, "cache_read": 0.5 }
+                  },
+                  "gpt-5.6-sol": {
+                    "id": "gpt-5.6-sol",
+                    "name": "GPT-5.6 Sol",
+                    "release_date": "2026-07-01",
+                    "limit": { "context": 1050000, "input": 922000, "output": 128000 },
                     "cost": { "input": 5.0, "output": 30.0, "cache_read": 0.5 }
                   }
                 }

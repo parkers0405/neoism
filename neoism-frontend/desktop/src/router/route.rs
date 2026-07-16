@@ -1,9 +1,10 @@
 use crate::router::routes::{assistant, RoutePath};
 use crate::router::window::RouteWindow;
-use neoism_backend::clipboard::Clipboard;
+use neoism_backend::clipboard::{Clipboard, ClipboardType};
 use neoism_backend::config::Config as RioConfig;
 use neoism_backend::error::{RioError, RioErrorType};
 use neoism_ui::editor::scroll_model::{parse_ex_command, GlobalExCommandPlan};
+use neoism_ui::widgets::modal::ModalAction;
 use neoism_window::keyboard::{Key, NamedKey};
 use neoism_window::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use std::time::{Duration, Instant};
@@ -606,6 +607,39 @@ impl Route<'_> {
                         self.request_overlay_redraw();
                         return true;
                     }
+                    Key::Named(NamedKey::Delete) if blocking && modal_has_input => {
+                        self.window.screen.renderer.modal.delete_input();
+                        self.request_overlay_redraw();
+                        return true;
+                    }
+                    Key::Named(NamedKey::ArrowLeft) if blocking && modal_has_input => {
+                        self.window.screen.renderer.modal.move_input_caret_left();
+                        self.request_overlay_redraw();
+                        return true;
+                    }
+                    Key::Named(NamedKey::ArrowRight)
+                        if blocking && modal_has_input =>
+                    {
+                        self.window.screen.renderer.modal.move_input_caret_right();
+                        self.request_overlay_redraw();
+                        return true;
+                    }
+                    Key::Named(NamedKey::Home) if blocking && modal_has_input => {
+                        self.window.screen.renderer.modal.input_caret_to_start();
+                        self.request_overlay_redraw();
+                        return true;
+                    }
+                    Key::Named(NamedKey::End) if blocking && modal_has_input => {
+                        self.window.screen.renderer.modal.input_caret_to_end();
+                        self.request_overlay_redraw();
+                        return true;
+                    }
+                    Key::Named(NamedKey::Tab) if blocking && modal_has_input => {
+                        if self.window.screen.renderer.modal.focus_next_form_field() {
+                            self.request_overlay_redraw();
+                            return true;
+                        }
+                    }
                     Key::Named(NamedKey::ArrowUp) if blocking => {
                         self.window.screen.renderer.modal.move_selection_up();
                         self.request_overlay_redraw();
@@ -623,12 +657,35 @@ impl Route<'_> {
                         self.request_overlay_redraw();
                     }
                     key if blocking && is_enter_key(key) => {
-                        if let Some(action) =
-                            self.window.screen.renderer.modal.selected_action()
-                        {
+                        let selected =
+                            self.window.screen.renderer.modal.selected_action();
+                        let action =
+                            if matches!(selected, Some(ModalAction::ServerFormSubmit)) {
+                                self.window.screen.renderer.modal.submit_form()
+                            } else {
+                                selected
+                            };
+                        if let Some(action) = action {
                             self.window.screen.execute_modal_action(action);
                         }
                         self.request_overlay_redraw();
+                    }
+                    Key::Character(text)
+                        if blocking
+                            && modal_has_input
+                            && matches!(text.as_str(), "v" | "V")
+                            && self.window.screen.modifiers.state().control_key() =>
+                    {
+                        let pasted: String = clipboard
+                            .get(ClipboardType::Clipboard)
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .collect();
+                        if !pasted.is_empty() {
+                            self.window.screen.renderer.modal.push_input(&pasted);
+                        }
+                        self.request_overlay_redraw();
+                        return true;
                     }
                     Key::Character(text) if blocking && !modal_has_input => {
                         if let Some(action) =
@@ -749,7 +806,60 @@ impl Route<'_> {
                 "command palette handling key"
             );
             if key_event.state == ElementState::Pressed {
+                let mods = self.window.screen.modifiers.state();
                 match &key_event.logical_key {
+                    Key::Character(text)
+                        if text.eq_ignore_ascii_case("e") && mods.control_key() =>
+                    {
+                        if let Some(id) = self
+                            .window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .selected_server_id()
+                        {
+                            self.window.screen.request_server_edit(id);
+                            self.window
+                                .screen
+                                .renderer
+                                .command_palette
+                                .set_enabled(false);
+                            self.request_overlay_redraw();
+                            return true;
+                        }
+                    }
+                    Key::Named(NamedKey::Delete) => {
+                        if let Some(id) = self
+                            .window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .selected_server_id()
+                        {
+                            use neoism_ui::widgets::modal::{
+                                ModalAction, ModalButton, ModalSpec,
+                            };
+                            self.window
+                                .screen
+                                .renderer
+                                .command_palette
+                                .set_enabled(false);
+                            self.window.screen.renderer.modal.open(ModalSpec {
+                                title: "Remove server?".into(),
+                                body: "This removes the saved address and its local credential. The remote server is not changed.".into(),
+                                meta: String::new(),
+                                buttons: vec![
+                                    ModalButton::new("Remove", "Enter", ModalAction::ServerRemoveConfirm { id }),
+                                    ModalButton::new("Cancel", "Esc", ModalAction::Close),
+                                ],
+                                input: None,
+                                busy: false,
+                                blocking: true,
+                            });
+                            self.request_overlay_redraw();
+                            return true;
+                        }
+                    }
                     Key::Named(NamedKey::Escape) => {
                         tracing::trace!(target: "neoism::input", "command palette closing on Escape");
                         let was_search =

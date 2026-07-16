@@ -72,8 +72,23 @@ impl NeoismAgentPane {
         })
     }
 
-    /// Open the "/" picker matching a clicked dropdown chip.
+    /// Open the "/" picker matching a clicked dropdown chip. Clicking
+    /// the chip whose picker is already up closes it instead (toggle);
+    /// clicking a different chip switches to that chip's picker.
     pub fn open_status_chip_picker(&mut self, index: usize) {
+        let kind = match index {
+            0 => NeoismAgentPickerKind::Agent,
+            1 => NeoismAgentPickerKind::Model,
+            _ => NeoismAgentPickerKind::Thinking,
+        };
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.kind == kind)
+        {
+            self.close_picker();
+            return;
+        }
         match index {
             0 => self.open_agent_picker(),
             1 => self.open_model_picker(),

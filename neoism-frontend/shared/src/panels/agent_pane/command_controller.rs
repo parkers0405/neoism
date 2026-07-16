@@ -255,7 +255,8 @@ fn slash_option_specs() -> &'static [SlashOptionSpec] {
         },
         SlashOptionSpec {
             title: "/cuss",
-            description: "The tiny visitor returns, furious (#$@!) — the model hears about it",
+            description:
+                "The tiny visitor returns, furious (#$@!) — the model hears about it",
             footer: "fun",
             value: "/cuss",
         },
@@ -435,7 +436,11 @@ mod tests {
 
     #[test]
     fn plans_skip_permissions_toggle() {
-        for spelling in ["/yolo", "/dangerously-skip-permissions", "/skip-permissions"] {
+        for spelling in [
+            "/yolo",
+            "/dangerously-skip-permissions",
+            "/skip-permissions",
+        ] {
             assert_eq!(
                 plan_slash_command(spelling),
                 SlashCommandAction::ToggleSkipPermissions,
@@ -446,14 +451,26 @@ mod tests {
 
     #[test]
     fn plans_the_easter_eggs() {
-        assert_eq!(plan_slash_command("/piss"), SlashCommandAction::PissOnScreen);
-        assert_eq!(plan_slash_command("/cuss"), SlashCommandAction::CussOnScreen);
-        assert_eq!(plan_slash_command("/swear"), SlashCommandAction::CussOnScreen);
+        assert_eq!(
+            plan_slash_command("/piss"),
+            SlashCommandAction::PissOnScreen
+        );
+        assert_eq!(
+            plan_slash_command("/cuss"),
+            SlashCommandAction::CussOnScreen
+        );
+        assert_eq!(
+            plan_slash_command("/swear"),
+            SlashCommandAction::CussOnScreen
+        );
         assert_eq!(
             plan_slash_command("/glitch"),
             SlashCommandAction::GlitchOnScreen
         );
-        assert_eq!(plan_slash_command("/dance"), SlashCommandAction::DiscoOnScreen);
+        assert_eq!(
+            plan_slash_command("/dance"),
+            SlashCommandAction::DiscoOnScreen
+        );
         assert_eq!(
             plan_slash_command("/gangfight"),
             SlashCommandAction::GangFightOnScreen
@@ -462,7 +479,10 @@ mod tests {
             plan_slash_command("/praise"),
             SlashCommandAction::PraiseOnScreen
         );
-        assert_eq!(plan_slash_command("/amen"), SlashCommandAction::PraiseOnScreen);
+        assert_eq!(
+            plan_slash_command("/amen"),
+            SlashCommandAction::PraiseOnScreen
+        );
     }
 
     #[test]

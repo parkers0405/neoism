@@ -40,6 +40,13 @@ struct Cli {
     /// Disable the unix-socket listener (TCP only).
     #[arg(long)]
     no_unix_socket: bool,
+    /// Declare this directory as a workspace at startup (repeatable).
+    /// The headless-host primitive: `neoism-workspace-daemon --workspace
+    /// /work/repo` serves that dir as a joinable workspace with no client
+    /// having to create it first. Idempotent — a dir already declared by
+    /// a previous run (restored from the state snapshot) is not duplicated.
+    #[arg(long, value_name = "DIR")]
+    workspace: Vec<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -125,6 +132,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
             neoism_workspace_daemon::hosts::PairedHostStore::in_memory()
         });
+    for dir in &cli.workspace {
+        let workspace = workspaces.declare_startup_workspace(dir);
+        tracing::info!(
+            workspace_id = %workspace.id,
+            root = ?workspace.root_dir,
+            title = %workspace.title,
+            "startup workspace ready",
+        );
+    }
     // GC any clipboard image temp files older than the 24h TTL before
     // we start serving (and trim the LRU cap as a side effect). The
     // opportunistic per-paste sweep keeps the cap enforced afterwards.

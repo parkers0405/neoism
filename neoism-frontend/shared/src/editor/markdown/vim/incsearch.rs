@@ -69,17 +69,44 @@ impl MarkdownPane {
             .map(|s| (s.origin_line, s.origin_col, s.reverse))
             .unwrap_or((self.cursor_line, self.cursor_col, false));
 
-        // Every non-overlapping occurrence, case-sensitive, file order —
-        // consistent with the `*`/`n` engine. `match_indices` keeps byte
-        // offsets on char boundaries.
+        // Smartcase + multi-word, mirroring `find_in_line` so the palette
+        // list and the committed `n`/`N` engine agree: an all-lowercase
+        // query matches case-insensitively; a query of several words
+        // matches lines containing ALL of them in any order (anchored at
+        // the first word), single words match every occurrence.
         let mut matches: Vec<(usize, usize)> = Vec::new();
         if !query.is_empty() {
+            let sensitive = query.chars().any(char::is_uppercase);
+            let pat = if sensitive {
+                query.to_string()
+            } else {
+                query.to_ascii_lowercase()
+            };
+            let terms: Vec<&str> = pat.split_whitespace().collect();
             'outer: for (li, line) in self.lines.iter().enumerate() {
-                for (col, _) in line.match_indices(query) {
-                    matches.push((li, col));
-                    if matches.len() >= 5000 {
-                        break 'outer;
+                let hay_buf;
+                let hay: &str = if sensitive {
+                    line
+                } else {
+                    hay_buf = line.to_ascii_lowercase();
+                    &hay_buf
+                };
+                if terms.len() > 1 {
+                    if terms.iter().all(|term| hay.contains(term)) {
+                        if let Some(col) = hay.find(terms[0]) {
+                            matches.push((li, col));
+                        }
                     }
+                } else {
+                    for (col, _) in hay.match_indices(pat.as_str()) {
+                        matches.push((li, col));
+                        if matches.len() >= 5000 {
+                            break 'outer;
+                        }
+                    }
+                }
+                if matches.len() >= 5000 {
+                    break;
                 }
             }
         }

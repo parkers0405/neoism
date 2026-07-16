@@ -462,7 +462,47 @@ impl Screen<'_> {
             incoming.set_width(width);
             incoming.set_scale(self.renderer.chrome_scale());
             self.renderer.file_tree = incoming;
+            // The swapped-in tree keeps its own root, so populate's
+            // root-changed reveal never fires — run the sweep explicitly:
+            // to the viewer this IS a re-root.
+            self.renderer.file_tree.begin_root_transition();
             self.file_tree_workspace = Some(id.clone());
+        }
+        // NOTES PANEL SWAP: per-workspace state exactly like the tree —
+        // a joined workspace must never show this machine's personal
+        // vault. Visibility/focus/width/scale are window chrome and
+        // transfer; the vault, entries, open dirs and selection stay
+        // with their workspace.
+        if self.notes_sidebar_workspace.as_ref() != Some(&id) {
+            let visible = self.renderer.notes_sidebar.is_visible();
+            let focused = self.renderer.notes_sidebar.is_focused();
+            let notes_width = self.renderer.notes_sidebar.width();
+            if let Some(old_id) = self.notes_sidebar_workspace.take() {
+                let outgoing = std::mem::take(&mut self.renderer.notes_sidebar);
+                self.workspace_notes_sidebars.insert(old_id, outgoing);
+            }
+            let mut incoming = self
+                .workspace_notes_sidebars
+                .remove(&id)
+                .unwrap_or_default();
+            incoming.set_visible(visible);
+            incoming.set_focused(focused);
+            incoming.set_width(notes_width);
+            incoming.set_scale(self.renderer.chrome_scale());
+            self.renderer.notes_sidebar = incoming;
+            self.notes_sidebar_workspace = Some(id.clone());
+            // A fresh LOCAL panel resolves its vault on entry while the
+            // sidebar is open; a REMOTE-joined workspace keeps an empty
+            // host-scoped panel (its notes live on the host).
+            if visible && self.renderer.notes_sidebar.workspace_path().is_none() {
+                if self.context_manager.current_workspace_is_remote_joined() {
+                    self.renderer
+                        .notes_sidebar
+                        .set_workspace("Host notes".to_string(), None);
+                } else {
+                    self.assign_local_vault_to_notes_sidebar();
+                }
+            }
         }
         self.renderer.buffer_tabs = self
             .workspace_buffer_tabs
@@ -1005,9 +1045,11 @@ impl Screen<'_> {
     /// current workspace is remote-joined (shared chats + SSE), and
     /// back to the local one for local workspaces.
     pub(crate) fn sync_agent_server_for_current_workspace(&mut self) {
-        crate::neoism::agent::set_agent_server_override(
-            self.context_manager.agent_server_override_for_current(),
-        );
+        let server = self
+            .context_manager
+            .agent_server_override_for_current()
+            .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
+        self.set_agent_server_for_window(server);
     }
 
     pub(crate) fn sync_file_tree_root_for_current_workspace(&mut self) {
@@ -1022,8 +1064,6 @@ impl Screen<'_> {
             );
             return;
         };
-        if self.renderer.file_tree.root() != Some(root.as_path()) {
-            self.set_active_workspace_root(root, true);
-        }
+        self.set_active_workspace_root(root, true);
     }
 }

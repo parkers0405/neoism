@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::daemon_client::{
     DaemonClient, DaemonClientOptions, DaemonEndpoint, ReconnectBackoff,

@@ -77,6 +77,8 @@ const SCALE_MIN: f32 = 0.5;
 const SCALE_MAX: f32 = 3.0;
 /// Mode bg cross-fade duration AND scramble-text duration.
 const TRANSITION_MS: f32 = 320.0;
+/// How long a new dir-pill label must stay put before it paints.
+const CWD_LABEL_SETTLE_MS: f32 = 250.0;
 const BRANCH_HOVER_MS: f32 = 140.0;
 /// How far the mode pill's rounded tail tucks under the file pill,
 /// expressed as a fraction of the pill radius. The visible portion of
@@ -104,8 +106,8 @@ const GLYPH_HOME: &str = "\u{f015}"; //  (home — unused after cwd pill switche
 #[allow(dead_code)]
 const GLYPH_GITHUB: &str = "\u{f09b}"; //  (FA github — repo pill on right cluster)
 const GLYPH_LINES: &str = "\u{f0c9}"; //  (line index)
-// Severity + LSP glyphs are shared with the diagnostics/LSP popups —
-// single source in `primitives::icons` so the panels never drift.
+                                      // Severity + LSP glyphs are shared with the diagnostics/LSP popups —
+                                      // single source in `primitives::icons` so the panels never drift.
 const GLYPH_LSP: &str = crate::primitives::icons::GLYPH_LSP;
 const GLYPH_SPLIT: &str = "\u{eb56}"; // codicon split-horizontal
 const GLYPH_ERROR: &str = crate::primitives::icons::GLYPH_ERROR;
@@ -686,6 +688,10 @@ pub struct StatusLine {
     scale: f32,
     prev_mode: Mode,
     transition_started: Instant,
+    /// Debounced dir pill (see `set_info`): what is actually painted,
+    /// plus the not-yet-committed candidate and when it first appeared.
+    cwd_label_display: Option<String>,
+    cwd_label_candidate: Option<(Option<String>, Instant)>,
     error_pill_rect: PillRect,
     warn_pill_rect: PillRect,
     branch_rect: PillRect,
@@ -710,6 +716,8 @@ impl StatusLine {
             prev_mode: Mode::default(),
             transition_started: Instant::now()
                 - Duration::from_millis(TRANSITION_MS as u64 + 1),
+            cwd_label_display: None,
+            cwd_label_candidate: None,
             error_pill_rect: PillRect::default(),
             warn_pill_rect: PillRect::default(),
             branch_rect: PillRect::default(),
@@ -845,7 +853,35 @@ impl StatusLine {
             self.prev_mode = self.info.mode;
             self.transition_started = Instant::now();
         }
+        // Debounce the dir pill: `cwd_label` is re-derived every frame
+        // from two sources (active buffer's parent vs pane cwd) that can
+        // alternate during scroll-repeat, which read as flicker. A new
+        // label only commits once it has stayed put for a beat; a real
+        // `cd` or pane switch still lands fast, single-frame flappers
+        // never paint.
+        let incoming = info.cwd_label.clone();
         self.info = info;
+        if incoming == self.cwd_label_display {
+            self.cwd_label_candidate = None;
+        } else if self.cwd_label_display.is_none()
+            || self
+                .cwd_label_candidate
+                .as_ref()
+                .is_some_and(|(candidate, since)| {
+                    *candidate == incoming
+                        && since.elapsed().as_secs_f32() * 1000.0 >= CWD_LABEL_SETTLE_MS
+                })
+        {
+            self.cwd_label_display = incoming;
+            self.cwd_label_candidate = None;
+        } else if self
+            .cwd_label_candidate
+            .as_ref()
+            .map(|(candidate, _)| candidate != &incoming)
+            .unwrap_or(true)
+        {
+            self.cwd_label_candidate = Some((incoming, Instant::now()));
+        }
     }
 
     pub fn is_animating(&self) -> bool {
@@ -973,7 +1009,7 @@ impl StatusLine {
             mode_x + mode_pill_w - tail_overlap
         };
 
-        let cwd_label = self.info.cwd_label.as_deref().filter(|s| !s.is_empty());
+        let cwd_label = self.cwd_label_display.as_deref().filter(|s| !s.is_empty());
         let glyph_folder = status_glyph("status.folder", GLYPH_FOLDER);
         let cwd_text_inset_left = tail_overlap + chain_breather;
         let (cwd_pill_w, cwd_text_section_w, cwd_icon_section_w, cwd_icon_w, cwd_text_w) =

@@ -31,7 +31,11 @@ async fn calculate_usage_cost(
         return Some(0.0);
     }
     let providers = state.inner.provider_catalog.providers().await.ok()?;
-    let metadata = crate::provider_catalog::generation_metadata(&providers, model);
+    let metadata = crate::provider_catalog::generation_metadata(
+        &providers,
+        model,
+        crate::provider_catalog::openai_codex_oauth(&state.inner.auth_store),
+    );
     let cost = metadata.cost.as_ref()?;
     Some(calculate_usage_cost_with_model_cost(cost, tokens))
 }

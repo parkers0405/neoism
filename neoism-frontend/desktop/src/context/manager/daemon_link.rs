@@ -36,8 +36,18 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             handle, runtime, endpoint,
         ));
         self.daemon.link_is_peer = !link_is_home;
-        self.ensure_daemon_sessions_for_all_routes();
-        self.sync_daemon_workspaces();
+        // Mirroring is HOME-only. Pushing this desktop's workspace
+        // inventory (and rebinding its panes) into a joined server copies
+        // the guest's local workspaces into the foreign daemon's tree —
+        // "Workspace 1 (/home/<user>)" then becomes that server's most
+        // recent workspace and wins the join-time adopt, so a join looks
+        // like nothing happened. It also leaks placeholder PTYs (2x1,
+        // cwd-less) into the host. A guest attaches without declaring
+        // anything; adopt flows create sessions explicitly.
+        if link_is_home {
+            self.ensure_daemon_sessions_for_all_routes();
+            self.sync_daemon_workspaces();
+        }
         // Wave 6A: warm the tailnet peer cache at attach so the first
         // Workspaces-modal open already has discovery data to show.
         self.request_tailnet_peers();
@@ -45,7 +55,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
 
     #[allow(dead_code)]
     pub fn detach_daemon_client(&mut self) {
-        self.daemon.link = None;
+        self.daemon = ContextManagerDaemonState::default();
     }
 
     pub fn daemon_client_attached(&self) -> bool {
@@ -390,7 +400,15 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .find(|workspace| workspace.id == workspace_id)
         {
             Some(workspace) => workspace.host_id == local,
-            None => !self.workspace_is_adopted(workspace_id),
+            // An id this daemon has never seen may only SELF-DECLARE on
+            // the HOME link. On a joined server every local workspace id
+            // is "unknown" — publishing them mirrored the guest's whole
+            // island strip into the host's tree ("Workspace 2, root /")
+            // and registered the guest's tabs there, which then
+            // resurrected on every rejoin.
+            None => {
+                !self.daemon.link_is_peer && !self.workspace_is_adopted(workspace_id)
+            }
         }
     }
 
@@ -639,26 +657,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                     workspace_id: workspace_id.clone(),
                 });
             }
-        }
-    }
-
-    pub fn share_workspace_at_index(&self, index: usize) {
-        let Some(link) = self.daemon.link.as_ref() else {
-            return;
-        };
-        self.sync_daemon_workspaces();
-        if let Some(workspace_id) = self.workspace_tree_id_for_index(index) {
-            link.send(WorkspaceClientMessage::ShareWorkspace { workspace_id });
-        }
-    }
-
-    pub fn stop_sharing_workspace_at_index(&self, index: usize) {
-        let Some(link) = self.daemon.link.as_ref() else {
-            return;
-        };
-        self.sync_daemon_workspaces();
-        if let Some(workspace_id) = self.workspace_tree_id_for_index(index) {
-            link.send(WorkspaceClientMessage::StopSharingWorkspace { workspace_id });
         }
     }
 

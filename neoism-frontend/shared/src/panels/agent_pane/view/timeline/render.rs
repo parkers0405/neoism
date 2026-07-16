@@ -607,10 +607,26 @@ pub fn render_timeline_scrollbar_with<P: AgentTimelinePane>(
     let thumb_hit_rect = [thumb_x - hit_pad, thumb_y, thumb_w + hit_pad * 2.0, thumb_h];
     pane.set_scrollbar_geometry(Some(track_rect), Some(thumb_hit_rect));
     scrollbar::draw_track_scaled(
-        sugarloaf, false, thumb_x, y, track_h, s, opacity, DEPTH, ORDER_CARET,
+        sugarloaf,
+        false,
+        thumb_x,
+        y,
+        track_h,
+        s,
+        opacity,
+        DEPTH,
+        ORDER_CARET,
     );
     scrollbar::draw_thumb_scaled(
-        sugarloaf, false, thumb_x, thumb_y, thumb_h, s, opacity, false, DEPTH,
+        sugarloaf,
+        false,
+        thumb_x,
+        thumb_y,
+        thumb_h,
+        s,
+        opacity,
+        false,
+        DEPTH,
         ORDER_CARET,
     );
 }

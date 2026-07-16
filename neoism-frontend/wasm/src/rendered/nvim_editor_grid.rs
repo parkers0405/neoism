@@ -154,6 +154,7 @@ impl ChromeBridge {
             | EditorServerMessage::Notification { surface_id, .. }
             | EditorServerMessage::YankFlash { surface_id, .. }
             | EditorServerMessage::BufferOpened { surface_id, .. }
+            | EditorServerMessage::CursorLine { surface_id, .. }
             | EditorServerMessage::BufferModified { surface_id, .. }
             | EditorServerMessage::Closed { surface_id, .. }
             | EditorServerMessage::Error { surface_id, .. } => surface_id.clone(),

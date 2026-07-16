@@ -541,6 +541,15 @@ const FILE_TREE_GIT_SELF_EVENT_SUPPRESS: Duration = Duration::from_millis(1200);
 const MAX_SEARCH_HISTORY_SIZE: usize = 255;
 static SCRATCH_BUFFER_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
+/// A decoded `cover:` banner registered with sugarloaf — see
+/// `markdown_cover_cache`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MarkdownCoverImage {
+    pub(crate) image_id: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct FileTreeResizeState {
     start_x: f32,
@@ -807,11 +816,34 @@ pub struct Screen<'screen> {
     /// re-dials the daemon connection back to this desktop's home
     /// daemon on the next pump.
     pending_daemon_go_home: bool,
+    /// Host-level server switch selected from the shared server picker.
+    pending_server_connect: Option<String>,
+    pending_server_manager_open: bool,
+    pending_server_add: Option<(String, Option<String>, Option<String>)>,
+    pending_server_edit: Option<String>,
+    pending_server_edit_submit: Option<(String, String, Option<String>, Option<String>)>,
+    pending_server_remove: Option<String>,
+    pending_workspace_subscription: Option<String>,
     /// In-flight files-plane MUTATIONS (create/rename/delete) this
     /// screen issued for the remote tree, by request id. Replies with
     /// these ids drive toasts + re-lists; unknown ids are listing
     /// traffic and stay quiet.
     pending_remote_file_ops: std::collections::HashSet<u64>,
+    /// In-flight daemon `ReadFile` fetches for markdown panes opened in
+    /// a joined workspace (the bytes only exist on the host), by request
+    /// id → pane path. The correlated `FileContent` reply fills the pane.
+    pending_remote_markdown_opens: HashMap<u64, PathBuf>,
+    /// Decoded `cover:` banner images by resolved file path. `None`
+    /// records a failed decode so a broken cover doesn't re-decode every
+    /// frame. Entries re-load lazily if sugarloaf drops the texture.
+    pub(crate) markdown_cover_cache:
+        HashMap<PathBuf, Option<crate::screen::MarkdownCoverImage>>,
+    /// rich_text_ids that received md/notebook image overlays LAST
+    /// frame. Any id not re-pushed this frame gets its overlays
+    /// cleared — a pane that stops rendering (tab stashed to another
+    /// grid, content swapped to a terminal) must not leave its cover
+    /// glued to the screen.
+    markdown_image_overlay_ids: std::collections::HashSet<usize>,
     /// In-flight remote git-status request → the root it was asked
     /// for, so a stale reply for a workspace we've left is dropped.
     pending_remote_git_status: HashMap<u64, PathBuf>,
@@ -830,6 +862,12 @@ pub struct Screen<'screen> {
     /// alike). Mirrors `workspace_buffer_tabs`.
     workspace_file_trees: HashMap<WorkspaceKey, crate::editor::file_tree::FileTree>,
     file_tree_workspace: Option<WorkspaceKey>,
+    /// Per-workspace NOTES panel state (viewed vault, entries, open
+    /// dirs, selection) — workspace switches SWAP whole panels exactly
+    /// like `workspace_file_trees`, so a joined workspace never shows
+    /// this machine's personal vault.
+    workspace_notes_sidebars: HashMap<WorkspaceKey, neoism_ui::panels::NotesSidebar>,
+    notes_sidebar_workspace: Option<WorkspaceKey>,
     workspace_editor_active_paths: HashMap<WorkspaceKey, PathBuf>,
     workspace_note_indexes: HashMap<PathBuf, crate::workspace::notes::WorkspaceNoteIndex>,
     workspace_note_index_rx: Option<
@@ -1531,8 +1569,9 @@ impl Screen<'_> {
         }
 
         let mut startup_shader_overlay: Option<String> = None;
-        if let Some(overlay) =
-            startup_pack.as_ref().and_then(|pack| pack.shader_overlay.clone())
+        if let Some(overlay) = startup_pack
+            .as_ref()
+            .and_then(|pack| pack.shader_overlay.clone())
         {
             let overlay_config =
                 neoism_backend::sugarloaf::ShaderOverlayConfig::new([overlay.clone()]);
@@ -1647,7 +1686,9 @@ impl Screen<'_> {
         // Precedence: an explicit `[window] background-image` in config
         // is the user's individual override and beats the active Mash
         // Up Pack's wallpaper slot.
-        let pack_wallpaper = startup_pack.as_ref().and_then(|pack| pack.wallpaper.as_ref());
+        let pack_wallpaper = startup_pack
+            .as_ref()
+            .and_then(|pack| pack.wallpaper.as_ref());
         if let Some(image) = config.window.background_image.as_ref().or(pack_wallpaper) {
             if let Err(message) = sugarloaf.set_background_image(image) {
                 renderer.assistant.set_error(RioError {
@@ -1739,10 +1780,22 @@ impl Screen<'_> {
                 .map(Self::normalize_workspace_root),
             pending_peer_workspace_join: None,
             pending_daemon_go_home: false,
+            pending_server_connect: None,
+            pending_server_manager_open: false,
+            pending_server_add: None,
+            pending_server_edit: None,
+            pending_server_edit_submit: None,
+            pending_server_remove: None,
+            pending_workspace_subscription: None,
             pending_remote_file_ops: std::collections::HashSet::new(),
+            pending_remote_markdown_opens: HashMap::new(),
+            markdown_cover_cache: HashMap::new(),
+            markdown_image_overlay_ids: std::collections::HashSet::new(),
             pending_remote_git_status: HashMap::new(),
             workspace_roots: HashMap::new(),
             workspace_buffer_tabs: HashMap::new(),
+            workspace_notes_sidebars: HashMap::new(),
+            notes_sidebar_workspace: None,
             workspace_file_trees: HashMap::new(),
             file_tree_workspace: None,
             workspace_buf_enter_targets: HashMap::new(),

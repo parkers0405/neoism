@@ -256,8 +256,11 @@ impl Screen<'_> {
             .filter(|id| !id.is_empty())
             .and_then(neoism_backend::config::mashup::find_mashup_pack)
             .and_then(|pack| pack.wallpaper);
-        if let Some(image) =
-            config.window.background_image.as_ref().or(pack_wallpaper.as_ref())
+        if let Some(image) = config
+            .window
+            .background_image
+            .as_ref()
+            .or(pack_wallpaper.as_ref())
         {
             if let Err(message) = self.sugarloaf.set_background_image(image) {
                 self.renderer.assistant.set_error(RioError {
@@ -1119,11 +1122,9 @@ impl Screen<'_> {
         self.sugarloaf
             .set_background_color(Some(self.renderer.dynamic_background.1));
 
-        if let Err(err) = neoism_backend::config::write_neoism_preferences(
-            Some(theme_name),
-            None,
-            None,
-        ) {
+        if let Err(err) =
+            neoism_backend::config::write_neoism_preferences(Some(theme_name), None, None)
+        {
             tracing::warn!(target: "neoism::config", "failed to persist theme: {err}");
         }
 

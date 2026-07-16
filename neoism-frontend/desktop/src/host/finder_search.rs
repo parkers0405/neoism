@@ -35,15 +35,69 @@ const LOOSE_MAX_DEPTH: &str = "6";
 const LOOSE_MAX_FILES: usize = 20_000;
 const MAX_HITS: usize = 500;
 
+/// Daemon route for finder searches in a JOINED workspace: the files
+/// live on the HOST's disk, so `rg`/`fff` must run there. Mirrors
+/// `RemoteFiles` — requests go out on the daemon link with a
+/// pre-allocated id, the trait returns `IoError::Pending(id)`, and the
+/// correlated `SearchReply` lands in
+/// `Screen::apply_daemon_search_message` → the finder's
+/// `handle_service_reply`.
+pub struct RemoteSearchRoute {
+    pub root: PathBuf,
+    pub handle: crate::daemon_client::DaemonClientHandle,
+    pub runtime: tokio::runtime::Handle,
+}
+
 pub struct NativeSearchService {
     pickers: Mutex<HashMap<PathBuf, fff_search::FilePicker>>,
+    remote: Mutex<Option<RemoteSearchRoute>>,
 }
 
 impl NativeSearchService {
     pub fn new() -> Self {
         Self {
             pickers: Mutex::new(HashMap::new()),
+            remote: Mutex::new(None),
         }
+    }
+
+    /// Install (or clear) the daemon route — set on workspace switch
+    /// alongside the file tree's `set_remote_files`.
+    pub fn set_remote(&self, route: Option<RemoteSearchRoute>) {
+        if let Ok(mut remote) = self.remote.lock() {
+            *remote = route;
+        }
+    }
+
+    /// When `cwd` lives in a joined workspace, ship the search to the
+    /// daemon and hand back the pending request id. `None` means local.
+    fn remote_dispatch(
+        &self,
+        cwd: &Path,
+        build: impl FnOnce(u64, String) -> neoism_protocol::search::SearchClientMessage,
+    ) -> Option<u64> {
+        let guard = self.remote.lock().ok()?;
+        let route = guard.as_ref()?;
+        if !cwd.starts_with(&route.root) {
+            return None;
+        }
+        let request_id = route.handle.allocate_request_id();
+        let message = build(request_id, cwd.to_string_lossy().into_owned());
+        let handle = route.handle.clone();
+        route.runtime.spawn(async move {
+            if let Err(error) = handle
+                .send_search_with_request_id(request_id, message)
+                .await
+            {
+                tracing::warn!(
+                    target: "neoism::remote_search",
+                    %error,
+                    request_id,
+                    "remote search request send failed"
+                );
+            }
+        });
+        Some(request_id)
     }
 
     fn with_picker<T>(
@@ -71,6 +125,11 @@ impl Default for NativeSearchService {
 
 impl SearchService for NativeSearchService {
     fn collect_files(&self, cwd: &Path) -> Result<Vec<String>, IoError> {
+        if let Some(id) = self.remote_dispatch(cwd, |req_id, cwd| {
+            neoism_protocol::search::SearchClientMessage::CollectFiles { req_id, cwd }
+        }) {
+            return Err(IoError::Pending(id));
+        }
         if let Some(paths) = self.with_picker(cwd, |picker| {
             picker
                 .get_files()
@@ -89,6 +148,23 @@ impl SearchService for NativeSearchService {
         query: &str,
         mode: SearchFileMode,
     ) -> Result<Vec<SearchFileHit>, IoError> {
+        if let Some(id) = self.remote_dispatch(cwd, |req_id, cwd| {
+            neoism_protocol::search::SearchClientMessage::SearchFiles {
+                req_id,
+                query: query.to_string(),
+                cwd,
+                mode: match mode {
+                    SearchFileMode::Fuzzy => {
+                        neoism_protocol::search::SearchFileMode::Fuzzy
+                    }
+                    SearchFileMode::Exact => {
+                        neoism_protocol::search::SearchFileMode::Exact
+                    }
+                },
+            }
+        }) {
+            return Err(IoError::Pending(id));
+        }
         match mode {
             SearchFileMode::Fuzzy => {
                 if let Some(hits) = self.with_picker(cwd, |picker| {
@@ -134,6 +210,28 @@ impl SearchService for NativeSearchService {
         query: &str,
         mode: SearchGrepMode,
     ) -> Result<Vec<SearchGrepHit>, IoError> {
+        if let Some(id) = self.remote_dispatch(cwd, |req_id, cwd| {
+            neoism_protocol::search::SearchClientMessage::SearchGrep {
+                req_id,
+                query: query.to_string(),
+                cwd,
+                mode: match mode {
+                    SearchGrepMode::Fuzzy => {
+                        neoism_protocol::search::SearchGrepMode::Fuzzy
+                    }
+                    SearchGrepMode::Exact => {
+                        neoism_protocol::search::SearchGrepMode::Exact
+                    }
+                    SearchGrepMode::Regex => {
+                        neoism_protocol::search::SearchGrepMode::Regex
+                    }
+                },
+                case_sensitive: None,
+                file_patterns: Vec::new(),
+            }
+        }) {
+            return Err(IoError::Pending(id));
+        }
         if let Some(hits) = self.with_picker(cwd, |picker| {
             let parser = fff_search::QueryParser::new(fff_search::GrepConfig);
             let query = parser.parse(query);
@@ -167,7 +265,15 @@ impl SearchService for NativeSearchService {
         Ok(Vec::new())
     }
 
-    fn collect_git_changes(&self, _cwd: &Path) -> Result<Vec<SearchGitHit>, IoError> {
+    fn collect_git_changes(&self, cwd: &Path) -> Result<Vec<SearchGitHit>, IoError> {
+        if let Some(id) = self.remote_dispatch(cwd, |req_id, cwd| {
+            neoism_protocol::search::SearchClientMessage::SearchGitChanges {
+                req_id,
+                cwd,
+            }
+        }) {
+            return Err(IoError::Pending(id));
+        }
         Ok(Vec::new())
     }
 

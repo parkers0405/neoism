@@ -46,6 +46,14 @@ pub struct FileTree {
     /// show (remote/tailnet joins take a while), cleared when entries
     /// land — so the wave always starts from the same phase.
     pub(super) skeleton_started: Option<Instant>,
+    /// Start of the staggered row-reveal sweep after the tree re-roots
+    /// (workspace switch, server join, explicit re-root). Cleared by
+    /// `render` once every visible row has finished. See
+    /// [`ROOT_TRANSITION_MS`](super::ROOT_TRANSITION_MS).
+    pub(super) root_transition_started: Option<Instant>,
+    /// A re-root whose listing is still in flight (remote joins): the
+    /// reveal starts when the entries land, not when they were asked for.
+    pub(super) root_transition_armed: bool,
     pub(super) label_truncation_cache:
         HashMap<TruncatedLabelMetricsKey, HashMap<String, CachedTruncatedLabel>>,
     pub(super) label_truncation_cache_items: usize,
@@ -108,6 +116,8 @@ impl FileTree {
             selected_cursor_rect: None,
             reveal_flash: None,
             skeleton_started: None,
+            root_transition_started: None,
+            root_transition_armed: false,
             label_truncation_cache: HashMap::new(),
             label_truncation_cache_items: 0,
             pending_opens: Vec::new(),
@@ -140,6 +150,8 @@ impl FileTree {
             selected_cursor_rect: None,
             reveal_flash: None,
             skeleton_started: None,
+            root_transition_started: None,
+            root_transition_armed: false,
             label_truncation_cache: HashMap::new(),
             label_truncation_cache_items: 0,
             pending_opens: Vec::new(),

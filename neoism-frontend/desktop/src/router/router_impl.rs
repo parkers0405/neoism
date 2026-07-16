@@ -1,4 +1,3 @@
-use crate::daemon_client::DaemonClientHandle;
 use crate::event::EventProxy;
 use crate::router::route::Route;
 use crate::router::routes::{assistant::Assistant, RoutePath};
@@ -6,9 +5,7 @@ use crate::router::window::RouteWindow;
 use neoism_backend::clipboard::Clipboard;
 use neoism_backend::config::Config as RioConfig;
 use neoism_backend::error::{RioError, RioErrorLevel, RioErrorType};
-use neoism_protocol::workspace::{
-    WorkspaceClientMessage, WorkspaceWindowKind, WorkspaceWindowSummary,
-};
+use neoism_protocol::workspace::{WorkspaceWindowKind, WorkspaceWindowSummary};
 use neoism_window::dpi::{PhysicalPosition, PhysicalSize};
 use neoism_window::event_loop::ActiveEventLoop;
 #[cfg(target_os = "macos")]
@@ -29,33 +26,11 @@ pub struct Router<'a> {
     pub daemon_to_native: FxHashMap<String, WindowId>,
     #[allow(dead_code)]
     pub native_to_daemon: FxHashMap<WindowId, String>,
-    daemon: Option<RouterDaemonLink>,
     propagated_report: Option<RioError>,
     pub font_library: Box<neoism_backend::sugarloaf::font::FontLibrary>,
     pub config_route: Option<WindowId>,
     pub clipboard: Clipboard,
     current_tab_id: u64,
-}
-
-#[derive(Clone)]
-struct RouterDaemonLink {
-    handle: DaemonClientHandle,
-    runtime: tokio::runtime::Handle,
-}
-
-impl RouterDaemonLink {
-    fn send(&self, message: WorkspaceClientMessage) {
-        let handle = self.handle.clone();
-        self.runtime.spawn(async move {
-            if let Err(error) = handle.send(message).await {
-                tracing::warn!(
-                    target: "neoism::router_daemon",
-                    %error,
-                    "daemon router request failed"
-                );
-            }
-        });
-    }
 }
 
 impl Router<'_> {
@@ -79,76 +54,12 @@ impl Router<'_> {
             routes: FxHashMap::default(),
             daemon_to_native: FxHashMap::default(),
             native_to_daemon: FxHashMap::default(),
-            daemon: None,
             propagated_report,
             config_route: None,
             font_library: Box::new(font_library),
             clipboard,
             current_tab_id: 0,
         }
-    }
-
-    pub fn attach_daemon_client(
-        &mut self,
-        handle: DaemonClientHandle,
-        runtime: tokio::runtime::Handle,
-    ) {
-        self.daemon = Some(RouterDaemonLink { handle, runtime });
-    }
-
-    #[allow(dead_code)]
-    pub fn detach_daemon_client(&mut self) {
-        self.daemon = None;
-    }
-
-    pub fn request_window_list(&self) -> bool {
-        self.daemon_request(WorkspaceClientMessage::ListWindows)
-    }
-
-    pub fn request_open_window(
-        &self,
-        workspace_id: Option<String>,
-        title: Option<String>,
-    ) -> bool {
-        self.daemon_request(WorkspaceClientMessage::RequestOpenWindow {
-            workspace_id,
-            title,
-        })
-    }
-
-    #[allow(dead_code)]
-    pub fn request_open_native_tab(
-        &self,
-        workspace_id: Option<String>,
-        parent_window_id: Option<String>,
-        title: Option<String>,
-    ) -> bool {
-        self.daemon_request(WorkspaceClientMessage::RequestOpenNativeTab {
-            workspace_id,
-            parent_window_id,
-            title,
-        })
-    }
-
-    pub fn request_open_config_editor(&self, workspace_id: Option<String>) -> bool {
-        self.daemon_request(WorkspaceClientMessage::RequestOpenConfigEditor {
-            workspace_id,
-        })
-    }
-
-    pub fn request_close_native_window(&self, native_id: WindowId) -> bool {
-        let Some(window_id) = self.native_to_daemon.get(&native_id).cloned() else {
-            return false;
-        };
-        self.daemon_request(WorkspaceClientMessage::RequestCloseWindow { window_id })
-    }
-
-    fn daemon_request(&self, message: WorkspaceClientMessage) -> bool {
-        let Some(daemon) = self.daemon.clone() else {
-            return false;
-        };
-        daemon.send(message);
-        true
     }
 
     #[allow(dead_code)]

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::context::factories::create_dead_context;
 use crate::event::VoidListener;

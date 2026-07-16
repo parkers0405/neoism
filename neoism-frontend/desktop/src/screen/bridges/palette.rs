@@ -4,9 +4,87 @@
 use super::super::*;
 use neoism_backend::clipboard::{Clipboard, ClipboardType};
 use neoism_terminal_core::crosswords::pos::Direction;
+use neoism_ui::panels::command_palette::PaletteAction;
 use neoism_window::keyboard::{Key, ModifiersState};
 
 impl Screen<'_> {
+    pub(crate) fn open_edit_server_form(
+        &mut self,
+        id: String,
+        address: String,
+        name: String,
+        token: String,
+    ) {
+        use neoism_ui::widgets::modal::{ModalFormField, ModalFormSpec};
+        self.renderer.modal.open_form(ModalFormSpec {
+            title: "Edit server".into(),
+            fields: vec![
+                ModalFormField {
+                    id: "server_id".into(),
+                    label: String::new(),
+                    value: id,
+                    placeholder: String::new(),
+                    secret: true,
+                },
+                ModalFormField {
+                    id: "address".into(),
+                    label: "Server address".into(),
+                    value: address,
+                    placeholder: "http://localhost:7878".into(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "name".into(),
+                    label: "Server name (optional)".into(),
+                    value: name,
+                    placeholder: "Home workstation".into(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "token".into(),
+                    label: "Access token (optional)".into(),
+                    value: token,
+                    placeholder: "token".into(),
+                    secret: true,
+                },
+            ],
+            submit_label: "Save server".into(),
+        });
+    }
+
+    fn open_add_server_prompt(&mut self) {
+        use neoism_ui::widgets::modal::{ModalFormField, ModalFormSpec};
+
+        self.renderer.modal.open_form(ModalFormSpec {
+            title: "Add server".to_string(),
+            fields: vec![
+                ModalFormField {
+                    id: "address".into(),
+                    label: "Server address".into(),
+                    value: String::new(),
+                    placeholder: "http://localhost:7878".into(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "name".into(),
+                    label: "Server name (optional)".into(),
+                    value: String::new(),
+                    placeholder: "Home workstation".into(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "token".into(),
+                    label: "Access token (optional)".into(),
+                    value: String::new(),
+                    placeholder: "token".into(),
+                    secret: true,
+                },
+            ],
+            submit_label: "Add server".into(),
+        });
+        self.mark_dirty();
+    }
+
     pub(crate) fn active_command_palette_surface(
         &self,
     ) -> neoism_ui::panels::command_palette::PaletteSurface {
@@ -251,6 +329,40 @@ impl Screen<'_> {
         let window_width = self.sugarloaf.window_size().width;
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
 
+        if let Some(action) = self
+            .renderer
+            .command_palette
+            .server_action_at(mouse_x, mouse_y)
+        {
+            match action {
+                PaletteAction::EditServer { id } => {
+                    self.request_server_edit(id);
+                    self.renderer.command_palette.set_enabled(false);
+                }
+                PaletteAction::RemoveServer { id } => {
+                    use neoism_ui::widgets::modal::{
+                        ModalAction, ModalButton, ModalSpec,
+                    };
+                    self.renderer.command_palette.set_enabled(false);
+                    self.renderer.modal.open(ModalSpec {
+                        title: "Remove server?".into(),
+                        body: "This removes the saved address and its local credential. The remote server is not changed.".into(),
+                        meta: String::new(),
+                        buttons: vec![
+                            ModalButton::new("Remove", "Enter", ModalAction::ServerRemoveConfirm { id }),
+                            ModalButton::new("Cancel", "Esc", ModalAction::Close),
+                        ],
+                        input: None,
+                        busy: false,
+                        blocking: true,
+                    });
+                }
+                _ => {}
+            }
+            self.mark_dirty();
+            return true;
+        }
+
         // 5D-drag: a press on a workspace row in the Workspaces modal
         // arms a drag instead of switching immediately. The switch (or
         // the move-to-host intent) is decided on release in
@@ -410,6 +522,9 @@ impl Screen<'_> {
                     // live daemon sessions) instead of only flipping
                     // the daemon's active pointer.
                     self.open_or_adopt_daemon_workspace(target.workspace_id);
+                    if let Some(workspace_id) = self.current_workspace_id() {
+                        self.report_workspace_subscription(workspace_id);
+                    }
                     self.mark_dirty();
                     return true;
                 }
@@ -427,6 +542,10 @@ impl Screen<'_> {
                         }
                         PaletteAction::ShowWorkplaces => {
                             self.open_daemon_workspaces_picker();
+                        }
+                        PaletteAction::ShowServers => {
+                            self.request_server_manager();
+                            self.renderer.command_palette.set_enabled(false);
                         }
                         action => {
                             self.renderer.command_palette.set_enabled(false);
@@ -506,6 +625,9 @@ impl Screen<'_> {
                 self.renderer.command_palette.set_enabled(false);
                 // 8C: same adopt path as the Enter pick.
                 self.open_or_adopt_daemon_workspace(target.workspace_id);
+                if let Some(workspace_id) = self.current_workspace_id() {
+                    self.report_workspace_subscription(workspace_id);
+                }
                 self.mark_dirty();
                 return true;
             }
@@ -730,12 +852,6 @@ impl Screen<'_> {
             PaletteAction::ToggleGitDiffPanel => {
                 self.toggle_git_diff_panel();
             }
-            PaletteAction::InitNeoismWorkspace => {
-                self.init_current_neoism_workspace();
-            }
-            PaletteAction::ReindexNeoismNotes => {
-                self.reindex_current_neoism_notes();
-            }
             PaletteAction::CreateNeoismNote => {
                 self.create_current_neoism_note();
             }
@@ -814,6 +930,21 @@ impl Screen<'_> {
             }
             PaletteAction::ShowWorkplaces => {
                 self.open_daemon_workspaces_picker();
+            }
+            PaletteAction::ShowServers => {
+                self.request_server_manager();
+            }
+            PaletteAction::SelectServer { id } => {
+                self.request_server_connect(id);
+            }
+            PaletteAction::EditServer { id } => {
+                self.request_server_edit(id);
+            }
+            PaletteAction::RemoveServer { id } => {
+                self.request_server_remove(id);
+            }
+            PaletteAction::AddServer => {
+                self.open_add_server_prompt();
             }
             PaletteAction::CreateWorkspace => {
                 self.create_tab(clipboard);
@@ -1013,6 +1144,14 @@ impl Screen<'_> {
             }
         }
 
+        // The workspace this window is currently VIEWING — the adopted id
+        // when the current grid came from a daemon, otherwise the local
+        // grid's own workspace id. Drives the left accent stripe.
+        let current_workspace_marker: Option<String> = self
+            .context_manager
+            .current_adopted_workspace_id()
+            .or_else(|| self.current_workspace_id());
+
         let entries: Vec<PaletteWorkspaceEntry> = merged
             .iter()
             .map(|workspace| {
@@ -1083,6 +1222,8 @@ impl Screen<'_> {
                     },
                     daemon_url,
                     host_online,
+                    current: current_workspace_marker.as_deref()
+                        == Some(workspace.id.as_str()),
                 }
             })
             .collect();

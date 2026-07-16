@@ -1025,7 +1025,11 @@ async fn auto_compaction_threshold_for_user_model(
     model: &UserModel,
 ) -> Option<u64> {
     let providers = state.inner.provider_catalog.providers().await.ok()?;
-    let metadata = crate::provider_catalog::generation_metadata(&providers, model);
+    let metadata = crate::provider_catalog::generation_metadata(
+        &providers,
+        model,
+        crate::provider_catalog::openai_codex_oauth(&state.inner.auth_store),
+    );
     let limit = metadata.limit?;
     let usable = usable_context_tokens(&limit);
     (usable > 0).then_some(usable)
@@ -1864,7 +1868,11 @@ async fn provider_generation_metadata(
         .providers()
         .await
         .unwrap_or_default();
-    crate::provider_catalog::generation_metadata(&providers, model)
+    crate::provider_catalog::generation_metadata(
+        &providers,
+        model,
+        crate::provider_catalog::openai_codex_oauth(&state.inner.auth_store),
+    )
 }
 
 async fn run_provider_stream_step_with_retry(

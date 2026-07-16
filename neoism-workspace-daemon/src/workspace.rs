@@ -52,7 +52,6 @@ use neoism_protocol::workspace::{
     WorkspaceServerMessage, WorkspaceSummary, WorkspaceTabSummary, WorkspaceWindowKind,
     WorkspaceWindowSummary,
 };
-use neoism_workspace_index::notes::WorkspaceNoteIndex;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

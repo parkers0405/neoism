@@ -245,6 +245,37 @@ impl CommandPalette {
             .and_then(|(_, row)| row.action())
     }
 
+    pub fn selected_server_id(&self) -> Option<String> {
+        match self
+            .filtered_rows()
+            .get(self.selected_index)
+            .map(|(_, row)| row)
+        {
+            Some(PaletteRow::Server { entry }) if !entry.local => Some(entry.id.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn server_action_at(&self, x: f32, y: f32) -> Option<PaletteAction> {
+        let contains = |rect: [f32; 4]| {
+            x >= rect[0]
+                && x <= rect[0] + rect[2]
+                && y >= rect[1]
+                && y <= rect[1] + rect[3]
+        };
+        if let Some((rect, id)) = self.server_edit_hit.as_ref() {
+            if contains(*rect) {
+                return Some(PaletteAction::EditServer { id: id.clone() });
+            }
+        }
+        if let Some((rect, id)) = self.server_remove_hit.as_ref() {
+            if contains(*rect) {
+                return Some(PaletteAction::RemoveServer { id: id.clone() });
+            }
+        }
+        None
+    }
+
     /// Returns the buffer location of the currently-highlighted search
     /// match, if any. Used by the router to preview or commit the match.
     pub fn selected_buffer_match_location(&self) -> Option<(u64, u64)> {
@@ -280,6 +311,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
+                | PaletteRow::Server { .. }
+                | PaletteRow::ServerAdd
                 | PaletteRow::Ex { .. } => None,
             })
     }
@@ -302,6 +335,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
+                | PaletteRow::Server { .. }
+                | PaletteRow::ServerAdd
                 | PaletteRow::Search { .. } => None,
             })
     }
@@ -319,6 +354,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
+                | PaletteRow::Server { .. }
+                | PaletteRow::ServerAdd
                 | PaletteRow::Ex { .. }
                 | PaletteRow::Search { .. } => None,
             })
@@ -337,6 +374,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
+                | PaletteRow::Server { .. }
+                | PaletteRow::ServerAdd
                 | PaletteRow::Ex { .. }
                 | PaletteRow::Search { .. } => None,
             })
@@ -355,6 +394,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
+                | PaletteRow::Server { .. }
+                | PaletteRow::ServerAdd
                 | PaletteRow::Ex { .. }
                 | PaletteRow::Search { .. } => None,
             })
@@ -374,6 +415,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
+                | PaletteRow::Server { .. }
+                | PaletteRow::ServerAdd
                 | PaletteRow::Search { .. } => None,
             })
     }
@@ -387,6 +430,8 @@ impl CommandPalette {
                 // nothing (selection never lands here anyway).
                 PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
+                | PaletteRow::Server { .. }
+                | PaletteRow::ServerAdd
                 | PaletteRow::Command { .. }
                 | PaletteRow::BufferMatch { .. }
                 | PaletteRow::Font { .. }
@@ -523,6 +568,26 @@ impl CommandPalette {
             PaletteMode::Workspaces(_) => unreachable!(
                 "Workspaces mode is handled by the early return in filtered_rows"
             ),
+            PaletteMode::Servers(servers) => {
+                let mut rows = servers
+                    .iter()
+                    .filter_map(|entry| {
+                        let name_score = fuzzy_score(&self.query, &entry.name);
+                        let address_score = fuzzy_score(&self.query, &entry.address);
+                        let score = match (name_score, address_score) {
+                            (Some(a), Some(b)) => a.max(b.saturating_sub(4)),
+                            (Some(a), None) => a,
+                            (None, Some(b)) => b.saturating_sub(4),
+                            (None, None) => return None,
+                        };
+                        Some((score, PaletteRow::Server { entry }))
+                    })
+                    .collect::<Vec<_>>();
+                if self.query.is_empty() {
+                    rows.push((i32::MIN, PaletteRow::ServerAdd));
+                }
+                rows
+            }
             // Ex mode: fuzzy-match the *first word* of the query against
             // the curated `EX_COMMANDS` list so the user gets noice/
             // wildmenu-style live suggestions as they type. Once they
@@ -815,7 +880,7 @@ impl CommandPalette {
         (px + pw / 2.0, y)
     }
 
-    /// Update selection based on mouse position. Returns true if selection changed.
+    /// Update pointer hover without stealing keyboard selection.
     pub fn hover(
         &mut self,
         mouse_x: f32,
@@ -823,20 +888,28 @@ impl CommandPalette {
         window_width: f32,
         scale_factor: f32,
     ) -> bool {
-        if let Ok(Some(index)) =
-            self.hit_test(mouse_x, mouse_y, window_width, scale_factor)
-        {
-            let rows = self.filtered_rows();
-            // Hovering a host header is a no-op — separators can't take
-            // the selection cursor.
-            if rows.get(index).is_some_and(|(_, row)| row.is_selectable())
-                && self.selected_index != index
-            {
-                self.move_selection_to(index, rows.len());
-                return true;
-            }
+        let next = self
+            .hit_test(mouse_x, mouse_y, window_width, scale_factor)
+            .ok()
+            .flatten();
+        if next == self.hovered_index {
+            return false;
         }
-        false
+        self.hovered_index = next;
+        true
+    }
+
+    pub fn pointer_over_row(
+        &self,
+        mouse_x: f32,
+        mouse_y: f32,
+        window_width: f32,
+        scale_factor: f32,
+    ) -> bool {
+        self.hit_test(mouse_x, mouse_y, window_width, scale_factor)
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     // ------------------------------------------------------------------

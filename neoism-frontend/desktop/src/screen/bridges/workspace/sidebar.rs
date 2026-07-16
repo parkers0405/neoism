@@ -138,8 +138,12 @@ impl Screen<'_> {
         self.renderer.notes_sidebar.set_focused(true);
         self.renderer.file_tree.set_focused(false);
         match hit {
-            NotesSidebarHit::Menu => self.open_notes_create_menu(x, y),
-            NotesSidebarHit::Visualize => self.open_neoism_graph_view(),
+            NotesSidebarHit::Settings => self.open_notes_settings_menu(),
+            NotesSidebarHit::CreateFirstNote => {
+                if let Some(dir) = self.notes_sidebar_create_target() {
+                    self.open_notes_new_file_prompt(dir);
+                }
+            }
             NotesSidebarHit::WorkspacePicker => {
                 self.open_notes_vault_menu(x, y);
             }
@@ -186,8 +190,10 @@ impl Screen<'_> {
                 self.renderer.notes_sidebar.note_path(index)
             }
             NotesSidebarHit::WorkspacePicker
-            | NotesSidebarHit::Menu
-            | NotesSidebarHit::Visualize => self.renderer.notes_sidebar.workspace_path(),
+            | NotesSidebarHit::Settings
+            | NotesSidebarHit::CreateFirstNote => {
+                self.renderer.notes_sidebar.workspace_path()
+            }
         };
         let Some(target) = target else {
             return true;
@@ -275,7 +281,7 @@ impl Screen<'_> {
             }
             Key::Character(s) if s == "a" => {
                 self.renderer.notes_sidebar.clear_pending();
-                if let Some(dir) = self.notes_sidebar_target_dir() {
+                if let Some(dir) = self.notes_sidebar_create_target() {
                     self.open_notes_new_file_prompt(dir);
                 }
                 true
@@ -332,17 +338,9 @@ impl Screen<'_> {
             }
             Key::Named(NamedKey::Enter) => {
                 self.renderer.notes_sidebar.clear_pending();
-                use neoism_ui::panels::notes_sidebar::NotesHeaderAction;
-                match self.renderer.notes_sidebar.selected_header_action() {
-                    Some(NotesHeaderAction::Visualize) => {
-                        self.open_neoism_graph_view();
-                        return true;
-                    }
-                    Some(NotesHeaderAction::Menu) => {
-                        self.open_notes_create_menu_at_button();
-                        return true;
-                    }
-                    None => {}
+                if self.renderer.notes_sidebar.is_settings_selected() {
+                    self.open_notes_settings_menu();
+                    return true;
                 }
                 if self.renderer.notes_sidebar.is_selector_selected() {
                     self.open_notes_vault_menu_for_selector();
@@ -406,6 +404,25 @@ impl Screen<'_> {
         } else {
             path.parent().map(Path::to_path_buf)
         }
+    }
+
+    /// Create-target that survives an EMPTY panel: a sidebar opened
+    /// before its vault resolved (or whose vault dir was never created)
+    /// has no workspace path, so `a` / "+ New note" silently did
+    /// nothing. Resolve + create the vault, then retry. Remote-joined
+    /// workspaces stay None — their notes live on the host.
+    pub(crate) fn notes_sidebar_create_target(&mut self) -> Option<PathBuf> {
+        if let Some(dir) = self
+            .notes_sidebar_target_dir()
+            .filter(|dir| dir.is_dir())
+        {
+            return Some(dir);
+        }
+        if self.context_manager.current_workspace_is_remote_joined() {
+            return None;
+        }
+        self.assign_local_vault_to_notes_sidebar();
+        self.notes_sidebar_target_dir()
     }
 
     fn open_path_from_notes_sidebar(&mut self, path: PathBuf) {

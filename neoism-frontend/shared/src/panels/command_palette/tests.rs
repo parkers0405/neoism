@@ -5,8 +5,9 @@
 
 use super::actions::{
     command_visible_for_surface, shaders_modal_spec, theme_picker_modal_spec, HostKind,
-    PaletteAction, PaletteShaderEntry, PaletteSurface, PaletteWorkspaceEntry,
-    PaletteWorkspaceTarget, WorkspaceHostKind, WorkspaceVisibility,
+    PaletteAction, PaletteServerEntry, PaletteShaderEntry, PaletteSurface,
+    PaletteWorkspaceEntry, PaletteWorkspaceTarget, WorkspaceHostKind,
+    WorkspaceVisibility,
 };
 use super::commands::COMMANDS;
 use super::commands::EX_COMMANDS;
@@ -128,6 +129,42 @@ fn test_filtered_commands_empty_query() {
         .filter(|cmd| command_visible_for_surface(&cmd.action, PaletteSurface::Terminal))
         .count();
     assert_eq!(filtered.len(), expected);
+}
+
+#[test]
+fn servers_mode_filters_and_emits_connection_actions() {
+    let mut palette = CommandPalette::new();
+    palette.enter_servers_mode(vec![
+        PaletteServerEntry {
+            id: "local".into(),
+            name: "Local Server".into(),
+            address: "local daemon".into(),
+            local: true,
+            status: crate::panels::ServerIndicatorStatus::Online,
+            active: true,
+        },
+        PaletteServerEntry {
+            id: "home".into(),
+            name: "Home Workstation".into(),
+            address: "wss://home.example/session".into(),
+            local: false,
+            status: crate::panels::ServerIndicatorStatus::Unknown,
+            active: false,
+        },
+    ]);
+
+    assert_eq!(palette.filtered_rows().len(), 3);
+    assert_eq!(
+        palette.get_selected_action(),
+        Some(PaletteAction::SelectServer { id: "local".into() })
+    );
+
+    palette.set_query("home".into());
+    assert_eq!(palette.filtered_rows().len(), 1);
+    assert_eq!(
+        palette.get_selected_action(),
+        Some(PaletteAction::SelectServer { id: "home".into() })
+    );
 }
 
 #[test]
@@ -935,20 +972,6 @@ fn notebook_commands_are_visible_only_on_notebook_surface() {
     palette.set_surface(PaletteSurface::Markdown);
     palette.set_query("insert code cell below".to_string());
     assert!(palette.filtered_rows().is_empty());
-}
-
-#[test]
-fn workplaces_command_is_present_and_actionable() {
-    let mut palette = CommandPalette::new();
-    palette.set_query("workplaces".to_string());
-    let filtered = palette.filtered_rows();
-    assert!(!filtered.is_empty());
-    assert_eq!(filtered[0].1.title(), "Workplaces");
-    palette.selected_index = 0;
-    assert_eq!(
-        palette.get_selected_action(),
-        Some(PaletteAction::ShowWorkplaces)
-    );
 }
 
 #[test]

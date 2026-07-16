@@ -422,6 +422,22 @@ impl<A> BufferTabs<A> {
             })
     }
 
+    pub fn has_modified_tabs(&self) -> bool {
+        self.tabs.iter().any(|tab| tab.modified)
+    }
+
+    /// Modified tabs whose buffer lives SERVER-side (nvim files) —
+    /// the only ones a server switch would actually lose. Markdown
+    /// panes are client-owned: their unsaved lines ride along across
+    /// a connection swap, so counting them in the switch gate traps
+    /// the user (view flips, connection refuses to follow, saves land
+    /// on the wrong daemon).
+    pub fn has_modified_server_tabs(&self) -> bool {
+        self.tabs.iter().any(|tab| {
+            tab.modified && matches!(tab.target(), Some(BufferTabTarget::File(_)))
+        })
+    }
+
     /// Flip the modified flag on the tab whose `path` matches.
     pub fn set_modified(&mut self, path: &Path, modified: bool) -> bool {
         if let Some(ix) = self.find_path(path) {
@@ -694,6 +710,22 @@ impl<A> BufferTabs<A> {
     }
 
     /// Add a buffer for `path` (or activate if already present).
+    /// Re-point every tab holding `old` at `new` (title follows the new
+    /// file name). Used by the markdown title-edit rename so the open
+    /// tab tracks the renamed file instead of orphaning.
+    pub fn rename_path(&mut self, old: &Path, new: PathBuf) {
+        let title = new
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| new.display().to_string());
+        for tab in &mut self.tabs {
+            if tab.path.as_deref() == Some(old) {
+                tab.path = Some(new.clone());
+                tab.title = title.clone();
+            }
+        }
+    }
+
     pub fn open_path(&mut self, path: PathBuf) -> usize {
         if is_markdown_path(&path) {
             return self.open_markdown(path);

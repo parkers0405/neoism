@@ -79,6 +79,13 @@ pub(crate) fn palette_action_name(
 ) -> &'static str {
     use neoism_ui::panels::command_palette::PaletteAction as A;
     match action {
+        // Server-manager actions are desktop-only today; the web host
+        // has no server picker, so these names are inert labels.
+        A::ShowServers => "ShowServers",
+        A::SelectServer { .. } => "SelectServer",
+        A::EditServer { .. } => "EditServer",
+        A::RemoveServer { .. } => "RemoveServer",
+        A::AddServer => "AddServer",
         A::TabCreate => "TabCreate",
         A::TabClose => "TabClose",
         A::TabCloseUnfocused => "TabCloseUnfocused",
@@ -127,8 +134,6 @@ pub(crate) fn palette_action_name(
         A::SearchWords => "SearchWords",
         A::SearchGitChanges => "SearchGitChanges",
         A::ToggleGitDiffPanel => "ToggleGitDiffPanel",
-        A::InitNeoismWorkspace => "InitNeoismWorkspace",
-        A::ReindexNeoismNotes => "ReindexNeoismNotes",
         A::CreateNeoismNote => "CreateNeoismNote",
         A::OpenNeoismNotes => "OpenNeoismNotes",
         A::LspHover => "LspHover",
@@ -301,6 +306,9 @@ pub(crate) fn parse_workspaces_payload(
                 ),
                 daemon_url: w.daemon_url,
                 host_online: w.host_online.unwrap_or(true),
+                // The web host doesn't track a per-window viewed
+                // workspace yet; no row gets the current-place stripe.
+                current: false,
             }
         })
         .collect();

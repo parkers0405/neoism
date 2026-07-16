@@ -16,6 +16,10 @@ readme.workspace = true
 name = "neoism"
 path = "src/main.rs"
 
+[lib]
+name = "neoism_desktop"
+path = "src/lib.rs"
+
 [dependencies]
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.18", features = [

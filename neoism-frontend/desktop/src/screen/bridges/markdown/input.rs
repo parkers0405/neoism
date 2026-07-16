@@ -284,6 +284,183 @@ impl Screen<'_> {
 
         let plain = !mods.control_key() && !mods.alt_key() && !mods.super_key();
         let ctrl_only = mods.control_key() && !mods.alt_key() && !mods.super_key();
+        // Virtual title line editing: ArrowUp (or `k` in Normal) from the
+        // top of the buffer moves the cursor "up" into the big page title;
+        // while active, every key drives the title edit. Enter commits and
+        // renames the file; Esc/ArrowDown drop back into the document.
+        {
+            let mut title_handled = false;
+            if let Some(markdown) =
+                self.context_manager.current_mut().active_markdown_mut()
+            {
+                if markdown.title_edit.is_some() {
+                    title_handled = true;
+                    let insert_mode = matches!(
+                        markdown.mode,
+                        crate::editor::markdown::state::MarkdownMode::Insert
+                    );
+                    match key.key_without_modifiers().as_ref() {
+                        Key::Named(NamedKey::Enter) => markdown.commit_title_edit(),
+                        Key::Named(NamedKey::Escape) => {
+                            if insert_mode {
+                                // Esc on the title behaves like the
+                                // body: drop to Normal (block cursor
+                                // stays on the title), vim's step-left
+                                // included.
+                                markdown.enter_normal();
+                                markdown.title_edit_move(-1);
+                            } else {
+                                markdown.cancel_title_edit()
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            markdown.cancel_title_edit()
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            if insert_mode {
+                                markdown.title_edit_backspace()
+                            } else {
+                                markdown.title_edit_move(-1)
+                            }
+                        }
+                        Key::Named(NamedKey::Delete) => markdown.title_edit_delete(),
+                        Key::Named(NamedKey::ArrowLeft) => markdown.title_edit_move(-1),
+                        Key::Named(NamedKey::ArrowRight) => markdown.title_edit_move(1),
+                        Key::Named(NamedKey::Home) => markdown.title_edit_home(),
+                        Key::Named(NamedKey::End) => markdown.title_edit_end(),
+                        _ if !insert_mode => {
+                            // Normal mode on the title line — the usual
+                            // vim keys, driving the title edit instead
+                            // of the buffer.
+                            if plain {
+                                match key.text.as_deref() {
+                                    Some("h") => markdown.title_edit_move(-1),
+                                    Some("l") => markdown.title_edit_move(1),
+                                    Some("0") | Some("^") => {
+                                        markdown.title_edit_home()
+                                    }
+                                    Some("$") => markdown.title_edit_end(),
+                                    Some("i") => markdown.enter_insert(),
+                                    Some("a") => {
+                                        markdown.title_edit_move(1);
+                                        markdown.enter_insert();
+                                    }
+                                    Some("I") => {
+                                        markdown.title_edit_home();
+                                        markdown.enter_insert();
+                                    }
+                                    Some("A") => {
+                                        markdown.title_edit_end();
+                                        markdown.enter_insert();
+                                    }
+                                    Some("x") => markdown.title_edit_delete(),
+                                    Some("j") => markdown.cancel_title_edit(),
+                                    _ => {}
+                                }
+                            }
+                            // Swallow plain keys so they can't leak
+                            // into the buffer beneath.
+                            title_handled = plain;
+                        }
+                        _ => {
+                            let mut inserted = false;
+                            if !mods.control_key()
+                                && !mods.alt_key()
+                                && !mods.super_key()
+                            {
+                                if let Some(text) = key.text.as_deref() {
+                                    if !text.is_empty()
+                                        && text.chars().all(|c| !c.is_control())
+                                    {
+                                        markdown.title_edit_insert(text);
+                                        inserted = true;
+                                    }
+                                }
+                            }
+                            // Swallow everything while editing except
+                            // modified chords, so stray keys can't leak
+                            // into the buffer beneath.
+                            title_handled = inserted
+                                || (!mods.control_key()
+                                    && !mods.alt_key()
+                                    && !mods.super_key());
+                        }
+                    }
+                } else if plain
+                    && markdown.cursor_line == 0
+                    && markdown.title_edit.is_none()
+                    && (matches!(
+                        key.key_without_modifiers().as_ref(),
+                        Key::Named(NamedKey::ArrowUp)
+                    ) || (matches!(
+                        markdown.mode,
+                        crate::editor::markdown::state::MarkdownMode::Normal
+                    ) && matches!(
+                        key.key_without_modifiers().as_ref(),
+                        Key::Character(ch) if ch == "k"
+                    )))
+                {
+                    markdown.begin_title_edit();
+                    title_handled = true;
+                }
+            }
+            if title_handled {
+                if let Some(new_title) = self
+                    .context_manager
+                    .current_mut()
+                    .active_markdown_mut()
+                    .and_then(|markdown| markdown.take_pending_title_rename())
+                {
+                    self.apply_markdown_title_rename(&new_title);
+                }
+                self.mark_dirty();
+                return;
+            }
+        }
+        // LSP-style value picker for `icon:`/`cover:` frontmatter lines:
+        // while it is open, navigation/accept keys drive the popup instead
+        // of the buffer. Esc falls through — leaving Insert closes the
+        // picker naturally via `refresh_value_picker`.
+        if plain {
+            let mut picker_handled = false;
+            let mut accepted_icon = None;
+            if let Some(markdown) =
+                self.context_manager.current_mut().active_markdown_mut()
+            {
+                if markdown.value_picker.is_some() {
+                    match key.key_without_modifiers().as_ref() {
+                        Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+                            markdown.value_picker_move(1);
+                            picker_handled = true;
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            picker_handled = markdown.value_picker_accept();
+                            if picker_handled {
+                                accepted_icon = Some((
+                                    markdown.path.clone(),
+                                    markdown.frontmatter_property("icon"),
+                                ));
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            markdown.value_picker_move(-1);
+                            picker_handled = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if picker_handled {
+                // Mirror the fresh `icon:` straight onto the Alt+N row —
+                // the sidebar entry was built from a disk walk and stays
+                // stale until the daemon flushes the buffer.
+                if let Some((path, icon)) = accepted_icon {
+                    self.renderer.notes_sidebar.set_note_icon(&path, icon);
+                }
+                self.mark_dirty();
+                return;
+            }
+        }
         if ctrl_only
             && matches!(
                 key.key_without_modifiers().as_ref(),

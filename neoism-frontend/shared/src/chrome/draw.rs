@@ -871,6 +871,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     band_h,
                     &ide_theme,
                     &[],
+                    None,
+                    0.0,
                 );
             }
         }

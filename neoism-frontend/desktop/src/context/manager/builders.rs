@@ -550,6 +550,23 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         })
     }
 
+    /// Mutable markdown pane lookup by path across EVERY grid — a
+    /// daemon file-content reply may land after the user has switched
+    /// islands, so the current-grid-only search is not enough.
+    pub fn markdown_pane_mut_by_path(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Option<&mut neoism_ui::editor::markdown::MarkdownPane> {
+        self.contexts.iter_mut().find_map(|grid| {
+            grid.contexts_mut().values_mut().find_map(|item| {
+                item.context_mut()
+                    .markdown
+                    .as_mut()
+                    .filter(|pane| pane.path.as_path() == path)
+            })
+        })
+    }
+
     pub fn draw_node_by_path(
         &self,
         path: &std::path::Path,

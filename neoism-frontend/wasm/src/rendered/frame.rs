@@ -308,6 +308,9 @@ impl ChromeBridge {
                 neoism_ui::panels::TopBarAction::OpenSettings => {
                     "open_settings".to_string()
                 }
+                neoism_ui::panels::TopBarAction::OpenServers => {
+                    "open_servers".to_string()
+                }
                 neoism_ui::panels::TopBarAction::OpenWorkspaces => {
                     "open_workspaces".to_string()
                 }

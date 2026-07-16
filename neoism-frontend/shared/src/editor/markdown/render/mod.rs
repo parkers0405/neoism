@@ -88,6 +88,14 @@ pub fn render(
 
     pane.set_cursor_rect(None);
 
+    if pane.remote_content_pending {
+        // Joined-workspace fetch in flight — the virtualized surface
+        // draws the skeleton; this legacy path just stays blank instead
+        // of flashing an os error.
+        pane.set_content_height(160.0, h);
+        return;
+    }
+
     if let Some(err) = pane.error.as_ref() {
         let opts = DrawOpts {
             font_size: markdown_font(16.0, font_scale),

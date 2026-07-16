@@ -691,7 +691,17 @@ impl Application<'_> {
             {
                 route.request_redraw();
             }
-            route.window.set_cursor(CursorIcon::Default);
+            let over_row = route
+                .window
+                .screen
+                .renderer
+                .command_palette
+                .pointer_over_row(mx, my, win_w, scale);
+            route.window.set_cursor(if over_row {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
             return;
         }
 

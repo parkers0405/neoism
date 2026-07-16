@@ -11,6 +11,7 @@ impl Application<'_> {
     ) {
         self.router.unbind_native_window(window_id);
         self.router.routes.remove(&window_id);
+        self.window_sessions.remove(&window_id);
         crate::app::freeze_watchdog::unregister_window(window_id);
 
         if self.router.routes.is_empty() {
@@ -35,13 +36,23 @@ impl Application<'_> {
         // Either way, by the time we see `CloseRequested`
         // the user has already confirmed — just close.
         if cfg!(any(target_os = "macos", target_os = "windows")) {
-            self.router.request_close_native_window(window_id);
+            if let Some(daemon_window_id) =
+                self.router.daemon_window_for_native(window_id)
+            {
+                self.send_window_message(
+                    window_id,
+                    neoism_protocol::workspace::WorkspaceClientMessage::RequestCloseWindow {
+                        window_id: daemon_window_id.to_string(),
+                    },
+                );
+            }
             if self.router.routes.len() <= 1 {
                 event_loop.exit();
                 return;
             }
             self.router.unbind_native_window(window_id);
             self.router.routes.remove(&window_id);
+            self.window_sessions.remove(&window_id);
             crate::app::freeze_watchdog::unregister_window(window_id);
             if self.router.routes.is_empty() {
                 event_loop.exit();
@@ -56,13 +67,23 @@ impl Application<'_> {
             }
             return;
         } else {
-            self.router.request_close_native_window(window_id);
+            if let Some(daemon_window_id) =
+                self.router.daemon_window_for_native(window_id)
+            {
+                self.send_window_message(
+                    window_id,
+                    neoism_protocol::workspace::WorkspaceClientMessage::RequestCloseWindow {
+                        window_id: daemon_window_id.to_string(),
+                    },
+                );
+            }
             if self.router.routes.len() <= 1 {
                 event_loop.exit();
                 return;
             }
             self.router.unbind_native_window(window_id);
             self.router.routes.remove(&window_id);
+            self.window_sessions.remove(&window_id);
             crate::app::freeze_watchdog::unregister_window(window_id);
         }
 

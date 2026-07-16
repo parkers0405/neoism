@@ -31,8 +31,115 @@ services:
       retries: 3
       start_period: 10s
 
+  # Host-scenario test bed: a daemon in a container with the neoism repo
+  # cloned INSIDE it, served as a ready-to-join workspace. The container
+  # filesystem is genuinely foreign to the desktop, so joining exercises
+  # the real remote path (tree/files/git/PTYs all daemon-side) instead of
+  # the localhost-alias case where both sides see the same disk.
+  #
+  #   docker compose --profile join-test up -d --build
+  #
+  # then in desktop Neoism: Servers → add ws://127.0.0.1:7980/session.
+  # Auth is intentionally off — this is a local test rig, not a deploy.
+  join-test:
+    profiles: ["join-test"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: neoism-daemon:local
+    ports:
+      - "7980:9876"
+    environment:
+      NEOISM_DAEMON_ADDR: 0.0.0.0:9876
+      NEOISM_DAEMON_DATA_DIR: /var/lib/neoism/data
+      NEOISM_CONFIG_DIR: /var/lib/neoism/config
+      NEOISM_WORKSPACES_DIR: /var/lib/neoism/workspaces
+      NEOISM_REQUIRE_AUTH: "0"
+      RUST_LOG: info,neoism_workspace_daemon=debug
+      JOIN_TEST_REPO: https://github.com/parkers0405/neoism.git
+    entrypoint: ["/usr/bin/tini", "--", "bash", "-c"]
+    command:
+      - |
+        set -e
+        repo_dir=/var/lib/neoism/workspaces/neoism
+        if [ ! -d "$$repo_dir/.git" ]; then
+          echo "join-test: cloning $$JOIN_TEST_REPO"
+          git clone --depth 1 "$$JOIN_TEST_REPO" "$$repo_dir"
+        fi
+        exec neoism-workspace-daemon \
+          --state-dir /var/lib/neoism/state \
+          --no-unix-socket \
+          --workspace "$$repo_dir"
+    volumes:
+      - neoism-join-state:/var/lib/neoism/state
+      - neoism-join-workspaces:/var/lib/neoism/workspaces
+
+  # Self-host YOUR project from a container — the "fast docker setup":
+  #
+  #   NEOISM_SERVE_DIR=$HOME/code/myproj \
+  #   NEOISM_SERVE_TOKEN=some-secret \
+  #   docker compose --profile server up -d server
+  #
+  # then join from desktop Neoism: Servers → ws://<machine-ip>:7981/session
+  # (the client sends ?token= automatically when you add the server with
+  # a token). For internet use put a TLS tunnel or reverse proxy in front
+  # (ngrok, cloudflared, caddy) — the desktop client speaks wss:// natively.
+  #
+  # Starts as root only to fix ownership, then drops privileges to the
+  # OWNER of the mounted project dir (setpriv), so the daemon can write
+  # your files without a chown ever touching them. Daemon state lives in
+  # a named volume, chowned to the same uid at startup.
+  server:
+    profiles: ["server"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: neoism-daemon:local
+    restart: unless-stopped
+    user: "0:0"
+    ports:
+      - "${NEOISM_SERVE_PORT:-7981}:9876"
+    environment:
+      NEOISM_DAEMON_ADDR: 0.0.0.0:9876
+      NEOISM_DAEMON_TOKEN: ${NEOISM_SERVE_TOKEN:-}
+      RUST_LOG: info
+      TERM: xterm-256color
+      SHELL: /bin/bash
+    entrypoint: ["/usr/bin/tini", "--", "bash", "-c"]
+    command:
+      - |
+        set -e
+        home=/var/lib/neoism-serve
+        project="$$home/project"
+        uid=$$(stat -c %u "$$project")
+        gid=$$(stat -c %g "$$project")
+        # A token implies "enforce it" — without REQUIRE_AUTH the token
+        # store loads but Hello is never gated.
+        if [ -n "$$NEOISM_DAEMON_TOKEN" ]; then
+          export NEOISM_REQUIRE_AUTH=1
+        fi
+        # Non-recursive on purpose: the project mount lives UNDER $$home
+        # and must keep its host ownership.
+        mkdir -p "$$home/state" "$$home/config" "$$home/data" "$$home/workspaces"
+        chown "$$uid:$$gid" "$$home" "$$home/state" "$$home/config" "$$home/data" "$$home/workspaces"
+        exec setpriv --reuid "$$uid" --regid "$$gid" --clear-groups \
+          env HOME="$$home" \
+              NEOISM_DAEMON_DATA_DIR="$$home/data" \
+              NEOISM_CONFIG_DIR="$$home/config" \
+              NEOISM_WORKSPACES_DIR="$$home/workspaces" \
+          neoism-workspace-daemon \
+            --state-dir "$$home/state" \
+            --no-unix-socket \
+            --workspace "$$project"
+    volumes:
+      - neoism-serve-state:/var/lib/neoism-serve
+      - "${NEOISM_SERVE_DIR:-./}:/var/lib/neoism-serve/project"
+
 volumes:
   neoism-state:
   neoism-data:
   neoism-config:
   neoism-workspaces:
+  neoism-join-state:
+  neoism-join-workspaces:
+  neoism-serve-state:

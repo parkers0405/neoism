@@ -11,10 +11,7 @@ pub const FOLDER_OPEN_ICON: &str = "\u{f07c}";
 /// pair. Each field falls back independently, so a color-only
 /// override keeps the built-in glyph and vice versa. With no override
 /// registered this returns `default` untouched.
-fn with_override(
-    key: &str,
-    default: (&'static str, [u8; 4]),
-) -> (&'static str, [u8; 4]) {
+fn with_override(key: &str, default: (&'static str, [u8; 4])) -> (&'static str, [u8; 4]) {
     match icon_override(key) {
         Some(over) => (
             over.glyph.unwrap_or(default.0),

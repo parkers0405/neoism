@@ -267,6 +267,11 @@ impl FileTree {
                 if self.root.as_deref() != Some(request.path.as_path()) {
                     return false;
                 }
+                // A re-root queued this listing (remote/tailnet join):
+                // the rows are about to appear — run the reveal now.
+                if std::mem::take(&mut self.root_transition_armed) {
+                    self.root_transition_started = Some(Instant::now());
+                }
                 // Carry expansion across the replace: a live re-list
                 // (daemon fs-watch push) must not collapse every open
                 // dir. Dirs that were open stay open and keep their
@@ -279,7 +284,21 @@ impl FileTree {
                     .filter_map(|entry| entry.path.clone())
                     .collect();
                 if open_dirs.is_empty() {
-                    self.set_entries(children);
+                    // Preserve scroll and keep the selection on the same
+                    // PATH — remote roots re-list repeatedly (fs-watch
+                    // pushes, liveness re-checks) and a plain set_entries
+                    // snapped the viewport back to the top on every reply,
+                    // which made scrolling a joined tree fight the user.
+                    let selected_path =
+                        self.selected().and_then(|entry| entry.path.clone());
+                    self.set_entries_preserve_scroll(children);
+                    if let Some(path) = selected_path {
+                        if let Some(ix) = self.entries.iter().position(|entry| {
+                            entry.path.as_deref() == Some(path.as_path())
+                        }) {
+                            self.selected = ix;
+                        }
+                    }
                     return true;
                 }
                 let mut merged = Vec::with_capacity(self.entries.len());
@@ -358,6 +377,17 @@ impl FileTree {
     pub fn populate_from_dir(&mut self, root: &Path, ctx: &PanelContext) {
         let root = normalize_path(root);
         let root_changed = self.root.as_deref() != Some(root.as_path());
+        // A remote root listing for this exact root is already in flight
+        // — re-dispatching just queues another reply that will stomp the
+        // tree again (and again, via the liveness re-check timer).
+        if !root_changed
+            && self.pending_dir_requests.values().any(|request| {
+                matches!(request.kind, PendingDirKind::Root)
+                    && request.path == root
+            })
+        {
+            return;
+        }
         if root_changed {
             self.selected = 0;
             self.scroll_top = 0;
@@ -365,6 +395,7 @@ impl FileTree {
             // Statuses are absolute paths. Never let badges from the old
             // workspace appear while the new root's worker is running.
             self.git_statuses.clear();
+            self.begin_root_transition();
         }
         // Deliberately do not call `git_statuses_for` here. Native Git can
         // spend minutes enumerating untracked files in a large repository;
@@ -389,9 +420,25 @@ impl FileTree {
                 if self.entries.is_empty() {
                     self.set_entries(Vec::new());
                 }
+                if root_changed {
+                    // Remote listing in flight — sweep when it lands, not
+                    // over the skeleton.
+                    self.root_transition_started = None;
+                    self.root_transition_armed = true;
+                }
             }
             Err(_) => self.set_entries(Vec::new()),
         }
+    }
+
+    /// Start the staggered row-reveal sweep — the tree-equivalent of the
+    /// status line's mode-swap transition. Called automatically when a
+    /// populate re-roots the tree; hosts call it directly when they swap
+    /// in a whole preserved tree (per-workspace tree caches, server
+    /// switches) where the root inside the struct never changes.
+    pub fn begin_root_transition(&mut self) {
+        self.root_transition_started = Some(Instant::now());
+        self.root_transition_armed = false;
     }
 
     /// Refresh the visible tree without discarding open folders where
@@ -1022,6 +1069,7 @@ impl FileTree {
             && (self.scroll.position != 0.0
                 || self.cursor_spring.position != 0.0
                 || reveal_animating
+                || self.root_transition_started.is_some()
                 || self.is_loading())
     }
 

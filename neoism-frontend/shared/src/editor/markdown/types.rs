@@ -577,6 +577,65 @@ pub struct MarkdownPane {
     /// it — never a monotonic "has ever been edited" flag.
     pub(super) saved_baseline: Vec<String>,
     pub error: Option<String>,
+    /// A joined-workspace content fetch is in flight (the file's bytes
+    /// only exist on the host daemon). While set: the renderer shows a
+    /// skeleton instead of an error, and the CRDT drain must NOT bind
+    /// the buffer — seeding the daemon doc from the placeholder text
+    /// made its (empty) snapshot clobber the fetched content the moment
+    /// it painted.
+    pub remote_content_pending: bool,
+    /// When the in-flight fetch started. The skeleton fades in only
+    /// after a short grace period, so near-instant loads never flash it.
+    pub(super) remote_loading_started: Option<Instant>,
+    /// Screen-space rect of the cover banner this frame (full band,
+    /// scroll-adjusted, may extend past the pane top). Set by the
+    /// virtualized surface when `cover:` is present; the HOST reads it
+    /// to place the actual image overlay — the shared renderer cannot
+    /// load files.
+    pub cover_overlay_rect: Option<[f32; 4]>,
+    /// LSP-completion-style value picker for `icon:` / `cover:`
+    /// frontmatter lines: opens while the cursor edits one of those
+    /// lines in Insert mode (the line itself is the search bar), rows
+    /// pop under the cursor. See `refresh_value_picker`.
+    pub value_picker: Option<MarkdownValuePicker>,
+    /// Cover names available to the picker — file stems of the host's
+    /// covers directory, supplied by the host on open (the shared pane
+    /// cannot list directories).
+    pub available_covers: Vec<String>,
+    /// Accepting a candidate must actually CLOSE the picker: the
+    /// per-frame refresh would instantly reopen it (cursor still on the
+    /// line, still Insert) and swallow the next Enter. Remembers the
+    /// accepted `(line, text)`; the picker stays closed until the line's
+    /// text changes (typing again reopens it).
+    pub(super) value_picker_suppressed: Option<(usize, String)>,
+    /// In-progress edit of the VIRTUAL page-title line (ArrowUp/`k`
+    /// from the top of the buffer). Committing renames the file; the
+    /// host drains `pending_title_rename`.
+    pub title_edit: Option<MarkdownTitleEdit>,
+    /// Committed title-edit text awaiting the host's file rename.
+    pub pending_title_rename: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MarkdownTitleEdit {
+    pub text: String,
+    /// Caret position in CHARS.
+    pub caret: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkdownDecorationKey {
+    Icon,
+    Cover,
+}
+
+#[derive(Clone, Debug)]
+pub struct MarkdownValuePicker {
+    pub key: MarkdownDecorationKey,
+    /// The frontmatter line this picker edits — selection resets when
+    /// the cursor moves to a different line.
+    pub line: usize,
+    pub selected: usize,
 }
 
 /// One heading in the "On this page" outline.

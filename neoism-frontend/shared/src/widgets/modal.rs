@@ -39,6 +39,10 @@ const ORDER: u8 = 24;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModalAction {
     Close,
+    /// Open the notes graph view (footer settings menu → Graph).
+    NotesOpenGraph,
+    /// Open the notes create menu (footer settings menu → Add…).
+    NotesOpenCreateMenu,
     InstallLsp {
         server: String,
     },
@@ -154,6 +158,10 @@ pub enum ModalAction {
         name: String,
     },
     NotesVaultPromptAdd,
+    ServerFormSubmit,
+    ServerRemoveConfirm {
+        id: String,
+    },
     NotesVaultAdd {
         name: String,
     },
@@ -269,6 +277,22 @@ pub struct ModalInputSpec {
     pub placeholder: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ModalFormField {
+    pub id: String,
+    pub label: String,
+    pub value: String,
+    pub placeholder: String,
+    pub secret: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModalFormSpec {
+    pub title: String,
+    pub fields: Vec<ModalFormField>,
+    pub submit_label: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BodyLineKind {
     Text,
@@ -309,6 +333,12 @@ pub struct UniversalModal {
     meta: String,
     buttons: Vec<ModalButton>,
     input: Option<ModalInputSpec>,
+    form: Option<ModalFormSpec>,
+    form_focus: usize,
+    /// Caret position in CHARS within the focused input (single input or
+    /// focused form field). Reset to end-of-value on open and focus change.
+    input_caret: usize,
+    submitted_form: Option<Vec<(String, String)>>,
     selected_index: usize,
     scroll_offset: usize,
     body_scroll_offset: usize,
@@ -328,6 +358,10 @@ impl Default for UniversalModal {
             meta: String::new(),
             buttons: Vec::new(),
             input: None,
+            form: None,
+            form_focus: 0,
+            input_caret: 0,
+            submitted_form: None,
             selected_index: 0,
             scroll_offset: 0,
             body_scroll_offset: 0,
@@ -357,6 +391,8 @@ impl UniversalModal {
         self.active = false;
         self.buttons.clear();
         self.input = None;
+        self.form = None;
+        self.submitted_form = None;
         self.selected_index = 0;
         self.scroll_offset = 0;
         self.body_scroll_offset = 0;
@@ -371,6 +407,7 @@ impl UniversalModal {
         self.body = spec.body;
         self.meta = spec.meta;
         self.input = spec.input;
+        self.form = None;
         self.buttons = if spec.buttons.is_empty() {
             vec![ModalButton::new("Close", "Esc", ModalAction::Close)]
         } else {
@@ -383,6 +420,38 @@ impl UniversalModal {
         self.scroll_offset = 0;
         self.body_scroll_offset = 0;
         self.body_wheel_accumulator = 0.0;
+        self.input_caret = self.focused_input_chars();
+    }
+
+    pub fn open_form(&mut self, spec: ModalFormSpec) {
+        self.open(ModalSpec {
+            title: spec.title.clone(),
+            body: String::new(),
+            meta: String::new(),
+            buttons: vec![
+                ModalButton::new(
+                    spec.submit_label.clone(),
+                    "Enter",
+                    ModalAction::ServerFormSubmit,
+                ),
+                ModalButton::new("Cancel", "Esc", ModalAction::Close),
+            ],
+            input: None,
+            busy: false,
+            blocking: true,
+        });
+        self.form = Some(spec);
+        self.form_focus = self
+            .form
+            .as_ref()
+            .and_then(|form| form.fields.iter().position(|field| !field.label.is_empty()))
+            .unwrap_or(0);
+        self.submitted_form = None;
+        self.input_caret = self.focused_input_chars();
+    }
+
+    pub fn take_submitted_form(&mut self) -> Option<Vec<(String, String)>> {
+        self.submitted_form.take()
     }
 
     pub fn open_message(&mut self, title: impl Into<String>, body: impl Into<String>) {
@@ -419,23 +488,122 @@ impl UniversalModal {
     }
 
     pub fn has_input(&self) -> bool {
-        self.active && self.input.is_some()
+        self.active && (self.input.is_some() || self.form.is_some())
+    }
+
+    fn focused_input_value(&self) -> Option<&str> {
+        if let Some(form) = self.form.as_ref() {
+            return form
+                .fields
+                .get(self.form_focus)
+                .map(|field| field.value.as_str());
+        }
+        self.input.as_ref().map(|input| input.value.as_str())
+    }
+
+    fn focused_input_value_mut(&mut self) -> Option<&mut String> {
+        if let Some(form) = self.form.as_mut() {
+            return form
+                .fields
+                .get_mut(self.form_focus)
+                .map(|field| &mut field.value);
+        }
+        self.input.as_mut().map(|input| &mut input.value)
+    }
+
+    fn focused_input_chars(&self) -> usize {
+        self.focused_input_value()
+            .map(|value| value.chars().count())
+            .unwrap_or(0)
+    }
+
+    fn byte_index_at(value: &str, caret_chars: usize) -> usize {
+        value
+            .char_indices()
+            .nth(caret_chars)
+            .map(|(index, _)| index)
+            .unwrap_or(value.len())
+    }
+
+    pub fn input_caret_chars(&self) -> usize {
+        self.input_caret
     }
 
     pub fn push_input(&mut self, text: &str) {
-        if let Some(input) = self.input.as_mut() {
-            input.value.push_str(text);
-        }
+        let caret = self.input_caret.min(self.focused_input_chars());
+        let inserted = text.chars().count();
+        let Some(value) = self.focused_input_value_mut() else {
+            return;
+        };
+        let at = Self::byte_index_at(value, caret);
+        value.insert_str(at, text);
+        self.input_caret = caret + inserted;
     }
 
     pub fn pop_input(&mut self) {
-        if let Some(input) = self.input.as_mut() {
-            input.value.pop();
+        let caret = self.input_caret.min(self.focused_input_chars());
+        if caret == 0 {
+            return;
         }
+        let Some(value) = self.focused_input_value_mut() else {
+            return;
+        };
+        let start = Self::byte_index_at(value, caret - 1);
+        let end = Self::byte_index_at(value, caret);
+        value.replace_range(start..end, "");
+        self.input_caret = caret - 1;
+    }
+
+    pub fn delete_input(&mut self) {
+        let caret = self.input_caret.min(self.focused_input_chars());
+        let Some(value) = self.focused_input_value_mut() else {
+            return;
+        };
+        let start = Self::byte_index_at(value, caret);
+        let end = Self::byte_index_at(value, caret + 1);
+        if start < end {
+            value.replace_range(start..end, "");
+        }
+        self.input_caret = caret;
+    }
+
+    pub fn move_input_caret_left(&mut self) {
+        let caret = self.input_caret.min(self.focused_input_chars());
+        self.input_caret = caret.saturating_sub(1);
+    }
+
+    pub fn move_input_caret_right(&mut self) {
+        self.input_caret = (self.input_caret + 1).min(self.focused_input_chars());
+    }
+
+    pub fn input_caret_to_start(&mut self) {
+        self.input_caret = 0;
+    }
+
+    pub fn input_caret_to_end(&mut self) {
+        self.input_caret = self.focused_input_chars();
     }
 
     pub fn needs_redraw(&self) -> bool {
         self.active && self.busy
+    }
+
+    pub fn focus_next_form_field(&mut self) -> bool {
+        let Some(form) = self.form.as_ref() else {
+            return false;
+        };
+        if form.fields.is_empty() {
+            return false;
+        }
+        for offset in 1..=form.fields.len() {
+            let index = (self.form_focus + offset) % form.fields.len();
+            if !form.fields[index].label.is_empty() {
+                self.form_focus = index;
+                self.input_caret = self.focused_input_chars();
+                return true;
+            }
+        }
+        true
     }
 
     pub fn move_selection_up(&mut self) {
@@ -462,6 +630,17 @@ impl UniversalModal {
             .get(self.selected_index)
             .map(|button| button.action.clone())?;
         Some(self.apply_input(action))
+    }
+
+    pub fn submit_form(&mut self) -> Option<ModalAction> {
+        let form = self.form.as_ref()?;
+        self.submitted_form = Some(
+            form.fields
+                .iter()
+                .map(|field| (field.id.clone(), field.value.clone()))
+                .collect(),
+        );
+        Some(ModalAction::ServerFormSubmit)
     }
 
     pub fn action_for_hint(&self, hint: &str) -> Option<ModalAction> {
@@ -739,6 +918,18 @@ impl UniversalModal {
         } else {
             0.0
         };
+        let form_h = self
+            .form
+            .as_ref()
+            .map(|form| {
+                form.fields
+                    .iter()
+                    .filter(|field| !field.label.is_empty())
+                    .count() as f32
+                    * (INPUT_ROW_HEIGHT + 30.0)
+                    * s
+            })
+            .unwrap_or(0.0);
         let actions_h = self.visible_action_count() as f32 * ACTION_ROW_HEIGHT * s;
         let height = MODAL_PADDING * s
             + TITLE_HEIGHT * s
@@ -747,6 +938,7 @@ impl UniversalModal {
             + meta_h
             + busy_h
             + input_h
+            + form_h
             + 14.0 * s
             + SEPARATOR_HEIGHT
             + 4.0 * s
@@ -771,6 +963,18 @@ impl UniversalModal {
         } else {
             0.0
         };
+        let form_h = self
+            .form
+            .as_ref()
+            .map(|form| {
+                form.fields
+                    .iter()
+                    .filter(|field| !field.label.is_empty())
+                    .count() as f32
+                    * (INPUT_ROW_HEIGHT + 30.0)
+                    * s
+            })
+            .unwrap_or(0.0);
         modal_y
             + MODAL_PADDING * s
             + TITLE_HEIGHT * s
@@ -779,6 +983,7 @@ impl UniversalModal {
             + meta_h
             + busy_h
             + input_h
+            + form_h
             + 14.0 * s
             + SEPARATOR_HEIGHT
             + 4.0 * s
@@ -794,6 +999,29 @@ impl UniversalModal {
         let (x, y, w, h) = self.modal_rect(window_width, scale_factor);
         if mouse_x < x || mouse_x > x + w || mouse_y < y || mouse_y > y + h {
             return Err(());
+        }
+        if let Some(form) = self.form.as_ref() {
+            let mut field_y = y
+                + MODAL_PADDING * self.scale
+                + TITLE_HEIGHT * self.scale
+                + 12.0 * self.scale;
+            for (index, field) in form.fields.iter().enumerate() {
+                if field.label.is_empty() {
+                    continue;
+                }
+                field_y += 20.0 * self.scale;
+                let input_h = INPUT_ROW_HEIGHT * self.scale;
+                let field_x = x + MODAL_PADDING * self.scale;
+                let field_w = w - MODAL_PADDING * self.scale * 2.0;
+                if mouse_x >= field_x
+                    && mouse_x <= field_x + field_w
+                    && mouse_y >= field_y
+                    && mouse_y <= field_y + input_h
+                {
+                    return Ok(Some(self.buttons.len() + index));
+                }
+                field_y += input_h + 10.0 * self.scale;
+            }
         }
 
         let actions_y = self.actions_y(y);
@@ -815,6 +1043,24 @@ impl UniversalModal {
             let (x, y, w, h) = self.modal_rect(window_width, scale_factor);
             [x, y, w, h]
         })
+    }
+
+    pub fn focus_form_hit(&mut self, hit: usize) -> bool {
+        let Some(form) = self.form.as_ref() else {
+            return false;
+        };
+        let index = hit.saturating_sub(self.buttons.len());
+        if form
+            .fields
+            .get(index)
+            .is_some_and(|field| !field.label.is_empty())
+        {
+            self.form_focus = index;
+            self.input_caret = self.focused_input_chars();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn render(
@@ -1047,9 +1293,15 @@ impl UniversalModal {
             let caret_offset = if is_placeholder {
                 0.0
             } else {
+                // Measure only up to the caret within the fitted text so
+                // arrow-key movement is visible mid-string.
+                let caret_prefix = input_fit
+                    .chars()
+                    .take(self.input_caret)
+                    .collect::<String>();
                 sugarloaf
                     .text_mut()
-                    .measure(input_fit.as_str(), &input_opts)
+                    .measure(caret_prefix.as_str(), &input_opts)
             };
             let caret_h = (INPUT_FONT_SIZE * s + 3.0 * s).min(input_h - 8.0 * s);
             sugarloaf.rect(
@@ -1062,6 +1314,95 @@ impl UniversalModal {
                 DEPTH_ELEMENT + 0.02,
                 ORDER + 2,
             );
+        }
+
+        if let Some(form) = self.form.as_ref() {
+            for (index, field) in form.fields.iter().enumerate() {
+                if field.label.is_empty() {
+                    continue;
+                }
+                let label_opts = DrawOpts {
+                    font_size: 12.0 * s,
+                    color: theme.u8(theme.muted),
+                    ..DrawOpts::default()
+                };
+                sugarloaf
+                    .text_mut()
+                    .draw(text_x, text_y, &field.label, &label_opts);
+                text_y += 20.0 * s;
+                let input_h = INPUT_ROW_HEIGHT * s;
+                sugarloaf.rounded_rect(
+                    None,
+                    text_x,
+                    text_y,
+                    w - pad * 2.0,
+                    input_h,
+                    theme.f32(theme.surface),
+                    DEPTH_ELEMENT,
+                    5.0 * s,
+                    ORDER,
+                );
+                let value = if field.value.is_empty() {
+                    field.placeholder.clone()
+                } else if field.secret {
+                    "•".repeat(field.value.chars().count())
+                } else {
+                    field.value.clone()
+                };
+                let opts = DrawOpts {
+                    font_size: INPUT_FONT_SIZE * s,
+                    color: if field.value.is_empty() {
+                        theme.u8(theme.muted)
+                    } else {
+                        theme.u8(theme.fg)
+                    },
+                    ..DrawOpts::default()
+                };
+                sugarloaf.text_mut().draw(
+                    text_x + 12.0 * s,
+                    text_y + (input_h - INPUT_FONT_SIZE * s) / 2.0,
+                    &value,
+                    &opts,
+                );
+                if index == self.form_focus {
+                    sugarloaf.rect(
+                        None,
+                        text_x,
+                        text_y,
+                        2.0 * s,
+                        input_h,
+                        theme.f32(theme.accent),
+                        DEPTH_ELEMENT + 0.02,
+                        ORDER + 1,
+                    );
+                    // The caret sits after `input_caret` chars of the
+                    // rendered value (masked for secret fields), not at
+                    // the end — arrow keys move it through the text.
+                    let caret_chars =
+                        self.input_caret.min(field.value.chars().count());
+                    let caret_text = if field.secret {
+                        "•".repeat(caret_chars)
+                    } else {
+                        field.value.chars().take(caret_chars).collect::<String>()
+                    };
+                    let caret_x = text_x
+                        + 12.0 * s
+                        + sugarloaf.text_mut().measure(caret_text.as_str(), &opts)
+                        + 2.0 * s;
+                    let caret_h = (INPUT_FONT_SIZE + 3.0) * s;
+                    sugarloaf.rect(
+                        None,
+                        caret_x,
+                        text_y + (input_h - caret_h) * 0.5,
+                        INPUT_CARET_WIDTH * s,
+                        caret_h,
+                        theme.f32(theme.accent),
+                        DEPTH_ELEMENT + 0.03,
+                        ORDER + 2,
+                    );
+                }
+                text_y += input_h + 10.0 * s;
+            }
         }
 
         let sep_y = self.actions_y(y) - 4.0 * s - SEPARATOR_HEIGHT;
@@ -1397,6 +1738,82 @@ fn lang_from_fence(label: &str) -> Lang {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_form_skips_hidden_id_and_submits_structured_values() {
+        let mut modal = UniversalModal::new();
+        modal.open_form(ModalFormSpec {
+            title: "Edit server".into(),
+            fields: vec![
+                ModalFormField {
+                    id: "server_id".into(),
+                    label: String::new(),
+                    value: "id-1".into(),
+                    placeholder: String::new(),
+                    secret: true,
+                },
+                ModalFormField {
+                    id: "address".into(),
+                    label: "Address".into(),
+                    value: String::new(),
+                    placeholder: "https://host".into(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "token".into(),
+                    label: "Token".into(),
+                    value: String::new(),
+                    placeholder: "token".into(),
+                    secret: true,
+                },
+            ],
+            submit_label: "Save".into(),
+        });
+        modal.push_input("https://work.example");
+        assert!(modal.focus_next_form_field());
+        modal.push_input("secret");
+        assert_eq!(modal.submit_form(), Some(ModalAction::ServerFormSubmit));
+        let values = modal.take_submitted_form().unwrap();
+        assert!(values.contains(&("server_id".into(), "id-1".into())));
+        assert!(values.contains(&("address".into(), "https://work.example".into())));
+        assert!(values.contains(&("token".into(), "secret".into())));
+    }
+
+    #[test]
+    fn server_form_hit_tests_fields_and_buttons() {
+        let mut modal = UniversalModal::new();
+        modal.open_form(ModalFormSpec {
+            title: "Add server".into(),
+            fields: vec![ModalFormField {
+                id: "address".into(),
+                label: "Server address".into(),
+                value: String::new(),
+                placeholder: "http://localhost:7878".into(),
+                secret: false,
+            }],
+            submit_label: "Add server".into(),
+        });
+        let (x, y, _, _) = modal.modal_rect(1200.0, 1.0);
+        let field_y = y + MODAL_PADDING + TITLE_HEIGHT + 12.0 + 20.0;
+        let field_hit =
+            modal.hit_test(x + MODAL_PADDING + 20.0, field_y + 10.0, 1200.0, 1.0);
+        assert_eq!(field_hit, Ok(Some(modal.buttons.len())));
+
+        let actions_y = modal.actions_y(y);
+        assert_eq!(
+            modal.hit_test(x + MODAL_PADDING + 20.0, actions_y + 10.0, 1200.0, 1.0),
+            Ok(Some(0))
+        );
+        assert_eq!(
+            modal.hit_test(
+                x + MODAL_PADDING + 20.0,
+                actions_y + ACTION_ROW_HEIGHT + 10.0,
+                1200.0,
+                1.0,
+            ),
+            Ok(Some(1))
+        );
+    }
 
     #[test]
     fn body_lines_upgrade_mermaid_fence_to_diagram_line() {

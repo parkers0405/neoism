@@ -17,8 +17,21 @@ impl Screen<'_> {
             .hit_test(mouse_x, mouse_y, window_width, scale_factor)
         {
             Ok(Some(index)) => {
+                if self.renderer.modal.focus_form_hit(index) {
+                    self.mark_dirty();
+                    return true;
+                }
                 self.renderer.modal.set_selected_index(index);
-                if let Some(action) = self.renderer.modal.selected_action() {
+                let selected = self.renderer.modal.selected_action();
+                let action = if matches!(
+                    selected,
+                    Some(neoism_ui::widgets::modal::ModalAction::ServerFormSubmit)
+                ) {
+                    self.renderer.modal.submit_form()
+                } else {
+                    selected
+                };
+                if let Some(action) = action {
                     self.execute_modal_action(action);
                 }
                 self.mark_dirty();
@@ -189,6 +202,12 @@ impl Screen<'_> {
             ModalAction::NotesPromptNewFile { dir } => {
                 self.open_notes_new_file_prompt(PathBuf::from(dir));
             }
+            ModalAction::NotesOpenGraph => {
+                self.open_neoism_graph_view();
+            }
+            ModalAction::NotesOpenCreateMenu => {
+                self.open_notes_create_menu_at_button();
+            }
             ModalAction::FileTreePromptNewFolder { dir } => {
                 self.open_file_tree_new_folder_prompt(PathBuf::from(dir));
             }
@@ -258,6 +277,42 @@ impl Screen<'_> {
             }
             ModalAction::NotesVaultPromptAdd => {
                 self.open_notes_vault_add_prompt();
+            }
+            ModalAction::ServerFormSubmit => {
+                let values = self
+                    .renderer
+                    .modal
+                    .take_submitted_form()
+                    .unwrap_or_default();
+                let value = |id: &str| {
+                    values
+                        .iter()
+                        .find(|(field_id, _)| field_id == id)
+                        .map(|(_, value)| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                };
+                let Some(address) = value("address") else {
+                    self.renderer.notifications.push(
+                        "Server address is required",
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    );
+                    return;
+                };
+                self.renderer.modal.close();
+                if let Some(server_id) = value("server_id") {
+                    self.request_server_edit_submit(
+                        server_id,
+                        address,
+                        value("name"),
+                        value("token"),
+                    );
+                } else {
+                    self.request_server_add(address, value("name"), value("token"));
+                }
+            }
+            ModalAction::ServerRemoveConfirm { id } => {
+                self.renderer.modal.close();
+                self.request_server_remove(id);
             }
             ModalAction::NotesVaultAdd { name } => {
                 self.add_notes_vault(name);

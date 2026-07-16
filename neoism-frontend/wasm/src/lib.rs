@@ -30,31 +30,6 @@ pub fn start() {
 }
 
 #[wasm_bindgen]
-pub fn workspace_chrome_actions() -> JsValue {
-    serde_wasm_bindgen::to_value(
-        neoism_ui::panels::context_menu::workspace_chrome_actions(),
-    )
-    .unwrap_or(JsValue::NULL)
-}
-
-#[wasm_bindgen]
-pub fn workspace_chrome_actions_for_visibility(visibility: &str) -> JsValue {
-    use neoism_ui::panels::context_menu::WorkspaceChromeVisibility;
-
-    let visibility = match visibility {
-        "shared" => WorkspaceChromeVisibility::Shared,
-        "team" => WorkspaceChromeVisibility::Team,
-        _ => WorkspaceChromeVisibility::Private,
-    };
-    serde_wasm_bindgen::to_value(
-        &neoism_ui::panels::context_menu::workspace_chrome_actions_for_visibility(
-            visibility,
-        ),
-    )
-    .unwrap_or(JsValue::NULL)
-}
-
-#[wasm_bindgen]
 pub fn island_chrome_spec(scale: f32) -> JsValue {
     serde_wasm_bindgen::to_value(&neoism_ui::widgets::island::island_chrome_spec(scale))
         .unwrap_or(JsValue::NULL)

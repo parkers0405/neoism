@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::panels::agent_pane::outbound::OutboundAgentCommand;
 use crate::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry;

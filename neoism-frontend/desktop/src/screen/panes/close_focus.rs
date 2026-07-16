@@ -414,11 +414,6 @@ impl Screen<'_> {
                 // escapes to the tab strip.
                 if self.renderer.notes_sidebar.is_focused()
                     && self.renderer.notes_sidebar.is_selector_selected()
-                    && self
-                        .renderer
-                        .notes_sidebar
-                        .selected_header_action()
-                        .is_none()
                 {
                     self.renderer.notes_sidebar.select_prev();
                     self.mark_dirty();
@@ -763,13 +758,9 @@ impl Screen<'_> {
         }
 
         if self.renderer.notes_sidebar.is_focused() {
-            // Caret walk inside the sidebar first: vault selector →
-            // share icon → ⋮ menu (and back). Only when the walk runs
-            // off an end does focus leave the panel.
-            if self.renderer.notes_sidebar.move_horizontal_focus(right) {
-                self.mark_dirty();
-                return true;
-            }
+            // Alt+arrows are PANEL-level navigation — they leave the
+            // sidebar directly, skipping the footer's selector↔gear
+            // walk (plain ArrowLeft/Right does that walk instead).
             if right {
                 self.renderer.notes_sidebar.set_focused(false);
                 self.focus_main_workspace();

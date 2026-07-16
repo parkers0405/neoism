@@ -263,34 +263,6 @@ impl Screen<'_> {
                 self.select_top_level_workspace_at(index);
                 self.close_tab(clipboard);
             }
-            WorkspaceContextAction::Share { index } => {
-                self.context_manager.share_workspace_at_index(index);
-            }
-            WorkspaceContextAction::StopSharing { index } => {
-                self.context_manager.stop_sharing_workspace_at_index(index);
-            }
-            WorkspaceContextAction::SendToDockerSandbox { index } => {
-                if let Some(workspace_id) =
-                    self.context_manager.workspace_tree_id_for_index(index)
-                {
-                    self.context_manager.send_workspace_request(
-                        neoism_protocol::workspace::WorkspaceClientMessage::SendWorkspaceToDockerSandbox {
-                            workspace_id,
-                        },
-                    );
-                }
-            }
-            WorkspaceContextAction::SendToCloud { index } => {
-                if let Some(workspace_id) =
-                    self.context_manager.workspace_tree_id_for_index(index)
-                {
-                    self.context_manager.send_workspace_request(
-                        neoism_protocol::workspace::WorkspaceClientMessage::SendWorkspaceToCloud {
-                            workspace_id,
-                        },
-                    );
-                }
-            }
             WorkspaceContextAction::RenameBufferTab { tab_index } => {
                 self.open_buffer_tab_rename_prompt(tab_index);
             }
@@ -316,33 +288,6 @@ impl Screen<'_> {
                 ContextMenuAction::Workspace(WorkspaceContextAction::Close { index }),
             ));
         }
-        let visibility = self.context_manager.workspace_visibility_for_index(index);
-        for action in
-            neoism_ui::panels::context_menu::workspace_chrome_actions_for_visibility(
-                visibility,
-            )
-        {
-            let context_action = match action.kind {
-                neoism_ui::panels::context_menu::WorkspaceChromeActionKind::Share => {
-                    WorkspaceContextAction::Share { index }
-                }
-                neoism_ui::panels::context_menu::WorkspaceChromeActionKind::StopSharing => {
-                    WorkspaceContextAction::StopSharing { index }
-                }
-                neoism_ui::panels::context_menu::WorkspaceChromeActionKind::SendToDockerSandbox => {
-                    WorkspaceContextAction::SendToDockerSandbox { index }
-                }
-                neoism_ui::panels::context_menu::WorkspaceChromeActionKind::SendToCloud => {
-                    WorkspaceContextAction::SendToCloud { index }
-                }
-            };
-            items.push(ContextMenuItem::new(
-                action.label,
-                action.shortcut,
-                ContextMenuAction::Workspace(context_action),
-            ));
-        }
-
         let label = self
             .context_manager
             .titles

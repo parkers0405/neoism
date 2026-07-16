@@ -36,75 +36,17 @@ use crate::widgets::modal::ModalAction;
 use crate::widgets::popover::{Popover, PopoverAnchor};
 use crate::widgets::scrollbar;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceChromeActionKind {
-    Share,
-    StopSharing,
-    SendToDockerSandbox,
-    SendToCloud,
-}
-
+/// Publish state of a workspace on its daemon — still used by the
+/// palette + web strip badges. The old chrome menu that acted on it
+/// (Share / Stop Sharing / Send to Docker Sandbox / Send to Cloud) was
+/// from the pre-server workspace iteration and is gone; joining a
+/// server IS the sharing model now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceChromeVisibility {
     Private,
     Shared,
     Team,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct WorkspaceChromeActionSpec {
-    pub kind: WorkspaceChromeActionKind,
-    pub label: &'static str,
-    pub shortcut: &'static str,
-}
-
-pub const WORKSPACE_CHROME_ACTIONS: [WorkspaceChromeActionSpec; 4] = [
-    WorkspaceChromeActionSpec {
-        kind: WorkspaceChromeActionKind::Share,
-        label: "Share Workspace",
-        shortcut: "s",
-    },
-    WorkspaceChromeActionSpec {
-        kind: WorkspaceChromeActionKind::StopSharing,
-        label: "Stop Sharing",
-        shortcut: "u",
-    },
-    WorkspaceChromeActionSpec {
-        kind: WorkspaceChromeActionKind::SendToDockerSandbox,
-        label: "Send to Docker Sandbox",
-        shortcut: "d",
-    },
-    WorkspaceChromeActionSpec {
-        kind: WorkspaceChromeActionKind::SendToCloud,
-        label: "Send to Cloud",
-        shortcut: "c",
-    },
-];
-
-pub fn workspace_chrome_actions() -> &'static [WorkspaceChromeActionSpec] {
-    &WORKSPACE_CHROME_ACTIONS
-}
-
-pub fn workspace_chrome_actions_for_visibility(
-    visibility: WorkspaceChromeVisibility,
-) -> Vec<WorkspaceChromeActionSpec> {
-    workspace_chrome_actions()
-        .iter()
-        .copied()
-        .filter(|action| match (visibility, action.kind) {
-            (
-                WorkspaceChromeVisibility::Private,
-                WorkspaceChromeActionKind::StopSharing,
-            ) => false,
-            (
-                WorkspaceChromeVisibility::Shared | WorkspaceChromeVisibility::Team,
-                WorkspaceChromeActionKind::Share,
-            ) => false,
-            _ => true,
-        })
-        .collect()
 }
 
 const MENU_WIDTH: f32 = 270.0;
@@ -159,14 +101,6 @@ pub enum WorkspaceContextAction {
     Detach { index: usize },
     /// Close the workspace and everything in it.
     Close { index: usize },
-    /// Publish the workspace so other clients can subscribe to it.
-    Share { index: usize },
-    /// Return a shared workspace to private visibility.
-    StopSharing { index: usize },
-    /// Send the workspace to a local Docker-backed daemon sandbox.
-    SendToDockerSandbox { index: usize },
-    /// Send the workspace to a cloud sandbox daemon.
-    SendToCloud { index: usize },
     /// Move a buffer tab from the current workspace into another
     /// top-level workspace **in the same window**. `tab_index` is the
     /// buffer-tab strip index; `target_workspace` is the destination

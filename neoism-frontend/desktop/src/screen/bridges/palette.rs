@@ -42,9 +42,9 @@ impl Screen<'_> {
                 },
                 ModalFormField {
                     id: "token".into(),
-                    label: "Access token (optional)".into(),
+                    label: "Password (optional)".into(),
                     value: token,
-                    placeholder: "token".into(),
+                    placeholder: "password".into(),
                     secret: true,
                 },
             ],
@@ -52,7 +52,7 @@ impl Screen<'_> {
         });
     }
 
-    fn open_add_server_prompt(&mut self) {
+    pub(crate) fn open_add_server_prompt(&mut self) {
         use neoism_ui::widgets::modal::{ModalFormField, ModalFormSpec};
 
         self.renderer.modal.open_form(ModalFormSpec {
@@ -62,7 +62,7 @@ impl Screen<'_> {
                     id: "address".into(),
                     label: "Server address".into(),
                     value: String::new(),
-                    placeholder: "http://localhost:7878".into(),
+                    placeholder: "ws://192.168.1.20:7981/session".into(),
                     secret: false,
                 },
                 ModalFormField {
@@ -74,14 +74,203 @@ impl Screen<'_> {
                 },
                 ModalFormField {
                     id: "token".into(),
-                    label: "Access token (optional)".into(),
+                    label: "Password (optional)".into(),
                     value: String::new(),
-                    placeholder: "token".into(),
+                    placeholder: "password".into(),
                     secret: true,
                 },
             ],
-            submit_label: "Add server".into(),
+            submit_label: "Join server".into(),
         });
+        self.renderer.modal.set_form_tabs(
+            vec!["Join server".to_string(), "Create server".to_string()],
+            0,
+        );
+        self.mark_dirty();
+    }
+
+    /// The CREATE half of the Create/Join pair: pick a folder, get a
+    /// server hosting it from this machine, and auto-join. Submission
+    /// lands in the `ServerFormSubmit` arm (the `create_dir` field is
+    /// the discriminator) → `create_and_join_local_server`.
+    pub(crate) fn open_create_server_prompt(&mut self) {
+        use neoism_ui::widgets::modal::{ModalFormField, ModalFormSpec};
+
+        let default_dir = self
+            .workspace_root_for_new_shell()
+            .map(|root| root.display().to_string())
+            .unwrap_or_default();
+        self.renderer.modal.open_form(ModalFormSpec {
+            title: "Add server".to_string(),
+            fields: vec![
+                ModalFormField {
+                    id: "create_dir".into(),
+                    label: "Project folder".into(),
+                    value: default_dir,
+                    placeholder: "~/code/myproject".into(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "name".into(),
+                    label: "Server name (optional)".into(),
+                    value: String::new(),
+                    placeholder: "Team server".into(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "token".into(),
+                    label: "Password (optional)".into(),
+                    value: String::new(),
+                    placeholder: "password".into(),
+                    secret: true,
+                },
+            ],
+            submit_label: "Create & join".into(),
+        });
+        self.renderer.modal.set_form_tabs(
+            vec!["Join server".to_string(), "Create server".to_string()],
+            1,
+        );
+        self.mark_dirty();
+    }
+
+    /// Create-and-join: spawn this machine's own daemon (+ agent, when
+    /// the binary is present) on a free LAN-visible port for `dir`,
+    /// register it, and hand off to the normal join path. The spawned
+    /// processes outlive the app on purpose — a server the user
+    /// created keeps serving until they stop it.
+    pub(crate) fn create_and_join_local_server(
+        &mut self,
+        dir: String,
+        name: Option<String>,
+        password: Option<String>,
+    ) {
+        use neoism_ui::panels::notifications::NotificationLevel;
+
+        let dir = if let Some(rest) = dir.strip_prefix("~/") {
+            match std::env::var("HOME") {
+                Ok(home) => std::path::PathBuf::from(home).join(rest),
+                Err(_) => std::path::PathBuf::from(dir),
+            }
+        } else {
+            std::path::PathBuf::from(dir)
+        };
+        if !dir.is_dir() {
+            self.renderer.notifications.push(
+                format!("`{}` is not a folder on this machine.", dir.display()),
+                NotificationLevel::Warn,
+            );
+            self.mark_dirty();
+            return;
+        }
+
+        // First port that binds; dropped immediately so the daemon can
+        // take it (the tiny race is fine — a failed spawn surfaces in
+        // the join error).
+        let Some(port) = (9877u16..9900).find(|port| {
+            std::net::TcpListener::bind(("0.0.0.0", *port)).is_ok()
+        }) else {
+            self.renderer.notifications.push(
+                "No free port between 9877 and 9899 — stop an old server first."
+                    .to_string(),
+                NotificationLevel::Error,
+            );
+            self.mark_dirty();
+            return;
+        };
+
+        // Installed and dev layouts both put the daemon next to the
+        // desktop binary; PATH is the fallback.
+        let sibling = |bin: &str| -> std::path::PathBuf {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join(bin)))
+                .filter(|path| path.is_file())
+                .unwrap_or_else(|| std::path::PathBuf::from(bin))
+        };
+        let daemon_bin = sibling("neoism-workspace-daemon");
+        let state_dir = neoism_backend::config::config_dir_path()
+            .join("hosted-servers")
+            .join(port.to_string());
+        let _ = std::fs::create_dir_all(&state_dir);
+
+        let mut daemon = std::process::Command::new(&daemon_bin);
+        daemon
+            .arg("--addr")
+            .arg(format!("0.0.0.0:{port}"))
+            .arg("--no-unix-socket")
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .arg("--workspace")
+            .arg(&dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Some(password) = password.as_deref() {
+            daemon
+                .env("NEOISM_DAEMON_TOKEN", password)
+                .env("NEOISM_REQUIRE_AUTH", "1");
+        }
+        if let Err(error) = daemon.spawn() {
+            self.renderer.notifications.push(
+                format!(
+                    "Could not start the server daemon ({}): {error}",
+                    daemon_bin.display()
+                ),
+                NotificationLevel::Error,
+            );
+            self.mark_dirty();
+            return;
+        }
+
+        // Co-hosted agent on port + 1 (the convention joined clients
+        // derive). Missing binary just means no remote agent — the
+        // server itself is unaffected.
+        let agent_bin = sibling("neoism-agent");
+        if agent_bin.is_file() || agent_bin.components().count() == 1 {
+            let _ = std::process::Command::new(&agent_bin)
+                .arg("serve")
+                .arg("--port")
+                .arg((port + 1).to_string())
+                .arg("--hostname")
+                .arg("0.0.0.0")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+
+        // Hand off to the normal add+join path (it dials with retry, so
+        // the daemon's startup wins the race).
+        let address = format!("ws://127.0.0.1:{port}/session");
+        let name = name.or_else(|| {
+            dir.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        });
+        self.request_server_add(address, name, password.clone());
+
+        // Best-effort LAN address for sharing (UDP connect never sends
+        // a packet; it just resolves the outbound interface).
+        let lan_ip = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|socket| {
+                socket.connect("8.8.8.8:80")?;
+                socket.local_addr()
+            })
+            .map(|addr| addr.ip().to_string())
+            .unwrap_or_else(|_| "<your-ip>".to_string());
+        let share = match password.as_deref() {
+            Some(_) => format!(
+                "Serving {} — share ws://{lan_ip}:{port}/session (+ the password)",
+                dir.display()
+            ),
+            None => format!(
+                "Serving {} — share ws://{lan_ip}:{port}/session",
+                dir.display()
+            ),
+        };
+        self.renderer
+            .notifications
+            .push(share, NotificationLevel::Info);
         self.mark_dirty();
     }
 
@@ -945,6 +1134,9 @@ impl Screen<'_> {
             }
             PaletteAction::AddServer => {
                 self.open_add_server_prompt();
+            }
+            PaletteAction::CreateServer => {
+                self.open_create_server_prompt();
             }
             PaletteAction::CreateWorkspace => {
                 self.create_tab(clipboard);

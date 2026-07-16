@@ -745,13 +745,13 @@ pub fn render_input(
         }
     }
 
-    // Usage chip sits to the LEFT of the square send button.
+    // Usage chip sits at the FAR LEFT of the send-button line.
     if let Some(label) = usage_label.as_deref() {
         if usage_chip_w > 0.0 {
             let usage_h = 22.0 * s;
-            let usage_x = send_x - usage_chip_w - 8.0 * s;
+            let usage_x = box_x + 16.0 * s;
             let usage_y = send_y + (send_side - usage_h) * 0.5;
-            if usage_x >= box_x + 16.0 * s {
+            if usage_x + usage_chip_w <= send_x - 8.0 * s {
                 sugarloaf.rounded_rect(
                     None,
                     usage_x,

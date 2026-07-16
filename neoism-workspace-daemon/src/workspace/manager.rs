@@ -529,11 +529,9 @@ impl WorkspaceManager {
         let resolved = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         {
             let inner = self.inner.lock();
-            if let Some(existing) = inner
-                .host_workspaces
-                .values()
-                .find(|workspace| workspace.root_dir.as_deref() == Some(resolved.as_path()))
-            {
+            if let Some(existing) = inner.host_workspaces.values().find(|workspace| {
+                workspace.root_dir.as_deref() == Some(resolved.as_path())
+            }) {
                 return existing.clone();
             }
         }

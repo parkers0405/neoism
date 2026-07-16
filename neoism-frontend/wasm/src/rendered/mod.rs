@@ -1,4 +1,3 @@
-
 use super::*;
 use neoism_terminal_core::colors::{AnsiColor, ColorRgb, NamedColor};
 use neoism_terminal_core::crosswords::grid::row::Row;

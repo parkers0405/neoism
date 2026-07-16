@@ -435,6 +435,7 @@ impl NeoismAgentPane {
             "/clear" => {
                 self.messages.clear();
                 self.timeline_live_trace_start = None;
+                self.timeline_live_trace_anchor = None;
                 self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
             }
             "/exit" => self.request_close_tab(),

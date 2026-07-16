@@ -281,8 +281,8 @@ impl FileTree {
             .root_transition_started
             .map(|started| started.elapsed().as_secs_f32() * 1000.0);
         if let Some(elapsed) = root_reveal_elapsed_ms {
-            let sweep_ms = ROOT_TRANSITION_MS
-                + rows_visible as f32 * ROOT_TRANSITION_STAGGER_MS;
+            let sweep_ms =
+                ROOT_TRANSITION_MS + rows_visible as f32 * ROOT_TRANSITION_STAGGER_MS;
             if elapsed >= sweep_ms {
                 self.root_transition_started = None;
             }
@@ -301,8 +301,7 @@ impl FileTree {
             rendered_rows += 1;
             let reveal = match root_reveal_elapsed_ms {
                 Some(elapsed) => {
-                    let delay =
-                        (rendered_rows - 1) as f32 * ROOT_TRANSITION_STAGGER_MS;
+                    let delay = (rendered_rows - 1) as f32 * ROOT_TRANSITION_STAGGER_MS;
                     ease_out_cubic(
                         ((elapsed - delay) / ROOT_TRANSITION_MS).clamp(0.0, 1.0),
                     )

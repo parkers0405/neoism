@@ -1331,24 +1331,39 @@ fn updated_final_part_does_not_reorder_past_later_tool() {
 }
 
 #[test]
-fn history_refresh_rebases_live_trace_to_durable_turn() {
+fn history_refresh_keeps_live_trace_anchored_to_its_turn() {
     let mut pane = NeoismAgentPane::default();
     pane.messages = vec![
-        NeoismAgentMessage::user("latest"),
+        NeoismAgentMessage::user("latest").with_id("latest"),
         NeoismAgentMessage::reasoning("thinking").with_id("reasoning"),
         NeoismAgentMessage::assistant("tool").with_id("tool"),
     ];
     pane.timeline_live_trace_start = Some(1);
+    pane.timeline_live_trace_anchor = Some("latest".to_string());
 
+    // The refresh prepends an older turn; the marker follows its anchored
+    // turn instead of drifting, so everything revealed this visit stays
+    // revealed.
     pane.apply_history(vec![
         NeoismAgentMessage::user("old"),
         NeoismAgentMessage::assistant("old answer").with_id("old-answer"),
-        NeoismAgentMessage::user("latest"),
+        NeoismAgentMessage::user("latest").with_id("latest"),
         NeoismAgentMessage::assistant("durable answer").with_id("answer"),
     ]);
 
     assert_eq!(pane.timeline_live_trace_start, Some(3));
     assert_eq!(pane.messages[3].text, "durable answer");
+
+    // A newer prompt must NOT collapse the anchored turn's trace.
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("old"),
+        NeoismAgentMessage::assistant("old answer").with_id("old-answer"),
+        NeoismAgentMessage::user("latest").with_id("latest"),
+        NeoismAgentMessage::assistant("durable answer").with_id("answer"),
+        NeoismAgentMessage::user("newer").with_id("newer"),
+        NeoismAgentMessage::assistant("newer answer").with_id("newer-answer"),
+    ]);
+    assert_eq!(pane.timeline_live_trace_start, Some(3));
 }
 
 #[test]

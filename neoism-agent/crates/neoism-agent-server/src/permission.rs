@@ -195,9 +195,10 @@ mod tests {
 
     #[test]
     fn dangerous_skip_star_rule_allows_asks_but_not_explicit_denies() {
-        // The `dangerouslySkipPermissions` flag injects `"*": "allow"`
-        // into the config permission map. BTreeMap order puts "*"
-        // first, so explicit entries still win (last match wins).
+        // A user-written global `"*": "allow"` lands first in BTreeMap
+        // order, so explicit entries still win (last match wins).
+        // (`dangerouslySkipPermissions` no longer injects this rule; it
+        // auto-grants at ask time instead so agent denies survive.)
         let rules = from_config_map(&BTreeMap::from([
             ("*".to_string(), json!("allow")),
             ("bash".to_string(), json!("deny")),

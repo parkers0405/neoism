@@ -28,11 +28,11 @@ use futures::{SinkExt, StreamExt};
 use neoism_protocol::crdt::{CrdtClientMessage, CrdtServerMessage};
 use neoism_protocol::editor::{EditorClientMessage, EditorServerMessage};
 use neoism_protocol::files::{FilesClientMessage, FilesServerMessage};
-use neoism_protocol::search::{SearchClientMessage, SearchServerMessage};
 use neoism_protocol::git::{GitClientMessage, GitServerMessage};
 use neoism_protocol::pty::{
     ClientMessage as PtyClientMessage, ServerMessage as PtyServerMessage,
 };
+use neoism_protocol::search::{SearchClientMessage, SearchServerMessage};
 use neoism_protocol::workspace::{WorkspaceClientMessage, WorkspaceServerMessage};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;

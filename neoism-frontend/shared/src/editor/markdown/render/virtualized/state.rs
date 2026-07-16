@@ -119,6 +119,14 @@ mod tests {
     fn tail_inline_append_suffix_detects_bottom_typing_without_join_rebuild() {
         let mut pane = MarkdownPane {
             path: PathBuf::from("tail.md"),
+            remote_loading_started: None,
+            value_picker_suppressed: None,
+            remote_content_pending: false,
+            cover_overlay_rect: None,
+            value_picker: None,
+            available_covers: Vec::new(),
+            title_edit: None,
+            pending_title_rename: None,
             title: "tail".to_string(),
             lines: vec!["alpha".to_string(), "betaz".to_string()],
             blocks: Vec::new(),

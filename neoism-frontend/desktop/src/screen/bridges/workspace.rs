@@ -484,7 +484,9 @@ fn active_notes_workspace_for_root(
     // step — honoring a per-project `.neoism/workspace.toml` vault
     // selection — is retired with the rest of the per-project notes
     // model: unlinked dirs must always mean Default.
-    neo_workspace::linked_project_for_code_dir(root).ok().flatten()
+    neo_workspace::linked_project_for_code_dir(root)
+        .ok()
+        .flatten()
 }
 
 /// Resolve an explicitly linked/project vault when one exists; otherwise use

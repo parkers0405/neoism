@@ -366,7 +366,15 @@ pub(crate) async fn append_prompt(
     let assistant_id = started.assistant_id;
     let text_part_id = started.text_part_id;
     let live_message = started.live_message;
-    let tool_permissions = permission::from_config_map(&agent_info.permission);
+    let mut tool_permissions = permission::from_config_map(&agent_info.permission);
+    // Session-scoped rules (e.g. `subtask_permission`'s `task: deny` written
+    // onto every sub-agent session) are appended AFTER the agent config so
+    // they win under last-match-wins evaluation. Without this, the stored
+    // session permissions were never enforced anywhere and sub-agents could
+    // recursively spawn sub-agents without bound.
+    if let Some(session_rules) = info.permission.clone() {
+        tool_permissions.extend(session_rules);
+    }
     let provider_tools = provider_tools_for_agent(
         state,
         &info.directory,

@@ -360,8 +360,7 @@ impl Screen<'_> {
         if bw <= 0.0 || bh <= 0.0 {
             return;
         }
-        let Some(path) = Self::resolve_markdown_cover_path(&markdown.path, &value)
-        else {
+        let Some(path) = Self::resolve_markdown_cover_path(&markdown.path, &value) else {
             return;
         };
         if let Some(Some(cover)) = cache.get(&path) {

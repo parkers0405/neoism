@@ -595,10 +595,7 @@ impl Sugarloaf<'_> {
     /// A read-lock + map hit, so calling it per frame is fine.
     #[inline]
     pub fn font_id_for_family(&self, family: &str) -> Option<usize> {
-        self.state
-            .content
-            .font_library()
-            .font_id_for_family(family)
+        self.state.content.font_library().font_id_for_family(family)
     }
 
     /// Register a bundled static font and return the `font_id` that can be used

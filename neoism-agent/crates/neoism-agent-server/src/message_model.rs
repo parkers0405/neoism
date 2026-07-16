@@ -31,6 +31,7 @@ pub(crate) fn provider_messages(messages: &[MessageWithParts]) -> Vec<ProviderMe
             include_attachments: true,
             recent_full_tool_calls: &recent_full_tool_calls,
             old_tool_output_max_chars: OLD_TOOL_OUTPUT_MAX_CHARS,
+            preserve_subagent_outputs: true,
         },
     )
 }
@@ -44,6 +45,9 @@ pub(crate) fn compaction_provider_messages(
             include_attachments: false,
             recent_full_tool_calls: &HashSet::new(),
             old_tool_output_max_chars: COMPACTION_TOOL_OUTPUT_MAX_CHARS,
+            // Compaction requests are already near the context limit;
+            // subagent outputs get no exemption there.
+            preserve_subagent_outputs: false,
         },
     )
 }
@@ -52,6 +56,15 @@ struct MessageModelOptions<'a> {
     include_attachments: bool,
     recent_full_tool_calls: &'a HashSet<String>,
     old_tool_output_max_chars: usize,
+    preserve_subagent_outputs: bool,
+}
+
+/// Subagent results are the condensed product of an entire child session —
+/// truncating them to `OLD_TOOL_OUTPUT_MAX_CHARS` a few steps later erases
+/// everything the fan-out paid for and makes the model re-spawn agents for
+/// answers it already has. They stay at the full recent-output cap instead.
+fn is_subagent_result_tool(tool: &str) -> bool {
+    matches!(tool, "task" | "task_result" | "background_task_result")
 }
 
 fn provider_messages_with_options(
@@ -230,7 +243,8 @@ fn tool_result_messages(
     part: &ToolPart,
     options: &MessageModelOptions<'_>,
 ) -> Vec<ProviderMessage> {
-    let recent = options.recent_full_tool_calls.contains(&part.call_id);
+    let recent = options.recent_full_tool_calls.contains(&part.call_id)
+        || (options.preserve_subagent_outputs && is_subagent_result_tool(&part.tool));
     let output_limit = if recent {
         RECENT_TOOL_OUTPUT_MAX_CHARS
     } else {

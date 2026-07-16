@@ -14,8 +14,8 @@ pub mod pixel_font;
 pub mod text;
 
 pub use drop_cap::maguntia_font_id;
-pub use pixel_font::pixel_font_id;
 pub use ease::*;
 pub use geom::*;
 pub use ide_theme::{IdeTheme, IdeThemeName};
+pub use pixel_font::pixel_font_id;
 pub use text::*;

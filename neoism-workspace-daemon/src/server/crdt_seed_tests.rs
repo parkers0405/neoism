@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::nvim::BufferText;
 use neoism_protocol::crdt::CrdtClientMessage;

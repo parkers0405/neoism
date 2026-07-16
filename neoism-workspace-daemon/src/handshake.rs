@@ -452,6 +452,15 @@ pub fn evaluate_hello(
         (true, Some(t)) if store.verify(t) => HandshakeOutcome::Accepted {
             reason: "valid pairing token",
         },
+        // The operator's static NEOISM_DAEMON_TOKEN is a first-class
+        // Hello credential, not just the legacy `?token=` query check —
+        // the desktop client refuses tokens in URLs (credentials never
+        // enter the server registry), so the token FIELD it sends in
+        // Hello was impossible to satisfy on daemons with an empty
+        // pairing store (docker self-host with only a token env).
+        (true, Some(t)) if daemon_token_matches(t) => HandshakeOutcome::Accepted {
+            reason: "valid daemon token",
+        },
         (true, Some(_)) => HandshakeOutcome::Rejected {
             reason: "invalid pairing token",
         },
@@ -461,6 +470,17 @@ pub fn evaluate_hello(
         (false, _) => HandshakeOutcome::Accepted {
             reason: "trust-local (auth not required)",
         },
+    }
+}
+
+/// Constant-time match against the operator-configured
+/// `NEOISM_DAEMON_TOKEN`, when set and non-empty.
+fn daemon_token_matches(candidate: &str) -> bool {
+    match std::env::var("NEOISM_DAEMON_TOKEN") {
+        Ok(expected) if !expected.trim().is_empty() => {
+            constant_time_eq(expected.trim().as_bytes(), candidate.as_bytes())
+        }
+        _ => false,
     }
 }
 

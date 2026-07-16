@@ -83,6 +83,192 @@ pub(crate) fn tools() -> Vec<McpToolInfo> {
     ]
 }
 
+/// Entry point used by the MCP dispatcher: identical to `call_tool`, but
+/// `memory.recall` upgrades to semantic (turso vector) ranking when an
+/// embeddings client and a turso-backed store are available. Any semantic
+/// failure falls back to the keyword scan — recall never breaks because an
+/// embeddings provider is down.
+pub(crate) async fn call_tool_with_app_state(
+    state: Option<&crate::state::AppState>,
+    directory: &str,
+    tool: &str,
+    arguments: Value,
+) -> anyhow::Result<McpToolCallResult> {
+    if tool == "memory.recall" {
+        if let Some(state) = state {
+            match semantic_recall(state, directory, &arguments).await {
+                Ok(Some(result)) => return Ok(result),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "semantic memory recall failed; falling back to keyword recall"
+                    );
+                }
+            }
+        }
+    }
+    call_tool(directory, tool, arguments)
+}
+
+/// Semantic memory.recall: sync the vector index for every root in scope
+/// (embed new/edited files, prune deleted ones), embed the query, and rank
+/// by cosine distance. Returns Ok(None) when semantic search is unavailable
+/// (no embeddings client, non-turso store, or an empty query) so the caller
+/// falls back to the keyword scan.
+async fn semantic_recall(
+    state: &crate::state::AppState,
+    directory: &str,
+    arguments: &Value,
+) -> anyhow::Result<Option<McpToolCallResult>> {
+    let Some(client) = state.inner.semantic.clone() else {
+        return Ok(None);
+    };
+    if !state.inner.store.semantic_search_supported() {
+        return Ok(None);
+    }
+    let query = required_string(arguments, "query")?;
+    if query.trim().is_empty() {
+        return Ok(None);
+    }
+    let limit = arguments
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(40)
+        .max(1) as usize;
+    let cwd = PathBuf::from(directory);
+    let roots = roots_for_scope(&cwd, scope_arg(arguments), false)?;
+
+    for root in &roots {
+        sync_memory_embeddings(state, &client, root).await?;
+    }
+
+    let mut query_vectors = client.embed(&[query.clone()]).await?;
+    let query_vector = match query_vectors.pop() {
+        Some(vector) if !vector.is_empty() => vector,
+        _ => return Ok(None),
+    };
+    let root_keys: Vec<String> = roots
+        .iter()
+        .map(|root| root.path.to_string_lossy().to_string())
+        .collect();
+    let ranked = state
+        .inner
+        .store
+        .memory_semantic_search(
+            &root_keys,
+            &crate::semantic::vector_json(&query_vector),
+            &client.model_spec,
+            limit,
+        )
+        .await?;
+
+    let mut hits = Vec::new();
+    for (path, distance) in ranked {
+        let absolute = PathBuf::from(&path);
+        let Ok(text) = std::fs::read_to_string(&absolute) else {
+            // File was deleted since indexing; drop the stale row.
+            let _ = state.inner.store.delete_memory_embedding(&path).await;
+            continue;
+        };
+        let Some(root) = roots.iter().find(|root| absolute.starts_with(&root.path))
+        else {
+            continue;
+        };
+        hits.push(json!({
+            "scope": root.scope,
+            "vault": root.label,
+            "path": relative_label(root, &absolute),
+            "description": frontmatter_value(&text, "description"),
+            "type": frontmatter_value(&text, "type"),
+            "snippet": snippet(&text, 0),
+            "distance": distance,
+        }));
+    }
+    let output = json!({
+        "operation": "recall",
+        "query": query,
+        "mode": "semantic",
+        "hits": hits,
+    });
+    Ok(Some(text_result(serde_json::to_string_pretty(&output)?)))
+}
+
+/// Bring the vector index for one memory root up to date with the files on
+/// disk: embed new/changed markdown (keyed by content hash), delete rows for
+/// removed files. Memory stores are tens of files, so this runs inline at
+/// recall time instead of needing a background indexer.
+async fn sync_memory_embeddings(
+    state: &crate::state::AppState,
+    client: &crate::semantic::EmbeddingsClient,
+    root: &MemoryRoot,
+) -> anyhow::Result<()> {
+    use sha2::{Digest, Sha256};
+
+    /// Matches the embeddings client's input cap.
+    const MAX_EMBED_CHARS: usize = 8_000;
+    const EMBED_BATCH: usize = 16;
+
+    let root_key = root.path.to_string_lossy().to_string();
+    let indexed: std::collections::HashMap<String, String> = state
+        .inner
+        .store
+        .memory_embedding_hashes(&root_key, &client.model_spec)
+        .await?
+        .into_iter()
+        .collect();
+    let mut on_disk = std::collections::HashSet::new();
+    let mut stale: Vec<(String, String, String)> = Vec::new();
+    for path in memory_files(root)? {
+        let path_key = path.to_string_lossy().to_string();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default();
+        let description = frontmatter_value(&text, "description").unwrap_or_default();
+        let embed_text: String = format!("{name}\n{description}\n{text}")
+            .chars()
+            .take(MAX_EMBED_CHARS)
+            .collect();
+        let hash = format!("{:x}", Sha256::digest(embed_text.as_bytes()));
+        on_disk.insert(path_key.clone());
+        if indexed.get(&path_key) == Some(&hash) {
+            continue;
+        }
+        stale.push((path_key, hash, embed_text));
+    }
+    for path in indexed.keys() {
+        if !on_disk.contains(path) {
+            let _ = state.inner.store.delete_memory_embedding(path).await;
+        }
+    }
+    let now = crate::now_millis() as i64;
+    for chunk in stale.chunks(EMBED_BATCH) {
+        let inputs: Vec<String> =
+            chunk.iter().map(|(_, _, text)| text.clone()).collect();
+        let vectors = client.embed(&inputs).await?;
+        for ((path, hash, _), vector) in chunk.iter().zip(vectors) {
+            if vector.is_empty() {
+                continue;
+            }
+            state
+                .inner
+                .store
+                .upsert_memory_embedding(
+                    path,
+                    &root_key,
+                    hash,
+                    &client.model_spec,
+                    now,
+                    &crate::semantic::vector_json(&vector),
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn call_tool(
     directory: &str,
     tool: &str,
@@ -228,7 +414,7 @@ pub(crate) fn system_memory_indexes(directory: &str) -> Vec<String> {
         }
         let text = truncate_at_char_boundary(text.trim(), MAX_INJECTED_INDEX_CHARS);
         sections.push(format!(
-            "Persistent {} memory index (vault {}). Before repeating project discovery, read the linked topic files with the {} MCP memory.read tool (paths are relative to the memory folder); memory.recall searches by single-keyword substring. Save new durable facts with memory.write.\n{}",
+            "Persistent {} memory index (vault {}). Before repeating project discovery, read the linked topic files with the {} MCP memory.read tool (paths are relative to the memory folder); memory.recall ranks memories semantically (natural-language queries work), falling back to keyword matching when embeddings are unavailable. Save new durable facts with memory.write.\n{}",
             root.scope, root.label, MEMORY_MCP_ID, text
         ));
     }

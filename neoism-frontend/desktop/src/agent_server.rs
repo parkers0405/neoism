@@ -261,6 +261,31 @@ fn is_provider_credential_key(key: &str) -> bool {
 /// time. Bounded by a short timeout so a slow or misbehaving rc file can't stall
 /// startup, and stdin is detached so an interactive shell can't block on a tty.
 fn resolve_login_shell_env() -> Vec<(String, String)> {
+    if let Some(home) = std::env::var_os("HOME") {
+        let session_vars = std::path::PathBuf::from(home)
+            .join(".nix-profile/etc/profile.d/hm-session-vars.sh");
+        if session_vars.is_file() {
+            let session_vars = session_vars.to_string_lossy();
+            let args = [
+                "-c",
+                "unset __HM_SESS_VARS_SOURCED; . \"$1\" && env",
+                "sh",
+                session_vars.as_ref(),
+            ];
+            if let Some(output) =
+                run_env_capture("/bin/sh", &args, Duration::from_secs(3))
+            {
+                let parsed = parse_env_dump(&output);
+                if parsed
+                    .iter()
+                    .any(|(key, _)| is_provider_credential_key(key))
+                {
+                    return parsed;
+                }
+            }
+        }
+    }
+
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|shell| !shell.trim().is_empty())
@@ -317,4 +342,24 @@ fn parse_env_dump(dump: &str) -> Vec<(String, String)> {
             Some((key.to_string(), value.to_string()))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_provider_credential_key, parse_env_dump};
+
+    #[test]
+    fn provider_credential_allowlist_includes_mcp_api_keys() {
+        assert!(is_provider_credential_key("FIRECRAWL_API_KEY"));
+        assert!(is_provider_credential_key("SOME_ACCESS_TOKEN"));
+        assert!(!is_provider_credential_key("PATH"));
+    }
+
+    #[test]
+    fn env_dump_parser_preserves_values_with_equals() {
+        assert_eq!(
+            parse_env_dump("FIRECRAWL_API_KEY=abc=def\nINVALID LINE\n"),
+            vec![("FIRECRAWL_API_KEY".to_string(), "abc=def".to_string())]
+        );
+    }
 }

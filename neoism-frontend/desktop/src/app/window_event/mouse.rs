@@ -82,6 +82,24 @@ impl Application<'_> {
                     return;
                 }
 
+                // The command palette is an overlay too: while it is
+                // open, EVERY click is its business — a press on a row
+                // acts, a press anywhere else closes the palette. It
+                // must never fall through to panes/tabs behind it.
+                if route.window.screen.renderer.command_palette.is_enabled() {
+                    route.window.screen.dismiss_lsp_hover();
+                    if button == MouseButton::Left
+                        && !route
+                            .window
+                            .screen
+                            .handle_palette_click(&mut self.router.clipboard)
+                    {
+                        route.window.screen.renderer.command_palette.set_enabled(false);
+                    }
+                    route.request_redraw();
+                    return;
+                }
+
                 if let MouseButton::Right = button {
                     route.window.screen.close_context_menu();
                     route.window.screen.dismiss_lsp_hover();

@@ -406,9 +406,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             // island strip into the host's tree ("Workspace 2, root /")
             // and registered the guest's tabs there, which then
             // resurrected on every rejoin.
-            None => {
-                !self.daemon.link_is_peer && !self.workspace_is_adopted(workspace_id)
-            }
+            None => !self.daemon.link_is_peer && !self.workspace_is_adopted(workspace_id),
         }
     }
 

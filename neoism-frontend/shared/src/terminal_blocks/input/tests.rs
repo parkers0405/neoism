@@ -1,4 +1,3 @@
-
 use super::super::chrome::{
     compose_block_chrome, compose_block_chrome_window, COMMAND_BLOCK_CHROME_ROWS,
 };

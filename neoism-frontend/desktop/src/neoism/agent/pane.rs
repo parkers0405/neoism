@@ -171,6 +171,7 @@ pub struct TimelineMeasureKey {
     width_bucket: i32,
     scale_bucket: i32,
     tool_expanded: bool,
+    tool_archived: bool,
     title: u64,
     text: u64,
     status: u64,
@@ -610,6 +611,10 @@ pub struct NeoismAgentPane {
     /// First source row whose trace was observed live during this visit to the
     /// session. It is cleared on session navigation, never persisted.
     timeline_live_trace_start: Option<usize>,
+    /// Id of the user message the live-trace window is anchored after; kept
+    /// alongside the index so list replacements/prepends re-derive the same
+    /// turn boundary instead of drifting to the latest turn.
+    timeline_live_trace_anchor: Option<String>,
     pub(super) timeline_history: AgentTimelineHistoryState,
     scrollbar_thumb_rect: Option<[f32; 4]>,
     scrollbar_track_rect: Option<[f32; 4]>,
@@ -792,6 +797,7 @@ impl Default for NeoismAgentPane {
             timeline_dirty_message_ids: BTreeSet::new(),
             timeline_dirty_message_indices: BTreeSet::new(),
             timeline_live_trace_start: None,
+            timeline_live_trace_anchor: None,
             timeline_history: AgentTimelineHistoryState::default(),
             scrollbar_thumb_rect: None,
             scrollbar_track_rect: None,

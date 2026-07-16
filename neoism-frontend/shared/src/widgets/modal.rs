@@ -20,7 +20,6 @@ const ACTION_FONT_SIZE: f32 = 13.0;
 const ACTION_ROW_HEIGHT: f32 = 32.0;
 const INPUT_ROW_HEIGHT: f32 = 34.0;
 const INPUT_FONT_SIZE: f32 = 13.0;
-const INPUT_CARET_WIDTH: f32 = 1.25;
 const BODY_LINE_HEIGHT: f32 = 19.0;
 const TITLE_HEIGHT: f32 = 24.0;
 const SEPARATOR_HEIGHT: f32 = 1.0;
@@ -335,6 +334,11 @@ pub struct UniversalModal {
     input: Option<ModalInputSpec>,
     form: Option<ModalFormSpec>,
     form_focus: usize,
+    /// Segmented mode slider labels (empty = none) + active segment;
+    /// rects recorded at render for click hit-testing.
+    form_tabs: Vec<String>,
+    form_active_tab: usize,
+    form_tab_rects: Vec<[f32; 4]>,
     /// Caret position in CHARS within the focused input (single input or
     /// focused form field). Reset to end-of-value on open and focus change.
     input_caret: usize,
@@ -360,6 +364,9 @@ impl Default for UniversalModal {
             input: None,
             form: None,
             form_focus: 0,
+            form_tabs: Vec::new(),
+            form_active_tab: 0,
+            form_tab_rects: Vec::new(),
             input_caret: 0,
             submitted_form: None,
             selected_index: 0,
@@ -392,6 +399,9 @@ impl UniversalModal {
         self.buttons.clear();
         self.input = None;
         self.form = None;
+        self.form_tabs.clear();
+        self.form_tab_rects.clear();
+        self.form_active_tab = 0;
         self.submitted_form = None;
         self.selected_index = 0;
         self.scroll_offset = 0;
@@ -441,6 +451,9 @@ impl UniversalModal {
             blocking: true,
         });
         self.form = Some(spec);
+        self.form_tabs.clear();
+        self.form_tab_rects.clear();
+        self.form_active_tab = 0;
         self.form_focus = self
             .form
             .as_ref()
@@ -588,6 +601,37 @@ impl UniversalModal {
         self.active && self.busy
     }
 
+    /// Attach a segmented mode slider to the OPEN form (call right
+    /// after `open_form`). `open_form` clears it, so plain forms never
+    /// inherit another modal's tabs.
+    pub fn set_form_tabs(&mut self, tabs: Vec<String>, active: usize) {
+        self.form_active_tab = active.min(tabs.len().saturating_sub(1));
+        self.form_tabs = tabs;
+    }
+
+    pub fn form_tab_count(&self) -> usize {
+        self.form_tabs.len()
+    }
+
+    pub fn form_active_tab(&self) -> usize {
+        self.form_active_tab
+    }
+
+    /// Which slider segment (if any) sits under the pointer — rects are
+    /// recorded at render time in the same logical space the modal's
+    /// `hit_test` uses.
+    pub fn form_tab_hit(&self, x: f32, y: f32) -> Option<usize> {
+        self.form_tab_rects
+            .iter()
+            .position(|rect| {
+                x >= rect[0]
+                    && x <= rect[0] + rect[2]
+                    && y >= rect[1]
+                    && y <= rect[1] + rect[3]
+            })
+            .filter(|_| self.active)
+    }
+
     pub fn focus_next_form_field(&mut self) -> bool {
         let Some(form) = self.form.as_ref() else {
             return false;
@@ -604,6 +648,77 @@ impl UniversalModal {
             }
         }
         true
+    }
+
+    /// Vertical navigation for FORM modals: Down walks the fields top
+    /// to bottom, steps onto the button row after the last field, then
+    /// moves within the buttons; Up reverses back into the fields.
+    /// `form_focus == fields.len()` is the buttons zone — every
+    /// focused-input accessor already returns None there, so typing
+    /// simply goes nowhere until focus returns to a field. Returns
+    /// false when no form is open (caller keeps plain button
+    /// navigation). Hidden fields (empty labels) are skipped, matching
+    /// Tab's `focus_next_form_field`.
+    pub fn form_focus_move(&mut self, down: bool) -> bool {
+        let labels: Vec<bool> = match self.form.as_ref() {
+            Some(form) => form
+                .fields
+                .iter()
+                .map(|field| !field.label.is_empty())
+                .collect(),
+            None => return false,
+        };
+        let count = labels.len();
+        if count == 0 {
+            return false;
+        }
+        if down {
+            if self.form_focus < count {
+                let mut next = self.form_focus + 1;
+                while next < count && !labels[next] {
+                    next += 1;
+                }
+                self.form_focus = next;
+                if next < count {
+                    self.input_caret = self.focused_input_chars();
+                }
+            } else {
+                self.move_selection_down();
+            }
+        } else if self.form_focus >= count {
+            if self.selected_index > 0 {
+                self.move_selection_up();
+            } else {
+                let mut prev = count;
+                while prev > 0 {
+                    prev -= 1;
+                    if labels[prev] {
+                        break;
+                    }
+                }
+                self.form_focus = prev;
+                self.input_caret = self.focused_input_chars();
+            }
+        } else {
+            let mut index = self.form_focus;
+            while index > 0 {
+                index -= 1;
+                if labels[index] {
+                    self.form_focus = index;
+                    self.input_caret = self.focused_input_chars();
+                    break;
+                }
+            }
+        }
+        true
+    }
+
+    /// True while a form's focus sits on the button row — the renderer
+    /// highlights the selected button instead of a field caret.
+    pub fn form_buttons_focused(&self) -> bool {
+        self.form
+            .as_ref()
+            .is_some_and(|form| self.form_focus >= form.fields.len())
     }
 
     pub fn move_selection_up(&mut self) {
@@ -1133,6 +1248,68 @@ impl UniversalModal {
             .text_mut()
             .draw(text_x, text_y, title.as_str(), &title_opts);
 
+        // Segmented mode slider, centered in the title row (the server
+        // modal's Join ↔ Create switch). Draws inside the row the title
+        // already reserves, so no layout below shifts.
+        self.form_tab_rects.clear();
+        if self.form.is_some() && !self.form_tabs.is_empty() {
+            let tab_opts = DrawOpts {
+                font_size: BODY_FONT_SIZE * s,
+                color: theme.u8(theme.fg),
+                clip_rect: Some(text_clip),
+                ..DrawOpts::default()
+            };
+            let pad_x = 10.0 * s;
+            let gap = 6.0 * s;
+            let tab_h = (TITLE_HEIGHT * s - 4.0 * s).max(14.0 * s);
+            let widths: Vec<f32> = self
+                .form_tabs
+                .iter()
+                .map(|label| {
+                    sugarloaf.text_mut().measure(label, &tab_opts) + pad_x * 2.0
+                })
+                .collect();
+            let total: f32 =
+                widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32;
+            let mut tab_x = x + (w - total) * 0.5;
+            let tab_y = y + pad - 2.0 * s;
+            for (index, label) in self.form_tabs.iter().enumerate() {
+                let tab_w = widths[index];
+                let active = index == self.form_active_tab;
+                sugarloaf.rounded_rect(
+                    None,
+                    tab_x,
+                    tab_y,
+                    tab_w,
+                    tab_h,
+                    if active {
+                        theme.f32_alpha(theme.accent, 0.30)
+                    } else {
+                        theme.f32_alpha(theme.hover, 0.35)
+                    },
+                    DEPTH_ELEMENT,
+                    tab_h * 0.5,
+                    ORDER + 2,
+                );
+                let label_opts = DrawOpts {
+                    color: if active {
+                        theme.u8(theme.fg)
+                    } else {
+                        theme.u8(theme.muted)
+                    },
+                    ..tab_opts
+                };
+                sugarloaf.text_mut().draw(
+                    tab_x + pad_x,
+                    tab_y + (tab_h - BODY_FONT_SIZE * s) * 0.5,
+                    label,
+                    &label_opts,
+                );
+                self.form_tab_rects.push([tab_x, tab_y, tab_w, tab_h]);
+                tab_x += tab_w + gap;
+            }
+        }
+
         text_y += TITLE_HEIGHT * s + 12.0 * s;
         let body_view_y = text_y;
         let body_view_h = self.visible_body_line_count() as f32 * BODY_LINE_HEIGHT * s;
@@ -1295,22 +1472,22 @@ impl UniversalModal {
             } else {
                 // Measure only up to the caret within the fitted text so
                 // arrow-key movement is visible mid-string.
-                let caret_prefix = input_fit
-                    .chars()
-                    .take(self.input_caret)
-                    .collect::<String>();
+                let caret_prefix =
+                    input_fit.chars().take(self.input_caret).collect::<String>();
                 sugarloaf
                     .text_mut()
                     .measure(caret_prefix.as_str(), &input_opts)
             };
-            let caret_h = (INPUT_FONT_SIZE * s + 3.0 * s).min(input_h - 8.0 * s);
+            // Same thick translucent block as the form fields / editor
+            // cursor — one caret silhouette across the app.
+            let caret_h = (INPUT_FONT_SIZE * s + 6.0 * s).min(input_h - 6.0 * s);
             sugarloaf.rect(
                 None,
-                input_text_x + caret_offset + 2.0 * s,
+                input_text_x + caret_offset,
                 input_y + (input_h - caret_h) / 2.0,
-                INPUT_CARET_WIDTH * s,
+                INPUT_FONT_SIZE * 0.55 * s,
                 caret_h,
-                theme.f32(theme.accent),
+                theme.f32_alpha(theme.accent, 0.55),
                 DEPTH_ELEMENT + 0.02,
                 ORDER + 2,
             );
@@ -1378,8 +1555,7 @@ impl UniversalModal {
                     // The caret sits after `input_caret` chars of the
                     // rendered value (masked for secret fields), not at
                     // the end — arrow keys move it through the text.
-                    let caret_chars =
-                        self.input_caret.min(field.value.chars().count());
+                    let caret_chars = self.input_caret.min(field.value.chars().count());
                     let caret_text = if field.secret {
                         "•".repeat(caret_chars)
                     } else {
@@ -1387,16 +1563,19 @@ impl UniversalModal {
                     };
                     let caret_x = text_x
                         + 12.0 * s
-                        + sugarloaf.text_mut().measure(caret_text.as_str(), &opts)
-                        + 2.0 * s;
-                    let caret_h = (INPUT_FONT_SIZE + 3.0) * s;
+                        + sugarloaf.text_mut().measure(caret_text.as_str(), &opts);
+                    // Thick BLOCK caret — same silhouette as the editor
+                    // cursor everywhere else. Translucent so the glyph
+                    // it sits on stays readable (the old hairline drew
+                    // straight through the text).
+                    let caret_h = (INPUT_FONT_SIZE + 6.0) * s;
                     sugarloaf.rect(
                         None,
                         caret_x,
                         text_y + (input_h - caret_h) * 0.5,
-                        INPUT_CARET_WIDTH * s,
+                        INPUT_FONT_SIZE * 0.55 * s,
                         caret_h,
-                        theme.f32(theme.accent),
+                        theme.f32_alpha(theme.accent, 0.55),
                         DEPTH_ELEMENT + 0.03,
                         ORDER + 2,
                     );
@@ -1442,7 +1621,12 @@ impl UniversalModal {
         {
             let actual_idx = self.scroll_offset + display_idx;
             let row_y = self.actions_y(y) + display_idx as f32 * row_h;
-            let selected = actual_idx == self.selected_index;
+            // In a FORM, the button highlight only shows once focus has
+            // actually walked onto the button row — while typing in a
+            // field, a pre-lit "Enter" reads as focused when it isn't.
+            // Plain modals (button lists) keep the always-on selection.
+            let selected = actual_idx == self.selected_index
+                && (self.form.is_none() || self.form_buttons_focused());
             let destructive = button.action.is_destructive();
             if selected {
                 sugarloaf.rounded_rect(

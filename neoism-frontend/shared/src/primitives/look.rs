@@ -254,12 +254,7 @@ mod tests {
         // Override keeps the site's alpha so fades still work.
         assert_eq!(
             style.thumb_or([0.6, 0.6, 0.6, 0.5]),
-            [
-                128.0 / 255.0,
-                128.0 / 255.0,
-                128.0 / 255.0,
-                0.5
-            ]
+            [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 0.5]
         );
         assert!(style.track_or(None).is_some());
     }

@@ -32,8 +32,7 @@ pub(super) fn draw_markdown_scrollbar(
     }
     let track_h = (h - MARKDOWN_SCROLLBAR_MARGIN * 2.0).max(1.0);
     let max_scroll = (content_height - h).max(1.0);
-    let thumb_h =
-        (track_h * (h / content_height)).clamp(min_thumb.min(track_h), track_h);
+    let thumb_h = (track_h * (h / content_height)).clamp(min_thumb.min(track_h), track_h);
     let progress = (pane.scroll_y / max_scroll).clamp(0.0, 1.0);
     let thumb_y = y + MARKDOWN_SCROLLBAR_MARGIN + (track_h - thumb_h) * progress;
     let track_rect = [

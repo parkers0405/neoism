@@ -67,8 +67,7 @@ impl Screen<'_> {
         // The finder rides the same fork: Alt+S in a joined workspace
         // must search the HOST's disk (its root doesn't exist locally,
         // which read as an always-empty "no files" finder).
-        let search_route = if self.context_manager.current_workspace_is_remote_joined()
-        {
+        let search_route = if self.context_manager.current_workspace_is_remote_joined() {
             self.context_manager.daemon_link_handle_and_runtime().map(
                 |(handle, runtime)| crate::host::finder_search::RemoteSearchRoute {
                     root: root.to_path_buf(),
@@ -132,6 +131,43 @@ impl Screen<'_> {
             }
         });
         true
+    }
+
+    /// List the joined workspace's `Notes/` folder on the server —
+    /// feeds the notes sidebar via the `TreeListing` reply. A missing
+    /// folder is fine (the daemon answers with an Error; the panel
+    /// shows the empty state and the first create makes the dir).
+    pub(crate) fn request_remote_notes_listing(&mut self) {
+        let Some(root) = self.renderer.file_tree.remote_root() else {
+            return;
+        };
+        let Some((handle, runtime)) =
+            self.context_manager.daemon_link_handle_and_runtime()
+        else {
+            return;
+        };
+        let request_id = handle.allocate_request_id();
+        self.pending_remote_notes_listing.insert(request_id);
+        runtime.spawn(async move {
+            if let Err(error) = handle
+                .send_files_with_request_id(
+                    request_id,
+                    neoism_protocol::files::FilesClientMessage::WalkTree {
+                        path: "Notes".to_string(),
+                        max_depth: Some(6),
+                    },
+                    Some(root),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "neoism::remote_files",
+                    %error,
+                    request_id,
+                    "remote notes listing send failed"
+                );
+            }
+        });
     }
 
     /// Remote git-status fetch for the JOINED workspace's repo (the
@@ -216,7 +252,31 @@ impl Screen<'_> {
         use neoism_ui::panels::notifications::NotificationLevel;
 
         let own_op = self.pending_remote_file_ops.remove(&request_id);
+        let notes_listing = self.pending_remote_notes_listing.remove(&request_id);
         match message {
+            FilesServerMessage::TreeListing { entries, .. } if notes_listing => {
+                let Some(notes_root) = self.renderer.notes_sidebar.workspace_path()
+                else {
+                    return false;
+                };
+                let list: Vec<(std::path::PathBuf, bool)> = entries
+                    .iter()
+                    .map(|entry| (notes_root.join(&entry.path), entry.is_dir))
+                    .collect();
+                self.renderer.notes_sidebar.set_entries_from_host(list);
+                self.mark_dirty();
+                true
+            }
+            // `Notes/` doesn't exist on the server yet — an empty panel
+            // (with its "+ New note" button) is the correct answer, not
+            // an error toast; the first create makes the folder.
+            FilesServerMessage::Error { .. } if notes_listing => {
+                self.renderer
+                    .notes_sidebar
+                    .set_entries_from_host(Vec::new());
+                self.mark_dirty();
+                true
+            }
             FilesServerMessage::DirListing { path, entries } => {
                 let Ok(payload) = serde_json::to_value(message) else {
                     return false;
@@ -315,7 +375,21 @@ impl Screen<'_> {
                 self.renderer.file_tree.relist_open_dirs();
                 if !is_dir {
                     if let Some(root) = self.renderer.file_tree.remote_root() {
-                        self.open_path_in_editor(root.join(path));
+                        let abs = root.join(path);
+                        // Notes open in the markdown surface and the
+                        // sidebar re-lists; everything else keeps the
+                        // editor open the tree ops always did.
+                        let is_note = self
+                            .renderer
+                            .notes_sidebar
+                            .workspace_path()
+                            .is_some_and(|notes_root| abs.starts_with(&notes_root));
+                        if is_note {
+                            self.open_path_in_markdown(abs);
+                            self.request_remote_notes_listing();
+                        } else {
+                            self.open_path_in_editor(abs);
+                        }
                     }
                 }
                 self.mark_dirty();

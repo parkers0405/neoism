@@ -798,12 +798,15 @@ where
                 pane,
                 AgentToolMessage::id(message),
             );
+            let archived =
+                AgentToolPane::tool_archived(pane, AgentToolMessage::id(message));
             if let Some(collapsed) = measure_tool_message_height(
                 sugarloaf,
                 message,
                 width,
                 s,
                 false,
+                archived,
                 selected_group_child,
             ) {
                 if progress <= 0.001 {
@@ -815,6 +818,7 @@ where
                     width,
                     s,
                     true,
+                    archived,
                     selected_group_child,
                 )
                 .unwrap_or(collapsed);

@@ -28,6 +28,7 @@ impl NeoismAgentPane {
         width: f32,
         scale: f32,
         tool_expanded: bool,
+        tool_archived: bool,
     ) -> TimelineMeasureKey {
         TimelineMeasureKey {
             id: hash_value(&message.id),
@@ -36,6 +37,7 @@ impl NeoismAgentPane {
             width_bucket: f32_measure_bucket(width),
             scale_bucket: f32_measure_bucket(scale),
             tool_expanded,
+            tool_archived,
             title: hash_value(&message.title),
             text: hash_agent_message_text_for_measure(&message.text),
             status: hash_value(&message.status),
@@ -53,9 +55,16 @@ impl NeoismAgentPane {
         width: f32,
         scale: f32,
         tool_expanded: bool,
+        tool_archived: bool,
         selected_tool_group_child: Option<&str>,
     ) -> TimelineMeasureKey {
-        let mut key = Self::timeline_measure_key(message, width, scale, tool_expanded);
+        let mut key = Self::timeline_measure_key(
+            message,
+            width,
+            scale,
+            tool_expanded,
+            tool_archived,
+        );
         key.selected_tool_group_child = selected_tool_group_child
             .map(|value| hash_value(&value))
             .unwrap_or(0);
@@ -518,6 +527,27 @@ impl NeoismAgentPane {
 
     pub fn tool_expanded(&self, id: &str) -> bool {
         !id.is_empty() && self.expanded_tool_ids.contains(id)
+    }
+
+    /// A tool row is archived when it sits before the live-trace window of the
+    /// current visit (everything, after a reload). Archived cards render
+    /// header-only until clicked. Synthetic read-group ids ("a..b") resolve
+    /// through their first member.
+    pub fn tool_archived(&self, id: &str) -> bool {
+        if id.is_empty() {
+            return false;
+        }
+        let live_start = self
+            .timeline_live_trace_start
+            .unwrap_or(self.messages.len());
+        let lookup =
+            |needle: &str| self.messages.iter().position(|message| message.id == needle);
+        lookup(id)
+            .or_else(|| {
+                id.split_once("..")
+                    .and_then(|(first, _)| lookup(first))
+            })
+            .is_some_and(|index| index < live_start)
     }
 
     pub fn tool_expand_progress(&self, id: &str) -> f32 {

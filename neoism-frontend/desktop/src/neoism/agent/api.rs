@@ -33,6 +33,27 @@ pub(crate) fn neoism_agent_server() -> String {
         .to_string()
 }
 
+/// Agent endpoint for a JOINED server — the agent runs NEXT TO the
+/// daemon on the machine that owns the workspace (its tools must
+/// execute where the files live), and the self-host container
+/// publishes it on daemon port + 1 by convention:
+/// `ws://host:7981/session` → `http://host:7982`. `None` for unix
+/// sockets or unparseable endpoints — callers keep the local agent.
+pub(crate) fn agent_server_for_daemon_endpoint(endpoint: &str) -> Option<String> {
+    let rest = endpoint
+        .strip_prefix("ws://")
+        .or_else(|| endpoint.strip_prefix("wss://"))?;
+    let hostport = rest.split('/').next()?;
+    let (host, port) = hostport.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    let scheme = if endpoint.starts_with("wss://") {
+        "https"
+    } else {
+        "http"
+    };
+    Some(format!("{scheme}://{host}:{}", port.checked_add(1)?))
+}
+
 pub(super) fn fetch_model_options(
     server: &str,
 ) -> Result<Vec<NeoismAgentPickerOption>, String> {

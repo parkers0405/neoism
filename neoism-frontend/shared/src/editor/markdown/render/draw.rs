@@ -284,9 +284,7 @@ fn draw_task_checkbox_retro95(
         (x, y, stroke, size + stroke),
         (x + size, y, stroke, size + stroke),
     ] {
-        draw_rect_clipped(
-            sugarloaf, clip, rx, ry, rw, rh, ink, DEPTH, ORDER_TEXT,
-        );
+        draw_rect_clipped(sugarloaf, clip, rx, ry, rw, rh, ink, DEPTH, ORDER_TEXT);
     }
     if checked {
         let font_size = 11.0 * font_scale;

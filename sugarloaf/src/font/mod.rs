@@ -1028,9 +1028,7 @@ impl FontLibraryData {
         // `font_id_for_family("Press Start 2P")`. Registered last so it sits
         // at the bottom of the per-char fallback cascade and never steals
         // glyphs the earlier fonts already cover.
-        self.insert(
-            FontData::from_static_slice(constants::FONT_PRESS_START_2P).unwrap(),
-        );
+        self.insert(FontData::from_static_slice(constants::FONT_PRESS_START_2P).unwrap());
 
         if spec.disable_warnings_not_found {
             vec![]
@@ -1637,9 +1635,7 @@ fn parse_family_name(data: &[u8]) -> Option<String> {
     let face = ttf_parser::Face::parse(data, 0).ok()?;
     face.names()
         .into_iter()
-        .find(|n| {
-            n.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY && n.is_unicode()
-        })
+        .find(|n| n.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY && n.is_unicode())
         .and_then(|n| n.to_string())
         .or_else(|| {
             face.names()

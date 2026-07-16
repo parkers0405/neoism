@@ -182,6 +182,7 @@ pub struct TimelineMeasureKey {
     width_bucket: i32,
     scale_bucket: i32,
     tool_expanded: bool,
+    tool_archived: bool,
     title: u64,
     text: u64,
     status: u64,
@@ -581,6 +582,10 @@ pub struct NeoismAgentPane {
     /// presents its settled answer-only history, while the current visit keeps
     /// reasoning and tools visible even after the foreground turn goes idle.
     timeline_live_trace_start: Option<usize>,
+    /// Id of the user message the live-trace window is anchored after; kept
+    /// alongside the index so list replacements/prepends re-derive the same
+    /// turn boundary instead of drifting to the latest turn.
+    timeline_live_trace_anchor: Option<String>,
     /// Bumped on every timeline message mutation, including the
     /// dirty-mark paths that deliberately do NOT bump
     /// `timeline_layout_epoch` (those patch the view's layout cache
@@ -883,6 +888,7 @@ impl Default for NeoismAgentPane {
             timeline_dirty_message_ids: BTreeSet::new(),
             timeline_dirty_message_indices: BTreeSet::new(),
             timeline_live_trace_start: None,
+            timeline_live_trace_anchor: None,
             timeline_content_revision: 0,
             timeline_history: AgentTimelineHistoryState::default(),
             virtual_timeline: NeoismAgentVirtualTimeline::default(),
@@ -949,6 +955,7 @@ impl NeoismAgentPane {
                 (Some(current), Some(next)) if current != next
             ) {
                 self.timeline_live_trace_start = None;
+                self.timeline_live_trace_anchor = None;
             }
             self.session_id = session_id;
         }
@@ -990,6 +997,7 @@ impl NeoismAgentPane {
         if self.session_id.as_deref() == Some(session_id) {
             self.session_id = None;
             self.timeline_live_trace_start = None;
+            self.timeline_live_trace_anchor = None;
             self.invalidate_timeline_layout();
         }
     }

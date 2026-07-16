@@ -87,6 +87,9 @@ pub(crate) enum PaletteRow<'a> {
         entry: &'a PaletteServerEntry,
     },
     ServerAdd,
+    /// "+ Create server" — host the machine's own daemon for a chosen
+    /// folder and auto-join it (the flip side of ServerAdd's join-by-URL).
+    ServerCreate,
     /// Vim ex command suggestion — a pure visual aid backed by the
     /// curated `EX_COMMANDS` list. Has no action: Enter always
     /// dispatches the literal query, Tab fills the query with `name`.
@@ -124,6 +127,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Workspace { entry } => entry.title.as_str(),
             PaletteRow::Server { entry } => entry.name.as_str(),
             PaletteRow::ServerAdd => "+ Add server",
+            PaletteRow::ServerCreate => "+ Create server",
             PaletteRow::Ex { name, .. } => name,
             PaletteRow::Search { term } => term,
             PaletteRow::BufferMatch { text, .. } => text,
@@ -158,6 +162,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Workspace { entry } => entry.detail.as_str(),
             PaletteRow::Server { entry } => entry.address.as_str(),
             PaletteRow::ServerAdd => "",
+            PaletteRow::ServerCreate => "",
             PaletteRow::Ex { hint, .. } => hint,
             PaletteRow::Search { .. } => "recent",
             // Buffer-match rows show their line number in the
@@ -177,6 +182,7 @@ impl<'a> PaletteRow<'a> {
                 id: entry.id.clone(),
             }),
             PaletteRow::ServerAdd => Some(PaletteAction::AddServer),
+            PaletteRow::ServerCreate => Some(PaletteAction::CreateServer),
             PaletteRow::Font { .. }
             | PaletteRow::Theme { .. }
             | PaletteRow::Shader { .. }

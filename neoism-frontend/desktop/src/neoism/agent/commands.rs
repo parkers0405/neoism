@@ -417,6 +417,11 @@ impl NeoismAgentPane {
                 self.input.clear();
                 self.close_picker();
                 self.reset_session_runtime_ui();
+                // Pagination state is per-session. Leaking the previous
+                // session's cursor/has_older here either disabled "load
+                // older" entirely or fed the server a foreign message id,
+                // which resolves to the newest page and dedupes to nothing.
+                self.timeline_history = Default::default();
                 self.side_panel.invalidate_subagent_refresh();
                 // Reset the previous session's goal AND its version, then
                 // force a refetch so the Goal section reflects the session we

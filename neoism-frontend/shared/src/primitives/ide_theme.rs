@@ -590,15 +590,32 @@ mod custom_theme_tests {
     fn lua_palette_pairs_cover_the_lua_contract() {
         let pairs = IdeTheme::pastel_dark().lua_palette_pairs();
         for key in [
-            "bg", "fg", "line", "surface", "muted", "comment", "string", "number",
-            "keyword", "statement", "func", "type", "property", "constructor",
-            "special", "error", "warn", "info",
+            "bg",
+            "fg",
+            "line",
+            "surface",
+            "muted",
+            "comment",
+            "string",
+            "number",
+            "keyword",
+            "statement",
+            "func",
+            "type",
+            "property",
+            "constructor",
+            "special",
+            "error",
+            "warn",
+            "info",
         ] {
             assert!(
                 pairs.iter().any(|(k, _)| *k == key),
                 "missing lua palette key {key}"
             );
         }
-        assert!(pairs.iter().all(|(_, v)| v.starts_with('#') && v.len() == 7));
+        assert!(pairs
+            .iter()
+            .all(|(_, v)| v.starts_with('#') && v.len() == 7));
     }
 }

@@ -106,6 +106,9 @@ pub enum PaletteAction {
         id: String,
     },
     AddServer,
+    /// Host a server from THIS machine for a chosen folder and
+    /// auto-join it — the create half of the Create/Join pair.
+    CreateServer,
     CreateWorkspace,
     ShareCurrentWorkspace,
     StopSharingCurrentWorkspace,
@@ -560,6 +563,7 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::EditServer { .. }
         | PaletteAction::RemoveServer { .. }
         | PaletteAction::AddServer
+        | PaletteAction::CreateServer
         | PaletteAction::CreateWorkspace
         | PaletteAction::ShareCurrentWorkspace
         | PaletteAction::StopSharingCurrentWorkspace

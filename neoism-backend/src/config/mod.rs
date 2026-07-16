@@ -28,8 +28,8 @@ use crate::config::window::Window;
 use colors::Colors;
 use neoism_terminal_core::ansi::CursorShape;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use std::{default::Default, fs::File};
 use sugarloaf::font::fonts::SugarloafFonts;
@@ -645,8 +645,8 @@ impl Config {
     fn load_from_path(path: &PathBuf) -> Self {
         if path.exists() {
             let content = std::fs::read_to_string(path).unwrap();
-            let decoded: Config =
-                parse_config_content(path, &content).unwrap_or_else(|_| Config::default());
+            let decoded: Config = parse_config_content(path, &content)
+                .unwrap_or_else(|_| Config::default());
             decoded
         } else {
             Config::default()
@@ -1129,7 +1129,8 @@ mod tests {
     fn json_section_writer_updates_and_preserves_other_keys() {
         // Exercise write_config_section's JSON merge logic directly via
         // the same primitives (parse → mutate → pretty).
-        let content = "// note\n{ \"fonts\": { \"size\": 14.0 }, \"mcp\": { \"x\": {} } }";
+        let content =
+            "// note\n{ \"fonts\": { \"size\": 14.0 }, \"mcp\": { \"x\": {} } }";
         let cleaned = strip_trailing_commas(&strip_json_comments(content));
         let mut root: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
         let object = root.as_object_mut().unwrap();
@@ -1196,10 +1197,8 @@ mod tests {
         let default = create_temporary_config("status-fps-default", "# empty\n");
         assert!(default.neoism.status_fps);
 
-        let disabled = create_temporary_config(
-            "status-fps-off",
-            "[neoism]\nstatus-fps = false\n",
-        );
+        let disabled =
+            create_temporary_config("status-fps-off", "[neoism]\nstatus-fps = false\n");
         assert!(!disabled.neoism.status_fps);
     }
 

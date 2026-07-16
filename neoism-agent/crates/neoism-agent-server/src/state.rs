@@ -694,6 +694,7 @@ impl SessionStore {
             .await?;
         self.migrate_fts().await?;
         self.migrate_semantic().await?;
+        self.migrate_memory_semantic().await?;
         Ok(())
     }
 
@@ -867,6 +868,129 @@ impl SessionStore {
             });
         }
         Ok(hits)
+    }
+
+    /// Vector-embedding mirror of the memory-note markdown files (the agent
+    /// MCP memory store under the notes vaults). Keyed by absolute file path;
+    /// `content_hash` detects edits so recall re-embeds only changed files.
+    /// Same turso-only gating as `message_embeddings`.
+    async fn migrate_memory_semantic(&self) -> anyhow::Result<()> {
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS memory_embeddings (
+                path TEXT PRIMARY KEY,
+                root TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                model TEXT NOT NULL,
+                updated INTEGER NOT NULL,
+                embedding BLOB
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_embeddings_root ON memory_embeddings(root)",
+                Vec::new(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// (path, content_hash) for every indexed memory file under `root` and
+    /// `model` — recall diffs this against the files on disk to find what
+    /// needs (re)embedding.
+    pub(crate) async fn memory_embedding_hashes(
+        &self,
+        root: &str,
+        model: &str,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let rows = self
+            .db
+            .fetch_all(
+                "SELECT path, content_hash FROM memory_embeddings \
+                 WHERE root = ? AND model = ? AND embedding IS NOT NULL",
+                vec![text(root), text(model)],
+            )
+            .await?;
+        rows.into_iter()
+            .map(|row| Ok((row.get_str("path")?, row.get_str("content_hash")?)))
+            .collect()
+    }
+
+    pub(crate) async fn upsert_memory_embedding(
+        &self,
+        path: &str,
+        root: &str,
+        content_hash: &str,
+        model: &str,
+        updated: i64,
+        vector_json: &str,
+    ) -> anyhow::Result<()> {
+        self.db
+            .execute(
+                r#"
+            INSERT INTO memory_embeddings (path, root, content_hash, model, updated, embedding)
+            VALUES (?, ?, ?, ?, ?, vector32(?))
+            ON CONFLICT(path) DO UPDATE SET
+                root = excluded.root,
+                content_hash = excluded.content_hash,
+                model = excluded.model,
+                updated = excluded.updated,
+                embedding = excluded.embedding
+            "#,
+                vec![
+                    text(path),
+                    text(root),
+                    text(content_hash),
+                    text(model),
+                    int(updated),
+                    text(vector_json),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Drop index rows for memory files that no longer exist on disk.
+    pub(crate) async fn delete_memory_embedding(&self, path: &str) -> anyhow::Result<()> {
+        self.db
+            .execute(
+                "DELETE FROM memory_embeddings WHERE path = ?",
+                vec![text(path)],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Rank indexed memory files by cosine distance to an embedded query.
+    /// Exact scan — memory stores are tens of files, not millions.
+    pub(crate) async fn memory_semantic_search(
+        &self,
+        roots: &[String],
+        query_vector_json: &str,
+        model: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, f64)>> {
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; roots.len()].join(", ");
+        let sql = format!(
+            "SELECT path, vector_distance_cos(embedding, vector32(?)) AS distance \
+             FROM memory_embeddings \
+             WHERE model = ? AND embedding IS NOT NULL AND root IN ({placeholders}) \
+             ORDER BY distance ASC LIMIT ?"
+        );
+        let mut params = vec![text(query_vector_json), text(model)];
+        params.extend(roots.iter().map(|root| text(root)));
+        params.push(int(limit.clamp(1, 100) as i64));
+        let rows = self.db.fetch_all(&sql, params).await?;
+        rows.into_iter()
+            .map(|row| Ok((row.get_str("path")?, row.get_f64("distance")?)))
+            .collect()
     }
 
     /// Full-text search mirror of `messages`. FTS5 ships in the bundled

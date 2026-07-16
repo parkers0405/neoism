@@ -155,9 +155,8 @@ pub fn draw_bar(
             sugarloaf.rounded_rect(None, x, y, width, height, color, depth, radius, order)
         }
         (false, false) => sugarloaf.rect(None, x, y, width, height, color, depth, order),
-        (true, true) => {
-            sugarloaf.overlay_rounded_rect(x, y, width, height, color, depth, radius, order)
-        }
+        (true, true) => sugarloaf
+            .overlay_rounded_rect(x, y, width, height, color, depth, radius, order),
         (true, false) => sugarloaf.overlay_rect(x, y, width, height, color, depth, order),
     }
 }
@@ -197,7 +196,9 @@ pub fn draw_thumb_scaled(
     let width = style.width_or(SCROLLBAR_WIDTH) * scale;
     let radius = style.radius(width, 0.0);
     let color = styled_thumb_color(opacity, dragging);
-    draw_bar(sugarloaf, overlay, x, y, width, height, color, radius, depth, order);
+    draw_bar(
+        sugarloaf, overlay, x, y, width, height, color, radius, depth, order,
+    );
 }
 
 /// Scale-aware track painter — a no-op unless the active look sets
@@ -226,7 +227,9 @@ pub fn draw_track_scaled(
     let color = [base[0], base[1], base[2], base[3] * opacity];
     let width = style.width_or(SCROLLBAR_WIDTH) * scale;
     let radius = style.radius(width, 0.0);
-    draw_bar(sugarloaf, overlay, x, y, width, height, color, radius, depth, order);
+    draw_bar(
+        sugarloaf, overlay, x, y, width, height, color, radius, depth, order,
+    );
 }
 
 /// Paint a single scrollbar thumb — the one and only way rio renders a

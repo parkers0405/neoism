@@ -119,6 +119,12 @@ impl Screen<'_> {
         if !self.renderer.notes_sidebar.is_visible() {
             return false;
         }
+        // A joined workspace's notes live on the server — a local fs
+        // re-walk would wipe the listing to empty; re-request instead.
+        if self.context_manager.current_workspace_is_remote_joined() {
+            self.request_remote_notes_listing();
+            return true;
+        }
         self.renderer.notes_sidebar.refresh_notes();
         true
     }
@@ -412,14 +418,14 @@ impl Screen<'_> {
     /// nothing. Resolve + create the vault, then retry. Remote-joined
     /// workspaces stay None — their notes live on the host.
     pub(crate) fn notes_sidebar_create_target(&mut self) -> Option<PathBuf> {
-        if let Some(dir) = self
-            .notes_sidebar_target_dir()
-            .filter(|dir| dir.is_dir())
-        {
-            return Some(dir);
-        }
         if self.context_manager.current_workspace_is_remote_joined() {
-            return None;
+            // Remote notes live under the workspace's `Notes/` on the
+            // server; `is_dir` can't vouch for a path that isn't on
+            // this disk, so hand back the panel's root as-is.
+            return self.renderer.notes_sidebar.workspace_path();
+        }
+        if let Some(dir) = self.notes_sidebar_target_dir().filter(|dir| dir.is_dir()) {
+            return Some(dir);
         }
         self.assign_local_vault_to_notes_sidebar();
         self.notes_sidebar_target_dir()
@@ -478,6 +484,31 @@ impl Screen<'_> {
         }
         if Path::new(&name).extension().is_none() {
             name.push_str(".md");
+        }
+        // Joined workspace: the note is created ON THE SERVER through
+        // the files plane (same op the remote tree uses). The
+        // `FileCreated` reply opens it in markdown and re-lists the
+        // panel.
+        if self.context_manager.current_workspace_is_remote_joined() {
+            if let Some(remote_root) = self.renderer.file_tree.remote_root() {
+                let rel_dir = dir
+                    .strip_prefix(&remote_root)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| dir.to_string_lossy().into_owned());
+                if self.send_remote_files_op(
+                    neoism_protocol::files::FilesClientMessage::CreateFile {
+                        dir: rel_dir,
+                        name: name.clone(),
+                    },
+                ) {
+                    self.renderer.notifications.push(
+                        format!("Creating note {name} on the server…"),
+                        NotificationLevel::Info,
+                    );
+                    self.mark_dirty();
+                    return;
+                }
+            }
         }
         let path = dir.join(name);
         if path.exists() {

@@ -761,25 +761,56 @@ impl NeoismAgentPane {
         if self.timeline_live_trace_start.is_some() {
             return;
         }
-        self.timeline_live_trace_start = Some(
-            self.messages
-                .iter()
-                .rposition(|message| message.kind == NeoismAgentMessageKind::User)
-                .map_or(0, |index| index + 1),
-        );
+        let last_user = self
+            .messages
+            .iter()
+            .rposition(|message| message.kind == NeoismAgentMessageKind::User);
+        // Anchor by the user message's id, not its index: the marker must
+        // stay on this SAME turn for the whole visit even as the list is
+        // replaced or older pages are prepended. Trace collapses only when
+        // the session is left and re-entered (opencode-style), never because
+        // a newer prompt was sent.
+        self.timeline_live_trace_anchor =
+            last_user.map(|index| self.messages[index].id.clone());
+        self.timeline_live_trace_start = Some(last_user.map_or(0, |index| index + 1));
         self.invalidate_timeline_layout();
     }
 
+    /// Re-derive the live-trace start index from the visit anchor after the
+    /// message list was replaced or prepended. Does NOT move the boundary to
+    /// the latest turn — earlier turns of this visit keep their trace.
     pub(crate) fn rebase_current_turn_trace(&mut self) {
         if self.timeline_live_trace_start.is_none() {
             return;
         }
-        self.timeline_live_trace_start = Some(
-            self.messages
+        let derived = match self.timeline_live_trace_anchor.as_deref() {
+            None => Some(0),
+            // Optimistic prompts carry empty ids until the server echo lands;
+            // an empty anchor is unfindable by design and falls through to
+            // the re-anchor branch below, which picks up the durable id.
+            Some("") => None,
+            Some(anchor) => self
+                .messages
                 .iter()
-                .rposition(|message| message.kind == NeoismAgentMessageKind::User)
-                .map_or(0, |index| index + 1),
-        );
+                .position(|message| message.id == anchor)
+                .map(|index| index + 1),
+        };
+        let index = match derived {
+            Some(index) => index,
+            None => {
+                // The anchor id vanished (e.g. an optimistic prompt was
+                // replaced by its server copy). Re-anchor at the latest turn
+                // so subsequent refreshes stay stable.
+                let last_user = self
+                    .messages
+                    .iter()
+                    .rposition(|message| message.kind == NeoismAgentMessageKind::User);
+                self.timeline_live_trace_anchor =
+                    last_user.map(|index| self.messages[index].id.clone());
+                last_user.map_or(0, |index| index + 1)
+            }
+        };
+        self.timeline_live_trace_start = Some(index);
     }
 
     pub(crate) fn mark_timeline_message_dirty_at(&mut self, index: usize) {
@@ -963,6 +994,7 @@ impl NeoismAgentPane {
         self.pending_permission_queue.clear();
         self.permission_choice_hit_rects.clear();
         self.timeline_live_trace_start = None;
+        self.timeline_live_trace_anchor = None;
     }
 
     pub(crate) fn merge_pending_user_prompts(

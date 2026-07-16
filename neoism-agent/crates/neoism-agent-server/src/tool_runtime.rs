@@ -332,6 +332,14 @@ async fn execute_stateful_tool_call(
                 .ok_or_else(|| format!("session {session_id} not found"))?;
             let task_id = string_arg(&input, "task_id");
             let continuing_existing_task = task_id.is_some();
+            if !continuing_existing_task {
+                let depth = session_subtask_depth(state, &parent).await;
+                if depth + 1 > MAX_SUBTASK_DEPTH {
+                    return Err(format!(
+                        "subagent depth limit reached ({MAX_SUBTASK_DEPTH}): this session is already {depth} level(s) deep in the subagent tree. Do the remaining work directly in this session instead of spawning further subagents."
+                    ));
+                }
+            }
             if crate::external_agent::is_external_agent(&agent_name) {
                 return crate::external_agent::execute_external_task(
                     state,
@@ -374,7 +382,7 @@ async fn execute_stateful_tool_call(
                     .await
                     .map_err(|error| error.to_string())?
                 {
-                    ensure_child_task_belongs_to_parent(&parent, &child)?;
+                    ensure_child_task_belongs_to_parent(state, &parent, &child).await?;
                     child.id.to_string()
                 } else {
                     let child = create_subtask_session(
@@ -609,6 +617,36 @@ async fn execute_stateful_tool_call(
     }
 }
 
+/// Hard backstop against runaway subagent recursion, independent of the
+/// permission-based guard: a session more than this many levels deep in the
+/// parent chain may not spawn further subagents. (Codex defaults to depth 1;
+/// we leave headroom for agents whose config explicitly grants `task`.)
+const MAX_SUBTASK_DEPTH: usize = 3;
+
+/// Number of ancestors above `session` in the subagent tree (root => 0).
+async fn session_subtask_depth(state: &AppState, session: &SessionInfo) -> usize {
+    let mut depth = 0usize;
+    let mut ancestor = session.parent_id.clone();
+    // Bounded walk so malformed parent links can never loop forever.
+    while let Some(id) = ancestor {
+        depth += 1;
+        if depth >= 16 {
+            break;
+        }
+        ancestor = match state.inner.store.get_session(id.as_str()).await {
+            Ok(Some(info)) => info.parent_id,
+            _ => None,
+        };
+    }
+    depth
+}
+
+fn dangerously_skip_permissions_enabled(directory: &str) -> bool {
+    crate::config::load(directory)
+        .map(|loaded| loaded.info.dangerously_skip_permissions)
+        .unwrap_or(false)
+}
+
 pub(crate) fn ensure_tool_permission(
     permissions: &[PermissionRule],
     permission_name: &str,
@@ -671,17 +709,69 @@ fn last_assistant_text(message: &MessageWithParts) -> Option<String> {
     last_text_part(message)
 }
 
-fn ensure_child_task_belongs_to_parent(
+/// A task belongs to this session if the session appears anywhere in the
+/// task's ancestor chain — not just as the direct parent. Grandchildren are
+/// real work this session caused (a subagent's own subagents), and the model
+/// must be able to inspect and stop them; matching direct children only left
+/// nested subagent trees invisible and unstoppable from the root session.
+async fn ensure_child_task_belongs_to_parent(
+    state: &AppState,
     parent: &SessionInfo,
     child: &SessionInfo,
 ) -> Result<(), String> {
-    if child.parent_id.as_ref().map(|id| id.as_str()) == Some(parent.id.as_str()) {
-        return Ok(());
+    let mut ancestor = child.parent_id.clone();
+    let mut hops = 0usize;
+    while let Some(id) = ancestor {
+        if id.as_str() == parent.id.as_str() {
+            return Ok(());
+        }
+        hops += 1;
+        if hops >= 16 {
+            break;
+        }
+        ancestor = match state.inner.store.get_session(id.as_str()).await {
+            Ok(Some(info)) => info.parent_id,
+            _ => None,
+        };
     }
     Err(format!(
         "task_id {} is not a subagent task for session {}",
         child.id, parent.id
     ))
+}
+
+/// Every session in the subagent tree rooted at `root_id` (children,
+/// grandchildren, ...), breadth-first.
+async fn descendant_sessions(
+    state: &AppState,
+    root_id: &str,
+) -> Result<Vec<SessionInfo>, String> {
+    let sessions = state
+        .inner
+        .store
+        .list_sessions()
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut children_by_parent: BTreeMap<String, Vec<SessionInfo>> = BTreeMap::new();
+    for session in sessions {
+        if let Some(parent_id) = session.parent_id.as_ref() {
+            children_by_parent
+                .entry(parent_id.as_str().to_string())
+                .or_default()
+                .push(session);
+        }
+    }
+    let mut queue = vec![root_id.to_string()];
+    let mut descendants = Vec::new();
+    while let Some(id) = queue.pop() {
+        if let Some(children) = children_by_parent.remove(&id) {
+            for child in children {
+                queue.push(child.id.as_str().to_string());
+                descendants.push(child);
+            }
+        }
+    }
+    Ok(descendants)
 }
 
 async fn session_is_running(state: &AppState, session_id: &str) -> bool {
@@ -798,7 +888,7 @@ async fn task_result_tool(
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("task_id {task_id} not found"))?;
-        ensure_child_task_belongs_to_parent(&parent, &child)?;
+        ensure_child_task_belongs_to_parent(state, &parent, &child).await?;
         let (status, output) = task_result_output_for_child(state, &child).await?;
         return Ok(tool::ToolExecutionResult {
             title: child.title,
@@ -811,17 +901,7 @@ async fn task_result_tool(
         });
     }
 
-    let mut children = state
-        .inner
-        .store
-        .list_sessions()
-        .await
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|session| {
-            session.parent_id.as_ref().map(|id| id.as_str()) == Some(parent.id.as_str())
-        })
-        .collect::<Vec<_>>();
+    let mut children = descendant_sessions(state, parent.id.as_str()).await?;
     children.sort_by(|left, right| right.time.updated.cmp(&left.time.updated));
     if children.is_empty() {
         return Ok(tool::ToolExecutionResult {
@@ -831,20 +911,28 @@ async fn task_result_tool(
         });
     }
 
-    let mut lines = vec!["Subagent tasks for this session:".to_string()];
+    let mut lines =
+        vec!["Subagent tasks for this session (including nested subagents):".to_string()];
     let mut metadata = Vec::new();
     for child in children {
         let status = task_status_for_child(state, &child).await?;
         let agent = child.agent.as_deref().unwrap_or("subagent");
+        let nested =
+            child.parent_id.as_ref().map(|id| id.as_str()) != Some(parent.id.as_str());
         lines.push(format!(
-            "task_id: {} status: {} agent: {} title: {}",
-            child.id, status, agent, child.title
+            "task_id: {} status: {} agent: {} title: {}{}",
+            child.id,
+            status,
+            agent,
+            child.title,
+            if nested { " (nested)" } else { "" }
         ));
         metadata.push(json!({
             "sessionId": child.id,
             "agent": child.agent,
             "status": status,
             "title": child.title,
+            "nested": nested,
         }));
     }
     Ok(tool::ToolExecutionResult {
@@ -878,11 +966,23 @@ async fn stop_task_tool(
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("task_id {task_id} not found"))?;
-        ensure_child_task_belongs_to_parent(&parent, &child)?;
+        ensure_child_task_belongs_to_parent(state, &parent, &child).await?;
         let was_running = session_is_running(state, &task_id).await;
         crate::session_actions::abort_session_run(state, &task_id).await;
         let cleared =
             crate::session_queue::clear_session_prompt_queue(state, &task_id).await;
+        // Stopping a subtree root must also stop everything it spawned, or
+        // its own subagents keep running (and spawning) as orphans.
+        let mut nested_stopped = 0usize;
+        for descendant in descendant_sessions(state, &task_id).await? {
+            let descendant_id = descendant.id.as_str();
+            if session_is_running(state, descendant_id).await {
+                crate::session_actions::abort_session_run(state, descendant_id).await;
+                crate::session_queue::clear_session_prompt_queue(state, descendant_id)
+                    .await;
+                nested_stopped += 1;
+            }
+        }
         let status = if was_running {
             "stopped"
         } else {
@@ -891,27 +991,18 @@ async fn stop_task_tool(
         return Ok(tool::ToolExecutionResult {
             title: format!("Stopped subagent: {}", child.title),
             output: format!(
-                "task_id: {task_id}\nstatus: {status}\nCleared {cleared} queued prompt(s)."
+                "task_id: {task_id}\nstatus: {status}\nCleared {cleared} queued prompt(s). Stopped {nested_stopped} nested subagent(s)."
             ),
             metadata: Some(json!({
                 "sessionId": task_id,
                 "stopped": was_running,
                 "clearedQueue": cleared,
+                "nestedStopped": nested_stopped,
             })),
         });
     }
 
-    let children = state
-        .inner
-        .store
-        .list_sessions()
-        .await
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|session| {
-            session.parent_id.as_ref().map(|id| id.as_str()) == Some(parent.id.as_str())
-        })
-        .collect::<Vec<_>>();
+    let children = descendant_sessions(state, parent.id.as_str()).await?;
 
     let mut stopped = Vec::new();
     for child in &children {
@@ -926,7 +1017,10 @@ async fn stop_task_tool(
     let output = if stopped.is_empty() {
         "No running subagents to stop for this session.".to_string()
     } else {
-        format!("Stopped {} running subagent(s).", stopped.len())
+        format!(
+            "Stopped {} running subagent(s) (including nested).",
+            stopped.len()
+        )
     };
     Ok(tool::ToolExecutionResult {
         title: "Stopped subagents".to_string(),
@@ -1173,7 +1267,8 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
                 return Ok(result);
             }
             Err(error) => {
-                if parse_permission_required_error(&error).is_none() {
+                let Some((permission, target)) = parse_permission_required_error(&error)
+                else {
                     tracing::warn!(
                         target: "neoism_agent::perf",
                         session_id = %session_id,
@@ -1187,6 +1282,20 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
                         "stateful tool execution failed"
                     );
                     return Err(error);
+                };
+                // `dangerouslySkipPermissions` converts every ASK into an
+                // automatic one-time allow. Explicit DENY rules never reach
+                // this branch (they fail with "is denied", which does not
+                // parse as a permission-required error), so agent-level
+                // denies — e.g. `task` for sub-agents — keep denying even
+                // in skip-permissions mode.
+                if dangerously_skip_permissions_enabled(directory) {
+                    one_time_rules.push(PermissionRule {
+                        permission,
+                        pattern: target,
+                        action: PermissionAction::Allow,
+                    });
+                    continue;
                 }
                 let grant = ask_permission_for_tool(
                     state,

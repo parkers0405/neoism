@@ -227,6 +227,7 @@ impl AgentTimelinePane for NeoismAgentPane {
             width,
             scale,
             tool_expanded,
+            NeoismAgentPane::tool_archived(self, &message.id),
             selected_tool_group_child,
         )
     }

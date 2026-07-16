@@ -387,18 +387,13 @@ pub fn load_mashup_packs() -> Vec<MashupPack> {
                     .iter()
                     .map(|value| resolve_asset(&dir, value))
                     .collect(),
-                font_family: section
-                    .font_family
-                    .filter(|value| !value.trim().is_empty()),
+                font_family: section.font_family.filter(|value| !value.trim().is_empty()),
                 wallpaper: section
                     .wallpaper
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| sugarloaf::ImageProperties {
                         path: resolve_asset(&dir, &value),
-                        opacity: section
-                            .wallpaper_opacity
-                            .unwrap_or(1.0)
-                            .clamp(0.0, 1.0),
+                        opacity: section.wallpaper_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
                     }),
                 look: file.look,
                 id,
@@ -418,10 +413,8 @@ mod tests {
     use super::*;
 
     fn scratch_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "neoism-mashup-test-{tag}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir()
+            .join(format!("neoism-mashup-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -441,10 +434,7 @@ mod tests {
         assert_eq!(spec.name, "phosphor");
         assert_eq!(spec.description, "Green CRT");
         assert_eq!(spec.extends, "pastel_dark");
-        assert!(spec
-            .colors
-            .iter()
-            .any(|(k, v)| k == "bg" && v == "#030f06"));
+        assert!(spec.colors.iter().any(|(k, v)| k == "bg" && v == "#030f06"));
 
         // Broken TOML is skipped, not fatal.
         std::fs::write(&path, "[colors\nbg = ").unwrap();
@@ -471,10 +461,7 @@ mod tests {
         let spec = parse_theme_file(&path, "phosphor").unwrap();
         assert_eq!(spec.name, "phosphor");
         assert_eq!(spec.description, "Green CRT");
-        assert!(spec
-            .colors
-            .iter()
-            .any(|(k, v)| k == "fg" && v == "#33ff66"));
+        assert!(spec.colors.iter().any(|(k, v)| k == "fg" && v == "#33ff66"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -496,7 +483,10 @@ mod tests {
             resolve_asset(&dir, "crawl.glsl"),
             dir.join("crawl.glsl").to_string_lossy().to_string()
         );
-        assert_eq!(resolve_asset(&dir, "builtin:ctv_round"), "builtin:ctv_round");
+        assert_eq!(
+            resolve_asset(&dir, "builtin:ctv_round"),
+            "builtin:ctv_round"
+        );
         assert_eq!(resolve_asset(&dir, "/abs/path.glsl"), "/abs/path.glsl");
         let _ = std::fs::remove_dir_all(&dir);
     }

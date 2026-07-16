@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::panels::completion_menu::ScrollDelta;
 use crate::terminal_blocks::CommandBlockSnapshot;

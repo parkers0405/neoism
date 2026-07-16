@@ -18,6 +18,7 @@ impl NeoismAgentPane {
         width: f32,
         scale: f32,
         tool_expanded: bool,
+        tool_archived: bool,
     ) -> TimelineMeasureKey {
         TimelineMeasureKey {
             id: hash_value(&message.id),
@@ -26,6 +27,7 @@ impl NeoismAgentPane {
             width_bucket: f32_measure_bucket(width),
             scale_bucket: f32_measure_bucket(scale),
             tool_expanded,
+            tool_archived,
             title: hash_value(&message.title),
             text: hash_agent_message_text_for_measure(&message.text),
             status: hash_value(&message.status),
@@ -43,9 +45,16 @@ impl NeoismAgentPane {
         width: f32,
         scale: f32,
         tool_expanded: bool,
+        tool_archived: bool,
         selected_tool_group_child: Option<&str>,
     ) -> TimelineMeasureKey {
-        let mut key = Self::timeline_measure_key(message, width, scale, tool_expanded);
+        let mut key = Self::timeline_measure_key(
+            message,
+            width,
+            scale,
+            tool_expanded,
+            tool_archived,
+        );
         key.selected_tool_group_child = selected_tool_group_child
             .map(|value| hash_value(&value))
             .unwrap_or(0);

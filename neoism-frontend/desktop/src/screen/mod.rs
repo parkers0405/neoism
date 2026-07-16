@@ -847,6 +847,9 @@ pub struct Screen<'screen> {
     /// In-flight remote git-status request → the root it was asked
     /// for, so a stale reply for a workspace we've left is dropped.
     pending_remote_git_status: HashMap<u64, PathBuf>,
+    /// In-flight WalkTree listings of a joined workspace's `Notes/`
+    /// folder — replies feed the notes sidebar, not the file tree.
+    pending_remote_notes_listing: std::collections::HashSet<u64>,
     workspace_roots: HashMap<WorkspaceKey, PathBuf>,
     workspace_buffer_tabs: HashMap<
         WorkspaceKey,
@@ -1792,6 +1795,7 @@ impl Screen<'_> {
             markdown_cover_cache: HashMap::new(),
             markdown_image_overlay_ids: std::collections::HashSet::new(),
             pending_remote_git_status: HashMap::new(),
+            pending_remote_notes_listing: std::collections::HashSet::new(),
             workspace_roots: HashMap::new(),
             workspace_buffer_tabs: HashMap::new(),
             workspace_notes_sidebars: HashMap::new(),

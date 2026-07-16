@@ -288,6 +288,7 @@ pub(crate) async fn finish_provider_stream_with_error(
 ) -> Result<(), ApiError> {
     let interrupted = message == "Session aborted";
     let mut interrupted_parts = Vec::new();
+    let mut step_finish_part = None;
     {
         let mut assistant_message = live_message.lock().await;
         if let MessageInfo::Assistant(assistant) = &mut assistant_message.info {
@@ -303,6 +304,32 @@ pub(crate) async fn finish_provider_stream_with_error(
             interrupted_parts = mark_interrupted_tool_parts(&mut assistant_message.parts);
         }
         finish_text_part(&mut assistant_message.parts, text_part_id, None);
+        // Terminate the step even on error/abort. Without a StepFinish the
+        // stored message ends on an open StepStart bracket, which readers
+        // that frame turns between the two markers render as a fragment.
+        let has_step_finish = assistant_message
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::StepFinish(_)));
+        if !has_step_finish {
+            if let MessageInfo::Assistant(assistant) = &assistant_message.info {
+                let step_finish = Part::StepFinish(StepFinishPart {
+                    id: Id::ascending(IdKind::Part),
+                    session_id: session_id.clone(),
+                    message_id: assistant.id.clone(),
+                    reason: if interrupted {
+                        "aborted".to_string()
+                    } else {
+                        "error".to_string()
+                    },
+                    tokens: TokenUsage::default(),
+                    cost: 0.0,
+                    snapshot: None,
+                });
+                assistant_message.parts.push(step_finish.clone());
+                step_finish_part = Some(step_finish);
+            }
+        }
         state
             .inner
             .store
@@ -314,6 +341,12 @@ pub(crate) async fn finish_provider_stream_with_error(
         ));
     }
     for part in interrupted_parts {
+        state.publish(EventPayload::new(
+            event_type::MESSAGE_PART_UPDATED,
+            json!({ "sessionID": session_id, "part": part, "time": now_millis() }),
+        ));
+    }
+    if let Some(part) = step_finish_part {
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
             json!({ "sessionID": session_id, "part": part, "time": now_millis() }),

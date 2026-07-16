@@ -526,6 +526,7 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
                     width,
                     scale,
                     tool_expanded,
+                    <$pane>::tool_archived(self, $crate::panels::agent_pane::view::timeline::AgentTimelineMessage::id(message)),
                     selected_tool_group_child,
                 )
             }

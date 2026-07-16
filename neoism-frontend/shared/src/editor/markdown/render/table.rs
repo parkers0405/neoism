@@ -13,11 +13,11 @@ use crate::editor::markdown::render::draw::{
     draw_rounded_rect_clipped, floor_char_boundary, intersect_rect, line_height,
     markdown_font, md_font_id, point_in_rect, wrap_lines,
 };
-use crate::primitives::look::scrollbar_style;
 use crate::editor::markdown::render::inline::{
     clean_inline_with_active_link, draw_inline_links_for_line,
 };
 use crate::primitives::ide_theme::IdeTheme;
+use crate::primitives::look::scrollbar_style;
 
 const LARGE_TABLE_VIRTUALIZE_ROWS: usize = 256;
 

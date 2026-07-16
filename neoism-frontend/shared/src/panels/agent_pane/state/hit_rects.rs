@@ -132,6 +132,27 @@ impl NeoismAgentPane {
         !id.is_empty() && self.expanded_tool_ids.contains(id)
     }
 
+    /// A tool row is archived when it sits before the live-trace window of the
+    /// current visit (everything, after a reload). Archived cards render
+    /// header-only until clicked. Synthetic read-group ids ("a..b") resolve
+    /// through their first member.
+    pub fn tool_archived(&self, id: &str) -> bool {
+        if id.is_empty() {
+            return false;
+        }
+        let live_start = self
+            .timeline_live_trace_start
+            .unwrap_or(self.messages.len());
+        let lookup =
+            |needle: &str| self.messages.iter().position(|message| message.id == needle);
+        lookup(id)
+            .or_else(|| {
+                id.split_once("..")
+                    .and_then(|(first, _)| lookup(first))
+            })
+            .is_some_and(|index| index < live_start)
+    }
+
     pub fn tool_expand_progress(&self, id: &str) -> f32 {
         if id.is_empty() {
             return 0.0;

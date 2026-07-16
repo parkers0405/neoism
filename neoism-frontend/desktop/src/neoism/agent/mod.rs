@@ -27,7 +27,7 @@ pub(crate) mod perf {
     }
 }
 
-pub(crate) use api::neoism_agent_server;
+pub(crate) use api::{agent_server_for_daemon_endpoint, neoism_agent_server};
 pub(crate) use pane::TimelineMeasureKey;
 pub use pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentNoticeLevel,

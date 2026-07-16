@@ -99,9 +99,18 @@ services:
     user: "0:0"
     ports:
       - "${NEOISM_SERVE_PORT:-7981}:9876"
+      # The co-hosted AI agent. Desktop clients derive this from the
+      # daemon URL by convention: daemon port + 1. Keep the pair
+      # adjacent when overriding.
+      - "${NEOISM_SERVE_AGENT_PORT:-7982}:4096"
     environment:
       NEOISM_DAEMON_ADDR: 0.0.0.0:9876
       NEOISM_DAEMON_TOKEN: ${NEOISM_SERVE_TOKEN:-}
+      # Provider keys for the co-hosted agent — set in .env or the
+      # shell; empty is fine (connect via /connect later, auth lands in
+      # the state volume's config dir).
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       RUST_LOG: info
       TERM: xterm-256color
       SHELL: /bin/bash
@@ -122,6 +131,13 @@ services:
         # and must keep its host ownership.
         mkdir -p "$$home/state" "$$home/config" "$$home/data" "$$home/workspaces"
         chown "$$uid:$$gid" "$$home" "$$home/state" "$$home/config" "$$home/data" "$$home/workspaces"
+        # Co-hosted agent (background, same dropped identity, config +
+        # auth under the state volume's HOME). The daemon stays the
+        # container's foreground lifeline; if the agent dies, joined
+        # agent panes error until the container restarts.
+        setpriv --reuid "$$uid" --regid "$$gid" --clear-groups \
+          env HOME="$$home" \
+          neoism-agent serve --port 4096 --hostname 0.0.0.0 &
         exec setpriv --reuid "$$uid" --regid "$$gid" --clear-groups \
           env HOME="$$home" \
               NEOISM_DAEMON_DATA_DIR="$$home/data" \

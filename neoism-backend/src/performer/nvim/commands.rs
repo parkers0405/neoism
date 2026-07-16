@@ -283,10 +283,7 @@ pub fn vim_apply_theme_command(name: &str) -> String {
 /// [`vim_apply_theme_command`]: pushes the full palette table because
 /// the lua runtime only ships the builtin four. Same no-`pcall`
 /// rationale as above.
-pub fn vim_apply_custom_theme_command(
-    name: &str,
-    palette: &[(&str, String)],
-) -> String {
+pub fn vim_apply_custom_theme_command(name: &str, palette: &[(&str, String)]) -> String {
     let fields = palette
         .iter()
         .map(|(key, value)| format!("{key} = {}", lua_string_literal(value)))

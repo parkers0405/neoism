@@ -38,6 +38,7 @@ fn ws_entry(
         host_kind,
         workspace_host_kind: WorkspaceHostKind::Local,
         workspace_visibility: WorkspaceVisibility::Private,
+        current: false,
         daemon_url: daemon_url.map(str::to_string),
         host_online,
     }

@@ -447,15 +447,14 @@ fn normalize_config(info: &mut NeoismConfig) {
     let tool_permissions = permissions_from_tools(&info.tools);
     merge_permission_maps(&mut info.permission, tool_permissions);
 
-    // `dangerouslySkipPermissions` — base allow-everything rule. It
-    // lands FIRST in rule order (BTreeMap: "*" sorts before letters),
-    // so any explicit permission entry the user wrote still overrides
-    // it (last match wins in `permission::evaluate`); everything that
-    // would have ASKED is allowed instead.
-    if info.dangerously_skip_permissions {
-        info.permission
-            .insert("*".to_string(), serde_json::json!("allow"));
-    }
+    // `dangerouslySkipPermissions` is handled at permission-ask time
+    // (see `execute_tool_call_with_permission_wait`): anything that would
+    // ASK is auto-granted, while explicit DENY rules keep denying. It must
+    // NOT inject a global `"*": "allow"` rule here — that map entry
+    // overwrote same-key agent rules (e.g. explore's `"*": "deny"`),
+    // silently handing sub-agents the `task` tool, and it still failed to
+    // suppress asks for permissions with more specific rules
+    // (external_directory) because those out-rank `*` in last-match-wins.
 
     for (name, command) in info.command.iter_mut() {
         if command.name.is_empty() {

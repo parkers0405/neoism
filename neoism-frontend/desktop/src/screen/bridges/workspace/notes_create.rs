@@ -207,9 +207,22 @@ impl Screen<'_> {
         // empty host-scoped panel (daemon-listed remote vaults are the
         // follow-up).
         if self.context_manager.current_workspace_is_remote_joined() {
-            self.renderer
-                .notes_sidebar
-                .set_workspace("Host notes".to_string(), None);
+            // Joined workspaces get WORKSPACE-SCOPED notes: a `Notes/`
+            // folder inside the project on the server — shared by every
+            // client, versioned with the repo, co-edited over the same
+            // CRDT path as any other md file. Listing comes back over
+            // the files plane (`apply_daemon_files_message`).
+            if let Some(remote_root) = self.renderer.file_tree.remote_root() {
+                self.renderer.notes_sidebar.set_workspace(
+                    "Workspace notes".to_string(),
+                    Some(remote_root.join("Notes")),
+                );
+                self.request_remote_notes_listing();
+            } else {
+                self.renderer
+                    .notes_sidebar
+                    .set_workspace("Host notes".to_string(), None);
+            }
             let visibility_changed =
                 self.renderer.notes_sidebar.toggle_focus_or_visibility();
             if self.renderer.notes_sidebar.is_visible() {

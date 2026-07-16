@@ -155,6 +155,37 @@ function M.setup()
     M.notify(msg, level)
   end
 
+  -- Multiplayer convergence for CODE buffers: md files ride the CRDT
+  -- hub, but each client gets its own nvim, so another client's save
+  -- only reaches this session through the disk. autoread + checktime
+  -- make unmodified buffers reload silently; the poll timer matters
+  -- because daemon-hosted nvims never receive OS focus events, so
+  -- FocusGained alone would leave an idle session stale forever.
+  -- (Locally-modified buffers are left alone — last writer wins, as
+  -- before.)
+  vim.o.autoread = true
+  vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter", "CursorHold" }, {
+    callback = function()
+      pcall(function()
+        vim.cmd("silent! checktime")
+      end)
+    end,
+  })
+  local function poll_checktime()
+    vim.defer_fn(function()
+      pcall(function()
+        -- Skip while typing: a mid-insert reload of some OTHER
+        -- window's buffer is fine, but churning checktime between
+        -- keystrokes is wasted work.
+        if vim.api.nvim_get_mode().mode:sub(1, 1) ~= "i" then
+          vim.cmd("silent! checktime")
+        end
+      end)
+      poll_checktime()
+    end, 2000)
+  end
+  poll_checktime()
+
   emit_cwd()
 
   vim.api.nvim_create_autocmd("DirChanged", {

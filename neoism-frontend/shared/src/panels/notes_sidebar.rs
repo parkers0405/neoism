@@ -294,11 +294,10 @@ impl NotesSidebar {
                     // Explicit `.neoism-icons.json` overrides beat the
                     // frontmatter icon, but a MISSING override must not
                     // wipe it.
-                    if let Some(icon) = entry
-                        .path
-                        .strip_prefix(&root)
-                        .ok()
-                        .and_then(|rel| icons.get(&rel.to_string_lossy().into_owned()))
+                    if let Some(icon) =
+                        entry.path.strip_prefix(&root).ok().and_then(|rel| {
+                            icons.get(&rel.to_string_lossy().into_owned())
+                        })
                     {
                         entry.icon = Some(icon.clone());
                     }

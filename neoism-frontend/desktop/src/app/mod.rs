@@ -1158,6 +1158,23 @@ impl Application<'_> {
         session.parked_home = parked_home;
         self.window_sessions.insert(window_id, session);
         self.attach_session_to_window(window_id);
+        // Agent panes follow the server: a JOINED server hosts its own
+        // neoism-agent beside the daemon (tools must run where the
+        // files live), so re-point the panes at it. Home connections
+        // keep the local agent (the reset above already restored it).
+        if let Some(session) = self.window_sessions.get(&window_id) {
+            if !session.is_home(self.home_daemon_endpoint.as_deref()) {
+                if let Some(agent_url) =
+                    crate::neoism::agent::agent_server_for_daemon_endpoint(
+                        session.connection.endpoint(),
+                    )
+                {
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        route.window.screen.set_agent_server_for_window(agent_url);
+                    }
+                }
+            }
+        }
         self.send_window_message(window_id, WorkspaceClientMessage::ListWindows);
         self.send_window_message(
             window_id,

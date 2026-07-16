@@ -375,6 +375,19 @@ impl Screen<'_> {
         use neoism_ui::panels::notifications::NotificationLevel;
         use neoism_ui::widgets::modal::ModalAction;
 
+        let _ = (x, y);
+        // Joined workspace: there is exactly one place its notes can
+        // live — the project's `Notes/` on the server. Personal vaults
+        // are this machine's and never leak into a shared workspace.
+        if self.context_manager.current_workspace_is_remote_joined() {
+            self.renderer.notifications.push(
+                "Shared workspaces keep notes in the project's Notes/ folder on the server."
+                    .to_string(),
+                NotificationLevel::Info,
+            );
+            self.mark_dirty();
+            return;
+        }
         let mut items = Vec::new();
         let vaults_dir = neo_workspace::notes_vaults_dir();
         let _ = std::fs::create_dir_all(&vaults_dir);
@@ -432,5 +445,4 @@ impl Screen<'_> {
         );
         self.mark_dirty();
     }
-
-    }
+}

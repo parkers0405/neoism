@@ -11,6 +11,18 @@ impl Screen<'_> {
         let scale_factor = self.sugarloaf.scale_factor();
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
 
+        // Mode slider (today only the server modal's Join ↔ Create):
+        // switching reopens the other form, keeping the modal up.
+        if let Some(tab) = self.renderer.modal.form_tab_hit(mouse_x, mouse_y) {
+            if tab == 0 {
+                self.open_add_server_prompt();
+            } else {
+                self.open_create_server_prompt();
+            }
+            self.mark_dirty();
+            return true;
+        }
+
         match self
             .renderer
             .modal
@@ -291,6 +303,21 @@ impl Screen<'_> {
                         .map(|(_, value)| value.trim().to_string())
                         .filter(|value| !value.is_empty())
                 };
+                // Create-server form: `create_dir` is the discriminator
+                // (no address — we spawn the server ourselves and join).
+                if let Some(dir) = value("create_dir") {
+                    self.renderer.modal.close();
+                    self.create_and_join_local_server(
+                        dir,
+                        value("name"),
+                        value("token"),
+                    );
+                    // Land back on the Servers list so the new entry
+                    // (and its connect status) is visible, instead of
+                    // dumping the user to whatever was behind.
+                    self.request_server_manager();
+                    return;
+                }
                 let Some(address) = value("address") else {
                     self.renderer.notifications.push(
                         "Server address is required",
@@ -309,6 +336,9 @@ impl Screen<'_> {
                 } else {
                     self.request_server_add(address, value("name"), value("token"));
                 }
+                // Back to the Servers list rather than closing the
+                // whole flow — join status shows right there.
+                self.request_server_manager();
             }
             ModalAction::ServerRemoveConfirm { id } => {
                 self.renderer.modal.close();

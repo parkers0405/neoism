@@ -420,8 +420,7 @@ impl MarkdownPane {
         }
         if let Some(picker) = self.value_picker.as_mut() {
             let current = picker.selected.min(count - 1) as isize;
-            picker.selected =
-                (current + delta).rem_euclid(count as isize) as usize;
+            picker.selected = (current + delta).rem_euclid(count as isize) as usize;
         }
     }
 
@@ -433,9 +432,9 @@ impl MarkdownPane {
         let Some(picker) = self.value_picker.take() else {
             return false;
         };
-        let Some((value, _)) = candidates.get(picker.selected.min(
-            candidates.len().saturating_sub(1),
-        )) else {
+        let Some((value, _)) =
+            candidates.get(picker.selected.min(candidates.len().saturating_sub(1)))
+        else {
             return false;
         };
         let key = match picker.key {

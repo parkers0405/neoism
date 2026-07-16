@@ -14,6 +14,14 @@ mod tests {
     fn pane_for_test() -> MarkdownPane {
         MarkdownPane {
             path: PathBuf::from("test.md"),
+            remote_loading_started: None,
+            value_picker_suppressed: None,
+            remote_content_pending: false,
+            cover_overlay_rect: None,
+            value_picker: None,
+            available_covers: Vec::new(),
+            title_edit: None,
+            pending_title_rename: None,
             title: "test".to_string(),
             lines: vec![String::new()],
             blocks: Vec::new(),

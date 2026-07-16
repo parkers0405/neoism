@@ -13,29 +13,51 @@ fn tool_message_accent(status: &str, theme: &IdeTheme) -> u32 {
     }
 }
 
+/// Height of an archived, unexpanded tool card: just the header row (status
+/// dot + title). The body only exists after a click.
+fn minimal_tool_header_height(s: f32) -> f32 {
+    30.0 * s
+}
+
 pub fn measure_tool_message_height(
     sugarloaf: &mut Sugarloaf,
     message: &impl AgentToolMessage,
     width: f32,
     s: f32,
     tool_expanded: bool,
+    tool_archived: bool,
     selected_group_child: Option<&str>,
 ) -> Option<f32> {
     if message.is_todos_output() {
         return None;
     }
+    // Settled turns keep tool/edit cards folded to their header line — the
+    // transcript shows what ran without replaying every byte. A click
+    // (tool_expanded) restores the full card.
+    let minimal = tool_archived && !tool_expanded;
     if let Some(sections) = cached_edit_diff_sections(message) {
         let card_w = tool_diff_card_width(width, s);
         let mut height = 30.0 * s;
         for section in sections.iter() {
-            let view = cached_diff_card_view(section, card_w, s, false);
-            let body_h = diff_body_height(view.preview_visual_rows, s);
+            let body_h = if minimal {
+                0.0
+            } else {
+                let view = cached_diff_card_view(section, card_w, s, false);
+                diff_body_height(view.preview_visual_rows, s)
+            };
             height += diff_card::HEADER_HEIGHT * s
                 + body_h
                 + diag_footer_height(section, s)
                 + 10.0 * s;
         }
+        if minimal {
+            return Some(height);
+        }
         return Some(height.max(58.0 * s));
+    }
+
+    if minimal {
+        return Some(minimal_tool_header_height(s));
     }
 
     if message.tool() == "tool_group" {
@@ -137,7 +159,11 @@ pub fn render_tool_message(
             .as_ref()
             .map(|sections| sections.as_slice())
     };
-    if diff_sections.is_none() && !suppress_interactions {
+    let archived = pane.tool_archived(message.id());
+    // Archived diff cards toggle as one unit through the message-level hit
+    // rect (per-card rects are skipped below); live diff cards keep their
+    // per-card toggles and register no message-level rect.
+    if (diff_sections.is_none() || archived) && !suppress_interactions {
         pane.register_tool_hit_rect(message.id().to_string(), [x, y, w, h]);
     }
     let accent = tool_message_accent(message.status(), theme);
@@ -223,8 +249,12 @@ pub fn render_tool_message(
 
     let render_expanded = pane.tool_expanded(message.id())
         || pane.tool_expand_progress(message.id()) > 0.01;
+    let minimal = archived && !render_expanded;
 
     if message.tool() == "tool_group" {
+        if minimal {
+            return h;
+        }
         render_tool_group_activity(
             sugarloaf,
             pane,
@@ -255,7 +285,13 @@ pub fn render_tool_message(
             s,
             message_clip,
             suppress_interactions,
+            archived,
+            minimal,
         );
+        return h;
+    }
+
+    if minimal {
         return h;
     }
 
@@ -554,6 +590,7 @@ fn tool_group_child_previews(message: &impl AgentToolMessage) -> HashMap<String,
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn render_tool_diff_cards(
     sugarloaf: &mut Sugarloaf,
     pane: &mut impl AgentToolPane,
@@ -566,6 +603,8 @@ fn render_tool_diff_cards(
     s: f32,
     viewport_clip: [f32; 4],
     suppress_interactions: bool,
+    archived: bool,
+    minimal: bool,
 ) {
     let card_x = x + 30.0 * s;
     let card_w = tool_diff_card_width(w, s);
@@ -578,11 +617,16 @@ fn render_tool_diff_cards(
         // shared the message id, so clicking one expanded (and made scrollable)
         // every card in the patch.
         let card_key = format!("{}:{section_index}", message.id());
-        let card_expanded =
-            pane.tool_expanded(&card_key) || pane.tool_expand_progress(&card_key) > 0.01;
+        let card_expanded = !minimal
+            && (pane.tool_expanded(&card_key)
+                || pane.tool_expand_progress(&card_key) > 0.01);
         let view = cached_diff_card_view(section, card_w, s, card_expanded);
         let full_body_h = diff_body_height(view.visual_rows, s);
-        let body_h = diff_body_height(view.preview_visual_rows, s);
+        let body_h = if minimal {
+            0.0
+        } else {
+            diff_body_height(view.preview_visual_rows, s)
+        };
         let scroll_key = card_key.clone();
         let body_scroll = if card_expanded {
             pane.diff_scroll_offset(&scroll_key, (full_body_h - body_h).max(0.0))
@@ -617,7 +661,7 @@ fn render_tool_diff_cards(
             clip_top,
             clip_bottom,
         );
-        if !suppress_interactions {
+        if !suppress_interactions && !archived {
             pane.register_tool_hit_rect(
                 card_key.clone(),
                 [card_x, card_y, card_w, layout.total_height],

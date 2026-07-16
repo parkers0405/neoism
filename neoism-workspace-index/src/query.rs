@@ -4,13 +4,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    default_notes_workspace, linked_project_for_code_dir, load_workspace,
-    NeoismWorkspace,
+    default_notes_workspace, linked_project_for_code_dir, load_workspace, NeoismWorkspace,
 };
 use crate::graph_db::{
-    block_on_db, int, migrate, open_note_db, rebuild_note_graph,
-    remove_note_graph_file, replace_note_graph_file, text, workspace_graph_db_path,
-    DbRow, NoteDb,
+    block_on_db, int, migrate, open_note_db, rebuild_note_graph, remove_note_graph_file,
+    replace_note_graph_file, text, workspace_graph_db_path, DbRow, NoteDb,
 };
 use crate::link_repair::{repair_links_for_move, LinkRepairReport};
 use crate::notes::WorkspaceNoteIndex;
@@ -625,10 +623,7 @@ struct DbNote {
     indexed_at: i64,
 }
 
-async fn resolve_note(
-    db: &NoteDb,
-    target: &str,
-) -> std::io::Result<Option<NoteSummary>> {
+async fn resolve_note(db: &NoteDb, target: &str) -> std::io::Result<Option<NoteSummary>> {
     let note = resolve_db_note(db, target).await?;
     Ok(note.map(|note| NoteSummary {
         path: note.path,

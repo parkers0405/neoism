@@ -617,9 +617,7 @@ impl Route<'_> {
                         self.request_overlay_redraw();
                         return true;
                     }
-                    Key::Named(NamedKey::ArrowRight)
-                        if blocking && modal_has_input =>
-                    {
+                    Key::Named(NamedKey::ArrowRight) if blocking && modal_has_input => {
                         self.window.screen.renderer.modal.move_input_caret_right();
                         self.request_overlay_redraw();
                         return true;
@@ -634,6 +632,22 @@ impl Route<'_> {
                         self.request_overlay_redraw();
                         return true;
                     }
+                    // Ctrl+Tab flips the server modal's Join ↔ Create
+                    // slider (must sit above the plain-Tab field walk).
+                    Key::Named(NamedKey::Tab)
+                        if blocking
+                            && self.window.screen.modifiers.state().control_key()
+                            && self.window.screen.renderer.modal.form_tab_count()
+                                > 0 =>
+                    {
+                        if self.window.screen.renderer.modal.form_active_tab() == 0 {
+                            self.window.screen.open_create_server_prompt();
+                        } else {
+                            self.window.screen.open_add_server_prompt();
+                        }
+                        self.request_overlay_redraw();
+                        return true;
+                    }
                     Key::Named(NamedKey::Tab) if blocking && modal_has_input => {
                         if self.window.screen.renderer.modal.focus_next_form_field() {
                             self.request_overlay_redraw();
@@ -641,11 +655,17 @@ impl Route<'_> {
                         }
                     }
                     Key::Named(NamedKey::ArrowUp) if blocking => {
-                        self.window.screen.renderer.modal.move_selection_up();
+                        // Forms walk fields ↔ buttons; plain modals keep
+                        // the button-list selection.
+                        if !self.window.screen.renderer.modal.form_focus_move(false) {
+                            self.window.screen.renderer.modal.move_selection_up();
+                        }
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::ArrowDown) if blocking => {
-                        self.window.screen.renderer.modal.move_selection_down();
+                        if !self.window.screen.renderer.modal.form_focus_move(true) {
+                            self.window.screen.renderer.modal.move_selection_down();
+                        }
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::PageUp) if blocking => {

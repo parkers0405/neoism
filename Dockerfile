@@ -13,7 +13,7 @@ COPY . .
 # Capped parallelism: an uncapped release build inside the container
 # saturates every host core (opt-level=3, codegen-units=1 on the heavy
 # deps) and starves the desktop the developer is actively using.
-RUN CARGO_BUILD_JOBS=4 cargo build --release -p neoism-workspace-daemon
+RUN CARGO_BUILD_JOBS=4 cargo build --release -p neoism-workspace-daemon -p neoism-agent
 
 FROM debian:bookworm-slim AS runtime
 
@@ -44,6 +44,10 @@ RUN useradd --system --create-home --home-dir /var/lib/neoism --shell /usr/sbin/
     && chown -R neoism:neoism /var/lib/neoism
 
 COPY --from=builder /src/target/release/neoism-workspace-daemon /usr/local/bin/neoism-workspace-daemon
+# The AI agent runs NEXT TO the daemon: joined clients' agent panes
+# talk to it directly (daemon port + 1 by convention), so tools
+# (read/edit/bash/git) execute on the machine that owns the files.
+COPY --from=builder /src/target/release/neoism-agent /usr/local/bin/neoism-agent
 
 USER neoism
 ENV NEOISM_DAEMON_ADDR=0.0.0.0:9876 \

@@ -1044,47 +1044,38 @@ where
 
 /// Build a presentation mask without mutating the persisted transcript.
 ///
-/// Trace observed during the current session visit remains visible even after
-/// the turn settles. Earlier/reloaded turns hide reasoning, tools, subtasks,
-/// and compaction, plus assistant progress text preceding later trace work.
-/// Every trailing assistant text part remains visible so a final answer split
-/// across several parts is never truncated.
+/// Settled turns (everything before `live_trace_start`; the whole transcript
+/// after a reload) show ONLY user prompts and assistant text — reasoning,
+/// tools, edits, subtasks, and compaction rows are hidden, exactly like the
+/// original decluttered design. The live window shows everything as it
+/// streams (and stays revealed until the session is left).
+///
+/// The one deliberate difference from the original mask: assistant text is
+/// NEVER hidden, in any turn. The old rule kept only each turn's trailing
+/// text part — and hid even the final answer when a turn ended on a tool
+/// call — which wiped re-entered transcripts down to fragments. Answers must
+/// survive every reload and session switch.
 pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
     messages: &[M],
     live_trace_start: Option<usize>,
 ) -> Vec<bool> {
-    let mut visible = vec![false; messages.len()];
     let live_start = live_trace_start
         .unwrap_or(messages.len())
         .min(messages.len());
-
-    for (index, message) in messages[live_start..].iter().enumerate() {
-        visible[live_start + index] = message.kind() != AgentTimelineMessageKind::System;
-    }
-
-    // In reverse order, an assistant part is final iff no later trace item
-    // exists before the next user boundary.
-    let mut later_trace_in_turn = false;
-    for index in (0..live_start).rev() {
-        match messages[index].kind() {
-            AgentTimelineMessageKind::User => {
-                visible[index] = true;
-                later_trace_in_turn = false;
-            }
-            AgentTimelineMessageKind::Assistant => {
-                visible[index] = !later_trace_in_turn;
-            }
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| match message.kind() {
+            AgentTimelineMessageKind::System => false,
             AgentTimelineMessageKind::Reasoning
             | AgentTimelineMessageKind::Tool
             | AgentTimelineMessageKind::Subtask
-            | AgentTimelineMessageKind::Compaction => {
-                later_trace_in_turn = true;
+            | AgentTimelineMessageKind::Compaction => index >= live_start,
+            AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => {
+                true
             }
-            AgentTimelineMessageKind::System => {}
-        }
-    }
-
-    visible
+        })
+        .collect()
 }
 
 fn build_timeline_layout_pages<M>(

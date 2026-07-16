@@ -382,8 +382,7 @@ impl FileTree {
         // tree again (and again, via the liveness re-check timer).
         if !root_changed
             && self.pending_dir_requests.values().any(|request| {
-                matches!(request.kind, PendingDirKind::Root)
-                    && request.path == root
+                matches!(request.kind, PendingDirKind::Root) && request.path == root
             })
         {
             return;

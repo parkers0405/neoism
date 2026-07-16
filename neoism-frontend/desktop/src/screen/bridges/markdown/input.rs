@@ -313,9 +313,7 @@ impl Screen<'_> {
                                 markdown.cancel_title_edit()
                             }
                         }
-                        Key::Named(NamedKey::ArrowDown) => {
-                            markdown.cancel_title_edit()
-                        }
+                        Key::Named(NamedKey::ArrowDown) => markdown.cancel_title_edit(),
                         Key::Named(NamedKey::Backspace) => {
                             if insert_mode {
                                 markdown.title_edit_backspace()
@@ -336,9 +334,7 @@ impl Screen<'_> {
                                 match key.text.as_deref() {
                                     Some("h") => markdown.title_edit_move(-1),
                                     Some("l") => markdown.title_edit_move(1),
-                                    Some("0") | Some("^") => {
-                                        markdown.title_edit_home()
-                                    }
+                                    Some("0") | Some("^") => markdown.title_edit_home(),
                                     Some("$") => markdown.title_edit_end(),
                                     Some("i") => markdown.enter_insert(),
                                     Some("a") => {
@@ -364,9 +360,7 @@ impl Screen<'_> {
                         }
                         _ => {
                             let mut inserted = false;
-                            if !mods.control_key()
-                                && !mods.alt_key()
-                                && !mods.super_key()
+                            if !mods.control_key() && !mods.alt_key() && !mods.super_key()
                             {
                                 if let Some(text) = key.text.as_deref() {
                                     if !text.is_empty()

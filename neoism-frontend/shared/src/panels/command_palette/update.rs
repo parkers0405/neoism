@@ -313,6 +313,7 @@ impl CommandPalette {
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
                 | PaletteRow::ServerAdd
+                | PaletteRow::ServerCreate
                 | PaletteRow::Ex { .. } => None,
             })
     }
@@ -337,6 +338,7 @@ impl CommandPalette {
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
                 | PaletteRow::ServerAdd
+                | PaletteRow::ServerCreate
                 | PaletteRow::Search { .. } => None,
             })
     }
@@ -356,6 +358,7 @@ impl CommandPalette {
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
                 | PaletteRow::ServerAdd
+                | PaletteRow::ServerCreate
                 | PaletteRow::Ex { .. }
                 | PaletteRow::Search { .. } => None,
             })
@@ -376,6 +379,7 @@ impl CommandPalette {
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
                 | PaletteRow::ServerAdd
+                | PaletteRow::ServerCreate
                 | PaletteRow::Ex { .. }
                 | PaletteRow::Search { .. } => None,
             })
@@ -396,6 +400,7 @@ impl CommandPalette {
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
                 | PaletteRow::ServerAdd
+                | PaletteRow::ServerCreate
                 | PaletteRow::Ex { .. }
                 | PaletteRow::Search { .. } => None,
             })
@@ -417,6 +422,7 @@ impl CommandPalette {
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
                 | PaletteRow::ServerAdd
+                | PaletteRow::ServerCreate
                 | PaletteRow::Search { .. } => None,
             })
     }
@@ -432,6 +438,7 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Server { .. }
                 | PaletteRow::ServerAdd
+                | PaletteRow::ServerCreate
                 | PaletteRow::Command { .. }
                 | PaletteRow::BufferMatch { .. }
                 | PaletteRow::Font { .. }

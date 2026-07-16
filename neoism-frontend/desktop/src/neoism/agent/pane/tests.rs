@@ -612,26 +612,46 @@ fn stale_idle_snapshot_keeps_streamed_assistant_text_by_id() {
 }
 
 #[test]
-fn transcript_refresh_rebases_live_trace_to_durable_turn() {
+fn transcript_refresh_keeps_live_trace_anchored_to_its_turn() {
     let mut pane = NeoismAgentPane::default();
     pane.messages = vec![
         NeoismAgentMessage::user("old"),
-        NeoismAgentMessage::user("latest"),
+        NeoismAgentMessage::user("latest").with_id("latest"),
         NeoismAgentMessage::reasoning("thinking").with_id("reasoning"),
         NeoismAgentMessage::assistant("tool").with_id("tool"),
     ];
     pane.timeline_live_trace_start = Some(2);
+    pane.timeline_live_trace_anchor = Some("latest".to_string());
 
+    // A refresh inserts an older answer above the anchored turn; the marker
+    // must follow its turn (id anchor), not jump rows or drift to a newer
+    // boundary. Turns revealed during a visit stay revealed until the
+    // session is left.
     pane.messages = vec![
         NeoismAgentMessage::user("old"),
         NeoismAgentMessage::assistant("old answer").with_id("old-answer"),
-        NeoismAgentMessage::user("latest"),
+        NeoismAgentMessage::user("latest").with_id("latest"),
         NeoismAgentMessage::assistant("durable answer").with_id("answer"),
     ];
     pane.rebase_current_turn_trace();
 
     assert_eq!(pane.timeline_live_trace_start, Some(3));
     assert_eq!(pane.messages[3].text, "durable answer");
+
+    // A newer prompt arriving must NOT move the boundary forward: the
+    // anchored turn's trace stays visible for the rest of the visit.
+    pane.messages.push(NeoismAgentMessage::user("newer").with_id("newer"));
+    pane.messages
+        .push(NeoismAgentMessage::assistant("newer answer").with_id("newer-answer"));
+    pane.rebase_current_turn_trace();
+    assert_eq!(pane.timeline_live_trace_start, Some(3));
+
+    // An unfindable (optimistic, empty-id) anchor falls back to the latest
+    // turn and re-anchors on its durable id.
+    pane.timeline_live_trace_anchor = Some(String::new());
+    pane.rebase_current_turn_trace();
+    assert_eq!(pane.timeline_live_trace_start, Some(5));
+    assert_eq!(pane.timeline_live_trace_anchor.as_deref(), Some("newer"));
 }
 
 #[test]

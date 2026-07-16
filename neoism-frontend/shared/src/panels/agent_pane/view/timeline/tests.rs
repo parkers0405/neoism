@@ -46,7 +46,11 @@ fn text_message(
 }
 
 #[test]
-fn settled_timeline_keeps_user_and_final_answer_parts_only() {
+fn settled_turns_show_only_prompts_and_all_answer_text() {
+    // Settled turns declutter exactly like the original design: reasoning,
+    // tools, and edits are hidden. The one difference: assistant text is
+    // NEVER masked — the old trailing-text-only rule wiped answers on
+    // reload.
     let messages = vec![
         text_message("u1", NeoismAgentMessageKind::User, "change it"),
         text_message("r1", NeoismAgentMessageKind::Reasoning, "planning"),
@@ -63,18 +67,21 @@ fn settled_timeline_keeps_user_and_final_answer_parts_only() {
         text_message("a4", NeoismAgentMessageKind::Assistant, "Part two."),
     ];
 
+    // Fully settled (reload): reasoning + tool hidden; every text part and
+    // both prompts survive.
     assert_eq!(
         timeline_message_visibility(&messages, None),
-        vec![true, false, false, false, true, true, true, true, true]
+        vec![true, false, true, false, true, true, true, true, true]
     );
+    // Live from index 1: everything visible.
     assert_eq!(
         timeline_message_visibility(&messages, Some(1)),
-        vec![true, true, true, true, true, true, true, true, true]
+        vec![true; messages.len()]
     );
 }
 
 #[test]
-fn visit_trace_boundary_does_not_reveal_older_reasoning() {
+fn live_window_reveals_trace_and_system_stays_hidden() {
     let messages = vec![
         text_message("u1", NeoismAgentMessageKind::User, "old question"),
         text_message("r1", NeoismAgentMessageKind::Reasoning, "old trace"),
@@ -86,9 +93,17 @@ fn visit_trace_boundary_does_not_reveal_older_reasoning() {
         text_message("s2", NeoismAgentMessageKind::System, "internal"),
     ];
 
+    // Old turn's trace hidden; live turn's trace visible; System never
+    // shows; text always shows.
     assert_eq!(
         timeline_message_visibility(&messages, Some(4)),
         vec![true, false, true, true, true, true, true, false]
+    );
+    // Fully settled: all trace hidden, prompts + every answer text still
+    // visible.
+    assert_eq!(
+        timeline_message_visibility(&messages, None),
+        vec![true, false, true, true, false, false, true, false]
     );
 }
 

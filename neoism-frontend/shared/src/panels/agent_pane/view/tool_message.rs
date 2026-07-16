@@ -304,6 +304,13 @@ pub trait AgentToolPane {
     fn selected_tool_group_child(&self, group_id: &str) -> Option<&str>;
     fn tool_expanded(&self, id: &str) -> bool;
     fn tool_expand_progress(&self, id: &str) -> f32;
+    /// True when this tool row belongs to a turn that settled before the
+    /// current visit's live trace window. Archived tool cards render as a
+    /// single header line (no output preview, no diff bodies) until clicked —
+    /// finished conversations show what happened, not every byte of it.
+    fn tool_archived(&self, _id: &str) -> bool {
+        false
+    }
     fn diff_scroll_offset(&mut self, key: &str, max_scroll: f32) -> f32;
     fn register_diff_scroll_rect(&mut self, key: String, rect: [f32; 4], max_scroll: f32);
     fn register_link_hit_rect(&mut self, target: String, rect: [f32; 4]);
@@ -383,6 +390,10 @@ macro_rules! neoism_ui_impl_agent_tool_message {
                 <$pane>::tool_expand_progress(self, id)
             }
 
+            fn tool_archived(&self, id: &str) -> bool {
+                <$pane>::tool_archived(self, id)
+            }
+
             fn diff_scroll_offset(&mut self, key: &str, max_scroll: f32) -> f32 {
                 <$pane>::diff_scroll_offset(self, key, max_scroll)
             }
@@ -434,6 +445,10 @@ impl AgentToolPane for NeoismAgentPane {
 
     fn tool_expand_progress(&self, id: &str) -> f32 {
         NeoismAgentPane::tool_expand_progress(self, id)
+    }
+
+    fn tool_archived(&self, id: &str) -> bool {
+        NeoismAgentPane::tool_archived(self, id)
     }
 
     fn diff_scroll_offset(&mut self, key: &str, max_scroll: f32) -> f32 {

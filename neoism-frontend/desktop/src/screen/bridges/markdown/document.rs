@@ -65,8 +65,7 @@ impl Screen<'_> {
             .and_then(|ext| ext.to_str())
             .unwrap_or("md");
         let file_name = format!("{sanitized}.{ext}");
-        if old_path.file_name().and_then(|name| name.to_str())
-            == Some(file_name.as_str())
+        if old_path.file_name().and_then(|name| name.to_str()) == Some(file_name.as_str())
         {
             return;
         }
@@ -95,7 +94,9 @@ impl Screen<'_> {
             pane.path = new_path.clone();
             pane.title = sanitized;
         }
-        self.renderer.buffer_tabs.rename_path(&old_path, new_path.clone());
+        self.renderer
+            .buffer_tabs
+            .rename_path(&old_path, new_path.clone());
         self.renderer.notes_sidebar.refresh_notes();
         self.renderer.file_tree.set_active_path(Some(new_path));
         self.mark_dirty();

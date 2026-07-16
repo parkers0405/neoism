@@ -362,7 +362,13 @@ pub(crate) async fn call_tool_with_state(
         return mcp_notes::call_tool(directory, tool, arguments);
     }
     if client == mcp_memory::MEMORY_MCP_ID {
-        return mcp_memory::call_tool(directory, tool, arguments);
+        return mcp_memory::call_tool_with_app_state(
+            state.as_ref(),
+            directory,
+            tool,
+            arguments,
+        )
+        .await;
     }
     ensure_connected_with_state(directory, client, auth_store, state).await?;
     let result = runtime_manager()

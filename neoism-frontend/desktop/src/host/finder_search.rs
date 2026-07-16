@@ -267,10 +267,7 @@ impl SearchService for NativeSearchService {
 
     fn collect_git_changes(&self, cwd: &Path) -> Result<Vec<SearchGitHit>, IoError> {
         if let Some(id) = self.remote_dispatch(cwd, |req_id, cwd| {
-            neoism_protocol::search::SearchClientMessage::SearchGitChanges {
-                req_id,
-                cwd,
-            }
+            neoism_protocol::search::SearchClientMessage::SearchGitChanges { req_id, cwd }
         }) {
             return Err(IoError::Pending(id));
         }

@@ -210,8 +210,6 @@ pub enum WorkspaceWindowKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WorkspaceAction {
-    InitNeoismWorkspace,
-    ReindexNeoismNotes,
     CreateNeoismNote,
 }
 

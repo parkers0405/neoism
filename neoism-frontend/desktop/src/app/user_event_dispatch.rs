@@ -537,7 +537,6 @@ impl Application<'_> {
             }
             CreateWindowStrategy::UseAppConfig => &self.config,
         };
-        self.router.request_open_window(None, None);
         let window_id = self.router.create_window(
             event_loop,
             self.event_proxy.clone(),
@@ -545,7 +544,7 @@ impl Application<'_> {
             None,
             self.app_id.as_deref(),
         );
-        self.attach_daemon_to_window(window_id);
+        self.ensure_local_session(window_id);
     }
 
     /// `RioEvent::CreateWindowWithOptions` — same as CreateWindow, but
@@ -568,7 +567,6 @@ impl Application<'_> {
             }
             CreateWindowStrategy::UseAppConfig => &self.config,
         };
-        self.router.request_open_window(None, None);
         let window_id = self.router.create_window(
             event_loop,
             self.event_proxy.clone(),
@@ -576,7 +574,7 @@ impl Application<'_> {
             None,
             self.app_id.as_deref(),
         );
-        self.attach_daemon_to_window(window_id);
+        self.ensure_local_session(window_id);
 
         if let Some(route) = self.router.routes.get_mut(&window_id) {
             for path in open_paths {
@@ -605,6 +603,12 @@ impl Application<'_> {
             .collect();
 
         for source_id in sources {
+            let inherited_server = self.window_sessions.get(&source_id).map(|session| {
+                (
+                    session.connection.endpoint().to_string(),
+                    session.active_server_id.clone(),
+                )
+            });
             let Some(detached) =
                 self.router.routes.get_mut(&source_id).and_then(|route| {
                     route.window.screen.take_pending_detached_workspace()
@@ -613,7 +617,6 @@ impl Application<'_> {
                 continue;
             };
 
-            self.router.request_open_window(None, None);
             let new_window_id = self.router.create_window(
                 event_loop,
                 self.event_proxy.clone(),
@@ -621,7 +624,15 @@ impl Application<'_> {
                 None,
                 self.app_id.as_deref(),
             );
-            self.attach_daemon_to_window(new_window_id);
+            if let Some((endpoint, server_id)) = inherited_server {
+                let token = server_id
+                    .as_deref()
+                    .and_then(|id| self.server_registry.token(id))
+                    .map(str::to_string);
+                self.switch_window_server(new_window_id, &endpoint, token, server_id);
+            } else {
+                self.ensure_local_session(new_window_id);
+            }
 
             if let Some(dest) = self.router.routes.get_mut(&new_window_id) {
                 dest.window.screen.adopt_detached_workspace(detached);
@@ -695,8 +706,14 @@ impl Application<'_> {
             .router
             .daemon_window_for_native(window_id)
             .map(str::to_string);
-        self.router
-            .request_open_native_tab(None, parent_window_id, None);
+        self.send_window_message(
+            window_id,
+            neoism_protocol::workspace::WorkspaceClientMessage::RequestOpenNativeTab {
+                workspace_id: None,
+                parent_window_id,
+                title: None,
+            },
+        );
         let native_window_id = self.router.create_native_tab(
             event_loop,
             self.event_proxy.clone(),
@@ -704,7 +721,7 @@ impl Application<'_> {
             Some(&tabbing_identifier),
             None,
         );
-        self.attach_daemon_to_window(native_window_id);
+        self.ensure_local_session(native_window_id);
     }
 
     /// `RioEvent::CreateConfigEditor` — open the config editor
@@ -716,13 +733,12 @@ impl Application<'_> {
                 self.router.open_config_split(&self.config);
             }
             ConfigEditorTarget::NewWindow => {
-                self.router.request_open_config_editor(None);
                 if let Some(window_id) = self.router.open_config_window(
                     event_loop,
                     self.event_proxy.clone(),
                     &self.config,
                 ) {
-                    self.attach_daemon_to_window(window_id);
+                    self.ensure_local_session(window_id);
                 }
             }
         }

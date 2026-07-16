@@ -68,6 +68,12 @@ pub(crate) const ORDER: u8 = 6;
 pub(crate) const SCROLL_ANIMATION_LENGTH: f32 = 0.30;
 pub(crate) const CURSOR_ANIMATION_LENGTH: f32 = 0.12;
 pub(crate) const REVEAL_FLASH_MS: f32 = 900.0;
+/// Row-reveal sweep when the tree re-roots (workspace switch, server
+/// join, explicit re-root). Mirrors the status line's mode-swap
+/// transition — same duration, same ease-out-cubic — with each row
+/// starting a beat after the one above it.
+pub(crate) const ROOT_TRANSITION_MS: f32 = 320.0;
+pub(crate) const ROOT_TRANSITION_STAGGER_MS: f32 = 12.0;
 pub(crate) const SCROLL_OFF_ROWS: usize = 4;
 pub(crate) const LABEL_TRUNCATION_CACHE_MAX: usize = 2048;
 

@@ -734,9 +734,9 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Workspace,
     },
     Command {
-        title: "Workplaces",
-        shortcut: "daemon switcher",
-        action: PaletteAction::ShowWorkplaces,
+        title: "Servers",
+        shortcut: "daemon connections",
+        action: PaletteAction::ShowServers,
         service: CommandService::Workspace,
     },
     Command {

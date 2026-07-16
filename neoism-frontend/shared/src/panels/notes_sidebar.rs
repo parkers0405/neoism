@@ -37,6 +37,12 @@ pub struct NotesSidebar {
     all_entries: Vec<NoteSidebarEntry>,
     rows: Vec<NoteSidebarRow>,
     open_dirs: HashSet<PathBuf>,
+    /// "+ New note" button of the empty-vault state, when drawn.
+    empty_create_rect: Option<[f32; 4]>,
+    /// Live `icon:` values from OPEN buffers (value-picker accepts) —
+    /// they beat the disk walk until the daemon flushes the file, else
+    /// any refresh between accept and flush reverts the row's emoji.
+    icon_overrides: HashMap<PathBuf, Option<String>>,
     selected_index: usize,
     selector_selected: bool,
     scroll_top: usize,
@@ -60,12 +66,15 @@ pub struct NotesSidebar {
     note_rects: Vec<([f32; 4], usize)>,
     icon_rects: Vec<([f32; 4], usize)>,
     selected_cursor_rect: Option<[f32; 4]>,
-    menu_rect: Option<[f32; 4]>,
     workspace_rect: Option<[f32; 4]>,
-    visualize_rect: Option<[f32; 4]>,
-    /// Keyboard caret parked on one of the header action icons (share /
-    /// create-menu), reachable with ArrowRight from the vault selector.
-    header_action: Option<NotesHeaderAction>,
+    /// The footer settings gear (right of the vault selector) — opens
+    /// the Graph / Add menu. Reachable with ArrowRight from the vault
+    /// selector, clickable, focus tracked by `settings_selected`.
+    settings_rect: Option<[f32; 4]>,
+    settings_selected: bool,
+    /// Per-letter NEOISM wordmark header — same hover/shimmer animation
+    /// as the splash and the agent home.
+    wordmark: crate::panels::agent_pane::state::NeoismWordmarkState,
     /// Pending vim-style numeric count (e.g. `5` then `j` moves 5 rows).
     /// Accumulated by [`push_count_digit`](Self::push_count_digit) and
     /// consumed by the next motion via [`take_count`](Self::take_count).
@@ -100,21 +109,14 @@ struct NoteSidebarRow {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotesSidebarHit {
-    /// The ⋮ create menu in the header (new note / drawing / folder).
-    Menu,
     WorkspacePicker,
-    Visualize,
+    /// The footer settings gear — Graph / Add menu.
+    Settings,
     Note(usize),
     /// The icon glyph of a row — opens the icon/emoji picker for it.
     NoteIcon(usize),
-}
-
-/// Header action icons the keyboard caret can park on. Order matters:
-/// ArrowRight from the vault selector walks Visualize (share) → Menu.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NotesHeaderAction {
-    Visualize,
-    Menu,
+    /// The "+ New note" button shown by the empty vault state.
+    CreateFirstNote,
 }
 
 impl Default for NotesSidebar {
@@ -129,6 +131,8 @@ impl Default for NotesSidebar {
             all_entries: Vec::new(),
             rows: Vec::new(),
             open_dirs: HashSet::new(),
+            empty_create_rect: None,
+            icon_overrides: HashMap::new(),
             selected_index: 0,
             selector_selected: false,
             scroll_top: 0,
@@ -142,10 +146,16 @@ impl Default for NotesSidebar {
             note_rects: Vec::new(),
             icon_rects: Vec::new(),
             selected_cursor_rect: None,
-            menu_rect: None,
             workspace_rect: None,
-            visualize_rect: None,
-            header_action: None,
+            settings_rect: None,
+            settings_selected: false,
+            wordmark: crate::panels::agent_pane::state::NeoismWordmarkState {
+                hover: [0.0; 6],
+                last_frame_at: None,
+                rect: None,
+                click_started: None,
+                click_pos: None,
+            },
             pending_count: None,
             pending_g: false,
         }
@@ -195,7 +205,7 @@ impl NotesSidebar {
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
         if !focused {
-            self.header_action = None;
+            self.settings_selected = false;
             self.clear_pending();
         }
     }
@@ -216,6 +226,13 @@ impl NotesSidebar {
         self.width
     }
 
+    /// Window-chrome width setter used when a workspace swap installs a
+    /// different panel instance — width belongs to the window, not the
+    /// workspace.
+    pub fn set_width(&mut self, width: f32) {
+        self.width = width.clamp(FILE_TREE_MIN_WIDTH, FILE_TREE_MAX_WIDTH);
+    }
+
     pub fn resize(&mut self, delta: f32) {
         self.width = (self.width + delta).clamp(FILE_TREE_MIN_WIDTH, FILE_TREE_MAX_WIDTH);
     }
@@ -230,6 +247,7 @@ impl NotesSidebar {
         self.workspace_path = path;
         if vault_changed {
             self.open_dirs.clear();
+            self.icon_overrides.clear();
         }
         if let Some(root) = self.workspace_path.clone() {
             self.open_dirs.insert(root);
@@ -273,16 +291,22 @@ impl NotesSidebar {
             let icons = load_notes_icons(&root);
             if !icons.is_empty() {
                 for entry in &mut self.all_entries {
-                    entry.icon = entry
+                    // Explicit `.neoism-icons.json` overrides beat the
+                    // frontmatter icon, but a MISSING override must not
+                    // wipe it.
+                    if let Some(icon) = entry
                         .path
                         .strip_prefix(&root)
                         .ok()
                         .and_then(|rel| icons.get(&rel.to_string_lossy().into_owned()))
-                        .cloned();
+                    {
+                        entry.icon = Some(icon.clone());
+                    }
                 }
             }
             self.open_dirs.insert(root);
         }
+        self.apply_icon_overrides();
         self.all_entries.sort_by(|a, b| {
             a.parent
                 .cmp(&b.parent)
@@ -334,6 +358,7 @@ impl NotesSidebar {
                 parent,
             });
         }
+        self.apply_icon_overrides();
         self.all_entries.sort_by(|a, b| {
             a.parent
                 .cmp(&b.parent)
@@ -347,6 +372,32 @@ impl NotesSidebar {
             }
         }
         self.clamp_selection_and_scroll();
+    }
+
+    /// In-place icon update for one note — the frontmatter `icon:` was
+    /// just edited in the open buffer, so the disk-walk value the entry
+    /// was built from is stale until the daemon flushes the file. The
+    /// override is remembered so refreshes between the edit and the
+    /// flush re-apply it instead of reverting to the disk value.
+    pub fn set_note_icon(&mut self, path: &Path, icon: Option<String>) {
+        self.icon_overrides.insert(path.to_path_buf(), icon.clone());
+        for entry in &mut self.all_entries {
+            if entry.path == path {
+                entry.icon = icon;
+                return;
+            }
+        }
+    }
+
+    fn apply_icon_overrides(&mut self) {
+        if self.icon_overrides.is_empty() {
+            return;
+        }
+        for entry in &mut self.all_entries {
+            if let Some(icon) = self.icon_overrides.get(&entry.path) {
+                entry.icon = icon.clone();
+            }
+        }
     }
 
     pub fn selected_note_path(&self) -> Option<PathBuf> {
@@ -367,32 +418,32 @@ impl NotesSidebar {
 
     pub fn select_selector(&mut self) {
         self.selector_selected = true;
-        self.header_action = None;
+        self.settings_selected = false;
     }
 
-    pub fn selected_header_action(&self) -> Option<NotesHeaderAction> {
-        self.header_action
+    pub fn is_settings_selected(&self) -> bool {
+        self.selector_selected && self.settings_selected
     }
 
-    pub fn menu_button_rect(&self) -> Option<[f32; 4]> {
-        self.menu_rect
+    /// The footer settings gear rect — menus anchor to it.
+    pub fn settings_button_rect(&self) -> Option<[f32; 4]> {
+        self.settings_rect
     }
 
-    /// Walk the keyboard caret between the header icons (share ↔ menu).
-    /// The icons are reached VERTICALLY (Up from the first row); horizontal
-    /// moves only toggle between them. Returns false when the move escapes
-    /// the sidebar (caller hands focus to the neighbouring panel).
+    /// ArrowLeft/Right on the footer walks vault selector <-> settings
+    /// gear. Elsewhere horizontal keys keep their normal meaning.
     pub fn move_horizontal_focus(&mut self, right: bool) -> bool {
-        match (self.header_action, right) {
-            (Some(NotesHeaderAction::Visualize), true) => {
-                self.header_action = Some(NotesHeaderAction::Menu);
-                true
-            }
-            (Some(NotesHeaderAction::Menu), false) => {
-                self.header_action = Some(NotesHeaderAction::Visualize);
-                true
-            }
-            _ => false,
+        if !self.selector_selected {
+            return false;
+        }
+        if right && !self.settings_selected {
+            self.settings_selected = true;
+            true
+        } else if !right && self.settings_selected {
+            self.settings_selected = false;
+            true
+        } else {
+            false
         }
     }
 
@@ -414,7 +465,7 @@ impl NotesSidebar {
 
     pub fn set_selected(&mut self, index: usize) {
         self.selector_selected = false;
-        self.header_action = None;
+        self.settings_selected = false;
         if !self.rows.is_empty() {
             self.move_selection_to(index.min(self.rows.len().saturating_sub(1)));
         }
@@ -442,22 +493,12 @@ impl NotesSidebar {
     }
 
     pub fn select_next(&mut self) {
-        if self.header_action.take().is_some() {
-            // Down from a header icon descends the hierarchy: first note
-            // row when there are notes, otherwise straight to the vault
-            // selector at the bottom.
-            if self.rows.is_empty() {
-                self.selector_selected = true;
-            } else {
-                self.set_selected(0);
-            }
-            return;
-        }
         if self.selector_selected {
             return;
         }
         if self.rows.is_empty() || self.selected_index + 1 >= self.rows.len() {
             self.selector_selected = true;
+            self.settings_selected = false;
         } else {
             self.set_selected(
                 (self.selected_index + 1).min(self.rows.len().saturating_sub(1)),
@@ -466,23 +507,15 @@ impl NotesSidebar {
     }
 
     pub fn select_prev(&mut self) {
-        if self.header_action.is_some() {
-            // Already at the top of the hierarchy.
-            return;
-        }
         if self.selector_selected {
             self.selector_selected = false;
+            self.settings_selected = false;
             if !self.rows.is_empty() {
                 self.selected_index = self.rows.len().saturating_sub(1);
                 self.clamp_scroll(self.last_panel_height_rows);
-            } else {
-                // No notes: the level above the selector is the header icons.
-                self.header_action = Some(NotesHeaderAction::Visualize);
             }
         } else if self.selected_index == 0 || self.rows.is_empty() {
-            // Up from the first row climbs to the header icons.
-            self.selector_selected = false;
-            self.header_action = Some(NotesHeaderAction::Visualize);
+            // Already at the top — the wordmark header is decorative.
         } else {
             self.set_selected(self.selected_index.saturating_sub(1));
         }
@@ -746,8 +779,15 @@ impl NotesSidebar {
     /// this to keep requesting redraws so the eased motion plays out
     /// instead of snapping on the next unrelated frame.
     pub fn is_animating(&self) -> bool {
+        let wordmark_settling = self
+            .wordmark
+            .hover
+            .iter()
+            .any(|hover| *hover > 0.005 && *hover < 0.995);
         self.visible
-            && (self.scroll.position != 0.0 || self.cursor_spring.position != 0.0)
+            && (self.scroll.position != 0.0
+                || self.cursor_spring.position != 0.0
+                || wordmark_settling)
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NotesSidebarHit> {
@@ -761,14 +801,14 @@ impl NotesSidebar {
                 return Some(NotesSidebarHit::Note(*index));
             }
         }
-        if let Some(r) = self.menu_rect {
+        if let Some(r) = self.settings_rect {
             if rect_contains(r, x, y) {
-                return Some(NotesSidebarHit::Menu);
+                return Some(NotesSidebarHit::Settings);
             }
         }
-        if let Some(r) = self.visualize_rect {
+        if let Some(r) = self.empty_create_rect {
             if rect_contains(r, x, y) {
-                return Some(NotesSidebarHit::Visualize);
+                return Some(NotesSidebarHit::CreateFirstNote);
             }
         }
         if rect_contains(self.workspace_rect?, x, y) {
@@ -786,13 +826,15 @@ impl NotesSidebar {
         panel_height: f32,
         theme: &IdeTheme,
         occlusion: &[[f32; 4]],
+        mouse: Option<(f32, f32)>,
+        now_seconds: f32,
     ) {
         if !self.visible || panel_width <= 0.0 || panel_height <= 0.0 {
             return;
         }
-        self.menu_rect = None;
         self.workspace_rect = None;
-        self.visualize_rect = None;
+        self.settings_rect = None;
+        self.empty_create_rect = None;
         self.note_rects.clear();
         self.icon_rects.clear();
         self.selected_cursor_rect = None;
@@ -822,13 +864,6 @@ impl NotesSidebar {
             frame_stroke,
         );
 
-        let title_opts = DrawOpts {
-            font_size,
-            color: theme.u8(theme.fg),
-            bold: true,
-            clip_rect: Some(panel_clip),
-            ..DrawOpts::default()
-        };
         let muted_opts = DrawOpts {
             font_size: font_size * 0.86,
             color: theme.u8(theme.muted),
@@ -843,84 +878,131 @@ impl NotesSidebar {
         };
 
         let header_y = content_y + 8.0 * self.scale;
-        // Two header actions, right-aligned: share (graph view) · ⋮ create
-        // menu. Creation lives behind the menu so it always targets the
-        // vault currently shown in this panel.
-        let action_size = 24.0 * self.scale;
-        let menu_rect = [
-            content_x + content_w - 34.0 * self.scale,
-            header_y - 4.0 * self.scale,
-            action_size,
-            action_size,
-        ];
-        let visualize_rect = [
-            content_x + content_w - 62.0 * self.scale,
-            header_y - 4.0 * self.scale,
-            action_size,
-            action_size,
-        ];
-        self.menu_rect = Some(menu_rect);
-        self.visualize_rect = Some(visualize_rect);
-        draw_text_with_occlusion(
-            sugarloaf,
-            content_x + row_pad_x,
-            header_y,
-            "Neoism Notes",
-            &title_opts,
-            occlusion,
-        );
-        if let Some(action) = self.header_action.filter(|_| self.focused) {
-            let rect = match action {
-                NotesHeaderAction::Visualize => visualize_rect,
-                NotesHeaderAction::Menu => menu_rect,
+        // "Notes" splash header — the bundled Press Start 2P arcade
+        // face (same as the agent side-panel headings) with the
+        // wordmark's per-letter hover lift + shimmer, sized to span
+        // the full panel top. Graph + create actions live in the
+        // footer settings gear.
+        let wordmark_h;
+        {
+            use crate::panels::agent_pane::view::wordmark::WordmarkState;
+            const SPLASH: &str = "Notes";
+            const SHIMMER_PERIOD: f32 = 3.4;
+            const SHIMMER_AMP: f32 = 0.03;
+            const HOVER_RATE: f32 = 10.0;
+            const HOVER_SCALE: f32 = 0.18;
+            const HOVER_LIFT: f32 = 0.16;
+            let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
+            let target_w = (content_w - row_pad_x * 2.0).max(1.0);
+            let probe_opts = DrawOpts {
+                font_size: 10.0,
+                font_id: pixel_font,
+                ..DrawOpts::default()
             };
+            let probe_w = sugarloaf.text_mut().measure(SPLASH, &probe_opts).max(1.0);
+            // Match the agent side-panel heading size (~15.5px drawn);
+            // the width fit only kicks in on very narrow panels.
+            let splash_size =
+                (16.0 * self.scale).min((10.0 * target_w / probe_w).max(10.0));
+            wordmark_h = splash_size * 1.15;
+            let rect = [content_x + row_pad_x, header_y, target_w, wordmark_h];
+            self.wordmark.set_rect(rect);
+            let dt = self.wordmark.frame_delta_seconds();
+            let smoothing = 1.0 - (-HOVER_RATE * dt).exp();
+            let letter_opts = DrawOpts {
+                font_size: splash_size,
+                color: theme.u8(theme.fg),
+                font_id: pixel_font,
+                clip_rect: Some(panel_clip),
+                ..DrawOpts::default()
+            };
+            let mut lx = rect[0];
+            for (i, ch) in SPLASH.chars().enumerate() {
+                let letter = ch.to_string();
+                let lw = sugarloaf.text_mut().measure(&letter, &letter_opts).max(1.0);
+                let target = mouse
+                    .map(|(mx, my)| {
+                        mx >= lx
+                            && mx <= lx + lw
+                            && my >= rect[1]
+                            && my <= rect[1] + wordmark_h
+                    })
+                    .unwrap_or(false) as u8 as f32;
+                let hover = &mut self.wordmark.hover[i];
+                *hover += (target - *hover) * smoothing;
+                let hover = hover.clamp(0.0, 1.0);
+                let shimmer = ((now_seconds / SHIMMER_PERIOD + i as f32 * 0.16)
+                    * std::f32::consts::TAU)
+                    .sin()
+                    * SHIMMER_AMP;
+                let extra = 1.0 + hover * HOVER_SCALE + shimmer;
+                let opts = DrawOpts {
+                    font_size: splash_size * extra,
+                    ..letter_opts
+                };
+                let lift = hover * HOVER_LIFT * wordmark_h;
+                draw_text_with_occlusion(
+                    sugarloaf,
+                    lx + lw * (1.0 - extra) * 0.5,
+                    header_y + (wordmark_h - splash_size * extra) * 0.5 - lift,
+                    &letter,
+                    &opts,
+                    occlusion,
+                );
+                lx += lw;
+            }
+        }
+
+        let footer_y = content_y + content_h - row_h - 6.0 * self.scale;
+        // Footer: vault selector row + the settings gear on its right
+        // (Graph / Add menu — the old header icons live here now).
+        let settings_w = row_h;
+        self.workspace_rect = Some([
+            content_x + 6.0 * self.scale,
+            footer_y,
+            (content_w - settings_w - 16.0 * self.scale).max(0.0),
+            row_h,
+        ]);
+        let settings_rect = [
+            content_x + content_w - settings_w - 6.0 * self.scale,
+            footer_y,
+            settings_w,
+            row_h,
+        ];
+        self.settings_rect = Some(settings_rect);
+        if self.focused && self.selector_selected && self.settings_selected {
             sugarloaf.quad(
                 None,
-                rect[0],
-                rect[1],
-                rect[2],
-                rect[3],
+                settings_rect[0],
+                settings_rect[1],
+                settings_rect[2],
+                settings_rect[3],
                 theme.f32_alpha(theme.hover, 0.5),
                 [6.0 * self.scale; 4],
                 DEPTH,
                 ORDER + 2,
             );
-            let cursor_w = (font_size * 0.5).max(2.0);
+            // The block cursor stays visible while the gear is focused
+            // — it parks just left of the settings button instead of
+            // vanishing when focus walks off the vault selector.
+            let cursor_w = (font_size * 0.6).max(2.0);
+            let cursor_h = (row_h - 6.0 * self.scale).max(font_size).min(row_h);
             self.selected_cursor_rect = Some([
-                rect[0] - cursor_w - 3.0 * self.scale,
-                rect[1] + 4.0 * self.scale,
+                (settings_rect[0] - cursor_w - 4.0 * self.scale).max(content_x),
+                footer_y + (row_h - cursor_h) / 2.0,
                 cursor_w,
-                rect[3] - 8.0 * self.scale,
+                cursor_h,
             ]);
         }
-        // Share / graph glyph (three connected nodes).
         draw_text_with_occlusion(
             sugarloaf,
-            visualize_rect[0] + 5.0 * self.scale,
-            header_y,
-            "\u{f1e0}",
+            settings_rect[0] + 7.0 * self.scale,
+            footer_y + (row_h - icon_size) / 2.0,
+            "\u{f013}",
             &action_opts,
             occlusion,
         );
-        // Vertical ellipsis create menu.
-        draw_text_with_occlusion(
-            sugarloaf,
-            menu_rect[0] + 8.0 * self.scale,
-            header_y,
-            "\u{f142}",
-            &action_opts,
-            occlusion,
-        );
-
-        let footer_y = content_y + content_h - row_h - 6.0 * self.scale;
-        // The vault selector owns the whole footer row.
-        self.workspace_rect = Some([
-            content_x + 6.0 * self.scale,
-            footer_y,
-            (content_w - 12.0 * self.scale).max(0.0),
-            row_h,
-        ]);
-        let list_y = header_y + row_h * 1.25;
+        let list_y = header_y + wordmark_h + 12.0 * self.scale;
         let list_h = (footer_y - list_y - 8.0 * self.scale).max(row_h);
         let rows_visible = (list_h / row_h).floor().max(1.0) as usize;
         // Re-clamp before painting — a terminal resize can shrink the
@@ -977,14 +1059,56 @@ impl NotesSidebar {
         }
 
         if self.rows.is_empty() {
+            // Centered empty state: "No notes yet" with a "+ New note"
+            // button underneath — click (or `a`) creates the vault's
+            // first markdown file.
+            let empty_text = "No notes yet";
+            let empty_w = sugarloaf.text_mut().measure(empty_text, &muted_opts);
             draw_text_with_occlusion(
                 sugarloaf,
-                content_x + row_pad_x,
+                content_x + ((content_w - empty_w) * 0.5).max(0.0),
                 list_y + 5.0 * self.scale,
-                "No notes yet",
+                empty_text,
                 &muted_opts,
                 occlusion,
             );
+            let btn_label = "\u{f067}  New note";
+            let btn_font = font_size * 0.92;
+            let btn_opts = DrawOpts {
+                font_size: btn_font,
+                color: theme.u8(theme.blue),
+                clip_rect: Some(panel_clip),
+                ..DrawOpts::default()
+            };
+            let label_w = sugarloaf.text_mut().measure(btn_label, &btn_opts);
+            let pad_h = 10.0 * self.scale;
+            let btn_w = label_w + pad_h * 2.0;
+            let btn = [
+                content_x + ((content_w - btn_w) * 0.5).max(0.0),
+                list_y + 5.0 * self.scale + row_h,
+                btn_w,
+                row_h * 0.95,
+            ];
+            sugarloaf.quad(
+                None,
+                btn[0],
+                btn[1],
+                btn[2],
+                btn[3],
+                theme.f32_alpha(theme.hover, 0.5),
+                [8.0 * self.scale; 4],
+                DEPTH,
+                ORDER + 2,
+            );
+            draw_text_with_occlusion(
+                sugarloaf,
+                btn[0] + pad_h,
+                btn[1] + (btn[3] - btn_font) / 2.0,
+                btn_label,
+                &btn_opts,
+                occlusion,
+            );
+            self.empty_create_rect = Some(btn);
         } else {
             // Overscan: while the lag spring is mid-flight the viewport
             // sits between two rows, so paint a row above/below the window
@@ -1132,7 +1256,7 @@ impl NotesSidebar {
         }
 
         let footer_hover =
-            self.focused && self.selector_selected && self.header_action.is_none();
+            self.focused && self.selector_selected && !self.settings_selected;
         if footer_hover {
             sugarloaf.quad(
                 None,
@@ -1244,6 +1368,44 @@ impl NotesSidebar {
     }
 }
 
+/// A note's `icon:` frontmatter emoji, read from the file head — the
+/// same page icon the markdown editor renders above the title, mirrored
+/// onto the sidebar row (Notion-style). Only the first KB is read; any
+/// miss (no frontmatter, no icon, unreadable) is `None`. Explicit
+/// `.neoism-icons.json` overrides still win at render time.
+fn note_frontmatter_icon(path: &Path) -> Option<String> {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return None;
+    }
+    let head = {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).ok()?;
+        let mut buffer = [0u8; 1024];
+        let read = file.read(&mut buffer).ok()?;
+        String::from_utf8_lossy(&buffer[..read]).into_owned()
+    };
+    let mut lines = head.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return None;
+    }
+    for line in lines.take(32) {
+        if line.trim() == "---" {
+            return None;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("icon") {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 fn collect_note_entries(
     root: &Path,
     path: &Path,
@@ -1281,7 +1443,7 @@ fn collect_note_entries(
             path: path.to_path_buf(),
             label,
             is_dir: false,
-            icon: None,
+            icon: note_frontmatter_icon(path),
             depth,
             parent,
         });
@@ -1313,6 +1475,12 @@ fn should_skip_note_entry(root: &Path, path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
+    // `project.toml` at the vault ROOT is vault metadata (code-project
+    // links), not a note — hidden like dotfiles. A user's own
+    // project.toml in a subfolder still shows.
+    if name == "project.toml" && path.parent() == Some(root) {
+        return true;
+    }
     name.starts_with('.') || matches!(name, "target" | "node_modules")
 }
 

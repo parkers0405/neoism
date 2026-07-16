@@ -35,6 +35,12 @@ impl FileTree {
             .as_ref()
             .map(|remote| remote.root().to_path_buf())
     }
+
+    pub fn remote_files(
+        &self,
+    ) -> Option<std::sync::Arc<crate::daemon_client::remote_files::RemoteFiles>> {
+        self.remote.clone()
+    }
 }
 
 impl Default for FileTree {

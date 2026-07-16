@@ -20,6 +20,20 @@ impl Screen<'_> {
             window_size.height,
             scale,
         );
+        // Black-region triage (`NEOISM_MD_OCCLUSION_LOG=1`): every text row
+        // intersecting an occlusion rect is silently dropped while block
+        // backgrounds still paint — a stale/oversized rect here blanks
+        // whatever scrolls under it. Log the active set so the next repro
+        // names the culprit panel instead of guessing.
+        if !text_occlusions.is_empty()
+            && std::env::var_os("NEOISM_MD_OCCLUSION_LOG").is_some()
+        {
+            tracing::warn!(
+                target: "neoism::md_occlusion",
+                rects = ?text_occlusions,
+                "markdown text occlusion set active this frame"
+            );
+        }
         let markdown_mouse = (!self.mouse_hidden_by_typing)
             .then_some([self.mouse.x as f32 / scale, self.mouse.y as f32 / scale]);
         let (visible_nodes, scaled_margin) = {
@@ -91,6 +105,10 @@ impl Screen<'_> {
         // (rect, note path, scroll) collected here, composited after the
         // loop to avoid borrowing `context_manager` while we render ink.
         let mut overlays: Vec<([f32; 4], std::path::PathBuf, f32)> = Vec::new();
+        // Panes whose image overlays are re-synced this frame — anything
+        // we pushed to LAST frame that isn't in here gets cleared below.
+        let mut overlay_ids_touched: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
         let markdown_animation_phase = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| {
@@ -107,6 +125,12 @@ impl Screen<'_> {
             .iter_mut()
         {
             if !visible_nodes.contains(key) {
+                // A pane that left the composition (background tab,
+                // collapsed split) must not leave its cover/image
+                // overlays registered — switching from an md file to
+                // the terminal kept compositing the page cover.
+                self.sugarloaf
+                    .clear_image_overlays_for(item.val.rich_text_id);
                 continue;
             }
             let Some(markdown) = item.val.markdown.as_mut() else {
@@ -141,6 +165,7 @@ impl Screen<'_> {
                         notebook,
                         markdown_font_scale,
                     );
+                    overlay_ids_touched.insert(rich_text_id);
                 }
                 continue;
             };
@@ -167,10 +192,32 @@ impl Screen<'_> {
                 markdown_animation_phase,
             );
             markdown_needs_redraw |= markdown.scroll_cursor_into_view(rect[1], rect[3]);
+            Self::sync_markdown_cover_overlay(
+                &mut self.sugarloaf,
+                &mut self.markdown_cover_cache,
+                item.val.rich_text_id,
+                markdown,
+                rect,
+                markdown_font_scale,
+            );
+            overlay_ids_touched.insert(item.val.rich_text_id);
             if show_overlay {
                 overlays.push((rect, markdown.path.clone(), markdown.scroll_y));
             }
         }
+
+        // Orphan sweep: clear overlays for every pane we fed LAST frame
+        // that didn't re-sync this frame — a cover whose pane left the
+        // composition (tab stashed to another grid, workspace switch,
+        // pane closed) otherwise stays screen-glued over whatever
+        // renders next. Terminals are untouched: their kitty overlays
+        // live on ids this sweep never owned.
+        for id in std::mem::take(&mut self.markdown_image_overlay_ids) {
+            if !overlay_ids_touched.contains(&id) {
+                self.sugarloaf.clear_image_overlays_for(id);
+            }
+        }
+        self.markdown_image_overlay_ids = overlay_ids_touched;
 
         // Composite the note's ink layer OVER the rendered markdown, in
         // content coordinates (zoom 1) offset by the scroll so it tracks the
@@ -278,6 +325,189 @@ impl Screen<'_> {
         let panel_overlays = sugarloaf.image_overlays.entry(rich_text_id).or_default();
         panel_overlays.clear();
         panel_overlays.extend(overlays);
+    }
+
+    /// Lay the `cover:` banner image over the band the shared renderer
+    /// reserved (`pane.cover_overlay_rect`): aspect-fill center-crop via
+    /// `source_rect`, clipped vertically to the pane as it scrolls.
+    fn sync_markdown_cover_overlay(
+        sugarloaf: &mut neoism_backend::sugarloaf::Sugarloaf<'_>,
+        cache: &mut std::collections::HashMap<
+            std::path::PathBuf,
+            Option<crate::screen::MarkdownCoverImage>,
+        >,
+        rich_text_id: usize,
+        markdown: &neoism_ui::editor::markdown::MarkdownPane,
+        pane_rect: [f32; 4],
+        font_scale: f32,
+    ) {
+        let Some(value) = markdown.frontmatter_cover() else {
+            return;
+        };
+        if markdown.cover_overlay_rect.is_none() {
+            return;
+        }
+        // Recompute the band HERE from authoritative frame inputs (pane
+        // rect + scroll + font scale, mirroring the shared surface's
+        // reservation math) instead of trusting the rect stashed during
+        // an earlier render — a stale rect painted the mostly-dark cover
+        // texture over live content, which read as "the paragraph turned
+        // black".
+        let bx = pane_rect[0];
+        let bw = pane_rect[2];
+        let bh = (170.0 * font_scale).min(pane_rect[3] * 0.35).max(0.0);
+        let by = pane_rect[1] - markdown.scroll_y.max(0.0);
+        if bw <= 0.0 || bh <= 0.0 {
+            return;
+        }
+        let Some(path) = Self::resolve_markdown_cover_path(&markdown.path, &value)
+        else {
+            return;
+        };
+        if let Some(Some(cover)) = cache.get(&path) {
+            // Texture evicted (context rebuild) — re-decode next frame.
+            if !sugarloaf.image_data.contains_key(&cover.image_id) {
+                cache.remove(&path);
+                return;
+            }
+        }
+        if !cache.contains_key(&path) {
+            let loaded = Self::load_markdown_cover(sugarloaf, &path);
+            cache.insert(path.clone(), loaded);
+        }
+        let Some(Some(cover)) = cache.get(&path) else {
+            return;
+        };
+
+        let pane_top = pane_rect[1];
+        let pane_bottom = pane_rect[1] + pane_rect[3];
+        let visible_top = by.max(pane_top);
+        let visible_bottom = (by + bh).min(pane_bottom);
+        if visible_bottom <= visible_top {
+            return;
+        }
+        let clip_top_fraction = (visible_top - by) / bh;
+        let clip_bottom_fraction = (visible_bottom - by) / bh;
+
+        // Aspect-fill: crop the source to the band's aspect ratio, then
+        // apply the scroll clip inside that cropped window.
+        let band_aspect = bw / bh;
+        let image_aspect = cover.width.max(1) as f32 / cover.height.max(1) as f32;
+        let (sx, sy, sw, sh) = if image_aspect > band_aspect {
+            let sw = (band_aspect / image_aspect).clamp(0.0, 1.0);
+            ((1.0 - sw) * 0.5, 0.0, sw, 1.0)
+        } else {
+            let sh = (image_aspect / band_aspect).clamp(0.0, 1.0);
+            (0.0, (1.0 - sh) * 0.5, 1.0, sh)
+        };
+        // `source_rect` is CORNERS `[u0, v0, u1, v1]`, not (origin,
+        // size) — passing a size here read fine at rest ([0,0,1,1] is
+        // identical in both conventions) but inverted the sampler the
+        // moment the scroll clip shrank the band: v1 fell below v0 and
+        // the image drew squashed and upside-down.
+        let source_rect = [
+            sx,
+            sy + sh * clip_top_fraction,
+            sx + sw,
+            sy + sh * clip_bottom_fraction,
+        ];
+
+        let scale = sugarloaf.scale_factor();
+        sugarloaf
+            .image_overlays
+            .entry(rich_text_id)
+            .or_default()
+            .push(neoism_backend::sugarloaf::GraphicOverlay {
+                image_id: cover.image_id,
+                x: bx * scale,
+                y: visible_top * scale,
+                width: bw * scale,
+                height: (visible_bottom - visible_top) * scale,
+                // ABOVE text (z >= 0): the BelowText layer renders under
+                // the pane's opaque background rect, which blacked the
+                // picture out entirely. Content can never overlap the
+                // band by construction (pad_top reserves it and the
+                // scroll crop shrinks the band in step), so AboveText is
+                // safe here.
+                z_index: 1,
+                source_rect,
+            });
+    }
+
+    /// Resolve a `cover:` value: absolute paths and `./`-style relatives
+    /// (against the note's directory) pass through; bare names look up
+    /// the shipped/user covers directory (`<config>/covers/`), trying
+    /// common image extensions.
+    fn resolve_markdown_cover_path(
+        md_path: &std::path::Path,
+        value: &str,
+    ) -> Option<std::path::PathBuf> {
+        let raw = std::path::Path::new(value);
+        if raw.is_absolute() {
+            return raw.exists().then(|| raw.to_path_buf());
+        }
+        if value.contains('/') {
+            let joined = md_path.parent()?.join(raw);
+            return joined.exists().then_some(joined);
+        }
+        let covers = neoism_backend::config::config_dir_path().join("covers");
+        let exact = covers.join(value);
+        if exact.exists() {
+            return Some(exact);
+        }
+        for ext in ["png", "jpg", "jpeg", "webp"] {
+            let candidate = covers.join(format!("{value}.{ext}"));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn load_markdown_cover(
+        sugarloaf: &mut neoism_backend::sugarloaf::Sugarloaf<'_>,
+        path: &std::path::Path,
+    ) -> Option<crate::screen::MarkdownCoverImage> {
+        let image = image_rs::open(path)
+            .map_err(|error| {
+                tracing::warn!(?path, %error, "cover image decode failed");
+                error
+            })
+            .ok()?;
+        let rgba = image.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let image_id = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            path.hash(&mut hasher);
+            // High bit keeps cover ids out of the notebook-output id space.
+            (hasher.finish() as u32) | (1u32 << 30)
+        };
+        sugarloaf.image_data.insert(
+            image_id,
+            neoism_backend::sugarloaf::GraphicDataEntry::from_graphic_data(
+                neoism_backend::sugarloaf::GraphicData {
+                    id: neoism_backend::sugarloaf::GraphicId::new(image_id as u64),
+                    width: width as usize,
+                    height: height as usize,
+                    color_type: neoism_backend::sugarloaf::ColorType::Rgba,
+                    pixels: rgba.into_raw(),
+                    is_opaque: true,
+                    resize: None,
+                    display_width: None,
+                    display_height: None,
+                    transmit_time: web_time::Instant::now(),
+                },
+            ),
+        );
+        Some(crate::screen::MarkdownCoverImage {
+            image_id,
+            width,
+            height,
+        })
     }
 
     fn notebook_image_overlay_size(

@@ -59,3 +59,10 @@ pub const FONT_CASCADIAMONO_SEMI_LIGHT_ITALIC: &[u8] =
 
 pub const FONT_SYMBOLS_NERD_FONT_MONO: &[u8] =
     font!("./resources/SymbolsNerdFontMono/SymbolsNerdFontMono-Regular.ttf");
+
+/// "Press Start 2P" (Google Fonts, SIL OFL 1.1 — see the OFL.txt beside the
+/// TTF) — the arcade pixel face feature UIs opt into by family name via
+/// `font_id_for_family("Press Start 2P")` (e.g. the agent side-panel
+/// headings). Registered with the other bundled fonts at library load.
+pub const FONT_PRESS_START_2P: &[u8] =
+    font!("./resources/PressStart2P/PressStart2P-Regular.ttf");

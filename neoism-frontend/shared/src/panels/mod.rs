@@ -55,7 +55,9 @@ mod chrome_shim;
 pub(crate) mod chrome_shim_more;
 
 pub use buffer_tabs::{AgentIconProvider, AgentLabel, BufferTabs};
-pub use chrome_topbar::{ChromeTopBar, TopBarAction, CHROME_TOPBAR_HEIGHT};
+pub use chrome_topbar::{
+    ChromeTopBar, ServerIndicatorStatus, TopBarAction, CHROME_TOPBAR_HEIGHT,
+};
 pub use command_composer::CommandComposer;
 pub use command_palette::CommandPalette;
 pub use extensions_page::{

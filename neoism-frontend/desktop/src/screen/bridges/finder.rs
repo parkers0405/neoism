@@ -278,6 +278,33 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    /// Search-plane reply from the daemon (finder searches for JOINED
+    /// workspaces run on the host's disk). Routes into the shared
+    /// finder's pending-request handler; returns true when the reply
+    /// was consumed and the frame needs a redraw.
+    pub(crate) fn apply_daemon_search_message(
+        &mut self,
+        request_id: u64,
+        message: &neoism_protocol::search::SearchServerMessage,
+    ) -> bool {
+        if !self.renderer.finder.is_enabled() {
+            return false;
+        }
+        let Ok(payload) = serde_json::to_value(message) else {
+            return false;
+        };
+        let renderer = &mut self.renderer;
+        let consumed = renderer.finder.handle_service_reply(
+            request_id,
+            &payload,
+            &renderer.finder_search,
+        );
+        if consumed {
+            self.mark_dirty();
+        }
+        consumed
+    }
+
     pub fn open_finder_selection(&mut self) {
         let Some((path, line)) = self.renderer.finder.selected_open_target() else {
             return;

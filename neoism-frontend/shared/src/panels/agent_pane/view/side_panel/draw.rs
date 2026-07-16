@@ -454,11 +454,16 @@ pub(crate) fn render_sessions_list(
         clip_rect: Some(list_rect),
         ..DrawOpts::default()
     };
-    // Cyan date-group / "Pinned" header rows, matching the /sessions modal.
+    // Cyan date-group / "Pinned" header rows, matching the /sessions modal —
+    // drawn in the bundled "Press Start 2P" pixel face like the section
+    // headers above (falls back to the default font when it can't resolve).
+    // Size is unchanged: ~12px pixel-face date labels still fit the panel.
+    let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
     let header_opts = DrawOpts {
         font_size: FONT_SIZE * s * 0.92,
         color: theme.u8(theme.cyan),
         bold: true,
+        font_id: pixel_font,
         clip_rect: Some(list_rect),
         ..DrawOpts::default()
     };

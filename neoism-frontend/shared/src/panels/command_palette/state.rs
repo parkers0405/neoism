@@ -14,8 +14,8 @@ use web_time::Instant;
 use crate::animation::CriticallyDampedSpring;
 
 use super::actions::{
-    PaletteBufferEntry, PaletteHostEntry, PaletteShaderEntry, PaletteSurface,
-    PaletteWorkspaceEntry,
+    PaletteBufferEntry, PaletteHostEntry, PaletteServerEntry, PaletteShaderEntry,
+    PaletteSurface, PaletteWorkspaceEntry,
 };
 use super::modes::PaletteMode;
 use super::MAX_RECENT_SEARCHES;
@@ -57,6 +57,9 @@ pub struct CommandPalette {
     pub(super) enabled: bool,
     pub query: String,
     pub selected_index: usize,
+    pub(super) hovered_index: Option<usize>,
+    pub(super) server_edit_hit: Option<([f32; 4], String)>,
+    pub(super) server_remove_hit: Option<([f32; 4], String)>,
     pub(super) scroll_offset: usize,
     pub has_adaptive_theme: bool,
     /// Which list the palette is showing (commands or fonts).
@@ -143,6 +146,9 @@ impl Default for CommandPalette {
             enabled: false,
             query: String::new(),
             selected_index: 0,
+            hovered_index: None,
+            server_edit_hit: None,
+            server_remove_hit: None,
             scroll_offset: 0,
             has_adaptive_theme: false,
             mode: PaletteMode::Commands,
@@ -241,6 +247,7 @@ impl CommandPalette {
         self.mode = PaletteMode::Ex;
         self.query.clear();
         self.selected_index = 0;
+        self.hovered_index = None;
         self.scroll_offset = 0;
         self.caret_blink_start = Instant::now();
         self.last_scroll_time = None;
@@ -396,6 +403,39 @@ impl CommandPalette {
     /// no change — the grouping happens in `grouped_workspace_rows`.
     pub fn enter_workspaces_mode(&mut self, workspaces: Vec<PaletteWorkspaceEntry>) {
         self.enter_workspaces_mode_with_hosts(workspaces, Vec::new());
+    }
+
+    /// Open the minimal server picker. The final Add row remains visible
+    /// while filtering so a missing server can always be added directly.
+    pub fn enter_servers_mode(&mut self, servers: Vec<PaletteServerEntry>) {
+        self.enabled = true;
+        self.mode = PaletteMode::Servers(servers);
+        self.query.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.caret_blink_start = Instant::now();
+        self.last_scroll_time = None;
+        self.reset_motion();
+        self.start_open_pop();
+    }
+
+    pub fn update_server_status(
+        &mut self,
+        server_id: &str,
+        status: crate::panels::ServerIndicatorStatus,
+    ) -> bool {
+        let PaletteMode::Servers(servers) = &mut self.mode else {
+            return false;
+        };
+        let Some(server) = servers.iter_mut().find(|server| server.id == server_id)
+        else {
+            return false;
+        };
+        if server.status == status {
+            return false;
+        }
+        server.status = status;
+        true
     }
 
     /// [`Self::enter_workspaces_mode`], plus workspace-less hosts (Wave

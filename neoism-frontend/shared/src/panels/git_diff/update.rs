@@ -9,7 +9,8 @@ use crate::widgets::diff_card;
 
 use super::state::GitDiffPanel;
 use super::types::{
-    FileChange, FocusSection, PanelHit, ScrollbarKind, VisualRow, VisualRowKind,
+    FileChange, FocusSection, PanelData, PanelHit, ScrollbarKind, VisualRow,
+    VisualRowKind,
 };
 use super::{
     FILE_ROW_HEIGHT, FILE_SCROLL_OFF_ROWS, PANEL_MAX_WIDTH, PANEL_MIN_WIDTH,
@@ -451,6 +452,15 @@ impl GitDiffPanel {
         self.commit_focused = false;
         self.branch_menu_open = false;
         self.open_started_at = None;
+        self.clear_pending();
+    }
+
+    pub fn reset_for_server_switch(&mut self) {
+        self.close();
+        if let Ok(mut data) = self.data.lock() {
+            *data = PanelData::default();
+        }
+        self.selected = 0;
         self.clear_pending();
     }
 

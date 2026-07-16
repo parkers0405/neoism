@@ -15,7 +15,7 @@
 //! - [`apply_generated_task_updates`] — parse a tasks-view markdown
 //!   buffer and write the underlying note files' checkbox state.
 //! - [`build_workspace_note_index`] / [`run_workspace_note_index_job`]
-//!   — the background init/reindex job body.
+//!   — the background reindex job body.
 //!
 //! Native-only because `neoism_workspace_index` (sqlx + tokio + notify)
 //! isn't in the wasm dep set. Web equivalents will arrive when the
@@ -30,11 +30,11 @@ use neoism_protocol::workspace::{
     generated_task_source_marker, parse_generated_task_update, set_task_line_checked,
 };
 
-/// Whether the background indexing job is initializing a workspace for
-/// the first time or rebuilding the index for an existing one.
+/// What the background indexing job is doing. Only rebuilds remain —
+/// the legacy per-project "Init Neoism Workspace" surface is gone; the
+/// vault model resolves a notes workspace without initializing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceNoteIndexAction {
-    Init,
     Reindex,
 }
 
@@ -93,12 +93,12 @@ pub fn build_workspace_note_index(
     String,
 > {
     let workspace = match action {
-        WorkspaceNoteIndexAction::Init => {
-            neo_workspace::init_workspace(&root).map_err(|err| err.to_string())?
-        }
+        // No `.neoism/workspace.toml` at `root` is fine: fall back to
+        // the global Default vault instead of demanding the removed
+        // per-project init step.
         WorkspaceNoteIndexAction::Reindex => neo_workspace::load_workspace(&root)
             .map_err(|err| err.to_string())?
-            .ok_or_else(|| "Run Init Neoism Workspace first".to_string())?,
+            .unwrap_or_else(neo_workspace::default_notes_workspace),
     };
 
     let index = WorkspaceNoteIndex::build(&workspace).map_err(|err| err.to_string())?;

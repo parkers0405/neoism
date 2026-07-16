@@ -28,6 +28,7 @@ use futures::{SinkExt, StreamExt};
 use neoism_protocol::crdt::{CrdtClientMessage, CrdtServerMessage};
 use neoism_protocol::editor::{EditorClientMessage, EditorServerMessage};
 use neoism_protocol::files::{FilesClientMessage, FilesServerMessage};
+use neoism_protocol::search::{SearchClientMessage, SearchServerMessage};
 use neoism_protocol::git::{GitClientMessage, GitServerMessage};
 use neoism_protocol::pty::{
     ClientMessage as PtyClientMessage, ServerMessage as PtyServerMessage,
@@ -318,6 +319,24 @@ impl DaemonClientHandle {
             .await
             .map_err(|_| DaemonClientError::ChannelClosed)
     }
+
+    /// Search-plane request (finder file/grep/git searches served by
+    /// the daemon's host-side `rg`/`fff` for JOINED workspaces). The
+    /// message carries its own `req_id`; `request_id` is the envelope
+    /// correlation id — callers pass the same value for both.
+    pub async fn send_search_with_request_id(
+        &self,
+        request_id: u64,
+        message: SearchClientMessage,
+    ) -> Result<()> {
+        self.tx
+            .send(OutboundServiceMessage::Search {
+                request_id,
+                message,
+            })
+            .await
+            .map_err(|_| DaemonClientError::ChannelClosed)
+    }
 }
 
 pub struct DaemonClient {
@@ -423,6 +442,12 @@ pub enum DaemonServerMessage {
         request_id: u64,
         message: FilesServerMessage,
     },
+    /// Search-plane reply — finder file/grep/git hits computed on the
+    /// daemon host for JOINED workspaces.
+    Search {
+        request_id: u64,
+        message: SearchServerMessage,
+    },
     /// Git-plane reply (status/diff/log) or unsolicited branch push.
     Git {
         request_id: u64,
@@ -437,6 +462,7 @@ impl DaemonServerMessage {
             | Self::Editor { request_id, .. }
             | Self::Crdt { request_id, .. }
             | Self::Files { request_id, .. }
+            | Self::Search { request_id, .. }
             | Self::Git { request_id, .. } => *request_id,
             Self::Pty { .. } => 0,
         }
@@ -661,6 +687,10 @@ enum OutboundServiceMessage {
         workspace_root: Option<PathBuf>,
         message: GitClientMessage,
     },
+    Search {
+        request_id: u64,
+        message: SearchClientMessage,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -690,6 +720,10 @@ enum ServiceClientMessage<'a> {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace_root: Option<&'a Path>,
         message: &'a GitClientMessage,
+    },
+    Search {
+        request_id: u64,
+        message: &'a SearchClientMessage,
     },
 }
 
@@ -751,6 +785,13 @@ fn serialize_outbound_service_message(
         } => ServiceClientMessage::Git {
             request_id: *request_id,
             workspace_root: workspace_root.as_deref(),
+            message,
+        },
+        OutboundServiceMessage::Search {
+            request_id,
+            message,
+        } => ServiceClientMessage::Search {
+            request_id: *request_id,
             message,
         },
     };
@@ -837,6 +878,19 @@ fn parse_server_frame(frame: Message) -> Result<Option<DaemonServerMessage>> {
                 message: parsed.message,
             }))
         }
+        "SearchReply" => {
+            #[derive(Debug, Deserialize)]
+            struct SearchPayload {
+                #[serde(default)]
+                request_id: u64,
+                message: SearchServerMessage,
+            }
+            let parsed: SearchPayload = serde_json::from_value(payload.clone())?;
+            Ok(Some(DaemonServerMessage::Search {
+                request_id: parsed.request_id,
+                message: parsed.message,
+            }))
+        }
         "CrdtReply" => {
             #[derive(Debug, Deserialize)]
             struct CrdtPayload {
@@ -868,6 +922,7 @@ fn ack_pending(pending: &mut VecDeque<OutboundServiceMessage>, request_id: u64) 
         | OutboundServiceMessage::Pty { request_id: id, .. }
         | OutboundServiceMessage::Crdt { request_id: id, .. }
         | OutboundServiceMessage::Files { request_id: id, .. }
+        | OutboundServiceMessage::Search { request_id: id, .. }
         | OutboundServiceMessage::Git { request_id: id, .. } => *id == request_id,
     }) {
         pending.remove(index);

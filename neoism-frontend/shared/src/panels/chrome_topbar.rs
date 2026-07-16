@@ -15,10 +15,11 @@
 //!   panel" without learning a new symbol. Clicking it dispatches
 //!   [`TopBarAction::TogglePanel`], which the host wires to
 //!   [`crate::chrome::Chrome::toggle_file_tree`].
-//! - Right: hamburger menu (\u{f0c9}). Click toggles a dropdown that
+//! - Left: hamburger menu (\u{f0c9}) beside the panel toggle. Its dropdown
 //!   lists `Settings`, `Themes`, `Extensions`. Each item dispatches the
 //!   matching `TopBarAction::Open*` variant; the host owns the actual
 //!   destination screens (none yet — those land in a follow-up).
+//! - Right: a standalone server-rack button with a connection-status dot.
 //!
 //! The strip is render-only on the shared crate: it doesn't reach into
 //! `Chrome` state. Chrome drains [`ChromeTopBar::take_action`] each
@@ -76,11 +77,20 @@ pub enum TopBarAction {
     /// when the host has enabled the right button via
     /// `set_right_button_visible(true)`.
     ToggleRightPanel,
+    OpenServers,
     OpenSettings,
     OpenWorkspaces,
     StartWebServer,
     OpenThemes,
     OpenExtensions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerIndicatorStatus {
+    Unknown,
+    Connecting,
+    Online,
+    Offline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,12 +152,15 @@ pub struct ChromeTopBar {
     /// activate the wrong region.
     panel_btn_rect: Rect,
     menu_btn_rect: Rect,
+    server_btn_rect: Rect,
     right_btn_rect: Rect,
     menu_rect: Rect,
     hover_panel_btn: bool,
     hover_menu_btn: bool,
+    hover_server_btn: bool,
     hover_right_btn: bool,
     hover_menu_item: Option<usize>,
+    server_status: ServerIndicatorStatus,
     pending_action: Option<TopBarAction>,
 }
 
@@ -163,12 +176,15 @@ impl ChromeTopBar {
             left_safe_inset: 0.0,
             panel_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            server_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             right_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             hover_panel_btn: false,
             hover_menu_btn: false,
+            hover_server_btn: false,
             hover_right_btn: false,
             hover_menu_item: None,
+            server_status: ServerIndicatorStatus::Unknown,
             pending_action: None,
         }
     }
@@ -196,6 +212,10 @@ impl ChromeTopBar {
     /// side panel) so the button can paint in its active accent style.
     pub fn set_right_panel_open(&mut self, open: bool) {
         self.right_panel_open = open;
+    }
+
+    pub fn set_server_status(&mut self, status: ServerIndicatorStatus) {
+        self.server_status = status;
     }
 
     pub fn set_left_safe_inset(&mut self, inset: f32) {
@@ -286,8 +306,9 @@ impl ChromeTopBar {
         let left_x = strip.x + edge + self.left_safe_inset * scale;
         self.panel_btn_rect = Rect::new(left_x, cy, btn, btn);
         self.menu_btn_rect = Rect::new(left_x + btn + gap, cy, btn, btn);
+        self.server_btn_rect = Rect::new(strip.x + strip.w - edge - btn, cy, btn, btn);
         self.right_btn_rect = if self.right_button_visible {
-            Rect::new(strip.x + strip.w - edge - btn, cy, btn, btn)
+            Rect::new(self.server_btn_rect.x - gap - btn, cy, btn, btn)
         } else {
             Rect::new(0.0, 0.0, 0.0, 0.0)
         };
@@ -322,6 +343,7 @@ impl ChromeTopBar {
         let handled = self.handle_pointer_down(x, y);
         let inside_strip = self.panel_btn_rect.contains(x, y)
             || self.menu_btn_rect.contains(x, y)
+            || self.server_btn_rect.contains(x, y)
             || (self.right_button_visible && self.right_btn_rect.contains(x, y))
             || self
                 .menu_overlay_rect()
@@ -333,6 +355,7 @@ impl ChromeTopBar {
     fn handle_pointer_move(&mut self, x: f32, y: f32) {
         self.hover_panel_btn = self.panel_btn_rect.contains(x, y);
         self.hover_menu_btn = self.menu_btn_rect.contains(x, y);
+        self.hover_server_btn = self.server_btn_rect.contains(x, y);
         self.hover_right_btn =
             self.right_button_visible && self.right_btn_rect.contains(x, y);
         self.hover_menu_item = if self.menu_open {
@@ -350,6 +373,11 @@ impl ChromeTopBar {
         }
         if self.menu_btn_rect.contains(x, y) {
             self.menu_open = !self.menu_open;
+            return true;
+        }
+        if self.server_btn_rect.contains(x, y) {
+            self.pending_action = Some(TopBarAction::OpenServers);
+            self.menu_open = false;
             return true;
         }
         if self.right_button_visible && self.right_btn_rect.contains(x, y) {
@@ -425,7 +453,7 @@ impl ChromeTopBar {
             self.panel_open.then_some(ActiveHalf::Left),
             theme,
         );
-        // Hamburger button (left, right of the panel toggle).
+        // Hamburger remains immediately beside the left panel toggle.
         self.draw_icon_button(
             sugarloaf,
             self.menu_btn_rect,
@@ -434,7 +462,10 @@ impl ChromeTopBar {
             None,
             theme,
         );
-        // Right-side agent panel toggle. Same glyph as the left panel
+        // Standalone server selector at the far-right edge.
+        self.draw_server_button(sugarloaf, theme);
+
+        // Agent panel toggle sits immediately left of the server selector.
         // toggle so the user reads "open / close a side panel" without
         // a second symbol. Only rendered when the host has flagged an
         // agent side panel as present; its right pane fills with the
@@ -510,6 +541,99 @@ impl ChromeTopBar {
             sugarloaf.text_mut().draw(gx, gy, glyph, &accent_opts);
         }
         let _ = ORDER_ICON;
+    }
+
+    fn draw_server_button(&self, sugarloaf: &mut Sugarloaf, theme: &IdeTheme) {
+        let rect = self.server_btn_rect;
+        if self.hover_server_btn {
+            sugarloaf.rect(
+                None,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                theme.f32_alpha(theme.hover, 0.85),
+                DEPTH,
+                ORDER_HOVER,
+            );
+        }
+
+        let scale = self.scale;
+        let rack_w = 12.0 * scale;
+        let rack_x = rect.x + (rect.w - rack_w) * 0.5;
+        let rack_y = rect.y + (rect.h - 14.0 * scale) * 0.5;
+        let stroke = scale.max(1.0);
+        let color = if self.hover_server_btn {
+            theme.f32(theme.fg)
+        } else {
+            theme.f32(theme.dim)
+        };
+
+        for row in 0..3 {
+            let y = rack_y + row as f32 * 5.0 * scale;
+            sugarloaf.rect(None, rack_x, y, rack_w, stroke, color, DEPTH, ORDER_ICON);
+            sugarloaf.rect(
+                None,
+                rack_x,
+                y + 3.0 * scale,
+                rack_w,
+                stroke,
+                color,
+                DEPTH,
+                ORDER_ICON,
+            );
+            sugarloaf.rect(
+                None,
+                rack_x,
+                y,
+                stroke,
+                4.0 * scale,
+                color,
+                DEPTH,
+                ORDER_ICON,
+            );
+            // Closing edge — without it the rack units read as open
+            // brackets instead of boxes.
+            sugarloaf.rect(
+                None,
+                rack_x + rack_w - stroke,
+                y,
+                stroke,
+                4.0 * scale,
+                color,
+                DEPTH,
+                ORDER_ICON,
+            );
+            sugarloaf.rect(
+                None,
+                rack_x + 2.5 * scale,
+                y + 1.4 * scale,
+                1.5 * scale,
+                1.5 * scale,
+                color,
+                DEPTH,
+                ORDER_ICON,
+            );
+        }
+
+        let dot = 5.0 * scale;
+        let dot_color = match self.server_status {
+            ServerIndicatorStatus::Online => theme.green,
+            ServerIndicatorStatus::Connecting => theme.yellow,
+            ServerIndicatorStatus::Offline => theme.red,
+            ServerIndicatorStatus::Unknown => theme.dim,
+        };
+        sugarloaf.rounded_rect(
+            None,
+            rect.x + rect.w - dot - scale,
+            rect.y + scale,
+            dot,
+            dot,
+            theme.f32(dot_color),
+            DEPTH,
+            dot * 0.5,
+            ORDER_ICON + 1,
+        );
     }
 
     fn draw_menu(&self, sugarloaf: &mut Sugarloaf, theme: &IdeTheme) {
@@ -686,8 +810,36 @@ mod tests {
         let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
         paint_strip(&mut bar, strip);
 
-        assert!(bar.menu_btn_rect.x > bar.panel_btn_rect.x);
         assert_eq!(bar.panel_btn_rect.x, EDGE_PAD_X + 76.0);
+        assert_eq!(
+            bar.menu_btn_rect.x,
+            bar.panel_btn_rect.x + bar.panel_btn_rect.w + BTN_GAP
+        );
+        assert_eq!(
+            bar.server_btn_rect.x,
+            strip.x + strip.w - EDGE_PAD_X - BTN_SIZE
+        );
+    }
+
+    #[test]
+    fn server_is_far_right_and_agent_toggle_precedes_it() {
+        let mut bar = ChromeTopBar::new();
+        bar.set_right_button_visible(true);
+        let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
+        paint_strip(&mut bar, strip);
+
+        assert_eq!(
+            bar.server_btn_rect.x,
+            strip.x + strip.w - EDGE_PAD_X - BTN_SIZE
+        );
+        assert_eq!(
+            bar.right_btn_rect.x + bar.right_btn_rect.w + BTN_GAP,
+            bar.server_btn_rect.x
+        );
+
+        let server = bar.server_btn_rect;
+        bar.handle_pointer_down(server.x + server.w * 0.5, server.y + server.h * 0.5);
+        assert_eq!(bar.take_action(), Some(TopBarAction::OpenServers));
     }
 
     #[test]
@@ -700,10 +852,7 @@ mod tests {
         assert!(bar.is_menu_open());
         assert_eq!(bar.take_action(), None);
 
-        // Click the "Themes" item. `MenuItem::ALL` order is
-        // [Settings, Workspaces, StartWebServer, Themes, Extensions],
-        // so Themes is index 3 (the comment + index here were stale from
-        // before Workspaces / Start Web Server were inserted above it).
+        // Locate Themes by action so menu additions cannot stale this test.
         let themes_ix = MenuItem::ALL
             .iter()
             .position(|item| item.action() == TopBarAction::OpenThemes)

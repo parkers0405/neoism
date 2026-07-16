@@ -252,15 +252,16 @@ fn ensure_virtual_cursor_visible(pane: &mut MarkdownPane, clip: [f32; 4]) {
         return;
     }
     let caret_h = (block.line_height * 0.82).max(10.0);
-    let rect = [
-        x,
-        y + (block.line_height - caret_h).max(0.0) * 0.25,
-        block.cell_width,
-        caret_h,
-    ];
-    if rect_intersects_clip(rect, Some(clip)) {
-        pane.set_cursor_rect(Some(rect));
-    }
+    set_cursor_rect_clipped(
+        pane,
+        [
+            x,
+            y + (block.line_height - caret_h).max(0.0) * 0.25,
+            block.cell_width,
+            caret_h,
+        ],
+        Some(clip),
+    );
 }
 
 fn set_cursor_rect_clipped(
@@ -268,8 +269,20 @@ fn set_cursor_rect_clipped(
     rect: [f32; 4],
     clip: Option<[f32; 4]>,
 ) {
-    if rect_intersects_clip(rect, clip) {
+    // Clamp (not just intersect-test) the caret to the pane clip: the
+    // trail-cursor overlay draws this rect verbatim, so a caret on a
+    // line half-scrolled under the chrome must shrink to its visible
+    // slice instead of phasing through the top bar.
+    let Some(clip) = clip else {
         pane.set_cursor_rect(Some(rect));
+        return;
+    };
+    let x0 = rect[0].max(clip[0]);
+    let y0 = rect[1].max(clip[1]);
+    let x1 = (rect[0] + rect[2]).min(clip[0] + clip[2]);
+    let y1 = (rect[1] + rect[3]).min(clip[1] + clip[3]);
+    if x1 > x0 && y1 > y0 {
+        pane.set_cursor_rect(Some([x0, y0, x1 - x0, y1 - y0]));
     }
 }
 
@@ -350,16 +363,3 @@ fn set_fallback_cursor_for_empty_virtual_markdown(
     );
 }
 
-fn rect_intersects_clip(rect: [f32; 4], clip: Option<[f32; 4]>) -> bool {
-    let Some(clip) = clip else {
-        return true;
-    };
-    let rect_right = rect[0] + rect[2];
-    let rect_bottom = rect[1] + rect[3];
-    let clip_right = clip[0] + clip[2];
-    let clip_bottom = clip[1] + clip[3];
-    rect_right >= clip[0]
-        && rect[0] <= clip_right
-        && rect_bottom >= clip[1]
-        && rect[1] <= clip_bottom
-}

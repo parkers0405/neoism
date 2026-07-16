@@ -14,8 +14,8 @@ use neoism_ui::primitives::ide_theme::{
     parse_theme_hex, replace_custom_ide_themes, IdeTheme,
 };
 use neoism_ui::primitives::look::{
-    intern_glyph, set_active_look, CheckboxLook, IconOverride, LookStyle,
-    MarkdownStyle, ScrollbarStyle,
+    intern_glyph, set_active_look, CheckboxLook, IconOverride, LookStyle, MarkdownStyle,
+    ScrollbarStyle,
 };
 
 /// Re-scan `ide-themes/*.toml` + pack `theme.toml`s into the shared
@@ -26,8 +26,7 @@ pub fn sync_custom_ide_themes() {
     let themes = load_ide_theme_specs()
         .into_iter()
         .map(|spec| {
-            let (theme, warnings) =
-                IdeTheme::from_overrides(&spec.extends, &spec.colors);
+            let (theme, warnings) = IdeTheme::from_overrides(&spec.extends, &spec.colors);
             for warning in warnings {
                 tracing::warn!(
                     target: "neoism::mashup",
@@ -87,10 +86,7 @@ pub fn mashup_palette_entries() -> Vec<PaletteMashupEntry> {
 /// and publish the result to the shared `active_look` cell that draw
 /// sites read. `active_pack` lets the pack-apply path publish
 /// immediately instead of waiting for the config-write hot-reload.
-pub fn publish_active_look(
-    config_look: &LookConfig,
-    active_pack: Option<&str>,
-) {
+pub fn publish_active_look(config_look: &LookConfig, active_pack: Option<&str>) {
     let pack_look = active_pack
         .map(str::trim)
         .filter(|id| !id.is_empty())
@@ -182,9 +178,9 @@ pub fn vim_theme_command(name: &str) -> String {
                 &theme.lua_palette_pairs(),
             )
         }
-        _ => neoism_backend::performer::nvim::vim_apply_theme_command(
-            theme.name.as_str(),
-        ),
+        _ => {
+            neoism_backend::performer::nvim::vim_apply_theme_command(theme.name.as_str())
+        }
     }
 }
 

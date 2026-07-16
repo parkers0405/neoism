@@ -8,23 +8,24 @@ use std::path::{Path, PathBuf};
 
 const NOTES_INDEX_MODAL_TITLE: &str = "Indexing Notes";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkspaceNoteIndexAction {
-    Init,
-    Reindex,
-}
-
+/// Result shape for the background note-index channel
+/// (`Screen::workspace_note_index_rx`, drained by
+/// `drain_workspace_note_index_events` on `WorkspaceNotesWake`). The
+/// legacy per-project "Init Neoism Workspace" job — the only producer —
+/// was removed with the vault-model cutover, so nothing constructs
+/// these variants today; the rx slot and its wake/drain call sites
+/// (screen/mod.rs, app/mod.rs, render/status_sync.rs) are kept for the
+/// next background-indexing producer.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum WorkspaceNoteIndexUpdate {
     Indexed {
-        action: WorkspaceNoteIndexAction,
         workspace: neo_workspace::config::NeoismWorkspace,
         index: WorkspaceNoteIndex,
         notes: usize,
         links: usize,
     },
     Failed {
-        action: WorkspaceNoteIndexAction,
         root: PathBuf,
         error: String,
     },
@@ -478,10 +479,12 @@ fn safe_path_component(value: &str) -> String {
 fn active_notes_workspace_for_root(
     root: &Path,
 ) -> Option<neo_workspace::config::NeoismWorkspace> {
-    if let Ok(Some(workspace)) = neo_workspace::linked_project_for_code_dir(root) {
-        return Some(workspace);
-    }
-    neo_workspace::load_workspace(root).ok().flatten()
+    // LINKED projects (vault `project.toml`) get their vault; everything
+    // else falls straight to the global Default vault. The old middle
+    // step — honoring a per-project `.neoism/workspace.toml` vault
+    // selection — is retired with the rest of the per-project notes
+    // model: unlinked dirs must always mean Default.
+    neo_workspace::linked_project_for_code_dir(root).ok().flatten()
 }
 
 /// Resolve an explicitly linked/project vault when one exists; otherwise use
@@ -499,55 +502,6 @@ fn notes_sidebar_workspace_name(
     workspace: &neo_workspace::config::NeoismWorkspace,
 ) -> String {
     workspace.config.notes.workspace.clone()
-}
-
-fn run_workspace_note_index_job(
-    root: PathBuf,
-    action: WorkspaceNoteIndexAction,
-) -> WorkspaceNoteIndexUpdate {
-    match build_workspace_note_index(root.clone(), action) {
-        Ok((workspace, index, notes, links)) => WorkspaceNoteIndexUpdate::Indexed {
-            action,
-            workspace,
-            index,
-            notes,
-            links,
-        },
-        Err(error) => WorkspaceNoteIndexUpdate::Failed {
-            action,
-            root,
-            error,
-        },
-    }
-}
-
-fn build_workspace_note_index(
-    root: PathBuf,
-    action: WorkspaceNoteIndexAction,
-) -> Result<
-    (
-        neo_workspace::config::NeoismWorkspace,
-        WorkspaceNoteIndex,
-        usize,
-        usize,
-    ),
-    String,
-> {
-    let workspace = match action {
-        WorkspaceNoteIndexAction::Init => {
-            neo_workspace::init_workspace(&root).map_err(|err| err.to_string())?
-        }
-        WorkspaceNoteIndexAction::Reindex => neo_workspace::load_workspace(&root)
-            .map_err(|err| err.to_string())?
-            .ok_or_else(|| "Run Init Neoism Workspace first".to_string())?,
-    };
-
-    let index = WorkspaceNoteIndex::build(&workspace).map_err(|err| err.to_string())?;
-    let notes = index.notes.len();
-    let links = index.links.len();
-    neo_workspace::rebuild_note_graph(&workspace, &index)
-        .map_err(|err| err.to_string())?;
-    Ok((workspace, index, notes, links))
 }
 
 #[cfg(test)]

@@ -1,4 +1,3 @@
-
 //! Right-attached side panel for the Neoism agent pane.
 //!
 //! Mirrors the visual shape of `editor/file_tree` (frame + scroll spring

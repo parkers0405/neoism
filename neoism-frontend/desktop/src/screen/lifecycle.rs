@@ -55,6 +55,9 @@ fn modal_action_policy_tag(
     use neoism_ui::widgets::modal::ModalAction as A;
     match action {
         A::Close => Tag::Close,
+        // Footer settings menu one-shots — plain UI opens, same class
+        // as Close (no fs mutation, no prompt).
+        A::NotesOpenGraph | A::NotesOpenCreateMenu => Tag::Close,
         A::InstallLsp { .. } => Tag::InstallLsp,
         A::InstallPythonKernel => Tag::InstallPythonKernel,
         A::InstallTreesitter { .. } => Tag::InstallTreesitter,
@@ -85,6 +88,8 @@ fn modal_action_policy_tag(
         A::FileTreeRename { .. } => Tag::FileTreeRename,
         A::RenameTab { .. } => Tag::RenameTab,
         A::NotesVaultPromptAdd => Tag::NotesVaultPromptAdd,
+        A::ServerFormSubmit => Tag::ServerFormSubmit,
+        A::ServerRemoveConfirm { .. } => Tag::ServerRemoveConfirm,
         A::NotesVaultAdd { .. } => Tag::NotesVaultAdd,
         A::NotesVaultPromptRename => Tag::NotesVaultPromptRename,
         A::NotesVaultRename { .. } => Tag::NotesVaultRename,

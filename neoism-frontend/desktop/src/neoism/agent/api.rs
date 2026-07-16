@@ -26,33 +26,7 @@ use neoism_ui::panels::agent_pane::session_group::{
 const SUBAGENT_TREE_MAX_DEPTH: usize = 5;
 const SUBAGENT_TREE_MAX_ROWS: usize = 80;
 
-/// When the ACTIVE workspace is remote-joined, the agent pane must
-/// talk to the HOST machine's agent-server (chats, threads, SSE all
-/// live there), reached through the host daemon's `/agent` reverse
-/// proxy. `None` = local default.
-static AGENT_SERVER_OVERRIDE: std::sync::RwLock<Option<String>> =
-    std::sync::RwLock::new(None);
-
-pub fn set_agent_server_override(url: Option<String>) {
-    let normalized = url.map(|url| url.trim_end_matches('/').to_string());
-    if let Ok(mut slot) = AGENT_SERVER_OVERRIDE.write() {
-        if *slot != normalized {
-            tracing::info!(
-                target: "neoism::workspaces",
-                override_url = ?normalized,
-                "agent server override changed"
-            );
-            *slot = normalized;
-        }
-    }
-}
-
-pub(super) fn neoism_agent_server() -> String {
-    if let Ok(slot) = AGENT_SERVER_OVERRIDE.read() {
-        if let Some(url) = slot.as_ref() {
-            return url.clone();
-        }
-    }
+pub(crate) fn neoism_agent_server() -> String {
     std::env::var("NEOISM_SERVER")
         .unwrap_or_else(|_| "http://127.0.0.1:4096".to_string())
         .trim_end_matches('/')

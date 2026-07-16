@@ -552,9 +552,9 @@ fn pane_layout_snapshot_normalize_rebalances_split_ratios() {
 #[test]
 fn server_workspace_action_and_clipboard_roundtrips() {
     roundtrip_server(&WorkspaceServerMessage::WorkspaceActionCompleted {
-        action: WorkspaceAction::InitNeoismWorkspace,
+        action: WorkspaceAction::CreateNeoismNote,
         path: Some(PathBuf::from("/tmp/proj")),
-        message: "initialized".into(),
+        message: "created".into(),
     });
     roundtrip_server(&WorkspaceServerMessage::ClipboardPayload {
         payload: Some(ClipboardPayload {

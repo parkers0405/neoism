@@ -1119,8 +1119,6 @@ export interface EditorSurfaceSummary {
 }
 
 export type WorkspaceAction =
-  | "InitNeoismWorkspace"
-  | "ReindexNeoismNotes"
   | "CreateNeoismNote";
 
 export interface ClipboardPayload {

@@ -19,10 +19,9 @@ pub(super) fn notes_tool(
             .map(|workspace| workspace.root)
             .unwrap_or_else(|| context.cwd.clone()),
     };
-    let graph = match operation.as_str() {
-        "init" => neoism_workspace_index::NoteGraph::init(&graph_root)?,
-        _ => neoism_workspace_index::NoteGraph::open(&graph_root)?,
-    };
+    // `open` is vault-first and self-indexing now — the legacy per-project
+    // init is gone, so "init" is just "ensure the graph is ready".
+    let graph = neoism_workspace_index::NoteGraph::open(&graph_root)?;
     context.ensure_allowed(
         "notes",
         &display_path(&context.cwd, graph.workspace().root.as_path()),

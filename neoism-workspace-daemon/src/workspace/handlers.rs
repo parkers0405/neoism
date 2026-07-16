@@ -3,7 +3,7 @@
 //! open, pane-layout op, and the workspace-action runner. Pure
 //! code-move out of the former monolithic `workspace.rs`.
 
-use super::shell_ops::{create_neoism_note, init_neoism_workspace, reindex_neoism_notes};
+use super::shell_ops::create_neoism_note;
 use super::*;
 
 pub(crate) fn open_workspace(
@@ -373,22 +373,6 @@ pub(crate) fn run_workspace_action(
         return vec![err("no active workspace".into())];
     };
     match action {
-        WorkspaceAction::InitNeoismWorkspace => init_neoism_workspace(&root)
-            .map(|message| WorkspaceServerMessage::WorkspaceActionCompleted {
-                action,
-                path: Some(root),
-                message,
-            })
-            .map(|m| vec![m])
-            .unwrap_or_else(|e| vec![err(e)]),
-        WorkspaceAction::ReindexNeoismNotes => reindex_neoism_notes(&root)
-            .map(|message| WorkspaceServerMessage::WorkspaceActionCompleted {
-                action,
-                path: Some(root),
-                message,
-            })
-            .map(|m| vec![m])
-            .unwrap_or_else(|e| vec![err(e)]),
         WorkspaceAction::CreateNeoismNote => create_neoism_note(&root)
             .map(|path| {
                 vec![WorkspaceServerMessage::WorkspaceActionCompleted {

@@ -46,9 +46,9 @@ mod tests;
 pub use actions::{
     mashup_packs_modal_spec, shaders_modal_spec, theme_picker_modal_spec, HostKind,
     PaletteAction, PaletteBufferEntry, PaletteBufferTarget, PaletteHostEntry,
-    PaletteMashupEntry, PaletteShaderEntry, PaletteSurface, PaletteWorkspaceEntry,
-    PaletteWorkspaceTarget, WorkspaceHostKind, WorkspaceVisibility,
-    WORKSPACE_ROOT_DETAIL_PREFIX,
+    PaletteMashupEntry, PaletteServerEntry, PaletteShaderEntry, PaletteSurface,
+    PaletteWorkspaceEntry, PaletteWorkspaceTarget, WorkspaceHostKind,
+    WorkspaceVisibility, WORKSPACE_ROOT_DETAIL_PREFIX,
 };
 pub use state::{CommandPalette, WorkspaceMovePhase, WorkspaceMoveStatus};
 

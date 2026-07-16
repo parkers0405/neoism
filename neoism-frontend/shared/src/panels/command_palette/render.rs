@@ -231,6 +231,8 @@ impl CommandPalette {
             self.selected_cursor_rect = None;
             return;
         }
+        self.server_edit_hit = None;
+        self.server_remove_hit = None;
 
         let (window_width, window_height, scale_factor) = dimensions;
 
@@ -298,6 +300,7 @@ impl CommandPalette {
             PaletteMode::Shaders(_) => "Type a shader name...",
             PaletteMode::Buffers(_) => "Search buffers...",
             PaletteMode::Workspaces(_) => "Search workspaces...",
+            PaletteMode::Servers(_) => "Search servers...",
             // Ex/Search modes should open with a readable prompt, not
             // a lone ':' or '/' glyph sitting in the input.
             PaletteMode::Ex => "Type a command...",
@@ -420,6 +423,8 @@ impl CommandPalette {
         let list_bottom = results_y + list_clip_h;
         let list_clip = [input_x, results_y, input_width, list_clip_h];
         let mut next_selected_cursor_rect = None;
+        let mut next_server_edit_hit = None;
+        let mut next_server_remove_hit = None;
 
         // 5D-drag: the host header currently under the cursor during an
         // active workspace drag is the drop target — highlight it so the
@@ -457,6 +462,9 @@ impl CommandPalette {
                 continue;
             }
             let is_selected = actual_index == self.selected_index;
+            let is_hovered = self.hovered_index == Some(actual_index);
+            let server_active =
+                matches!(row, PaletteRow::Server { entry } if entry.active);
 
             // 5D-drag drop-target highlight: paint the hovered host
             // header with the selection-hover fill plus a folder-blue
@@ -487,7 +495,7 @@ impl CommandPalette {
             }
 
             // Selection highlight
-            if is_selected {
+            if is_selected || is_hovered {
                 let selected_y = item_y + cursor_offset;
                 let visible_y = selected_y.max(results_y);
                 let visible_h = (selected_y + row_h).min(list_bottom) - visible_y;
@@ -497,7 +505,11 @@ impl CommandPalette {
                         visible_y,
                         input_width,
                         visible_h,
-                        theme.f32(theme.hover),
+                        if is_selected {
+                            theme.f32_alpha(theme.accent, 0.34)
+                        } else {
+                            theme.f32_alpha(theme.hover, 0.72)
+                        },
                         DEPTH_ELEMENT,
                         4.0 * s,
                         ORDER,
@@ -516,12 +528,45 @@ impl CommandPalette {
                         .clamp(results_y, (list_bottom - cursor_h).max(results_y));
                     next_selected_cursor_rect =
                         Some([cursor_x, cursor_y, cursor_w, cursor_h]);
+                    if is_selected && matches!(row, PaletteRow::Server { .. }) {
+                        sugarloaf.overlay_rect(
+                            input_x,
+                            visible_y + 4.0 * s,
+                            3.0 * s,
+                            (visible_h - 8.0 * s).max(2.0 * s),
+                            theme.f32(theme.accent),
+                            DEPTH_ELEMENT + 0.02,
+                            ORDER + 1,
+                        );
+                    }
+                }
+            }
+
+            // Current-place marker: the connected server / the workspace
+            // this window is viewing gets a LEFT accent stripe (like the
+            // file tree's active-buffer stripe) — never a full-row wash,
+            // and independent of hover/selection.
+            let row_is_current = server_active
+                || matches!(row, PaletteRow::Workspace { entry } if entry.current);
+            if row_is_current {
+                let visible_y = item_y.max(results_y);
+                let visible_h = (item_y + row_h).min(list_bottom) - visible_y;
+                if visible_h > 6.0 * s {
+                    sugarloaf.overlay_rect(
+                        input_x,
+                        visible_y + 3.0 * s,
+                        3.0 * s,
+                        visible_h - 6.0 * s,
+                        theme.f32(theme.green),
+                        DEPTH_ELEMENT + 0.03,
+                        ORDER + 2,
+                    );
                 }
             }
 
             let result_opts = DrawOpts {
                 font_size: result_font,
-                color: if is_selected {
+                color: if is_selected || is_hovered {
                     theme.u8(theme.fg)
                 } else {
                     theme.u8(theme.dim)
@@ -612,6 +657,23 @@ impl CommandPalette {
                     };
                     (Some(dot), color)
                 }
+                PaletteRow::Server { entry } => {
+                    let (dot, color) = match entry.status {
+                        crate::panels::ServerIndicatorStatus::Online => {
+                            ("\u{25cf}", theme.u8(theme.green))
+                        }
+                        crate::panels::ServerIndicatorStatus::Connecting => {
+                            ("\u{25cf}", theme.u8(theme.yellow))
+                        }
+                        crate::panels::ServerIndicatorStatus::Offline => {
+                            ("\u{25cf}", theme.u8(theme.red))
+                        }
+                        crate::panels::ServerIndicatorStatus::Unknown => {
+                            ("\u{25cb}", theme.u8(theme.muted))
+                        }
+                    };
+                    (Some(dot), color)
+                }
                 _ => (None, theme.u8(theme.muted)),
             };
             let online_dot_width = online_dot
@@ -649,7 +711,10 @@ impl CommandPalette {
             } else {
                 None
             };
-            let shortcut_text: &str = if is_command {
+            let is_server_row = matches!(row, PaletteRow::Server { .. });
+            let shortcut_text: &str = if is_server_row {
+                ""
+            } else if is_command {
                 command_chip.as_deref().unwrap_or("")
             } else {
                 row.shortcut()
@@ -717,6 +782,15 @@ impl CommandPalette {
             } else {
                 0.0
             };
+            let server_actions = match row {
+                PaletteRow::Server { entry } if !entry.local => Some(entry.id.clone()),
+                _ => None,
+            };
+            let server_action_reserve = if server_actions.is_some() {
+                132.0 * s
+            } else {
+                0.0
+            };
             let title_budget = (input_width
                 - input_pad_x * 2.0
                 - row_indent
@@ -724,7 +798,8 @@ impl CommandPalette {
                 - row_icon_gap
                 - online_dot_width
                 - online_dot_gap
-                - right_reserve)
+                - right_reserve
+                - server_action_reserve)
                 .max(0.0);
             // Host header label reads as a muted group separator (never
             // the bright selected-row fg), since a header can't be
@@ -749,7 +824,7 @@ impl CommandPalette {
             let display_title = row.display_title();
             let title =
                 truncate_to_fit(&display_title, title_budget, sugarloaf, &title_opts);
-            if matches!(row, PaletteRow::WorkspaceCreate) {
+            if matches!(row, PaletteRow::WorkspaceCreate | PaletteRow::ServerAdd) {
                 let plus_w = sugarloaf.overlay_text_mut().measure(&title, &title_opts);
                 sugarloaf.overlay_text_mut().draw(
                     input_x + (input_width - plus_w) / 2.0,
@@ -793,6 +868,83 @@ impl CommandPalette {
                 &title,
                 &title_opts,
             );
+            if let PaletteRow::Server { entry } = row {
+                let endpoint_x = row_text_x
+                    + sugarloaf.overlay_text_mut().measure(&title, &title_opts)
+                    + 16.0 * s;
+                let endpoint_right = if server_actions.is_some() {
+                    input_x + input_width - input_pad_x - server_action_reserve
+                } else {
+                    input_x + input_width - input_pad_x - 24.0 * s
+                };
+                let endpoint_budget = (endpoint_right - endpoint_x).max(0.0);
+                if endpoint_budget > 18.0 * s {
+                    let endpoint_opts = DrawOpts {
+                        font_size: shortcut_font,
+                        color: theme.u8(theme.dim),
+                        clip_rect: Some([
+                            endpoint_x,
+                            list_clip[1],
+                            endpoint_budget,
+                            list_clip[3],
+                        ]),
+                        ..DrawOpts::default()
+                    };
+                    let endpoint = truncate_to_fit(
+                        &entry.address,
+                        endpoint_budget,
+                        sugarloaf,
+                        &endpoint_opts,
+                    );
+                    sugarloaf.overlay_text_mut().draw(
+                        endpoint_x,
+                        item_y + (row_h - shortcut_font) / 2.0,
+                        &endpoint,
+                        &endpoint_opts,
+                    );
+                }
+            }
+            if let Some(server_id) = server_actions {
+                let chip_h = 24.0 * s;
+                let remove_w = 66.0 * s;
+                let edit_w = 52.0 * s;
+                let gap = 6.0 * s;
+                let remove_x = input_x + input_width - input_pad_x - remove_w;
+                let edit_x = remove_x - gap - edit_w;
+                let chip_y = item_y + (row_h - chip_h) * 0.5;
+                for (x, w, label) in
+                    [(edit_x, edit_w, "Edit"), (remove_x, remove_w, "Remove")]
+                {
+                    sugarloaf.rounded_rect(
+                        None,
+                        x,
+                        chip_y,
+                        w,
+                        chip_h,
+                        theme.f32_alpha(theme.surface, 0.94),
+                        DEPTH_ELEMENT + 0.03,
+                        5.0 * s,
+                        ORDER + 2,
+                    );
+                    let opts = DrawOpts {
+                        font_size: 11.0 * s,
+                        color: theme.u8(theme.fg),
+                        clip_rect: Some(list_clip),
+                        ..DrawOpts::default()
+                    };
+                    let text_w = sugarloaf.overlay_text_mut().measure(label, &opts);
+                    sugarloaf.overlay_text_mut().draw(
+                        x + (w - text_w) * 0.5,
+                        chip_y + (chip_h - 11.0 * s) * 0.5,
+                        label,
+                        &opts,
+                    );
+                }
+                next_server_edit_hit =
+                    Some(([edit_x, chip_y, edit_w, chip_h], server_id.clone()));
+                next_server_remove_hit =
+                    Some(([remove_x, chip_y, remove_w, chip_h], server_id));
+            }
             if let Some(((text, _), opts)) =
                 move_hint.as_ref().zip(move_hint_opts.as_ref())
             {
@@ -848,6 +1000,9 @@ impl CommandPalette {
         // Drawn only when the palette has actually been scrolled —
         // hidden on first open, faded out 2.3 s after the last scroll.
         let total = filtered.len();
+        drop(filtered);
+        self.server_edit_hit = next_server_edit_hit;
+        self.server_remove_hit = next_server_remove_hit;
         let track_height = MAX_VISIBLE_RESULTS as f32 * row_h;
         let normalized = if total > MAX_VISIBLE_RESULTS {
             self.scroll_offset as f32 / (total - MAX_VISIBLE_RESULTS) as f32

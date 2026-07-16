@@ -559,6 +559,8 @@ pub enum ModalActionTag {
     FileTreeRename,
     RenameTab,
     NotesVaultPromptAdd,
+    ServerFormSubmit,
+    ServerRemoveConfirm,
     NotesVaultAdd,
     NotesVaultPromptRename,
     NotesVaultRename,
@@ -604,6 +606,8 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         | T::FileTreeNewFolder
         | T::FileTreeRename
         | T::NotesVaultAdd
+        | T::ServerFormSubmit
+        | T::ServerRemoveConfirm
         | T::NotesVaultRename
         | T::NotesVaultSwitch
         | T::NotesVaultOpenVaultsRoot

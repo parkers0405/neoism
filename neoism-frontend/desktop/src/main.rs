@@ -32,6 +32,8 @@ mod panic;
 mod platform;
 mod router;
 mod screen;
+#[cfg(not(target_arch = "wasm32"))]
+mod server_registry;
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 mod ssh_hosts;
 #[cfg(not(target_arch = "wasm32"))]
@@ -138,37 +140,6 @@ fn run_neoism_terminal_command() -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
-fn run_workspace_init_command() -> Result<bool, Box<dyn std::error::Error>> {
-    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if args.first().and_then(|arg| arg.to_str()) != Some("init") {
-        return Ok(false);
-    }
-    if args.len() > 2 {
-        return Err("usage: neoism init [path]".into());
-    }
-    let root = args
-        .get(1)
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir()?);
-    let workspace = workspace::init_workspace(&root)?;
-    let index = workspace::notes::WorkspaceNoteIndex::build(&workspace)?;
-    workspace::rebuild_note_graph(&workspace, &index)?;
-    println!(
-        "Initialized Neoism workspace `{}` at {}",
-        workspace.config.name,
-        workspace.root.display()
-    );
-    println!(
-        "Config: {}",
-        workspace::config::workspace_config_path(&workspace.root).display()
-    );
-    println!(
-        "Note graph: {}",
-        workspace::workspace_graph_db_path(&workspace).display()
-    );
-    Ok(true)
-}
-
 fn run_workspace_notes_command() -> Result<bool, Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if args.first().and_then(|arg| arg.to_str()) != Some("notes") {
@@ -193,27 +164,10 @@ fn run_workspace_notes_command() -> Result<bool, Box<dyn std::error::Error>> {
         .to_string();
     args.remove(0);
 
-    let graph = match command.as_str() {
-        "init" => workspace::NoteGraph::init(&workspace)?,
-        _ => workspace::NoteGraph::open(&workspace)?,
-    };
+    let graph = workspace::NoteGraph::open(&workspace)?;
     let limit = workspace::NoteQueryLimit(limit);
 
     match command.as_str() {
-        "init" => {
-            print_note_result(
-                json,
-                &serde_json::json!({
-                    "workspace": graph.workspace().root,
-                    "dbPath": graph.db_path(),
-                }),
-                format!(
-                    "Neoism notes ready at {}\nNote graph: {}",
-                    graph.workspace().root.display(),
-                    graph.db_path().display()
-                ),
-            )?;
-        }
         "reindex" => {
             graph.reindex()?;
             print_note_result(
@@ -457,7 +411,7 @@ fn run_workspace_notes_command() -> Result<bool, Box<dyn std::error::Error>> {
 }
 
 fn notes_usage() -> String {
-    "usage: neoism notes <init|reindex|update|remove|repair-move|create|list|headings|links|unresolved|backlinks|tags|tasks|task-toggle|properties|search|graph|watch> [args] [--workspace PATH] [--limit N] [--json]".to_string()
+    "usage: neoism notes <reindex|update|remove|repair-move|create|list|headings|links|unresolved|backlinks|tags|tasks|task-toggle|properties|search|graph|watch> [args] [--workspace PATH] [--limit N] [--json]".to_string()
 }
 
 fn take_flag(args: &mut Vec<std::ffi::OsString>, flag: &str) -> bool {
@@ -1001,10 +955,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    if run_workspace_init_command()? {
-        return Ok(());
-    }
-
     if run_workspace_notes_command()? {
         return Ok(());
     }
@@ -1208,19 +1158,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
 
-    // Resolve which workspace-daemon to use. On Unix we keep the embedded
-    // daemon handle alive for the rest of main(); on Windows the first-class
-    // local path is the standalone loopback daemon used by the web UI.
+    // Resolve Local Server independently from the initial window's optional
+    // explicit endpoint. Fresh windows always use this retained local
+    // descriptor, even when the first window was launched with --daemon-url
+    // or --ssh-host.
     #[cfg(all(unix, not(target_arch = "wasm32")))]
-    let resolved_daemon = resolve_daemon(explicit_daemon_url.as_deref());
+    let local_daemon = resolve_daemon(None);
     #[cfg(all(unix, not(target_arch = "wasm32")))]
-    let daemon_url = resolved_daemon.as_ref().map(|daemon| daemon.url.clone());
+    let home_daemon_endpoint = local_daemon.as_ref().map(|daemon| daemon.url.clone());
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    let daemon_url = explicit_daemon_url
+        .clone()
+        .or_else(|| home_daemon_endpoint.clone());
     #[cfg(all(windows, not(target_arch = "wasm32")))]
-    let daemon_url = Some(
-        explicit_daemon_url.unwrap_or_else(|| "ws://127.0.0.1:7878/session".to_string()),
-    );
+    let home_daemon_endpoint = Some("ws://127.0.0.1:7878/session".to_string());
+    #[cfg(all(windows, not(target_arch = "wasm32")))]
+    let daemon_url = explicit_daemon_url
+        .clone()
+        .or_else(|| home_daemon_endpoint.clone());
     #[cfg(all(not(unix), not(windows), not(target_arch = "wasm32")))]
-    let daemon_url = explicit_daemon_url;
+    let home_daemon_endpoint = None;
+    #[cfg(all(not(unix), not(windows), not(target_arch = "wasm32")))]
+    let daemon_url = explicit_daemon_url.clone();
+
+    let daemon_token = None;
+    let initial_server_id = explicit_daemon_url
+        .as_ref()
+        .map(|_| "startup-explicit".to_string());
 
     let window_event_loop =
         neoism_window::event_loop::EventLoop::<EventPayload>::with_user_event()
@@ -1238,6 +1202,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app_id,
         initial_open_paths,
         daemon_url,
+        daemon_token,
+        initial_server_id,
+        home_daemon_endpoint,
     );
     let _ = application.run(window_event_loop);
 

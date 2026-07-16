@@ -14,8 +14,20 @@ use super::state::{CachedTruncatedLabel, FileTree, TruncatedLabelMetricsKey};
 use super::types::{GitStatus, NodeKind};
 use super::{
     DEPTH, FONT_SIZE, FRAME_RADIUS, FRAME_STROKE, ICON_FONT_SIZE, ICON_GAP, INDENT_PX,
-    LABEL_TRUNCATION_CACHE_MAX, ORDER, REVEAL_FLASH_MS, ROW_PADDING_X,
+    LABEL_TRUNCATION_CACHE_MAX, ORDER, REVEAL_FLASH_MS, ROOT_TRANSITION_MS,
+    ROOT_TRANSITION_STAGGER_MS, ROW_PADDING_X,
 };
+use crate::animation::ease_out_cubic;
+
+fn fade_u8(mut color: [u8; 4], alpha: f32) -> [u8; 4] {
+    color[3] = (color[3] as f32 * alpha) as u8;
+    color
+}
+
+fn fade_f32(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
+    color[3] *= alpha;
+    color
+}
 
 // TODO(wave6-cutover): the native build draws the panel chassis via
 // `chrome::widgets::frame::draw_frame(FrameConfig { rounded_corners:
@@ -261,6 +273,20 @@ impl FileTree {
         let overscan = ((scroll_offset.abs() / row_h).ceil() as usize).saturating_add(1);
         let start = self.scroll_top.saturating_sub(overscan);
         let end = (self.scroll_top + rows_visible + overscan).min(self.entries.len());
+        // Root-swap reveal: same duration/easing as the status-line mode
+        // transition, cascading a beat per row from the top. Expire the
+        // sweep once the LAST visible row has finished so `is_animating`
+        // stops holding the redraw loop open.
+        let root_reveal_elapsed_ms = self
+            .root_transition_started
+            .map(|started| started.elapsed().as_secs_f32() * 1000.0);
+        if let Some(elapsed) = root_reveal_elapsed_ms {
+            let sweep_ms = ROOT_TRANSITION_MS
+                + rows_visible as f32 * ROOT_TRANSITION_STAGGER_MS;
+            if elapsed >= sweep_ms {
+                self.root_transition_started = None;
+            }
+        }
         let mut rendered_rows = 0usize;
         for absolute_ix in start..end {
             let entry = &self.entries[absolute_ix];
@@ -273,6 +299,16 @@ impl FileTree {
                 continue;
             }
             rendered_rows += 1;
+            let reveal = match root_reveal_elapsed_ms {
+                Some(elapsed) => {
+                    let delay =
+                        (rendered_rows - 1) as f32 * ROOT_TRANSITION_STAGGER_MS;
+                    ease_out_cubic(
+                        ((elapsed - delay) / ROOT_TRANSITION_MS).clamp(0.0, 1.0),
+                    )
+                }
+                None => 1.0,
+            };
             let is_selected = absolute_ix == self.selected;
             let is_active_buffer = self
                 .active_path
@@ -291,7 +327,7 @@ impl FileTree {
                     visible_row_y,
                     stripe_w,
                     visible_row_h,
-                    theme.f32(theme.accent),
+                    fade_f32(theme.f32(theme.accent), reveal),
                     edge_left_row_radii(
                         visible_row_y,
                         visible_row_h,
@@ -311,7 +347,7 @@ impl FileTree {
                         visible_row_y,
                         content_w,
                         visible_row_h,
-                        theme.f32_alpha(theme.yellow, alpha),
+                        theme.f32_alpha(theme.yellow, alpha * reveal),
                         edge_row_radii(
                             visible_row_y,
                             visible_row_h,
@@ -358,31 +394,35 @@ impl FileTree {
 
             let label_opts = DrawOpts {
                 font_size,
-                color: label_color,
+                color: fade_u8(label_color, reveal),
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()
             };
             let git_opts = DrawOpts {
                 font_size: font_size * 0.9,
-                color: entry.git_status.color(theme),
+                color: fade_u8(entry.git_status.color(theme), reveal),
                 bold: true,
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()
             };
             let chevron_opts = DrawOpts {
                 font_size,
-                color: theme.u8(theme.muted),
+                color: fade_u8(theme.u8(theme.muted), reveal),
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()
             };
             let icon_opts = DrawOpts {
                 font_size: icon_size,
-                color: icon_color,
+                color: fade_u8(icon_color, reveal),
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()
             };
 
-            let base_x = content_x + row_pad_x + entry.depth as f32 * indent_px;
+            // Mid-sweep rows slide in from the left as they fade.
+            let base_x = content_x
+                + row_pad_x
+                + entry.depth as f32 * indent_px
+                + (1.0 - reveal) * 12.0 * self.scale;
             let text_y = row_y + (row_h - font_size) / 2.0;
             let icon_y = row_y + (row_h - icon_size) / 2.0;
 

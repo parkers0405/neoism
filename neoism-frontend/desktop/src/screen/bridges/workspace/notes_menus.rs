@@ -145,9 +145,46 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    /// The footer settings gear menu: Graph, or Add… (which opens the
+    /// existing create menu as its submenu).
+    pub(crate) fn open_notes_settings_menu(&mut self) {
+        use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
+        use neoism_ui::widgets::modal::ModalAction;
+
+        let items = vec![
+            ContextMenuItem::new(
+                "Visualize Graph",
+                "g",
+                ContextMenuAction::Modal(ModalAction::NotesOpenGraph.into()),
+            ),
+            ContextMenuItem::new(
+                "Add\u{2026}",
+                "a",
+                ContextMenuAction::Modal(ModalAction::NotesOpenCreateMenu.into()),
+            ),
+        ];
+        let (x, y) = self
+            .renderer
+            .notes_sidebar
+            .settings_button_rect()
+            .map(|rect| (rect[0], rect[1] - 8.0))
+            .unwrap_or((0.0, 0.0));
+        let scale = self.sugarloaf.scale_factor();
+        let size = self.sugarloaf.window_size();
+        self.renderer.context_menu.open(
+            "Notes".to_string(),
+            items,
+            x,
+            y,
+            size.width as f32 / scale,
+            self.context_menu_logical_height(),
+        );
+        self.mark_dirty();
+    }
+
     pub(crate) fn open_notes_create_menu_at_button(&mut self) {
-        if let Some(rect) = self.renderer.notes_sidebar.menu_button_rect() {
-            self.open_notes_create_menu(rect[0], rect[1] + rect[3]);
+        if let Some(rect) = self.renderer.notes_sidebar.settings_button_rect() {
+            self.open_notes_create_menu(rect[0], rect[1] - 8.0);
         } else {
             self.open_notes_create_menu(0.0, 0.0);
         }
@@ -396,75 +433,4 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    #[allow(dead_code)]
-    fn open_notes_vault_actions_menu(&mut self, x: f32, y: f32) {
-        use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
-        use neoism_ui::panels::notifications::NotificationLevel;
-        use neoism_ui::widgets::modal::ModalAction;
-
-        let mut items = Vec::new();
-        if let Some(root) = self.renderer.notes_sidebar.workspace_path() {
-            items.push(ContextMenuItem::new(
-                "Open Vaults Root",
-                "o",
-                ContextMenuAction::Modal(ModalAction::NotesVaultOpenVaultsRoot.into()),
-            ));
-            items.push(ContextMenuItem::new(
-                "Add Current Workspace",
-                "p",
-                ContextMenuAction::Modal(
-                    ModalAction::NotesVaultLinkCurrentWorkspace.into(),
-                ),
-            ));
-            items.push(ContextMenuItem::new(
-                "New Note",
-                "a",
-                ContextMenuAction::Modal(
-                    ModalAction::NotesPromptNewFile {
-                        dir: root.display().to_string(),
-                    }
-                    .into(),
-                ),
-            ));
-            items.push(ContextMenuItem::new(
-                "New Folder",
-                "f",
-                ContextMenuAction::Modal(
-                    ModalAction::FileTreePromptNewFolder {
-                        dir: root.display().to_string(),
-                    }
-                    .into(),
-                ),
-            ));
-            items.push(ContextMenuItem::new(
-                "Add Vault",
-                "+",
-                ContextMenuAction::Modal(ModalAction::NotesVaultPromptAdd.into()),
-            ));
-            items.push(ContextMenuItem::new(
-                "Rename Vault",
-                "r",
-                ContextMenuAction::Modal(ModalAction::NotesVaultPromptRename.into()),
-            ));
-        }
-        if items.is_empty() {
-            self.renderer.notifications.push(
-                "No notes vault is active".to_string(),
-                NotificationLevel::Warn,
-            );
-            self.mark_dirty();
-            return;
-        }
-        let scale = self.sugarloaf.scale_factor();
-        let size = self.sugarloaf.window_size();
-        self.renderer.context_menu.open(
-            "Notes Vault".to_string(),
-            items,
-            x,
-            y,
-            size.width as f32 / scale,
-            self.context_menu_logical_height(),
-        );
-        self.mark_dirty();
     }
-}

@@ -490,6 +490,17 @@ pub enum EditorServerMessage {
         /// Total line count (handy for the chrome's status line).
         line_count: u64,
     },
+    /// Cursor moved (nvim `rio_winbar`) — feeds the status line's
+    /// `cur/total` lines pill for daemon-backed code panes, which the
+    /// local-editor winbar drain can't see.
+    CursorLine {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+        /// 1-based cursor line.
+        line: u64,
+        /// Total buffer line count; 0 when unresolved.
+        total_lines: u64,
+    },
     /// Nvim's `modified` flag changed for a buffer. Desktop uses this
     /// to drive the yellow dirty dot in buffer tabs.
     BufferModified {

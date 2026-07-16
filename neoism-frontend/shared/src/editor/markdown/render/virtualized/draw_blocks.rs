@@ -1524,24 +1524,9 @@ fn draw_frontmatter_row(
             None,
         );
         if line_ix == fm_start {
-            let label_opts = DrawOpts {
-                font_size: markdown_font(11.0, font_scale),
-                color: theme.u8_alpha(theme.muted, 0.95),
-                bold: true,
-                clip_rect: Some(clip),
-                font_id: md_font_id(sugarloaf),
-                ..DrawOpts::default()
-            };
-            draw_if_visible(
-                sugarloaf,
-                x,
-                y + 2.0,
-                "PROPERTIES",
-                &label_opts,
-                clip_top,
-                clip_bottom,
-                occlusions,
-            );
+            // Opening fence: intentionally unlabeled — the key/value rows
+            // speak for themselves (the old "PROPERTIES" caption read as
+            // clutter).
         } else {
             // Closing fence: a real divider separating the metadata
             // section from the page content (same weight as a `---` rule).

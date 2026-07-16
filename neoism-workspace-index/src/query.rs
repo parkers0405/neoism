@@ -2,12 +2,15 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 
-use crate::config::{init_workspace, load_workspace, NeoismWorkspace};
+use crate::config::{
+    default_notes_workspace, linked_project_for_code_dir, load_workspace,
+    NeoismWorkspace,
+};
 use crate::graph_db::{
-    block_on_db, io_other, migrate, open_pool, rebuild_note_graph,
-    remove_note_graph_file, replace_note_graph_file, workspace_graph_db_path,
+    block_on_db, int, migrate, open_note_db, rebuild_note_graph,
+    remove_note_graph_file, replace_note_graph_file, text, workspace_graph_db_path,
+    DbRow, NoteDb,
 };
 use crate::link_repair::{repair_links_for_move, LinkRepairReport};
 use crate::notes::WorkspaceNoteIndex;
@@ -127,26 +130,21 @@ pub struct NoteGraphSummary {
 }
 
 impl NoteGraph {
+    /// Open the note graph for a code root, vault-first: the vault the
+    /// root LINKS to (vault `project.toml`), else the root's own
+    /// workspace config, else the global Default vault. Never requires
+    /// (or writes) a per-project `.neoism` marker — Vaults are the only
+    /// notes model.
     pub fn open(root: impl AsRef<Path>) -> std::io::Result<Self> {
-        let workspace = load_workspace(root.as_ref())?.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "{} is not a Neoism workspace; run `neoism init {}` first",
-                    root.as_ref().display(),
-                    root.as_ref().display()
-                ),
-            )
-        })?;
+        let root = root.as_ref();
+        let workspace = linked_project_for_code_dir(root)
+            .ok()
+            .flatten()
+            .or_else(|| load_workspace(root).ok().flatten())
+            .filter(|workspace| workspace.config.notes.enabled)
+            .unwrap_or_else(default_notes_workspace);
         let graph = Self { workspace };
         graph.ensure_indexed()?;
-        Ok(graph)
-    }
-
-    pub fn init(root: impl AsRef<Path>) -> std::io::Result<Self> {
-        let workspace = init_workspace(root.as_ref())?;
-        let graph = Self { workspace };
-        graph.reindex()?;
         Ok(graph)
     }
 
@@ -252,10 +250,10 @@ impl NoteGraph {
     pub fn note(&self, target: &str) -> std::io::Result<Option<NoteSummary>> {
         let db_path = self.db_path();
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
-            let note = resolve_note(&pool, target).await?;
-            pool.close().await;
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
+            let note = resolve_note(&db, target).await?;
+            db.close().await;
             Ok(note)
         })
     }
@@ -263,17 +261,16 @@ impl NoteGraph {
     pub fn notes(&self, limit: NoteQueryLimit) -> std::io::Result<Vec<NoteSummary>> {
         let db_path = self.db_path();
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
-            let rows = sqlx::query(
-                "SELECT path, title, modified, indexed_at FROM notes ORDER BY title, path LIMIT ?",
-            )
-            .bind(limit.0 as i64)
-            .fetch_all(&pool)
-            .await
-            .map_err(io_other)?;
-            pool.close().await;
-            Ok(rows.into_iter().map(note_from_row).collect())
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
+            let rows = db
+                .fetch_all(
+                    "SELECT path, title, modified, indexed_at FROM notes ORDER BY title, path LIMIT ?",
+                    vec![int(limit.0 as i64)],
+                )
+                .await?;
+            db.close().await;
+            rows.iter().map(note_from_row).collect()
         })
     }
 
@@ -285,33 +282,28 @@ impl NoteGraph {
         let db_path = self.db_path();
         let note = note.map(str::to_string);
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
             let rows = if let Some(note) = note {
-                let note = resolve_note(&pool, &note).await?;
+                let note = resolve_note(&db, &note).await?;
                 let Some(note) = note else {
-                    pool.close().await;
+                    db.close().await;
                     return Ok(Vec::new());
                 };
-                sqlx::query(
+                db.fetch_all(
                     "SELECT path, line, level, text, slug FROM headings WHERE path = ? ORDER BY line LIMIT ?",
+                    vec![text(note.path), int(limit.0 as i64)],
                 )
-                .bind(note.path)
-                .bind(limit.0 as i64)
-                .fetch_all(&pool)
-                .await
-                .map_err(io_other)?
+                .await?
             } else {
-                sqlx::query(
+                db.fetch_all(
                     "SELECT path, line, level, text, slug FROM headings ORDER BY path, line LIMIT ?",
+                    vec![int(limit.0 as i64)],
                 )
-                .bind(limit.0 as i64)
-                .fetch_all(&pool)
-                .await
-                .map_err(io_other)?
+                .await?
             };
-            pool.close().await;
-            Ok(rows.into_iter().map(heading_from_row).collect())
+            db.close().await;
+            rows.iter().map(heading_from_row).collect()
         })
     }
 
@@ -322,8 +314,8 @@ impl NoteGraph {
     ) -> std::io::Result<Vec<LinkSummary>> {
         let db_path = self.db_path();
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
             let sql = if unresolved_only {
                 r#"
                 SELECT links.source_path, links.source_line, links.raw, links.target,
@@ -344,13 +336,9 @@ impl NoteGraph {
                 LIMIT ?
                 "#
             };
-            let rows = sqlx::query(sql)
-                .bind(limit.0 as i64)
-                .fetch_all(&pool)
-                .await
-                .map_err(io_other)?;
-            pool.close().await;
-            Ok(rows.into_iter().map(link_from_row).collect())
+            let rows = db.fetch_all(sql, vec![int(limit.0 as i64)]).await?;
+            db.close().await;
+            rows.iter().map(link_from_row).collect()
         })
     }
 
@@ -362,53 +350,51 @@ impl NoteGraph {
         let db_path = self.db_path();
         let target = target.to_string();
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
-            let Some(note) = resolve_db_note(&pool, &target).await? else {
-                pool.close().await;
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
+            let Some(note) = resolve_db_note(&db, &target).await? else {
+                db.close().await;
                 return Ok(Vec::new());
             };
-            let rows = sqlx::query(
-                r#"
-                SELECT links.source_path, links.source_line, links.raw, links.target,
-                       notes.path AS target_path, links.heading, links.alias, links.kind
-                FROM links
-                LEFT JOIN notes ON notes.id = links.target_note_id
-                WHERE links.target_note_id = ?
-                ORDER BY links.source_path, links.source_line
-                LIMIT ?
-                "#,
-            )
-            .bind(note.id)
-            .bind(limit.0 as i64)
-            .fetch_all(&pool)
-            .await
-            .map_err(io_other)?;
-            pool.close().await;
-            Ok(rows.into_iter().map(link_from_row).collect())
+            let rows = db
+                .fetch_all(
+                    r#"
+                    SELECT links.source_path, links.source_line, links.raw, links.target,
+                           notes.path AS target_path, links.heading, links.alias, links.kind
+                    FROM links
+                    LEFT JOIN notes ON notes.id = links.target_note_id
+                    WHERE links.target_note_id = ?
+                    ORDER BY links.source_path, links.source_line
+                    LIMIT ?
+                    "#,
+                    vec![text(note.id), int(limit.0 as i64)],
+                )
+                .await?;
+            db.close().await;
+            rows.iter().map(link_from_row).collect()
         })
     }
 
     pub fn tags(&self, limit: NoteQueryLimit) -> std::io::Result<Vec<TagSummary>> {
         let db_path = self.db_path();
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
-            let rows = sqlx::query(
-                "SELECT tag, COUNT(*) AS count FROM tags GROUP BY tag ORDER BY count DESC, tag LIMIT ?",
-            )
-            .bind(limit.0 as i64)
-            .fetch_all(&pool)
-            .await
-            .map_err(io_other)?;
-            pool.close().await;
-            Ok(rows
-                .into_iter()
-                .map(|row| TagSummary {
-                    tag: row.get("tag"),
-                    count: row.get("count"),
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
+            let rows = db
+                .fetch_all(
+                    "SELECT tag, COUNT(*) AS count FROM tags GROUP BY tag ORDER BY count DESC, tag LIMIT ?",
+                    vec![int(limit.0 as i64)],
+                )
+                .await?;
+            db.close().await;
+            rows.iter()
+                .map(|row| {
+                    Ok(TagSummary {
+                        tag: row.get_str("tag")?,
+                        count: row.get_i64("count")?,
+                    })
                 })
-                .collect())
+                .collect()
         })
     }
 
@@ -420,10 +406,10 @@ impl NoteGraph {
         let db_path = self.db_path();
         let tag = tag.map(str::to_string);
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
             let rows = if let Some(tag) = tag {
-                sqlx::query(
+                db.fetch_all(
                     r#"
                     SELECT tags.tag, tags.path, tags.line, notes.title
                     FROM tags
@@ -432,14 +418,11 @@ impl NoteGraph {
                     ORDER BY tags.path, tags.line
                     LIMIT ?
                     "#,
+                    vec![text(tag), int(limit.0 as i64)],
                 )
-                .bind(tag)
-                .bind(limit.0 as i64)
-                .fetch_all(&pool)
-                .await
-                .map_err(io_other)?
+                .await?
             } else {
-                sqlx::query(
+                db.fetch_all(
                     r#"
                     SELECT tags.tag, tags.path, tags.line, notes.title
                     FROM tags
@@ -447,14 +430,12 @@ impl NoteGraph {
                     ORDER BY tags.tag, tags.path, tags.line
                     LIMIT ?
                     "#,
+                    vec![int(limit.0 as i64)],
                 )
-                .bind(limit.0 as i64)
-                .fetch_all(&pool)
-                .await
-                .map_err(io_other)?
+                .await?
             };
-            pool.close().await;
-            Ok(rows.into_iter().map(tag_occurrence_from_row).collect())
+            db.close().await;
+            rows.iter().map(tag_occurrence_from_row).collect()
         })
     }
 
@@ -465,28 +446,23 @@ impl NoteGraph {
     ) -> std::io::Result<Vec<TaskSummary>> {
         let db_path = self.db_path();
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
             let rows = if let Some(checked) = checked {
-                sqlx::query(
+                db.fetch_all(
                     "SELECT path, line, checked, text FROM tasks WHERE checked = ? ORDER BY checked, path, line LIMIT ?",
+                    vec![int(if checked { 1 } else { 0 }), int(limit.0 as i64)],
                 )
-                .bind(if checked { 1_i64 } else { 0_i64 })
-                .bind(limit.0 as i64)
-                .fetch_all(&pool)
-                .await
-                .map_err(io_other)?
+                .await?
             } else {
-                sqlx::query(
+                db.fetch_all(
                     "SELECT path, line, checked, text FROM tasks ORDER BY checked, path, line LIMIT ?",
+                    vec![int(limit.0 as i64)],
                 )
-                .bind(limit.0 as i64)
-                .fetch_all(&pool)
-                .await
-                .map_err(io_other)?
+                .await?
             };
-            pool.close().await;
-            Ok(rows.into_iter().map(task_from_row).collect())
+            db.close().await;
+            rows.iter().map(task_from_row).collect()
         })
     }
 
@@ -498,32 +474,27 @@ impl NoteGraph {
         let db_path = self.db_path();
         let note = note.map(str::to_string);
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
             let rows = if let Some(note) = note {
-                let Some(note) = resolve_note(&pool, &note).await? else {
-                    pool.close().await;
+                let Some(note) = resolve_note(&db, &note).await? else {
+                    db.close().await;
                     return Ok(Vec::new());
                 };
-                sqlx::query(
+                db.fetch_all(
                     "SELECT path, key, value, value_type FROM note_properties WHERE path = ? ORDER BY key LIMIT ?",
+                    vec![text(note.path), int(limit.0 as i64)],
                 )
-                .bind(note.path)
-                .bind(limit.0 as i64)
-                .fetch_all(&pool)
-                .await
-                .map_err(io_other)?
+                .await?
             } else {
-                sqlx::query(
+                db.fetch_all(
                     "SELECT path, key, value, value_type FROM note_properties ORDER BY path, key LIMIT ?",
+                    vec![int(limit.0 as i64)],
                 )
-                .bind(limit.0 as i64)
-                .fetch_all(&pool)
-                .await
-                .map_err(io_other)?
+                .await?
             };
-            pool.close().await;
-            Ok(rows.into_iter().map(property_from_row).collect())
+            db.close().await;
+            rows.iter().map(property_from_row).collect()
         })
     }
 
@@ -537,83 +508,98 @@ impl NoteGraph {
         }
         let db_path = self.db_path();
         let fts = fts_query(query);
-        let like = format!("%{}%", query.trim());
+        // Tokenized LIKE scan — the first-class search path on turso (no
+        // FTS5 module there) and the fallback for a failed MATCH on
+        // SQLite. Every whitespace term must hit the block, in any order
+        // ("docker workspace" finds "workspace ... docker"), which is the
+        // useful half of what the FTS query grammar gave us.
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .map(|term| format!("%{term}%"))
+            .collect();
+        let like_sql = format!(
+            "SELECT path, start_line, end_line, kind, text FROM blocks WHERE {} ORDER BY path, start_line LIMIT ?",
+            vec!["text LIKE ?"; terms.len().max(1)].join(" AND "),
+        );
+        let like_params = || {
+            let mut params: Vec<_> =
+                terms.iter().map(|term| text(term.as_str())).collect();
+            params.push(int(limit.0 as i64));
+            params
+        };
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
-            let rows = match sqlx::query(
-                r#"
-                SELECT blocks.path, blocks.start_line, blocks.end_line, blocks.kind,
-                       snippet(blocks_fts, 4, '[', ']', '...', 16) AS text
-                FROM blocks_fts
-                JOIN blocks ON blocks.id = blocks_fts.block_id
-                WHERE blocks_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                "#,
-            )
-            .bind(&fts)
-            .bind(limit.0 as i64)
-            .fetch_all(&pool)
-            .await
-            {
-                Ok(rows) => rows,
-                Err(_) => {
-                    sqlx::query(
-                        "SELECT path, start_line, end_line, kind, text FROM blocks WHERE text LIKE ? ORDER BY path, start_line LIMIT ?",
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
+            let rows = if db.fts_enabled() {
+                match db
+                    .fetch_all(
+                        r#"
+                        SELECT blocks.path, blocks.start_line, blocks.end_line, blocks.kind,
+                               snippet(blocks_fts, 4, '[', ']', '...', 16) AS text
+                        FROM blocks_fts
+                        JOIN blocks ON blocks.id = blocks_fts.block_id
+                        WHERE blocks_fts MATCH ?
+                        ORDER BY rank
+                        LIMIT ?
+                        "#,
+                        vec![text(fts.as_str()), int(limit.0 as i64)],
                     )
-                    .bind(&like)
-                    .bind(limit.0 as i64)
-                    .fetch_all(&pool)
                     .await
-                    .map_err(io_other)?
+                {
+                    Ok(rows) => rows,
+                    Err(_) => db.fetch_all(&like_sql, like_params()).await?,
                 }
+            } else {
+                db.fetch_all(&like_sql, like_params()).await?
             };
-            pool.close().await;
-            Ok(rows.into_iter().map(search_hit_from_row).collect())
+            db.close().await;
+            rows.iter().map(search_hit_from_row).collect()
         })
     }
 
     pub fn graph(&self, limit: NoteQueryLimit) -> std::io::Result<NoteGraphSummary> {
         let db_path = self.db_path();
         block_on_db(async {
-            let pool = open_pool(&db_path).await?;
-            migrate(&pool).await?;
-            let nodes =
-                sqlx::query("SELECT path, title FROM notes ORDER BY title, path LIMIT ?")
-                    .bind(limit.0 as i64)
-                    .fetch_all(&pool)
-                    .await
-                    .map_err(io_other)?
-                    .into_iter()
-                    .map(|row| NoteGraphNode {
-                        path: row.get("path"),
-                        title: row.get("title"),
+            let db = open_note_db(&db_path).await?;
+            migrate(&db).await?;
+            let nodes = db
+                .fetch_all(
+                    "SELECT path, title FROM notes ORDER BY title, path LIMIT ?",
+                    vec![int(limit.0 as i64)],
+                )
+                .await?
+                .iter()
+                .map(|row| {
+                    Ok(NoteGraphNode {
+                        path: row.get_str("path")?,
+                        title: row.get_str("title")?,
                     })
-                    .collect::<Vec<_>>();
-            let edges = sqlx::query(
-                r#"
-                SELECT links.source_path, notes.path AS target_path, links.source_line, links.kind
-                FROM links
-                JOIN notes ON notes.id = links.target_note_id
-                WHERE links.kind != 'code_ref'
-                ORDER BY links.source_path, links.source_line
-                LIMIT ?
-                "#,
-            )
-            .bind(limit.0 as i64)
-            .fetch_all(&pool)
-            .await
-            .map_err(io_other)?
-            .into_iter()
-            .map(|row| NoteGraphEdge {
-                source_path: row.get("source_path"),
-                target_path: row.get("target_path"),
-                source_line: row.get("source_line"),
-                kind: row.get("kind"),
-            })
-            .collect::<Vec<_>>();
-            pool.close().await;
+                })
+                .collect::<std::io::Result<Vec<_>>>()?;
+            let edges = db
+                .fetch_all(
+                    r#"
+                    SELECT links.source_path, notes.path AS target_path, links.source_line, links.kind
+                    FROM links
+                    JOIN notes ON notes.id = links.target_note_id
+                    WHERE links.kind != 'code_ref'
+                    ORDER BY links.source_path, links.source_line
+                    LIMIT ?
+                    "#,
+                    vec![int(limit.0 as i64)],
+                )
+                .await?
+                .iter()
+                .map(|row| {
+                    Ok(NoteGraphEdge {
+                        source_path: row.get_str("source_path")?,
+                        target_path: row.get_str("target_path")?,
+                        source_line: row.get_i64("source_line")?,
+                        kind: row.get_str("kind")?,
+                    })
+                })
+                .collect::<std::io::Result<Vec<_>>>()?;
+            db.close().await;
             Ok(NoteGraphSummary { nodes, edges })
         })
     }
@@ -640,10 +626,10 @@ struct DbNote {
 }
 
 async fn resolve_note(
-    pool: &sqlx::SqlitePool,
+    db: &NoteDb,
     target: &str,
 ) -> std::io::Result<Option<NoteSummary>> {
-    let note = resolve_db_note(pool, target).await?;
+    let note = resolve_db_note(db, target).await?;
     Ok(note.map(|note| NoteSummary {
         path: note.path,
         title: note.title,
@@ -652,25 +638,26 @@ async fn resolve_note(
     }))
 }
 
-async fn resolve_db_note(
-    pool: &sqlx::SqlitePool,
-    target: &str,
-) -> std::io::Result<Option<DbNote>> {
+async fn resolve_db_note(db: &NoteDb, target: &str) -> std::io::Result<Option<DbNote>> {
     let target = target.trim();
-    let rows = sqlx::query("SELECT id, path, title, modified, indexed_at FROM notes")
-        .fetch_all(pool)
-        .await
-        .map_err(io_other)?;
+    let rows = db
+        .fetch_all(
+            "SELECT id, path, title, modified, indexed_at FROM notes",
+            Vec::new(),
+        )
+        .await?;
     let notes = rows
-        .into_iter()
-        .map(|row| DbNote {
-            id: row.get("id"),
-            path: row.get("path"),
-            title: row.get("title"),
-            modified: row.get("modified"),
-            indexed_at: row.get("indexed_at"),
+        .iter()
+        .map(|row| {
+            Ok(DbNote {
+                id: row.get_str("id")?,
+                path: row.get_str("path")?,
+                title: row.get_str("title")?,
+                modified: row.get_i64("modified")?,
+                indexed_at: row.get_i64("indexed_at")?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<std::io::Result<Vec<_>>>()?;
     Ok(notes
         .iter()
         .find(|note| {
@@ -682,74 +669,73 @@ async fn resolve_db_note(
         .cloned())
 }
 
-fn note_from_row(row: sqlx::sqlite::SqliteRow) -> NoteSummary {
-    NoteSummary {
-        path: row.get("path"),
-        title: row.get("title"),
-        modified: row.get("modified"),
-        indexed_at: row.get("indexed_at"),
-    }
+fn note_from_row(row: &DbRow) -> std::io::Result<NoteSummary> {
+    Ok(NoteSummary {
+        path: row.get_str("path")?,
+        title: row.get_str("title")?,
+        modified: row.get_i64("modified")?,
+        indexed_at: row.get_i64("indexed_at")?,
+    })
 }
 
-fn heading_from_row(row: sqlx::sqlite::SqliteRow) -> HeadingSummary {
-    HeadingSummary {
-        path: row.get("path"),
-        line: row.get("line"),
-        level: row.get("level"),
-        text: row.get("text"),
-        slug: row.get("slug"),
-    }
+fn heading_from_row(row: &DbRow) -> std::io::Result<HeadingSummary> {
+    Ok(HeadingSummary {
+        path: row.get_str("path")?,
+        line: row.get_i64("line")?,
+        level: row.get_i64("level")?,
+        text: row.get_str("text")?,
+        slug: row.get_str("slug")?,
+    })
 }
 
-fn link_from_row(row: sqlx::sqlite::SqliteRow) -> LinkSummary {
-    LinkSummary {
-        source_path: row.get("source_path"),
-        source_line: row.get("source_line"),
-        raw: row.get("raw"),
-        target: row.get("target"),
-        target_path: row.get("target_path"),
-        heading: row.get("heading"),
-        alias: row.get("alias"),
-        kind: row.get("kind"),
-    }
+fn link_from_row(row: &DbRow) -> std::io::Result<LinkSummary> {
+    Ok(LinkSummary {
+        source_path: row.get_str("source_path")?,
+        source_line: row.get_i64("source_line")?,
+        raw: row.get_str("raw")?,
+        target: row.get_str("target")?,
+        target_path: row.get_opt_str("target_path")?,
+        heading: row.get_opt_str("heading")?,
+        alias: row.get_opt_str("alias")?,
+        kind: row.get_str("kind")?,
+    })
 }
 
-fn tag_occurrence_from_row(row: sqlx::sqlite::SqliteRow) -> TagOccurrenceSummary {
-    TagOccurrenceSummary {
-        tag: row.get("tag"),
-        path: row.get("path"),
-        line: row.get("line"),
-        title: row.get("title"),
-    }
+fn tag_occurrence_from_row(row: &DbRow) -> std::io::Result<TagOccurrenceSummary> {
+    Ok(TagOccurrenceSummary {
+        tag: row.get_str("tag")?,
+        path: row.get_str("path")?,
+        line: row.get_i64("line")?,
+        title: row.get_str("title")?,
+    })
 }
 
-fn task_from_row(row: sqlx::sqlite::SqliteRow) -> TaskSummary {
-    let checked: i64 = row.get("checked");
-    TaskSummary {
-        path: row.get("path"),
-        line: row.get("line"),
-        checked: checked != 0,
-        text: row.get("text"),
-    }
+fn task_from_row(row: &DbRow) -> std::io::Result<TaskSummary> {
+    Ok(TaskSummary {
+        path: row.get_str("path")?,
+        line: row.get_i64("line")?,
+        checked: row.get_i64("checked")? != 0,
+        text: row.get_str("text")?,
+    })
 }
 
-fn property_from_row(row: sqlx::sqlite::SqliteRow) -> PropertySummary {
-    PropertySummary {
-        path: row.get("path"),
-        key: row.get("key"),
-        value: row.get("value"),
-        value_type: row.get("value_type"),
-    }
+fn property_from_row(row: &DbRow) -> std::io::Result<PropertySummary> {
+    Ok(PropertySummary {
+        path: row.get_str("path")?,
+        key: row.get_str("key")?,
+        value: row.get_str("value")?,
+        value_type: row.get_str("value_type")?,
+    })
 }
 
-fn search_hit_from_row(row: sqlx::sqlite::SqliteRow) -> NoteSearchHit {
-    NoteSearchHit {
-        path: row.get("path"),
-        start_line: row.get("start_line"),
-        end_line: row.get("end_line"),
-        kind: row.get("kind"),
-        text: row.get("text"),
-    }
+fn search_hit_from_row(row: &DbRow) -> std::io::Result<NoteSearchHit> {
+    Ok(NoteSearchHit {
+        path: row.get_str("path")?,
+        start_line: row.get_i64("start_line")?,
+        end_line: row.get_i64("end_line")?,
+        kind: row.get_str("kind")?,
+        text: row.get_str("text")?,
+    })
 }
 
 fn fts_query(query: &str) -> String {
@@ -828,7 +814,7 @@ mod tests {
         unsafe {
             std::env::set_var("NEOISM_NOTES_HOME", &notes_home);
         }
-        let graph = NoteGraph::init(&root).unwrap();
+        let graph = NoteGraph::open(&root).unwrap();
         let notes_root = graph.workspace().notes_workspace_dir();
         std::fs::create_dir_all(&notes_root).unwrap();
         std::fs::write(
@@ -843,7 +829,11 @@ mod tests {
         .unwrap();
         graph.reindex().unwrap();
 
-        assert_eq!(graph.notes(NoteQueryLimit(10)).unwrap().len(), 3);
+        // The default vault is also seeded with welcome pages, so assert on
+        // the fixture notes rather than an exact count.
+        let notes = graph.notes(NoteQueryLimit(100)).unwrap();
+        assert!(notes.iter().any(|note| note.path == "Roadmap.md"));
+        assert!(notes.iter().any(|note| note.path == "Plan.md"));
         assert_eq!(
             graph
                 .backlinks("Roadmap", NoteQueryLimit(10))
@@ -851,7 +841,11 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(graph.tags(NoteQueryLimit(10)).unwrap()[0].tag, "neoism");
+        assert!(graph
+            .tags(NoteQueryLimit(100))
+            .unwrap()
+            .iter()
+            .any(|tag| tag.tag == "neoism"));
         assert_eq!(
             graph
                 .tag_occurrences(Some("neoism"), NoteQueryLimit(10))
@@ -871,6 +865,8 @@ mod tests {
                 .key,
             "owner"
         );
+        // Backend-aware: on the SQLite backend this exercises FTS5 MATCH;
+        // on turso (no FTS5) it exercises the LIKE fallback path.
         assert!(!graph.search("ship", NoteQueryLimit(10)).unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(root);

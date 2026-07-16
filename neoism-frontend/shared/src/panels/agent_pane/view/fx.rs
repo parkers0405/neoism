@@ -457,12 +457,58 @@ fn render_praise(
     // Dais + throne: two gold steps, tall back, seat and armrests.
     let dais_w = guy_w * 2.4;
     let dais_h = 5.0 * s;
-    sugarloaf.rect(None, cx - dais_w * 0.5, floor_y - dais_h, dais_w, dais_h, GOLD_DARK, DEPTH, ORDER);
-    sugarloaf.rect(None, cx - dais_w * 0.35, floor_y - dais_h * 2.0, dais_w * 0.7, dais_h, GOLD, DEPTH, ORDER);
+    sugarloaf.rect(
+        None,
+        cx - dais_w * 0.5,
+        floor_y - dais_h,
+        dais_w,
+        dais_h,
+        GOLD_DARK,
+        DEPTH,
+        ORDER,
+    );
+    sugarloaf.rect(
+        None,
+        cx - dais_w * 0.35,
+        floor_y - dais_h * 2.0,
+        dais_w * 0.7,
+        dais_h,
+        GOLD,
+        DEPTH,
+        ORDER,
+    );
     let throne_top = floor_y - dais_h * 2.0 - guy_h - 10.0 * s;
-    sugarloaf.rounded_rect(None, cx - guy_w * 0.62, throne_top, guy_w * 1.24, guy_h + 10.0 * s, GOLD_DARK, DEPTH, 6.0 * s, ORDER);
-    sugarloaf.rect(None, cx - guy_w * 0.78, floor_y - dais_h * 2.0 - 9.0 * s, guy_w * 0.16, 9.0 * s, GOLD, DEPTH, ORDER);
-    sugarloaf.rect(None, cx + guy_w * 0.62, floor_y - dais_h * 2.0 - 9.0 * s, guy_w * 0.16, 9.0 * s, GOLD, DEPTH, ORDER);
+    sugarloaf.rounded_rect(
+        None,
+        cx - guy_w * 0.62,
+        throne_top,
+        guy_w * 1.24,
+        guy_h + 10.0 * s,
+        GOLD_DARK,
+        DEPTH,
+        6.0 * s,
+        ORDER,
+    );
+    sugarloaf.rect(
+        None,
+        cx - guy_w * 0.78,
+        floor_y - dais_h * 2.0 - 9.0 * s,
+        guy_w * 0.16,
+        9.0 * s,
+        GOLD,
+        DEPTH,
+        ORDER,
+    );
+    sugarloaf.rect(
+        None,
+        cx + guy_w * 0.62,
+        floor_y - dais_h * 2.0 - 9.0 * s,
+        guy_w * 0.16,
+        9.0 * s,
+        GOLD,
+        DEPTH,
+        ORDER,
+    );
 
     // Light from above: a soft gold column plus two breathing outer
     // bands — glory, in rects.
@@ -507,13 +553,22 @@ fn render_praise(
         ([0.30, 0.34, 0.46, 1.0], [0.55, 0.38, 0.26, 1.0], 0.0, true),
         ([0.42, 0.24, 0.18, 1.0], [0.91, 0.71, 0.55, 1.0], 0.45, true),
         ([0.26, 0.38, 0.28, 1.0], [0.98, 0.80, 0.64, 1.0], 0.2, false),
-        ([0.36, 0.28, 0.42, 1.0], [0.76, 0.56, 0.40, 1.0], 0.65, false),
+        (
+            [0.36, 0.28, 0.42, 1.0],
+            [0.76, 0.56, 0.40, 1.0],
+            0.65,
+            false,
+        ),
     ];
     let slots = [0.24, 0.35, 0.65, 0.76];
     for (i, ((outfit, skin, phase, from_left), slot)) in
         worshipers.iter().zip(slots.iter()).enumerate()
     {
-        let style = SpriteStyle { shirt: *outfit, skin: *skin, hat: *outfit };
+        let style = SpriteStyle {
+            shirt: *outfit,
+            skin: *skin,
+            hat: *outfit,
+        };
         let target = rect[0] + rect[2] * slot - guy_w * 0.5;
         let guy_y = floor_y - guy_h;
         if elapsed < GATHER_END {
@@ -600,7 +655,15 @@ fn render_glitch(
         let u = (elapsed / GLITCH_WALK_END).clamp(0.0, 1.0);
         let x = rect[0] - guy_w + (stop_x - rect[0] + guy_w) * u;
         let bob = ((elapsed * 14.0).sin() * 1.2 * s).abs();
-        draw_sprite(sugarloaf, walk_frame(elapsed, 8.0), x, guy_y - bob, px, shirt, false);
+        draw_sprite(
+            sugarloaf,
+            walk_frame(elapsed, 8.0),
+            x,
+            guy_y - bob,
+            px,
+            shirt,
+            false,
+        );
         return;
     }
 
@@ -615,14 +678,29 @@ fn render_glitch(
     if elapsed < PLUG_END {
         // Bent over the plug (the business pose reads as "reaching
         // down" from this angle, don't overthink it).
-        draw_sprite(sugarloaf, &PISS_POSE, stop_x + jitter_x, guy_y, px, shirt, false);
+        draw_sprite(
+            sugarloaf,
+            &PISS_POSE,
+            stop_x + jitter_x,
+            guy_y,
+            px,
+            shirt,
+            false,
+        );
     } else {
-        let u = ((elapsed - PLUG_END)
-            / (total_seconds(AgentFxKind::Glitch) - PLUG_END))
+        let u = ((elapsed - PLUG_END) / (total_seconds(AgentFxKind::Glitch) - PLUG_END))
             .clamp(0.0, 1.0);
         let x = stop_x + (rect[0] - guy_w * 2.0 - stop_x) * u;
         let bob = ((elapsed * 14.0).sin() * 1.2 * s).abs();
-        draw_sprite(sugarloaf, walk_frame(elapsed, 8.0), x, guy_y - bob, px, shirt, true);
+        draw_sprite(
+            sugarloaf,
+            walk_frame(elapsed, 8.0),
+            x,
+            guy_y - bob,
+            px,
+            shirt,
+            true,
+        );
     }
 
     if glitching {
@@ -751,8 +829,8 @@ fn render_disco(
         let tile_w = rect[2] * 0.5 / tiles as f32;
         let beat = (elapsed * 3.0) as usize;
         for i in 0..tiles {
-            let color = [theme.red, theme.green, theme.blue, theme.yellow]
-                [(i + beat) % 4];
+            let color =
+                [theme.red, theme.green, theme.blue, theme.yellow][(i + beat) % 4];
             sugarloaf.rect(
                 None,
                 rect[0] + rect[2] * 0.25 + i as f32 * tile_w,
@@ -770,8 +848,14 @@ fn render_disco(
             let speed = 40.0 + hash01(i.wrapping_add(99)) * 80.0;
             let drop = (elapsed * speed + hash01(i.wrapping_add(7)) * rect[3] * 2.0)
                 % (rect[3] - 20.0 * s);
-            let color = [theme.red, theme.green, theme.blue, theme.yellow,
-                theme.magenta, theme.cyan][(i % 6) as usize];
+            let color = [
+                theme.red,
+                theme.green,
+                theme.blue,
+                theme.yellow,
+                theme.magenta,
+                theme.cyan,
+            ][(i % 6) as usize];
             sugarloaf.rect(
                 None,
                 col_x,
@@ -792,7 +876,11 @@ fn render_disco(
             _ => &WALK_B,
         };
         let wiggle = (dance_t * 6.0).sin() * 3.0 * s;
-        let hop = if ((dance_t * 4.0) as usize) % 2 == 0 { 2.0 * s } else { 0.0 };
+        let hop = if ((dance_t * 4.0) as usize) % 2 == 0 {
+            2.0 * s
+        } else {
+            0.0
+        };
         draw_sprite(
             sugarloaf,
             pose,
@@ -809,13 +897,29 @@ fn render_disco(
         // Strolls in from the left while the ball descends.
         let u = (elapsed / BALL_DROP_END).clamp(0.0, 1.0);
         let x = rect[0] - guy_w + (cx - guy_w * 0.5 - rect[0] + guy_w) * u;
-        draw_sprite(sugarloaf, walk_frame(elapsed, 8.0), x, guy_y, px, shirt, false);
+        draw_sprite(
+            sugarloaf,
+            walk_frame(elapsed, 8.0),
+            x,
+            guy_y,
+            px,
+            shirt,
+            false,
+        );
     } else {
         // Walks off the way he came (a moonwalk exit read as a bug,
         // not a bit — RIP).
         let u = ((elapsed - DANCE_END) / (total - DANCE_END)).clamp(0.0, 1.0);
         let x = cx - guy_w * 0.5 + (rect[0] - guy_w * 2.0 - cx + guy_w * 0.5) * u;
-        draw_sprite(sugarloaf, walk_frame(elapsed, 10.0), x, guy_y, px, shirt, true);
+        draw_sprite(
+            sugarloaf,
+            walk_frame(elapsed, 10.0),
+            x,
+            guy_y,
+            px,
+            shirt,
+            true,
+        );
     }
 }
 
@@ -833,11 +937,46 @@ struct CrewMember {
 /// Both crews are mixed — they're told apart by outfit (hoodies vs
 /// fedora suits), not by who's in them.
 const CREW: [CrewMember; 5] = [
-    CrewMember { slot: 0.16, outfit: [0.26, 0.30, 0.42, 1.0], skin: [0.55, 0.38, 0.26, 1.0], hat: [0.19, 0.22, 0.32, 1.0], fall_at: 3.0, from_left: true },
-    CrewMember { slot: 0.23, outfit: [0.45, 0.18, 0.18, 1.0], skin: [0.98, 0.80, 0.64, 1.0], hat: [0.34, 0.13, 0.13, 1.0], fall_at: 4.2, from_left: true },
-    CrewMember { slot: 0.30, outfit: [0.30, 0.38, 0.24, 1.0], skin: [0.76, 0.56, 0.40, 1.0], hat: [0.22, 0.28, 0.17, 1.0], fall_at: 5.4, from_left: true },
-    CrewMember { slot: 0.72, outfit: [0.22, 0.22, 0.27, 1.0], skin: [0.45, 0.30, 0.20, 1.0], hat: [0.13, 0.13, 0.16, 1.0], fall_at: 3.6, from_left: false },
-    CrewMember { slot: 0.79, outfit: [0.34, 0.26, 0.19, 1.0], skin: [0.91, 0.71, 0.55, 1.0], hat: [0.13, 0.13, 0.16, 1.0], fall_at: 4.8, from_left: false },
+    CrewMember {
+        slot: 0.16,
+        outfit: [0.26, 0.30, 0.42, 1.0],
+        skin: [0.55, 0.38, 0.26, 1.0],
+        hat: [0.19, 0.22, 0.32, 1.0],
+        fall_at: 3.0,
+        from_left: true,
+    },
+    CrewMember {
+        slot: 0.23,
+        outfit: [0.45, 0.18, 0.18, 1.0],
+        skin: [0.98, 0.80, 0.64, 1.0],
+        hat: [0.34, 0.13, 0.13, 1.0],
+        fall_at: 4.2,
+        from_left: true,
+    },
+    CrewMember {
+        slot: 0.30,
+        outfit: [0.30, 0.38, 0.24, 1.0],
+        skin: [0.76, 0.56, 0.40, 1.0],
+        hat: [0.22, 0.28, 0.17, 1.0],
+        fall_at: 5.4,
+        from_left: true,
+    },
+    CrewMember {
+        slot: 0.72,
+        outfit: [0.22, 0.22, 0.27, 1.0],
+        skin: [0.45, 0.30, 0.20, 1.0],
+        hat: [0.13, 0.13, 0.16, 1.0],
+        fall_at: 3.6,
+        from_left: false,
+    },
+    CrewMember {
+        slot: 0.79,
+        outfit: [0.34, 0.26, 0.19, 1.0],
+        skin: [0.91, 0.71, 0.55, 1.0],
+        hat: [0.13, 0.13, 0.16, 1.0],
+        fall_at: 4.8,
+        from_left: false,
+    },
 ];
 
 /// Cartoon crew shootout. The fella leads the fedora crew in from the
@@ -880,11 +1019,19 @@ fn render_gang_fight(
     if elapsed < CREWS_IN_END {
         let u = (elapsed / CREWS_IN_END).clamp(0.0, 1.0);
         for m in &CREW {
-            let style = SpriteStyle { shirt: m.outfit, skin: m.skin, hat: m.hat };
+            let style = SpriteStyle {
+                shirt: m.outfit,
+                skin: m.skin,
+                hat: m.hat,
+            };
             let bob = ((elapsed * 14.0 + m.slot * 20.0).sin() * 1.2 * s).abs();
             draw_sprite_styled(
                 sugarloaf,
-                if m.from_left { &HOOD_SHOOT } else { &FEDORA_SHOOT },
+                if m.from_left {
+                    &HOOD_SHOOT
+                } else {
+                    &FEDORA_SHOOT
+                },
                 walk_in_x(m, u),
                 guy_y - bob,
                 px,
@@ -915,7 +1062,11 @@ fn render_gang_fight(
     // stood for the rest of the skit.
     let mut left_standing = 0;
     for (i, m) in CREW.iter().enumerate() {
-        let style = SpriteStyle { shirt: m.outfit, skin: m.skin, hat: m.hat };
+        let style = SpriteStyle {
+            shirt: m.outfit,
+            skin: m.skin,
+            hat: m.hat,
+        };
         let x = member_x(m.slot);
         let down = shootout_progress(elapsed) > m.fall_at;
         if !down {
@@ -924,7 +1075,11 @@ fn render_gang_fight(
             }
             draw_sprite_styled(
                 sugarloaf,
-                if m.from_left { &HOOD_SHOOT } else { &FEDORA_SHOOT },
+                if m.from_left {
+                    &HOOD_SHOOT
+                } else {
+                    &FEDORA_SHOOT
+                },
                 x,
                 guy_y,
                 px,
@@ -940,13 +1095,35 @@ fn render_gang_fight(
                 } else {
                     x + 2.0 * px - 4.0 * s
                 };
-                sugarloaf.rect(None, flash_x, gun_y - 1.0 * s, 4.0 * s, 4.0 * s, MUZZLE, DEPTH, ORDER);
-                sugarloaf.rect(None, flash_x + 1.5 * s, gun_y - 3.0 * s, 1.5 * s, 8.0 * s, MUZZLE, DEPTH, ORDER);
+                sugarloaf.rect(
+                    None,
+                    flash_x,
+                    gun_y - 1.0 * s,
+                    4.0 * s,
+                    4.0 * s,
+                    MUZZLE,
+                    DEPTH,
+                    ORDER,
+                );
+                sugarloaf.rect(
+                    None,
+                    flash_x + 1.5 * s,
+                    gun_y - 3.0 * s,
+                    1.5 * s,
+                    8.0 * s,
+                    MUZZLE,
+                    DEPTH,
+                    ORDER,
+                );
             }
         } else {
             draw_sprite_styled(
                 sugarloaf,
-                if m.from_left { &HOOD_SHOOT } else { &FEDORA_SHOOT },
+                if m.from_left {
+                    &HOOD_SHOOT
+                } else {
+                    &FEDORA_SHOOT
+                },
                 x,
                 fallen_y,
                 px,
@@ -973,7 +1150,16 @@ fn render_gang_fight(
         if shootout && tick % 4 == 0 {
             let gun_y = guy_y + 6.5 * px;
             let flash_x = member_x(main_slot) + 2.0 * px - 4.0 * s;
-            sugarloaf.rect(None, flash_x, gun_y - 1.0 * s, 4.0 * s, 4.0 * s, MUZZLE, DEPTH, ORDER);
+            sugarloaf.rect(
+                None,
+                flash_x,
+                gun_y - 1.0 * s,
+                4.0 * s,
+                4.0 * s,
+                MUZZLE,
+                DEPTH,
+                ORDER,
+            );
         }
     } else {
         let u = ((elapsed - SHOOTOUT_END) / (total - SHOOTOUT_END)).clamp(0.0, 1.0);
@@ -999,8 +1185,8 @@ fn render_gang_fight(
         for i in 0..5u32 {
             // Rightward fire only while the left crew still has
             // shooters; return fire dries up as they drop.
-            let phase = (elapsed * (2.2 + hash01(i) * 1.4) + hash01(i.wrapping_add(40)))
-                % 1.0;
+            let phase =
+                (elapsed * (2.2 + hash01(i) * 1.4) + hash01(i.wrapping_add(40))) % 1.0;
             if left_standing > 0 {
                 let bx = left_x + (right_x - left_x) * phase;
                 let by = gun_y + (hash01(i.wrapping_add(11)) - 0.5) * 10.0 * s;
@@ -1083,16 +1269,7 @@ fn render_piss(
                 }
                 let dx = x0 - reach * u;
                 let dy = y0 + drop * u * u;
-                sugarloaf.rect(
-                    None,
-                    dx,
-                    dy,
-                    2.0 * s,
-                    2.0 * s,
-                    PISS_YELLOW,
-                    DEPTH,
-                    ORDER,
-                );
+                sugarloaf.rect(None, dx, dy, 2.0 * s, 2.0 * s, PISS_YELLOW, DEPTH, ORDER);
             }
         }
 
@@ -1205,7 +1382,10 @@ fn render_cuss(
         let pad = 6.0 * s;
         let bubble_w = text_w + pad * 2.0;
         let bubble_h = font_size + pad * 1.4;
-        let jitter = ((rant_t * 23.0).sin() * 1.5 * s, (rant_t * 31.0).cos() * 1.2 * s);
+        let jitter = (
+            (rant_t * 23.0).sin() * 1.5 * s,
+            (rant_t * 31.0).cos() * 1.2 * s,
+        );
         let bubble_x = stop_x - bubble_w + 3.0 * px + jitter.0;
         let bubble_y = guy_y - bubble_h - 8.0 * s + jitter.1;
         sugarloaf.rounded_rect(
@@ -1249,8 +1429,26 @@ fn render_cuss(
             let sx = stop_x + 6.0 * px + angle.cos() * 9.0 * px * 0.6;
             let sy = guy_y - 2.0 * px + angle.sin() * 4.0 * px * 0.4;
             // A tiny "+" — two crossed 1px bars.
-            sugarloaf.rect(None, sx - 2.0 * s, sy, 5.0 * s, 1.5 * s, ANGER_RED, DEPTH, ORDER);
-            sugarloaf.rect(None, sx, sy - 2.0 * s, 1.5 * s, 5.0 * s, ANGER_RED, DEPTH, ORDER);
+            sugarloaf.rect(
+                None,
+                sx - 2.0 * s,
+                sy,
+                5.0 * s,
+                1.5 * s,
+                ANGER_RED,
+                DEPTH,
+                ORDER,
+            );
+            sugarloaf.rect(
+                None,
+                sx,
+                sy - 2.0 * s,
+                1.5 * s,
+                5.0 * s,
+                ANGER_RED,
+                DEPTH,
+                ORDER,
+            );
         }
         return;
     }

@@ -40,8 +40,21 @@ pub(super) fn render_virtual(
     };
     let title_h = line_height(&title_opts) + 16.0;
 
+    // Notion/Thymer-style page decorations from the properties block:
+    // `cover:` reserves an edge-to-edge banner band (the HOST paints the
+    // actual image via `cover_overlay_rect`), `icon:` a large emoji row.
+    // Both sit above the title and scroll with the content.
+    let page_icon = pane.frontmatter_icon();
+    let cover_active = pane.frontmatter_cover().is_some();
+    let cover_h = if cover_active {
+        (170.0 * font_scale).min(h * 0.35).max(0.0)
+    } else {
+        0.0
+    };
+    // The icon renders INLINE with the title ("{emoji} Title"), so it
+    // reserves no vertical band of its own.
     let pad_x = 48.0;
-    let pad_top = 38.0 + title_h;
+    let pad_top = 38.0 + title_h + cover_h;
     let content_w = (w - pad_x * 2.0).clamp(220.0, 920.0);
     let content_x = x + ((w - content_w) * 0.5).max(pad_x.min(w * 0.08));
     let viewport_h = (h - pad_top).max(1.0);
@@ -50,6 +63,52 @@ pub(super) fn render_virtual(
 
     pane.begin_block_layout();
     pane.set_cursor_rect(None);
+
+    if pane.remote_content_pending {
+        // Joined-workspace fetch in flight: full-viewport skeleton rows
+        // instead of an error. The skeleton FADES IN after a short grace
+        // window so a near-instant load never flashes it (nothing draws
+        // for the first ~80ms, then the bars ramp up), and it fills the
+        // whole viewport rather than reading as one stubby paragraph.
+        // Content lands via `apply_remote_source`.
+        let elapsed_ms = pane
+            .remote_loading_started
+            .map(|started| started.elapsed().as_secs_f32() * 1000.0)
+            .unwrap_or(f32::MAX);
+        let ramp = crate::animation::ease_out_cubic(
+            ((elapsed_ms - 80.0) / 240.0).clamp(0.0, 1.0),
+        );
+        if ramp > 0.0 {
+            let row_h = markdown_font(16.0, font_scale) * 1.3;
+            let rows = ((viewport_h / row_h).ceil() as usize).max(1);
+            let mut bar_y = y + pad_top;
+            for i in 0..rows {
+                let width_factor = match i % 4 {
+                    0 => 0.72,
+                    1 => 0.55,
+                    2 => 0.85,
+                    _ => 0.64,
+                };
+                let alpha = (0.14 - (i % 6) as f32 * 0.012).max(0.05) * ramp;
+                sugarloaf.rect(
+                    None,
+                    content_x,
+                    bar_y,
+                    content_w * width_factor,
+                    row_h * 0.6,
+                    theme.f32_alpha(theme.dim, alpha),
+                    DEPTH,
+                    ORDER_BG + 1,
+                );
+                bar_y += row_h;
+                if bar_y > bottom {
+                    break;
+                }
+            }
+        }
+        pane.set_content_height(160.0, h);
+        return true;
+    }
 
     if let Some(err) = pane.error.clone() {
         let opts = DrawOpts {
@@ -213,16 +272,88 @@ pub(super) fn render_virtual(
         })
         .max_by_key(|(end_line, _)| *end_line);
 
+    // Cover band: subtle placeholder tint under where the host lays the
+    // image overlay (also what shows while the image decodes).
+    pane.cover_overlay_rect = None;
+    if cover_active {
+        let band_y = y - pane.scroll_y.max(0.0);
+        let visible_top = band_y.max(y);
+        let visible_bottom = (band_y + cover_h).min(bottom);
+        if visible_bottom > visible_top {
+            sugarloaf.rect(
+                None,
+                x,
+                visible_top,
+                w,
+                visible_bottom - visible_top,
+                theme.f32_alpha(theme.dim, 0.08),
+                DEPTH,
+                ORDER_BG + 1,
+            );
+        }
+        pane.cover_overlay_rect = Some([x, band_y, w, cover_h]);
+    }
+    // "{emoji} Title" — the page icon sits on the title line, right
+    // before the text (Notion-style), not in a band of its own.
+    let title_y = y + 30.0 + cover_h - pane.scroll_y;
+    let mut title_x = content_x;
+    if let Some(icon) = page_icon.as_deref() {
+        let icon_opts = DrawOpts {
+            font_size: title_opts.font_size,
+            color: theme.u8(theme.fg),
+            clip_rect: Some(clip),
+            ..DrawOpts::default()
+        };
+        // Emoji glyphs sit a touch lower than the title face at the
+        // same size — lift the icon slightly so it reads baseline-even
+        // with the text.
+        draw_if_visible(
+            sugarloaf,
+            content_x,
+            title_y - 3.0 * font_scale,
+            icon,
+            &icon_opts,
+            y,
+            bottom,
+            text_occlusions,
+        );
+        title_x += sugarloaf.text_mut().measure(icon, &icon_opts)
+            + 10.0 * font_scale;
+    }
+    let title_draw = pane
+        .title_edit
+        .as_ref()
+        .map(|edit| edit.text.clone())
+        .unwrap_or_else(|| title_text.clone());
     draw_if_visible(
         sugarloaf,
-        content_x,
-        y + 30.0 - pane.scroll_y,
-        &title_text,
+        title_x,
+        title_y,
+        &title_draw,
         &title_opts,
         y,
         bottom,
         text_occlusions,
     );
+    if let Some((prefix, under)) = pane.title_edit.as_ref().map(|edit| {
+        let prefix: String = edit.text.chars().take(edit.caret).collect();
+        let under: String = edit.text.chars().skip(edit.caret).take(1).collect();
+        (prefix, under)
+    }) {
+        // The title caret is the SAME trail cursor the body uses —
+        // block in Normal (sits on the char at the caret), beam in
+        // Insert (the host overlay narrows Beam rects itself). Setting
+        // cursor_rect here, before the item loop, also suppresses the
+        // body caret while the title is being edited.
+        let caret_x = title_x + sugarloaf.text_mut().measure(&prefix, &title_opts);
+        let probe = if under.is_empty() { "M" } else { under.as_str() };
+        let cell_w = sugarloaf.text_mut().measure(probe, &title_opts).max(3.0);
+        set_cursor_rect_clipped(
+            pane,
+            [caret_x, title_y - 2.0, cell_w, title_opts.font_size * 1.15],
+            Some(clip),
+        );
+    }
 
     for item in items {
         draw_item(
@@ -270,7 +401,103 @@ pub(super) fn render_virtual(
     draw_remote_markdown_carets(sugarloaf, pane, theme, clip, font_scale);
     draw_markdown_scrollbar(sugarloaf, pane, rect, total_height, theme, mouse, clip);
     draw_markdown_roster(sugarloaf, pane, rect, theme, mouse, clip, font_scale);
+    pane.refresh_value_picker();
+    draw_value_picker(sugarloaf, pane, rect, theme, font_scale);
     true
+}
+
+/// LSP-completion-style popup for `icon:` / `cover:` frontmatter lines:
+/// the line being typed is the search bar, candidates pop under the
+/// cursor. Up/Down/Tab move, Enter accepts (host key path), Esc/leaving
+/// the line closes via `refresh_value_picker`.
+fn draw_value_picker(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut MarkdownPane,
+    rect: [f32; 4],
+    theme: &IdeTheme,
+    font_scale: f32,
+) {
+    if pane.value_picker.is_none() {
+        return;
+    }
+    let candidates = pane.value_picker_candidates();
+    if candidates.is_empty() {
+        return;
+    }
+    let Some(cursor) = pane.cursor_rect else {
+        return;
+    };
+    let [x, y, w, h] = rect;
+    let selected = pane
+        .value_picker
+        .as_ref()
+        .map(|picker| picker.selected.min(candidates.len() - 1))
+        .unwrap_or(0);
+
+    let row_font = markdown_font(15.0, font_scale);
+    let row_h = row_font * 1.7;
+    let pad = 6.0;
+    let visible_rows = candidates.len().min(8);
+    let menu_w = (w * 0.5).clamp(220.0, 360.0);
+    let menu_h = visible_rows as f32 * row_h + pad * 2.0;
+    let below_y = cursor[1] + cursor[3] + 6.0;
+    let menu_y = if below_y + menu_h > y + h {
+        (cursor[1] - menu_h - 6.0).max(y + 4.0)
+    } else {
+        below_y
+    };
+    let menu_x = cursor[0].min(x + w - menu_w - 8.0).max(x + 8.0);
+    let menu_clip = [menu_x, menu_y, menu_w, menu_h];
+
+    // OVERLAY pipeline (like the palette/modal), not the pane's own
+    // rich-text layer — drawn in-layer, the underlying note text bled
+    // straight through the card.
+    sugarloaf.overlay_rounded_rect(
+        menu_x,
+        menu_y,
+        menu_w,
+        menu_h,
+        theme.f32(theme.surface),
+        DEPTH,
+        6.0,
+        ORDER_BG + 4,
+    );
+
+    // Keep the selection inside the visible window.
+    let first = selected.saturating_sub(visible_rows.saturating_sub(1));
+    let first = first.min(candidates.len() - visible_rows);
+    for (slot, index) in (first..first + visible_rows).enumerate() {
+        let row_y = menu_y + pad + slot as f32 * row_h;
+        let is_selected = index == selected;
+        if is_selected {
+            sugarloaf.overlay_rounded_rect(
+                menu_x + 4.0,
+                row_y,
+                menu_w - 8.0,
+                row_h,
+                theme.f32_alpha(theme.accent, 0.28),
+                DEPTH,
+                4.0,
+                ORDER_BG + 5,
+            );
+        }
+        let opts = DrawOpts {
+            font_size: row_font,
+            color: if is_selected {
+                theme.u8(theme.fg)
+            } else {
+                theme.u8(theme.dim)
+            },
+            clip_rect: Some(menu_clip),
+            ..DrawOpts::default()
+        };
+        sugarloaf.overlay_text_mut().draw(
+            menu_x + 12.0,
+            row_y + (row_h - row_font) / 2.0,
+            &candidates[index].1,
+            &opts,
+        );
+    }
 }
 
 /// Rebuild the "On this page" heading outline only when the source changed —
@@ -816,7 +1043,7 @@ fn prepare_surface(
             state.adapter =
                 sugarloaf::VirtualMarkdownAdapter::new("neoism-markdown-pane");
             state.surface = sugarloaf::VirtualSurface::new(VirtualSurfaceConfig {
-                overscan_px: 260.0,
+                overscan_px: 700.0,
                 warm_distance_px: 12_000.0,
                 cold_distance_px: 60_000.0,
                 tile_height_px: 768.0,
@@ -920,7 +1147,7 @@ fn prepare_large_line_surface(
             state.adapter =
                 sugarloaf::VirtualMarkdownAdapter::new("neoism-markdown-pane");
             state.surface = sugarloaf::VirtualSurface::new(VirtualSurfaceConfig {
-                overscan_px: 260.0,
+                overscan_px: 700.0,
                 warm_distance_px: 12_000.0,
                 cold_distance_px: 60_000.0,
                 tile_height_px: 768.0,

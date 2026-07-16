@@ -1,6 +1,19 @@
 use super::*;
 
 impl Screen<'_> {
+    pub(crate) fn restore_subscribed_daemon_workspaces(
+        &mut self,
+        workspace_ids: &[String],
+        last_active_workspace_id: Option<&str>,
+    ) {
+        for workspace_id in workspace_ids {
+            self.open_or_adopt_daemon_workspace(workspace_id.clone());
+        }
+        if let Some(workspace_id) = last_active_workspace_id {
+            self.open_or_adopt_daemon_workspace(workspace_id.to_string());
+        }
+    }
+
     pub fn open_path_in_editor(&mut self, path: std::path::PathBuf) {
         let started_at = std::time::Instant::now();
         if crate::editor::markdown::state::is_markdown_path(&path) {
@@ -622,9 +635,7 @@ impl Screen<'_> {
         // which left a visible tree stuck on the previous workspace's
         // (local) listing after a join.
         if let Some(root) = self.active_workspace_root.clone() {
-            if self.renderer.file_tree.is_visible()
-                && self.renderer.file_tree.root() != Some(root.as_path())
-            {
+            if self.renderer.file_tree.is_visible() {
                 self.populate_file_tree_from_dir(&root);
             }
             if let Some(id) = self.current_workspace_id() {

@@ -227,7 +227,15 @@ impl SessionRegistry {
         explicit_shell: Option<String>,
     ) -> Vec<ServerMessage> {
         let (shell, args) = shell_for_create(explicit_shell);
-        let env: Vec<(String, String)> = std::env::vars().collect();
+        let mut env: Vec<(String, String)> = std::env::vars().collect();
+        // Headless daemons (containers, systemd units) often run with no
+        // TERM at all — child shells then break every curses program and
+        // even `clear` ("TERM environment variable not set"). The client
+        // renders xterm-256color escapes, so advertise that when the
+        // daemon's own environment has nothing better.
+        if !env.iter().any(|(key, _)| key == "TERM") {
+            env.push(("TERM".to_string(), "xterm-256color".to_string()));
+        }
         let config = PtySessionConfig {
             shell,
             args,
@@ -364,6 +372,11 @@ fn shell_for_create(explicit_shell: Option<String>) -> (Option<String>, Vec<Stri
         let requested = explicit_shell
             .or_else(preferred_zsh)
             .or_else(|| std::env::var("SHELL").ok())
+            // Headless daemons (containers) often have neither zsh nor
+            // SHELL. Bare `/bin/sh` gets no block-prompt integration, so
+            // every command shows as perpetually running — prefer bash
+            // when it exists.
+            .or_else(preferred_bash)
             .unwrap_or_else(|| "/bin/sh".to_string());
 
         match block_shell_for_spawn(&requested) {
@@ -393,6 +406,15 @@ fn preferred_zsh() -> Option<String> {
         .find(|path| Path::new(path).exists())
         .map(|path| (*path).to_string())
         .or_else(|| command_in_path("zsh"))
+}
+
+#[cfg(not(windows))]
+fn preferred_bash() -> Option<String> {
+    ["/usr/bin/bash", "/bin/bash"]
+        .iter()
+        .find(|path| Path::new(path).exists())
+        .map(|path| (*path).to_string())
+        .or_else(|| command_in_path("bash"))
 }
 
 fn command_in_path(command: &str) -> Option<String> {

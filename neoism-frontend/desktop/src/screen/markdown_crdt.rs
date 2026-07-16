@@ -212,6 +212,17 @@ impl Screen<'_> {
         if !self.context_manager.daemon_client_attached() {
             return false;
         }
+        // Wrong-daemon guard: a PEER link (joined server) can only save
+        // files of the workspace joined THROUGH it. If the view sits in
+        // a local workspace while the link still points at the peer
+        // (e.g. a refused switch left them desynced), routing SaveBuffer
+        // there writes a host path on the wrong machine — fall back to
+        // the local write instead.
+        if self.context_manager.daemon_link_is_peer()
+            && !self.context_manager.current_workspace_is_remote_joined()
+        {
+            return false;
+        }
         let Some(pane) = self.context_manager.current_mut().markdown.as_mut() else {
             return false;
         };
@@ -424,6 +435,14 @@ fn drain_markdown_pane_crdt(
     buffer_id: String,
     open_buffer_ids: &mut HashSet<String>,
 ) -> bool {
+    // The pane's real content is still in flight from the host daemon.
+    // Binding now would seed the CRDT doc with the empty placeholder —
+    // whose snapshot then CLOBBERS the fetched content the moment it
+    // paints (content flashes, goes blank, tab reads dirty). Bind on the
+    // next drain after `apply_remote_source` lands.
+    if pane.remote_content_pending {
+        return false;
+    }
     let mut pane_changed = false;
     open_buffer_ids.insert(buffer_id.clone());
     match state.bindings.entry(buffer_id) {

@@ -1000,7 +1000,8 @@ impl Screen<'_> {
                 } else {
                     None
                 }
-            } else if let Some(markdown) = self.context_manager.current().markdown.as_ref()
+            } else if let Some(markdown) =
+                self.context_manager.current().markdown.as_ref()
             {
                 let total = markdown.lines.len();
                 (total > 0).then(|| ((markdown.cursor_line + 1).min(total), total))

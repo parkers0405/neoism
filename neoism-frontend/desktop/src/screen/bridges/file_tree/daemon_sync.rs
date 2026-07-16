@@ -64,6 +64,22 @@ impl Screen<'_> {
         };
         let is_remote = remote.is_some();
         self.renderer.file_tree.set_remote_files(remote);
+        // The finder rides the same fork: Alt+S in a joined workspace
+        // must search the HOST's disk (its root doesn't exist locally,
+        // which read as an always-empty "no files" finder).
+        let search_route = if self.context_manager.current_workspace_is_remote_joined()
+        {
+            self.context_manager.daemon_link_handle_and_runtime().map(
+                |(handle, runtime)| crate::host::finder_search::RemoteSearchRoute {
+                    root: root.to_path_buf(),
+                    handle,
+                    runtime,
+                },
+            )
+        } else {
+            None
+        };
+        self.renderer.finder_search.set_remote(search_route);
         tracing::info!(
             target: "neoism::remote_files",
             root = %root.display(),
@@ -222,6 +238,22 @@ impl Screen<'_> {
                     self.mark_dirty();
                 }
                 applied
+            }
+            FilesServerMessage::FileContent { bytes, .. } => {
+                let Some(pane_path) =
+                    self.pending_remote_markdown_opens.remove(&request_id)
+                else {
+                    return false;
+                };
+                let source = String::from_utf8_lossy(bytes).into_owned();
+                let Some(pane) =
+                    self.context_manager.markdown_pane_mut_by_path(&pane_path)
+                else {
+                    return false;
+                };
+                pane.apply_remote_source(&source);
+                self.mark_dirty();
+                true
             }
             FilesServerMessage::Changed { root, paths } => {
                 let Some(remote_root) = self.renderer.file_tree.remote_root() else {

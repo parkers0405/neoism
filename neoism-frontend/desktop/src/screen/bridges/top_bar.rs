@@ -34,6 +34,10 @@ impl Screen<'_> {
                 }
                 true
             }
+            Some(TopBarAction::OpenServers) => {
+                self.request_server_manager();
+                true
+            }
             Some(TopBarAction::OpenSettings) => {
                 self.open_settings_config_tab();
                 true

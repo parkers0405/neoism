@@ -4,7 +4,10 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use crate::daemon_client::{DaemonClient, DaemonClientHandle, DaemonServerMessage};
+use crate::daemon_client::{
+    DaemonClient, DaemonClientHandle, DaemonClientOptions, DaemonClientStatus,
+    DaemonServerMessage,
+};
 use crate::event::{EventProxy, RioEvent, RioEventType};
 use neoism_protocol::workspace::WorkspaceClientMessage;
 
@@ -14,27 +17,45 @@ pub struct DesktopDaemonConnection {
     handle: DaemonClientHandle,
     inbound: Arc<Mutex<VecDeque<DaemonServerMessage>>>,
     inbound_wake_pending: Arc<AtomicBool>,
-    /// The endpoint string this connection was dialled against (the
-    /// `unix://…` / `ws://…` URL, including any `?token=` auth carried in
-    /// the URL). Retained so the "follow the workspace to its new home"
-    /// logic in `app::mod` can (a) compare the live endpoint against a
-    /// candidate host `daemon_url` to guard against reconnecting to the
-    /// URL we're already on, and (b) preserve the auth/token shape when
-    /// rebuilding the connection against a new host.
+    status_rx: tokio::sync::watch::Receiver<DaemonClientStatus>,
     endpoint: String,
 }
 
 impl DesktopDaemonConnection {
-    pub fn connect(
+    pub fn connect_with_token(
         endpoint: &str,
+        token: Option<String>,
         event_proxy: EventProxy,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .thread_name("neoism-desktop-daemon-client")
             .enable_all()
             .build()?;
-        let client = runtime.block_on(DaemonClient::connect(endpoint))?;
-        let (handle, mut rx, _status_rx) = client.into_channels();
+        let endpoint = crate::daemon_client::DaemonEndpoint::parse(endpoint)?;
+        let endpoint_string = endpoint.normalized();
+        let mut options = DaemonClientOptions::new(endpoint);
+        options.token = token;
+        let client = runtime.block_on(DaemonClient::connect_with_options(options))?;
+        let mut status_rx = client.status_receiver();
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(4), async {
+                loop {
+                    if *status_rx.borrow() == DaemonClientStatus::Open {
+                        return Ok::<(), Box<dyn std::error::Error>>(());
+                    }
+                    status_rx.changed().await.map_err(|_| {
+                        Box::<dyn std::error::Error>::from(
+                            "daemon connection closed during startup",
+                        )
+                    })?;
+                }
+            })
+            .await
+            .map_err(|_| {
+                Box::<dyn std::error::Error>::from("daemon connection timed out")
+            })?
+        })?;
+        let (handle, mut rx, status_rx) = client.into_channels();
         let inbound = Arc::new(Mutex::new(VecDeque::new()));
         let inbound_task = Arc::clone(&inbound);
         let inbound_wake_pending = Arc::new(AtomicBool::new(false));
@@ -71,14 +92,11 @@ impl DesktopDaemonConnection {
             handle,
             inbound,
             inbound_wake_pending,
-            endpoint: endpoint.to_string(),
+            status_rx,
+            endpoint: endpoint_string,
         })
     }
 
-    /// The endpoint URL this connection is dialled against. Used by the
-    /// re-home follow logic to avoid re-dialling the daemon we're already
-    /// connected to (loop guard) and to know which auth-bearing URL to
-    /// preserve when no fresh token is supplied.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -89,6 +107,10 @@ impl DesktopDaemonConnection {
 
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime_handle.clone()
+    }
+
+    pub fn status(&self) -> DaemonClientStatus {
+        *self.status_rx.borrow()
     }
 
     pub fn send(&self, message: WorkspaceClientMessage) {

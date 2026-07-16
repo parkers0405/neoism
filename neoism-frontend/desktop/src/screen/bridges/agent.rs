@@ -637,6 +637,11 @@ impl Screen<'_> {
         // `renderer.run()` later in the same frame, after which the
         // loop would park until the next input event.
         self.renderer.neoism_agent_animating = agent_animating;
+        // The notes sidebar wordmark hover needs the pointer; the
+        // renderer owns no input, so push the logical position here
+        // (this bridge already runs every frame).
+        self.renderer.notes_sidebar_mouse =
+            Some((self.mouse.x as f32 / scale, self.mouse.y as f32 / scale));
         // Publish the open picker card's rect so chrome text drawn
         // later (tab-strip labels, panels) occludes under the modal
         // instead of bleeding through it.

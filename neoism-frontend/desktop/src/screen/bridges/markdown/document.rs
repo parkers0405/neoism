@@ -28,10 +28,136 @@ impl Screen<'_> {
             self.workspace_editor_active_paths.insert(id, path.clone());
         }
 
-        self.activate_markdown_path(path);
+        self.activate_markdown_path(path.clone());
+        self.request_remote_markdown_content(&path);
+        // Feed the cover picker its candidates — the shared pane cannot
+        // list directories.
+        let covers = Self::list_available_covers();
+        if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(&path) {
+            pane.available_covers = covers;
+        }
         self.reapply_chrome_layout();
         self.renderer.trail_cursor.reset();
         self.mark_dirty();
+    }
+
+    /// Rename the current note to match a committed title edit: fs rename
+    /// through the shared file-tree plumbing (note graph + tree refresh +
+    /// toasts), then re-point the open pane and its tab at the new path.
+    pub(crate) fn apply_markdown_title_rename(&mut self, new_title: &str) {
+        use neoism_ui::panels::notifications::NotificationLevel;
+
+        let Some(old_path) = self
+            .context_manager
+            .current()
+            .markdown
+            .as_ref()
+            .map(|markdown| markdown.path.clone())
+        else {
+            return;
+        };
+        let sanitized = new_title.trim().replace(['/', '\\'], "-");
+        if sanitized.is_empty() {
+            return;
+        }
+        let ext = old_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("md");
+        let file_name = format!("{sanitized}.{ext}");
+        if old_path.file_name().and_then(|name| name.to_str())
+            == Some(file_name.as_str())
+        {
+            return;
+        }
+        let Some(new_path) = old_path.parent().map(|parent| parent.join(&file_name))
+        else {
+            return;
+        };
+        if new_path.exists() {
+            self.renderer.notifications.push(
+                format!("A note named `{file_name}` already exists"),
+                NotificationLevel::Warn,
+            );
+            return;
+        }
+        let remote = self.renderer.file_tree.is_remote();
+        self.rename_file_tree_path(old_path.clone(), file_name);
+        if remote {
+            // The daemon performs the rename; its push refreshes panes.
+            return;
+        }
+        if !new_path.exists() {
+            // Local rename failed — rename_file_tree_path already toasted.
+            return;
+        }
+        if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(&old_path) {
+            pane.path = new_path.clone();
+            pane.title = sanitized;
+        }
+        self.renderer.buffer_tabs.rename_path(&old_path, new_path.clone());
+        self.renderer.notes_sidebar.refresh_notes();
+        self.renderer.file_tree.set_active_path(Some(new_path));
+        self.mark_dirty();
+    }
+
+    /// File stems in the covers directory (`<config>/covers/`), sorted.
+    fn list_available_covers() -> Vec<String> {
+        let covers = neoism_backend::config::config_dir_path().join("covers");
+        let mut names: Vec<String> = std::fs::read_dir(covers)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| {
+                        entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                    })
+                    .filter_map(|entry| {
+                        entry
+                            .path()
+                            .file_stem()
+                            .map(|stem| stem.to_string_lossy().into_owned())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// In a joined workspace the pane's local read just failed (the
+    /// bytes only exist on the host) — fetch them over the daemon files
+    /// plane and show a loading note instead of the raw os error. The
+    /// correlated `FileContent` reply lands in
+    /// `apply_daemon_files_message` and fills the pane.
+    fn request_remote_markdown_content(&mut self, path: &Path) {
+        let Some(remote) = self.renderer.file_tree.remote_files() else {
+            return;
+        };
+        if !path.starts_with(remote.root()) {
+            return;
+        }
+        let pane_needs_fetch = self
+            .context_manager
+            .markdown_pane_mut_by_path(path)
+            .map(|pane| {
+                if pane.remote_content_pending {
+                    // A fetch is already in flight for this pane.
+                    return false;
+                }
+                let missing = pane.error.is_some();
+                if missing {
+                    pane.mark_remote_loading();
+                }
+                missing
+            })
+            .unwrap_or(false);
+        if !pane_needs_fetch {
+            return;
+        }
+        let request_id = remote.request_read_file(path);
+        self.pending_remote_markdown_opens
+            .insert(request_id, path.to_path_buf());
     }
 
     pub(crate) fn activate_markdown_path(&mut self, path: std::path::PathBuf) {

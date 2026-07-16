@@ -69,8 +69,6 @@ pub enum PaletteAction {
     SearchWords,
     SearchGitChanges,
     ToggleGitDiffPanel,
-    InitNeoismWorkspace,
-    ReindexNeoismNotes,
     CreateNeoismNote,
     DrawOnNote,
     OpenNeoismNotes,
@@ -97,6 +95,17 @@ pub enum PaletteAction {
     /// Open the web workplace switcher. Desktop has native window/workspace
     /// chrome; web owns this action at the host layer.
     ShowWorkplaces,
+    ShowServers,
+    SelectServer {
+        id: String,
+    },
+    EditServer {
+        id: String,
+    },
+    RemoveServer {
+        id: String,
+    },
+    AddServer,
     CreateWorkspace,
     ShareCurrentWorkspace,
     StopSharingCurrentWorkspace,
@@ -176,6 +185,17 @@ pub struct PaletteWorkspaceTarget {
 /// `Cloud` is an ephemeral burst daemon. The kind only drives the
 /// header glyph + whether the `daemon_url` is surfaced — selection and
 /// switching are identical across kinds.
+/// One server shown by the shared command palette's Servers mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteServerEntry {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    pub local: bool,
+    pub status: crate::panels::ServerIndicatorStatus,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostKind {
     Local,
@@ -248,6 +268,9 @@ pub struct PaletteWorkspaceEntry {
     /// Whether the owning host is currently reachable. Drives the
     /// online dot (`●` vs `○`) in the header.
     pub host_online: bool,
+    /// Whether this is the workspace the window is CURRENTLY viewing —
+    /// drawn as a left accent stripe, mirroring the active-server marker.
+    pub current: bool,
 }
 
 impl PaletteWorkspaceEntry {
@@ -271,6 +294,7 @@ impl PaletteWorkspaceEntry {
             workspace_visibility: WorkspaceVisibility::Private,
             daemon_url: None,
             host_online: true,
+            current: false,
         }
     }
 }
@@ -333,8 +357,7 @@ pub fn theme_picker_modal_spec() -> ModalSpec {
         .collect();
     // Runtime themes (ide-themes/*.toml + Mash Up Pack themes) after
     // the builtin four, same action.
-    for (name, description) in crate::primitives::ide_theme::custom_ide_theme_entries()
-    {
+    for (name, description) in crate::primitives::ide_theme::custom_ide_theme_entries() {
         let hint = if description.is_empty() {
             "Custom theme".to_string()
         } else {
@@ -525,8 +548,6 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::SearchWords
         | PaletteAction::SearchGitChanges
         | PaletteAction::ToggleGitDiffPanel
-        | PaletteAction::InitNeoismWorkspace
-        | PaletteAction::ReindexNeoismNotes
         | PaletteAction::CreateNeoismNote
         | PaletteAction::DrawOnNote
         | PaletteAction::OpenNeoismNotes
@@ -534,6 +555,11 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::ListFonts
         | PaletteAction::ListBuffers
         | PaletteAction::ShowWorkplaces
+        | PaletteAction::ShowServers
+        | PaletteAction::SelectServer { .. }
+        | PaletteAction::EditServer { .. }
+        | PaletteAction::RemoveServer { .. }
+        | PaletteAction::AddServer
         | PaletteAction::CreateWorkspace
         | PaletteAction::ShareCurrentWorkspace
         | PaletteAction::StopSharingCurrentWorkspace

@@ -1023,6 +1023,15 @@ impl FontLibraryData {
 
         self.symbol_maps = Some(symbol_maps);
 
+        // Bundled "Press Start 2P" (OFL) — the arcade pixel face feature UIs
+        // (agent side-panel headings) resolve by family name through
+        // `font_id_for_family("Press Start 2P")`. Registered last so it sits
+        // at the bottom of the per-char fallback cascade and never steals
+        // glyphs the earlier fonts already cover.
+        self.insert(
+            FontData::from_static_slice(constants::FONT_PRESS_START_2P).unwrap(),
+        );
+
         if spec.disable_warnings_not_found {
             vec![]
         } else {

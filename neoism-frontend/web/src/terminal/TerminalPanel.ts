@@ -2049,11 +2049,7 @@ export class TerminalPanel {
     // surfaces the full, current set — desktop re-walks the vault after
     // each of these. The web only queued a listing on first open, so a
     // freshly-created note never appeared until the panel was toggled.
-    if (
-      event.action === "CreateNeoismNote" ||
-      event.action === "InitNeoismWorkspace" ||
-      event.action === "ReindexNeoismNotes"
-    ) {
+    if (event.action === "CreateNeoismNote") {
       void this.refreshNotesSidebarEntries();
     }
   }
@@ -2629,6 +2625,11 @@ export class TerminalPanel {
       if (!action) break;
       acted = true;
       switch (action) {
+        case "open_servers":
+          // Web connection ownership lives above TerminalPanel; use the
+          // existing host-provided workplace/server surface there.
+          this.options.onShowWorkplaces?.();
+          break;
         case "open_workspaces":
           window.setTimeout(() => this.openWorkspacesModal(), 80);
           break;
@@ -2848,12 +2849,9 @@ export class TerminalPanel {
     };
     let ok = await listDir("notes", 0);
     if (!ok) {
-      // No notes dir yet — ask the daemon to scaffold the Neoism
-      // workspace (creates `.neoism/workspace.toml` + `notes/`), then
-      // retry the listing once.
-      this.options.client.sendWorkspace?.({
-        RunWorkspaceAction: { action: "InitNeoismWorkspace" },
-      });
+      // No notes dir yet. The legacy per-project scaffold action is
+      // gone (Vaults are the only notes model); one delayed retry
+      // covers a vault that is still being created server-side.
       await new Promise((resolve) => setTimeout(resolve, 350));
       ok = await listDir("notes", 0);
     }
@@ -3108,8 +3106,6 @@ export class TerminalPanel {
       case "ToggleGitDiffPanel":
         this.toggleGitSidePanel();
         break;
-      case "InitNeoismWorkspace":
-      case "ReindexNeoismNotes":
       case "CreateNeoismNote":
         this.options.client.sendWorkspace({
           RunWorkspaceAction: { action },

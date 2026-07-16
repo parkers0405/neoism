@@ -48,11 +48,6 @@ impl Screen<'_> {
 
     /// Create a fresh `.neodraw` drawing in the viewed vault and open
     /// it in the sketch editor (the ⋮ create menu in the notes sidebar).
-    #[allow(dead_code)]
-    pub(crate) fn create_current_neoism_drawing(&mut self) {
-        self.create_neoism_drawing_in(self.notes_creation_dir());
-    }
-
     pub(crate) fn create_neoism_drawing_in(&mut self, note_dir: PathBuf) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
@@ -94,13 +89,33 @@ impl Screen<'_> {
     pub(crate) fn open_neoism_graph_view(&mut self) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
-        let root = self
-            .active_workspace_root
-            .clone()
-            .or_else(|| self.active_pane_workspace_root())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let workspace = notes_workspace_for_root_or_default(&root);
+        // PER-VAULT: the graph follows the vault the sidebar is VIEWING
+        // (same resolution as note creation) — the old code-root
+        // resolution drew the code workspace's linked vault even while
+        // the user browsed a different one. The Vaults-root pseudo-vault
+        // spans every vault and has no index of its own, so it falls
+        // back to the code-root resolution.
+        let viewed_vault = self
+            .renderer
+            .notes_sidebar
+            .workspace_path()
+            .filter(|path| *path != neo_workspace::notes_vaults_dir())
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            });
+        let workspace = match viewed_vault {
+            Some(name) => neo_workspace::vault_notes_workspace(&name),
+            None => {
+                let root = self
+                    .active_workspace_root
+                    .clone()
+                    .or_else(|| self.active_pane_workspace_root())
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                notes_workspace_for_root_or_default(&root)
+            }
+        };
         if let Err(err) = neo_workspace::ensure_notes_workspace(&workspace) {
             self.renderer.notifications.push(
                 format!("Could not prepare Neoism notes: {err}"),
@@ -187,6 +202,26 @@ impl Screen<'_> {
     pub(crate) fn open_neoism_notes_sidebar(&mut self) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
+        // A REMOTE-joined workspace's notes live on the host — never
+        // point its panel at this machine's personal vault. v1 shows an
+        // empty host-scoped panel (daemon-listed remote vaults are the
+        // follow-up).
+        if self.context_manager.current_workspace_is_remote_joined() {
+            self.renderer
+                .notes_sidebar
+                .set_workspace("Host notes".to_string(), None);
+            let visibility_changed =
+                self.renderer.notes_sidebar.toggle_focus_or_visibility();
+            if self.renderer.notes_sidebar.is_visible() {
+                self.renderer.file_tree.set_focused(false);
+            }
+            if visibility_changed {
+                self.reapply_chrome_layout();
+            }
+            self.mark_dirty();
+            return;
+        }
+
         let root = self
             .active_workspace_root
             .clone()
@@ -215,6 +250,28 @@ impl Screen<'_> {
             self.reapply_chrome_layout();
         }
         self.mark_dirty();
+    }
+
+    /// Point the CURRENT workspace's notes panel at its resolved local
+    /// vault (linked project -> vault, else Default) and list it. Used
+    /// when a workspace swap installs a fresh panel while the sidebar is
+    /// open.
+    pub(crate) fn assign_local_vault_to_notes_sidebar(&mut self) {
+        let root = self
+            .active_workspace_root
+            .clone()
+            .or_else(|| self.active_pane_workspace_root())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let workspace = notes_workspace_for_root_or_default(&root);
+        if neo_workspace::ensure_notes_workspace(&workspace).is_err() {
+            return;
+        }
+        self.renderer.notes_sidebar.set_workspace(
+            notes_sidebar_workspace_name(&workspace),
+            Some(workspace.notes_workspace_dir()),
+        );
+        self.renderer.notes_sidebar.refresh_notes();
     }
 
     /// First-run welcome reveal. Fires at most once, gated by the

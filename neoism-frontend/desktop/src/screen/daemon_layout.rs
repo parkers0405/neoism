@@ -150,6 +150,68 @@ impl ScreenPaneLayoutCache {
 }
 
 impl Screen<'_> {
+    pub fn reset_server_owned_state(&mut self) {
+        self.context_manager.detach_daemon_client();
+        self.daemon_pane_layout = ScreenPaneLayoutCache::default();
+        self.markdown_crdt = crate::screen::markdown_crdt::MarkdownCrdtState::default();
+        self.remote_presence = neoism_ui::editor::crdt::RemotePresenceStore::new();
+        self.presence_publisher = None;
+        self.pending_peer_workspace_join = None;
+        self.pending_daemon_go_home = false;
+        self.pending_remote_file_ops.clear();
+        self.pending_remote_git_status.clear();
+        self.renderer.file_tree.set_entries(Vec::new());
+        self.renderer.git_diff_panel.reset_for_server_switch();
+        // Tab strips and the per-workspace caches are server-owned: every
+        // WorkspaceKey in them names a workspace on the daemon being left,
+        // and a different daemon can mint the same keys — carrying them
+        // across a switch resurrects the old server's tabs and trees on
+        // the new one.
+        self.renderer.buffer_tabs = neoism_ui::panels::buffer_tabs::BufferTabs::new();
+        // Every workspace always shows at least its root terminal tab —
+        // an empty strip hides the whole row (and the "+" button) until
+        // something re-seeds it.
+        let chrome_scale = self.renderer.chrome_scale();
+        self.renderer.buffer_tabs.set_scale(chrome_scale);
+        self.renderer.buffer_tabs.ensure_terminal_tab();
+        self.workspace_buffer_tabs.clear();
+        self.workspace_buf_enter_targets.clear();
+        self.workspace_file_trees.clear();
+        self.file_tree_workspace = None;
+        self.workspace_editor_active_paths.clear();
+        self.workspace_roots.clear();
+        // Notes panels are workspace-keyed too (and keys can collide
+        // across daemons) — reset to a fresh panel, keeping the
+        // window-chrome bits (visibility/width).
+        self.workspace_notes_sidebars.clear();
+        self.notes_sidebar_workspace = None;
+        let notes_visible = self.renderer.notes_sidebar.is_visible();
+        let notes_width = self.renderer.notes_sidebar.width();
+        self.renderer.notes_sidebar = Default::default();
+        self.renderer.notes_sidebar.set_visible(notes_visible);
+        self.renderer.notes_sidebar.set_width(notes_width);
+        self.renderer.notes_sidebar.set_scale(chrome_scale);
+        self.set_agent_server_for_window(crate::neoism::agent::neoism_agent_server());
+    }
+
+    pub fn set_agent_server_for_window(&mut self, server: String) {
+        for grid in self.context_manager.contexts_mut() {
+            for context in grid.contexts_mut().values_mut() {
+                if let Some(agent) = context.context_mut().neoism_agent.as_mut() {
+                    agent.switch_server(server.clone());
+                }
+            }
+        }
+    }
+
+    pub fn has_unsaved_server_buffers(&self) -> bool {
+        self.renderer.buffer_tabs.has_modified_server_tabs()
+            || self
+                .workspace_buffer_tabs
+                .values()
+                .any(|tabs| tabs.has_modified_server_tabs())
+    }
+
     pub fn attach_daemon_client(
         &mut self,
         handle: DaemonClientHandle,
@@ -318,6 +380,77 @@ impl Screen<'_> {
         std::mem::take(&mut self.pending_daemon_go_home)
     }
 
+    pub fn request_server_connect(&mut self, server_id: String) {
+        self.pending_server_connect = Some(server_id);
+    }
+
+    pub fn take_server_connect(&mut self) -> Option<String> {
+        self.pending_server_connect.take()
+    }
+
+    pub fn request_server_manager(&mut self) {
+        self.pending_server_manager_open = true;
+    }
+
+    pub fn take_server_manager_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_server_manager_open)
+    }
+
+    pub fn request_server_add(
+        &mut self,
+        address: String,
+        name: Option<String>,
+        token: Option<String>,
+    ) {
+        self.pending_server_add = Some((address, name, token));
+    }
+
+    pub fn take_server_add(
+        &mut self,
+    ) -> Option<(String, Option<String>, Option<String>)> {
+        self.pending_server_add.take()
+    }
+
+    pub fn request_server_edit(&mut self, id: String) {
+        self.pending_server_edit = Some(id);
+    }
+
+    pub fn take_server_edit(&mut self) -> Option<String> {
+        self.pending_server_edit.take()
+    }
+
+    pub fn request_server_edit_submit(
+        &mut self,
+        id: String,
+        address: String,
+        name: Option<String>,
+        token: Option<String>,
+    ) {
+        self.pending_server_edit_submit = Some((id, address, name, token));
+    }
+
+    pub fn take_server_edit_submit(
+        &mut self,
+    ) -> Option<(String, String, Option<String>, Option<String>)> {
+        self.pending_server_edit_submit.take()
+    }
+
+    pub fn request_server_remove(&mut self, id: String) {
+        self.pending_server_remove = Some(id);
+    }
+
+    pub fn take_server_remove(&mut self) -> Option<String> {
+        self.pending_server_remove.take()
+    }
+
+    pub fn report_workspace_subscription(&mut self, workspace_id: String) {
+        self.pending_workspace_subscription = Some(workspace_id);
+    }
+
+    pub fn take_workspace_subscription(&mut self) -> Option<String> {
+        self.pending_workspace_subscription.take()
+    }
+
     pub fn request_split_pane(
         &mut self,
         axis: PaneSplitAxis,
@@ -414,6 +547,7 @@ fn editor_message_surface_id(message: &EditorServerMessage) -> Option<&str> {
         | EditorServerMessage::LspHoverResult { surface_id, .. }
         | EditorServerMessage::ModeChange { surface_id, .. }
         | EditorServerMessage::BufferOpened { surface_id, .. }
+        | EditorServerMessage::CursorLine { surface_id, .. }
         | EditorServerMessage::BufferModified { surface_id, .. }
         | EditorServerMessage::Message { surface_id, .. }
         | EditorServerMessage::Notification { surface_id, .. }

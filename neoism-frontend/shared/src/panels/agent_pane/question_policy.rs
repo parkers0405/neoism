@@ -189,7 +189,10 @@ fn question_item_from_value(value: &Value) -> NeoismAgentQuestionItem {
             .or_else(|| value.get("choices"))
             .and_then(Value::as_array)
             .map(|options| {
-                options.iter().filter_map(question_option_from_value).collect()
+                options
+                    .iter()
+                    .filter_map(question_option_from_value)
+                    .collect()
             })
             .unwrap_or_default(),
     }

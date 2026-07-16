@@ -1,4 +1,3 @@
-
 use web_time::Instant;
 
 use crate::animation::CriticallyDampedSpring;

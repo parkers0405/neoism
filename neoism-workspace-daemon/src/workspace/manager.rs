@@ -521,6 +521,28 @@ impl WorkspaceManager {
         workspace
     }
 
+    /// Startup declaration for headless hosts (`--workspace DIR`): declare
+    /// `dir` as a workspace on this machine's host unless one already roots
+    /// there, so snapshot-restored restarts stay duplicate-free.
+    pub fn declare_startup_workspace(&self, dir: &std::path::Path) -> WorkspaceSummary {
+        let _ = std::fs::create_dir_all(dir);
+        let resolved = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        {
+            let inner = self.inner.lock();
+            if let Some(existing) = inner
+                .host_workspaces
+                .values()
+                .find(|workspace| workspace.root_dir.as_deref() == Some(resolved.as_path()))
+            {
+                return existing.clone();
+            }
+        }
+        let title = resolved
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        self.create_host_workspace(machine_host_id(), None, title, Some(resolved))
+    }
+
     pub(crate) fn switch_host_workspace(
         &self,
         workspace_id: &str,

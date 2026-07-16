@@ -6,7 +6,7 @@
 //! Palette mode + row shapes consumed by the filter / render pipelines.
 
 use super::actions::{
-    HostKind, PaletteAction, PaletteBufferEntry, PaletteShaderEntry,
+    HostKind, PaletteAction, PaletteBufferEntry, PaletteServerEntry, PaletteShaderEntry,
     PaletteWorkspaceEntry,
 };
 
@@ -27,6 +27,7 @@ pub(crate) enum PaletteMode {
     Shaders(Vec<PaletteShaderEntry>),
     Buffers(Vec<PaletteBufferEntry>),
     Workspaces(Vec<PaletteWorkspaceEntry>),
+    Servers(Vec<PaletteServerEntry>),
     /// Vim-style ex-command capture. The shared command palette is the
     /// default `:` surface now; this mode remains for explicit raw-nvim
     /// command capture paths (e.g. `Go to Line…`).
@@ -82,6 +83,10 @@ pub(crate) enum PaletteRow<'a> {
     Workspace {
         entry: &'a PaletteWorkspaceEntry,
     },
+    Server {
+        entry: &'a PaletteServerEntry,
+    },
+    ServerAdd,
     /// Vim ex command suggestion — a pure visual aid backed by the
     /// curated `EX_COMMANDS` list. Has no action: Enter always
     /// dispatches the literal query, Tab fills the query with `name`.
@@ -117,6 +122,8 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::WorkspaceHost { label, .. } => label,
             PaletteRow::WorkspaceCreate => "+",
             PaletteRow::Workspace { entry } => entry.title.as_str(),
+            PaletteRow::Server { entry } => entry.name.as_str(),
+            PaletteRow::ServerAdd => "+ Add server",
             PaletteRow::Ex { name, .. } => name,
             PaletteRow::Search { term } => term,
             PaletteRow::BufferMatch { text, .. } => text,
@@ -149,6 +156,8 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::WorkspaceHost { daemon_url, .. } => daemon_url.unwrap_or(""),
             PaletteRow::WorkspaceCreate => "",
             PaletteRow::Workspace { entry } => entry.detail.as_str(),
+            PaletteRow::Server { entry } => entry.address.as_str(),
+            PaletteRow::ServerAdd => "",
             PaletteRow::Ex { hint, .. } => hint,
             PaletteRow::Search { .. } => "recent",
             // Buffer-match rows show their line number in the
@@ -164,6 +173,10 @@ impl<'a> PaletteRow<'a> {
         match self {
             PaletteRow::Command { action, .. } => Some(action.clone()),
             PaletteRow::WorkspaceCreate => Some(PaletteAction::CreateWorkspace),
+            PaletteRow::Server { entry } => Some(PaletteAction::SelectServer {
+                id: entry.id.clone(),
+            }),
+            PaletteRow::ServerAdd => Some(PaletteAction::AddServer),
             PaletteRow::Font { .. }
             | PaletteRow::Theme { .. }
             | PaletteRow::Shader { .. }

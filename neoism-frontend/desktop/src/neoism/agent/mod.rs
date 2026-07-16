@@ -27,7 +27,7 @@ pub(crate) mod perf {
     }
 }
 
-pub use api::set_agent_server_override;
+pub(crate) use api::neoism_agent_server;
 pub(crate) use pane::TimelineMeasureKey;
 pub use pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentNoticeLevel,

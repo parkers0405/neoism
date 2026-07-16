@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn terminal(title: &str, route: Option<usize>) -> BufferTab<()> {

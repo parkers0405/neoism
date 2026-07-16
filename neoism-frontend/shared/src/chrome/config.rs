@@ -158,6 +158,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 self.command_palette.enter_themes_mode(themes);
                 self.relayout();
             }
+            TopBarAction::OpenServers => {
+                self.pending_top_bar_action = Some(TopBarAction::OpenServers);
+            }
             other => {
                 // No shared-hosted surface yet — store for the bridge to
                 // drain and route. Desktop opens Settings (config tab),

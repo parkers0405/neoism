@@ -13,7 +13,6 @@
 mod create;
 mod edit;
 mod geometry;
-mod graph;
 mod graph_sim;
 mod history;
 mod input;
@@ -27,7 +26,6 @@ mod toolbar;
 pub use create::Draft;
 pub use edit::Handle;
 pub use geometry::Bounds;
-pub use graph::graph_scene;
 pub use graph_sim::{GraphNode, GraphSim};
 pub use history::History;
 pub use input::DrawGesture;

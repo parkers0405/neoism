@@ -841,6 +841,15 @@ impl Renderer {
                 side_x += self.file_tree.width();
             }
             if self.notes_sidebar.is_visible() {
+                let wordmark_now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| {
+                        neoism_ui::render_policy::animation_phase_from_unix_secs(
+                            duration.as_secs(),
+                            duration.subsec_nanos(),
+                        )
+                    })
+                    .unwrap_or(0.0);
                 self.notes_sidebar.render(
                     sugarloaf,
                     side_x,
@@ -849,6 +858,8 @@ impl Renderer {
                     tree_height,
                     &self.theme,
                     &tree_text_occlusions,
+                    self.notes_sidebar_mouse,
+                    wordmark_now,
                 );
             }
 

@@ -9,12 +9,12 @@ use crate::widgets::{diff_card, scrollbar};
 use super::state::GitDiffPanel;
 use super::types::{FocusSection, Rect, VisualRowKind};
 use super::{
-    BRANCH_MENU_MAX_ROWS, CARD_GAP_TOP, CARD_PAD_X, CARD_VGAP, CHECKBOX_SIZE, CLOSE_HIT,
-    COMMIT_BUTTON_HEIGHT, COMMIT_FONT_SIZE, COMMIT_INPUT_HEIGHT, COMMIT_INPUT_MAX_LINES,
-    DEPTH, FILES_CARD_MAX_VISIBLE_ROWS, FILES_CARD_MIN_VISIBLE_ROWS, FILE_FONT_SIZE,
-    FILE_ROW_HEIGHT, FRAME_RADIUS, FRAME_STROKE, branch_glyph, check_glyph,
-    chevron_down_glyph, chevron_right_glyph, close_glyph, folder_glyph,
-    folder_open_glyph, HEADER_FONT_SIZE, HEADER_HEIGHT, ORDER_ACCENT, ORDER_FRAME,
+    branch_glyph, check_glyph, chevron_down_glyph, chevron_right_glyph, close_glyph,
+    folder_glyph, folder_open_glyph, BRANCH_MENU_MAX_ROWS, CARD_GAP_TOP, CARD_PAD_X,
+    CARD_VGAP, CHECKBOX_SIZE, CLOSE_HIT, COMMIT_BUTTON_HEIGHT, COMMIT_FONT_SIZE,
+    COMMIT_INPUT_HEIGHT, COMMIT_INPUT_MAX_LINES, DEPTH, FILES_CARD_MAX_VISIBLE_ROWS,
+    FILES_CARD_MIN_VISIBLE_ROWS, FILE_FONT_SIZE, FILE_ROW_HEIGHT, FRAME_RADIUS,
+    FRAME_STROKE, HEADER_FONT_SIZE, HEADER_HEIGHT, ORDER_ACCENT, ORDER_FRAME,
     ORDER_INNER, ORDER_LINE_BG, ORDER_MENU_BG, ORDER_MENU_ROW, ORDER_MENU_TEXT,
     ORDER_ROW_BG, ORDER_SCROLL, PADDING_X, SCROLLBAR_HIT_PAD, STATS_FONT_SIZE,
     STATS_HEIGHT, TREE_INDENT,
@@ -188,7 +188,9 @@ impl GitDiffPanel {
         };
         let btn_pad_x = 8.0 * s;
         let icon_w = sugarloaf.text_mut().measure(branch_glyph(), &icon_opts);
-        let chevron_w = sugarloaf.text_mut().measure(chevron_down_glyph(), &icon_opts);
+        let chevron_w = sugarloaf
+            .text_mut()
+            .measure(chevron_down_glyph(), &icon_opts);
         // Available span: between the title (+ gap) on the left and the
         // close button (− gap) on the right.
         let btn_right = close_x - 8.0 * s;
@@ -257,9 +259,10 @@ impl GitDiffPanel {
             &branch_name_opts,
         );
         bx += 8.0 * s;
-        let _ = sugarloaf
-            .text_mut()
-            .draw(bx, btn_text_y, chevron_down_glyph(), &icon_opts);
+        let _ =
+            sugarloaf
+                .text_mut()
+                .draw(bx, btn_text_y, chevron_down_glyph(), &icon_opts);
 
         cursor_y += header_h;
 
@@ -1190,10 +1193,12 @@ impl GitDiffPanel {
         };
         let branch_text_y = cy + (branch_line_h - STATS_FONT_SIZE * s) / 2.0;
         let mut bx = inner_x;
-        bx +=
-            sugarloaf
-                .text_mut()
-                .draw(bx, branch_text_y, branch_glyph(), &branch_icon_opts);
+        bx += sugarloaf.text_mut().draw(
+            bx,
+            branch_text_y,
+            branch_glyph(),
+            &branch_icon_opts,
+        );
         bx += 6.0 * s;
         let branch_line = if branch_label.is_empty() {
             "detached".to_string()

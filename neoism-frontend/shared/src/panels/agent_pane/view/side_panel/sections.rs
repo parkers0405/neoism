@@ -30,23 +30,38 @@ pub(crate) fn render_section_header(
     // `theme.white` token is a bluish grey there) rather than the old muted
     // header grey.
     let header_size = section_header_font_size(s);
+    // Headings render in the bundled "Press Start 2P" arcade pixel face when
+    // it resolves. The pixel face draws much wider per point than the default
+    // font, so only the DRAWN size drops by 3px (`s`-scaled) — every layout
+    // advance below still uses `header_size`, keeping section heights (and
+    // `tasks_section_height`'s mirror of them) unchanged.
+    let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
+    let drawn_size = if pixel_font.is_some() {
+        header_size - 3.0 * s
+    } else {
+        header_size
+    };
     let rest_opts = DrawOpts {
-        font_size: header_size,
+        font_size: drawn_size,
         color: theme.u8(theme.fg),
         bold: true,
+        font_id: pixel_font,
         clip_rect: Some(clip),
         ..DrawOpts::default()
     };
 
-    // Illuminated drop-cap: the first letter in the UnifrakturMaguntia
-    // blackletter, scaled up from the H3 header size and drawn white; the rest
-    // of the label in the bold H3 header font on the same baseline. Falls back
-    // to a plain header if the font is missing.
+    // Illuminated drop-cap: the first letter scaled up from the header size
+    // and drawn white; the rest of the label in the bold header font on the
+    // same baseline. With the pixel face loaded the whole heading (cap
+    // included) shapes in Press Start 2P so it reads as one face; the
+    // UnifrakturMaguntia blackletter cap remains the fallback look, and a
+    // plain header the fallback to that.
     let mut chars = label.chars();
     if let Some(first) = chars.next() {
         let rest: String = chars.collect();
-        let cap_font = crate::primitives::maguntia_font_id(sugarloaf);
-        let cap_size = header_size * 1.4;
+        let cap_font =
+            pixel_font.or_else(|| crate::primitives::maguntia_font_id(sugarloaf));
+        let cap_size = drawn_size * 1.4;
         let cap_opts = DrawOpts {
             font_size: cap_size,
             color: theme.u8(theme.fg),
@@ -58,7 +73,7 @@ pub(crate) fn render_section_header(
         let first_str = first.to_string();
         // Lift the taller cap so its baseline matches the rest (text y is the
         // glyph top, so a larger glyph would otherwise sit lower).
-        let cap_y = y - (cap_size - header_size) * 0.75;
+        let cap_y = y - (cap_size - drawn_size) * 0.75;
         draw_text_with_occlusion(
             sugarloaf,
             x,

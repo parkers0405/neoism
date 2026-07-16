@@ -49,6 +49,16 @@ impl RemoteFiles {
         &self.root
     }
 
+    /// Async file-content fetch for panes whose bytes live on the HOST
+    /// (markdown/notebook opens in a joined workspace). The correlated
+    /// `FileContent` reply lands in
+    /// `Screen::apply_daemon_files_message`.
+    pub fn request_read_file(&self, path: &Path) -> u64 {
+        self.dispatch(FilesClientMessage::ReadFile {
+            path: self.relative(path),
+        })
+    }
+
     /// Workspace-relative form of a tree path (the daemon's files
     /// plane wants relative paths; absolute-inside-root is tolerated).
     /// A path that doesn't sit under our recorded root (normalization

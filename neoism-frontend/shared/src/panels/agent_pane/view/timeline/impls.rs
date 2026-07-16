@@ -174,7 +174,6 @@ impl AgentTimelinePane for NeoismAgentPane {
         NeoismAgentPane::clear_tool_hit_rects(self);
     }
 
-
     fn timeline_layout_epoch(&self) -> u64 {
         NeoismAgentPane::timeline_layout_epoch(self)
     }

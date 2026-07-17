@@ -44,9 +44,6 @@ window and event-loop code.
 
 wezterm-char-props (via `neoism-grapheme-width`) — MIT, Copyright (c) Wez Furlong.
 
-fff-search (vendored in `vendor/fff-search`) — MIT, Copyright (c) Dmitriy
-Kovalenko. See vendor/fff-search/LICENSE.
-
 newpixiecrt shaders (`sugarloaf/src/components/filters/builtin/newpixiecrt`) —
 MIT / public domain, Copyright (c) 2016 Mattias Gustavsson, adapted by hunterk.
 

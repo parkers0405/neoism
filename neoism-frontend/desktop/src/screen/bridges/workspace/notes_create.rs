@@ -202,27 +202,22 @@ impl Screen<'_> {
     pub(crate) fn open_neoism_notes_sidebar(&mut self) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
-        // A REMOTE-joined workspace's notes live on the host — never
-        // point its panel at this machine's personal vault. v1 shows an
-        // empty host-scoped panel (daemon-listed remote vaults are the
-        // follow-up).
-        if self.context_manager.current_workspace_is_remote_joined() {
-            // Joined workspaces get WORKSPACE-SCOPED notes: a `Notes/`
-            // folder inside the project on the server — shared by every
-            // client, versioned with the repo, co-edited over the same
-            // CRDT path as any other md file. Listing comes back over
-            // the files plane (`apply_daemon_files_message`).
-            if let Some(remote_root) = self.renderer.file_tree.remote_root() {
-                self.renderer.notes_sidebar.set_workspace(
-                    "Workspace notes".to_string(),
-                    Some(remote_root.join("Notes")),
-                );
-                self.request_remote_notes_listing();
-            } else {
-                self.renderer
-                    .notes_sidebar
-                    .set_workspace("Host notes".to_string(), None);
-            }
+        // WORKSPACE-SCOPED notes: whenever this window is a CLIENT of a
+        // daemon-served workspace — a guest that joined, OR the host
+        // viewing its own served workspace (self-hosted on a spawned
+        // daemon, or docker-hosted on a pod) — notes live in a `Notes/`
+        // folder inside the project on the server: one store, shared by
+        // every client, versioned with the repo, co-edited over the same
+        // CRDT path as any other md file, listed over the files plane
+        // (`apply_daemon_files_message`). Only a plain local `home`
+        // session (no served root) falls through to this machine's
+        // personal vault below.
+        if let Some(served_root) = self.served_workspace_root() {
+            self.renderer.notes_sidebar.set_workspace(
+                "Workspace notes".to_string(),
+                Some(served_root.join("Notes")),
+            );
+            self.request_remote_notes_listing();
             let visibility_changed =
                 self.renderer.notes_sidebar.toggle_focus_or_visibility();
             if self.renderer.notes_sidebar.is_visible() {

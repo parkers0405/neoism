@@ -5,6 +5,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -41,9 +42,6 @@ use super::updates::{
 const DEFAULT_AGENT: &str = "build";
 const DEFAULT_MODEL: &str = "";
 const FILE_MENTION_LIMIT: usize = 10;
-const FILE_MENTION_SCAN_LIMIT: usize = 512;
-const FILE_MENTION_VISIT_LIMIT: usize = 6000;
-const FILE_MENTION_MAX_DEPTH: usize = 8;
 const MAX_INLINE_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const ABORT_STREAM_SUPPRESSION: Duration = Duration::from_secs(5);
 const TOOL_EXPAND_ANIMATION: Duration = Duration::from_millis(190);
@@ -835,6 +833,10 @@ mod session;
 mod submit;
 mod timeline;
 
+/// Options for the agent input bar's `@` file-mention picker. Candidates
+/// come from fff-search fuzzy file search (the same engine as the Alt+S
+/// finder) rooted at `root`, ranked best-first by fff's score and capped
+/// to `limit`. An empty `query` returns fff's top files (frecency-ranked).
 fn file_mention_options(
     root: &Path,
     query: &str,
@@ -843,89 +845,85 @@ fn file_mention_options(
     if limit == 0 {
         return Vec::new();
     }
-    let mut scored = Vec::new();
-    let mut visited = 0usize;
-    collect_file_mention_candidates(root, root, query, 0, &mut visited, &mut scored);
-    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-    scored
+    // Over-fetch so the ignored-path post-filter (below) can drop a stray
+    // `target/` / `build/` leak without starving the final `limit` rows.
+    let fetch = limit.saturating_mul(4).max(64);
+    let relatives = with_file_mention_picker(root, |picker| {
+        let parser = fff_search::QueryParser::default();
+        let parsed = parser.parse(query);
+        let search = picker.fuzzy_search(
+            &parsed,
+            None,
+            fff_search::FuzzySearchOptions {
+                max_threads: 0,
+                project_path: Some(root),
+                pagination: fff_search::PaginationArgs {
+                    offset: 0,
+                    limit: fetch,
+                },
+                ..Default::default()
+            },
+        );
+        search
+            .items
+            .iter()
+            .map(|item| item.relative_path(picker).replace('\\', "/"))
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+
+    relatives
         .into_iter()
+        .filter(|relative| !file_mention_path_ignored(relative))
         .take(limit)
-        .map(|(_, display, path)| {
-            let kind = if path.is_dir() { "directory" } else { "file" };
-            let description = file_mention_description(&display, kind);
+        .map(|relative| {
+            let description = file_mention_description(&relative, "file");
             NeoismAgentPickerOption::new(
-                &format!("@{display}"),
+                &format!("@{relative}"),
                 &description,
-                kind,
-                &display,
+                "file",
+                &relative,
             )
         })
         .collect()
 }
 
-fn collect_file_mention_candidates(
+/// Cached fff-search pickers keyed by mention root. Mirrors the finder's
+/// per-root cache (`host::finder_search`): building a fresh `FilePicker`
+/// (a full directory scan) on every `@` keystroke would be far too slow,
+/// so each root is scanned once and its picker reused for later queries.
+fn file_mention_pickers() -> &'static Mutex<HashMap<PathBuf, fff_search::FilePicker>> {
+    static PICKERS: OnceLock<Mutex<HashMap<PathBuf, fff_search::FilePicker>>> =
+        OnceLock::new();
+    PICKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Run `op` against the cached picker for `root`, building and scanning it
+/// on first use. Returns `None` if the picker could not be built.
+fn with_file_mention_picker<T>(
     root: &Path,
-    dir: &Path,
-    query: &str,
-    depth: usize,
-    visited: &mut usize,
-    output: &mut Vec<(i64, String, PathBuf)>,
-) {
-    if output.len() >= FILE_MENTION_SCAN_LIMIT
-        || *visited >= FILE_MENTION_VISIT_LIMIT
-        || depth > FILE_MENTION_MAX_DEPTH
-    {
-        return;
+    op: impl FnOnce(&fff_search::FilePicker) -> T,
+) -> Option<T> {
+    let mut pickers = file_mention_pickers().lock().ok()?;
+    if !pickers.contains_key(root) {
+        let picker = crate::host::finder_search::build_fff_picker(root)?;
+        pickers.insert(root.to_path_buf(), picker);
     }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if output.len() >= FILE_MENTION_SCAN_LIMIT || *visited >= FILE_MENTION_VISIT_LIMIT
-        {
-            return;
-        }
-        *visited += 1;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if file_mention_ignored_component(std::ffi::OsStr::new(name)) {
-            continue;
-        }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_file() && !file_type.is_dir() {
-            continue;
-        }
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if let Some(score) = fuzzy_score(&relative, query) {
-            output.push((
-                score - i64::try_from(depth).unwrap_or_default(),
-                if file_type.is_dir() {
-                    format!("{relative}/")
-                } else {
-                    relative.clone()
-                },
-                path.clone(),
-            ));
-        }
-        if file_type.is_dir() {
-            collect_file_mention_candidates(
-                root,
-                &path,
-                query,
-                depth + 1,
-                visited,
-                output,
-            );
-        }
-    }
+    pickers.get(root).map(op)
+}
+
+/// True when any component of a relative path falls in the historic
+/// `@`-mention exclude set (`target`, `build`, `node_modules`, …). fff
+/// already skips hidden dirs and gitignored paths, but a bare `target/`
+/// on a non-git root can still leak, so this preserves the old walk's
+/// explicit excludes.
+fn file_mention_path_ignored(relative: &str) -> bool {
+    Path::new(relative).components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(part) if file_mention_ignored_component(part)
+        )
+    })
 }
 
 fn file_mention_ignored_component(part: &std::ffi::OsStr) -> bool {
@@ -944,31 +942,6 @@ fn file_mention_ignored_component(part: &std::ffi::OsStr) -> bool {
                 | "target"
         )
     )
-}
-
-fn fuzzy_score(value: &str, query: &str) -> Option<i64> {
-    if query.is_empty() {
-        return Some(100 - value.matches('/').count() as i64);
-    }
-    let value_lower = value.to_ascii_lowercase();
-    let query_lower = query.to_ascii_lowercase();
-    if value_lower.contains(&query_lower) {
-        return Some(1_000 - value_lower.find(&query_lower).unwrap_or(0) as i64);
-    }
-    let mut score = 0i64;
-    let mut chars = query_lower.chars();
-    let mut current = chars.next()?;
-    for (index, ch) in value_lower.chars().enumerate() {
-        if ch == current {
-            score += 20 - i64::try_from(index).unwrap_or_default().min(20);
-            if let Some(next) = chars.next() {
-                current = next;
-            } else {
-                return Some(score);
-            }
-        }
-    }
-    None
 }
 
 fn file_mention_description(display: &str, kind: &str) -> String {

@@ -78,7 +78,14 @@ smallvec = "1.15.1"
 unicode-width = { package = "unicode-width-16", version = "0.1.0" }
 base64 = "0.22.1"
 clap = { version = "4.5", features = ["derive", "env"] }
-fff-search = { version = "0.9.4-nightly.8092cfa", default-features = false }
+# `ripgrep` is fff's DEFAULT glob backend (pure-Rust globset). It must be
+# on explicitly: with default-features off and neither `ripgrep` nor `zlob`
+# enabled, fff-search 0.10.0 fails to compile — its constraints module calls
+# glob helpers that only exist under one of those features. `ripgrep` avoids
+# the native FFI the `zlob` SIMD backend would pull in (cleaner mac/win builds).
+fff-search = { version = "0.10.1-nightly.31be224", default-features = false, features = [
+    "ripgrep",
+] }
 futures-core = "0.3"
 git2 = "0.20.2"
 image_rs = { package = "image", version = "0.25.10", default-features = false, features = [
@@ -153,6 +160,3 @@ split-debuginfo = "unpacked"
 lto = false
 incremental = true
 opt-level = 0
-
-[patch.crates-io]
-fff-search = { path = "vendor/fff-search" }

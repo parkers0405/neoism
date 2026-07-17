@@ -537,15 +537,20 @@ where
             || AgentToolMessage::text(message).contains("task_id:")
             || message.detail().contains("task_id:"));
     let live_task_alpha = 0.45 + 0.55 * (now_seconds * 4.0).sin().abs();
+    // Running-task cards pulse their accent; `white` reads as emphasis on dark
+    // themes but is invisible on a light one, so fall back to the (dark)
+    // foreground there. Static accents are routed through `readable_accent` so
+    // a dark-tuned accent stays legible as the card title on light themes.
+    let live_base = if theme.is_dark() { theme.white } else { theme.fg };
     let accent_u8 = if live_task {
-        theme.u8_alpha(theme.white, live_task_alpha)
+        theme.u8_alpha(live_base, live_task_alpha)
     } else {
-        theme.u8(accent)
+        theme.u8(theme.readable_accent(accent))
     };
     let accent_f32 = if live_task {
-        theme.f32_alpha(theme.white, live_task_alpha)
+        theme.f32_alpha(live_base, live_task_alpha)
     } else {
-        theme.f32(accent)
+        theme.f32(theme.readable_accent(accent))
     };
     let surface = match kind {
         AgentMessageCardKind::Reasoning => theme.panel_bg(),
@@ -956,7 +961,7 @@ where
     let Some(label_opts) = opts_with_clip(
         DrawOpts {
             font_size: 12.0 * s,
-            color: theme.u8(theme.magenta),
+            color: theme.u8(theme.readable_accent(theme.magenta)),
             bold: true,
             ..DrawOpts::default()
         },

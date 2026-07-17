@@ -635,7 +635,7 @@ pub fn render_input(
     let usage_label = pane.usage_summary_label();
     let usage_opts = DrawOpts {
         font_size: 11.5 * s,
-        color: theme.u8(theme.cyan),
+        color: theme.u8(theme.readable_accent(theme.cyan)),
         bold: true,
         ..DrawOpts::default()
     };
@@ -1194,7 +1194,7 @@ pub fn render_status_chips(
         }
         let opts = DrawOpts {
             font_size,
-            color: theme.u8(color),
+            color: theme.u8(theme.readable_accent(color)),
             bold: true,
             ..DrawOpts::default()
         };
@@ -1241,7 +1241,7 @@ fn draw_agent_prompt_text(
     }
 
     let mut link_opts = *opts;
-    link_opts.color = theme.u8(theme.blue);
+    link_opts.color = theme.u8(theme.readable_accent(theme.blue));
 
     let mut segment_x = x;
     let mut cursor = 0;

@@ -376,10 +376,10 @@ impl Screen<'_> {
         use neoism_ui::widgets::modal::ModalAction;
 
         let _ = (x, y);
-        // Joined workspace: there is exactly one place its notes can
-        // live — the project's `Notes/` on the server. Personal vaults
+        // Served workspace: there is exactly one place its notes can
+        // live — the project's `Notes/` on the daemon. Personal vaults
         // are this machine's and never leak into a shared workspace.
-        if self.context_manager.current_workspace_is_remote_joined() {
+        if self.served_workspace_root().is_some() {
             self.renderer.notifications.push(
                 "Shared workspaces keep notes in the project's Notes/ folder on the server."
                     .to_string(),

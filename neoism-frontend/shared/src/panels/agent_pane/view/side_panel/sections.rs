@@ -469,11 +469,11 @@ fn render_goal_section(
     );
 
     // Status badge — color-coded by lifecycle, mirroring the branch dots.
-    let badge_color = match goal.status {
-        GoalStatus::Active => theme.u8(theme.accent),
-        GoalStatus::Complete => theme.u8(theme.green),
-        GoalStatus::Blocked => theme.u8(theme.red),
-    };
+    let badge_color = theme.u8(theme.readable_accent(match goal.status {
+        GoalStatus::Active => theme.accent,
+        GoalStatus::Complete => theme.green,
+        GoalStatus::Blocked => theme.red,
+    }));
     let badge_text = if goal.paused {
         format!("{} · paused", goal.status.label())
     } else {

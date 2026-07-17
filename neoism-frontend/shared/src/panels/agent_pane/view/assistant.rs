@@ -119,7 +119,16 @@ where
     let Some(label_opts) = opts_with_clip(
         DrawOpts {
             font_size: 12.0 * s,
-            color: theme.u8_alpha(theme.yellow, 0.6),
+            // Dim yellow "Thinking" label. On dark themes the 0.6 alpha keeps
+            // it recessive against the panel; on light themes (retro_95) the
+            // low alpha washes the amber toward the light panel until it reads
+            // as near-white, so paint it at full opacity where `theme.yellow`
+            // already resolves to a readable dark amber.
+            color: if theme.is_dark() {
+                theme.u8_alpha(theme.yellow, 0.6)
+            } else {
+                theme.u8(theme.yellow)
+            },
             italic: true,
             ..DrawOpts::default()
         },

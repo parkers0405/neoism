@@ -2208,9 +2208,9 @@ dependencies = [
 
 [[package]]
 name = "fff-grep"
-version = "0.9.4-nightly.8092cfa"
+version = "0.10.1-nightly.31be224"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b54a57102bead524d02e43bf924ad67b69443e81b3a6a872973bba6d7b992518"
+checksum = "dd39fca995996278de568d36bd5d38b52dbae15259ca16021cefd895877a90f6"
 dependencies = [
  "bstr",
  "memchr",
@@ -2232,13 +2232,15 @@ dependencies = [
 
 [[package]]
 name = "fff-query-parser"
-version = "0.9.4-nightly.8092cfa"
+version = "0.10.1-nightly.31be224"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c839166fa07aa236dd56b4c74f7a92bb6b33a6e6402e7f86794560644bb603db"
+checksum = "d265f2800d0dc2f04ea7d1b484db43614fdae09d008218784471d2b0a3345812"
 
 [[package]]
 name = "fff-search"
-version = "0.9.4-nightly.8092cfa"
+version = "0.10.1-nightly.31be224"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27f73077386878ad23924ca423e34be44e649264a88ae8727624ebba689cd764"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -2780,9 +2782,9 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "globset"
-version = "0.4.18"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+checksum = "e47d37d2ae4464254884b60ab7071be2b876a9c35b696bd018ddcc76847309cd"
 dependencies = [
  "aho-corasick",
  "bstr",
@@ -3372,9 +3374,9 @@ dependencies = [
 
 [[package]]
 name = "ignore"
-version = "0.4.25"
+version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3d782a365a015e0f5c04902246139249abf769125006fbe7649e2ee88169b4a"
+checksum = "d4ffa3a0547a138e59ddd6fa3b7c672ed47e6ad6a3cd177984ff1116aa5ba742"
 dependencies = [
  "crossbeam-deque",
  "globset",
@@ -4761,13 +4763,9 @@ dependencies = [
 
 [[package]]
 name = "neo_frizbee"
-version = "0.10.2"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "728e0731ad3a0083b9f72a82df72c298641ba970d4e308e0897ec4c89212c31d"
-dependencies = [
- "itertools 0.14.0",
- "raw-cpuid",
-]
+checksum = "7a2f6120a8da26bea3587731072111062c5d8c51ca3a3a75a716bd8b735d5882"
 
 [[package]]
 name = "neoism"
@@ -6728,15 +6726,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5e48930979c155e2f33aa36ab3119b5ee81332beb6482199a8ecd6029b80b59"
 dependencies = [
  "rustversion",
-]
-
-[[package]]
-name = "raw-cpuid"
-version = "11.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
-dependencies = [
- "bitflags 2.11.0",
 ]
 
 [[package]]

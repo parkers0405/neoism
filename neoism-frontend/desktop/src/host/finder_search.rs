@@ -292,7 +292,11 @@ impl SearchService for NativeSearchService {
     }
 }
 
-fn build_fff_picker(cwd: &Path) -> Option<fff_search::FilePicker> {
+/// Build (and fully scan) an fff-search `FilePicker` for `cwd` with the
+/// safe finder config: AI mode, no content indexing, no mmap cache. Shared
+/// with the agent input bar's `@` file-mention picker so both surfaces use
+/// one construction path.
+pub(crate) fn build_fff_picker(cwd: &Path) -> Option<fff_search::FilePicker> {
     let mut picker = fff_search::FilePicker::new(fff_search::FilePickerOptions {
         base_path: cwd.display().to_string(),
         mode: fff_search::FFFMode::Ai,

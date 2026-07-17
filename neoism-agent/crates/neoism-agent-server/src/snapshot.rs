@@ -518,8 +518,21 @@ fn write_state(path: &Path, state: &FileState) -> anyhow::Result<()> {
 }
 
 fn git_status_states(root: &Path) -> Option<BTreeMap<String, FileState>> {
+    // This runs twice per bash command (before + after) to diff what the
+    // command touched, so keep it cheap: `--no-optional-locks` skips the
+    // on-disk index refresh/lock, and `--untracked-files=normal` avoids
+    // recursively walking whole untracked directories (a big cost on repos
+    // with large untracked trees). New files under a fresh untracked dir
+    // surface as the dir and are gracefully skipped by the snapshot rather
+    // than dragging every bash call.
     let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .args([
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=normal",
+        ])
         .current_dir(root)
         .output()
         .ok()?;

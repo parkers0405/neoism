@@ -133,12 +133,71 @@ impl Screen<'_> {
         true
     }
 
+    /// Root of the workspace this window is a CLIENT of, when that
+    /// workspace is served by a hosted daemon — a guest that joined
+    /// someone else's host, OR the host itself viewing its own served
+    /// workspace (self-hosted on a spawned daemon, or docker-hosted on
+    /// a pod). `Some` is the "notes + agent are workspace-scoped and
+    /// shared through the daemon" signal; `None` is a plain local `home`
+    /// session that keeps this machine's personal vault.
+    ///
+    /// Prefers the file tree's remote root (a guest whose tree is
+    /// already in remote mode) and falls back to the daemon's served
+    /// workspace root — so a self-hosting host, whose tree is still
+    /// LOCAL (`sync_file_tree_remote_mode` keys that on host-identity),
+    /// still resolves the same `Notes/` folder every guest sees. Keying
+    /// on the peer LINK rather than host-identity is exactly what lets a
+    /// host read its OWN served workspace instead of falling through to
+    /// the personal vault.
+    pub(crate) fn served_workspace_root(&self) -> Option<std::path::PathBuf> {
+        if !self.context_manager.daemon_link_is_peer() {
+            return None;
+        }
+        if let Some(root) = self.renderer.file_tree.remote_root() {
+            return Some(root);
+        }
+        let workspace_id = self.context_manager.current_adopted_workspace_id()?;
+        self.context_manager.daemon_host_workspace_root(&workspace_id)
+    }
+
+    /// Like [`Self::send_remote_files_op`] but fires at an explicit
+    /// workspace root instead of the file tree's remote root — used for
+    /// notes ops on a self-hosting host, whose tree root is local while
+    /// its notes live in the served workspace's `Notes/`.
+    pub(crate) fn send_remote_files_op_with_root(
+        &mut self,
+        root: std::path::PathBuf,
+        message: neoism_protocol::files::FilesClientMessage,
+    ) -> bool {
+        let Some((handle, runtime)) =
+            self.context_manager.daemon_link_handle_and_runtime()
+        else {
+            return true;
+        };
+        let request_id = handle.allocate_request_id();
+        self.pending_remote_file_ops.insert(request_id);
+        runtime.spawn(async move {
+            if let Err(error) = handle
+                .send_files_with_request_id(request_id, message, Some(root))
+                .await
+            {
+                tracing::warn!(
+                    target: "neoism::remote_files",
+                    %error,
+                    request_id,
+                    "remote notes op send failed"
+                );
+            }
+        });
+        true
+    }
+
     /// List the joined workspace's `Notes/` folder on the server —
     /// feeds the notes sidebar via the `TreeListing` reply. A missing
     /// folder is fine (the daemon answers with an Error; the panel
     /// shows the empty state and the first create makes the dir).
     pub(crate) fn request_remote_notes_listing(&mut self) {
-        let Some(root) = self.renderer.file_tree.remote_root() else {
+        let Some(root) = self.served_workspace_root() else {
             return;
         };
         let Some((handle, runtime)) =
@@ -374,7 +433,10 @@ impl Screen<'_> {
                 );
                 self.renderer.file_tree.relist_open_dirs();
                 if !is_dir {
-                    if let Some(root) = self.renderer.file_tree.remote_root() {
+                    if let Some(root) = self
+                        .served_workspace_root()
+                        .or_else(|| self.renderer.file_tree.remote_root())
+                    {
                         let abs = root.join(path);
                         // Notes open in the markdown surface and the
                         // sidebar re-lists; everything else keeps the

@@ -35,6 +35,68 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 const MAX_PATHS_PER_BURST: usize = 64;
 const BROADCAST_CAPACITY: usize = 256;
 
+/// Path segments whose contents never carry a tree-relevant change but
+/// whose churn floods every guest. A recursive watch on a real repo
+/// otherwise fires continuously: a running dev server rewrites `.next`
+/// / `dist`, an install rewrites `node_modules`, and — the worst
+/// offender — every `git status` the client runs re-stats `.git`
+/// (index, objects, packed-refs), which the watcher reports right back
+/// as a change, which makes the client run `git status` again. On the
+/// live synapse repo this measured 3.3 `Changed` bursts/sec, and since
+/// the client does a directory re-list + git-status refresh per burst
+/// against the 300ms debounce window, a joined guest was starved to
+/// ~4fps. Dropping these segments before they reach the debouncer
+/// breaks the loop and mirrors the ignore set every editor's file
+/// watcher already uses. `.git` is dropped wholesale: real edits touch
+/// the worktree (which still fires) and that is what drives a git-badge
+/// refresh — a bare branch flip with no working-tree change is the only
+/// case that goes unsignalled, and the guest re-lists on focus anyway.
+const IGNORED_SEGMENTS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".output",
+    ".vite",
+    ".turbo",
+    ".parcel-cache",
+    ".cache",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".gradle",
+    ".idea",
+    "vendor",
+    ".terraform",
+    "coverage",
+    ".nyc_output",
+];
+
+/// True when `path` lies inside (or is) an ignored directory, checked
+/// against the segments *below* `root` only — an ancestor of the
+/// watched root that happens to be named `build` must not disqualify
+/// the whole tree, and the match is exact per-component so a file named
+/// `dist.rs` is kept while `.../dist/bundle.js` is dropped.
+fn is_ignored_watch_path(root: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(seg)
+                if seg.to_str().is_some_and(|s| IGNORED_SEGMENTS.contains(&s))
+        )
+    })
+}
+
 pub struct FsWatchHub {
     tx: broadcast::Sender<FsChanged>,
     /// Root → live watcher. Keeping the watcher alive keeps the watch.
@@ -127,8 +189,14 @@ impl FsWatchHub {
                 // Content-only modifications don't change the tree
                 // shape, but renames/creates/removes do; send them
                 // all and let the debounce + client re-list absorb
-                // the noise (a listing is cheap).
+                // the noise (a listing is cheap). Ignored trees
+                // (`node_modules`, `.git`, build output) are dropped
+                // here so their churn never reaches the debouncer — see
+                // `IGNORED_SEGMENTS`.
                 for path in event.paths {
+                    if is_ignored_watch_path(&event_root, &path) {
+                        continue;
+                    }
                     let _ = event_tx.send((event_root.clone(), path));
                 }
             },
@@ -160,5 +228,59 @@ impl FsWatchHub {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_ignored_watch_path, Path};
+
+    #[test]
+    fn drops_churny_trees_under_root() {
+        let root = Path::new("/home/me/repo");
+        for tail in [
+            "node_modules/twilio/lib/rest/pricing/v2/voice",
+            ".git/index",
+            ".git/objects/63/a9c8bf",
+            "apps/frontend/.next/static/chunk.js",
+            "target/debug/build/x",
+            "dist/bundle.js",
+            "__pycache__/mod.cpython-312.pyc",
+            ".venv/lib/site-packages/foo.py",
+        ] {
+            let p = root.join(tail);
+            assert!(
+                is_ignored_watch_path(root, &p),
+                "expected {tail} to be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_real_source_changes() {
+        let root = Path::new("/home/me/repo");
+        for tail in [
+            "src/main.rs",
+            "apps/frontend/pages/index.tsx",
+            "README.md",
+            "dist.rs",            // file named like an ignored dir, not inside one
+            "my-node_modules.md", // segment must match exactly
+            "notes/build-log.md",
+        ] {
+            let p = root.join(tail);
+            assert!(
+                !is_ignored_watch_path(root, &p),
+                "expected {tail} to be kept"
+            );
+        }
+    }
+
+    #[test]
+    fn root_ancestor_named_like_ignored_dir_is_not_disqualifying() {
+        // The watched root itself lives under a `build/` ancestor; only
+        // segments *below* the root should be considered.
+        let root = Path::new("/srv/build/my-repo");
+        let p = root.join("src/lib.rs");
+        assert!(!is_ignored_watch_path(root, &p));
     }
 }

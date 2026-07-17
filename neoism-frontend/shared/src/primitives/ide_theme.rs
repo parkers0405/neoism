@@ -427,6 +427,64 @@ impl IdeTheme {
         (0.299 * r + 0.587 * g + 0.114 * b) < 128.0
     }
 
+    /// Adjusts an accent `color` so it stays legible as **text** against this
+    /// palette's background.
+    ///
+    /// Dark themes get the color back untouched — they were tuned that way and
+    /// must render exactly as before. On a *light* palette an accent picked for
+    /// a dark UI (e.g. a theme that overrides only `bg`/`fg` and so inherits the
+    /// pastel light-blue `0x89b4fa`) can wash out until it is unreadable. When
+    /// the accent's contrast against `bg` drops below a readable floor it is
+    /// darkened toward black — preserving its hue, so a blue link stays blue —
+    /// until it clears the floor, falling back to `fg` for a near-white accent
+    /// that darkening can't rescue.
+    ///
+    /// The floor sits just under the dimmest accent hand-picked for the shipped
+    /// light pack (retro_95's amber, ~2.8:1), so every deliberately tuned light
+    /// theme is returned unchanged and only genuinely-illegible accents move.
+    pub fn readable_accent(&self, color: u32) -> u32 {
+        if self.is_dark() {
+            return color;
+        }
+        const FLOOR: f32 = 2.6;
+        let bg_l = Self::relative_luminance(self.bg);
+        let contrast = |c: u32| {
+            let l = Self::relative_luminance(c);
+            let (hi, lo) = if l >= bg_l { (l, bg_l) } else { (bg_l, l) };
+            (hi + 0.05) / (lo + 0.05)
+        };
+        if contrast(color) >= FLOOR {
+            return color;
+        }
+        // Darken toward black in hue-preserving steps until it reads.
+        let mut shade = color;
+        for _ in 0..12 {
+            let scale = |v: u32| ((v & 0xff) as f32 * 0.82) as u32;
+            shade = (scale(shade >> 16) << 16) | (scale(shade >> 8) << 8) | scale(shade);
+            if contrast(shade) >= FLOOR {
+                return shade;
+            }
+        }
+        // A near-grey/near-white accent can't reach the floor by darkening;
+        // use the (readable) foreground instead.
+        self.fg
+    }
+
+    /// WCAG relative luminance of an RGB color, in linearized sRGB.
+    fn relative_luminance(color: u32) -> f32 {
+        let channel = |v: u32| {
+            let s = ((v & 0xff) as f32) / 255.0;
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color >> 16)
+            + 0.7152 * channel(color >> 8)
+            + 0.0722 * channel(color)
+    }
+
     /// Deep elevated-panel background (floating pickers, hover docs,
     /// code blocks, reasoning cards). Dark themes keep the historical
     /// `black` token (darker than `bg` — the "deep panel" look); light

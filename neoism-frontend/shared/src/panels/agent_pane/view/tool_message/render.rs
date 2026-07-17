@@ -750,11 +750,11 @@ fn render_diff_card_diagnostics(
     let max_chars = ((w / (7.0 * s)).floor().max(20.0)) as usize;
     for diag in section.diagnostics.iter().take(MAX_DIAG_LINES_PER_CARD) {
         let mut opts = base_opts;
-        opts.color = theme.u8(if diag.is_error {
+        opts.color = theme.u8(theme.readable_accent(if diag.is_error {
             theme.red
         } else {
             theme.yellow
-        });
+        }));
         draw_text_clipped(
             sugarloaf,
             x + 4.0 * s,

@@ -1335,13 +1335,19 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
     let skip_above = clip_top - overscan;
     // Only offset content when we actually draw the leading status marker.
     let text_x = if show_leading_marker { x + 22.0 * s } else { x };
-    let body_color = if body_muted { theme.white } else { theme.fg };
+    // Reasoning ("body_muted") text is a dimmed "inner monologue". On dark
+    // themes that recessive look comes from `white`; on light themes (e.g. the
+    // retro_95 Mash Up look, bg luminance high) `white` is near-white and
+    // unreadable on the light panel, so fall back to the theme foreground,
+    // which is dark there. Keeps the dim intent on both without hardcoding.
+    let reasoning_dim = if theme.is_dark() { theme.white } else { theme.fg };
+    let body_color = if body_muted { reasoning_dim } else { theme.fg };
     // Reasoning blocks render in italic so the "inner monologue" reads
     // distinctly from the assistant's final answer. `body_muted` is the
     // reasoning signal — render_assistant_text passes false.
     let italic = body_muted;
     let body_text_color = if body_muted {
-        theme.u8_alpha(theme.white, 0.6)
+        theme.u8_alpha(reasoning_dim, 0.6)
     } else {
         theme.u8(theme.fg)
     };
@@ -1938,7 +1944,14 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
             MarkdownInlineSegment::Bold(text) => {
                 let mut bold = *opts;
                 bold.bold = true;
-                bold.color = theme.u8(theme.white);
+                // Brighter-than-`fg` white emphasises bold text on dark themes;
+                // on a light theme white is invisible, so lean on the (already
+                // dark) foreground — the bold weight carries the emphasis.
+                bold.color = theme.u8(if theme.is_dark() {
+                    theme.white
+                } else {
+                    theme.fg
+                });
                 draw_text_clipped(sugarloaf, x, y, text, &bold, occlusion_rects);
                 x += measure_text_cached(sugarloaf, text, &bold);
             }
@@ -1964,11 +1977,11 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
             MarkdownInlineSegment::Code { text, target } => {
                 let mut code = *opts;
                 code.bold = true;
-                code.color = theme.u8(if target.is_some() {
+                code.color = theme.u8(theme.readable_accent(if target.is_some() {
                     theme.blue
                 } else {
                     theme.syn_string
-                });
+                }));
                 draw_text_clipped(sugarloaf, x, y, text, &code, occlusion_rects);
                 x += measure_text_cached(sugarloaf, text, &code);
                 if !suppress_interactions {
@@ -1992,11 +2005,11 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
             }
             MarkdownInlineSegment::MarkdownLink { label, target, .. } => {
                 let mut link_opts = *opts;
-                link_opts.color = theme.u8(if target.is_some() {
+                link_opts.color = theme.u8(theme.readable_accent(if target.is_some() {
                     theme.blue
                 } else {
                     theme.cyan
-                });
+                }));
                 draw_text_clipped(sugarloaf, x, y, label, &link_opts, occlusion_rects);
                 let w = measure_text_cached(sugarloaf, label, &link_opts);
                 if !suppress_interactions {
@@ -2026,7 +2039,7 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
             } => {
                 let mut token_opts = *opts;
                 if target.is_some() {
-                    token_opts.color = theme.u8(theme.blue);
+                    token_opts.color = theme.u8(theme.readable_accent(theme.blue));
                 } else if let Some(style) = style {
                     token_opts.color = theme.u8(plain_token_color(*style, theme));
                     token_opts.bold = style.bold;
@@ -2138,7 +2151,7 @@ fn render_markdown_table<P: AgentMarkdownPane>(
             let cell = row.get(col).map(String::as_str).unwrap_or_default();
             let mut cell_opts = opts;
             if md::looks_like_file_ref(cell) {
-                cell_opts.color = theme.u8(theme.blue);
+                cell_opts.color = theme.u8(theme.readable_accent(theme.blue));
             }
             for (line_ix, line) in table_cell_lines(cell).iter().enumerate() {
                 let line_y =

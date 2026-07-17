@@ -92,11 +92,10 @@ fn fffind_tool_sync(
     if query_text.is_empty() {
         return fffind_directory_fallback(&context, &path, limit, offset, timeout_ms);
     }
-    let parser = QueryParser::default();
-    let query = parser.parse(&query_text);
     let (items, total_matched) = with_picker(&path, |picker| {
-        let results = picker.fuzzy_search(
-            &query,
+        let parser = QueryParser::default();
+        let mut results = picker.fuzzy_search(
+            &parser.parse(&query_text),
             None,
             FuzzySearchOptions {
                 max_threads: 0,
@@ -106,6 +105,31 @@ fn fffind_tool_sync(
                 ..Default::default()
             },
         );
+        // An oversized / natural-language query fuzzy-matches no file PATH
+        // (paths don't contain sentences), so it came back empty. Retry on
+        // the single most distinctive token so we still surface the relevant
+        // files instead of returning nothing.
+        if results.items.is_empty() {
+            if let Some(token) = query_text
+                .split_whitespace()
+                .filter(|token| token.len() >= 3)
+                .max_by_key(|token| token.len())
+            {
+                if token != query_text.as_str() {
+                    results = picker.fuzzy_search(
+                        &parser.parse(token),
+                        None,
+                        FuzzySearchOptions {
+                            max_threads: 0,
+                            current_file: None,
+                            project_path: Some(&path),
+                            pagination: PaginationArgs { offset, limit },
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
         let items = results
             .items
             .iter()
@@ -230,7 +254,40 @@ fn ffgrep_tool_sync(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let mode = grep_mode(&arguments, &pattern);
+    // fff's fuzzy scorer computes `needle.len() as u16 * 16` (fuzzy_grep.rs)
+    // and OVERFLOWS once the needle passes ~4095 bytes — panicking on an
+    // INTERNAL fff worker thread that our `catch_unwind` cannot intercept, so
+    // it hangs the tool instead of erroring. Never hand fuzzy an oversized
+    // needle: skip the fuzzy fallback for long patterns and downgrade an
+    // explicit fuzzy request to a plain literal search.
+    const MAX_FUZZY_NEEDLE: usize = 1024;
+    // fff's fuzzy needle = the query's joined non-constraint text tokens
+    // (`FFFQuery::grep_text()`): our `!exclude` globs are constraints, so the
+    // needle is the pattern plus any positive `include` glob. Bound on both.
+    let fuzzy_safe = pattern.len() + include.as_deref().map_or(0, str::len)
+        <= MAX_FUZZY_NEEDLE;
+    let mode = if mode == GrepMode::Fuzzy && !fuzzy_safe {
+        GrepMode::PlainText
+    } else {
+        mode
+    };
     let root = grep_root(&path);
+    // A pure literal alternation (`a|b|c`) is an OR search. Route it through
+    // multi-pattern (Aho-Corasick) instead of compiling one wide regex: fff
+    // can hit "attempt to multiply with overflow" building/scoring a broad
+    // regex alternation (~35 branches), and multi-pattern is the correct and
+    // faster engine for a literal OR anyway.
+    let alternation = literal_alternation_terms(&pattern);
+    // Constraint-only query (path + include + exclude, empty search term) for
+    // the multi-pattern route; the regex/plain route appends the pattern.
+    let constraint_text = grep_query_text(
+        &context.cwd,
+        &path,
+        &root,
+        include.as_deref(),
+        Some(exclude.as_str()),
+        "",
+    );
     let query_text = grep_query_text(
         &context.cwd,
         &path,
@@ -239,37 +296,48 @@ fn ffgrep_tool_sync(
         Some(exclude.as_str()),
         &pattern,
     );
-    let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
-    let query = parser.parse(&query_text);
+    // Bound each grep the way fff intends (and opencode does): return
+    // PARTIAL results at a time budget instead of grinding to the outer
+    // hard-kill with nothing. Kept a hair under the tool timeout so fff
+    // self-bounds first; also hand fff the cancel flag so it stops mid-
+    // search on abort rather than only when the outer select! fires.
+    let grep_budget_ms = timeout_ms.saturating_sub(2_000).max(500);
+    let abort = context.cancel.clone();
     let (items, files_with_matches, total_files_searched, next_file_offset, used_mode) =
         with_picker(&root, |picker| {
-            let mut results = picker.grep(
-                &query,
-                &GrepSearchOptions {
-                    page_limit: limit,
-                    mode,
-                    smart_case: !case_sensitive,
-                    before_context: context_lines,
-                    after_context: context_lines,
-                    classify_definitions: true,
-                    trim_whitespace: false,
-                    ..Default::default()
-                },
-            );
-            let used_mode = if results.matches.is_empty() && mode != GrepMode::Fuzzy {
-                results = picker.grep(
-                    &query,
-                    &GrepSearchOptions {
-                        page_limit: limit,
-                        mode: GrepMode::Fuzzy,
-                        smart_case: !case_sensitive,
-                        before_context: context_lines,
-                        after_context: context_lines,
-                        classify_definitions: true,
-                        trim_whitespace: false,
-                        ..Default::default()
-                    },
+            let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
+            let options = |grep_mode: GrepMode| GrepSearchOptions {
+                page_limit: limit,
+                mode: grep_mode,
+                smart_case: !case_sensitive,
+                before_context: context_lines,
+                after_context: context_lines,
+                classify_definitions: true,
+                trim_whitespace: false,
+                time_budget_ms: grep_budget_ms,
+                abort_signal: abort.clone(),
+                ..Default::default()
+            };
+            if let Some(terms) = &alternation {
+                let constraints = parser.parse(&constraint_text);
+                let refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+                let results =
+                    picker.multi_grep(&refs, &constraints.constraints, &options(GrepMode::PlainText));
+                return (
+                    grep_items(picker, &results),
+                    results.files_with_matches,
+                    results.total_files_searched,
+                    results.next_file_offset,
+                    "multi",
                 );
+            }
+            let query = parser.parse(&query_text);
+            let mut results = picker.grep(&query, &options(mode));
+            let used_mode = if results.matches.is_empty()
+                && mode != GrepMode::Fuzzy
+                && fuzzy_safe
+            {
+                results = picker.grep(&query, &options(GrepMode::Fuzzy));
                 if results.matches.is_empty() {
                     mode_label(mode)
                 } else {
@@ -346,6 +414,9 @@ fn fff_multi_grep_tool_sync(
     let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
     let query = parser.parse(&constraint_query);
     let refs = patterns.iter().map(String::as_str).collect::<Vec<_>>();
+    // Same partial-result time budget + cancel propagation as ffgrep.
+    let grep_budget_ms = timeout_ms.saturating_sub(2_000).max(500);
+    let abort = context.cancel.clone();
     let (items, files_with_matches, total_files_searched, next_file_offset) =
         with_picker(&root, |picker| {
             let results = picker.multi_grep(
@@ -357,6 +428,8 @@ fn fff_multi_grep_tool_sync(
                     after_context: context_lines,
                     classify_definitions: true,
                     trim_whitespace: false,
+                    time_budget_ms: grep_budget_ms,
+                    abort_signal: abort.clone(),
                     ..Default::default()
                 },
             );
@@ -474,13 +547,52 @@ fn with_picker<T>(
             root.display()
         );
     }
-    let guard = shared
-        .read()
-        .map_err(|error| anyhow::anyhow!("FFF picker read lock failed: {error}"))?;
-    let picker = guard.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("FFF picker for {} was dropped", root.display())
-    })?;
-    Ok(operation(picker))
+    let outcome = {
+        let guard = shared
+            .read()
+            .map_err(|error| anyhow::anyhow!("FFF picker read lock failed: {error}"))?;
+        let picker = guard.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("FFF picker for {} was dropped", root.display())
+        })?;
+        // fff-search is a third-party engine and some inputs make it panic in
+        // a worker (data-dependent: a pathological line, an unhandled regex
+        // decomposition, …). Isolate the call so a library panic becomes a
+        // clean tool error carrying the REAL message, instead of a bare
+        // "worker panicked". Catching here — while the read `guard` is still
+        // held, before it unwinds — is also what stops the shared RwLock from
+        // being POISONED; otherwise one panic bricks every later query against
+        // this cached root.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(picker)))
+        // `guard`/`picker` drop here NORMALLY: catch_unwind already absorbed
+        // the unwind, so there is no in-flight panic to poison the lock.
+    };
+    match outcome {
+        Ok(value) => Ok(value),
+        Err(payload) => {
+            // The picker's internal state may be inconsistent after a panic —
+            // evict it so the next query rebuilds a fresh index for this root.
+            if let Some(cache) = PICKER_CACHE.get() {
+                if let Ok(mut cache) = cache.lock() {
+                    cache.remove(&root);
+                }
+            }
+            Err(anyhow::anyhow!(
+                "fff search engine panicked ({}); narrow the path/pattern, lower the limit, or switch grep mode",
+                panic_payload_message(payload.as_ref())
+            ))
+        }
+    }
+}
+
+/// Best-effort human message from a `catch_unwind` payload.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 fn build_picker(root: &Path) -> anyhow::Result<SharedFilePicker> {
@@ -500,7 +612,15 @@ fn build_picker(root: &Path) -> anyhow::Result<SharedFilePicker> {
             base_path: root.to_string_lossy().to_string(),
             mode: FFFMode::Ai,
             enable_mmap_cache: mmap_enabled,
-            enable_content_indexing: true,
+            // Match fff's default (and opencode's agent integration):
+            // content indexing OFF. Turning it on builds a RESIDENT
+            // content index of the whole tree — reading every file — on
+            // the first query, behind `wait_for_scan`; on a large repo
+            // (esp. macOS) that is a multi-second first-hit freeze. With
+            // it off, the path index still powers `fffind`, and `ffgrep`
+            // greps on demand bounded by `time_budget_ms` (see below),
+            // which is how the reference agent uses it.
+            enable_content_indexing: false,
             watch: true,
             follow_symlinks: false,
             enable_fs_root_scanning: false,
@@ -613,6 +733,27 @@ fn grep_mode(arguments: &Value, pattern: &str) -> GrepMode {
         _ if has_regex_metacharacters(pattern) => GrepMode::Regex,
         _ => GrepMode::PlainText,
     }
+}
+
+/// Split a pure literal alternation (`foo|bar|baz`) into its terms. Returns
+/// `None` when the pattern isn't a multi-branch alternation or any branch
+/// carries regex metacharacters — then it's a real regex and must stay on the
+/// regex engine. A literal OR is routed to multi-pattern search, which avoids
+/// the wide-regex "multiply with overflow" panic and is the faster engine.
+fn literal_alternation_terms(pattern: &str) -> Option<Vec<String>> {
+    if !pattern.contains('|') {
+        return None;
+    }
+    let terms: Vec<String> = pattern
+        .split('|')
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_string)
+        .collect();
+    if terms.len() < 2 || terms.iter().any(|term| has_regex_metacharacters(term)) {
+        return None;
+    }
+    Some(terms)
 }
 
 fn mode_label(mode: GrepMode) -> &'static str {

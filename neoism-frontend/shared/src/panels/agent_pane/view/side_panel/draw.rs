@@ -461,7 +461,7 @@ pub(crate) fn render_sessions_list(
     let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
     let header_opts = DrawOpts {
         font_size: FONT_SIZE * s * 0.92,
-        color: theme.u8(theme.cyan),
+        color: theme.u8(theme.readable_accent(theme.cyan)),
         bold: true,
         font_id: pixel_font,
         clip_rect: Some(list_rect),

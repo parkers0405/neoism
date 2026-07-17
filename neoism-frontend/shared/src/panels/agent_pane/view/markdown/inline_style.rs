@@ -558,7 +558,7 @@ pub(crate) fn draw_hover_underline<P: AgentMarkdownPane>(
         draw_rect_clipped(
             sugarloaf,
             rect,
-            theme.f32(theme.blue),
+            theme.f32(theme.readable_accent(theme.blue)),
             ORDER_TEXT,
             viewport_clip,
         );

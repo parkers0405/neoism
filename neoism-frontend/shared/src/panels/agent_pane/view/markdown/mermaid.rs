@@ -34,7 +34,13 @@ pub(crate) fn render_mermaid_block<P: AgentMarkdownPane>(
     let Some(header_opts) = opts_with_clip(
         DrawOpts {
             font_size: 11.5 * s,
-            color: theme.u8_alpha(theme.white, 0.68),
+            // Dimmed white reads as a quiet caption on dark panels but vanishes
+            // on a light one — dim the foreground there instead.
+            color: if theme.is_dark() {
+                theme.u8_alpha(theme.white, 0.68)
+            } else {
+                theme.u8_alpha(theme.fg, 0.68)
+            },
             ..DrawOpts::default()
         },
         viewport_clip,

@@ -1235,7 +1235,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "copa"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "arrayvec",
  "criterion",
@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "corcovado"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "bytes 1.11.1",
  "cfg-if 0.1.10",
@@ -4769,7 +4769,7 @@ checksum = "7a2f6120a8da26bea3587731072111062c5d8c51ca3a3a75a716bd8b735d5882"
 
 [[package]]
 name = "neoism"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "ahash",
  "base64",
@@ -4837,7 +4837,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -4858,7 +4858,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-core"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "rand 0.8.5",
  "serde",
@@ -4868,7 +4868,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-server"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4899,7 +4899,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-backend"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4946,7 +4946,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-extensions"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "dirs 5.0.1",
  "flate2",
@@ -4963,7 +4963,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-grapheme-width"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "phf 0.13.1",
  "ucd-trie",
@@ -4971,7 +4971,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-notifier"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "block2 0.5.1",
  "objc-rs 0.3.1",
@@ -4984,7 +4984,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-proc-macros"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4992,7 +4992,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-protocol"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -5003,7 +5003,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-remarkable"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "neoism-sync",
  "neoism-ui",
@@ -5012,14 +5012,14 @@ dependencies = [
 
 [[package]]
 name = "neoism-rm-agent"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "neoism-sync",
 ]
 
 [[package]]
 name = "neoism-sync"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "loro",
  "mdns-sd",
@@ -5030,7 +5030,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-core"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
@@ -5060,7 +5060,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-pty"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "corcovado",
  "libc",
@@ -5072,7 +5072,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-wasm"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",
@@ -5094,7 +5094,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-ui"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
@@ -5129,7 +5129,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-window"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "ahash",
  "atomic-waker",
@@ -5184,7 +5184,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-daemon"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -5228,7 +5228,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-index"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "dirs 6.0.0",
  "notify 8.2.0",
@@ -8024,7 +8024,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sugarloaf"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "approx",
  "ash",
@@ -8348,7 +8348,7 @@ dependencies = [
 
 [[package]]
 name = "teletypewriter"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "corcovado",
  "dirs 6.0.0",

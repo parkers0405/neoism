@@ -596,7 +596,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     #[inline]
-    pub(super) fn create_context(
+    pub(crate) fn create_context(
         cursor_state: (&Cursor, bool),
         event_proxy: T,
         window_id: WindowId,

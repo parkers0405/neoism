@@ -72,6 +72,9 @@ pub enum ModalAction {
         line: u32,
         character: u32,
     },
+    ApplyLspCodeAction {
+        action: neoism_protocol::editor::EditorLspCodeAction,
+    },
     /// Retry an agent CLI install (claude / codex / opencode).
     /// `kind` matches `AgentKind::id()`.
     InstallAgent {
@@ -1265,12 +1268,9 @@ impl UniversalModal {
             let widths: Vec<f32> = self
                 .form_tabs
                 .iter()
-                .map(|label| {
-                    sugarloaf.text_mut().measure(label, &tab_opts) + pad_x * 2.0
-                })
+                .map(|label| sugarloaf.text_mut().measure(label, &tab_opts) + pad_x * 2.0)
                 .collect();
-            let total: f32 =
-                widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32;
+            let total: f32 = widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32;
             let mut tab_x = x + (w - total) * 0.5;
             let tab_y = y + pad - 2.0 * s;
             for (index, label) in self.form_tabs.iter().enumerate() {

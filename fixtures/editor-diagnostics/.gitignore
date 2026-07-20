@@ -1,0 +1,3 @@
+# Runtime/compiler caches produced while exercising the fixtures.
+godot/.godot/
+rust/target/

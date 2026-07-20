@@ -377,9 +377,21 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                     "query": { "type": "string" },
                     "file": { "type": "string" },
                     "filePath": { "type": "string" },
-                    "line": { "type": "integer" },
-                    "character": { "type": "integer" },
-                    "column": { "type": "integer" }
+                    "line": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Zero-based document line"
+                    },
+                    "character": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Zero-based UTF-8 byte column (not a Unicode scalar or UTF-16 offset)"
+                    },
+                    "column": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Alias for character; zero-based UTF-8 byte column"
+                    }
                 },
                 "required": ["operation"]
             }),

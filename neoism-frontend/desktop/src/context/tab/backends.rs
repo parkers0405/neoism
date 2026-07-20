@@ -84,27 +84,76 @@ impl EditorBackend {
         }
     }
 
+    pub fn apply_lsp_code_action(
+        &self,
+        action: neoism_protocol::editor::EditorLspCodeAction,
+    ) {
+        match self {
+            Self::Local(_) => {}
+            Self::Daemon(editor) => {
+                editor.send(EditorClientMessage::ApplyLspCodeAction {
+                    action,
+                    surface_id: Some(editor.surface_id.clone()),
+                })
+            }
+        }
+    }
+
     /// Request engine completion at the current cursor. `seq` is echoed back
     /// so the reply handler can drop a response a newer keystroke superseded.
-    pub fn lsp_complete(&self, seq: u64) {
+    pub fn lsp_complete(&self, seq: u64, trigger_character: Option<String>) {
         match self {
             Self::Local(_) => {}
             Self::Daemon(editor) => editor.send(EditorClientMessage::LspComplete {
                 seq,
+                trigger_character,
                 surface_id: Some(editor.surface_id.clone()),
             }),
         }
     }
 
-    /// Request hover docs at an explicit buffer position (the mouse cell) for
-    /// VS Code-style hover-on-mouseover — does not move the cursor.
-    pub fn lsp_hover_at(&self, seq: u64, line: u32, character: u32) {
+    /// Resolve and accept a daemon-owned completion. The full item returns to
+    /// the daemon so textEdit ranges, additionalTextEdits and the originating
+    /// server identity are not flattened into simulated backspaces.
+    pub fn apply_lsp_completion(
+        &self,
+        item: neoism_protocol::editor::EditorLspCompletionItem,
+        replace_prefix: String,
+    ) {
+        match self {
+            Self::Local(_) => {}
+            Self::Daemon(editor) => {
+                editor.send(EditorClientMessage::ApplyLspCompletion {
+                    item,
+                    replace_prefix,
+                    surface_id: Some(editor.surface_id.clone()),
+                })
+            }
+        }
+    }
+
+    pub fn cancel_lsp_completion(&self) {
+        match self {
+            Self::Local(_) => {}
+            Self::Daemon(editor) => {
+                editor.send(EditorClientMessage::CancelLspCompletion {
+                    surface_id: Some(editor.surface_id.clone()),
+                })
+            }
+        }
+    }
+
+    /// Request hover docs at an explicit Neovim UI grid cell. The daemon uses
+    /// Neovim's own hit testing to resolve the buffer position without moving
+    /// the cursor.
+    pub fn lsp_hover_at(&self, seq: u64, grid: i64, row: i64, col: i64) {
         match self {
             Self::Local(_) => {}
             Self::Daemon(editor) => editor.send(EditorClientMessage::LspHoverAt {
                 seq,
-                line,
-                character,
+                grid,
+                row,
+                col,
                 surface_id: Some(editor.surface_id.clone()),
             }),
         }

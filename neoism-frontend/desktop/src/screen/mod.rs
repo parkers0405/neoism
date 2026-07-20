@@ -239,6 +239,63 @@ fn editor_scroll_render_offset(
     )
 }
 
+/// Project a 1-based buffer diagnostic into the same resident output row
+/// that the editor grid paints for this animation frame.
+///
+/// `win_viewport.topline` and the diagnostic line describe the latest nvim
+/// snapshot. The retained GPU grid deliberately lags behind that snapshot:
+/// output row `y` samples source row `y + source_line_offset`, then every
+/// row receives `pixel_offset_y`. Inverting that integer relation here and
+/// carrying the identical pixel residual in the inline layout keeps code and
+/// its diagnostic locked together throughout the spring.
+fn editor_inline_diagnostic_placement(
+    line_one_based: u64,
+    viewport_topline_zero_based: u64,
+    source_line_offset: i32,
+    pixel_offset_y: f32,
+    cell_height_px: f32,
+    visible_rows: usize,
+) -> Option<neoism_ui::panels::inline_diagnostics::InlineDiagnosticPlacement> {
+    neoism_ui::panels::inline_diagnostics::inline_diagnostic_placement(
+        line_one_based,
+        neoism_ui::panels::inline_diagnostics::InlineDiagnosticViewport {
+            topline: viewport_topline_zero_based,
+            source_line_offset,
+            pixel_offset_y,
+            cell_height_px,
+            visible_rows: visible_rows.min(u32::MAX as usize) as u32,
+            buffer_above: EDITOR_BUFFER_ABOVE,
+            buffer_below: EDITOR_BUFFER_BELOW,
+        },
+    )
+}
+
+/// Occupied editor text width for inline-diagnostic placement.
+///
+/// Daemon-fed Neovim grids send explicit `" "` cells when clearing the
+/// remainder of a row. The terminal-oriented `LineLength` helper considers
+/// those cells occupied, which put every diagnostic lens at `columns` and
+/// made the renderer reject it for having no remaining width. Ignore trailing
+/// whitespace here while preserving wide-character spacer cells and grapheme
+/// extras as real visual content.
+fn editor_row_text_end_col(row: &Row<Square>, columns: usize) -> u32 {
+    use neoism_terminal_core::crosswords::square::Wide;
+
+    let limit = row.len().min(columns);
+    row[..Column(limit)]
+        .iter()
+        .rposition(|cell| {
+            let ch = cell.c();
+            (!ch.is_whitespace() && ch != '\0')
+                || cell.has_extras()
+                || cell.has_graphics()
+                || matches!(cell.wide(), Wide::Spacer | Wide::LeadingSpacer)
+        })
+        .map(|index| index.saturating_add(1))
+        .unwrap_or(0)
+        .min(u32::MAX as usize) as u32
+}
+
 // Native-side wrapper that adapts the shared 3-value previous-state
 // signature to the `EditorScrollGridState` reference we carry per
 // grid. Pure forwarding logic — no state mutation.

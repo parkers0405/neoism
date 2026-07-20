@@ -1148,7 +1148,7 @@ impl Renderer {
                 .current_grid()
                 .current_item()
                 .and_then(|item| {
-                    // The Rust-engine completion popup takes precedence; nvim's
+                    // The Neoism LSP completion popup takes precedence; nvim's
                     // ext_popupmenu (keyword completion via Ctrl-P) still shows
                     // when no engine completion is active.
                     item.val.lsp_completion_popup().or_else(|| {
@@ -1202,6 +1202,25 @@ impl Renderer {
             &self.theme,
         );
 
+        // Inline lenses stay terse; their hover/pinned card is the complete,
+        // wrapped diagnostic surface. It is painted in this late overlay pass
+        // so later grid rows cannot cover it.
+        let diagnostic_detail_active = self.inline_diagnostics.has_active_detail();
+        if diagnostic_detail_active
+            && completion_anchor.editor_focused
+            && !input_overlay_active
+            && !self.modal.is_active()
+        {
+            let inv = 1.0 / scale_factor;
+            self.inline_diagnostics.render_detail(
+                sugarloaf,
+                window_size.width as f32 * inv,
+                window_size.height as f32 * inv,
+                self.chrome_scale,
+                &self.theme,
+            );
+        }
+
         // VS Code-style hover doc popup, anchored under the mouse cell. Owned
         // data is extracted first so the `context_manager` borrow is released
         // before `sugarloaf` is borrowed mutably by the renderer.
@@ -1213,6 +1232,7 @@ impl Renderer {
             if completion_anchor.editor_focused
                 && !input_overlay_active
                 && !self.modal.is_active()
+                && !diagnostic_detail_active
             {
                 let inv = 1.0 / scale_factor;
                 let cell_w = completion_anchor.cell_w * inv;

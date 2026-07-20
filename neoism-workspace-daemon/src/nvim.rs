@@ -49,7 +49,7 @@ use neoism_protocol::editor::{
 use nvim_rs::{Handler, Neovim, UiAttachOptions};
 use rmpv::Value;
 use tokio::process::Command as TokioCommand;
-use tokio::sync::{broadcast, mpsc, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock};
 use tokio::time::{timeout, Duration};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 

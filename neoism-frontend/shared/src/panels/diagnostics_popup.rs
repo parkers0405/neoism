@@ -104,6 +104,10 @@ impl From<&DiagnosticItem> for PopupItem {
 /// shared `Popover<T>`, which handles open/close + fade.
 pub struct DiagnosticsContent {
     items: Vec<PopupItem>,
+    /// Authoritative count reported for the selected severity. The row
+    /// payload can be bounded independently, so `items.len()` is not always
+    /// the number shown by the status-line pill.
+    total_count: u64,
     pill: DiagnosticPill,
     selected: usize,
     scroll_offset: usize,
@@ -119,6 +123,7 @@ impl Default for DiagnosticsContent {
     fn default() -> Self {
         Self {
             items: Vec::new(),
+            total_count: 0,
             pill: DiagnosticPill::Error,
             selected: 0,
             scroll_offset: 0,
@@ -171,8 +176,25 @@ impl DiagnosticsPopup {
         anchor_x: f32,
         anchor_y: f32,
     ) {
+        let total_count = items.len().min(u64::MAX as usize) as u64;
+        self.open_with_total(pill, items, total_count, anchor_x, anchor_y);
+    }
+
+    /// Open with the authoritative severity total from the same diagnostics
+    /// snapshot that populated the status-line pill. `items` may contain only
+    /// a bounded subset; keeping the two values separate prevents a popup
+    /// header such as "Errors — 100" beneath a pill that correctly says 137.
+    pub fn open_with_total(
+        &mut self,
+        pill: DiagnosticPill,
+        items: Vec<PopupItem>,
+        total_count: u64,
+        anchor_x: f32,
+        anchor_y: f32,
+    ) {
         let content = self.popover.content_mut();
         content.pill = pill;
+        content.total_count = total_count.max(items.len().min(u64::MAX as usize) as u64);
         content.msg_scroll = vec![0.0; items.len()];
         content.row_layout.clear();
         content.items = items;
@@ -194,12 +216,21 @@ impl DiagnosticsPopup {
     }
 
     pub fn refresh_items(&mut self, items: Vec<PopupItem>) {
+        let total_count = items.len().min(u64::MAX as usize) as u64;
+        self.refresh_items_with_total(items, total_count);
+    }
+
+    /// Refresh the visible rows and authoritative severity total atomically.
+    /// The popup never paints a new count above stale rows (or vice versa).
+    pub fn refresh_items_with_total(&mut self, items: Vec<PopupItem>, total_count: u64) {
         if !self.is_visible() {
             return;
         }
         let content = self.popover.content_mut();
         let prev_lnum = content.items.get(content.selected).map(|i| i.lnum);
         content.items = items;
+        content.total_count =
+            total_count.max(content.items.len().min(u64::MAX as usize) as u64);
         content.msg_scroll = vec![0.0; content.items.len()];
         content.row_layout.clear();
         if let Some(prev) = prev_lnum {
@@ -369,11 +400,12 @@ impl DiagnosticsPopup {
         // through `sugarloaf.text_mut()`, which can't run while we're
         // also borrowing `self.popover.content_mut()` later. We rebuild
         // row_layout into a local Vec and push it back once we're done.
-        let (pill, items_len, scroll_offset, selected, msg_scroll_snapshot) = {
+        let (pill, items_len, total_count, scroll_offset, selected, msg_scroll_snapshot) = {
             let c = self.popover.content();
             (
                 c.pill,
                 c.items.len(),
+                c.total_count,
                 c.scroll_offset,
                 c.selected,
                 c.msg_scroll.clone(),
@@ -381,7 +413,8 @@ impl DiagnosticsPopup {
         };
         let visible = items_len.min(MAX_VISIBLE_ROWS);
         let rows_h = visible as f32 * row_h;
-        let footer_hint = items_len > visible;
+        let payload_bounded = total_count > items_len.min(u64::MAX as usize) as u64;
+        let footer_hint = items_len > visible || payload_bounded;
         let footer_h = if footer_hint { 16.0 * s } else { 0.0 };
         let inner_h = header_h + 6.0 * s + rows_h + footer_h;
         let total_h = inner_h + pad * 2.0;
@@ -450,8 +483,8 @@ impl DiagnosticsPopup {
             ..DrawOpts::default()
         };
         let header_label = match pill {
-            DiagnosticPill::Error => format!("  Errors — {}", items_len),
-            DiagnosticPill::Warn => format!("  Warnings — {}", items_len),
+            DiagnosticPill::Error => format!("  Errors — {total_count}"),
+            DiagnosticPill::Warn => format!("  Warnings — {total_count}"),
         };
         sugarloaf.text_mut().draw(
             x + pad + 4.0 * s,
@@ -568,12 +601,17 @@ impl DiagnosticsPopup {
                 clip_rect: Some(footer_clip),
                 ..DrawOpts::default()
             };
-            let extra = items_len - visible;
+            let footer = if payload_bounded {
+                format!("Showing {items_len} of {total_count} received diagnostics")
+            } else {
+                let extra = items_len - visible;
+                format!("+{extra} more — scroll to see all")
+            };
             let hint_y = y + lift + total_h - pad - FONT_HINT * s;
             sugarloaf.text_mut().draw(
                 x + pad + 4.0 * s,
                 hint_y,
-                format!("+{} more — scroll to see all", extra).as_str(),
+                footer.as_str(),
                 &hint_opts,
             );
         }
@@ -692,4 +730,65 @@ fn trim_to_fit(
     let mut out: String = chars[..lo].iter().collect();
     out.push_str(ellipsis);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DiagnosticsPopup, PopupItem, Severity};
+    use crate::panels::status_line::DiagnosticPill;
+
+    fn item(lnum: u64) -> PopupItem {
+        PopupItem {
+            lnum,
+            severity: Severity::Error,
+            message: format!("error on line {lnum}"),
+        }
+    }
+
+    #[test]
+    fn authoritative_total_is_independent_from_bounded_rows() {
+        let mut popup = DiagnosticsPopup::new();
+        popup.open_with_total(
+            DiagnosticPill::Error,
+            vec![item(1), item(2)],
+            102,
+            100.0,
+            100.0,
+        );
+
+        let content = popup.popover.content();
+        assert_eq!(content.items.len(), 2);
+        assert_eq!(content.total_count, 102);
+    }
+
+    #[test]
+    fn refresh_updates_rows_and_total_as_one_snapshot() {
+        let mut popup = DiagnosticsPopup::new();
+        popup.open_with_total(
+            DiagnosticPill::Warn,
+            vec![item(7), item(8)],
+            12,
+            100.0,
+            100.0,
+        );
+        popup.refresh_items_with_total(vec![item(8)], 5);
+
+        let content = popup.popover.content();
+        assert_eq!(content.items.len(), 1);
+        assert_eq!(content.total_count, 5);
+    }
+
+    #[test]
+    fn total_never_claims_fewer_diagnostics_than_received_rows() {
+        let mut popup = DiagnosticsPopup::new();
+        popup.open_with_total(
+            DiagnosticPill::Error,
+            vec![item(1), item(2)],
+            0,
+            100.0,
+            100.0,
+        );
+
+        assert_eq!(popup.popover.content().total_count, 2);
+    }
 }

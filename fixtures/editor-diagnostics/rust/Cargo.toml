@@ -1,0 +1,8 @@
+[package]
+name = "neoism-diagnostics-scroll-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Keep this deliberately broken crate independent from Neoism's workspace.
+[workspace]

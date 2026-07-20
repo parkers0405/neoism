@@ -1009,7 +1009,25 @@ impl StatusLine {
             mode_x + mode_pill_w - tail_overlap
         };
 
-        let cwd_label = self.cwd_label_display.as_deref().filter(|s| !s.is_empty());
+        let cwd_label_raw = self.cwd_label_display.as_deref().filter(|s| !s.is_empty());
+        // The directory is context, not the primary status payload. Keep it
+        // width-aware so a deep workspace cannot evict diagnostics/LSP/cursor
+        // pills from the opposite edge. Preserve the path root and the most
+        // useful trailing components (for example `~/…/typescript`).
+        let cwd_measure_opts = DrawOpts {
+            font_size,
+            color: palette.u8(palette.red),
+            bold: true,
+            ..DrawOpts::default()
+        };
+        let cwd_text_budget = (width * 0.30).min(360.0 * s).max(96.0 * s);
+        let cwd_label_compact = cwd_label_raw.map(|label| {
+            let ui = sugarloaf.text_mut();
+            compact_path_label(label, cwd_text_budget, |candidate| {
+                ui.measure(candidate, &cwd_measure_opts)
+            })
+        });
+        let cwd_label = cwd_label_compact.as_deref();
         let glyph_folder = status_glyph("status.folder", GLYPH_FOLDER);
         let cwd_text_inset_left = tail_overlap + chain_breather;
         let (cwd_pill_w, cwd_text_section_w, cwd_icon_section_w, cwd_icon_w, cwd_text_w) =
@@ -1797,6 +1815,75 @@ impl StatusLine {
     }
 }
 
+/// Collapse a path to its root plus the longest trailing component sequence
+/// that fits the supplied pixel budget. The measurer keeps this independent
+/// of any particular font metrics and makes the policy directly testable.
+fn compact_path_label(
+    label: &str,
+    max_width: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> String {
+    if label.is_empty() || measure(label) <= max_width {
+        return label.to_string();
+    }
+
+    let separator = if label.contains('/') { '/' } else { '\\' };
+    let separator_text = separator.to_string();
+    let (prefix, body) = if label.starts_with("~/") || label.starts_with("~\\") {
+        (&label[..2], &label[2..])
+    } else if label.starts_with('/') || label.starts_with('\\') {
+        (&label[..1], &label[1..])
+    } else if label.len() >= 3
+        && label.as_bytes()[1] == b':'
+        && matches!(label.as_bytes()[2], b'/' | b'\\')
+    {
+        (&label[..3], &label[3..])
+    } else {
+        ("", label)
+    };
+    let components = body
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        return "…".to_string();
+    }
+
+    let marker = if prefix.is_empty() {
+        format!("…{separator}")
+    } else {
+        format!("{prefix}…{separator}")
+    };
+    for start in 0..components.len() {
+        let candidate = format!(
+            "{marker}{}",
+            components[start..].join(&separator_text)
+        );
+        if measure(&candidate) <= max_width {
+            return candidate;
+        }
+    }
+
+    // An individual final component can itself be wider than the budget.
+    // Retain its suffix (usually the differentiating part) rather than
+    // allowing it to overlap the right cluster.
+    let tail = components.last().copied().unwrap_or_default();
+    let mut suffix = String::new();
+    for ch in tail.chars().rev() {
+        let candidate_suffix = format!("{ch}{suffix}");
+        let candidate = format!("…{candidate_suffix}");
+        if measure(&candidate) > max_width {
+            break;
+        }
+        suffix = candidate_suffix;
+    }
+    if suffix.is_empty() {
+        "…".to_string()
+    } else {
+        format!("…{suffix}")
+    }
+}
+
 impl Default for StatusLine {
     fn default() -> Self {
         StatusLine::new()
@@ -1854,7 +1941,7 @@ impl Panel for StatusLine {
 
 #[cfg(test)]
 mod tests {
-    use super::icon_baseline_shift_em;
+    use super::{compact_path_label, icon_baseline_shift_em};
 
     #[test]
     fn status_icons_use_platform_font_metric_corrections() {
@@ -1862,5 +1949,26 @@ mod tests {
         assert_eq!(icon_baseline_shift_em(false, true), 0.08);
         assert_eq!(icon_baseline_shift_em(true, false), 0.12);
         assert_eq!(icon_baseline_shift_em(true, true), 0.12);
+    }
+
+    #[test]
+    fn deep_status_paths_keep_the_root_and_useful_tail() {
+        let measured_chars = |text: &str| text.chars().count() as f32;
+        assert_eq!(
+            compact_path_label(
+                "~/projects/neoism/fixtures/editor-diagnostics/typescript",
+                20.0,
+                measured_chars,
+            ),
+            "~/…/typescript"
+        );
+        assert_eq!(
+            compact_path_label("/workspace/packages/api/src", 19.0, measured_chars),
+            "/…/packages/api/src"
+        );
+        assert_eq!(
+            compact_path_label("short/path", 20.0, measured_chars),
+            "short/path"
+        );
     }
 }

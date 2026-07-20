@@ -325,7 +325,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     #[allow(dead_code)]
-    fn apply_session_list(&mut self, sessions: Vec<SessionSummary>) {
+    pub(super) fn apply_session_list(&mut self, sessions: Vec<SessionSummary>) {
         self.daemon.cache.sessions = sessions;
         self.reconcile_cached_session_selection();
         self.daemon.cache.last_session_update_at = Some(Instant::now());

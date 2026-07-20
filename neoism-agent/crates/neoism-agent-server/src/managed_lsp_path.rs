@@ -2,6 +2,14 @@ use std::path::PathBuf;
 
 pub(crate) fn managed_lsp_path_entries() -> Vec<PathBuf> {
     let mut entries = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        // GUI apps do not inherit the user's interactive-shell PATH on macOS.
+        // npm-installed language-server launchers use `/usr/bin/env node`, so
+        // include both standard Homebrew prefixes for the child process too.
+        entries.push(PathBuf::from("/opt/homebrew/bin"));
+        entries.push(PathBuf::from("/usr/local/bin"));
+    }
     if let Some(home) = home_dir() {
         entries.push(
             home.join(".local")

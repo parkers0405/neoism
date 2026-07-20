@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource path="res://scroll_errors.gd" type="Script" id="1_script"]
+
+[node name="DiagnosticsScrollFixture" type="Node"]
+script = ExtResource("1_script")

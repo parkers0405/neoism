@@ -94,7 +94,12 @@ impl Application<'_> {
                             .screen
                             .handle_palette_click(&mut self.router.clipboard)
                     {
-                        route.window.screen.renderer.command_palette.set_enabled(false);
+                        route
+                            .window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .set_enabled(false);
                     }
                     route.request_redraw();
                     return;
@@ -287,6 +292,14 @@ impl Application<'_> {
                     }
 
                     if route.window.screen.handle_scrollbar_click() {
+                        route.request_redraw();
+                        return;
+                    }
+
+                    // The diagnostic lens/card floats over the editor grid.
+                    // Give its pin + Quick Fix controls first refusal before
+                    // the same click is translated into a Neovim mouse event.
+                    if route.window.screen.handle_inline_diagnostic_click() {
                         route.request_redraw();
                         return;
                     }
@@ -1227,11 +1240,27 @@ impl Application<'_> {
         route.window.screen.mouse.inside_text_area = inside_text_area;
         route.window.screen.mouse.square_side = square_side;
 
-        // VS Code-style hover: over an editor pane, ask the Rust LSP for docs
+        let inline_diagnostic_hover = if !is_selecting {
+            route.window.screen.update_inline_diagnostic_hover()
+        } else {
+            Default::default()
+        };
+        if inline_diagnostic_hover.changed {
+            route.request_redraw();
+        }
+        if inline_diagnostic_hover.owns_pointer {
+            route.window.screen.dismiss_lsp_hover();
+            route.window.set_cursor(CursorIcon::Pointer);
+        }
+
+        // VS Code-style hover: over an editor pane, ask Neoism's LSP for docs
         // at the cell under the mouse (deduped per cell); off the text area,
         // dismiss. `request_lsp_hover_at_mouse` no-ops on non-editor contexts.
         if !is_selecting {
-            if inside_text_area
+            if inline_diagnostic_hover.owns_pointer {
+                // Diagnostic details are immediate and already carry the full
+                // error. Do not issue a second symbol-hover request beneath it.
+            } else if inside_text_area
                 && route
                     .window
                     .screen
@@ -1298,6 +1327,9 @@ impl Application<'_> {
             route.request_redraw();
         }
         if route.window.screen.renderer.notifications.clear_hover() {
+            route.request_redraw();
+        }
+        if route.window.screen.clear_inline_diagnostic_hover() {
             route.request_redraw();
         }
     }

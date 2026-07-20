@@ -62,7 +62,12 @@ mod provider_transform;
 mod pty;
 mod pty_routes;
 mod route_query;
-pub mod rust_lsp;
+pub mod language_server;
+/// Compatibility export for older callers. New code should use
+/// [`language_server`].
+pub mod rust_lsp {
+    pub use crate::language_server::*;
+}
 mod search_routes;
 mod semantic;
 mod server_util;

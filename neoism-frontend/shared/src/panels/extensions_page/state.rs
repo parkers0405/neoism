@@ -47,8 +47,20 @@ impl Default for ExtensionFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtensionStatus {
     NotInstalled,
-    Installing { percent: u8, status_text: String },
-    Installed { version: String },
+    /// The integration ships with Neoism and has no package lifecycle. It is
+    /// shown in the catalog, but clicking/pressing Enter must never dispatch
+    /// an install or uninstall job.
+    BuiltIn,
+    /// `None` means the current phase has no trustworthy denominator (DNS,
+    /// package-manager work, extraction, linking). The view renders an
+    /// animated indeterminate bar instead of lying with a frozen `0%`.
+    Installing {
+        percent: Option<u8>,
+        status_text: String,
+    },
+    Installed {
+        version: String,
+    },
     Uninstalling,
 }
 
@@ -78,15 +90,18 @@ pub struct ExtensionEntry {
     pub downloads: Option<u64>,
     pub categories: Vec<String>,
     /// Languages this extension targets (Mason puts the language list on
-    /// each package — Rust LSP entries carry `["Rust"]`, etc.). Used by
+    /// each package — Rust language-server entries carry `["Rust"]`, etc.). Used by
     /// the card chips and search index. Empty for entries without a
     /// language association (e.g. most MCP servers).
     pub languages: Vec<String>,
     pub status: ExtensionStatus,
     pub repository_url: Option<String>,
-    /// For language-server rows: where the Rust LSP engine resolves the
-    /// binary — `"extension"` (managed install), `"path"` (found on
-    /// `$PATH`), `"config"`, or `"missing"`. `None` for non-LSP entries.
+    /// For language-server rows: where the Neoism LSP engine resolves the
+    /// binary/endpoint — `"built-in/socket"`, `"extension"` (managed
+    /// install), `"path"` (found on `$PATH`), `"config"`, `"missing"`, or
+    /// `"adapter required"` when Mason can install the package but the runtime
+    /// does not yet know how to attach it.
+    /// `None` for non-LSP entries.
     /// Drives the source badge so the page reflects what the engine will
     /// actually run, not just what the Mason registry lists.
     pub lsp_source: Option<String>,
@@ -565,7 +580,9 @@ impl NeoismExtensionsPane {
             ExtensionFilter::All => true,
             ExtensionFilter::Installed => matches!(
                 entry.status,
-                ExtensionStatus::Installed { .. } | ExtensionStatus::Uninstalling
+                ExtensionStatus::BuiltIn
+                    | ExtensionStatus::Installed { .. }
+                    | ExtensionStatus::Uninstalling
             ),
             ExtensionFilter::NotInstalled => matches!(
                 entry.status,
@@ -889,6 +906,9 @@ impl NeoismExtensionsPane {
                 let clamped = self.selected_index.min(last);
                 let entry_idx = visible[clamped];
                 let entry = &self.entries[entry_idx];
+                if matches!(entry.status, ExtensionStatus::BuiltIn) {
+                    return KeyResponse::handled();
+                }
                 KeyResponse::with_action(PaneAction::InstallToggleRequested {
                     id: entry.id.clone(),
                     currently_installed: matches!(
@@ -1104,11 +1124,11 @@ mod interaction_tests {
                     version: "1.0.0".into(),
                 },
             ),
-            entry("c", ExtensionStatus::NotInstalled),
+            entry("c", ExtensionStatus::BuiltIn),
         ]);
         pane.set_active_tab(ExtensionTab::McpServers);
         pane.set_filter(ExtensionFilter::Installed);
-        assert_eq!(pane.visible_entries(), vec![1]);
+        assert_eq!(pane.visible_entries(), vec![1, 2]);
     }
 
     #[test]
@@ -1230,6 +1250,18 @@ mod interaction_tests {
                 currently_installed: false,
             })
         );
+    }
+
+    #[test]
+    fn enter_on_built_in_entry_never_requests_package_lifecycle() {
+        let mut pane = NeoismExtensionsPane::new();
+        pane.set_entries(vec![entry("godot-gdscript", ExtensionStatus::BuiltIn)]);
+        pane.set_filter(ExtensionFilter::All);
+        pane.set_active_tab(ExtensionTab::McpServers);
+
+        let response = pane.on_key(&key_press(NamedKey::Enter));
+        assert!(response.consumed);
+        assert_eq!(response.action, None);
     }
 
     fn key_press_mods(named: NamedKey, modifiers: Modifiers) -> KeyDescriptor {

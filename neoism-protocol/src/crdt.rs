@@ -337,6 +337,7 @@ mod tests {
                 },
             }),
             insert: false,
+            rainbow: false,
             updated_at_ms: 1234,
         };
 

@@ -1,6 +1,7 @@
 // Tests moved from screen/mod.rs.
 
 use super::*;
+use neoism_terminal_core::crosswords::square::LineLength;
 use neoism_ui::editor::scroll_model::raw_scroll_has_room;
 use neoism_ui::editor::selection_model::post_process_hyperlink_uri;
 
@@ -51,6 +52,137 @@ fn editor_scroll_render_offset_uses_mutated_snapshot_split() {
             pixel_offset_y: 34.0,
         }
     );
+}
+
+#[test]
+fn inline_diagnostic_uses_the_grid_source_inverse_during_fractional_scroll() {
+    let cell_h = 20.0;
+    let visible_rows = 10;
+    // Buffer line 101 is source row zero when nvim's 0-based topline is 100.
+    let line = 101;
+    let topline = 100;
+
+    // Scrolling down: the already-mutated snapshot starts with the new top
+    // line at output row 1, then glides it upward with the pixel residual.
+    let placement =
+        editor_inline_diagnostic_placement(line, topline, -1, -8.0, cell_h, visible_rows)
+            .expect("new top line remains visible during the fractional glide");
+    assert_eq!(placement.source_row, 0);
+    assert_eq!(placement.output_row, 1);
+    assert_eq!(
+        placement.output_row - 1,
+        placement.source_row,
+        "diagnostic placement must invert grid source = output + offset",
+    );
+    assert_eq!(placement.output_row as f32 * cell_h - 8.0, 12.0);
+
+    // At rest the identical diagnostic lands on output row zero. The
+    // transition is continuous because row 1 at -20px and row 0 at 0px
+    // describe the same physical position at the integer boundary.
+    let settled =
+        editor_inline_diagnostic_placement(line, topline, 0, 0.0, cell_h, visible_rows)
+            .unwrap();
+    assert_eq!(settled.source_row, 0);
+    assert_eq!(settled.output_row, 0);
+}
+
+#[test]
+fn inline_diagnostic_keeps_fractional_top_and_bottom_edge_rows() {
+    let cell_h = 20.0;
+    let visible_rows = 10;
+    let topline = 100;
+
+    // Scrolling up: the current top line is in the retained row above the
+    // ordinary output band and is still partially visible after +8px.
+    let top_edge =
+        editor_inline_diagnostic_placement(101, topline, 1, 8.0, cell_h, visible_rows)
+            .unwrap();
+    assert_eq!(top_edge.source_row, 0);
+    assert_eq!(top_edge.output_row, -1);
+
+    // Scrolling down: the last current viewport line is in the retained
+    // row below the ordinary band and is partially visible after -8px.
+    let bottom_edge =
+        editor_inline_diagnostic_placement(110, topline, -1, -8.0, cell_h, visible_rows)
+            .unwrap();
+    assert_eq!(bottom_edge.source_row, 9);
+    assert_eq!(bottom_edge.output_row, 10);
+
+    // The same edge rows do not exist in the visible clip once the pixel
+    // residual reaches zero.
+    assert!(editor_inline_diagnostic_placement(
+        101,
+        topline,
+        1,
+        0.0,
+        cell_h,
+        visible_rows,
+    )
+    .is_none());
+    assert!(editor_inline_diagnostic_placement(
+        110,
+        topline,
+        -1,
+        0.0,
+        cell_h,
+        visible_rows,
+    )
+    .is_none());
+}
+
+#[test]
+fn inline_diagnostic_reappears_at_the_same_row_after_scrolling_away_and_back() {
+    let before = editor_inline_diagnostic_placement(123, 120, 0, 0.0, 20.0, 10)
+        .expect("diagnostic starts in the viewport");
+    assert_eq!(before.output_row, 2);
+
+    assert!(
+        editor_inline_diagnostic_placement(123, 150, 0, 0.0, 20.0, 10).is_none(),
+        "offscreen diagnostics are culled, not deleted",
+    );
+
+    let after = editor_inline_diagnostic_placement(123, 120, 0, 0.0, 20.0, 10)
+        .expect("the unchanged diagnostic must reappear after returning");
+    assert_eq!(after, before);
+}
+
+#[test]
+fn inline_diagnostic_rejects_invalid_or_unrepresentable_lines() {
+    assert!(editor_inline_diagnostic_placement(0, 0, 0, 0.0, 20.0, 10).is_none());
+    assert!(editor_inline_diagnostic_placement(u64::MAX, 0, 0, 0.0, 20.0, 10,).is_none());
+}
+
+#[test]
+fn daemon_editor_row_trims_explicit_space_cells_for_inline_lens_width() {
+    let mut row = Row::<Square>::new(80);
+    let code = "let value = missing_name;";
+    for (column, ch) in code.chars().enumerate() {
+        row[Column(column)].set_c(ch);
+    }
+    // Daemon GridUpdate carries the cleared tail as real spaces rather than
+    // the terminal grid's default NUL cells. `LineLength` consequently reads
+    // this as a full 80-column row, which used to leave no room for a lens.
+    for column in code.len()..80 {
+        row[Column(column)].set_c(' ');
+    }
+
+    assert_eq!(row.line_length().0, 80, "reproduce the daemon-row trap");
+    assert_eq!(
+        editor_row_text_end_col(&row, 80),
+        code.len() as u32,
+        "inline placement must use visual code width, not cleared tail width",
+    );
+}
+
+#[test]
+fn editor_row_text_end_keeps_internal_whitespace_and_honors_column_cap() {
+    let mut row = Row::<Square>::new(20);
+    for (column, ch) in "a  b trailing".chars().enumerate() {
+        row[Column(column)].set_c(ch);
+    }
+
+    assert_eq!(editor_row_text_end_col(&row, 20), 13);
+    assert_eq!(editor_row_text_end_col(&row, 4), 4);
 }
 
 #[test]

@@ -237,7 +237,15 @@ async fn recv_marker_for_session(
                 assert_eq!(
                     got_id, session_id,
                     "a fresh socket must only ever see the shared session id in \
-                     replayed backlog, never a new socket-private one"
+                    replayed backlog, never a new socket-private one"
+                );
+            }
+            PtyServerMessage::SessionCwd {
+                session_id: got_id, ..
+            } => {
+                assert_eq!(
+                    got_id, session_id,
+                    "SessionCwd must carry the same shared session id as PTY output"
                 );
             }
             PtyServerMessage::PtyClosed { .. } | PtyServerMessage::Error { .. } => {}

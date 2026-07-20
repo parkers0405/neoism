@@ -472,6 +472,16 @@ impl Route<'_> {
             self.request_overlay_redraw();
         }
 
+        // A pinned diagnostic behaves like an editor popover: Escape closes
+        // it but still reaches the editor so normal-mode semantics remain
+        // unchanged.
+        if key_event.state == ElementState::Pressed
+            && matches!(key_event.logical_key, Key::Named(NamedKey::Escape))
+            && self.window.screen.dismiss_inline_diagnostic_detail()
+        {
+            self.request_overlay_redraw();
+        }
+
         if self.window.screen.handle_app_global_shortcut(key_event) {
             if key_event.state == ElementState::Pressed {
                 self.assistant.clear();
@@ -637,8 +647,7 @@ impl Route<'_> {
                     Key::Named(NamedKey::Tab)
                         if blocking
                             && self.window.screen.modifiers.state().control_key()
-                            && self.window.screen.renderer.modal.form_tab_count()
-                                > 0 =>
+                            && self.window.screen.renderer.modal.form_tab_count() > 0 =>
                     {
                         if self.window.screen.renderer.modal.form_active_tab() == 0 {
                             self.window.screen.open_create_server_prompt();

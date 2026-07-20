@@ -1,0 +1,18 @@
+; Engine configuration file.
+; Manual Neoism editor fixture -- intentionally tiny.
+
+config_version=5
+
+[application]
+
+config/name="Neoism Diagnostics Scroll Fixture"
+run/main_scene="res://scroll_scene.tscn"
+
+[display]
+
+window/size/viewport_width=960
+window/size/viewport_height=540
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"

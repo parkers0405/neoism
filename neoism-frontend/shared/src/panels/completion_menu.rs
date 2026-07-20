@@ -21,7 +21,7 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
 use crate::animation::CriticallyDampedSpring;
-use crate::editor_snapshot::PopupMenu;
+use crate::editor_snapshot::{PopupMenu, PopupMenuItem};
 use crate::panels::status_line::STATUS_LINE_HEIGHT;
 use crate::primitives::IdeTheme;
 
@@ -35,8 +35,13 @@ const MAX_WIDTH: f32 = 560.0;
 const MAX_VISIBLE_ROWS: usize = 12;
 const EDGE_GAP: f32 = 8.0;
 const RADIUS: f32 = 8.0;
-const DEPTH: f32 = 0.0;
-const ORDER: u8 = 13;
+// Completion and its documentation are editor chrome, not grid content. Keep
+// both above inline diagnostics/terminal glyphs in Sugarloaf's overlay pass.
+const DEPTH: f32 = 0.021;
+const ORDER: u8 = 42;
+const DETAIL_GAP: f32 = 6.0;
+const DETAIL_MIN_WIDTH: f32 = 240.0;
+const DETAIL_MAX_WIDTH: f32 = 440.0;
 const LIST_SCROLL_ANIMATION_LENGTH: f32 = 0.14;
 const MAX_WHEEL_SELECTION_STEPS: i32 = 6;
 
@@ -105,6 +110,20 @@ struct CompletionMenuLayout {
     kind_w: f32,
     menu_w: f32,
     visible_rows: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompletionDetailSide {
+    Right,
+    Left,
+    Below,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CompletionDetailPlacement {
+    x: f32,
+    width: f32,
+    side: CompletionDetailSide,
 }
 
 impl CompletionMenu {
@@ -236,7 +255,7 @@ impl CompletionMenu {
             y,
             menu_w_total,
             menu_h,
-            theme.f32(theme.surface),
+            theme.f32_alpha(theme.panel_bg(), 1.0),
             DEPTH,
             RADIUS,
             ORDER,
@@ -389,6 +408,122 @@ impl CompletionMenu {
                 ORDER + 2,
             );
         }
+
+        self.render_selected_detail(sugarloaf, menu, layout, dimensions, theme);
+    }
+
+    fn render_selected_detail(
+        &self,
+        sugarloaf: &mut Sugarloaf,
+        menu: &PopupMenu,
+        list: CompletionMenuLayout,
+        dimensions: (f32, f32, f32),
+        theme: &IdeTheme,
+    ) {
+        let Some(item) = menu
+            .selected_index()
+            .and_then(|selected| menu.items.get(selected))
+        else {
+            return;
+        };
+        // `menu` is the LSP detail/signature and `info` is its documentation.
+        // The list row deliberately truncates detail; the adjacent surface is
+        // where both values remain readable.
+        if item.menu.trim().is_empty() && item.info.trim().is_empty() {
+            return;
+        }
+
+        let scale_factor = dimensions.2.max(0.01);
+        let window_w = dimensions.0 / scale_factor;
+        let window_h = dimensions.1 / scale_factor;
+        let s = self.scale;
+        let gap = DETAIL_GAP * s;
+        let placement = detail_placement(list, window_w, gap, s);
+        let font_size = 12.0 * s;
+        let line_h = font_size + 5.0 * s;
+        let pad = 10.0 * s;
+        let max_chars = ((placement.width - pad * 2.0) / (font_size * 0.58))
+            .floor()
+            .max(8.0) as usize;
+        let mut lines = completion_detail_lines(item, max_chars);
+        if lines.is_empty() {
+            return;
+        }
+
+        let usable_bottom = (window_h - STATUS_LINE_HEIGHT - EDGE_GAP).max(EDGE_GAP);
+        let max_height = (usable_bottom - EDGE_GAP).max(line_h + pad * 2.0);
+        let max_lines = ((max_height - pad * 2.0) / line_h).floor().max(1.0) as usize;
+        if lines.len() > max_lines {
+            lines.truncate(max_lines);
+            if let Some(last) = lines.last_mut() {
+                last.text = "…".to_string();
+                last.kind = CompletionDetailLineKind::Documentation;
+            }
+        }
+        let height = lines.len() as f32 * line_h + pad * 2.0;
+        let y = match placement.side {
+            CompletionDetailSide::Right | CompletionDetailSide::Left => list
+                .y
+                .min((usable_bottom - height).max(EDGE_GAP))
+                .max(EDGE_GAP),
+            CompletionDetailSide::Below => {
+                let below = list.y + list.height + gap;
+                if below + height <= usable_bottom {
+                    below
+                } else {
+                    (list.y - gap - height).max(EDGE_GAP)
+                }
+            }
+        };
+
+        sugarloaf.overlay_rounded_rect(
+            placement.x,
+            y,
+            placement.width,
+            height,
+            // Fully opaque: completion documentation must mask editor and
+            // inline-diagnostic text in the independent overlay text pass.
+            theme.f32_alpha(theme.panel_bg(), 1.0),
+            DEPTH,
+            RADIUS,
+            ORDER,
+        );
+        sugarloaf.overlay_rounded_rect(
+            placement.x,
+            y,
+            placement.width,
+            1.0_f32.max(s),
+            theme.f32(theme.border),
+            DEPTH,
+            RADIUS,
+            ORDER + 1,
+        );
+
+        let clip = [
+            placement.x + pad,
+            y + pad,
+            (placement.width - pad * 2.0).max(0.0),
+            (height - pad * 2.0).max(0.0),
+        ];
+        for (index, line) in lines.iter().enumerate() {
+            let opts = DrawOpts {
+                font_size,
+                color: match line.kind {
+                    CompletionDetailLineKind::Label => theme.u8(theme.fg),
+                    CompletionDetailLineKind::Detail => theme.u8(theme.accent),
+                    CompletionDetailLineKind::Documentation => theme.u8(theme.dim),
+                },
+                bold: matches!(line.kind, CompletionDetailLineKind::Label),
+                clip_rect: Some(clip),
+                ..DrawOpts::default()
+            };
+            sugarloaf.overlay_text_mut().draw(
+                placement.x + pad,
+                y + pad + index as f32 * line_h,
+                &line.text,
+                &opts,
+            );
+        }
     }
 
     fn layout<'a>(
@@ -532,6 +667,134 @@ impl CompletionMenu {
     }
 }
 
+fn detail_placement(
+    list: CompletionMenuLayout,
+    window_w: f32,
+    gap: f32,
+    scale: f32,
+) -> CompletionDetailPlacement {
+    let edge = EDGE_GAP;
+    let desired = (DETAIL_MAX_WIDTH * scale).min((window_w - edge * 2.0).max(1.0));
+    let minimum = (DETAIL_MIN_WIDTH * scale).min(desired);
+    let right_room = (window_w - edge - (list.x + list.width + gap)).max(0.0);
+    let left_room = (list.x - gap - edge).max(0.0);
+    if right_room >= minimum {
+        let width = desired.min(right_room);
+        return CompletionDetailPlacement {
+            x: list.x + list.width + gap,
+            width,
+            side: CompletionDetailSide::Right,
+        };
+    }
+    if left_room >= minimum {
+        let width = desired.min(left_room);
+        return CompletionDetailPlacement {
+            x: list.x - gap - width,
+            width,
+            side: CompletionDetailSide::Left,
+        };
+    }
+    let width = desired;
+    CompletionDetailPlacement {
+        x: list.x.min((window_w - edge - width).max(edge)).max(edge),
+        width,
+        side: CompletionDetailSide::Below,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompletionDetailLineKind {
+    Label,
+    Detail,
+    Documentation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompletionDetailLine {
+    text: String,
+    kind: CompletionDetailLineKind,
+}
+
+fn completion_detail_lines(
+    item: &PopupMenuItem,
+    max_chars: usize,
+) -> Vec<CompletionDetailLine> {
+    let mut lines = vec![CompletionDetailLine {
+        text: item.word.clone(),
+        kind: CompletionDetailLineKind::Label,
+    }];
+    for line in wrap_completion_text(&item.menu, max_chars) {
+        lines.push(CompletionDetailLine {
+            text: line,
+            kind: CompletionDetailLineKind::Detail,
+        });
+    }
+    if !item.menu.trim().is_empty() && !item.info.trim().is_empty() {
+        lines.push(CompletionDetailLine {
+            text: String::new(),
+            kind: CompletionDetailLineKind::Documentation,
+        });
+    }
+    for line in wrap_completion_text(&item.info, max_chars) {
+        lines.push(CompletionDetailLine {
+            text: line,
+            kind: CompletionDetailLineKind::Documentation,
+        });
+    }
+    lines
+}
+
+fn wrap_completion_text(text: &str, max_chars: usize) -> Vec<String> {
+    let max_chars = max_chars.max(1);
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for raw in text.lines() {
+        let trimmed = raw.trim_end().replace('\t', "    ");
+        let lead = trimmed.trim_start();
+        if lead.starts_with("```") || lead.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        let cleaned = if in_fence {
+            trimmed
+        } else {
+            lead.trim_start_matches('#').trim_start().to_string()
+        };
+        if cleaned.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut remaining = cleaned.as_str();
+        while remaining.chars().count() > max_chars {
+            let mut split_byte = remaining.len();
+            let mut last_space = None;
+            for (count, (byte, ch)) in remaining.char_indices().enumerate() {
+                if count == max_chars {
+                    split_byte = last_space.unwrap_or(byte);
+                    break;
+                }
+                if ch.is_whitespace() {
+                    last_space = Some(byte);
+                }
+            }
+            if split_byte == 0 {
+                split_byte = remaining
+                    .char_indices()
+                    .nth(max_chars)
+                    .map(|(byte, _)| byte)
+                    .unwrap_or(remaining.len());
+            }
+            out.push(remaining[..split_byte].trim_end().to_string());
+            remaining = remaining[split_byte..].trim_start();
+        }
+        out.push(remaining.to_string());
+    }
+    while out.last().is_some_and(|line| line.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
 impl Default for CompletionMenu {
     fn default() -> Self {
         Self::new()
@@ -661,5 +924,58 @@ fn kind_color(kind: &str, theme: &IdeTheme) -> [u8; 4] {
         | "folder" => theme.u8(theme.green),
         "Event" | "event" | "Color" | "color" => theme.u8(theme.cyan),
         _ => theme.u8(theme.dim),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list_at(x: f32, width: f32) -> CompletionMenuLayout {
+        CompletionMenuLayout {
+            x,
+            y: 100.0,
+            width,
+            height: 260.0,
+            row_h: 26.0,
+            font_size: 13.0,
+            pad_x: 10.0,
+            kind_w: 58.0,
+            menu_w: 84.0,
+            visible_rows: 10,
+        }
+    }
+
+    #[test]
+    fn detail_panel_prefers_a_non_overlapping_viewport_side() {
+        let right = detail_placement(list_at(100.0, 300.0), 1200.0, 6.0, 1.0);
+        assert_eq!(right.side, CompletionDetailSide::Right);
+        assert!(right.x >= 406.0);
+        assert!(right.x + right.width <= 1200.0 - EDGE_GAP);
+
+        let left = detail_placement(list_at(700.0, 480.0), 1200.0, 6.0, 1.0);
+        assert_eq!(left.side, CompletionDetailSide::Left);
+        assert!(left.x + left.width <= 694.0);
+        assert!(left.x >= EDGE_GAP);
+    }
+
+    #[test]
+    fn completion_detail_keeps_signature_and_wrapped_documentation() {
+        let item = PopupMenuItem {
+            word: "dateMDY".to_string(),
+            kind: "snippet".to_string(),
+            menu: "fn dateMDY(value: Date) -> String".to_string(),
+            info: "```typescript\nFormats a date using month-day-year order without losing the supplied timezone.\n```".to_string(),
+        };
+        let lines = completion_detail_lines(&item, 24);
+        assert_eq!(lines[0].text, "dateMDY");
+        assert!(lines.iter().any(|line| {
+            line.kind == CompletionDetailLineKind::Detail && line.text.contains("dateMDY")
+        }));
+        assert!(lines.iter().any(|line| {
+            line.kind == CompletionDetailLineKind::Documentation
+                && line.text.contains("Formats a date")
+        }));
+        assert!(lines.iter().all(|line| !line.text.contains("```")));
     }
 }

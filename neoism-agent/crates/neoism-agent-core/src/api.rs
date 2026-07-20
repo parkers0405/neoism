@@ -186,7 +186,9 @@ pub enum LspConfig {
 
 impl Default for LspConfig {
     fn default() -> Self {
-        Self::Enabled(false)
+        // Built-in language adapters are enabled unless a workspace or user
+        // config explicitly sets `"lsp": false`.
+        Self::Enabled(true)
     }
 }
 

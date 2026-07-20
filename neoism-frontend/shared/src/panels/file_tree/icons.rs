@@ -84,8 +84,12 @@ pub fn icon_for_file(label: &str) -> (&'static str, [u8; 4]) {
 fn builtin_file_icon(label: &str, ext: &str) -> (&'static str, [u8; 4]) {
     // Whole-name matches first — "Dockerfile" has no extension.
     let lower = label.to_ascii_lowercase();
+    if lower.ends_with(".gd.uid") {
+        return ("\u{e65f}", [71, 140, 191, 255]);
+    }
     if let Some(hit) = match lower.as_str() {
         "dockerfile" | ".dockerignore" => Some(("\u{f308}", [69, 142, 230, 255])),
+        "project.godot" => Some(("\u{e65f}", [71, 140, 191, 255])),
         ".gitignore" | ".gitattributes" | ".gitmodules" | ".gitconfig" => {
             Some(("\u{e702}", [228, 77, 38, 255]))
         }
@@ -132,6 +136,13 @@ fn builtin_file_icon(label: &str, ext: &str) -> (&'static str, [u8; 4]) {
         "swift" => ("\u{e755}", [228, 119, 51, 255]),
         "kt" | "kts" => ("\u{e634}", [149, 137, 224, 255]),
         "dart" => ("\u{e798}", [80, 184, 205, 255]),
+        // Nerd Fonts Devicons `nf-dev-godot` (U+E65F). The bundled
+        // Symbols Nerd Font covers this codepoint, so both scripts and
+        // serialized scenes have a real default icon without depending on the
+        // user's terminal font.
+        "gd" | "gdshader" | "gdshaderinc" | "tscn" | "tres" | "godot" => {
+            ("\u{e65f}", [71, 140, 191, 255])
+        }
         "ex" | "exs" => ("\u{e62d}", [161, 122, 197, 255]),
         "elm" => ("\u{e62c}", [102, 168, 255, 255]),
         "haskell" | "hs" => ("\u{e61f}", [161, 122, 197, 255]),

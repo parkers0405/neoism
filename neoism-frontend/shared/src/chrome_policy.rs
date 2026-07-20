@@ -538,6 +538,7 @@ pub enum ModalActionTag {
     RunEditorCommand,
     RunEditorCommandWithInput,
     OpenLspLocation,
+    ApplyLspCodeAction,
     InstallAgent,
     RunAgent,
     AcpPermission,
@@ -593,6 +594,7 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         | T::InstallAgent => D::KeepOpenForBusyAction,
         T::RunEditorCommand
         | T::OpenLspLocation
+        | T::ApplyLspCodeAction
         | T::RunAgent
         | T::AcpPermission
         | T::FileTreeEdit

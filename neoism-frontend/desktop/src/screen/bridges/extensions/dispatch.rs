@@ -1,7 +1,8 @@
 use super::*;
 use crate::workspace::extensions::ExtensionStatus;
 use neoism_extensions::{
-    ExtensionManifest, InstallError, InstalledEntry, InstalledIndex, ProgressEvent,
+    ExtensionManifest, InstallError, InstallHandle, InstalledEntry, InstalledIndex,
+    ProgressEvent,
 };
 use neoism_ui::panels::notifications::NotificationLevel;
 use tokio::sync::mpsc::unbounded_channel;
@@ -12,6 +13,12 @@ impl Screen<'_> {
     /// `InstallTracker`. The per-frame pump (`pump_install_progress`)
     /// drains the receiver and finalises bookkeeping.
     pub(crate) fn dispatch_install(&mut self, id: &str) {
+        // The progress button doubles as Cancel. Check before routing special
+        // installers so every install kind behaves the same and a double click
+        // cannot start two writers against one destination.
+        if self.cancel_install_if_running(id) {
+            return;
+        }
         if is_builtin_extension_id(id) {
             self.dispatch_builtin_mcp_install(id);
             return;
@@ -29,7 +36,7 @@ impl Screen<'_> {
             return;
         }
 
-        let Some(manifest) = self.lookup_bundled_manifest(id) else {
+        let Some(manifest) = self.resolve_bundled_manifest(id) else {
             self.renderer.notifications.push(
                 format!("Unknown extension `{}`", id),
                 NotificationLevel::Error,
@@ -48,7 +55,7 @@ impl Screen<'_> {
             for entry in pane.entries_mut().iter_mut() {
                 if entry.id == id {
                     entry.status = ExtensionStatus::Installing {
-                        percent: 0,
+                        percent: None,
                         status_text: "starting…".to_string(),
                     };
                     break;
@@ -61,16 +68,16 @@ impl Screen<'_> {
         // tokio runtime current on this thread for the duration of
         // that call. The desktop UI runs on winit's loop (no tokio
         // reactor), so enter our process-wide extensions runtime.
-        let join_handle = {
+        let install_handle = {
             let _guard = ext_runtime_handle().enter();
             neoism_extensions::install(manifest, tx)
         };
         self.renderer.install_tracker.in_flight.insert(
             id.to_string(),
             InstallJob {
-                join_handle,
+                install_handle,
                 progress_rx: rx,
-                last_percent: 0,
+                last_percent: None,
                 last_status: "starting…".to_string(),
                 uninstall: false,
                 source: InstallSource::ExtensionsPanel,
@@ -79,8 +86,36 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    fn cancel_install_if_running(&mut self, id: &str) -> bool {
+        let Some(job) = self.renderer.install_tracker.in_flight.remove(id) else {
+            return false;
+        };
+        job.install_handle.cancel();
+        if let InstallSource::TreeSitterParser { lang } = &job.source {
+            self.treesitter_installing.remove(lang);
+        }
+        if let Some(pane) = self
+            .context_manager
+            .current_mut()
+            .neoism_extensions
+            .as_mut()
+        {
+            if let Some(entry) =
+                pane.entries_mut().iter_mut().find(|entry| entry.id == id)
+            {
+                entry.status = ExtensionStatus::NotInstalled;
+            }
+        }
+        self.renderer.notifications.push(
+            format!("Cancelled installation of {id}"),
+            NotificationLevel::Info,
+        );
+        self.mark_dirty();
+        true
+    }
+
     fn dispatch_builtin_mcp_install(&mut self, id: &str) {
-        let Some(manifest) = self.lookup_bundled_manifest(id) else {
+        let Some(manifest) = self.resolve_bundled_manifest(id) else {
             self.renderer.notifications.push(
                 format!("Unknown built-in extension `{}`", id),
                 NotificationLevel::Error,
@@ -142,7 +177,7 @@ impl Screen<'_> {
             for entry in pane.entries_mut().iter_mut() {
                 if entry.id == id {
                     entry.status = ExtensionStatus::Installing {
-                        percent: 0,
+                        percent: None,
                         status_text: format!("installing {} parser…", spec.display_name),
                     };
                     break;
@@ -160,10 +195,9 @@ impl Screen<'_> {
         let display_name = spec.display_name.to_string();
         let parser_path = treesitter_parser_path(spec.lang);
         let (tx, rx) = unbounded_channel::<ProgressEvent>();
-        let join_handle = ext_runtime_handle().spawn(async move {
+        let task = ext_runtime_handle().spawn(async move {
             let _ = tx.send(ProgressEvent::Started);
-            let _ = tx.send(ProgressEvent::Progress {
-                percent: 8,
+            let _ = tx.send(ProgressEvent::Waiting {
                 status: format!("fetching {} grammar", display_name),
             });
             let install_lang_for_blocking = install_lang.clone();
@@ -177,18 +211,19 @@ impl Screen<'_> {
 
             match result {
                 Ok(message) => {
-                    let _ = tx.send(ProgressEvent::Progress {
-                        percent: 96,
-                        status: message,
-                    });
-                    let _ = tx.send(ProgressEvent::Done);
-                    Ok(InstalledEntry {
+                    let _ = tx.send(ProgressEvent::Waiting { status: message });
+                    let entry = InstalledEntry {
                         id: install_id,
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         install_kind: "treesitter".to_string(),
                         bin_path: Some(parser_path),
                         installed_at: now_millis_i64(),
-                    })
+                    };
+                    neoism_extensions::record_installed(entry.clone())
+                        .await
+                        .map_err(|error| emit_install_failure(&tx, error))?;
+                    let _ = tx.send(ProgressEvent::Done);
+                    Ok(entry)
                 }
                 Err(message) => {
                     let _ = tx.send(ProgressEvent::Failed {
@@ -202,13 +237,14 @@ impl Screen<'_> {
                 }
             }
         });
+        let install_handle = InstallHandle::from_task(id.clone(), task);
 
         self.renderer.install_tracker.in_flight.insert(
             id,
             InstallJob {
-                join_handle,
+                install_handle,
                 progress_rx: rx,
-                last_percent: 0,
+                last_percent: None,
                 last_status: format!("installing {} parser…", spec.display_name),
                 uninstall: false,
                 source: InstallSource::TreeSitterParser {
@@ -220,6 +256,14 @@ impl Screen<'_> {
     }
 
     pub(crate) fn dispatch_python_kernel_install(&mut self, source: InstallSource) {
+        if self
+            .renderer
+            .install_tracker
+            .in_flight
+            .contains_key(NEOISM_PYTHON_KERNEL_ID)
+        {
+            return;
+        }
         if let Some(pane) = self
             .context_manager
             .current_mut()
@@ -229,7 +273,7 @@ impl Screen<'_> {
             for entry in pane.entries_mut().iter_mut() {
                 if entry.id == NEOISM_PYTHON_KERNEL_ID {
                     entry.status = ExtensionStatus::Installing {
-                        percent: 0,
+                        percent: None,
                         status_text: "creating managed Python environment…".to_string(),
                     };
                     break;
@@ -238,14 +282,15 @@ impl Screen<'_> {
         }
 
         let (tx, rx) = unbounded_channel::<ProgressEvent>();
-        let join_handle = ext_runtime_handle()
+        let task = ext_runtime_handle()
             .spawn(async move { install_managed_python_kernel(tx).await });
+        let install_handle = InstallHandle::from_task(NEOISM_PYTHON_KERNEL_ID, task);
         self.renderer.install_tracker.in_flight.insert(
             NEOISM_PYTHON_KERNEL_ID.to_string(),
             InstallJob {
-                join_handle,
+                install_handle,
                 progress_rx: rx,
-                last_percent: 0,
+                last_percent: None,
                 last_status: "creating managed Python environment…".to_string(),
                 uninstall: false,
                 source,
@@ -264,7 +309,7 @@ impl Screen<'_> {
             for entry in pane.entries_mut().iter_mut() {
                 if entry.id == EVCXR_JUPYTER_KERNEL_ID {
                     entry.status = ExtensionStatus::Installing {
-                        percent: 0,
+                        percent: None,
                         status_text: "installing evcxr_jupyter…".to_string(),
                     };
                     break;
@@ -273,14 +318,15 @@ impl Screen<'_> {
         }
 
         let (tx, rx) = unbounded_channel::<ProgressEvent>();
-        let join_handle = ext_runtime_handle()
+        let task = ext_runtime_handle()
             .spawn(async move { install_rust_jupyter_kernel(tx).await });
+        let install_handle = InstallHandle::from_task(EVCXR_JUPYTER_KERNEL_ID, task);
         self.renderer.install_tracker.in_flight.insert(
             EVCXR_JUPYTER_KERNEL_ID.to_string(),
             InstallJob {
-                join_handle,
+                install_handle,
                 progress_rx: rx,
-                last_percent: 0,
+                last_percent: None,
                 last_status: "installing evcxr_jupyter…".to_string(),
                 uninstall: false,
                 source: InstallSource::ExtensionsPanel,
@@ -322,7 +368,10 @@ impl Screen<'_> {
         let registry = neoism_extensions::load_mason_registry(&mason_path).ok()?;
         for candidate in &candidates {
             if let Some(pkg) = registry.iter().find(|p| p.name == *candidate) {
-                return neoism_extensions::package_to_manifest(pkg).ok();
+                let manifest = neoism_extensions::package_to_manifest(pkg).ok()?;
+                if manifest_is_auto_installable_lsp(&manifest) {
+                    return Some(manifest);
+                }
             }
         }
         None
@@ -341,21 +390,24 @@ impl Screen<'_> {
         display: String,
     ) {
         let id = manifest.id.clone();
+        if self.renderer.install_tracker.in_flight.contains_key(&id) {
+            return;
+        }
         let (tx, rx) = unbounded_channel::<ProgressEvent>();
         // `install` internally calls `tokio::spawn`, so we need a
         // tokio runtime current on this thread for the duration of
         // that call. The desktop UI runs on winit's loop (no tokio
         // reactor), so enter our process-wide extensions runtime.
-        let join_handle = {
+        let install_handle = {
             let _guard = ext_runtime_handle().enter();
             neoism_extensions::install(manifest, tx)
         };
         self.renderer.install_tracker.in_flight.insert(
             id,
             InstallJob {
-                join_handle,
+                install_handle,
                 progress_rx: rx,
-                last_percent: 0,
+                last_percent: None,
                 last_status: "starting…".to_string(),
                 uninstall: false,
                 source: InstallSource::MissingLspModal { server, display },
@@ -408,6 +460,27 @@ impl Screen<'_> {
             if let Some(record) = removed.as_ref() {
                 if let Some(bin) = record.bin_path.as_ref() {
                     let _ = std::fs::remove_file(bin);
+                }
+            }
+            if let Some(manifest) = manifest.as_ref() {
+                let mut executable_names = manifest.executables.clone();
+                if let Some(primary) =
+                    manifest.run.as_ref().and_then(|run| run.command.first())
+                {
+                    if !executable_names.contains(primary) {
+                        executable_names.push(primary.clone());
+                    }
+                }
+                let managed_bin_dir = neoism_extensions::paths::bin_dir();
+                for executable in executable_names {
+                    if !executable.is_empty()
+                        && executable != "."
+                        && executable != ".."
+                        && !executable.contains('/')
+                        && !executable.contains('\\')
+                    {
+                        let _ = std::fs::remove_file(managed_bin_dir.join(executable));
+                    }
                 }
             }
             let install_dir = neoism_extensions::paths::install_dir_for(id);

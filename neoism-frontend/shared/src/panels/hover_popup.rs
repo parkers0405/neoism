@@ -1,5 +1,5 @@
 //! VS Code-style hover doc popup — a floating box anchored under the editor
-//! cell the mouse is resting on. Fed by the Rust LSP engine's `hover` result
+//! cell the mouse is resting on. Fed by the Neoism LSP engine's `hover` result
 //! (`EditorServerMessage::LspHoverResult`). Drawn on the overlay layer so it
 //! composites above editor content, mirroring `inline_diagnostics`.
 
@@ -138,7 +138,10 @@ pub fn render(
         box_y,
         box_w,
         box_h,
-        theme.f32_alpha(theme.panel_bg(), 0.97),
+        // Fully opaque: overlay text (including inline diagnostics) is
+        // composited in a separate pass, so translucency makes unrelated
+        // editor glyphs visibly bleed through the documentation surface.
+        theme.f32_alpha(theme.panel_bg(), 1.0),
         DEPTH,
         6.0 * s,
         ORDER,

@@ -345,8 +345,8 @@ impl Handler for RedrawHandler {
             return;
         }
         if name == "rio_lsp_status" {
-            // Legacy nvim/Lua pill source. The Rust LSP engine now owns the
-            // status-bar pill (rust_lsp::poll → EditorServerMessage::
+            // Legacy nvim/Lua pill source. The Neoism LSP engine now owns the
+            // status-bar pill (language_server::poll → EditorServerMessage::
             // LspSnapshot); ignore the Lua notification so the two sources
             // don't fight over `lsp_snapshot`.
             return;
@@ -367,8 +367,8 @@ impl Handler for RedrawHandler {
             return;
         }
         if name == "rio_lsp_snapshot" {
-            // Legacy nvim/Lua snapshot, superseded by the Rust LSP engine
-            // (rust_lsp::poll builds the pill's server list from the real
+            // Legacy nvim/Lua snapshot, superseded by the Neoism LSP engine
+            // (language_server::poll builds the pill's server list from the real
             // per-workspace runtime). Ignored to keep the pill single-
             // sourced and avoid flicker between the two producers.
             return;
@@ -394,8 +394,8 @@ impl Handler for RedrawHandler {
             return;
         }
         if name == "rio_diagnostics" {
-            // Legacy nvim/Lua diagnostics source. The Rust LSP engine now owns
-            // inline diagnostics too (rust_lsp::poll builds
+            // Legacy nvim/Lua diagnostics source. The Neoism LSP engine now owns
+            // inline diagnostics too (language_server::poll builds
             // `EditorServerMessage::Diagnostics` from the engine's own
             // publishDiagnostics); ignore the nvim notification so the two
             // don't fight over `editor_diagnostics`.

@@ -204,9 +204,15 @@ pub(crate) fn decode_diagnostics(value: Value) -> Vec<ProtoDiagnosticItem> {
         out.push(ProtoDiagnosticItem {
             line,
             col,
+            end_line: line,
+            end_col: col,
             severity,
             message,
             source,
+            code: None,
+            code_description: None,
+            tags: Vec::new(),
+            related_information: Vec::new(),
         });
     }
     out
@@ -340,9 +346,23 @@ pub(crate) fn hash_items(items: &[ProtoDiagnosticItem]) -> u64 {
     for it in items {
         it.line.hash(&mut hasher);
         it.col.hash(&mut hasher);
+        it.end_line.hash(&mut hasher);
+        it.end_col.hash(&mut hasher);
         it.severity.hash(&mut hasher);
         it.message.hash(&mut hasher);
         it.source.hash(&mut hasher);
+        it.code.hash(&mut hasher);
+        it.code_description.hash(&mut hasher);
+        it.tags.hash(&mut hasher);
+        it.related_information.len().hash(&mut hasher);
+        for related in &it.related_information {
+            related.path.hash(&mut hasher);
+            related.line.hash(&mut hasher);
+            related.col.hash(&mut hasher);
+            related.end_line.hash(&mut hasher);
+            related.end_col.hash(&mut hasher);
+            related.message.hash(&mut hasher);
+        }
     }
     hasher.finish()
 }

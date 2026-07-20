@@ -1,41 +1,56 @@
-//! Bridge from `InstalledIndex` to the nvim runtime's managed tool layer.
+//! Bridge from `InstalledIndex` to Neoism's managed tool resolution.
 //!
-//! `lsp.lua` builds each LSP / formatter command from a hardcoded bare
-//! bin name (e.g. `rust-analyzer` or `black`) and falls back to `$PATH`
-//! resolution. When a user installs a tool through the Extensions UI, we drop a
-//! managed binary under `paths::bin_dir()` and record it in
-//! `installed.json`. To let the lua side prefer that managed binary
-//! over `$PATH`, we serialize a `{ id → absolute_path }` map and push
-//! it across the embed RPC on init.
+//! Language-server and formatter adapters begin with a portable command name
+//! (for example `rust-analyzer` or `black`). When a user installs a tool
+//! through Extensions, Neoism drops a launcher under `paths::bin_dir()` and
+//! records it in `installed.json`. This module resolves those records before
+//! falling back to `$PATH`.
 //!
-//! Keying by `id` is intentional: the lua side stores the id (or the
-//! original `cmd[1]`) and resolves at LSP-attach time, so either form
-//! works. Entries without a `bin_path` (server-side packages, scripts
+//! Keying by both package id and executable filename lets a runtime adapter
+//! resolve packages whose registry id differs from its command. Entries
+//! without a `bin_path` (server-side packages, scripts
 //! installed without a managed binary) are skipped — they have nothing
 //! to offer the resolver.
 //!
-//! Cross-name fallback: lua's `server.name` and Mason's package id can
-//! diverge for some LSPs (e.g. lua `jsonls` vs Mason `json-lsp`, lua
-//! `ts_ls` vs Mason `typescript-language-server`). Lua's resolver tries
-//! `managed_bin[server.name]` first, then `managed_bin[server.cmd[1]]`.
-//! To cover the cases where neither matches the install id, we also
-//! insert each entry keyed by its bin filename (e.g.
-//! `vscode-json-language-server`), which is exactly what lua's
-//! `cmd[1]` carries.
+//! Cross-name fallback matters for packages such as `json-lsp`, whose runtime
+//! command is `vscode-json-language-server`; the filename key makes that
+//! relationship data-driven instead of an adapter-specific alias.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::install_runner::InstallError;
 use crate::installed::InstalledIndex;
+use crate::manifest::ExtensionManifest;
 use crate::paths;
+
+static STARTUP_MANIFESTS: OnceLock<Vec<ExtensionManifest>> = OnceLock::new();
 
 /// Build a `{ extension_id → absolute_bin_path }` map from the live
 /// `installed.json` index. Entries without a `bin_path` are dropped
 /// — they cannot satisfy a `cmd[1]` lookup. Empty result is valid
 /// (fresh install, nothing managed yet).
 pub fn managed_bin_map() -> Result<BTreeMap<String, String>, InstallError> {
-    managed_bin_map_from(&paths::installed_record_path())
+    // Command resolution runs during LSP startup, before the Extensions page
+    // necessarily opens. Reconcile old, fully-installed Mason packages here
+    // so an orphaned managed binary becomes immediately usable. This never
+    // consults PATH; the reconciler only accepts binaries rooted in Neoism's
+    // own managed store.
+    let manifests = STARTUP_MANIFESTS.get_or_init(|| {
+        let Ok(registry) =
+            crate::mason::load_mason_registry(&crate::mason::mason_cache_path())
+        else {
+            return Vec::new();
+        };
+        let manifests = crate::mason::translate_registry(&registry);
+        if let Err(error) = crate::install_runner::reconcile_managed_installs(&manifests)
+        {
+            eprintln!("neoism: managed extension reconciliation failed: {error}");
+        }
+        manifests
+    });
+    managed_bin_map_from_manifests(&paths::installed_record_path(), manifests)
 }
 
 /// Path-explicit variant for tests. Keeps the production path
@@ -43,34 +58,71 @@ pub fn managed_bin_map() -> Result<BTreeMap<String, String>, InstallError> {
 pub fn managed_bin_map_from(
     path: &Path,
 ) -> Result<BTreeMap<String, String>, InstallError> {
+    managed_bin_map_from_manifests(path, &[])
+}
+
+/// Build the managed command map with catalog metadata. The manifest's
+/// executable list resolves every package-provided command and also repairs
+/// legacy records whose primary path pointed at a sibling CLI rather than the
+/// language-server executable. No package id is special-cased.
+pub fn managed_bin_map_from_manifests(
+    path: &Path,
+    manifests: &[ExtensionManifest],
+) -> Result<BTreeMap<String, String>, InstallError> {
     let index = InstalledIndex::load_from(path)?;
+    let manifest_by_id: BTreeMap<&str, &ExtensionManifest> = manifests
+        .iter()
+        .map(|manifest| (manifest.id.as_str(), manifest))
+        .collect();
+    let mut resolved = Vec::new();
+    for (id, entry) in &index.entries {
+        let Some(recorded_bin) = entry.bin_path.as_ref() else {
+            continue;
+        };
+        let manifest = manifest_by_id.get(id.as_str()).copied();
+        let primary = manifest
+            .and_then(|manifest| manifest.run.as_ref())
+            .and_then(|run| run.command.first())
+            .and_then(|command| sibling_bin(recorded_bin, command))
+            .unwrap_or_else(|| recorded_bin.clone());
+        resolved.push((id.as_str(), primary, manifest));
+    }
+
+    // Canonical package ids always win over aliases, independent of BTreeMap
+    // ordering or a package whose executable happens to equal another id.
     let mut out = BTreeMap::new();
-    for (id, entry) in index.entries.iter() {
-        if let Some(bin) = entry.bin_path.as_ref() {
-            let resolved_bin = preferred_lsp_bin_path(id, bin);
-            let bin_str = resolved_bin.display().to_string();
-            out.insert(id.clone(), bin_str.clone());
-            // Also key by bin filename to cover lua server names that
-            // differ from the Mason install id (lua resolver tries both
-            // server.name and server.cmd[1]; cmd[1] is the bin name).
-            if let Some(file_name) = resolved_bin.file_name().and_then(|s| s.to_str()) {
-                out.entry(file_name.to_string()).or_insert(bin_str);
+    for (id, primary, _) in &resolved {
+        out.insert((*id).to_string(), primary.display().to_string());
+    }
+    for (_, primary, manifest) in resolved {
+        let primary_string = primary.display().to_string();
+        if let Some(file_name) = primary.file_name().and_then(|name| name.to_str()) {
+            out.entry(file_name.to_string())
+                .or_insert_with(|| primary_string.clone());
+        }
+        if let Some(manifest) = manifest {
+            let mut names = manifest.executables.clone();
+            if let Some(command) =
+                manifest.run.as_ref().and_then(|run| run.command.first())
+            {
+                if !names.contains(command) {
+                    names.push(command.clone());
+                }
+            }
+            for name in names {
+                if let Some(bin) = sibling_bin(&primary, &name) {
+                    out.entry(name).or_insert_with(|| bin.display().to_string());
+                }
             }
         }
     }
     Ok(out)
 }
 
-fn preferred_lsp_bin_path(id: &str, bin: &Path) -> PathBuf {
-    if id == "pyright" {
-        if let Some(path) = sibling_bin(bin, "pyright-langserver") {
-            return path;
-        }
-    }
-    bin.to_path_buf()
-}
-
 fn sibling_bin(bin: &Path, name: &str) -> Option<PathBuf> {
+    if executable_name_matches(bin, name) && bin.exists() {
+        return Some(bin.to_path_buf());
+    }
     if let Some(candidate) = sibling_from_parent(bin, name) {
         return Some(candidate);
     }
@@ -88,14 +140,27 @@ fn sibling_bin(bin: &Path, name: &str) -> Option<PathBuf> {
     sibling_from_parent(&canonical, name)
 }
 
-fn sibling_from_parent(bin: &Path, name: &str) -> Option<PathBuf> {
-    let candidate = bin.parent()?.join(name);
-    candidate.exists().then_some(candidate)
+fn executable_name_matches(path: &Path, name: &str) -> bool {
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    file_name == name
+        || file_name.strip_suffix(".exe") == Some(name)
+        || file_name.strip_suffix(".cmd") == Some(name)
+        || file_name.strip_suffix(".bat") == Some(name)
 }
 
-/// JSON-encode `managed_bin_map()` for shipping across the nvim RPC.
-/// On any error (missing index, bad JSON, IO) returns `"{}"` so the
-/// lua side just sees an empty map and falls back to `$PATH`.
+fn sibling_from_parent(bin: &Path, name: &str) -> Option<PathBuf> {
+    let parent = bin.parent()?;
+    std::iter::once(name.to_string())
+        .chain(["exe", "cmd", "bat"].map(|suffix| format!("{name}.{suffix}")))
+        .map(|name| parent.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// JSON-encode `managed_bin_map()` for compatibility consumers. On any error
+/// (missing index, bad JSON, IO), return `"{}"`; command resolution can still
+/// fall back to `$PATH`.
 pub fn managed_bin_map_json() -> String {
     managed_bin_map()
         .ok()
@@ -115,6 +180,8 @@ pub fn managed_bin_map_json_from(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::installed::{InstalledEntry, InstalledIndex};
+    use crate::manifest::{InstallKind, RunSpec};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     fn tempdir() -> PathBuf {
@@ -143,6 +210,32 @@ mod tests {
             install_kind: "test".to_string(),
             bin_path: bin.map(PathBuf::from),
             installed_at: 0,
+        }
+    }
+
+    fn npm_manifest(id: &str, primary: &str, executables: &[&str]) -> ExtensionManifest {
+        ExtensionManifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            author: String::new(),
+            downloads: None,
+            categories: vec!["LSP".to_string()],
+            languages: Vec::new(),
+            repository_url: None,
+            homepage: None,
+            executables: executables.iter().map(|name| (*name).to_string()).collect(),
+            install: InstallKind::Npm {
+                package: id.to_string(),
+                version: "1.0.0".to_string(),
+                extra_packages: Vec::new(),
+            },
+            run: Some(RunSpec {
+                command: vec![primary.to_string()],
+                env: BTreeMap::new(),
+            }),
+            env_keys: Vec::new(),
         }
     }
 
@@ -252,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn pyright_prefers_sibling_langserver_for_existing_installs() {
+    fn catalog_primary_repairs_a_legacy_record_and_maps_every_executable() {
         let dir = tempdir();
         let npm_bin = dir.join("node_modules").join(".bin");
         std::fs::create_dir_all(&npm_bin).unwrap();
@@ -266,15 +359,25 @@ mod tests {
         idx.install_record(entry("pyright", Some(pyright.to_str().unwrap())));
         idx.save_to(&path).unwrap();
 
-        let map = managed_bin_map_from(&path).unwrap();
+        let manifest = npm_manifest(
+            "pyright",
+            "pyright-langserver",
+            &["pyright", "pyright-langserver"],
+        );
+        let map = managed_bin_map_from_manifests(&path, &[manifest]).unwrap();
         let expected = pyright_langserver.display().to_string();
         assert_eq!(map.get("pyright"), Some(&expected));
         assert_eq!(map.get("pyright-langserver"), Some(&expected));
+        assert_eq!(
+            map.get("pyright").map(String::as_str),
+            Some(expected.as_str()),
+            "package id resolves the manifest-selected primary"
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn pyright_prefers_sibling_langserver_for_symlinked_wrapper() {
+    fn catalog_primary_is_found_next_to_a_legacy_symlink_target() {
         let dir = tempdir();
         let public_bin = dir.join("extensions").join("bin");
         let npm_bin = dir
@@ -297,7 +400,12 @@ mod tests {
         idx.install_record(entry("pyright", Some(wrapped_pyright.to_str().unwrap())));
         idx.save_to(&path).unwrap();
 
-        let map = managed_bin_map_from(&path).unwrap();
+        let manifest = npm_manifest(
+            "pyright",
+            "pyright-langserver",
+            &["pyright", "pyright-langserver"],
+        );
+        let map = managed_bin_map_from_manifests(&path, &[manifest]).unwrap();
         let expected = pyright_langserver.display().to_string();
         assert_eq!(map.get("pyright"), Some(&expected));
         assert_eq!(map.get("pyright-langserver"), Some(&expected));

@@ -1427,6 +1427,20 @@ fn editor_key_plain_key_passes_through() {
     );
 }
 
+#[test]
+fn editor_normal_k_uses_the_standard_lsp_hover_binding() {
+    assert_eq!(
+        EditorKeyDispatchPlan::classify("K", key_ctx(EditorModeClass::Normal)),
+        EditorKeyDispatchPlan::OpenLspHover
+    );
+    assert_eq!(
+        EditorKeyDispatchPlan::classify("K", key_ctx(EditorModeClass::Insert)),
+        EditorKeyDispatchPlan::PassThrough {
+            notation: "K".to_string()
+        }
+    );
+}
+
 // -----------------------------------------------------------------
 // Ex command intercept tests
 // -----------------------------------------------------------------

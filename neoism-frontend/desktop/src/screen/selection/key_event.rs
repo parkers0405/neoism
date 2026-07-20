@@ -49,6 +49,20 @@ impl Screen<'_> {
             return;
         }
 
+        // Match the conventional editor Quick Fix chord on every platform.
+        // Consume both edges so the release cannot leak into nvim after the
+        // modal changes focus.
+        if Self::is_lsp_quick_fix_key(key, mods)
+            && self.context_manager.current().editor.is_some()
+        {
+            if key.state == ElementState::Pressed && !self.renderer.modal.is_active() {
+                self.execute_lsp_context_action(
+                    neoism_ui::panels::context_menu::LspContextAction::CodeAction,
+                );
+            }
+            return;
+        }
+
         if let Some(action) = Self::font_size_action_for_key(key, mods) {
             if key.state == ElementState::Pressed {
                 self.change_font_size(action);

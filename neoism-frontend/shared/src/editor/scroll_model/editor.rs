@@ -313,6 +313,9 @@ pub enum EditorKeyDispatchPlan {
     OpenSearchPalette,
     /// `?` → open the command palette in backward search mode.
     OpenSearchPaletteBackward,
+    /// `K` in Normal mode → request LSP hover at the editor cursor, matching
+    /// Neovim's built-in LSP default.
+    OpenLspHover,
     /// Leader sequence `<Space>` held; record the timestamp.
     StartLeader,
     /// Leader sequence `<Space> e` → toggle file tree.
@@ -414,6 +417,10 @@ impl EditorKeyDispatchPlan {
             return Self::BufferCycle {
                 next: notation == "<Tab>",
             };
+        }
+
+        if notation == "K" && ctx.editor_present && matches!(ctx.mode, EditorModeClass::Normal) {
+            return Self::OpenLspHover;
         }
 
         // `:` / `/` / `?` open the palette in non-text-input modes.

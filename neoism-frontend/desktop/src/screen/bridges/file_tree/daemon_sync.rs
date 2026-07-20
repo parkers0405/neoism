@@ -157,7 +157,8 @@ impl Screen<'_> {
             return Some(root);
         }
         let workspace_id = self.context_manager.current_adopted_workspace_id()?;
-        self.context_manager.daemon_host_workspace_root(&workspace_id)
+        self.context_manager
+            .daemon_host_workspace_root(&workspace_id)
     }
 
     /// Like [`Self::send_remote_files_op`] but fires at an explicit

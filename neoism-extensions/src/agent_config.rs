@@ -329,9 +329,11 @@ mod tests {
             languages: vec![],
             repository_url: None,
             homepage: None,
+            executables: Vec::new(),
             install: InstallKind::Npm {
                 package: "@modelcontextprotocol/server-filesystem".to_string(),
                 version: "1.2.3".to_string(),
+                extra_packages: Vec::new(),
             },
             run: Some(RunSpec {
                 command: vec![

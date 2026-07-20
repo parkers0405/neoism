@@ -90,24 +90,56 @@ pub enum EditorClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_id: Option<String>,
     },
+    /// Apply one code action previously returned by
+    /// [`EditorServerMessage::LspActionResult`]. The originating server and
+    /// file travel with the opaque LSP payload so a multi-server workspace
+    /// cannot resolve or execute the action on the wrong client.
+    ApplyLspCodeAction {
+        action: EditorLspCodeAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
     /// Request LSP completion items at the active editor cursor. Served
     /// asynchronously from the Rust engine (never blocks nvim), answered with
     /// `EditorServerMessage::LspCompletions`. `seq` is echoed back so a stale
     /// (superseded) response can be discarded after fast typing.
     LspComplete {
         seq: u64,
+        /// Character whose insertion caused this request. The engine compares
+        /// it with each server's advertised triggerCharacters; ordinary typed
+        /// identifiers remain triggerKind=Invoked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_character: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_id: Option<String>,
     },
-    /// Request LSP hover docs at an EXPLICIT buffer position (the cell the
-    /// mouse is over) — unlike `LspAction::Hover`, this does NOT move the
-    /// cursor, so it powers VS Code-style hover-on-mouseover. Answered with
-    /// `EditorServerMessage::LspHoverResult`; `seq` is echoed so a stale
-    /// response (mouse already moved on) is discarded.
+    /// Accept one completion from the latest popup. The daemon revalidates the
+    /// document revision, resolves the opaque CompletionItem on its originating
+    /// server when supported, and applies its primary/additional text edits as
+    /// one editor operation.
+    ApplyLspCompletion {
+        item: EditorLspCompletionItem,
+        #[serde(default)]
+        replace_prefix: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
+    /// Cancel a debounced completion request for this surface when the popup
+    /// is dismissed or insert mode ends before another request supersedes it.
+    CancelLspCompletion {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
+    /// Request LSP hover docs at an explicit Neovim UI grid cell. The daemon
+    /// asks Neovim to resolve this rendered cell to a buffer line + UTF-8 byte
+    /// column, so tabs, wide Unicode, gutters, wrapping, folds, and horizontal
+    /// scrolling never get mistaken for buffer coordinates. Unlike
+    /// `LspAction::Hover`, this does not move the cursor.
     LspHoverAt {
         seq: u64,
-        line: u32,
-        character: u32,
+        grid: i64,
+        row: i64,
+        col: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_id: Option<String>,
     },
@@ -157,9 +189,46 @@ pub struct EditorLspSymbol {
     pub depth: u32,
 }
 
+/// A selectable `textDocument/codeAction` result.
+///
+/// Display metadata is typed so frontends never need to interpret arbitrary
+/// server JSON. `payload` remains opaque until the daemon sends it back to the
+/// originating language server and applies any resulting edit through its
+/// workspace-containment and range-validation path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorLspCodeAction {
+    pub server_id: String,
+    pub file_path: PathBuf,
+    /// Fingerprint of the live buffer revision used to request this action.
+    /// The daemon rejects a selection after intervening edits and asks the
+    /// user to request fresh fixes instead of applying stale ranges.
+    #[serde(default)]
+    pub document_revision: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub preferred: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
+    /// Original LSP `CodeAction | Command`; only the daemon interprets it.
+    pub payload: serde_json::Value,
+}
+
 /// One completion candidate for the editor popup.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EditorLspCompletionItem {
+    /// Exact server that produced the semantic item. `None` marks a local
+    /// buffer-word fallback, which needs no completionItem/resolve request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    /// File/revision captured with the completion response. Acceptance is
+    /// rejected after intervening edits or a buffer switch rather than
+    /// applying stale LSP ranges to unrelated text.
+    #[serde(default)]
+    pub file_path: PathBuf,
+    #[serde(default)]
+    pub document_revision: String,
     pub label: String,
     /// Lowercase kind word ("function", "variable", "keyword", …) for the
     /// popup's leading tag/icon.
@@ -178,6 +247,10 @@ pub struct EditorLspCompletionItem {
     pub sort_text: Option<String>,
     #[serde(default)]
     pub preselect: bool,
+    /// Original CompletionItem with list defaults expanded. Only the daemon
+    /// interprets this payload for resolve and edit application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
 }
 
 /// Messages the daemon emits in response to (or independently of)
@@ -381,6 +454,11 @@ pub enum EditorServerMessage {
     LspSnapshot {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_id: Option<String>,
+        /// File this snapshot was computed for. Older/nvim-originated
+        /// snapshots may omit it; daemon-owned snapshots always include it so
+        /// clients can reject a late result after a buffer switch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_path: Option<PathBuf>,
         filetype: String,
         servers: Vec<LspSnapshotServer>,
     },
@@ -412,6 +490,10 @@ pub enum EditorServerMessage {
         /// selectable symbol picker instead of a bare count.
         #[serde(default)]
         symbols: Vec<EditorLspSymbol>,
+        /// Selectable quick fixes returned for `CodeActions`; empty for every
+        /// other action and after one selection has been applied.
+        #[serde(default)]
+        code_actions: Vec<EditorLspCodeAction>,
     },
     /// Completion items for the active cursor, answering an
     /// `EditorClientMessage::LspComplete`. `seq` echoes the request so the
@@ -428,9 +510,9 @@ pub enum EditorServerMessage {
         items: Vec<EditorLspCompletionItem>,
     },
     /// Hover docs for an `LspHoverAt` request. `contents` is the rendered
-    /// markdown (empty ⇒ nothing to show). `line`/`character` echo the
-    /// requested position so the client can anchor the popup; `seq` echoes the
-    /// request so a superseded hover (mouse moved) is dropped.
+    /// markdown (empty ⇒ nothing to show). `line`/`character` are the resolved
+    /// zero-based buffer line and UTF-8 byte column; `seq` echoes the request
+    /// so a superseded hover (mouse moved) is dropped.
     LspHoverResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_id: Option<String>,
@@ -536,7 +618,10 @@ impl EditorClientMessage {
             | EditorClientMessage::MouseInput { surface_id, .. }
             | EditorClientMessage::Resize { surface_id, .. }
             | EditorClientMessage::LspAction { surface_id, .. }
+            | EditorClientMessage::ApplyLspCodeAction { surface_id, .. }
             | EditorClientMessage::LspComplete { surface_id, .. }
+            | EditorClientMessage::ApplyLspCompletion { surface_id, .. }
+            | EditorClientMessage::CancelLspCompletion { surface_id }
             | EditorClientMessage::LspHoverAt { surface_id, .. } => surface_id.as_deref(),
             EditorClientMessage::Close => None,
         }
@@ -629,8 +714,21 @@ pub struct DiagnosticItem {
     pub line: u32,
     /// 0-based column.
     pub col: u32,
+    /// Zero-based end position (exclusive) for the marked range.
+    #[serde(default)]
+    pub end_line: u32,
+    #[serde(default)]
+    pub end_col: u32,
     /// 1-based line number — convenient for `:<lnum>` jumps.
     pub lnum: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_information: Vec<crate::diagnostics::DiagnosticRelatedInformation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -698,7 +796,80 @@ mod tests {
             count: 1,
             surface_id: Some("pane:7".into()),
         });
+        roundtrip_client(&EditorClientMessage::LspHoverAt {
+            seq: 42,
+            grid: 0,
+            row: 7,
+            col: 19,
+            surface_id: Some("pane:7".into()),
+        });
+        roundtrip_client(&EditorClientMessage::ApplyLspCodeAction {
+            action: EditorLspCodeAction {
+                server_id: "rust-analyzer".into(),
+                file_path: "src/lib.rs".into(),
+                document_revision: "revision-41".into(),
+                title: "Import `HashMap`".into(),
+                kind: Some("quickfix".into()),
+                preferred: true,
+                disabled_reason: None,
+                payload: serde_json::json!({
+                    "title": "Import `HashMap`",
+                    "data": {"id": 7}
+                }),
+            },
+            surface_id: Some("pane:7".into()),
+        });
+        roundtrip_client(&EditorClientMessage::ApplyLspCompletion {
+            item: EditorLspCompletionItem {
+                server_id: Some("typescript".into()),
+                file_path: "src/main.ts".into(),
+                document_revision: "revision-42".into(),
+                label: "details".into(),
+                kind: "property".into(),
+                detail: Some("(property) details: string".into()),
+                documentation: Some("Additional request details.".into()),
+                insert_text: "details".into(),
+                filter_text: Some("details".into()),
+                sort_text: Some("11".into()),
+                preselect: true,
+                payload: Some(serde_json::json!({
+                    "label": "details",
+                    "data": {"id": 9}
+                })),
+            },
+            replace_prefix: "det".into(),
+            surface_id: Some("pane:7".into()),
+        });
+        roundtrip_client(&EditorClientMessage::CancelLspCompletion {
+            surface_id: Some("pane:7".into()),
+        });
         roundtrip_client(&EditorClientMessage::Close);
+    }
+
+    #[test]
+    fn lsp_code_action_result_roundtrip_preserves_selection_payload() {
+        let action = EditorLspCodeAction {
+            server_id: "fixture-lsp".into(),
+            file_path: "src/main.rs".into(),
+            document_revision: "revision-99".into(),
+            title: "Fix this".into(),
+            kind: Some("quickfix".into()),
+            preferred: true,
+            disabled_reason: None,
+            payload: serde_json::json!({"title": "Fix this", "data": {"id": 9}}),
+        };
+        roundtrip_server(&EditorServerMessage::LspActionResult {
+            surface_id: Some("pane:7".into()),
+            action: EditorLspAction::CodeActions,
+            line: 3,
+            character: 5,
+            summary: "1 code action".into(),
+            hover: None,
+            locations: Vec::new(),
+            symbol_count: 0,
+            symbols: Vec::new(),
+            code_actions: vec![action],
+        });
     }
 
     #[test]

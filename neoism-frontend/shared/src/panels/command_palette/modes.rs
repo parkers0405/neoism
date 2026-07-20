@@ -29,12 +29,12 @@ pub(crate) enum PaletteMode {
     Workspaces(Vec<PaletteWorkspaceEntry>),
     Servers(Vec<PaletteServerEntry>),
     /// Vim-style ex-command capture. The shared command palette is the
-    /// default `:` surface now; this mode remains for explicit raw-nvim
-    /// command capture paths (e.g. `Go to Line…`).
+    /// default `:` surface now; this mode remains for explicit raw
+    /// ex-command capture paths (e.g. `Go to Line…`).
     Ex,
-    /// Forward `/` search capture. Mirrors `Ex` but Enter goes through
-    /// the managed nvim search bridge so live preview and commit use
-    /// the same literal matching rules.
+    /// Forward `/` search capture. Mirrors `Ex` but Enter commits a
+    /// search so live preview and commit use the same literal matching
+    /// rules.
     Search,
 }
 
@@ -43,7 +43,7 @@ pub(crate) enum PaletteMode {
 /// lifetime mixing.
 pub(crate) enum PaletteRow<'a> {
     Command {
-        /// Zed-style service namespace prefix (e.g. `nvim`, `markdown`,
+        /// Zed-style service namespace prefix (e.g. `code`, `markdown`,
         /// `neoism-agent`). Rendered as `{service}: {title}` via
         /// [`PaletteRow::display_title`].
         service: &'a str,
@@ -103,10 +103,10 @@ pub(crate) enum PaletteRow<'a> {
     Search {
         term: &'a str,
     },
-    /// Live buffer match for the current `/` query. The lua side
-    /// scans the active editor's buffer and pushes one row per
-    /// matching line; selecting a row sends the cursor to `lnum`/`col`
-    /// and previews a temporary highlight on it.
+    /// Live buffer match for the current `/` query. The host's
+    /// incremental-search pass scans the active buffer and pushes one
+    /// row per matching line; selecting a row sends the cursor to
+    /// `lnum`/`col` and previews a temporary highlight on it.
     BufferMatch {
         lnum: u64,
         col: u64,
@@ -135,7 +135,7 @@ impl<'a> PaletteRow<'a> {
     }
 
     /// Display title for the render pass. Command rows render Zed-style
-    /// as `{service}: {title}` (e.g. `nvim: Write File`); every other
+    /// as `{service}: {title}` (e.g. `code: Write File`); every other
     /// row kind renders its plain title. Owned because the prefixed form
     /// has to be built per-frame.
     pub(crate) fn display_title(&self) -> String {

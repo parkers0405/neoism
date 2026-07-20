@@ -20,9 +20,7 @@ impl Application<'_> {
             return;
         }
 
-        let hover_dismissed = route.window.screen.dismiss_lsp_hover();
-        let diagnostic_hover_dismissed =
-            route.window.screen.clear_inline_diagnostic_hover();
+        let _ = route.window.screen.clear_inline_diagnostic_hover();
 
         if self.config.hide_cursor_when_typing {
             route.window.set_cursor_visible(true);
@@ -51,19 +49,6 @@ impl Application<'_> {
         // list/body instead of leaking into the pane behind it.
         if route.window.screen.handle_rust_overlay_wheel(&delta) {
             route.request_redraw();
-            return;
-        }
-
-        // Wheel over the LSP completion popup changes the
-        // popup selection instead of scrolling the editor pane
-        // underneath. Tested before tree/editor routing because
-        // the popup floats above those surfaces.
-        let (completion_wheel_consumed, completion_wheel_changed) =
-            route.window.screen.handle_completion_menu_wheel(&delta);
-        if completion_wheel_consumed {
-            if completion_wheel_changed || hover_dismissed || diagnostic_hover_dismissed {
-                route.request_redraw();
-            }
             return;
         }
 

@@ -183,9 +183,6 @@ impl<T: EventListener> ContextGrid<T> {
         let active_stacked_by_parent = self.active_stacked_by_parent.clone();
         let root = self.root;
         let splits_hidden = self.splits_hidden;
-        let window_height = self.height;
-        let scaled_margin_top = self.scaled_margin.top;
-        let status_line_height = self.scaled_margin.bottom;
 
         for (&node, item) in self.inner.iter_mut() {
             let [abs_x, abs_y, width, height] = item.layout_rect;
@@ -225,19 +222,6 @@ impl<T: EventListener> ContextGrid<T> {
             item.val.dimension.restore_nominal_cell_height();
             item.val.dimension.update_width(width);
             item.val.dimension.update_height(height);
-            if item.val.editor.is_some() {
-                let fit = neoism_ui::chrome_policy::fit_editor_rows(
-                    neoism_ui::chrome_policy::EditorRowFitInput {
-                        scaled_margin_top,
-                        layout_top: abs_y,
-                        layout_height: height,
-                        window_height,
-                        status_line_height,
-                        nominal_cell_height: item.val.dimension.base_cell_height(),
-                    },
-                );
-                item.val.dimension.apply_editor_row_fit(fit);
-            }
             let winsize = crate::bridges::utils::terminal_dimensions(&item.val.dimension);
             let cols = winsize.cols;
             let rows = winsize.rows;
@@ -254,17 +238,6 @@ impl<T: EventListener> ContextGrid<T> {
 
             if visible {
                 let _ = item.val.messenger.send_resize(winsize);
-            }
-
-            // Editor-source contexts have no PTY listening on the
-            // messenger channel — push the new geometry into the embedded
-            // nvim instance directly so it reflows. Done unconditionally
-            // (not just when `visible`) so a pane created mid-split — which
-            // can be transiently non-visible — still reflows to its rect
-            // instead of painting at its old full-width grid (the "split
-            // overlays instead of taking space" bug).
-            if let Some(editor) = item.val.editor.as_ref() {
-                editor.resize(cols as u64, u64::from(terminal_rows));
             }
 
             // Update position via sugarloaf (handles scaling)

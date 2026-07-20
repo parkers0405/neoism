@@ -690,17 +690,11 @@ impl Screen<'_> {
 
         self.open_path_in_editor(path.clone());
         if let Some(line) = target.line {
-            self.ensure_primary_editor_route();
-            if let Some(route) = self.renderer.primary_editor_route {
-                let path_str = path.display().to_string();
-                let path_lit =
-                    neoism_backend::performer::nvim::lua_string_literal(&path_str);
-                let cmd = format!(
-                    r#"lua pcall(function() vim.cmd.edit({path_lit}); vim.api.nvim_win_set_cursor(0, {{ {}, 0 }}); vim.cmd('normal! zz'); require('rio.search').preview({}) end)"#,
-                    line.max(1),
-                    line.max(1)
-                );
-                self.send_editor_command_to_route(route, cmd);
+            // nvim removed — jump the native code pane's cursor instead.
+            if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                code.buffer
+                    .set_cursor_position(line.max(1).saturating_sub(1), 0, false);
+                self.renderer.trail_cursor.reset();
             }
         }
         self.mark_dirty();

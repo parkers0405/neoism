@@ -202,14 +202,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
 
     #[inline]
     pub fn select_route_from_current_grid(&mut self) {
-        let (route_id, is_editor) = {
-            let current = self.current();
-            (current.route_id, current.editor.is_some())
-        };
-        self.current_route = route_id;
-        if is_editor {
-            self.current_mut().pending_terminal_resize = true;
-        }
+        self.current_route = self.current().route_id;
     }
 
     #[inline]
@@ -301,17 +294,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         &mut self,
     ) -> &mut SmallVec<[ContextGrid<T>; DEFAULT_CONTEXT_CAPACITY]> {
         &mut self.contexts
-    }
-
-    pub fn pump_editor_redraws(&mut self) -> (usize, bool) {
-        let mut applied = 0usize;
-        let mut visible_hit_frame_limit = false;
-        for (index, grid) in self.contexts.iter_mut().enumerate() {
-            let (n, _limited, visible_limited) = grid.pump_editor_redraws();
-            applied = applied.saturating_add(n);
-            visible_hit_frame_limit |= index == self.current_index && visible_limited;
-        }
-        (applied, visible_hit_frame_limit)
     }
 
     #[inline]

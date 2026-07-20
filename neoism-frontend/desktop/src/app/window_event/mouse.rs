@@ -74,7 +74,6 @@ impl Application<'_> {
                 };
 
                 if route.window.screen.renderer.modal.is_active() {
-                    route.window.screen.dismiss_lsp_hover();
                     if button == MouseButton::Left {
                         route.window.screen.handle_modal_click();
                     }
@@ -87,7 +86,6 @@ impl Application<'_> {
                 // acts, a press anywhere else closes the palette. It
                 // must never fall through to panes/tabs behind it.
                 if route.window.screen.renderer.command_palette.is_enabled() {
-                    route.window.screen.dismiss_lsp_hover();
                     if button == MouseButton::Left
                         && !route
                             .window
@@ -107,7 +105,6 @@ impl Application<'_> {
 
                 if let MouseButton::Right = button {
                     route.window.screen.close_context_menu();
-                    route.window.screen.dismiss_lsp_hover();
                     // Workspace ("Island") tab strip sits at the very top
                     // and spans the width, so check it before the panels
                     // below it.
@@ -131,10 +128,6 @@ impl Application<'_> {
                         return;
                     }
                     if route.window.screen.handle_file_tree_context_click() {
-                        route.request_redraw();
-                        return;
-                    }
-                    if route.window.screen.handle_editor_context_click() {
                         route.request_redraw();
                         return;
                     }
@@ -313,10 +306,7 @@ impl Application<'_> {
                     route.request_redraw();
                 }
 
-                if route.window.screen.handle_editor_mouse_click(button) {
-                    route.request_redraw();
-                    return;
-                } else if route.window.screen.handle_neoism_tags_mouse_press(button) {
+                if route.window.screen.handle_neoism_tags_mouse_press(button) {
                     route.request_redraw();
                     return;
                 } else if route.window.screen.handle_extensions_click(button) {
@@ -337,6 +327,10 @@ impl Application<'_> {
                             CursorIcon::Text
                         },
                     );
+                    route.request_redraw();
+                    return;
+                } else if route.window.screen.handle_code_mouse_press(button) {
+                    route.window.set_cursor(CursorIcon::Text);
                     route.request_redraw();
                     return;
                 } else if !switched_panel
@@ -375,8 +369,7 @@ impl Application<'_> {
 
                     if let MouseButton::Left = button {
                         let current = route.window.screen.context_manager.current();
-                        let pos = if current.editor.is_none()
-                            && current.markdown.is_none()
+                        let pos = if current.markdown.is_none()
                             && current.neoism_agent.is_none()
                             && current.neoism_tags.is_none()
                             && current.neoism_extensions.is_none()
@@ -463,14 +456,6 @@ impl Application<'_> {
                 // cleared. Real reorders short-circuit the
                 // rest of the release path.
                 if button == MouseButton::Left
-                    && route.window.screen.handle_editor_mouse_release()
-                {
-                    route.window.set_cursor(CursorIcon::Text);
-                    route.request_redraw();
-                    return;
-                }
-
-                if button == MouseButton::Left
                     && route.window.screen.handle_draw_mouse_release()
                 {
                     route.request_redraw();
@@ -479,6 +464,14 @@ impl Application<'_> {
 
                 if button == MouseButton::Left
                     && route.window.screen.handle_markdown_mouse_release()
+                {
+                    route.window.set_cursor(CursorIcon::Text);
+                    route.request_redraw();
+                    return;
+                }
+
+                if button == MouseButton::Left
+                    && route.window.screen.handle_code_mouse_release()
                 {
                     route.window.set_cursor(CursorIcon::Text);
                     route.request_redraw();
@@ -750,7 +743,6 @@ impl Application<'_> {
                 route.window.screen.renderer.modal.set_selected_index(index);
                 route.request_redraw();
             }
-            route.window.screen.dismiss_lsp_hover();
             route.window.set_cursor(CursorIcon::Default);
             return;
         }
@@ -774,12 +766,6 @@ impl Application<'_> {
             return;
         }
 
-        if route.window.screen.handle_editor_mouse_drag_move() {
-            route.window.set_cursor(CursorIcon::Text);
-            route.request_redraw();
-            return;
-        }
-
         if route.window.screen.markdown_drag_active() {
             if route.window.screen.handle_markdown_drag_move() {
                 route.window.set_cursor(
@@ -793,6 +779,24 @@ impl Application<'_> {
             }
             return;
         }
+
+        if route.window.screen.code_scrollbar_drag_active() {
+            if route.window.screen.handle_code_scrollbar_drag_move() {
+                route.request_redraw();
+            }
+            return;
+        }
+
+        if route.window.screen.code_drag_active() {
+            if route.window.screen.handle_code_drag_move() {
+                route.window.set_cursor(CursorIcon::Text);
+                route.request_redraw();
+            }
+            return;
+        }
+        // Idle pointer over the code pane arms the LSP mouse-hover
+        // candidate (non-consuming — the move continues downstream).
+        route.window.screen.note_code_mouse_hover();
 
         if route.window.screen.draw_drag_active() {
             if route.window.screen.handle_draw_drag_move() {
@@ -1249,36 +1253,12 @@ impl Application<'_> {
             route.request_redraw();
         }
         if inline_diagnostic_hover.owns_pointer {
-            route.window.screen.dismiss_lsp_hover();
             route.window.set_cursor(CursorIcon::Pointer);
-        }
-
-        // VS Code-style hover: over an editor pane, ask Neoism's LSP for docs
-        // at the cell under the mouse (deduped per cell); off the text area,
-        // dismiss. `request_lsp_hover_at_mouse` no-ops on non-editor contexts.
-        if !is_selecting {
-            if inline_diagnostic_hover.owns_pointer {
-                // Diagnostic details are immediate and already carry the full
-                // error. Do not issue a second symbol-hover request beneath it.
-            } else if inside_text_area
-                && route
-                    .window
-                    .screen
-                    .context_manager
-                    .current()
-                    .editor
-                    .is_some()
-            {
-                route.window.screen.request_lsp_hover_at_mouse();
-            } else {
-                route.window.screen.dismiss_lsp_hover();
-            }
         }
 
         if is_selecting {
             let current = route.window.screen.context_manager.current();
-            let should_update = if current.editor.is_none()
-                && current.markdown.is_none()
+            let should_update = if current.markdown.is_none()
                 && current.neoism_agent.is_none()
                 && current.neoism_tags.is_none()
                 && current.neoism_extensions.is_none()

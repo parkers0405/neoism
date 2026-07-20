@@ -29,4 +29,4 @@ By default the daemon accepts local clients. To require pairing tokens (minted b
 NEOISM_REQUIRE_AUTH=1 cargo run -p neoism-workspace-daemon
 ```
 
-Collaborative nvim and Markdown/notes editing are part of the direction here — one workspace, every screen.
+Collaborative code and Markdown/notes editing are part of the direction here — one workspace, every screen.

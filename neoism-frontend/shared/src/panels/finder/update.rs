@@ -99,6 +99,140 @@ impl Finder {
         self.refresh_git_results();
     }
 
+    /// Open the finder in BufferLines mode over a snapshot of the
+    /// active code pane's lines (nvim `/`). Same fresh-state reset as
+    /// `open_files`; no cwd involvement — rows carry only line
+    /// numbers, the host owns the pane they refer to.
+    pub fn open_buffer_lines(&mut self, lines: Vec<String>) {
+        self.enabled = true;
+        self.mode = FinderMode::BufferLines;
+        self.buffer_lines = lines;
+        self.buffer_match_total = 0;
+        self.query.clear();
+        self.results.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.reset_motion();
+        self.query_dirty_at = Some(Instant::now());
+        self.last_executed_query.clear();
+        self.caret_blink_start = Instant::now();
+        self.start_open_pop();
+    }
+
+    /// Open the finder in References mode over pre-computed LSP hits
+    /// (`gr` on the code pane). Rows carry cwd-relative paths so
+    /// Enter/preview reuse the grep open path; typing fuzzy-filters
+    /// the installed list in-memory.
+    pub fn open_references(
+        &mut self,
+        cwd: PathBuf,
+        rows: Vec<super::types::ReferenceRow>,
+    ) {
+        self.enabled = true;
+        self.mode = FinderMode::References;
+        if cwd != self.cwd {
+            self.files = None;
+            self.invalidate_preview_cache();
+        }
+        self.cwd = cwd;
+        self.reference_rows = rows
+            .into_iter()
+            .map(|row| GrepResult {
+                path: row.path,
+                line: row.line,
+                column: row.column,
+                text: row.text,
+            })
+            .collect();
+        self.query.clear();
+        self.results.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.reset_motion();
+        self.query_dirty_at = Some(Instant::now());
+        self.last_executed_query.clear();
+        self.caret_blink_start = Instant::now();
+        self.start_open_pop();
+        self.refresh_reference_results();
+    }
+
+    /// Open the finder in Symbols mode (VS Code Ctrl+P `@` / the
+    /// "Go to Symbol…" palette command). Rows arrive later through
+    /// `set_symbol_rows`; until then the empty state shows the
+    /// waiting/no-symbols line depending on `symbols_loading`.
+    pub fn open_symbols(&mut self) {
+        self.enabled = true;
+        self.mode = FinderMode::Symbols;
+        self.symbol_rows.clear();
+        self.symbols_loading = false;
+        self.query.clear();
+        self.results.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.reset_motion();
+        self.query_dirty_at = Some(Instant::now());
+        self.last_executed_query.clear();
+        self.caret_blink_start = Instant::now();
+        self.start_open_pop();
+    }
+
+    /// Live-switch the already-open finder into Symbols mode (typing
+    /// `@` as the first char of the Files-mode query). `query` is the
+    /// effective post-`@` query. No open pop — the overlay is already
+    /// on screen.
+    pub fn switch_to_symbols(&mut self, query: String) {
+        self.enabled = true;
+        self.mode = FinderMode::Symbols;
+        self.symbol_rows.clear();
+        self.symbols_loading = false;
+        self.query = query;
+        self.results.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.reset_motion();
+        self.query_dirty_at = Some(Instant::now());
+        self.last_executed_query.clear();
+        self.caret_blink_start = Instant::now();
+    }
+
+    /// Live-switch back to Files mode (backspacing the `@` away in
+    /// Symbols mode) — the inverse of `switch_to_symbols`.
+    pub fn switch_to_files(&mut self, cwd: PathBuf) {
+        self.enabled = true;
+        self.mode = FinderMode::Files;
+        if cwd != self.cwd {
+            self.files = None;
+            self.invalidate_preview_cache();
+        }
+        self.cwd = cwd;
+        self.query.clear();
+        self.results.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.reset_motion();
+        self.query_dirty_at = Some(Instant::now());
+        self.last_executed_query.clear();
+        self.caret_blink_start = Instant::now();
+    }
+
+    /// Mark the document-symbols request as in flight (or not) so the
+    /// empty state picks the right hint line.
+    pub fn set_symbols_loading(&mut self, loading: bool) {
+        self.symbols_loading = loading;
+    }
+
+    /// Install the host-fetched symbol rows (the code-LSP drain).
+    /// Refreshes the filtered view when Symbols mode is still active;
+    /// a late reply after switching modes only caches the list.
+    pub fn set_symbol_rows(&mut self, rows: Vec<super::types::SymbolRow>) {
+        self.symbols_loading = false;
+        self.symbol_rows = rows;
+        if matches!(self.mode, FinderMode::Symbols) {
+            self.refresh_symbol_results();
+            self.clamp_selection();
+        }
+    }
+
     pub fn close(&mut self) {
         self.enabled = false;
         self.pop_on_open = false;
@@ -121,8 +255,13 @@ impl Finder {
                 if req_id == request_id =>
             {
                 self.files = Some(paths);
-                self.refresh_file_results(search);
-                self.clamp_selection();
+                // Late replies must not stomp another mode's rows
+                // (e.g. a BufferLines search opened after the Files
+                // request went out) — cache the list, skip the refresh.
+                if matches!(self.mode, FinderMode::Files) {
+                    self.refresh_file_results(search);
+                    self.clamp_selection();
+                }
                 true
             }
             SearchServerMessage::SearchFilesResult { req_id, hits }
@@ -195,6 +334,10 @@ impl Finder {
             }
             FinderMode::Grep => {
                 self.grep_search_mode = self.grep_search_mode.next();
+            }
+            // Single search mode — nothing to cycle.
+            FinderMode::BufferLines | FinderMode::References | FinderMode::Symbols => {
+                return
             }
         }
         self.results.clear();
@@ -376,7 +519,10 @@ impl Finder {
         } else {
             self.results.len().min(max_visible_rows)
         };
-        let body_h = (row_h * visible_rows_actual as f32) + 4.0 * scale;
+        // The Files-mode prefix cheatsheet occupies one extra row
+        // between the input and the results.
+        let hint_rows = 0usize;
+        let body_h = (row_h * (visible_rows_actual + hint_rows) as f32) + 4.0 * scale;
         let preview_active = self.preview_enabled() && !self.results.is_empty();
         let body_with_preview_min = if preview_active {
             (FINDER_HEIGHT * 0.55 * scale).max(body_h)
@@ -421,7 +567,10 @@ impl Finder {
         } else {
             inner_w
         };
-        let results_y = inner_y + input_h + SEPARATOR_HEIGHT + 4.0 * scale;
+        // Skip the prefix cheatsheet row (Files mode, empty query) —
+        // must mirror the render pass's results_y offset.
+        let hint_h = 0.0f32;
+        let results_y = inner_y + input_h + SEPARATOR_HEIGHT + 4.0 * scale + hint_h;
         let list_bottom = inner_y + inner_h;
 
         if mouse_x < inner_x

@@ -97,7 +97,6 @@ fn prune_diag_logs() {
     };
     let cutoff = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
     let watchdog_on = watchdog_enabled();
-    let grid_on = super::editor_grid_diag::enabled();
     let this_pid = format!("-{}.log", std::process::id());
     for entry in entries.flatten() {
         let path = entry.path();
@@ -106,6 +105,7 @@ fn prune_diag_logs() {
         };
         let (is_watchdog, is_grid) = (
             name.starts_with("freeze-watchdog-") && name.ends_with(".log"),
+            // Legacy nvim editor-grid diagnostics — always stale now.
             name.starts_with("editor-grid-") && name.ends_with(".log"),
         );
         if !is_watchdog && !is_grid {
@@ -114,7 +114,7 @@ fn prune_diag_logs() {
         if name.ends_with(&this_pid) {
             continue;
         }
-        let family_disabled = (is_watchdog && !watchdog_on) || (is_grid && !grid_on);
+        let family_disabled = (is_watchdog && !watchdog_on) || is_grid;
         let too_old = entry
             .metadata()
             .and_then(|meta| meta.modified())

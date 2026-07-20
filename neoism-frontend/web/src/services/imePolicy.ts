@@ -64,7 +64,7 @@ export function commitDispatch(text: string): CommitDispatch {
  *
  * While the IME is showing a preedit popup, every keystroke (Enter
  * to commit, Escape to cancel, arrows to navigate the candidate
- * list) belongs to the IME, not the underlying nvim / terminal
+ * list) belongs to the IME, not the underlying terminal
  * surface. The browser fires `keydown` alongside `compositionupdate`
  * with `KeyboardEvent.isComposing === true` (or `keyCode === 229` on
  * legacy hosts); the host must swallow them.

@@ -5,7 +5,6 @@ impl Screen<'_> {
         &mut self,
         action: neoism_ui::panels::context_menu::LspContextAction,
     ) {
-        use neoism_protocol::editor::EditorLspAction;
         use neoism_ui::panels::context_menu::LspContextAction;
 
         if matches!(action, LspContextAction::Rename) {
@@ -16,25 +15,8 @@ impl Screen<'_> {
             self.open_lsp_workspace_symbols_prompt();
             return;
         }
-
-        let Some(editor) = self.context_manager.current().editor.as_ref() else {
-            return;
-        };
-        let action = match action {
-            LspContextAction::Hover => EditorLspAction::Hover,
-            LspContextAction::Definition => EditorLspAction::Definition,
-            LspContextAction::References => EditorLspAction::References,
-            LspContextAction::CodeAction => EditorLspAction::CodeActions,
-            LspContextAction::Format => EditorLspAction::Format,
-            LspContextAction::DocumentSymbols => EditorLspAction::DocumentSymbols,
-            LspContextAction::ToggleInlayHints => EditorLspAction::ToggleInlayHints,
-            LspContextAction::Info => EditorLspAction::Info,
-            LspContextAction::Rename | LspContextAction::WorkspaceSymbols => {
-                unreachable!()
-            }
-        };
-        editor.lsp_action(action);
-        self.mark_dirty();
+        // nvim removed — the remaining per-buffer LSP actions come back
+        // with the native code editor's LSP integration.
     }
 
     pub(crate) fn execute_block_hover_action(
@@ -599,12 +581,7 @@ impl Screen<'_> {
         _lines: usize,
     ) -> Option<Option<Line>> {
         let current = self.context_manager.current();
-        if current.editor.is_some()
-            || current.markdown.is_some()
-            || current.notebook.is_some()
-            || current.neoism_agent.is_some()
-            || current.neoism_tags.is_some()
-        {
+        if current.has_non_terminal_surface() {
             return None;
         }
         if current.terminal_input.passthrough_session_active() {
@@ -646,12 +623,7 @@ impl Screen<'_> {
 
     pub(crate) fn current_terminal_block_input_active(&self) -> bool {
         let current = self.context_manager.current();
-        if current.editor.is_some()
-            || current.markdown.is_some()
-            || current.notebook.is_some()
-            || current.neoism_agent.is_some()
-            || current.neoism_tags.is_some()
-        {
+        if current.has_non_terminal_surface() {
             return false;
         }
         if current.terminal_input.passthrough_session_active() {

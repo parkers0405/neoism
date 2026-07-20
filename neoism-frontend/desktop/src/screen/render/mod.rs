@@ -6,15 +6,13 @@ pub mod welcome;
 
 use super::*;
 use neoism_ui::chrome_policy::{
-    editor_chrome_mask_rects, grid_panel_chrome_geometry, trail_cursor_overlay_draw_kind,
-    trail_cursor_overlay_target, EditorChromeMaskInput, GridPanelChromeGeometryInput,
+    grid_panel_chrome_geometry, trail_cursor_overlay_draw_kind,
+    trail_cursor_overlay_target, GridPanelChromeGeometryInput,
     TrailCursorOverlayDrawKind, TrailCursorOverlayState, TrailCursorOverlayTarget,
 };
 use neoism_ui::render_policy::{
-    block_cursor_uniforms, editor_cursor_grid_row, editor_edge_slot_actions,
-    editor_edge_slot_source_y, editor_scroll_frame_plan, terminal_cursor_visible,
-    terminal_edge_slot_actions, EditorScrollSourcePlan, TerminalCursorVisibilityInput,
-    TerminalEdgeSlotAction,
+    block_cursor_uniforms, terminal_cursor_visible, terminal_edge_slot_actions,
+    TerminalCursorVisibilityInput, TerminalEdgeSlotAction,
 };
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -60,16 +58,6 @@ pub(crate) struct PanelFrame {
     /// modules key everything off it.
     #[allow(dead_code)]
     rich_text_id: usize,
-    /// Editor scroll spring position in signed rows. This
-    /// feeds Neovide/Ghostty's floor(position)+row source
-    /// lookup; the fractional remainder becomes the pixel
-    /// offset applied uniformly to the grid.
-    editor_scroll_position_lines: f32,
-    /// Elastic rubber-band offset in physical pixels. Kept
-    /// separate from `editor_scroll_position_lines` because
-    /// only the real scrollback spring participates in
-    /// Neovide's row/fraction source lookup.
-    editor_elastic_offset_y: f32,
     /// Terminal smooth-scroll residual in physical pixels.
     /// Unlike the old whole-grid shift, this now feeds the
     /// per-grid uniform path so hidden edge rows can slide
@@ -78,33 +66,6 @@ pub(crate) struct PanelFrame {
     /// Rows reserved at the bottom for the off-grid command
     /// composer. Terminal output must clip above this band.
     terminal_reserved_bottom_rows: u32,
-    /// `true` for nvim editor panes — drives the buffer-
-    /// row allocation and snapshot-row write loop. Other
-    /// panes treat this as `false` and skip the buffer.
-    is_editor: bool,
-    /// Neovide-style 2x viewport scrollback ring for nvim
-    /// editor panes. During scroll animation, visible and
-    /// edge rows are sampled from this single coherent
-    /// buffer using signed floor-based row indices.
-    editor_scrollback: Option<(
-        Vec<
-            Option<
-                neoism_terminal_core::crosswords::grid::row::Row<
-                    neoism_terminal_core::crosswords::square::Square,
-                >,
-            >,
-        >,
-        isize,
-    )>,
-    /// Logical origin of the editor scrollback ring. This
-    /// is cheap to carry even when `editor_scrollback` is
-    /// not cloned for drawing, and it must stay available
-    /// so row-shift planning compares against the same
-    /// persistent ring base Neovide uses.
-    editor_scrollback_origin: Option<isize>,
-    editor_viewport_topline: u64,
-    editor_viewport_botline: u64,
-    editor_viewport_line_count: u64,
     /// One hidden row above the visible terminal viewport.
     /// Used for fractional smooth scroll; `None` for
     /// editor panes and when no older row exists.
@@ -200,9 +161,7 @@ pub(crate) struct PanelFrame {
 pub(crate) struct FrameCtx {
     window_id: neoism_window::window::WindowId,
     render_started: std::time::Instant,
-    editor_redraw_backlog_pending: bool,
     current_route: usize,
-    editor_scroll_was_animating: bool,
     window_update: Option<crate::context::renderable::WindowUpdate>,
     any_panel_dirty: bool,
     has_animation: bool,
@@ -358,31 +317,9 @@ impl Screen<'_> {
         // failure later. Nothing is rendered *through* the grid yet
         // — `sugarloaf.render()` is still called with no grids
         // slice below.
-        // Drain editor-pane redraws BEFORE we read grid dimensions —
-        // a `grid_resize` event may change them. Walk all editor
-        // contexts so hidden buffers cannot accumulate an unbounded
-        // redraw backlog and later stall the whole window.
-        let (_, editor_redraw_backlog_pending) =
-            self.context_manager.pump_editor_redraws();
-
         if self.context_manager.current().pending_terminal_resize {
-            let current_editor_row_fit = {
-                let current_grid = self.context_manager.current_grid();
-                current_grid.current_item().and_then(|item| {
-                    item.val.editor.as_ref().and_then(|_| {
-                        Self::editor_rows_above_bottom_chrome(
-                            item.layout_rect,
-                            current_grid.get_scaled_margin(),
-                            item.val.dimension,
-                            self.sugarloaf.window_size().height as f32,
-                            self.renderer.status_line_height()
-                                * self.sugarloaf.scale_factor(),
-                        )
-                    })
-                })
-            };
             let current = self.context_manager.current_mut();
-            if !Self::apply_context_resize(current, current_editor_row_fit) {
+            if !Self::apply_context_resize(current) {
                 crate::app::freeze_watchdog::mark_render_stage(
                     window_id,
                     "screen.render.skip_pending_resize_busy",
@@ -419,16 +356,13 @@ impl Screen<'_> {
             "screen.render.terminal_dimensions",
         );
         if grid_cols > 0 && grid_rows > 0 {
-            let is_editor = self.context_manager.current().editor.is_some();
-            self.ensure_grid(current_route, grid_cols, grid_rows, is_editor);
+            self.ensure_grid(current_route, grid_cols, grid_rows);
         }
 
         let mut frame_ctx = FrameCtx {
             window_id,
             render_started,
-            editor_redraw_backlog_pending,
             current_route,
-            editor_scroll_was_animating: false,
             window_update: None,
             any_panel_dirty: false,
             has_animation: false,
@@ -453,14 +387,6 @@ impl Screen<'_> {
 
         self.sync_status_and_chrome(&frame_ctx);
 
-        // Re-elect primary editor route every frame — handles
-        // workspace switches (the prior workspace's pinned route
-        // vanishes from the new grid) and split-pane closures (the
-        // primary may have been the closed pane, leaving us pointing
-        // at a dead route). Cheap: a single hash lookup when the
-        // current pin is still valid.
-        self.ensure_primary_editor_route();
-
         if self.poll_notebook_executions() {
             self.mark_dirty();
         }
@@ -470,7 +396,19 @@ impl Screen<'_> {
             .notebook
             .as_ref()
             .is_some_and(|notebook| notebook.has_running_cells());
-        if self.render_markdown_panels() {
+        // Panel springs must survive as ANIMATION owners past
+        // `renderer.run` (which consumes the dirty flag mid-frame):
+        // `mark_dirty` alone dies inside the same frame, and once no
+        // other animation (e.g. the trail cursor) is running, the
+        // scroll settle limps at blink-timer cadence (~4fps tail on
+        // long jumps). The bools are OR-ed into `frame_ctx
+        // .has_animation` AFTER `draw_overlays` (which assigns it).
+        let markdown_panels_animating = self.render_markdown_panels();
+        if markdown_panels_animating {
+            self.mark_dirty();
+        }
+        let code_panels_animating = self.render_code_panels();
+        if code_panels_animating {
             self.mark_dirty();
         }
         if self.render_draw_panels() {
@@ -484,9 +422,6 @@ impl Screen<'_> {
         }
         self.render_neoism_agent_panels();
 
-        frame_ctx.editor_scroll_was_animating =
-            self.step_editor_scroll_for_frame(animation_dt);
-
         let (window_update, any_panel_dirty) = self.renderer.run(
             &mut self.sugarloaf,
             &mut self.context_manager,
@@ -494,14 +429,12 @@ impl Screen<'_> {
         );
         frame_ctx.window_update = window_update;
         frame_ctx.any_panel_dirty = any_panel_dirty;
-        if frame_ctx.editor_redraw_backlog_pending {
-            self.mark_dirty();
-        }
 
         self.draw_overlays(&mut frame_ctx, animation_dt);
+        frame_ctx.has_animation |= markdown_panels_animating || code_panels_animating;
 
         self.snapshot_panels(&mut frame_ctx);
-        self.mask_editor_seams(&frame_ctx);
+        self.ensure_panel_grids(&frame_ctx);
         self.emit_and_present_grids(
             &frame_ctx,
             animation_dt,

@@ -1,23 +1,11 @@
 use super::*;
 
 impl Screen<'_> {
-    pub fn ensure_grid(
-        &mut self,
-        route_id: usize,
-        cols: u32,
-        rows: u32,
-        is_editor: bool,
-    ) {
+    pub fn ensure_grid(&mut self, route_id: usize, cols: u32, rows: u32) {
         use std::collections::hash_map::Entry;
-        // Editor panes allocate one extra edge row above and below the
-        // visible viewport. Large integer scroll lag is handled by
-        // source-row remapping into visible slots; only the fractional
-        // row entering/leaving the viewport needs an offscreen slot.
-        let total_rows = if is_editor {
-            rows + EDITOR_BUFFER_ABOVE + EDITOR_BUFFER_BELOW
-        } else {
-            rows + TERMINAL_BUFFER_ABOVE + TERMINAL_BUFFER_BELOW
-        };
+        // One extra edge row above and below the visible viewport so a
+        // fractional smooth-scroll row can slide in/out of view.
+        let total_rows = rows + TERMINAL_BUFFER_ABOVE + TERMINAL_BUFFER_BELOW;
         match self.grids.entry(route_id) {
             Entry::Occupied(mut e) => e.get_mut().resize(cols, total_rows),
             Entry::Vacant(e) => {
@@ -33,7 +21,6 @@ impl Screen<'_> {
     #[allow(dead_code)]
     pub fn drop_grid(&mut self, route_id: usize) {
         self.grids.remove(&route_id);
-        self.editor_scroll_grid_states.remove(&route_id);
     }
 
     pub(crate) fn normalize_workspace_root(path: PathBuf) -> PathBuf {
@@ -65,8 +52,7 @@ impl Screen<'_> {
 
     pub(crate) fn active_terminal_process_cwd(&self) -> Option<PathBuf> {
         let current = self.context_manager.current();
-        if current.editor.is_some()
-            || current.markdown.is_some()
+        if current.markdown.is_some()
             || current.notebook.is_some()
             || current.neoism_agent.is_some()
             || current.neoism_tags.is_some()
@@ -99,8 +85,7 @@ impl Screen<'_> {
 
     pub(crate) fn current_terminal_completion_cwd(&self) -> Option<PathBuf> {
         let current = self.context_manager.current();
-        if current.editor.is_some()
-            || current.markdown.is_some()
+        if current.markdown.is_some()
             || current.notebook.is_some()
             || current.neoism_agent.is_some()
             || current.neoism_tags.is_some()
@@ -161,12 +146,11 @@ impl Screen<'_> {
                 .or_else(|| std::env::current_dir().ok())
                 .map(Self::normalize_workspace_root);
         }
-        if let Some(editor) = current.editor.as_ref() {
-            let cfg = editor.config();
+        if let Some(code) = current.code.as_ref() {
             return self
                 .active_workspace_root
                 .clone()
-                .or_else(|| cfg.cwd.clone())
+                .or_else(|| code.path.parent().map(Path::to_path_buf))
                 .or_else(|| {
                     self.renderer
                         .buffer_tabs
@@ -257,10 +241,6 @@ impl Screen<'_> {
             return false;
         };
         let changed = self.active_workspace_root.as_deref() != Some(root.as_path());
-        let current_grid = self.context_manager.current_grid();
-        let sync_editor = changed
-            && self.context_manager.current().editor.is_none()
-            && current_grid.root == Some(current_grid.current);
         if changed {
             self.active_workspace_root = Some(root.clone());
             if let Some(workspace_id) = self.current_workspace_id() {
@@ -279,7 +259,6 @@ impl Screen<'_> {
                 changed,
                 force_tree_refresh,
                 tree_visible = self.renderer.file_tree.is_visible(),
-                sync_editor,
                 "set active workspace root"
             );
         }
@@ -292,9 +271,6 @@ impl Screen<'_> {
             || (self.renderer.file_tree.is_visible() && tree_root_changed)
         {
             self.populate_file_tree_from_dir(&root);
-        }
-        if sync_editor {
-            self.sync_editor_cwd_to_workspace(&root);
         }
         changed || tree_root_changed
     }
@@ -355,51 +331,6 @@ impl Screen<'_> {
                     "cleared BufEnter guard"
                 );
             }
-        }
-    }
-
-    pub(crate) fn should_accept_buf_enter(
-        &mut self,
-        workspace_id: Option<crate::screen::WorkspaceKey>,
-        path: &Path,
-    ) -> bool {
-        let Some(id) = workspace_id else {
-            return true;
-        };
-        let Some(target) = self.workspace_buf_enter_targets.get(&id).cloned() else {
-            tracing::trace!(
-                target: "neoism::editor_tabs",
-                workspace_id = id,
-                path = %path.display(),
-                "accepted BufEnter without guard"
-            );
-            return true;
-        };
-        let expected = target
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "<terminal>".to_string());
-        let accepted = target
-            .as_ref()
-            .is_some_and(|target| target.as_path() == path);
-        self.workspace_buf_enter_targets.remove(&id);
-        if accepted {
-            tracing::info!(
-                target: "neoism::editor_tabs",
-                workspace_id = id,
-                path = %path.display(),
-                "accepted guarded BufEnter"
-            );
-            true
-        } else {
-            tracing::warn!(
-                target: "neoism::editor_tabs",
-                workspace_id = id,
-                path = %path.display(),
-                expected,
-                "rejected stale BufEnter"
-            );
-            false
         }
     }
 
@@ -560,16 +491,6 @@ impl Screen<'_> {
         self.renderer.trail_cursor.reset();
     }
 
-    pub(crate) fn sync_editor_cwd_to_workspace(&mut self, root: &Path) {
-        let command =
-            neoism_backend::performer::nvim::vim_cd_command(&root.display().to_string());
-        for (_, item) in self.context_manager.current_grid().contexts() {
-            if let Some(editor) = item.context().editor.as_ref() {
-                editor.command(command.clone());
-            }
-        }
-    }
-
     pub(crate) fn activate_workspace_terminal_tab(&mut self) {
         let workspace_id = self.current_workspace_id();
         tracing::info!(
@@ -672,7 +593,7 @@ impl Screen<'_> {
             ));
         self.apply_workspace_active_path_update(workspace_id.clone(), &path_update);
 
-        let cmd = match target {
+        match target {
             neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path) => {
                 self.renderer.file_tree.set_active_path(Some(path.clone()));
                 self.activate_markdown_path(path);
@@ -706,46 +627,14 @@ impl Screen<'_> {
                     "activating workspace file tab"
                 );
                 self.renderer.file_tree.set_active_path(Some(path.clone()));
-                neoism_backend::performer::nvim::vim_select_file_command(
-                    &path.display().to_string(),
-                )
+                self.activate_code_path(path);
+                self.reapply_chrome_layout();
+                self.renderer.trail_cursor.reset();
+                self.mark_dirty();
+                return true;
             }
-            neoism_ui::panels::buffer_tabs::BufferTabTarget::Scratch(scratch_id) => {
-                tracing::info!(
-                    target: "neoism::editor_tabs",
-                    ?workspace_id,
-                    tab_index = ix,
-                    scratch_id,
-                    "activating workspace scratch tab"
-                );
-                self.renderer.file_tree.set_active_path(None);
-                neoism_backend::performer::nvim::vim_scratch_select_command(scratch_id)
-            }
-        };
-
-        // Workspace strip belongs to the primary editor pane. Switch
-        // focus to it before sending the edit/select so the buffer
-        // opens in the primary pane (the user expects clicking a
-        // left-strip tab to focus the left pane), and route the command
-        // to that specific nvim instance — not "whichever editor
-        // `send_editor_command_raw` picks first," which after a
-        // tear-out can be the split's.
-        if let Some(primary_route) = self.renderer.primary_editor_route {
-            if let Some(node) = self
-                .context_manager
-                .current_grid()
-                .node_by_route_id(primary_route)
-            {
-                let _ = self
-                    .context_manager
-                    .current_grid_mut()
-                    .set_current_node(node, &mut self.sugarloaf);
-                self.context_manager.select_route_from_current_grid();
-            }
-            self.send_editor_command_to_route(primary_route, cmd);
-        } else {
-            self.send_editor_command_raw(cmd);
         }
+
         let sent_at = std::time::Instant::now();
         self.sync_current_workspace_buffer_files();
         let layout_at = std::time::Instant::now();
@@ -789,9 +678,6 @@ impl Screen<'_> {
                     tab.title.clone(),
                     format!("chrome page · {}", page.kind.title()),
                 ),
-                Some(BufferTabTarget::Scratch(_)) => {
-                    (tab.title.clone(), "unnamed buffer".to_string())
-                }
                 None if tab.terminal_route_id.is_none() => {
                     let workspace_root = self
                         .active_workspace_root
@@ -858,9 +744,6 @@ impl Screen<'_> {
                     }
                     Some(BufferTabTarget::ChromePage(page)) => {
                         format!("pane {route_id} · chrome page · {}", page.kind.title())
-                    }
-                    Some(BufferTabTarget::Scratch(_)) => {
-                        format!("pane {route_id} · unnamed buffer")
                     }
                     None => format!("pane {route_id} · terminal"),
                 };

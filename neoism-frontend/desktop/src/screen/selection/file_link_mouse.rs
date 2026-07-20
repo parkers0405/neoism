@@ -8,7 +8,7 @@ impl Screen<'_> {
         }
         let display_offset = {
             let current = self.context_manager.current();
-            if current.editor.is_some()
+            if current.code.is_some()
                 || current.markdown.is_some()
                 || current.notebook.is_some()
                 || current.neoism_agent.is_some()
@@ -88,7 +88,7 @@ impl Screen<'_> {
         }
         let display_offset = {
             let current = self.context_manager.current();
-            if current.editor.is_some()
+            if current.code.is_some()
                 || current.markdown.is_some()
                 || current.notebook.is_some()
                 || current.neoism_agent.is_some()
@@ -110,7 +110,7 @@ impl Screen<'_> {
         point: Pos,
     ) -> Option<crate::terminal::file_link::FileLink> {
         let current = self.context_manager.current();
-        if current.editor.is_some()
+        if current.code.is_some()
             || current.markdown.is_some()
             || current.notebook.is_some()
             || current.neoism_agent.is_some()

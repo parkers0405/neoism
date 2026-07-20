@@ -1,8 +1,7 @@
 // JS-side bridge for `neoism-protocol::diagnostics`.
 //
-// The desktop frontend pulls LSP diagnostics off its embedded nvim
-// (`vim.diagnostic.get` shim). The web frontend has no local nvim, so
-// the daemon forwards LSP diagnostics over the WebSocket per-route.
+// The web frontend has no local language servers, so the daemon
+// forwards LSP diagnostics over the WebSocket per-route.
 // The chrome subscribes to a route before the daemon starts pushing;
 // this keeps per-session bandwidth bounded to whatever the UI is
 // actually rendering.

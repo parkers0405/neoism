@@ -1197,6 +1197,13 @@ fn virtual_markdown_code_lang(lang: &str) -> Lang {
         "lua" => Lang::Lua,
         "toml" => Lang::Toml,
         "json" | "jsonc" => Lang::Json,
+        "nix" => Lang::Nix,
+        "bash" | "sh" | "shell" | "zsh" => Lang::Bash,
+        "c" | "h" => Lang::C,
+        "cpp" | "c++" | "cc" | "cxx" | "hpp" => Lang::Cpp,
+        "yaml" | "yml" => Lang::Yaml,
+        "css" => Lang::Css,
+        "html" | "htm" => Lang::Html,
         _ => Lang::Other,
     }
 }

@@ -18,7 +18,6 @@ impl Screen<'_> {
             file_tree_visible = self.renderer.file_tree.is_visible(),
             search_active = self.search_active(),
             hint_active = self.hint_state.is_active(),
-            editor_active = self.context_manager.current().editor.is_some(),
             state = ?key.state,
             repeat = key.repeat,
             logical_key = ?key.logical_key,
@@ -46,20 +45,6 @@ impl Screen<'_> {
         }
 
         if self.handle_context_menu_key(key, clipboard) {
-            return;
-        }
-
-        // Match the conventional editor Quick Fix chord on every platform.
-        // Consume both edges so the release cannot leak into nvim after the
-        // modal changes focus.
-        if Self::is_lsp_quick_fix_key(key, mods)
-            && self.context_manager.current().editor.is_some()
-        {
-            if key.state == ElementState::Pressed && !self.renderer.modal.is_active() {
-                self.execute_lsp_context_action(
-                    neoism_ui::panels::context_menu::LspContextAction::CodeAction,
-                );
-            }
             return;
         }
 
@@ -287,21 +272,16 @@ impl Screen<'_> {
             // consume it as copy before it can leak visible `5~` text
             // into chat TUIs.
             neoism_ui::selection_input::EarlyKeyDispatchAction::ControlInsert => {
-                if self.context_manager.current().editor.is_some() {
-                    self.send_editor_command(
-                        neoism_backend::performer::nvim::vim_copy_active_command(),
-                    );
-                } else {
-                    self.copy_selection(ClipboardType::Clipboard, clipboard);
-                }
+                self.copy_selection(ClipboardType::Clipboard, clipboard);
                 return;
             }
             neoism_ui::selection_input::EarlyKeyDispatchAction::ShiftInsert => {
                 let content = clipboard.get(ClipboardType::Clipboard);
-                if self.context_manager.current().editor.is_some() {
-                    self.send_editor_command(
-                        neoism_backend::performer::nvim::vim_paste_command(&content),
-                    );
+                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    code.buffer.insert_text(&content);
+                    self.sync_active_code_modified();
+                    self.renderer.trail_cursor.reset();
+                    self.mark_dirty();
                 } else if let Some(markdown) =
                     self.context_manager.current_mut().active_markdown_mut()
                 {
@@ -590,14 +570,14 @@ impl Screen<'_> {
             "screen text resolved for key"
         );
 
-        // Mid-stage consumption gates: search bar → editor pane →
+        // Mid-stage consumption gates: search bar → code surface →
         // markdown surface → vi-mode no-op. The shared dispatcher in
         // `neoism_ui::selection_input::mid_key_event_dispatch` mirrors
         // the original chained `if` precedence exactly; each match arm
         // below just runs the side effect the original branch ran.
         let mid_dispatch_input = neoism_ui::selection_input::MidKeyDispatchInput {
             search_active: self.search_active(),
-            editor_active: self.context_manager.current().editor.is_some(),
+            code_active: self.context_manager.current().code.is_some(),
             markdown_active: self.context_manager.current().markdown.is_some()
                 || self.context_manager.current().notebook.is_some(),
             vi_mode: mode.contains(Mode::VI),
@@ -617,65 +597,8 @@ impl Screen<'_> {
                 self.mark_dirty();
                 return;
             }
-            // Editor pane: skip the terminal byte-builder entirely.
-            // Arrow keys, Backspace, Enter, etc. produce empty `bytes`
-            // in non-kitty terminal mode (since nvim's tab is just a
-            // normal pty with no kitty kbd protocol active), and the
-            // old code only forwarded to nvim when `!bytes.is_empty()`
-            // — silently dropping every special key. Hoist the editor
-            // dispatch here so it sees the raw KeyEvent and translates
-            // via `format_key_for_nvim` for ALL keys, not just textual
-            // ones.
-            neoism_ui::selection_input::MidKeyDispatchAction::RouteToEditor => {
-                if let Some(notation) = Self::format_key_for_nvim(key, mods) {
-                    if std::env::var_os(SCROLL_LOG_ENV).is_some() {
-                        let now = std::time::Instant::now();
-                        let since_last_key_ms = self
-                            .last_editor_key_log_at
-                            .map(|last| now.duration_since(last).as_secs_f32() * 1000.0);
-                        let same_as_previous =
-                            self.last_editor_key_log_notation.as_deref()
-                                == Some(notation.as_str());
-                        self.last_editor_key_log_at = Some(now);
-                        self.last_editor_key_log_notation = Some(notation.clone());
-                        let vertical_motion = matches!(
-                            notation.as_str(),
-                            "<Up>" | "<Down>" | "j" | "k" | "<C-d>" | "<C-u>"
-                        );
-                        if key.repeat || vertical_motion {
-                            tracing::info!(
-                                target: "neoism::editor_key",
-                                route_id,
-                                notation = %notation.escape_debug(),
-                                repeat = key.repeat,
-                                same_as_previous,
-                                since_last_key_ms = ?since_last_key_ms,
-                                state = ?key.state,
-                                logical_key = ?key.logical_key,
-                                physical_key = ?key.physical_key,
-                                modifiers = ?mods,
-                                editor_mode = ?self.context_manager.current().editor_mode,
-                                "editor key dispatched to nvim"
-                            );
-                        }
-                    }
-                    tracing::trace!(
-                        target: "neoism::input",
-                        route_id,
-                        notation = %notation.escape_debug(),
-                        "dispatching key to editor pane (early)"
-                    );
-                    self.scroll_bottom_when_cursor_not_visible();
-                    self.clear_selection();
-                    self.dispatch_editor_key(notation);
-                } else {
-                    tracing::trace!(
-                        target: "neoism::input",
-                        route_id,
-                        logical_key = ?key.logical_key,
-                        "editor pane dropped key: no nvim notation"
-                    );
-                }
+            neoism_ui::selection_input::MidKeyDispatchAction::RouteToCode => {
+                self.dispatch_code_key(key, mods, &text, clipboard);
                 return;
             }
             neoism_ui::selection_input::MidKeyDispatchAction::RouteToMarkdown => {
@@ -736,18 +659,15 @@ impl Screen<'_> {
             byte_len = bytes.len(),
             bytes_hex = %Self::bytes_hex_for_log(&bytes),
             bytes_text = %Self::bytes_text_for_log(&bytes),
-            editor_active = self.context_manager.current().editor.is_some(),
             "screen output bytes built"
         );
 
-        // Post-build output dispatch: empty → log no-op; editor pane
-        // active → re-translate key for nvim; else → write bytes to
-        // PTY. Precedence lives in
+        // Post-build output dispatch: empty → log no-op; else → write
+        // bytes to PTY. Precedence lives in
         // `neoism_ui::selection_input::terminal_output_dispatch`.
         let output_action = neoism_ui::selection_input::terminal_output_dispatch(
             neoism_ui::selection_input::TerminalOutputDispatchInput {
                 bytes_empty: bytes.is_empty(),
-                editor_active: self.context_manager.current().editor.is_some(),
             },
         );
         match output_action {
@@ -759,32 +679,6 @@ impl Screen<'_> {
                     text = %text.escape_debug(),
                     "screen key event produced no output bytes"
                 );
-            }
-            neoism_ui::selection_input::TerminalOutputDispatchAction::RouteToEditor => {
-                self.scroll_bottom_when_cursor_not_visible();
-                self.clear_selection();
-
-                // Editor panes don't have a PTY — keystrokes go to nvim
-                // via msgpack-rpc instead. Build nvim's key notation
-                // here from the same KeyEvent (ignore the just-built
-                // `bytes`, which is terminal escape sequences nvim
-                // doesn't want).
-                if let Some(notation) = Self::format_key_for_nvim(key, mods) {
-                    tracing::trace!(
-                        target: "neoism::input",
-                        route_id,
-                        notation = %notation.escape_debug(),
-                        "dispatching key to editor pane"
-                    );
-                    self.dispatch_editor_key(notation);
-                } else {
-                    tracing::trace!(
-                        target: "neoism::input",
-                        route_id,
-                        logical_key = ?key.logical_key,
-                        "editor pane dropped key: no nvim notation"
-                    );
-                }
             }
             neoism_ui::selection_input::TerminalOutputDispatchAction::SendToPty => {
                 self.scroll_bottom_when_cursor_not_visible();

@@ -49,7 +49,6 @@ use neoism_workspace_daemon::auth::AuthService;
 use neoism_workspace_daemon::cloud_auth::ENV_CLOUD_PROVISION_TOKEN;
 use neoism_workspace_daemon::crdt::sync::CrdtSyncHub;
 use neoism_workspace_daemon::handshake::PairingTokenStore;
-use neoism_workspace_daemon::nvim::NvimSessionRegistry;
 use neoism_workspace_daemon::server::{self, AppState};
 use neoism_workspace_daemon::sessions::SessionRegistry;
 use neoism_workspace_daemon::workspace::{self, ConnectionWorkspace, WorkspaceManager};
@@ -208,7 +207,6 @@ fn build_daemon() -> Daemon {
         sessions: SessionRegistry::shared(),
         workspaces: WorkspaceManager::bootstrap(),
         pairing_tokens: PairingTokenStore::in_memory(),
-        nvim_sessions: NvimSessionRegistry::new(),
         crdt: CrdtSyncHub::default(),
         paired_hosts: neoism_workspace_daemon::hosts::PairedHostStore::in_memory(),
     });
@@ -467,7 +465,6 @@ impl TargetDaemon {
             sessions: SessionRegistry::shared(),
             workspaces: WorkspaceManager::bootstrap(),
             pairing_tokens: PairingTokenStore::in_memory(),
-            nvim_sessions: NvimSessionRegistry::new(),
             crdt: CrdtSyncHub::default(),
             paired_hosts: neoism_workspace_daemon::hosts::PairedHostStore::in_memory(),
         });
@@ -599,7 +596,6 @@ async fn promote_succeeds_when_agent_export_unreachable() {
         sessions: SessionRegistry::shared(),
         workspaces: workspaces.clone(),
         pairing_tokens: PairingTokenStore::in_memory(),
-        nvim_sessions: NvimSessionRegistry::new(),
         crdt: CrdtSyncHub::default(),
         paired_hosts: neoism_workspace_daemon::hosts::PairedHostStore::in_memory(),
     });

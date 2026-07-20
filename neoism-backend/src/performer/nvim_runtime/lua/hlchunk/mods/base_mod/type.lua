@@ -1,8 +1,0 @@
----@class HlChunk.MetaInfo
----@field name string
----@field augroup_name string
----@field hl_base_name string
----@field ns_id number
----@field hl_name_list string[]
----@field shiftwidth number
----@field leftcol number

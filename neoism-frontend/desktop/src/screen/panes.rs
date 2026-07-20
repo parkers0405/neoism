@@ -74,7 +74,7 @@ impl<'a> neoism_ui::session_layout::ContextGridLike for ContextGridDescriptorAda
                 let shell_pid = 0u32;
                 (
                     shell_pid,
-                    context.editor.is_none()
+                    context.code.is_none()
                         && context.markdown.is_none()
                         && context.neoism_agent.is_none()
                         && context.neoism_tags.is_none(),

@@ -5,9 +5,7 @@ use neoism_ui::panels::breadcrumbs::Breadcrumbs;
 use neoism_ui::panels::buffer_tabs::BufferTab;
 use neoism_ui::panels::completion_menu::CompletionMenu;
 use neoism_ui::panels::context_menu::ContextMenu;
-use neoism_ui::panels::cursorline_overlay::CursorlineOverlay;
 use neoism_ui::panels::diagnostics_popup::DiagnosticsPopup;
-use neoism_ui::panels::editor_scroll::EditorScroll;
 use neoism_ui::panels::minimap::Minimap;
 use neoism_ui::panels::notifications::Notifications;
 use neoism_ui::panels::search::SearchOverlay;
@@ -60,7 +58,6 @@ impl ChromeBridge {
                 modified: false,
                 path: None,
                 markdown: false,
-                scratch_id: None,
                 terminal_route_id: None,
                 neoism_agent_route_id: None,
                 chrome_page: None,
@@ -114,10 +111,8 @@ impl ChromeBridge {
         chrome.install_search(SearchOverlay::default());
         chrome.install_git_branch(GitBranch::new());
         chrome.install_custom_cursor(CustomCursor::new());
-        chrome.install_cursorline_overlay(CursorlineOverlay::new());
         chrome.install_trail_cursor(TrailCursor::new());
         chrome.install_yank_flash(YankFlash::new());
-        chrome.install_editor_scroll(EditorScroll::new());
 
         let shared = SharedState(Rc::new(RefCell::new(JsServiceState::new())));
 
@@ -145,23 +140,11 @@ impl ChromeBridge {
             tab_contents: std::collections::HashMap::new(),
             last_markdown_viewport_h: 600.0,
             markdown_crdt_client_id: generate_crdt_client_id(),
-            editor_viewport_textoff: 0,
             markdown_crdt_binding: None,
             crdt_outbound: Vec::new(),
             tab_paths: std::collections::HashMap::new(),
             tab_kinds: std::collections::HashMap::new(),
             active_font_scale: 1.0,
-            editor_grid_snapshot: None,
-            editor_grid_snapshots:
-                neoism_ui::editor_snapshot::EditorGridSnapshotStore::new(),
-            editor_grid_surface_id: None,
-            editor_default_fg: 0x00FF_FFFF,
-            editor_default_bg: 0x0000_0000,
-            editor_viewport_topline: 0,
-            editor_viewport_botline: 0,
-            editor_viewport_line_count: 0,
-            pending_grid_scroll_animation_rows: 0,
-            nvim_send: None,
             pty_outbox: None,
             last_dpr_scale: 1.0,
             terminal_blocks: TerminalInputBuffer::default(),

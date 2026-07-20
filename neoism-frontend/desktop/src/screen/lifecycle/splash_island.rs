@@ -22,7 +22,7 @@ impl Screen<'_> {
             self.renderer.command_palette.set_enabled(false);
         }
         if !matches!(keep, SplashModalKind::Finder) {
-            self.renderer.finder.close();
+            self.close_finder_overlay();
         }
         // Search bar / assistant / context menu / universal
         // modal are never opened by the splash menu, so always

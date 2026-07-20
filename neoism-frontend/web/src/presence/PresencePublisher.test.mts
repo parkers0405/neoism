@@ -5,7 +5,7 @@ import {
   PresencePublisher,
   PRESENCE_HEARTBEAT_INTERVAL_MS,
 } from "./PresencePublisher.ts";
-import { stablePresenceColor } from "../editor/nvim/NvimPresence.ts";
+import { stablePresenceColor } from "./presenceColor.ts";
 import type {
   CrdtClientMessage,
   CrdtPeerPresence,

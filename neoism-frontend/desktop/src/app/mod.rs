@@ -54,7 +54,6 @@ const FRAME_WATCHDOG_NOTE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub mod bell;
 pub mod daemon_pump;
-pub mod editor_grid_diag;
 pub mod freeze_watchdog;
 pub mod ime;
 pub mod messenger;
@@ -303,9 +302,9 @@ impl Application<'_> {
                             window_id, event_loop, message,
                         );
                     }
-                    DaemonServerMessage::Editor { message, .. } => {
-                        self.apply_daemon_editor_message(window_id, message);
-                    }
+                    // nvim removed — remote editor surfaces are gone;
+                    // daemon Editor messages are ignored.
+                    DaemonServerMessage::Editor { .. } => {}
                     DaemonServerMessage::Pty { message, .. } => {
                         self.apply_daemon_pty_message(window_id, message);
                     }
@@ -373,9 +372,6 @@ impl Application<'_> {
                 .unwrap_or_default();
             for message in parked_messages {
                 match message {
-                    DaemonServerMessage::Editor { message, .. } => {
-                        self.apply_daemon_editor_message(window_id, message);
-                    }
                     DaemonServerMessage::Pty { message, .. } => {
                         self.apply_daemon_pty_message(window_id, message);
                     }
@@ -1207,22 +1203,6 @@ impl Application<'_> {
                 std::slice::from_ref(workspace)
             }
             _ => &[],
-        }
-    }
-
-    fn apply_daemon_editor_message(
-        &mut self,
-        window_id: WindowId,
-        message: neoism_protocol::editor::EditorServerMessage,
-    ) {
-        if let Some(route) = self.router.routes.get_mut(&window_id) {
-            if route
-                .window
-                .screen
-                .apply_daemon_editor_message(message.clone())
-            {
-                route.request_redraw();
-            }
         }
     }
 

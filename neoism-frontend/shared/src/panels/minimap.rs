@@ -197,9 +197,9 @@ impl Minimap {
         self.snapshots.remove(&route_id).is_some()
     }
 
-    /// Apply a per-route minimap data push. The native path packs nvim's
-    /// `MinimapNotification` into `MinimapData` at the boundary so this
-    /// panel stays backend-free.
+    /// Apply a per-route minimap data push. The host packs its editor
+    /// state into `MinimapData` at the boundary so this panel stays
+    /// backend-free.
     pub fn apply_update(&mut self, route_id: usize, update: MinimapData) -> bool {
         if !self.enabled {
             return false;

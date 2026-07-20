@@ -320,8 +320,8 @@ impl CommandPalette {
 
     /// Selected ex-command suggestion, if the palette is in `:` mode.
     /// This lets Enter accept the highlighted canonical command name
-    /// (`LspInfo`) instead of forwarding lowercase/partial input
-    /// (`lspinfo`, `lsp`) that nvim would reject.
+    /// (`ThemePicker`) instead of dispatching lowercase/partial input
+    /// (`themepick`, `theme p`) the intercept table would reject.
     pub fn get_selected_ex_command(&self) -> Option<String> {
         self.filtered_rows()
             .get(self.selected_index)

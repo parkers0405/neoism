@@ -67,6 +67,24 @@ impl Finder {
                         });
                 }
             }
+            FinderMode::BufferLines => {
+                if search_key != self.last_executed_query {
+                    self.last_executed_query = search_key;
+                    self.refresh_buffer_results();
+                }
+            }
+            FinderMode::References => {
+                if search_key != self.last_executed_query {
+                    self.last_executed_query = search_key;
+                    self.refresh_reference_results();
+                }
+            }
+            FinderMode::Symbols => {
+                if search_key != self.last_executed_query {
+                    self.last_executed_query = search_key;
+                    self.refresh_symbol_results();
+                }
+            }
         }
         self.query_dirty_at = None;
         if self.selected_index >= self.results.len() {
@@ -126,6 +144,89 @@ impl Finder {
             }
             FileSearchMode::Exact => exact_git_results(q, &self.git_changes),
         };
+    }
+
+    /// In-memory scan of the snapshotted buffer lines (BufferLines
+    /// mode): plain case-sensitive substring match, one row per
+    /// matching line, capped at `BUFFER_MAX_RESULTS` rows.
+    /// `buffer_match_total` keeps the uncapped count for the badge.
+    pub(super) fn refresh_buffer_results(&mut self) {
+        let q = self.query.as_str();
+        if q.is_empty() {
+            self.results.clear();
+            self.buffer_match_total = 0;
+            return;
+        }
+        let mut total = 0usize;
+        let mut rows: Vec<(i32, Result_)> = Vec::new();
+        for (ix, line) in self.buffer_lines.iter().enumerate() {
+            if !line.contains(q) {
+                continue;
+            }
+            total += 1;
+            if rows.len() < super::state::BUFFER_MAX_RESULTS {
+                rows.push((
+                    0,
+                    Result_::Buffer(super::types::BufferLineResult {
+                        line: (ix + 1) as u32,
+                        text: line.trim().to_string(),
+                    }),
+                ));
+            }
+        }
+        self.buffer_match_total = total;
+        self.results = rows;
+    }
+
+    /// References mode: fuzzy-filter the installed hit list against
+    /// the query (`path:line text` haystack); an empty query shows
+    /// every hit in server order.
+    pub(super) fn refresh_reference_results(&mut self) {
+        let q = self.query.as_str();
+        if q.is_empty() {
+            self.results = self
+                .reference_rows
+                .iter()
+                .map(|row| (0, Result_::Grep(row.clone())))
+                .collect();
+            return;
+        }
+        let mut scored: Vec<(i32, Result_)> = self
+            .reference_rows
+            .iter()
+            .filter_map(|row| {
+                let haystack = format!("{}:{} {}", row.path, row.line, row.text);
+                let score = fuzzy_score(q, &haystack)?;
+                Some((score, Result_::Grep(row.clone())))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        self.results = scored;
+    }
+
+    /// Symbols mode: fuzzy-filter the installed symbol list against
+    /// the query (symbol-name haystack); an empty query shows every
+    /// symbol in document order.
+    pub(super) fn refresh_symbol_results(&mut self) {
+        let q = self.query.as_str();
+        if q.is_empty() {
+            self.results = self
+                .symbol_rows
+                .iter()
+                .map(|row| (0, Result_::Symbol(row.clone())))
+                .collect();
+            return;
+        }
+        let mut scored: Vec<(i32, Result_)> = self
+            .symbol_rows
+            .iter()
+            .filter_map(|row| {
+                let score = fuzzy_score(q, &row.name)?;
+                Some((score, Result_::Symbol(row.clone())))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        self.results = scored;
     }
 
     /// Ask the SearchService for fuzzy/exact file results. Returns

@@ -111,6 +111,7 @@ fn status_line_constructs() {
 
     let info = StatusInfo {
         mode: Mode::Insert,
+        pending_keys: None,
         primary: "src/main.rs".into(),
         primary_kind: PrimaryKind::File,
         branch: Some("main".into()),
@@ -130,7 +131,6 @@ fn status_line_constructs() {
             hint: 0,
         },
         cwd_label: Some("~/proj".into()),
-        pending_keys: None,
         fps: Some(120),
     };
     s.set_info(info);

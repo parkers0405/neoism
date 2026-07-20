@@ -73,10 +73,6 @@ if [[ ! -x "$DAEMON_BIN" ]]; then
   exit 1
 fi
 
-if ! command -v nvim >/dev/null 2>&1; then
-  echo "warn: nvim not in PATH; editor-surface tests will fail" >&2
-fi
-
 # Use a throwaway HOME to keep the harness from polluting the real
 # user's auth + workspace state (~/.config/neoism, ~/.local/share/neoism).
 ISOLATED_HOME="${NEOISM_E2E_HOME:-/tmp/neoism-e2e-home}"

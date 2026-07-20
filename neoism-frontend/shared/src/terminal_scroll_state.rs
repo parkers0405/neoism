@@ -1,7 +1,7 @@
 //! Per-pane terminal smooth-scroll state.
 //!
 //! Pixel-perfect smooth scroll for terminal panes — explicitly NOT a
-//! spring. The spring is reserved for nvim editor panes (matches
+//! spring. The spring is reserved for editor panes (matches
 //! neovide's "content lags into position over animation_length" feel).
 //! Terminals here behave like dragging a piece of paper: every wheel
 //! pixel moves content by exactly that pixel, and the sub-row residual

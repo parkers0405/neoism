@@ -192,8 +192,41 @@ pub struct VimPending {
 }
 
 impl VimPending {
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// nvim-style showcmd text for the status pill ("2d", "d2f", "g").
+    pub fn showcmd(&self) -> String {
+        let mut out = String::new();
+        if self.count1 > 0 {
+            out.push_str(&self.count1.to_string());
+        }
+        if let Some(op) = self.operator {
+            out.push(match op {
+                VimOperator::Delete => 'd',
+                VimOperator::Change => 'c',
+                VimOperator::Yank => 'y',
+                VimOperator::Indent => '>',
+                VimOperator::Outdent => '<',
+            });
+        }
+        if self.count2 > 0 {
+            out.push_str(&self.count2.to_string());
+        }
+        match self.stage {
+            VimStage::Ready => {}
+            VimStage::Find(kind) => out.push(match kind {
+                VimFindKind::To => 'f',
+                VimFindKind::ToBack => 'F',
+                VimFindKind::Till => 't',
+                VimFindKind::TillBack => 'T',
+            }),
+            VimStage::Replace => out.push('r'),
+            VimStage::Gee => out.push('g'),
+            VimStage::Object { around } => out.push(if around { 'a' } else { 'i' }),
+        }
+        out
     }
 
     fn current_count(&self) -> usize {

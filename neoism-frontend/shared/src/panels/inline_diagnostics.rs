@@ -25,14 +25,6 @@ pub enum InlineDiagnosticSeverity {
 }
 
 impl InlineDiagnosticSeverity {
-    pub fn from_nvim(severity: u8) -> Option<Self> {
-        match severity {
-            1 => Some(Self::Error),
-            2 => Some(Self::Warn),
-            _ => None,
-        }
-    }
-
     fn color(self, theme: &IdeTheme) -> u32 {
         match self {
             Self::Error => theme.red,

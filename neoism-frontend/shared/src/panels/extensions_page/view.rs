@@ -11,7 +11,8 @@ use crate::primitives::ide_theme::IdeTheme;
 use crate::primitives::{draw_text_with_occlusion, truncate_to_fit};
 
 use super::state::{
-    ExtensionStatus, ExtensionTab, NeoismExtensionsPane, RowAction, RowHit,
+    ExtensionFilter, ExtensionStatus, ExtensionTab, NeoismExtensionsPane, RowAction,
+    RowHit,
 };
 
 pub(crate) const HEADER_HEIGHT: f32 = 56.0;
@@ -45,8 +46,6 @@ const BUTTON_H: f32 = 32.0;
 const TAB_ORDER: &[(ExtensionTab, &str)] = &[
     (ExtensionTab::McpServers, "MCP Servers"),
     (ExtensionTab::LanguageServers, "Language Servers"),
-    (ExtensionTab::Formatters, "Formatters"),
-    (ExtensionTab::Linters, "Linters"),
     (ExtensionTab::TreeSitterParsers, "Syntax Parsers"),
     (ExtensionTab::Kernels, "Kernels"),
 ];
@@ -925,6 +924,27 @@ fn draw_card_list(
     let mut card_y = list_top - pane.scroll_top;
 
     let visible_indices = pane.visible_entries();
+
+    // Empty tab: say why instead of painting a blank list. The curated
+    // Formatters / Linters tabs can legitimately hold nothing — that
+    // capability lives in the language servers' cards.
+    if visible_indices.is_empty() {
+        let hint_opts = DrawOpts {
+            font_size: 13.0 * s,
+            color: theme.u8(theme.dim),
+            clip_rect: list_clip,
+            ..DrawOpts::default()
+        };
+        draw_text_with_occlusion(
+            sugarloaf,
+            x + 4.0 * s,
+            list_top + 18.0 * s,
+            empty_tab_hint(pane),
+            &hint_opts,
+            occlusion_rects,
+        );
+    }
+
     // visible_position is the on-screen row (used for selection
     // highlight + hit Focus payload). entry_idx points back into
     // `pane.entries` for content lookup.
@@ -1001,6 +1021,21 @@ fn draw_card_list(
     // Keyboard scroll-follow places the selected row in this same
     // scaled space, so hand it the scaled advance we just drew with.
     pane.set_list_row_advance(row_advance);
+}
+
+/// One-liner for an empty card list. Search / filters get a generic
+/// nothing-matches line; the curated Formatters and Linters tabs
+/// explain where that capability actually lives.
+fn empty_tab_hint(pane: &NeoismExtensionsPane) -> &'static str {
+    let filtered = !pane.search_query.trim().is_empty()
+        || pane.filter != ExtensionFilter::All
+        || (pane.tab_supports_language_filter() && pane.selected_language.is_some());
+    if filtered {
+        return "Nothing here matches the current search or filters.";
+    }
+    match pane.active_tab {
+        _ => "Nothing to show here yet.",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1235,8 +1270,13 @@ fn draw_card_body(
     );
     // Hit-rect for 1.3's click dispatch. Pushed after the row Focus
     // entry so click-resolution can prefer the button before falling
-    // back to row-level focus.
-    if !matches!(entry.status, ExtensionStatus::BuiltIn) {
+    // back to row-level focus. Informational states have no action.
+    if !matches!(
+        entry.status,
+        ExtensionStatus::BuiltIn
+            | ExtensionStatus::Detected
+            | ExtensionStatus::Unavailable
+    ) {
         row_hits.push(RowHit {
             rect: button_rect,
             action: RowAction::ToggleInstall(entry.id.clone()),
@@ -1260,7 +1300,12 @@ fn paint_install_button(
     let [bx, by, bw, bh] = rect;
 
     match status {
-        ExtensionStatus::BuiltIn => {
+        // Informational states: outlined, dim, no lifecycle action.
+        // `Detected` = usable binary Neoism does not manage; `Unavailable`
+        // = no binary and no managed installer for it.
+        ExtensionStatus::BuiltIn
+        | ExtensionStatus::Detected
+        | ExtensionStatus::Unavailable => {
             let btn_clip = clip.unwrap_or(rect);
             draw_rounded_rect_clipped(
                 sugarloaf,
@@ -1460,6 +1505,8 @@ fn paint_install_button(
 fn install_button_label(status: &ExtensionStatus) -> &'static str {
     match status {
         ExtensionStatus::BuiltIn => "Built in",
+        ExtensionStatus::Detected => "Detected",
+        ExtensionStatus::Unavailable => "No installer",
         ExtensionStatus::NotInstalled => "+ Install",
         ExtensionStatus::Installed { .. } => "Uninstall",
         ExtensionStatus::Installing { .. } => "Installing...",

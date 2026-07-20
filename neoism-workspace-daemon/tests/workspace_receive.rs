@@ -27,7 +27,6 @@ use axum::http::{header, Request, StatusCode};
 use neoism_workspace_daemon::auth::AuthService;
 use neoism_workspace_daemon::cloud_auth::ENV_CLOUD_PROVISION_TOKEN;
 use neoism_workspace_daemon::handshake::PairingTokenStore;
-use neoism_workspace_daemon::nvim::NvimSessionRegistry;
 use neoism_workspace_daemon::server::{self, AppState};
 use neoism_workspace_daemon::workspace::{
     self as workspace_handler, ConnectionWorkspace, WorkspaceManager,
@@ -154,7 +153,6 @@ fn build_harness() -> Harness {
         sessions: neoism_workspace_daemon::sessions::SessionRegistry::shared(),
         workspaces: workspaces.clone(),
         pairing_tokens,
-        nvim_sessions: NvimSessionRegistry::new(),
         crdt: neoism_workspace_daemon::crdt::sync::CrdtSyncHub::default(),
         paired_hosts: neoism_workspace_daemon::hosts::PairedHostStore::in_memory(),
     });

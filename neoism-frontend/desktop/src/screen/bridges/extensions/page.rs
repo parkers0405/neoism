@@ -95,7 +95,7 @@ impl Screen<'_> {
             .buffer_tabs
             .open_chrome_page(ChromePageKind::Extensions, route_id);
 
-        self.kick_mason_seed_if_needed();
+        self.kick_catalog_seed_if_needed();
         self.reapply_chrome_layout();
         self.renderer.trail_cursor.reset();
         self.mark_dirty();
@@ -140,12 +140,13 @@ impl Screen<'_> {
         }
     }
 
-    /// Build the initial `ExtensionEntry` list from the bundled MCP registry
-    /// merged with any Mason-cached LSP entries, joined against the local
-    /// `installed.json` so already-installed servers render with their
-    /// `Installed { version }` status. Also populates
-    /// `renderer.bundled_manifests` so the install/uninstall dispatcher
-    /// can re-resolve a full manifest from an `ExtensionEntry` id.
+    /// Build the `ExtensionEntry` list: the bundled MCP registry and
+    /// kernels joined against the local `installed.json`, plus one card
+    /// per adapter in the Neoism LSP engine's runtime registry (real
+    /// connected/installed state) and the compiled-in tree-sitter
+    /// grammars. Also populates `renderer.bundled_manifests` so the
+    /// install/uninstall dispatcher can re-resolve a full manifest from
+    /// an `ExtensionEntry` id.
     fn load_bundled_extension_entries(&mut self) -> Vec<ExtensionEntry> {
         let notes_manifest = neoism_notes_mcp_manifest();
         let memory_manifest = neoism_memory_mcp_manifest();
@@ -170,95 +171,9 @@ impl Screen<'_> {
             }
         }
 
-        // Mason LSPs: load from the cache if present (first launch will
-        // miss; `kick_mason_seed_if_needed` warms it asynchronously and
-        // the next open picks them up). Filter to entries whose
-        // categories mention "LSP" so the panel's Language Servers tab
-        // surfaces just them. Tag with "Language Server" for the same
-        // tab-filter substring-match reason.
-        // Mason: keep packages tagged as LSP / Formatter / Linter so the
-        // panel can split them across tabs. The "Tag" insertion below
-        // is a safety net — Mason's own category strings already cover
-        // most of the substrings the tabs match on, but a couple of
-        // entries categorise themselves only as "Compiler" / "Runtime"
-        // alongside one of the three; tagging makes the tab filter
-        // deterministic regardless of which category Mason picked.
-        let mason_path = neoism_extensions::mason::mason_cache_path();
-        match neoism_extensions::load_mason_registry(&mason_path) {
-            Ok(reg) => {
-                let translated = neoism_extensions::translate_registry(&reg);
-                let mut tool_manifests: Vec<ExtensionManifest> = Vec::new();
-                let mut unsupported_count = 0usize;
-                let mut lsp_count = 0usize;
-                let mut fmt_count = 0usize;
-                let mut lint_count = 0usize;
-                for mut m in translated {
-                    if !extension_manifest_supported_by_host(&m) {
-                        unsupported_count += 1;
-                        continue;
-                    }
-                    let is_lsp =
-                        m.categories.iter().any(|c| c.eq_ignore_ascii_case("LSP"));
-                    let is_fmt = m
-                        .categories
-                        .iter()
-                        .any(|c| c.eq_ignore_ascii_case("Formatter"));
-                    let is_lint = m
-                        .categories
-                        .iter()
-                        .any(|c| c.eq_ignore_ascii_case("Linter"));
-                    if !(is_lsp || is_fmt || is_lint) {
-                        continue;
-                    }
-                    // Ensure a tab-friendly tag is present so
-                    // `matches_tab` resolves cleanly. Multi-purpose
-                    // packages (e.g. ruff = LSP + Formatter + Linter)
-                    // appear in every tab they qualify for.
-                    if is_lsp
-                        && !m.categories.iter().any(|c| {
-                            c.eq_ignore_ascii_case("Language Server")
-                                || c.eq_ignore_ascii_case("LSP")
-                        })
-                    {
-                        m.categories.insert(0, "Language Server".to_string());
-                    }
-                    if is_lsp {
-                        lsp_count += 1;
-                    }
-                    if is_fmt {
-                        fmt_count += 1;
-                    }
-                    if is_lint {
-                        lint_count += 1;
-                    }
-                    tool_manifests.push(m);
-                }
-                tracing::info!(
-                    target: "neoism::extensions",
-                    mason_packages = reg.len(),
-                    lsp = lsp_count,
-                    formatters = fmt_count,
-                    linters = lint_count,
-                    unsupported = unsupported_count,
-                    "loaded mason registry"
-                );
-                mcp_manifests.extend(tool_manifests);
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target: "neoism::extensions",
-                    path = %mason_path.display(),
-                    ?err,
-                    "mason registry load failed; tool entries will appear after background fetch"
-                );
-            }
-        }
-
         let python_kernel_manifest = neoism_python_kernel_manifest();
         let rust_kernel_manifest = evcxr_jupyter_kernel_manifest();
-        let syntax_manifests = treesitter_parser_manifests();
         let mut manifests = mcp_manifests;
-        manifests.extend(syntax_manifests);
         manifests.insert(0, rust_kernel_manifest);
         manifests.insert(0, python_kernel_manifest);
         manifests.insert(0, memory_manifest);
@@ -286,53 +201,59 @@ impl Screen<'_> {
 
         // Populate the manifest cache keyed by id BEFORE consuming the
         // vec into entries — needed by the install/uninstall dispatch.
+        // Catalog manifests for the engine's language-server adapters are
+        // cached alongside so the LSP rows' Install/Uninstall buttons can
+        // resolve a real install plan by row id.
         self.renderer.bundled_manifests = manifests
             .iter()
             .map(|m| (m.id.clone(), m.clone()))
             .collect();
+        for manifest in catalog_manifests_for_engine_adapters() {
+            self.renderer
+                .bundled_manifests
+                .insert(manifest.id.clone(), manifest);
+        }
 
         let mut entries: Vec<ExtensionEntry> = manifests
             .into_iter()
             .map(|m| {
                 let installed_version =
-                    installed.get(&m.id).map(|e| e.version.clone()).or_else(|| {
-                        treesitter_lang_from_extension_id(&m.id)
-                            .filter(|lang| treesitter_parser_installed(lang))
-                            .map(|_| m.version.clone())
-                    });
+                    installed.get(&m.id).map(|e| e.version.clone());
                 extension_manifest_to_entry(m, installed_version)
             })
             .collect();
-        entries.extend(built_in_language_server_entries());
+        let workspace_root = self.active_pane_workspace_root();
+        entries.extend(language_server_entries(workspace_root.as_deref(), &installed));
+        entries.extend(built_in_syntax_entries());
         entries
     }
 
-    /// First-time-open trigger to background-fetch the Mason registry
-    /// snapshot. We don't block the UI on it — on cache miss the panel
-    /// just shows the bundled MCP entries this session and LSPs land on
-    /// next open. Subsequent opens hit `ensure_cached_mason_registry`'s
-    /// 24h freshness check and short-circuit immediately.
-    fn kick_mason_seed_if_needed(&mut self) {
-        if self.renderer.mason_seeded {
+    /// First-time-open trigger to background-fetch the package-catalog
+    /// snapshot that backs the language-server Install buttons. We don't
+    /// block the UI on it — on cache miss the LSP rows simply resolve
+    /// their install plans once the fetch lands. Subsequent opens hit
+    /// the cache's 24h freshness check and short-circuit immediately.
+    fn kick_catalog_seed_if_needed(&mut self) {
+        if self.renderer.catalog_seeded {
             return;
         }
-        self.renderer.mason_seeded = true;
+        self.renderer.catalog_seeded = true;
         // Detached: the result hits disk; the per-frame pump in
-        // `render_neoism_extensions_panels` watches `MASON_CACHE_FRESH`
+        // `render_neoism_extensions_panels` watches `CATALOG_CACHE_FRESH`
         // and re-seeds the visible pane's entries once this lands.
         ext_runtime_handle().spawn(async move {
             let _ = neoism_extensions::ensure_cached_mason_registry().await;
-            MASON_CACHE_FRESH.store(true, Ordering::Release);
+            CATALOG_CACHE_FRESH.store(true, Ordering::Release);
         });
     }
 
     /// Called from `render_neoism_extensions_panels` once per frame. If
-    /// the background Mason seed has reported a fresh cache since the
+    /// the background catalog seed has reported a fresh cache since the
     /// last call, rebuild the Extensions pane's entries (preserving
-    /// install state via `installed.json`) so LSP rows appear without
-    /// the user closing/reopening the tab.
-    pub(crate) fn drain_mason_cache_refresh(&mut self) {
-        if !MASON_CACHE_FRESH.swap(false, Ordering::AcqRel) {
+    /// install state via `installed.json`) so the language-server rows'
+    /// install plans resolve without the user closing/reopening the tab.
+    pub(crate) fn drain_catalog_cache_refresh(&mut self) {
+        if !CATALOG_CACHE_FRESH.swap(false, Ordering::AcqRel) {
             return;
         }
         let entries = self.load_bundled_extension_entries();
@@ -373,8 +294,8 @@ impl Screen<'_> {
 
     /// Drain the install tracker, applying the latest progress to each
     /// row and finalising completed jobs (write `installed.json`, agent
-    /// config, refresh nvim's managed bin map, flip row status). Called
-    /// per-frame BEFORE rendering so the visible bar tracks the runner.
+    /// config, flip row status). Called per-frame BEFORE rendering so
+    /// the visible bar tracks the runner.
     ///
     /// `pane` is `Some` only when the Extensions panel is currently
     /// rendered and we've swapped it out for mutation; modal-sourced
@@ -474,19 +395,15 @@ impl Screen<'_> {
 
         // Second pass: finalise completed jobs. We have to remove them
         // out-of-band so the borrow on `in_flight` is released before
-        // we mutate notifications / nvim broadcast paths.
+        // we mutate notifications / modal state.
         if completed.is_empty() {
             return;
         }
-        let mut retry_treesitter_syntax = false;
         for id in completed {
             let Some(job) = self.renderer.install_tracker.in_flight.remove(&id) else {
                 continue;
             };
             let source = job.source.clone();
-            if let InstallSource::TreeSitterParser { lang } = &source {
-                self.treesitter_installing.remove(lang);
-            }
             // futures::executor::block_on is safe here: the JoinHandle
             // already reports finished, so the underlying task completed
             // and the await is just a synchronous unwrap of its result.
@@ -546,19 +463,17 @@ impl Screen<'_> {
                             entry.status = ExtensionStatus::Installed {
                                 version: installed_entry.version.clone(),
                             };
+                            // Language-server rows: the binary now resolves
+                            // from the managed install dir — say so.
+                            if entry.lsp_source.is_some() {
+                                entry.lsp_source = Some("extension".to_string());
+                            }
                         }
                     }
                     self.finalize_install_success(&id, &source);
-                    // A newly-installed LSP/formatter binary needs no nvim
-                    // push anymore: the Neoism LSP engine re-reads the managed
-                    // bin map on every `status()`. Only tree-sitter parsers
-                    // still need an nvim-side syntax retry.
-                    if matches!(source, InstallSource::TreeSitterParser { .. }) {
-                        retry_treesitter_syntax = true;
-                    }
-                    // A newly-installed LSP server needs no nvim re-attach: the
-                    // Neoism's LSP engine discovers it from the managed bin map on its
-                    // next status()/completion query.
+                    // A newly-installed language-server binary needs no push:
+                    // the Neoism LSP engine re-reads the managed bin map every
+                    // time it resolves an adapter's command.
                 }
                 Ok(Err(err)) => {
                     if let Some(p) = pane.as_deref_mut() {
@@ -585,9 +500,6 @@ impl Screen<'_> {
                     );
                 }
             }
-        }
-        if retry_treesitter_syntax {
-            self.retry_treesitter_syntax_in_nvim();
         }
     }
 
@@ -647,10 +559,10 @@ impl Screen<'_> {
                     neoism_ui::widgets::modal::ModalSpec {
                         title: format!("Installed {display}"),
                         body: format!(
-                            "Neoism installed `{}` and asked embedded nvim to start the LSP for the current buffer again.",
+                            "Neoism installed `{}`. The built-in LSP engine picks the managed binary up automatically the next time the language is used.",
                             server
                         ),
-                        meta: "Use :LspInfo to inspect active clients.".to_string(),
+                        meta: "The Extensions page shows live server status.".to_string(),
                         input: None,
                         buttons: vec![neoism_ui::widgets::modal::ModalButton::new(
                             "Close",
@@ -661,26 +573,6 @@ impl Screen<'_> {
                         blocking: false,
                     },
                 );
-            }
-            InstallSource::TreeSitterParser { lang } => {
-                let display = crate::neoism::ide_tools::treesitter_install_spec(lang)
-                    .map(|spec| spec.display_name)
-                    .unwrap_or(lang);
-                self.renderer.notifications.push(
-                    format!("Installed {} syntax parser", display),
-                    NotificationLevel::Info,
-                );
-            }
-        }
-    }
-
-    pub(crate) fn retry_treesitter_syntax_in_nvim(&mut self) {
-        let cmd = neoism_backend::performer::nvim::vim_treesitter_retry_command();
-        for grid in self.context_manager.contexts_mut() {
-            for item in grid.contexts_mut().values_mut() {
-                if let Some(editor) = item.context().editor.as_ref() {
-                    editor.command(cmd.clone());
-                }
             }
         }
     }
@@ -743,36 +635,6 @@ impl Screen<'_> {
                                 neoism_ui::widgets::modal::ModalAction::Close,
                             ),
                         ],
-                        busy: false,
-                        blocking: true,
-                    });
-            }
-            InstallSource::TreeSitterParser { lang } => {
-                let display = crate::neoism::ide_tools::treesitter_install_spec(lang)
-                    .map(|spec| spec.display_name)
-                    .unwrap_or(lang);
-                self.renderer
-                    .modal
-                    .open(neoism_ui::widgets::modal::ModalSpec {
-                        title: format!("Could Not Install {display} Syntax"),
-                        body: err.to_string(),
-                        meta: "Install git/tree-sitter/cc if missing, then retry."
-                            .to_string(),
-                        input: None,
-                        buttons: vec![
-                        neoism_ui::widgets::modal::ModalButton::new(
-                            "Retry Install",
-                            "Enter",
-                            neoism_ui::widgets::modal::ModalAction::InstallTreesitter {
-                                lang: lang.clone(),
-                            },
-                        ),
-                        neoism_ui::widgets::modal::ModalButton::new(
-                            "Close",
-                            "Esc",
-                            neoism_ui::widgets::modal::ModalAction::Close,
-                        ),
-                    ],
                         busy: false,
                         blocking: true,
                     });

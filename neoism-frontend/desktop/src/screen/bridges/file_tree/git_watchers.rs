@@ -149,15 +149,6 @@ impl Screen<'_> {
         }
     }
 
-    pub(crate) fn request_file_tree_git_status_refresh(&self) {
-        self.context_manager.event_proxy().send_event(
-            neoism_backend::event::RioEventType::Rio(
-                neoism_backend::event::RioEvent::PrepareRefreshFileTreeGitStatus,
-            ),
-            self.context_manager.window_id(),
-        );
-    }
-
     pub(crate) fn sync_file_tree_watchers(&mut self) {
         self.sync_file_tree_git_watcher();
         self.sync_file_tree_fs_watcher();

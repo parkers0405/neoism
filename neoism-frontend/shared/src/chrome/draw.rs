@@ -13,12 +13,6 @@ use crate::layout::PanelLayout;
 use crate::panels::agent_pane::view as agent_pane_view;
 use crate::panels::splash_overlay::{SplashInjection, SplashOverlay};
 use crate::panels::terminal_splash::adapt_layout;
-use crate::render_policy::{
-    editor_cursorline_plan_for_mutated_snapshot,
-    terminal_grid_trail_cursor_destination_for_mutated_snapshot, CursorlinePlanInput,
-    EditorScrollState, GridPanelGeometry, ScaledMargin, TrailCursorPlanInput,
-};
-
 use crate::panels::{Panel, PanelContext};
 use crate::services::Services;
 
@@ -50,13 +44,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             _ => 1.0 / 60.0,
         };
         self.last_draw_time = Some(time);
-        if self.editor_scroll.is_animating() {
-            if !self.editor_scroll.step(dt) {
-                self.editor_grid_scrollback = None;
-            }
-        } else {
-            self.editor_grid_scrollback = None;
-        }
 
         // 1. Background strips: buffer tabs (top), status line (bottom).
         let layout = self.layout.clone();
@@ -213,57 +200,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 let effective_offset =
                     (self.scroll_offset_px + self.scroll_spring.position).max(0.0);
 
-                // Wave 16B: if the daemon's nvim proxy has pushed a
-                // grid snapshot for this tab, paint the cells directly.
-                // This is the live source of truth — nvim already
-                // resolved fg/bg per cell via its highlight table, so
-                // we walk the row-major buffer and emit one bg quad
-                // per non-default cell plus one glyph per non-empty
-                // cell. Cursor lands as an accent block with the
-                // cell's fg flipped to the theme bg for contrast.
-                if let Some(grid) = self.editor_grid.as_ref().filter(|grid| {
-                    editor_grid_has_visible_text(grid) || grid.cursor.is_some()
-                }) {
-                    let editor_cell_w =
-                        (terminal_rect.w / grid.width.max(1) as f32).max(1.0);
-                    let editor_cell_h =
-                        (terminal_rect.h / grid.height.max(1) as f32).max(1.0);
-                    let scroll_state = self.editor_grid_render_state(editor_cell_h);
-                    paint_editor_grid(
-                        sugarloaf,
-                        grid,
-                        self.editor_grid_scrollback.as_ref(),
-                        &self.editor_scrollback_above_rows,
-                        &self.editor_scrollback_below_rows,
-                        terminal_rect,
-                        &theme,
-                        editor_cell_w,
-                        editor_cell_h,
-                        scroll_state,
-                        self.editor_cursor_shape,
-                        false,
-                    );
-                    self.remember_editor_grid_render_state(scroll_state);
-                    // 7C-2: collaborators' carets ride over the grid —
-                    // the same colored bar + name flag markdown draws.
-                    crate::panels::remote_carets::render_editor_remote_carets(
-                        sugarloaf,
-                        &self.editor_remote_carets,
-                        &self.editor_remote_roster,
-                        self.editor_caret_topline,
-                        terminal_rect.x,
-                        terminal_rect.y,
-                        terminal_rect.w,
-                        terminal_rect.h,
-                        editor_cell_w,
-                        editor_cell_h,
-                        // The EXACT translation the grid cells render
-                        // under: whole-row shift through the scrollback
-                        // ring + the smooth-scroll pixel offset.
-                        scroll_state.source_line_offset,
-                        scroll_state.pixel_offset_y,
-                    );
-                } else if self.tab_lang == crate::syntax::Lang::Markdown {
+                if self.tab_lang == crate::syntax::Lang::Markdown {
                     if let Some(pane) = self.markdown_pane.as_mut() {
                         // The REAL renderer — same virtualized path as the
                         // desktop (Live Preview, caret, remote carets,
@@ -440,37 +377,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             },
             &ctx,
         );
-        let editor_grid_tab_active =
-            !self.is_terminal_tab_active() && !self.is_neoism_agent_tab_active();
-        if let Some((grid_w, grid_h)) = self
-            .editor_grid
-            .as_ref()
-            .filter(|_| editor_grid_tab_active)
-            .map(|grid| (grid.width, grid.height))
-        {
-            let editor_cell_w = (layout.terminal.w / grid_w.max(1) as f32).max(1.0);
-            let editor_cell_h = (layout.terminal.h / grid_h.max(1) as f32).max(1.0);
-            let scroll_state = self.editor_grid_render_state(editor_cell_h);
-            self.yank_flash.render(
-                sugarloaf,
-                layout.terminal.x,
-                layout.terminal.y + scroll_state.pixel_offset_y,
-                layout.terminal.w,
-                editor_cell_w,
-                editor_cell_h,
-                1.0,
-                &self.ide_theme,
-            );
-        } else {
-            self.yank_flash.draw(
-                sugarloaf,
-                &PanelLayout {
-                    bounds: layout.terminal,
-                    scale: 1.0,
-                },
-                &ctx,
-            );
-        }
+        self.yank_flash.draw(
+            sugarloaf,
+            &PanelLayout {
+                bounds: layout.terminal,
+                scale: 1.0,
+            },
+            &ctx,
+        );
         self.completion_menu.draw(
             sugarloaf,
             &PanelLayout {
@@ -494,61 +408,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 (window_w, window_h, 1.0),
                 &self.ide_theme,
             );
-        }
-
-        if editor_grid_tab_active && self.editor_grid.is_some() {
-            if let Some(grid) = self.editor_grid.as_ref() {
-                let overlay_cell_h =
-                    (layout.terminal.h / grid.height.max(1) as f32).max(1.0);
-                if let Some((row, _)) = grid.cursor {
-                    let plan = editor_cursorline_plan_for_mutated_snapshot(
-                        CursorlinePlanInput {
-                            geometry: GridPanelGeometry {
-                                panel_rect: [
-                                    layout.terminal.x,
-                                    layout.terminal.y,
-                                    layout.terminal.w,
-                                    layout.terminal.h,
-                                ],
-                                scaled_margin: ScaledMargin::default(),
-                                cell_width: (layout.terminal.w
-                                    / grid.width.max(1) as f32)
-                                    .max(1.0),
-                                cell_height: overlay_cell_h,
-                                columns: grid.width,
-                            },
-                            cursor_row: row as i32,
-                            visible_rows: grid.height as f32,
-                            editor_scroll: EditorScrollState {
-                                scroll_position_lines: self
-                                    .editor_scroll
-                                    .current_scroll_offset(EDITOR_GRID_SCROLL_ID),
-                                elastic_offset_y: self
-                                    .editor_scroll
-                                    .current_elastic_offset(EDITOR_GRID_SCROLL_ID),
-                                previous_source_line_offset: self
-                                    .editor_scroll_render_state
-                                    .map(|state| state.source_line_offset),
-                            },
-                        },
-                    );
-                    self.cursorline_overlay.set_target(
-                        EDITOR_GRID_SCROLL_ID,
-                        plan.target_y,
-                        plan.editor_scroll_animating,
-                    );
-                }
-                self.cursorline_overlay.tick();
-                self.cursorline_overlay.render(
-                    sugarloaf,
-                    EDITOR_GRID_SCROLL_ID,
-                    layout.terminal.x,
-                    layout.terminal.w,
-                    overlay_cell_h,
-                    1.0,
-                    &self.ide_theme,
-                );
-            }
         }
 
         // Modal overlays must draw before the shared trail cursor so
@@ -653,6 +512,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             modal_owns_editor_focus: false,
             agent_input_cursor_available,
             markdown_cursor_available,
+            // Web has no native code pane yet; the desktop feeds this.
+            code_cursor_available: false,
             terminal_block_input_active,
             trail_cursor_enabled: !markdown_active,
         }) {
@@ -716,114 +577,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             Some(TrailCursorOverlayTarget::TerminalGrid) => {
                 // Default terminal tabs have a cell cursor underneath
                 // the trail, so they only need the in-flight afterimage.
-                // Daemon nvim grids do not: `paint_editor_grid` suppresses
-                // its static cursor so this shared trail is the single
-                // visual cursor owner and must also paint when settled.
-                if let Some(grid) =
-                    self.editor_grid.as_ref().filter(|_| editor_grid_tab_active)
-                {
-                    let editor_cell_w =
-                        (layout.terminal.w / grid.width.max(1) as f32).max(1.0);
-                    let editor_cell_h =
-                        (layout.terminal.h / grid.height.max(1) as f32).max(1.0);
-                    if let Some((row, col)) = grid.cursor {
-                        let destination =
-                            terminal_grid_trail_cursor_destination_for_mutated_snapshot(
-                                TrailCursorPlanInput {
-                                    geometry: GridPanelGeometry {
-                                        panel_rect: [
-                                            layout.terminal.x,
-                                            layout.terminal.y,
-                                            layout.terminal.w,
-                                            layout.terminal.h,
-                                        ],
-                                        scaled_margin: ScaledMargin::default(),
-                                        cell_width: editor_cell_w,
-                                        cell_height: editor_cell_h,
-                                        columns: grid.width,
-                                    },
-                                    cursor_row: row as usize,
-                                    cursor_col: col as usize,
-                                    visible_rows: grid.height as f32,
-                                    editor_scroll: Some(EditorScrollState {
-                                        scroll_position_lines: self
-                                            .editor_scroll
-                                            .current_scroll_offset(EDITOR_GRID_SCROLL_ID),
-                                        elastic_offset_y: self
-                                            .editor_scroll
-                                            .current_elastic_offset(
-                                                EDITOR_GRID_SCROLL_ID,
-                                            ),
-                                        previous_source_line_offset: self
-                                            .editor_scroll_render_state
-                                            .map(|state| state.source_line_offset),
-                                    }),
-                                    last_editor_trail_cursor_cell: self
-                                        .last_editor_trail_cursor_cell,
-                                    rich_text_id: EDITOR_GRID_SCROLL_ID,
-                                },
-                            );
-                        self.last_editor_trail_cursor_cell = destination.next_last_cell;
-                        self.trail_cursor.set_cursor_shape(self.editor_cursor_shape);
-                        if destination.no_jump {
-                            // Scroll-driven move on the same nvim cell: shift
-                            // the destination WITHOUT re-ranking corners, then
-                            // let `animate` below glide the trailing edges with
-                            // the sliding buffer. (Previously we
-                            // `snap_to_destination`'d here, which froze the
-                            // edges so the nvim caret popped rigidly while every
-                            // other editor — markdown, side panels — trailed.
-                            // Desktop's `TerminalGrid` arm never snapped; this
-                            // brings web to parity.)
-                            self.trail_cursor.set_destination_no_jump(
-                                destination.x,
-                                destination.y,
-                                destination.width,
-                                destination.height,
-                            );
-                        } else {
-                            self.trail_cursor.set_destination(
-                                destination.x,
-                                destination.y,
-                                destination.width,
-                                destination.height,
-                            );
-                        }
-                    } else {
-                        self.last_editor_trail_cursor_cell = None;
-                    }
-                    self.trail_cursor.animate(editor_cell_w, editor_cell_h, dt);
-                    if self.trail_cursor.is_animating() {
-                        self.trail_cursor.draw(sugarloaf, 1.0, cursor_color);
-                    } else {
-                        self.trail_cursor.draw_always(sugarloaf, 1.0, cursor_color);
-                    }
-                } else {
-                    self.last_editor_trail_cursor_cell = None;
-                    self.trail_cursor.animate(cell_w, cell_h, dt);
-                    self.trail_cursor.draw_slim(
-                        sugarloaf,
-                        &PanelLayout {
-                            bounds: layout.terminal,
-                            scale: 1.0,
-                        },
-                        &ctx,
-                    );
-                }
+                self.trail_cursor.animate(cell_w, cell_h, dt);
+                self.trail_cursor.draw_slim(
+                    sugarloaf,
+                    &PanelLayout {
+                        bounds: layout.terminal,
+                        scale: 1.0,
+                    },
+                    &ctx,
+                );
             }
             Some(_) => {}
         }
-        if editor_grid_tab_active && self.editor_grid.is_some() {
-            self.editor_scroll.draw(
-                sugarloaf,
-                &PanelLayout {
-                    bounds: layout.terminal,
-                    scale: 1.0,
-                },
-                &ctx,
-            );
-        }
-
         // 6. Custom mouse-cursor sprite — paints on top of everything
         //    so the pointer sits above modal overlays. The desktop
         //    renderer drives this from its live `Mouse` struct; on the

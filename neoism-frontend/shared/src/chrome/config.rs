@@ -8,9 +8,7 @@ use crate::panels::breadcrumbs::Breadcrumbs;
 use crate::panels::buffer_tabs::BufferTabTarget;
 use crate::panels::completion_menu::CompletionMenu;
 use crate::panels::context_menu::ContextMenu;
-use crate::panels::cursorline_overlay::CursorlineOverlay;
 use crate::panels::diagnostics_popup::DiagnosticsPopup;
-use crate::panels::editor_scroll::EditorScroll;
 use crate::panels::minimap::Minimap;
 use crate::panels::notifications::Notifications;
 use crate::panels::search::SearchOverlay;
@@ -64,17 +62,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             terminal_input: SimpleInputBuffer::default(),
             tab_lang: crate::syntax::Lang::Other,
             markdown_pane: None,
-            editor_remote_carets: Vec::new(),
-            editor_remote_roster: Vec::new(),
-            editor_caret_topline: 0,
-            editor_grid: None,
-            editor_grid_scrollback: None,
-            editor_cursor_shape: neoism_terminal_core::ansi::CursorShape::Block,
-            editor_scroll_render_state: None,
-            editor_scrollback_origin: None,
-            editor_scrollback_above_rows: Vec::new(),
-            editor_scrollback_below_rows: Vec::new(),
-            last_editor_trail_cursor_cell: None,
             status_line: StatusLine::new(),
             buffer_tabs: BufferTabs::<A>::new(),
             top_bar: ChromeTopBar::new(),
@@ -96,10 +83,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             minimap: Minimap::new(),
             yank_flash: YankFlash::new(),
             trail_cursor: TrailCursor::new(),
-            editor_scroll: EditorScroll::new(),
             diagnostics_popup: DiagnosticsPopup::new(),
             context_menu: ContextMenu::new(),
-            cursorline_overlay: CursorlineOverlay::new(),
             git_branch: GitBranch::new(),
             custom_cursor: CustomCursor::new(),
             focus_stack: Vec::new(),
@@ -238,8 +223,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// host keeps repainting while otherwise idle.
     pub(crate) fn rainbow_cursor_active(&self) -> bool {
         self.cursor_style.is_animated()
-            || self.editor_remote_carets.iter().any(|cue| cue.rainbow)
-            || self.editor_remote_roster.iter().any(|cue| cue.rainbow)
             || self.markdown_pane.as_ref().is_some_and(|pane| {
                 pane.remote_cursors.iter().any(|cursor| cursor.rainbow)
             })
@@ -314,20 +297,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.custom_cursor = panel;
     }
 
-    pub fn install_cursorline_overlay(&mut self, panel: CursorlineOverlay) {
-        self.cursorline_overlay = panel;
-    }
-
     pub fn install_trail_cursor(&mut self, panel: TrailCursor) {
         self.trail_cursor = panel;
     }
 
     pub fn install_yank_flash(&mut self, panel: YankFlash) {
         self.yank_flash = panel;
-    }
-
-    pub fn install_editor_scroll(&mut self, panel: EditorScroll) {
-        self.editor_scroll = panel;
     }
 
     /// Desktop-parity file-tree toggle:

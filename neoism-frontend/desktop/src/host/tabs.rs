@@ -121,9 +121,7 @@ impl Renderer {
         if self.pane_tabs.is_empty() {
             return (default_left, default_width);
         }
-        let primary_route = self
-            .primary_editor_route
-            .or_else(|| context_manager.current_grid().workspace_route_id());
+        let primary_route = context_manager.current_grid().workspace_route_id();
         let Some(primary_route) = primary_route else {
             return (default_left, default_width);
         };
@@ -185,6 +183,12 @@ impl Renderer {
             rects.push(rect);
         }
         if let Some(rect) = self.agent_picker_occlusion {
+            rects.push(rect);
+        }
+        if let Some(rect) = self.diagnostics_popup.occlusion_rect() {
+            rects.push(rect);
+        }
+        if let Some(rect) = self.lsp_popup.occlusion_rect() {
             rects.push(rect);
         }
         rects
@@ -280,9 +284,7 @@ impl Renderer {
             return;
         }
         let mut targets: Vec<(usize, f32, f32, f32)> = Vec::new();
-        let primary = self
-            .primary_editor_route
-            .or_else(|| context_manager.current_grid().workspace_route_id());
+        let primary = context_manager.current_grid().workspace_route_id();
         let scaled_margin = context_manager.current_grid().scaled_margin;
         // Smallest top-edge across visible panes — top-aligned panes
         // (those whose `rect[1]` matches this min) render their

@@ -41,38 +41,12 @@ pub(crate) fn palette_enter_action(
     chrome.command_palette.get_selected_action()
 }
 
-pub(crate) fn default_editor_grid_cell(
-    fg: u32,
-    bg: u32,
-) -> neoism_ui::editor_snapshot::GridCell {
-    neoism_ui::editor_snapshot::GridCell {
-        ch: String::new(),
-        fg,
-        bg,
-        attrs: 0,
-    }
-}
-
-pub(crate) fn cursor_shape_for_nvim_mode(
-    mode: &str,
-) -> neoism_terminal_core::ansi::CursorShape {
-    let mode = mode.trim().to_ascii_lowercase();
-    if mode.starts_with("insert") || mode == "i" || mode == "ic" || mode == "ix" {
-        neoism_terminal_core::ansi::CursorShape::Beam
-    } else if mode.starts_with("replace") || mode == "r" || mode == "rx" || mode == "rvc"
-    {
-        neoism_terminal_core::ansi::CursorShape::Underline
-    } else {
-        neoism_terminal_core::ansi::CursorShape::Block
-    }
-}
-
-// ---------- base64 helpers for `nvim_send_keys` -----------------
+// ---------- base64 helper for `flush_pty_outbox` ----------------
 //
-// `nvim_send_keys` round-trips bytes through base64 so the JS
-// side can stuff them straight into the WebSocket envelope. We
-// keep the helpers inline (zero new deps) — the alphabet is
-// RFC 4648 standard with `=` padding.
+// PTY response bytes round-trip through base64 so the JS side can
+// stuff them straight into the WebSocket envelope. We keep the
+// helper inline (zero new deps) — the alphabet is RFC 4648
+// standard with `=` padding.
 
 pub(crate) const B64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -97,45 +71,6 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
         }
     }
     out
-}
-
-pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
-    let trimmed = s.trim();
-    let bytes = trimmed.as_bytes();
-    if bytes.len() % 4 != 0 {
-        return Err("length not multiple of 4");
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks(4) {
-        let mut v = [0u8; 4];
-        let mut pad = 0usize;
-        for (i, &b) in chunk.iter().enumerate() {
-            v[i] = match b {
-                b'A'..=b'Z' => b - b'A',
-                b'a'..=b'z' => b - b'a' + 26,
-                b'0'..=b'9' => b - b'0' + 52,
-                b'+' => 62,
-                b'/' => 63,
-                b'=' => {
-                    pad += 1;
-                    0
-                }
-                _ => return Err("non-alphabet character"),
-            };
-        }
-        let triple = ((v[0] as u32) << 18)
-            | ((v[1] as u32) << 12)
-            | ((v[2] as u32) << 6)
-            | (v[3] as u32);
-        out.push(((triple >> 16) & 0xFF) as u8);
-        if pad < 2 {
-            out.push(((triple >> 8) & 0xFF) as u8);
-        }
-        if pad < 1 {
-            out.push((triple & 0xFF) as u8);
-        }
-    }
-    Ok(out)
 }
 
 pub(crate) fn agent_bridge_key_from_web(

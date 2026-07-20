@@ -289,7 +289,6 @@ impl Screen<'_> {
         let scaled_margin = self.context_manager.current_grid().scaled_margin;
         let pane_chrome_top = self.island_chrome_top();
         let min_top = self.current_grid_min_pane_top();
-        let primary = self.renderer.primary_editor_route;
         for (node, item) in self.context_manager.current_grid().contexts().iter() {
             if !self
                 .context_manager
@@ -300,9 +299,6 @@ impl Screen<'_> {
             }
             let ctx = item.context();
             let route = ctx.route_id;
-            if Some(route) == primary {
-                continue;
-            }
             let Some(tabs) = self.renderer.pane_tabs.get(&route) else {
                 continue;
             };
@@ -394,36 +390,53 @@ impl Screen<'_> {
             // duplication, so a tear-out drag just no-ops.
             neoism_ui::panels::buffer_tabs::BufferTabTarget::ChromePage(_) => return,
             neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path) => path,
-            neoism_ui::panels::buffer_tabs::BufferTabTarget::Scratch(_) => return,
         };
-        // Source side: wipe in the source pane's nvim.
-        self.bwipeout_in_strip(source, &path);
+        // Native code panes live in the grid, not per-strip nvim —
+        // moving a File tab re-parents its code context (mirrors the
+        // markdown flow above).
+        let code_route = self
+            .context_manager
+            .code_node_by_path(&path)
+            .map(|(route, _node)| route);
         self.activate_remaining_tab_in_strip(source);
-        // Destination side: insert the tab + ask the dest nvim to
-        // open the file as a buffer.
         match dest {
             crate::host::StripRef::Workspace => {
-                self.renderer.buffer_tabs.open_path(path.clone());
-                let cmd = neoism_backend::performer::nvim::vim_select_file_command(
-                    &path.display().to_string(),
-                );
-                if let Some(p) = self.renderer.primary_editor_route {
-                    self.send_editor_command_to_route(p, cmd);
-                } else {
-                    self.send_editor_command_raw(cmd);
+                if let Some(route) = code_route {
+                    let _ = self
+                        .context_manager
+                        .stack_existing_route_on_workspace(route, &mut self.sugarloaf);
                 }
+                self.renderer.buffer_tabs.open_path(path.clone());
+                self.renderer.file_tree.set_active_path(Some(path.clone()));
+                self.activate_code_path(path.clone());
             }
             crate::host::StripRef::Pane(dest_route) => {
-                let Some(editor_route) =
-                    self.ensure_pane_editor_route_for_file(dest_route, &path)
-                else {
+                let moved = if let Some(route) = code_route {
+                    self.context_manager.stack_existing_route_on_route(
+                        route,
+                        dest_route,
+                        &mut self.sugarloaf,
+                    )
+                } else {
+                    let rich_text_id = next_rich_text_id();
+                    let _ = self.sugarloaf.text(Some(rich_text_id));
+                    self.context_manager
+                        .add_stacked_code_on_route(
+                            path.clone(),
+                            dest_route,
+                            rich_text_id,
+                            &mut self.sugarloaf,
+                        )
+                        .is_some()
+                };
+                if !moved {
                     self.reinsert_tab_into_strip(source, &tab, path);
                     self.renderer.notifications.push(
                         format!("Could not move `{}` into that split.", tab.title),
                         neoism_ui::panels::notifications::NotificationLevel::Warn,
                     );
                     return;
-                };
+                }
                 let scale = self.renderer.chrome_scale();
                 let tabs =
                     self.renderer
@@ -442,12 +455,6 @@ impl Screen<'_> {
                 {
                     crumbs.set_from_path(&path, cwd.as_deref());
                 }
-                self.send_editor_command_to_route(
-                    editor_route,
-                    neoism_backend::performer::nvim::vim_select_file_command(
-                        &path.display().to_string(),
-                    ),
-                );
             }
         }
         // Close the source pane if it ended up empty AND wasn't the
@@ -515,35 +522,6 @@ impl Screen<'_> {
         }
     }
 
-    pub(crate) fn bwipeout_in_strip(
-        &mut self,
-        source: crate::host::StripRef,
-        path: &Path,
-    ) {
-        use neoism_ui::panels::buffer_tabs::{bwipeout_send_target, BwipeoutSendTarget};
-        let cmd = neoism_backend::performer::nvim::vim_bwipeout_command(
-            &path.display().to_string(),
-        );
-        let pane_editor_route = match source {
-            crate::host::StripRef::Workspace => None,
-            crate::host::StripRef::Pane(route) => self.pane_editor_route_for_strip(route),
-        };
-        let target = bwipeout_send_target(
-            strip_ref_to_key(source),
-            self.renderer.primary_editor_route,
-            pane_editor_route,
-        );
-        match target {
-            BwipeoutSendTarget::Route(route) => {
-                self.send_editor_command_to_route(route, cmd);
-            }
-            BwipeoutSendTarget::Raw => {
-                self.send_editor_command_raw(cmd);
-            }
-            BwipeoutSendTarget::None => {}
-        }
-    }
-
     pub(crate) fn reinsert_tab_into_strip(
         &mut self,
         source: crate::host::StripRef,
@@ -607,48 +585,38 @@ impl Screen<'_> {
         source: crate::host::StripRef,
         split_down: bool,
     ) {
-        // Pin the workspace's primary editor route on first split,
-        // so subsequent panes are correctly classified as secondary.
-        if self.renderer.primary_editor_route.is_none() {
-            if let Some(node) = self.context_manager.current_grid().editor_node() {
-                if let Some(item) =
-                    self.context_manager.current_grid().contexts().get(&node)
-                {
-                    self.renderer.primary_editor_route = Some(item.context().route_id);
-                }
+        // Native code panes: split the file's existing code context out
+        // into its own pane (creating the context first if the tab was
+        // never activated). Mirrors `tear_out_markdown_tab_to_pane`.
+        let mut code_route = self
+            .context_manager
+            .code_node_by_path(&path)
+            .map(|(route, _node)| route);
+        if code_route.is_none() {
+            let rich_text_id = next_rich_text_id();
+            let _ = self.sugarloaf.text(Some(rich_text_id));
+            if self.context_manager.add_stacked_code(
+                path.clone(),
+                rich_text_id,
+                &mut self.sugarloaf,
+            ) {
+                code_route = Some(self.context_manager.current().route_id);
             }
         }
-        // Drop the buffer in the source nvim — the new pane owns it
-        // now.
-        let path_str = path.display().to_string();
-        self.bwipeout_in_strip(source, std::path::Path::new(&path_str));
+        let Some(code_route) = code_route else {
+            self.reinsert_tab_into_strip(source, tab, path);
+            self.renderer.notifications.push(
+                format!("Could not tear out `{}` to a split.", tab.title),
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
+            return;
+        };
         self.activate_remaining_tab_in_strip(source);
-        // Allocate a rich_text_id for the new pane's content.
-        let current_grid = self.context_manager.current_grid();
-        let (_context, margin) = current_grid.current_context_with_computed_dimension();
-        let padding_x = margin.left;
-        let padding_y_top = self.renderer.margin.top
-            + self
-                .renderer
-                .island
-                .as_ref()
-                .map_or(0.0, |i| i.effective_height(self.context_manager.len()));
-        let rich_text_id = next_rich_text_id();
-        let _ = self.sugarloaf.text(Some(rich_text_id));
-        self.sugarloaf
-            .set_position(rich_text_id, padding_x, padding_y_top);
-
-        let cwd = self.active_pane_workspace_root();
-        let ok = self.context_manager.split_editor(
-            path.clone(),
-            rich_text_id,
-            &mut self.sugarloaf,
-            cwd,
+        if !self.context_manager.split_existing_route(
+            code_route,
             split_down,
-        );
-        if !ok {
-            // Spawn failed — restore the tab in the source strip so
-            // the user doesn't lose it.
+            &mut self.sugarloaf,
+        ) {
             self.reinsert_tab_into_strip(source, tab, path);
             self.renderer.notifications.push(
                 format!("Could not tear out `{}` to a split.", tab.title),
@@ -656,7 +624,7 @@ impl Screen<'_> {
             );
             return;
         }
-        let new_route = self.context_manager.current().route_id;
+        let new_route = code_route;
         // New pane gets its own strip with just the dragged tab. The
         // primary editor's strip (`buffer_tabs`) keeps everything it
         // already had minus the file we just bwipeout'd. Pure plan
@@ -790,10 +758,11 @@ impl Screen<'_> {
             CrossWindowTabKind::File { path }
         };
 
-        // Source-side bwipeout + strip cleanup (mirrors
-        // tear_out_file_tab_to_pane).
+        // Source-side cleanup (mirrors tear_out_file_tab_to_pane): the
+        // destination window owns the file now, so drop this window's
+        // code context for it.
         if let Some(path) = path_opt.as_deref() {
-            self.bwipeout_in_strip(source, path);
+            let _ = self.context_manager.remove_code_by_path(path, &mut self.sugarloaf);
         }
         self.activate_remaining_tab_in_strip(source);
         if let crate::host::StripRef::Pane(src_route) = source {

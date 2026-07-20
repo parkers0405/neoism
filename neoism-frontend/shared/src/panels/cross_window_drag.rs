@@ -59,7 +59,7 @@ use std::path::PathBuf;
 pub enum CrossWindowTabKind {
     /// Rust-rendered markdown document tab.
     Markdown { path: PathBuf },
-    /// Plain file tab (nvim-backed).
+    /// Plain file tab (code-pane-backed).
     File { path: PathBuf },
     /// Agent CLI / Neoism agent tab. `agent_tag` is a daemon-local
     /// stringified discriminator (the desktop fork uses

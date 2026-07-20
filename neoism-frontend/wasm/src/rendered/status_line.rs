@@ -482,62 +482,6 @@ impl ChromeBridge {
                 .collect(),
         );
     }
-    /// 7C-2: remote collaborator carets for the ACTIVE editor
-    /// (nvim) grid. Peers arrive in BUFFER coordinates (the
-    /// presence wire format); this bridge folds the current
-    /// `win_viewport.topline` out so the chrome paints screen rows.
-    /// Off-screen peers drop for this frame — the next presence
-    /// push or viewport change re-evaluates.
-    /// Returns `[visible_carets, roster_size]` so the host can log
-    /// exactly what survived (a silent zero here cost a debugging
-    /// day once).
-    pub fn set_editor_remote_cursors(&mut self, json: JsValue) -> Vec<u32> {
-        #[derive(serde::Deserialize)]
-        struct WireCursor {
-            name: String,
-            color: [u8; 3],
-            #[serde(default)]
-            rainbow: bool,
-            line: u64,
-            col: u32,
-            #[serde(default)]
-            insert: bool,
-        }
-        let cursors: Vec<WireCursor> = match serde_wasm_bindgen::from_value(json) {
-            Ok(cursors) => cursors,
-            Err(_) => return vec![0, 0],
-        };
-        let textoff = self.editor_viewport_textoff as u32;
-        let roster: Vec<_> = cursors
-            .iter()
-            .map(|c| neoism_ui::panels::remote_carets::EditorRemoteCaret {
-                name: c.name.clone(),
-                color: c.color,
-                rainbow: c.rainbow,
-                insert: false,
-                line: 0,
-                col: 0,
-            })
-            .collect();
-        // BUFFER lines, raw — the chrome converts to screen rows
-        // at PAINT time from its live topline so carets stay glued
-        // to their line while the local user scrolls.
-        let cues: Vec<_> = cursors
-            .into_iter()
-            .map(|c| neoism_ui::panels::remote_carets::EditorRemoteCaret {
-                name: c.name,
-                color: c.color,
-                rainbow: c.rainbow,
-                insert: c.insert,
-                line: c.line,
-                // Buffer column + MY gutter width = grid cell.
-                col: c.col.saturating_add(textoff),
-            })
-            .collect();
-        let counts = vec![cues.len() as u32, roster.len() as u32];
-        self.chrome.set_editor_remote_carets(cues, roster);
-        counts
-    }
     pub fn set_status_mode_agent(&mut self) {
         let mut info = self.chrome.status_line.info().clone();
         info.mode = Mode::Agent;

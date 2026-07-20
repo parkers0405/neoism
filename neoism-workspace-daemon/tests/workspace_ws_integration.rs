@@ -47,7 +47,6 @@ use neoism_protocol::workspace::{
 };
 use neoism_workspace_daemon::auth::AuthService;
 use neoism_workspace_daemon::handshake::{self, PairingTokenStore};
-use neoism_workspace_daemon::nvim::NvimSessionRegistry;
 use neoism_workspace_daemon::server::{self, AppState};
 use neoism_workspace_daemon::workspace::WorkspaceManager;
 use serde::{Deserialize, Serialize};
@@ -406,7 +405,6 @@ impl Daemon {
             sessions: neoism_workspace_daemon::sessions::SessionRegistry::shared(),
             workspaces,
             pairing_tokens: pairing_tokens.clone(),
-            nvim_sessions: NvimSessionRegistry::new(),
             crdt: neoism_workspace_daemon::crdt::sync::CrdtSyncHub::default(),
             paired_hosts: neoism_workspace_daemon::hosts::PairedHostStore::in_memory(),
         });

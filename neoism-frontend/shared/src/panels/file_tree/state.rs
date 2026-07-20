@@ -20,8 +20,8 @@ pub struct FileTree {
     pub(super) scale: f32,
     /// Current logical width in pixels. Resizable via Alt+Left/Right.
     pub(super) width: f32,
-    /// Path of the buffer nvim currently has open. Set from the
-    /// per-frame BufEnter drain in `screen` and used by `render` to
+    /// Path of the buffer the editor currently has open. Set from the
+    /// per-frame buffer-activation drain in `screen` and used by `render` to
     /// paint a subtle accent on the matching row, so the user can see
     /// which file the editor is showing without the row needing to be
     /// the keyboard selection too.
@@ -60,8 +60,8 @@ pub struct FileTree {
     /// File rows the user activated (double-click / Enter) since the
     /// host last drained. The host (native dispatcher / web bridge)
     /// pulls these with [`FileTree::drain_open_paths`] each frame and
-    /// turns them into "open file" intents: native sends `:edit
-    /// <path>` to nvim; web adds a buffer tab + fetches contents.
+    /// turns them into "open file" intents: native opens the path in
+    /// the code pane; web adds a buffer tab + fetches contents.
     pub(super) pending_opens: Vec<PathBuf>,
     /// Pending vim-style numeric count (`5` then `j` moves 5 rows).
     /// Accumulated by [`FileTree::push_count_digit`], consumed by the

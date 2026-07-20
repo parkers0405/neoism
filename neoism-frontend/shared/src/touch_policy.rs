@@ -139,7 +139,7 @@ pub enum TouchZone {
     /// Pinch-zoom is suppressed here so dragging on a header doesn't
     /// resize fonts.
     ChromePanel,
-    /// Editor surface (nvim grid). Swipe-from-edge back/forward must
+    /// Editor surface (code pane). Swipe-from-edge back/forward must
     /// be eaten so the browser's native gesture doesn't steal vi
     /// motion.
     EditorArea,

@@ -2,14 +2,14 @@
 
 Welcome to **Neoism** — a terminal-first workspace for code, notes, agents, and multiplayer editing.
 
-Neoism starts from the terminal instead of hiding it. Shells, a managed Neovim editor, Markdown notes, drawings, AI agents, file trees, and command palettes all live inside one GPU-rendered chrome layer — on the desktop app, in a browser, or on your phone over Tailscale.
+Neoism starts from the terminal instead of hiding it. Shells, a native code editor, Markdown notes, drawings, AI agents, file trees, and command palettes all live inside one GPU-rendered chrome layer — on the desktop app, in a browser, or on your phone over Tailscale.
 
 This `Welcome` folder is your built-in guide. Open it any time from the **Getting Started** button on the start screen, or press **Alt + N** for the notes sidebar. Links below are wiki links — click one to jump.
 
 ## The four pillars
 
 - [[The Terminal]] — real shells with GPU-rendered text, smooth scrollback, tabs, and a command palette from any focus.
-- [[Editor/The Editor|The Editor]] — managed Neovim wrapped in Neoism chrome, with [[Editor/Languages and LSP|language servers]] that install on demand.
+- [[Editor/The Editor|The Editor]] — Neoism's native code editor, with [[Editor/Languages and LSP|language servers]] that install on demand.
 - [[The Neoism Agent]] — a local agent server with sub-agents, a full tool runtime, permissions, checkpoints, and memory.
 - [[Notes and Drawings]] — this vault, Markdown with wiki links and backlinks, and hand-drawn `.neodraw` sketches.
 

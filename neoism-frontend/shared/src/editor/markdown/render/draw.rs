@@ -36,7 +36,7 @@ pub(super) fn draw_rect_clipped(
     sugarloaf.rect(None, x0, y0, x1 - x0, y1 - y0, color, depth, order);
 }
 
-pub(super) fn draw_rounded_rect_clipped(
+pub(crate) fn draw_rounded_rect_clipped(
     sugarloaf: &mut Sugarloaf,
     clip: [f32; 4],
     x: f32,

@@ -90,10 +90,6 @@ impl Screen<'_> {
             ModalAction::InstallPythonKernel => {
                 self.start_python_kernel_install_modal();
             }
-            ModalAction::InstallTreesitter { lang } => {
-                self.treesitter_installing.remove(&lang);
-                self.start_treesitter_install(lang, String::new());
-            }
             ModalAction::ApplyTheme { name } => {
                 self.apply_unified_theme(&name);
             }
@@ -103,72 +99,26 @@ impl Screen<'_> {
             ModalAction::ApplyMashupPack { id } => {
                 self.apply_mashup_pack(id);
             }
-            ModalAction::RunEditorCommand { command } => {
+            ModalAction::RunEditorCommand { command: _ } => {
+                // nvim removed; native editor equivalent TBD.
                 self.renderer.modal.close();
-                self.send_editor_command(command);
             }
-            ModalAction::RunEditorCommandWithInput { command, value } => {
-                let value = value.trim();
-                if value.is_empty() {
-                    self.renderer.notifications.push(
-                        "Input required",
-                        neoism_ui::panels::notifications::NotificationLevel::Warn,
-                    );
-                    return;
-                }
+            ModalAction::RunEditorCommandWithInput { command: _, value: _ } => {
+                // nvim removed; native editor equivalent TBD.
                 self.renderer.modal.close();
-                if command == "Rename" {
-                    if let Some(editor) = self.context_manager.current().editor.as_ref() {
-                        editor.lsp_action_with_text(
-                            neoism_protocol::editor::EditorLspAction::Rename,
-                            Some(value.to_string()),
-                        );
-                    }
-                    return;
-                }
-                if command == "WorkspaceSymbols" {
-                    if let Some(editor) = self.context_manager.current().editor.as_ref() {
-                        editor.lsp_action_with_text(
-                            neoism_protocol::editor::EditorLspAction::WorkspaceSymbols,
-                            Some(value.to_string()),
-                        );
-                    }
-                    return;
-                }
-                // Pure dispatch table — see `chrome_policy::modal_input_editor_command`.
-                // The host still owns `lua_string_literal` (it lives on the
-                // host's nvim performer crate) so the policy hands back a
-                // wrapper + raw value the host quote-escapes here.
-                let cmd = match neoism_ui::chrome_policy::modal_input_editor_command(
-                    command.as_str(),
-                    value,
-                ) {
-                    neoism_ui::chrome_policy::ModalEditorCommand::LuaCall {
-                        lua_call_prefix,
-                        value,
-                    } => format!(
-                        "{lua_call_prefix}{})",
-                        neoism_backend::performer::nvim::lua_string_literal(&value),
-                    ),
-                    neoism_ui::chrome_policy::ModalEditorCommand::Raw(raw) => raw,
-                };
-                self.send_editor_command(cmd);
             }
-            ModalAction::OpenLspLocation {
-                uri,
-                line,
-                character,
-            } => {
+            ModalAction::OpenLspLocation { uri, line, character } => {
+                // Jump-to-line/column comes back with the native editor's
+                // LSP integration; for now just open the file.
+                let _ = (line, character);
                 self.renderer.modal.close();
-                if let Some(editor) = self.context_manager.current().editor.as_ref() {
-                    editor.open_buffer_at_location(uri, line, character);
-                }
+                self.open_path_in_code(std::path::PathBuf::from(
+                    uri.strip_prefix("file://").unwrap_or(&uri).to_string(),
+                ));
             }
-            ModalAction::ApplyLspCodeAction { action } => {
+            ModalAction::ApplyLspCodeAction { action: _ } => {
+                // nvim removed; native editor code actions TBD.
                 self.renderer.modal.close();
-                if let Some(editor) = self.context_manager.current().editor.as_ref() {
-                    editor.apply_lsp_code_action(action);
-                }
             }
             ModalAction::InstallAgent { kind } => {
                 if let Some(ak) = crate::neoism::icon::AgentKind::from_id(&kind) {
@@ -309,6 +259,22 @@ impl Screen<'_> {
                         .map(|(_, value)| value.trim().to_string())
                         .filter(|value| !value.is_empty())
                 };
+                // Code rename form: the `code_rename_to` field id is
+                // the discriminator (present even when left empty).
+                if values.iter().any(|(id, _)| id == "code_rename_to") {
+                    self.renderer.modal.close();
+                    match value("code_rename_to") {
+                        Some(new_name) => self.submit_code_rename(new_name),
+                        None => {
+                            self.renderer.code_lsp.pending_rename = None;
+                            self.renderer.notifications.push(
+                                "Rename needs a non-empty name",
+                                neoism_ui::panels::notifications::NotificationLevel::Warn,
+                            );
+                        }
+                    }
+                    return;
+                }
                 // Create-server form: `create_dir` is the discriminator
                 // (no address — we spawn the server ourselves and join).
                 if let Some(dir) = value("create_dir") {
@@ -378,14 +344,14 @@ impl Screen<'_> {
     }
 
     pub(crate) fn start_lsp_install(&mut self, server: String) {
-        // Mason resolves the install plan (download URL, version,
-        // package layout). Skipping this lookup is fatal — without a
-        // manifest we have no idea what binary to fetch.
-        let Some(manifest) = self.resolve_mason_manifest_for_server(&server) else {
+        // The package catalog resolves the install plan (download URL,
+        // version, package layout). Skipping this lookup is fatal —
+        // without a manifest we have no idea what binary to fetch.
+        let Some(manifest) = self.resolve_catalog_manifest_for_server(&server) else {
             self.renderer.modal.open_message(
                 "No Installer Available",
                 format!(
-                    "Neoism does not have a Mason entry for `{server}` yet. Install the binary manually and reopen the buffer."
+                    "Neoism does not have a managed installer for `{server}` yet. Install the binary manually and reopen the buffer."
                 ),
             );
             return;
@@ -415,18 +381,6 @@ impl Screen<'_> {
         // in `bridges/extensions.rs` keyed off the `MissingLspModal`
         // source tag — no event round-trip required.
         self.dispatch_install_via_runner(manifest, server, display);
-    }
-
-    pub(crate) fn start_treesitter_install(&mut self, lang: String, _filetype: String) {
-        if crate::neoism::ide_tools::treesitter_install_spec(&lang).is_none() {
-            self.renderer.notifications.push(
-                format!("No Treesitter installer for {lang}"),
-                neoism_ui::panels::notifications::NotificationLevel::Warn,
-            );
-            return;
-        }
-
-        self.dispatch_treesitter_parser_install(lang);
     }
 
     pub fn handle_ide_tool_install_finished(
@@ -496,48 +450,6 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        if let Some(rest) = tool.strip_prefix("treesitter:") {
-            let lang = rest.split(':').next().unwrap_or(rest);
-            self.treesitter_installing.remove(lang);
-            if success {
-                self.renderer.notifications.push(
-                    format!("Installed {lang} Treesitter syntax"),
-                    neoism_ui::panels::notifications::NotificationLevel::Info,
-                );
-                self.send_editor_command(
-                    neoism_backend::performer::nvim::vim_treesitter_retry_command(),
-                );
-            } else {
-                self.renderer
-                    .modal
-                    .open(neoism_ui::widgets::modal::ModalSpec {
-                        title: format!("Could Not Install {lang} Syntax"),
-                        body: message,
-                        meta: "Install git/tree-sitter/cc if missing, then retry."
-                            .to_string(),
-                        input: None,
-                        buttons: vec![
-                        neoism_ui::widgets::modal::ModalButton::new(
-                            "Retry Install",
-                            "Enter",
-                            neoism_ui::widgets::modal::ModalAction::InstallTreesitter {
-                                lang: lang.to_string(),
-                            },
-                        ),
-                        neoism_ui::widgets::modal::ModalButton::new(
-                            "Close",
-                            "Esc",
-                            neoism_ui::widgets::modal::ModalAction::Close,
-                        ),
-                    ],
-                        busy: false,
-                        blocking: true,
-                    });
-            }
-            self.mark_dirty();
-            return;
-        }
-
         // Catch-all for unknown tool prefixes. LSP installs no longer
         // flow through this event — they go through the install_runner
         // tracker in bridges/extensions.rs. Anything reaching here is
@@ -556,214 +468,4 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    pub(crate) fn maybe_open_lsp_missing_modal(
-        &mut self,
-        status: neoism_backend::performer::nvim::LspStatusNotification,
-    ) {
-        // Resolve display strings + dedupe key via shared policy so
-        // both desktop and a future web host agree on which
-        // (server, filetype) pairs collapse into a single prompt.
-        let descriptor = neoism_ui::chrome_policy::lsp_missing_modal_descriptor(
-            neoism_ui::chrome_policy::LspMissingNotificationInput {
-                name: status.name.clone(),
-                binary: status.binary.clone(),
-                filetype: status.filetype.clone(),
-            },
-        );
-        if !self
-            .lsp_missing_prompts
-            .insert(descriptor.dedupe_key.clone())
-        {
-            return;
-        }
-
-        let server = descriptor.server;
-        let binary = descriptor.binary;
-        let filetype = descriptor.filetype_label;
-        // Resolve via Mason first by server name, then by binary name
-        // (e.g. `vscode-json-language-server` -> `json-lsp`). The result
-        // drives whether the modal shows an "Install" button at all.
-        let manifest = self
-            .resolve_mason_manifest_for_server(&server)
-            .or_else(|| self.resolve_mason_manifest_for_server(&binary));
-
-        let mut buttons = Vec::new();
-        if let Some(ref m) = manifest {
-            buttons.push(neoism_ui::widgets::modal::ModalButton::new(
-                format!("Install {}", m.name),
-                "mason",
-                neoism_ui::widgets::modal::ModalAction::InstallLsp {
-                    server: server.clone(),
-                },
-            ));
-        }
-        buttons.push(neoism_ui::widgets::modal::ModalButton::new(
-            "Ignore For Now",
-            "Esc",
-            neoism_ui::widgets::modal::ModalAction::Close,
-        ));
-
-        // Pure body-copy resolver — see `chrome_policy::lsp_missing_modal_body`.
-        // The host still owns button construction (it needs the Mason
-        // manifest name) and the `BTreeSet` dedupe; the policy
-        // just settles which body string runs so multiple frontends agree.
-        let body = neoism_ui::chrome_policy::lsp_missing_modal_body(
-            neoism_ui::chrome_policy::LspMissingModalBodyInput {
-                binary: &binary,
-                filetype_label: &filetype,
-                has_installer_spec: manifest.is_some(),
-            },
-        );
-
-        self.renderer
-            .modal
-            .open(neoism_ui::widgets::modal::ModalSpec {
-                title: "LSP Server Missing".to_string(),
-                body,
-                meta: "Managed nvim will retry after install.".to_string(),
-                input: None,
-                buttons,
-                busy: false,
-                blocking: false,
-            });
-        self.mark_dirty();
-    }
-
-    pub(crate) fn maybe_open_lsp_action_result_modal(&mut self) {
-        let current = self.context_manager.current_mut();
-        if current.editor_lsp_action_result_modal_seen {
-            return;
-        }
-        let Some(neoism_protocol::editor::EditorServerMessage::LspActionResult {
-            action,
-            summary,
-            hover,
-            locations,
-            symbol_count,
-            symbols,
-            code_actions,
-            ..
-        }) = current.editor_lsp_action_result.clone()
-        else {
-            current.editor_lsp_action_result_modal_seen = true;
-            return;
-        };
-        let should_open = matches!(
-            action,
-            neoism_protocol::editor::EditorLspAction::References
-                | neoism_protocol::editor::EditorLspAction::DocumentSymbols
-                | neoism_protocol::editor::EditorLspAction::WorkspaceSymbols
-                | neoism_protocol::editor::EditorLspAction::Hover
-        ) || (matches!(
-            action,
-            neoism_protocol::editor::EditorLspAction::CodeActions
-        ) && !code_actions.is_empty());
-        if !should_open {
-            current.editor_lsp_action_result_modal_seen = true;
-            return;
-        }
-        current.editor_lsp_action_result_modal_seen = true;
-
-        // Cap the picker so a huge symbol table / reference set can't
-        // build thousands of modal buttons. The modal windows 8 rows at a
-        // time and scrolls, so the cap only bounds allocation, not reach.
-        const MAX_PICKER_ITEMS: usize = 300;
-        use neoism_ui::widgets::modal::{ModalAction, ModalButton};
-        let mut buttons: Vec<ModalButton> = Vec::new();
-
-        let body = if matches!(
-            action,
-            neoism_protocol::editor::EditorLspAction::CodeActions
-        ) {
-            let mut disabled = Vec::new();
-            for code_action in code_actions.iter().take(MAX_PICKER_ITEMS) {
-                let preferred = if code_action.preferred { "★ " } else { "" };
-                if let Some(reason) = code_action.disabled_reason.as_deref() {
-                    disabled.push(format!("{preferred}{} — {reason}", code_action.title));
-                    continue;
-                }
-                let hint = match (code_action.kind.as_deref(), code_action.preferred) {
-                    (Some(kind), true) => format!("{kind} · preferred"),
-                    (Some(kind), false) => kind.to_string(),
-                    (None, true) => "preferred".to_string(),
-                    (None, false) => String::new(),
-                };
-                buttons.push(ModalButton::new(
-                    format!("{preferred}{}", code_action.title),
-                    hint,
-                    ModalAction::ApplyLspCodeAction {
-                        action: code_action.clone(),
-                    },
-                ));
-            }
-            let mut body =
-                picker_summary("code action", code_actions.len(), MAX_PICKER_ITEMS);
-            if !disabled.is_empty() {
-                body.push_str("\n\nDisabled:\n");
-                body.push_str(&disabled.join("\n"));
-            }
-            body
-        } else if let Some(hover) = hover {
-            hover
-        } else if matches!(
-            action,
-            neoism_protocol::editor::EditorLspAction::DocumentSymbols
-                | neoism_protocol::editor::EditorLspAction::WorkspaceSymbols
-        ) && !symbols.is_empty()
-        {
-            // Zed-style outline: one selectable row per symbol, indented
-            // by nesting depth, jumping to the symbol's selection range.
-            for symbol in symbols.iter().take(MAX_PICKER_ITEMS) {
-                let indent = "  ".repeat(symbol.depth as usize);
-                buttons.push(ModalButton::new(
-                    format!("{indent}{}", symbol.name),
-                    symbol.kind.clone(),
-                    ModalAction::OpenLspLocation {
-                        uri: symbol.uri.clone(),
-                        line: symbol.line,
-                        character: symbol.character,
-                    },
-                ));
-            }
-            picker_summary("symbol", symbols.len(), MAX_PICKER_ITEMS)
-        } else if !locations.is_empty() {
-            // References / any location list: one selectable row per hit.
-            for location in locations.iter().take(MAX_PICKER_ITEMS) {
-                buttons.push(ModalButton::new(
-                    lsp_location_label(&location.uri, location.line),
-                    String::new(),
-                    ModalAction::OpenLspLocation {
-                        uri: location.uri.clone(),
-                        line: location.line,
-                        character: location.character,
-                    },
-                ));
-            }
-            picker_summary("location", locations.len(), MAX_PICKER_ITEMS)
-        } else if symbol_count > 0 {
-            format!("{symbol_count} symbols returned.")
-        } else {
-            summary.clone()
-        };
-
-        buttons.push(ModalButton::new("Close", "Esc", ModalAction::Close));
-        self.renderer
-            .modal
-            .open(neoism_ui::widgets::modal::ModalSpec {
-                title: if matches!(
-                    action,
-                    neoism_protocol::editor::EditorLspAction::CodeActions
-                ) {
-                    "Quick Fixes".to_string()
-                } else {
-                    format!("Neoism LSP {action:?}")
-                },
-                body,
-                meta: summary,
-                input: None,
-                busy: false,
-                blocking: false,
-                buttons,
-            });
-    }
 }

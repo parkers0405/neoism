@@ -65,7 +65,7 @@ impl Screen<'_> {
         let (context_dimension, mut visual_pos) = self.current_visual_mouse_position();
         if let Some(item) = self.context_manager.current_grid().current_item() {
             let ctx = &item.val;
-            if ctx.editor.is_none()
+            if ctx.code.is_none()
                 && ctx.markdown.is_none()
                 && ctx.neoism_agent.is_none()
                 && ctx.neoism_tags.is_none()

@@ -308,6 +308,10 @@ impl ChromeBridge {
             FinderMode::Files => "files",
             FinderMode::Grep => "grep",
             FinderMode::GitChanges => "git_changes",
+            // Web has no native code pane yet; the desktop owns these.
+            FinderMode::BufferLines | FinderMode::References | FinderMode::Symbols => {
+                return false
+            }
         };
         let query = self.chrome.finder.query.clone();
         self.pending_finder_open_intents.push(FinderOpenIntent {
@@ -433,15 +437,6 @@ impl ChromeBridge {
 
         if let Some(action) = self.chrome.command_palette.get_selected_action() {
             use neoism_ui::panels::command_palette::PaletteAction;
-            // NvimEx entries dispatch like a typed `:{cmd}` — reuse
-            // the ExCommand intent so JS routes them through the
-            // same editor envelope as `:` mode picks.
-            if let PaletteAction::NvimEx(cmd) = action {
-                self.pending_palette_intents.push(PaletteIntent::ExCommand {
-                    command: cmd.to_string(),
-                });
-                return true;
-            }
             // OpenNeoismAgent has its own dedicated tab-open queue
             // path (see `handle_event`'s post-dispatch check); skip
             // the Action intent so JS doesn't double-fire it.

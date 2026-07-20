@@ -1696,17 +1696,6 @@ impl Screen<'_> {
         source: crate::host::StripRef,
         split_down: bool,
     ) -> bool {
-        // Pin the primary editor route so subsequent panes register as
-        // secondary — mirrors what file/markdown tear-outs do.
-        if self.renderer.primary_editor_route.is_none() {
-            if let Some(node) = self.context_manager.current_grid().editor_node() {
-                if let Some(item) =
-                    self.context_manager.current_grid().contexts().get(&node)
-                {
-                    self.renderer.primary_editor_route = Some(item.context().route_id);
-                }
-            }
-        }
         self.activate_remaining_tab_in_strip(source);
         if !self.context_manager.split_existing_route(
             route_id,

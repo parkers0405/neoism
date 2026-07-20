@@ -17,7 +17,7 @@ import {
  *   - a binary the CI image may not have (tailscale CLI for discover),
  *     OR
  *   - daemon broadcast frames that arrive only after a long-running
- *     wasm boot + nvim attach round-trip (agent pane streaming).
+ *     wasm boot round-trip (agent pane streaming).
  *
  * The non-skipped tests assert on chrome DOM + network behaviour that
  * `e2e-up.sh`'s daemon + vite combo serve out of the box.
@@ -42,97 +42,6 @@ test.describe("D1 — Web E2E smoke harness", () => {
     await expect(app.locator(".terminal-canvas")).toBeVisible({
       timeout: 30_000,
     });
-  });
-
-  test("I4 — Nvim editor open/type reaches nonblank canvas", async ({
-    app,
-  }, testInfo) => {
-    await app.waitForFunction(
-      () => Boolean((window as any).__neoismE2E?.terminal),
-      undefined,
-      { timeout: 30_000 },
-    );
-
-    const marker = `neoism-i4-${Date.now()}`;
-    const path = `/tmp/${marker}.txt`;
-    try {
-      await app.evaluate((bufferPath) => {
-        (window as any).__neoismE2E.terminal.openNvimBuffer(bufferPath);
-      }, path);
-
-      const opened = await app
-        .waitForFunction(
-          () => {
-            const snapshot = (window as any).__neoismE2E?.terminal?.snapshot?.();
-            if (!snapshot) return null;
-            if (snapshot.error) {
-              return { state: "error", error: snapshot.error };
-            }
-            if (snapshot.width > 0 && snapshot.height > 0) {
-              return { state: "opened" };
-            }
-            return null;
-          },
-          undefined,
-          { timeout: 20_000 },
-        )
-        .then((handle) => handle.jsonValue() as Promise<{ state: string; error?: string }>);
-
-      if (opened.state === "error") {
-        if (opened.error?.includes("nvim not installed")) {
-          testInfo.skip(true, opened.error);
-          return;
-        }
-        throw new Error(`nvim open failed: ${opened.error ?? "(unknown error)"}`);
-      }
-
-      await app.evaluate((keys) => {
-        (window as any).__neoismE2E.terminal.sendNvimKeys(keys);
-      }, `i${marker}<Esc>`);
-
-      const typed = await app
-        .waitForFunction(
-          (expected) => {
-            const snapshot = (window as any).__neoismE2E?.terminal?.snapshot?.();
-            if (!snapshot) return null;
-            if (snapshot.error) {
-              return { state: "error", error: snapshot.error };
-            }
-            if (snapshot.text.includes(expected as string)) {
-              return { state: "typed", snapshot };
-            }
-            return null;
-          },
-          marker,
-          { timeout: 20_000 },
-        )
-        .then(
-          (handle) =>
-            handle.jsonValue() as Promise<{
-              state: string;
-              error?: string;
-              snapshot?: {
-                nonBlankCells: number;
-                canvas: { width: number; height: number; nonBackgroundPixels: number } | null;
-              };
-            }>,
-        );
-
-      if (typed.state === "error") {
-        throw new Error(`nvim typing failed: ${typed.error ?? "(unknown error)"}`);
-      }
-
-      expect(typed.snapshot?.nonBlankCells ?? 0).toBeGreaterThan(0);
-      expect(typed.snapshot?.canvas?.width ?? 0).toBeGreaterThan(1);
-      expect(typed.snapshot?.canvas?.height ?? 0).toBeGreaterThan(1);
-      expect(typed.snapshot?.canvas?.nonBackgroundPixels ?? 0).toBeGreaterThan(0);
-    } finally {
-      await app.evaluate((bufferPath) => {
-        const terminal = (window as any).__neoismE2E?.terminal;
-        terminal?.sendNvimKeys?.(":bwipeout!\n");
-        terminal?.closeNvimBuffer?.(bufferPath);
-      }, path);
-    }
   });
 
   test("flow 1 — PTY: shell echoes typed input", async ({

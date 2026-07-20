@@ -95,7 +95,6 @@ impl ChromeBridge {
                                 == neoism_ui::syntax::Lang::Markdown
                         })
                         .unwrap_or(false),
-                    scratch_id: None,
                     terminal_route_id: (t.kind.as_deref() == Some("terminal") && ix != 0)
                         .then_some(ix),
                     neoism_agent_route_id: agent_route,

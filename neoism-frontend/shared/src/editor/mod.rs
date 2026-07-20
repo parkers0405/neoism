@@ -6,6 +6,7 @@
 //! shell and the web wasm shell; render code that needs the native
 //! `IdeTheme` and sugarloaf primitives stays in the native shim.
 
+pub mod code;
 pub mod crdt;
 pub mod markdown;
 pub mod neodraw;

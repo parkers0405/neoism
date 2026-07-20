@@ -19,7 +19,7 @@ import type {
   CrdtPresenceColor,
   CrdtSelectionRange,
 } from "../workspace/types";
-import { stablePresenceColor } from "../editor/nvim/NvimPresence";
+import { stablePresenceColor } from "./presenceColor";
 
 /** Minimum interval between publishes while the cursor IS moving:
  * 75ms ≈ 13Hz, matching the shared Rust constant. */

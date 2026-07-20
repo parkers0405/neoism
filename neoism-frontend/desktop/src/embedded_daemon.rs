@@ -41,7 +41,7 @@ use tokio::sync::Notify;
 use tower_service::Service;
 
 use neoism_workspace_daemon::{
-    auth, handshake, nvim::NvimSessionRegistry, server, workspace::WorkspaceManager,
+    auth, handshake, server, workspace::WorkspaceManager,
 };
 
 const EMBEDDED_DAEMON_TOKEN_ENV: &str = "NEOISM_DAEMON_TOKEN";
@@ -228,7 +228,6 @@ impl EmbeddedDaemonHandle {
                         sessions: neoism_workspace_daemon::sessions::SessionRegistry::shared(),
                         workspaces,
                         pairing_tokens,
-                        nvim_sessions: NvimSessionRegistry::new(),
                         crdt: neoism_workspace_daemon::crdt::sync::CrdtSyncHub::default(),
                         paired_hosts,
                     });

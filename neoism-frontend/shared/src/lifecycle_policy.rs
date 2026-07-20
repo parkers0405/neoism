@@ -4,9 +4,9 @@
 //! `frontends/neoism/src/router/*.rs`, `frontends/neoism/src/app/*.rs`,
 //! and `frontends/neoism/src/app/messenger.rs` host most of the
 //! winit/Sugarloaf/PTY plumbing — but a long tail of pure helpers
-//! (byte-preview formatters, nvim-style key formatting, kitty-keyboard
-//! sequence gates, vblank math, env-flag parsing, monitor-centered
-//! placement, grid-size-to-pixel math, font-size action classification)
+//! (byte-preview formatters, kitty-keyboard sequence gates, vblank
+//! math, env-flag parsing, monitor-centered placement,
+//! grid-size-to-pixel math, font-size action classification)
 //! is renderer-neutral. Those helpers live here so the web frontend can
 //! match them byte-for-byte.
 //!
@@ -19,11 +19,6 @@
 //! * Byte-preview formatters used by the PTY messenger logs
 //!   ([`LOG_BYTE_PREVIEW_LIMIT`], [`bytes_hex_for_log`],
 //!   [`bytes_text_for_log`]).
-//! * `is_ascii_alphabetic_str` predicate.
-//! * `named_key_to_nvim_name` mapping for the nvim key notation
-//!   (`<S-CR>`, `<C-Esc>`, etc.).
-//! * [`format_nvim_key_token`] — the actual nvim-key formatter, taking
-//!   POD inputs so callers can adapt their platform key event to it.
 //! * [`vblank_interval_from_refresh_rate`] — refresh-rate math.
 //! * [`centered_window_position`] — monitor-centered placement math.
 //! * [`compute_window_size_from_grid_dims`] — desired-window-size from
@@ -72,90 +67,7 @@ pub fn bytes_text_for_log(bytes: &[u8]) -> String {
     out
 }
 
-/// True iff `s` is exactly one ASCII alphabetic character.
-///
-/// Used by the nvim key formatter to decide when to emit a `S-` prefix
-/// and when shifted alpha is sufficient.
-pub fn is_ascii_alphabetic_str(s: &str) -> bool {
-    let mut it = s.chars();
-    match (it.next(), it.next()) {
-        (Some(c), None) => c.is_ascii_alphabetic(),
-        _ => false,
-    }
-}
-
-/// Renderer-neutral mirror of winit's `NamedKey` — only the subset the
-/// nvim formatter cares about. Callers translate their platform key
-/// enum to this kind once at the boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NvimNamedKey {
-    ArrowDown,
-    ArrowLeft,
-    ArrowRight,
-    ArrowUp,
-    Backspace,
-    Delete,
-    End,
-    Enter,
-    Escape,
-    Home,
-    Insert,
-    PageDown,
-    PageUp,
-    Space,
-    Tab,
-    F1,
-    F2,
-    F3,
-    F4,
-    F5,
-    F6,
-    F7,
-    F8,
-    F9,
-    F10,
-    F11,
-    F12,
-}
-
-/// nvim's "special key" name for a given named key.
-///
-/// Returns `None` for named keys nvim has no token for, in which case
-/// callers fall back to emitting the textual representation. The names
-/// match nvim's docs (`:h key-notation`).
-pub const fn named_key_to_nvim_name(key: NvimNamedKey) -> &'static str {
-    match key {
-        NvimNamedKey::ArrowDown => "Down",
-        NvimNamedKey::ArrowLeft => "Left",
-        NvimNamedKey::ArrowRight => "Right",
-        NvimNamedKey::ArrowUp => "Up",
-        NvimNamedKey::Backspace => "BS",
-        NvimNamedKey::Delete => "Del",
-        NvimNamedKey::End => "End",
-        NvimNamedKey::Enter => "CR",
-        NvimNamedKey::Escape => "Esc",
-        NvimNamedKey::Home => "Home",
-        NvimNamedKey::Insert => "Insert",
-        NvimNamedKey::PageDown => "PageDown",
-        NvimNamedKey::PageUp => "PageUp",
-        NvimNamedKey::Space => "Space",
-        NvimNamedKey::Tab => "Tab",
-        NvimNamedKey::F1 => "F1",
-        NvimNamedKey::F2 => "F2",
-        NvimNamedKey::F3 => "F3",
-        NvimNamedKey::F4 => "F4",
-        NvimNamedKey::F5 => "F5",
-        NvimNamedKey::F6 => "F6",
-        NvimNamedKey::F7 => "F7",
-        NvimNamedKey::F8 => "F8",
-        NvimNamedKey::F9 => "F9",
-        NvimNamedKey::F10 => "F10",
-        NvimNamedKey::F11 => "F11",
-        NvimNamedKey::F12 => "F12",
-    }
-}
-
-/// POD modifier-state bag for the nvim formatter and the kitty
+/// POD modifier-state bag for the font-size decider and the kitty
 /// sequence gate. Mirrors the bits winit reports without taking a
 /// hard dependency on `neoism_window`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -178,81 +90,6 @@ impl LifecycleMods {
 
     pub const fn is_empty(self) -> bool {
         !self.shift && !self.control && !self.alt && !self.super_key
-    }
-}
-
-/// Format a key event for nvim consumption, returning the token nvim
-/// expects (e.g. `<C-CR>`, `<S-Esc>`, `a`, `A`, `<lt>`).
-///
-/// Inputs:
-///
-/// * `text` — the resolved character text the key produces. Pass empty
-///   when there isn't one.
-/// * `named` — `Some(NvimNamedKey)` when the key is one of the named
-///   keys nvim has a token for; `None` otherwise.
-/// * `mods` — modifier state.
-///
-/// Returns `None` for modifier-only events (no text and no named key),
-/// or when the resolved text is all control characters without being
-/// a single ASCII alpha.
-pub fn format_nvim_key_token(
-    text: &str,
-    named: Option<NvimNamedKey>,
-    mods: LifecycleMods,
-) -> Option<String> {
-    let (text, is_special) = if let Some(named) = named {
-        (named_key_to_nvim_name(named).to_string(), true)
-    } else {
-        if text.is_empty() {
-            return None;
-        }
-        if text.chars().all(|c| c.is_control()) && !is_ascii_alphabetic_str(text) {
-            return None;
-        }
-        (text.to_string(), false)
-    };
-
-    // nvim expects shifted ascii alphas to be uppercase even when
-    // the platform reports lowercase + shift state.
-    let text = if mods.shift && is_ascii_alphabetic_str(&text) {
-        text.to_uppercase()
-    } else {
-        text
-    };
-
-    // `<` is its own special token to avoid being confused for the
-    // start of a key notation.
-    let (text, is_special) = if text == "<" {
-        ("lt".to_string(), true)
-    } else {
-        (text, is_special)
-    };
-
-    // Modifier prefix. Shift is only emitted for special keys and
-    // for Ctrl-letter combos (per nvim's normalization rules).
-    let include_shift = is_special || (mods.control && is_ascii_alphabetic_str(&text));
-    let mut prefix = String::new();
-    if mods.shift && include_shift {
-        prefix.push_str("S-");
-    }
-    if mods.control {
-        prefix.push_str("C-");
-    }
-    if mods.alt {
-        prefix.push_str("M-");
-    }
-    if mods.super_key {
-        prefix.push_str("D-");
-    }
-
-    if prefix.is_empty() {
-        if is_special {
-            Some(format!("<{text}>"))
-        } else {
-            Some(text)
-        }
-    } else {
-        Some(format!("<{prefix}{text}>"))
     }
 }
 
@@ -535,98 +372,6 @@ mod tests {
         assert!(out.ends_with("..."));
         // No leading space on the ellipsis — matches the original.
         assert!(!out.ends_with(" ..."));
-    }
-
-    #[test]
-    fn ascii_alphabetic_single_char() {
-        assert!(is_ascii_alphabetic_str("a"));
-        assert!(is_ascii_alphabetic_str("Z"));
-        assert!(!is_ascii_alphabetic_str(""));
-        assert!(!is_ascii_alphabetic_str("ab"));
-        assert!(!is_ascii_alphabetic_str("1"));
-        assert!(!is_ascii_alphabetic_str("é"));
-    }
-
-    #[test]
-    fn nvim_key_named_lookup() {
-        assert_eq!(named_key_to_nvim_name(NvimNamedKey::Enter), "CR");
-        assert_eq!(named_key_to_nvim_name(NvimNamedKey::Escape), "Esc");
-        assert_eq!(named_key_to_nvim_name(NvimNamedKey::Backspace), "BS");
-        assert_eq!(named_key_to_nvim_name(NvimNamedKey::Delete), "Del");
-        assert_eq!(named_key_to_nvim_name(NvimNamedKey::Space), "Space");
-        assert_eq!(named_key_to_nvim_name(NvimNamedKey::F12), "F12");
-    }
-
-    #[test]
-    fn nvim_format_plain_letter() {
-        assert_eq!(
-            format_nvim_key_token("a", None, LifecycleMods::default()).as_deref(),
-            Some("a")
-        );
-    }
-
-    #[test]
-    fn nvim_format_shifted_letter_uppercases() {
-        let mods = LifecycleMods::new(true, false, false, false);
-        assert_eq!(format_nvim_key_token("a", None, mods).as_deref(), Some("A"));
-    }
-
-    #[test]
-    fn nvim_format_ctrl_letter_emits_s() {
-        // Ctrl+Shift+a → <S-C-A>.
-        let mods = LifecycleMods::new(true, true, false, false);
-        assert_eq!(
-            format_nvim_key_token("a", None, mods).as_deref(),
-            Some("<S-C-A>")
-        );
-    }
-
-    #[test]
-    fn nvim_format_lt_special() {
-        assert_eq!(
-            format_nvim_key_token("<", None, LifecycleMods::default()).as_deref(),
-            Some("<lt>")
-        );
-    }
-
-    #[test]
-    fn nvim_format_named_enter() {
-        assert_eq!(
-            format_nvim_key_token(
-                "",
-                Some(NvimNamedKey::Enter),
-                LifecycleMods::default()
-            )
-            .as_deref(),
-            Some("<CR>")
-        );
-    }
-
-    #[test]
-    fn nvim_format_shift_enter() {
-        let mods = LifecycleMods::new(true, false, false, false);
-        assert_eq!(
-            format_nvim_key_token("", Some(NvimNamedKey::Enter), mods).as_deref(),
-            Some("<S-CR>")
-        );
-    }
-
-    #[test]
-    fn nvim_format_modifier_only_returns_none() {
-        assert_eq!(
-            format_nvim_key_token("", None, LifecycleMods::default()),
-            None
-        );
-    }
-
-    #[test]
-    fn nvim_format_control_chars_dropped() {
-        // BEL is a single control char that's not ascii alphabetic →
-        // formatter drops it.
-        assert_eq!(
-            format_nvim_key_token("\u{07}", None, LifecycleMods::default()),
-            None
-        );
     }
 
     #[test]

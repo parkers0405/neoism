@@ -27,4 +27,5 @@ pub mod update;
 
 pub use modes::FinderMode;
 pub use state::*;
+pub use types::{ReferenceRow, SymbolRow};
 use types::*;

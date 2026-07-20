@@ -3,7 +3,7 @@
 // Identity + buffer-id helpers shared by the inbound store
 // (`RemotePresenceStore`), the outbound publisher
 // (`PresencePublisher`), and the surfaces that draw remote carets
-// (nvim canvas layer, markdown DOM overlay).
+// (markdown DOM overlay).
 //
 // The wire format is `neoism-protocol/src/crdt.rs` (mirrored in
 // `workspace/types.ts`); the semantics deliberately mirror the shared

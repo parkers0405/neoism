@@ -12,8 +12,6 @@ import {
   type TerminalAdapter,
   type WorkspacesModalPayload,
 } from "./createTerminal";
-import { NvimCanvasLayer } from "../editor/nvim/NvimCanvasLayer";
-import type { NvimGridSnapshot } from "../editor/nvim/NvimGridModel";
 import { MarkdownPresenceOverlay } from "./MarkdownPresenceOverlay";
 import {
   localPresenceIdentity,
@@ -68,7 +66,6 @@ import type {
   CrdtClientMessage,
   EditorSurfaceSummary,
   EditorClientMessage,
-  EditorServerMessage,
 } from "../workspace/types";
 import type { SearchBridge } from "../services/SearchService";
 
@@ -90,15 +87,6 @@ const WEB_SHADER_FILTERS = [
   { title: "Classic CRT TV", detail: "Browser CRT approximation", filter: "crt_curve" },
   { title: "New Pixie CRT", detail: "High contrast scanline filter", filter: "newpixiecrt" },
 ] as const;
-
-function luaStringLiteral(value: string): string {
-  return `"${value
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t")}"`;
-}
 
 // Tab-content ReadFile requests use a private id space starting above
 // the wasm bridge's own counter range so the two never collide.
@@ -170,12 +158,6 @@ interface MobileFileTreePan {
   suppressTap: boolean;
 }
 
-interface EditorWheelAnchor {
-  x: number;
-  y: number;
-  modifier: string;
-}
-
 interface WebPaneRect {
   external_id: number;
   leaf_id: number;
@@ -194,68 +176,6 @@ interface WebSessionLayoutPolicyResult {
   active_external_ids: number[];
   panes: WebPaneRect[];
   changed: boolean;
-}
-
-interface EditorGridCellSnapshot {
-  ch: string;
-  fg: number;
-  bg: number;
-  attrs: number;
-}
-
-interface EditorGridSnapshot {
-  width: number;
-  height: number;
-  cells: EditorGridCellSnapshot[];
-  cursor: [number, number] | null;
-  default_fg: number;
-  default_bg: number;
-}
-
-interface NvimCanvasPixelStats {
-  width: number;
-  height: number;
-  sampledPixels: number;
-  nonBackgroundPixels: number;
-}
-
-interface NvimSmokeSnapshot {
-  surfaceId: string | null;
-  width: number;
-  height: number;
-  mode: string | null;
-  cursor: [number, number] | null;
-  text: string;
-  nonBlankCells: number;
-  error: string | null;
-  canvas: NvimCanvasPixelStats | null;
-}
-
-interface WebNvimSmokeHook {
-  openNvimBuffer(path: string): void;
-  closeNvimBuffer(path: string): void;
-  sendNvimKeys(keys: string): void;
-  snapshot(surfaceId?: string | null): NvimSmokeSnapshot | null;
-  canvasStats(): NvimCanvasPixelStats | null;
-  activeSurfaceId(): string | null;
-  cachedSurfaceIds(): string[];
-}
-
-declare global {
-  interface Window {
-    __neoismE2E?: {
-      terminal?: WebNvimSmokeHook;
-    };
-  }
-}
-
-function editorReplySurfaceId(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object") return null;
-  const rec = payload as Record<string, unknown>;
-  const first = Object.values(rec)[0];
-  if (!first || typeof first !== "object") return null;
-  const surfaceId = (first as Record<string, unknown>).surface_id;
-  return typeof surfaceId === "string" && surfaceId.length > 0 ? surfaceId : null;
 }
 
 function parseBufferTabPolicyResult(value: unknown): BufferTabPolicyResult | null {
@@ -319,79 +239,6 @@ function parseSessionLayoutPolicyResult(value: unknown): WebSessionLayoutPolicyR
     panes,
     changed: rec.changed === true,
   };
-}
-
-function parseEditorGridSnapshotJson(json: string | undefined): EditorGridSnapshot | null {
-  if (!json) return null;
-  try {
-    const raw = JSON.parse(json);
-    if (!raw || typeof raw !== "object") return null;
-    const rec = raw as Record<string, unknown>;
-    const width = rec.width;
-    const height = rec.height;
-    const cells = rec.cells;
-    if (
-      typeof width !== "number" ||
-      typeof height !== "number" ||
-      !Number.isFinite(width) ||
-      !Number.isFinite(height) ||
-      !Array.isArray(cells)
-    ) {
-      return null;
-    }
-    const parsedCells: EditorGridCellSnapshot[] = [];
-    for (const rawCell of cells) {
-      if (!rawCell || typeof rawCell !== "object") {
-        parsedCells.push({ ch: " ", fg: 0, bg: 0, attrs: 0 });
-        continue;
-      }
-      const cell = rawCell as Record<string, unknown>;
-      parsedCells.push({
-        ch: typeof cell.ch === "string" ? cell.ch : " ",
-        fg: typeof cell.fg === "number" ? cell.fg : 0,
-        bg: typeof cell.bg === "number" ? cell.bg : 0,
-        attrs: typeof cell.attrs === "number" ? cell.attrs : 0,
-      });
-    }
-    if (parsedCells.length < width * height) return null;
-    const cursor = Array.isArray(rec.cursor)
-      ? rec.cursor.length >= 2 &&
-        typeof rec.cursor[0] === "number" &&
-        typeof rec.cursor[1] === "number"
-        ? ([rec.cursor[0], rec.cursor[1]] as [number, number])
-        : null
-      : null;
-    return {
-      width: Math.max(0, Math.trunc(width)),
-      height: Math.max(0, Math.trunc(height)),
-      cells: parsedCells,
-      cursor,
-      default_fg: typeof rec.default_fg === "number" ? rec.default_fg : 0xe6edf3,
-      default_bg: typeof rec.default_bg === "number" ? rec.default_bg : 0x000000,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function packedRgbCss(value: number): string {
-  const n = Math.max(0, Math.min(0xffffff, Math.trunc(value)));
-  return `#${n.toString(16).padStart(6, "0")}`;
-}
-
-function nvimSnapshotText(snapshot: NvimGridSnapshot): string {
-  const rows: string[] = [];
-  for (let row = 0; row < snapshot.height; row += 1) {
-    const start = row * snapshot.width;
-    rows.push(
-      snapshot.cells
-        .slice(start, start + snapshot.width)
-        .map((cell) => cell.ch || " ")
-        .join("")
-        .trimEnd(),
-    );
-  }
-  return rows.join("\n").trimEnd();
 }
 
 export interface TerminalPanelOptions {
@@ -478,8 +325,6 @@ export class TerminalPanel {
   private readonly root: HTMLElement;
   private readonly canvas: HTMLCanvasElement;
   private readonly markdownLayer: HTMLDivElement;
-  private readonly nvimLayer: NvimCanvasLayer;
-  private e2eHook: WebNvimSmokeHook | null = null;
   private readonly paneOverlay: HTMLDivElement;
   // Lazily acquired — calling getContext("2d") on the canvas locks it
   // to a 2D context for its lifetime, which makes sugarloaf's WebGL2
@@ -546,7 +391,7 @@ export class TerminalPanel {
   // IME composition tracking. `imeComposing` flips true between
   // `compositionstart` and `compositionend`; the keydown path uses it
   // (combined with `event.isComposing`) to drop keystrokes the IME
-  // owns so nvim / pty never see the candidate-list navigation keys.
+  // owns so the pty never sees the candidate-list navigation keys.
   private imeComposing = false;
   private readonly compositionStartHandler: (event: CompositionEvent) => void;
   private readonly compositionUpdateHandler: (event: CompositionEvent) => void;
@@ -629,8 +474,7 @@ export class TerminalPanel {
     );
     this.remotePresence.setLocalPeerId(this.crdtPeerId);
     // Coarse presence pump: heartbeats, markdown reading-position
-    // publishes (scroll-driven), and client-side TTL pruning. Cursor
-    // moves additionally pump synchronously from `editorReply`.
+    // publishes (scroll-driven), and client-side TTL pruning.
     this.presenceTimer = setInterval(() => {
       this.pumpPresence();
       // Safety-net CRDT flush: keystrokes pump synchronously from the
@@ -643,14 +487,6 @@ export class TerminalPanel {
         this.scheduleDraw();
       }
     }, 250);
-    this.nvimLayer = new NvimCanvasLayer({
-      mount: this.root,
-      sendEditor: (message) => this.sendEditorMessage(message),
-      activeSurfaceId: () => this.focusedEditorSurfaceId(),
-      focusHost: () => this.focus(),
-    });
-    this.nvimLayer.setVisible(false);
-    this.installE2eHook();
     this.paneOverlay = document.createElement("div");
     this.paneOverlay.className = "terminal-pane-layout-overlay";
     this.root.appendChild(this.paneOverlay);
@@ -750,7 +586,7 @@ export class TerminalPanel {
         // the push-up.
         this.keyboardInsetBottom = insets.keyboardOpen ? insets.bottom : 0;
         // iOS fires visualViewport resizes continuously while the
-        // keyboard animates; reflowing nvim/PTY for every frame of
+        // keyboard animates; reflowing the PTY for every frame of
         // that animation reads as the viewport thrashing. Trail the
         // final value instead.
         if (this.insetResizeTimer !== null) {
@@ -784,7 +620,6 @@ export class TerminalPanel {
     this.pointerDownHandler = (event) => this.handlePointerDown(event);
     this.pointerUpHandler = (event) => this.handlePointerUp(event);
     this.pointerLeaveHandler = () => {
-      this.editorPointerDragging = false;
       this.hideCustomCursor();
       this.forwardChromeEvent(pointerLeaveEvent());
     };
@@ -835,7 +670,7 @@ export class TerminalPanel {
     // chrome (`Composition::{Start, Update, Commit, End}`) so the
     // shared decision table sees the same events the desktop fork
     // gets from winit. Without these, Japanese / Chinese input never
-    // reaches nvim or the pty — the keydown path only fires for
+    // reaches the pty — the keydown path only fires for
     // single-byte keys.
     this.canvas.addEventListener("compositionstart", this.compositionStartHandler);
     this.canvas.addEventListener("compositionupdate", this.compositionUpdateHandler);
@@ -1258,8 +1093,6 @@ export class TerminalPanel {
     for (const message of this.presencePublisher.tick(null, Date.now())) {
       this.options.client.sendCrdt(message);
     }
-    this.clearEditorLeaderPending(false);
-    this.uninstallE2eHook();
     this.observer.disconnect();
     this.dprMediaQuery?.removeEventListener("change", this.dprChangeHandler);
     this.dprMediaQuery = null;
@@ -1322,204 +1155,14 @@ export class TerminalPanel {
     this.root.remove();
   }
 
-  private installE2eHook(): void {
-    if (typeof window === "undefined") return;
-    const hook: WebNvimSmokeHook = {
-      openNvimBuffer: (path) => this.openNvimBufferForE2e(path),
-      closeNvimBuffer: (path) => this.closeNvimBufferForE2e(path),
-      sendNvimKeys: (keys) => this.sendEditorSendKeys(new TextEncoder().encode(keys)),
-      snapshot: (surfaceId) => this.nvimSmokeSnapshot(surfaceId),
-      canvasStats: () => this.nvimCanvasPixelStats(),
-      activeSurfaceId: () => this.focusedEditorSurfaceId(),
-      cachedSurfaceIds: () => this.nvimLayer.surfaceIds(),
-    };
-    this.e2eHook = hook;
-    window.__neoismE2E = {
-      ...(window.__neoismE2E ?? {}),
-      terminal: hook,
-    };
-  }
-
-  private uninstallE2eHook(): void {
-    if (typeof window === "undefined" || !this.e2eHook) return;
-    if (window.__neoismE2E?.terminal === this.e2eHook) {
-      delete window.__neoismE2E.terminal;
-    }
-    this.e2eHook = null;
-  }
-
-  private openNvimBufferForE2e(path: string): void {
-    const trimmed = path.trim();
-    if (trimmed.length === 0) return;
-    this.ensureSessionLayoutState();
-
-    const existing = this.bufferTabs.findIndex((tab) => tab.path === trimmed);
-    const tabIndex =
-      existing >= 0
-        ? existing
-        : this.bufferTabs.push({
-            title: trimmed.split(/[\\/]/).pop() ?? trimmed,
-            kind: "file",
-            path: trimmed,
-          }) - 1;
-
-    if (existing < 0) {
-      this.requestFileContent(trimmed, tabIndex);
-    }
-    this.activeTabIndex = tabIndex;
-    this.wasmAdapter?.setActiveTab?.(tabIndex);
-    this.assignActiveTabToFocusedEditorPane();
-    this.replayBufferTabs();
-    if (!isMarkdownPath(trimmed) && this.focusedEditorSurfaceId() === null) {
-      // The hook can be installed before ChromeBridge finishes booting.
-      // Keep the host tab state, then let adapter-ready synchronization
-      // open the buffer once a real editor surface can be bound.
-      this.scheduleDraw();
-      return;
-    }
-    this.openFileTabContent(trimmed);
-    this.syncNvimLayerVisibility();
-    this.scheduleDraw();
-  }
-
-  private closeNvimBufferForE2e(path: string): void {
-    const trimmed = path.trim();
-    if (trimmed.length === 0) return;
-    const index = this.bufferTabs.findIndex((tab) => tab.path === trimmed);
-    if (index < 0) return;
-    this.applyBufferTabPolicy("close_index", index);
-    this.scheduleDraw();
-  }
-
-  private nvimSmokeSnapshot(surfaceId?: string | null): NvimSmokeSnapshot | null {
-    const requestedSurfaceId =
-      surfaceId === undefined ? this.focusedEditorSurfaceId() : surfaceId;
-    const snapshot =
-      this.nvimLayer.snapshotForSurface(requestedSurfaceId) ??
-      this.nvimLayer.activeSnapshot();
-    if (!snapshot) return null;
-    return {
-      surfaceId: snapshot.surfaceId,
-      width: snapshot.width,
-      height: snapshot.height,
-      mode: snapshot.mode,
-      cursor: snapshot.cursor,
-      text: nvimSnapshotText(snapshot),
-      nonBlankCells: snapshot.cells.filter((cell) => cell.ch.trim().length > 0).length,
-      error: snapshot.error,
-      canvas: this.nvimCanvasPixelStats(),
-    };
-  }
-
-  private nvimCanvasPixelStats(): NvimCanvasPixelStats | null {
-    this.syncNvimLayerVisibility();
-    const canvas = this.nvimLayer.canvas;
-    const wasHidden = canvas.hidden;
-    try {
-      if (wasHidden) {
-        this.nvimLayer.setVisible(true);
-      } else {
-        this.nvimLayer.render();
-      }
-      if (canvas.width <= 0 || canvas.height <= 0) return null;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return null;
-      const { width, height } = canvas;
-      const image = ctx.getImageData(0, 0, width, height);
-      const data = image.data;
-      const bgR = data[0] ?? 0;
-      const bgG = data[1] ?? 0;
-      const bgB = data[2] ?? 0;
-      const bgA = data[3] ?? 0;
-      let nonBackgroundPixels = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        if (
-          data[i] !== bgR ||
-          data[i + 1] !== bgG ||
-          data[i + 2] !== bgB ||
-          data[i + 3] !== bgA
-        ) {
-          nonBackgroundPixels += 1;
-        }
-      }
-      return {
-        width,
-        height,
-        sampledPixels: width * height,
-        nonBackgroundPixels,
-      };
-    } catch {
-      return null;
-    } finally {
-      if (wasHidden) {
-        this.nvimLayer.setVisible(false);
-      }
-    }
-  }
-
   // ---------------------------------------------------------------
 
-  /// Hand a daemon `EditorReply` (nvim redraw frame) to the bridge so
-  /// the file-viewer pane updates its grid snapshot. The bridge parses
-  /// the JSON and pushes it onto `Chrome::editor_grid`, which the next
-  /// `Chrome::draw` paints. We never round-trip through serviceReply
-  /// because editor frames are unsolicited and route by panel, not by
-  /// request id.
-  editorReply(payload: unknown): void {
-    if (!payload) return;
-    try {
-      const json = JSON.stringify(payload);
-      // Single-hop diagnostic: log the variant tag so we can confirm in
-      // devtools that EditorReply frames are arriving and being handed
-      // to the wasm bridge. Truncate the JSON so long GridUpdate cell
-      // arrays don't flood the console.
-      const tag =
-        payload && typeof payload === "object"
-          ? Object.keys(payload as Record<string, unknown>)[0] ?? "<unknown>"
-          : "<non-object>";
-      console.debug(
-        `[nvim-trace] TerminalPanel.editorReply variant=${tag} bytes=${json.length}`,
-      );
-      const surfaceId = editorReplySurfaceId(payload);
-      const focusedSurfaceId = this.focusedEditorSurfaceId();
-      const shouldRemainLive = this.shouldApplyEditorRedraw(surfaceId);
-      const liveBeforeUpdate = this.liveEditorGridSurfaceId ?? focusedSurfaceId;
-      this.nvimLayer.ingest(payload as EditorServerMessage);
-      this.requestPresenceSnapshotForSurface(surfaceId ?? focusedSurfaceId);
-      this.pumpPresence();
-      if (shouldRemainLive) {
-        this.wasmAdapter?.editorGridUpdate?.(json);
-      } else {
-        // Background surface (another tab): cache the frame without
-        // touching the live grid — applying it live and restoring
-        // afterwards flashed the other tab's buffer whenever the
-        // restore had no cached snapshot to fall back to (e.g. the
-        // redraw storm after a font-scale resize).
-        this.wasmAdapter?.editorGridUpdatePassive?.(json);
-      }
-      this.refreshEditorGridSurfaceSnapshotIds();
-      if (shouldRemainLive) {
-        this.noteLiveEditorGridSurface(surfaceId);
-      } else {
-        console.debug(
-          `[nvim-trace] editorReply cached inactive surface=${surfaceId ?? "<primary>"}`,
-        );
-        const restoreSurface = liveBeforeUpdate ?? focusedSurfaceId;
-        if (
-          restoreSurface &&
-          this.wasmAdapter?.activateEditorGridSurface?.(restoreSurface) === true
-        ) {
-          this.noteLiveEditorGridSurface(restoreSurface);
-        } else {
-          this.noteLiveEditorGridSurface(surfaceId);
-        }
-      }
-      this.scheduleDraw();
-    } catch (err) {
-      console.warn("[nvim-trace] editorReply: failed to forward frame", err);
-      // Drop malformed frames silently — the next redraw will catch up.
-    }
-  }
+  /// Sink for daemon `EditorReply` envelopes. The embedded-nvim grid
+  /// path is gone (the daemon answers editor messages with an
+  /// "editor backend unavailable" error), so frames are ignored.
+  /// The envelope wiring is kept: the future native Rust CodePane
+  /// will consume this same reply channel.
+  editorReply(_payload: unknown): void {}
 
   private crdtInboundLogAt = new Map<string, number>();
   crdtReply(payload: CrdtServerMessage): void {
@@ -1549,10 +1192,8 @@ export class TerminalPanel {
     // recovery snapshot requests) — ship them now.
     this.pumpCrdtOutbox();
     const changed = this.remotePresence.applyServerMessage(payload);
-    this.nvimLayer.ingestPresence(payload, this.crdtPeerId);
     if (changed) {
       this.syncMarkdownPresenceOverlay();
-      this.syncEditorPresenceOverlay();
     }
     if (textChanged) {
       this.pumpMarkdownAnimation();
@@ -1914,23 +1555,6 @@ export class TerminalPanel {
         this.options.client.sendGit(requestId, { Diff: { path } });
       },
     });
-    // Install the outbound nvim-keys bridge. The bridge's stub passes
-    // a single base64 string per call; we wrap it in an
-    // `EditorClientMessage::SendKeys { bytes }` envelope under the
-    // `Editor` service tag the daemon dispatches in `server.rs`.
-    adapter.setNvimSend?.((bytesB64) => {
-      const bytes = base64ToBytes(bytesB64);
-      const surfaceId = this.editorInputSurfaceId();
-      this.options.client.sendEditor(
-        {
-          SendKeys: {
-            bytes: Array.from(bytes),
-            ...(surfaceId ? { surface_id: surfaceId } : {}),
-          },
-        },
-        this.options.workspaceRoot ?? null,
-      );
-    });
     // Install the PTY outbox so the wasm bridge can push DSR / OSC /
     // clipboard responses straight to the daemon without the host
     // having to poll `takePtyWrites()` after every feed. The poll
@@ -2117,9 +1741,6 @@ export class TerminalPanel {
       if (this.activePaneExternalId() === externalId) {
         this.activeTabIndex = tabIndex;
         this.wasmAdapter?.setActiveTab?.(tabIndex);
-        if (this.restoreEditorGridSnapshotForSurface(externalId)) {
-          this.noteLiveEditorGridSurface(surface.surface_id);
-        }
       }
     }
     this.paneTabState.set(externalId, state);
@@ -2132,7 +1753,6 @@ export class TerminalPanel {
 
   private ingestEditorSurfaceClosed(surfaceId: string): void {
     this.editorSurfaceBindings.delete(surfaceId);
-    this.cachedEditorGridSurfaceIds.delete(surfaceId);
     const externalId = this.externalIdFromEditorSurface(surfaceId);
     if (externalId === null) {
       return;
@@ -2377,29 +1997,8 @@ export class TerminalPanel {
     );
   }
 
-  private clearEditorLeaderPending(flushSpace: boolean): void {
-    if (this.editorLeaderTimer !== null) {
-      window.clearTimeout(this.editorLeaderTimer);
-      this.editorLeaderTimer = null;
-    }
-    const wasPending = this.editorLeaderPendingAt !== null;
-    this.editorLeaderPendingAt = null;
-    if (flushSpace && wasPending) {
-      this.sendEditorSendKeys(new TextEncoder().encode(" "));
-    }
-  }
-
-  private editorIsNormalMode(): boolean {
-    const surface = this.focusedEditorSurfaceId();
-    const snapshot =
-      (surface ? this.nvimLayer.snapshotForSurface(surface) : null) ??
-      this.nvimLayer.activeSnapshot();
-    const mode = (snapshot?.mode ?? "normal").toLowerCase();
-    return mode === "n" || mode === "normal" || mode.startsWith("normal");
-  }
-
-  /** Markdown mirror of the nvim Space-leader: Space then x closes
-   *  the tab. Only in normal mode — insert-mode spaces are text. */
+  /** Markdown Space-leader: Space then x closes the tab. Only in
+   *  normal mode — insert-mode spaces are text. */
   private markdownLeaderPendingAt: number | null = null;
   private handleMarkdownLeaderShortcut(event: KeyboardEvent): boolean {
     if (!this.activeTabIsMarkdown() || !this.useWasmMarkdown()) {
@@ -2437,49 +2036,6 @@ export class TerminalPanel {
       this.markdownLeaderPendingAt = now;
       return true;
     }
-    return false;
-  }
-
-  private handleEditorLeaderShortcut(event: KeyboardEvent): boolean {
-    if (this.activeSurface() !== "editor") {
-      this.clearEditorLeaderPending(false);
-      return false;
-    }
-    if (event.altKey || event.ctrlKey || event.metaKey) {
-      this.clearEditorLeaderPending(true);
-      return false;
-    }
-    if (!this.editorIsNormalMode()) {
-      this.clearEditorLeaderPending(false);
-      return false;
-    }
-
-    const now = performance.now();
-    if (
-      this.editorLeaderPendingAt !== null &&
-      now - this.editorLeaderPendingAt > 900
-    ) {
-      this.clearEditorLeaderPending(true);
-    }
-
-    if (this.editorLeaderPendingAt !== null) {
-      this.clearEditorLeaderPending(false);
-      if (!event.shiftKey && matchesKey(event, "KeyX", "x")) {
-        this.closeActiveBufferTab();
-        return true;
-      }
-      this.sendEditorSendKeys(new TextEncoder().encode(" "));
-      return false;
-    }
-
-    if (!event.shiftKey && event.code === "Space") {
-      this.editorLeaderPendingAt = now;
-      this.editorLeaderTimer = window.setTimeout(() => {
-        this.clearEditorLeaderPending(true);
-      }, 900);
-      return true;
-    }
-
     return false;
   }
 
@@ -2543,12 +2099,6 @@ export class TerminalPanel {
     const chromeTerminal = this.wasmAdapter?.chromeLayout?.()?.terminal;
     const terminalWidth = chromeTerminal?.w ?? width;
     const terminalHeight = chromeTerminal?.h ?? height;
-    this.nvimLayer.setViewport({
-      x: chromeTerminal?.x ?? 0,
-      y: chromeTerminal?.y ?? 0,
-      w: terminalWidth,
-      h: terminalHeight,
-    });
     const scaledCellWidth = CELL_WIDTH * this.currentFontScale;
     const scaledCellHeight = CELL_HEIGHT * this.currentFontScale;
     const cols = Math.max(MIN_COLS, Math.floor(terminalWidth / scaledCellWidth));
@@ -2593,16 +2143,9 @@ export class TerminalPanel {
   private editorSessionStarted = false;
   private editorGridCols = 0;
   private editorGridRows = 0;
-  private editorWheelRaf: number | null = null;
-  private editorWheelAnchor: EditorWheelAnchor | null = null;
-  private editorPointerDragging = false;
-  private editorLeaderPendingAt: number | null = null;
-  private editorLeaderTimer: number | null = null;
   private workspaceSessionId: string | null = null;
   private readonly editorSurfaceBindings = new Map<string, EditorSurfaceSummary>();
   private readonly editorResizeBySurface = new Map<string, { width: number; height: number }>();
-  private readonly cachedEditorGridSurfaceIds = new Set<string>();
-  private liveEditorGridSurfaceId: string | null = null;
 
   private drainChromeIntents(): void {
     this.drainTopBarActions();
@@ -2862,7 +2405,6 @@ export class TerminalPanel {
   private syncBridgeStateAfterAdapterReady(): void {
     this.replayBufferTabs();
     this.activateCurrentTabContents(true);
-    this.syncNvimLayerVisibility();
     if (this.lastGitBranch !== undefined) {
       this.wasmAdapter?.setStatusBranch?.(this.lastGitBranch);
     }
@@ -2884,9 +2426,9 @@ export class TerminalPanel {
 
   /// Apply finder Enter / click picks the wasm bridge queued via
   /// `pick_finder_selection`. Each intent becomes a buffer-tab append
-  /// (same path the file-tree open intents take) plus, for grep / git
-  /// hits, a follow-up `SendKeys` envelope that jumps the embedded
-  /// nvim's cursor to the matching line.
+  /// (same path the file-tree open intents take). The grep/git line
+  /// jump was an embedded-nvim SendKeys hop; the native CodePane will
+  /// reintroduce line targeting.
   private drainFinderOpenIntents(): void {
     const intents = this.wasmAdapter?.drainFinderOpenIntents?.();
     if (!intents || intents.length === 0) return;
@@ -2909,14 +2451,6 @@ export class TerminalPanel {
         this.openFileTabContent(intent.path);
       }
       changed = true;
-      // Grep / git hits carry a 1-based line. Send `:<n>\n` as raw
-      // input bytes so nvim's `:` ex command moves the cursor; the
-      // resulting `grid_cursor_goto` redraw routes back through the
-      // bridge's `editor_grid_update` path.
-      if (intent.line && intent.line > 0) {
-        const cmd = `:${intent.line}\n`;
-        this.sendEditorSendKeys(new TextEncoder().encode(cmd));
-      }
       this.assignActiveTabToFocusedEditorPane();
     }
     if (changed) {
@@ -2948,11 +2482,8 @@ export class TerminalPanel {
           }
           break;
         case "search":
-          if (intent.query.length > 0) {
-            this.sendEditorSendKeys(
-              this.paletteSearchCommitKeys(intent.query, intent.match_location),
-            );
-          }
+          // Buffer search commits were embedded-nvim lua calls; the
+          // native CodePane will own search-commit routing.
           break;
         case "font":
           this.handlePaletteFontPick(intent.family, adapter);
@@ -3068,28 +2599,12 @@ export class TerminalPanel {
         return;
       }
     }
-    // Send the ex command verbatim to nvim by prefixing `:` and
-    // terminating with `<CR>`. Matches the desktop's vim_run_ex_command
-    // path for commands the host does not intercept.
-    this.sendEditorSendKeys(new TextEncoder().encode(`:${trimmed}\n`));
-  }
-
-  private paletteSearchCommitKeys(
-    query: string,
-    matchLocation: [number, number] | null,
-  ): Uint8Array {
-    const location =
-      matchLocation &&
-      matchLocation[0] > 0 &&
-      matchLocation[1] > 0 &&
-      Number.isFinite(matchLocation[0]) &&
-      Number.isFinite(matchLocation[1])
-        ? ([Math.trunc(matchLocation[0]), Math.trunc(matchLocation[1])] as const)
-        : null;
-    const quoted = luaStringLiteral(query);
-    const args = location ? `${quoted}, ${location[0]}, ${location[1]}` : quoted;
-    return new TextEncoder().encode(
-      `:lua pcall(function() require('rio.search').commit(${args}) end)\n`,
+    // Unintercepted ex commands used to forward to the embedded nvim.
+    // That backend is gone; surface the miss instead of silently
+    // dropping the input. The native CodePane will own `:` routing.
+    this.notifyPaletteUnavailable(
+      `Ex command ":${trimmed}" is not available in the web frontend.`,
+      adapter,
     );
   }
 
@@ -3097,8 +2612,8 @@ export class TerminalPanel {
   /// wasm bridge) onto the matching host-side handler. Mirrors the
   /// `Screen::execute_palette_action` arm-by-arm on desktop. Shared
   /// Rust owns the command list and palette UI; this host layer owns
-  /// transport-specific effects such as spawning daemon PTYs, opening
-  /// browser windows, or forwarding nvim commands.
+  /// transport-specific effects such as spawning daemon PTYs or
+  /// opening browser windows.
   private dispatchPaletteAction(action: string): void {
     const adapter = this.wasmAdapter;
     if (!adapter) return;
@@ -3202,15 +2717,7 @@ export class TerminalPanel {
         this.selectRelativeTab(-1);
         break;
       case "Copy":
-        if (this.activeSurface() === "editor") {
-          this.sendEditorSendKeys(
-            new TextEncoder().encode(
-              ":lua pcall(function() require('rio.clipboard').copy_active() end)\n",
-            ),
-          );
-        } else {
-          void this.writeClipboard(this.terminalInput || this.agentInput);
-        }
+        void this.writeClipboard(this.terminalInput || this.agentInput);
         break;
       case "Paste":
         void this.readClipboard().then((text) => {
@@ -3221,17 +2728,11 @@ export class TerminalPanel {
         if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
           this.saveActiveMarkdown();
         } else {
-          this.sendEditorSendKeys(new TextEncoder().encode(":w\n"));
+          this.notifyPaletteUnavailable(
+            "Save is only available for markdown documents on the web today.",
+            adapter,
+          );
         }
-        break;
-      case "SearchForward":
-        this.sendEditorSendKeys(new TextEncoder().encode("/"));
-        break;
-      case "SearchBackward":
-        this.sendEditorSendKeys(new TextEncoder().encode("?"));
-        break;
-      case "ConfigEditor":
-        this.sendEditorSendKeys(new TextEncoder().encode(":edit $MYVIMRC\n"));
         break;
       case "WindowCreateNew":
         window.open(window.location.href, "_blank", "noopener");
@@ -3247,37 +2748,6 @@ export class TerminalPanel {
         break;
       case "OpenShaders":
         adapter.enterPaletteShadersMode?.(JSON.stringify(WEB_SHADER_FILTERS));
-        break;
-      case "LspRename":
-        this.sendEditorSendKeys(new TextEncoder().encode(":Rename "));
-        break;
-      case "LspHover":
-      case "LspCodeAction":
-      case "LspFormat":
-      case "LspDefinition":
-      case "LspReferences":
-      case "LspDocumentSymbols":
-      case "LspWorkspaceSymbols":
-      case "ToggleInlayHints":
-      case "ToggleMinimap":
-        // These map to user-command names the embedded nvim exposes
-        // (Hover, CodeAction, LspFormat, Definition, References,
-        // Rename, DocumentSymbols, WorkspaceSymbols, InlayHints,
-        // Minimap). Run them as ex commands the same way desktop does
-        // via `send_editor_command`.
-        {
-          const name =
-            action === "LspWorkspaceSymbols"
-              ? "WorkspaceSymbols"
-              : action === "LspFormat"
-              ? "LspFormat"
-              : action.startsWith("Lsp")
-                ? action.slice(3)
-                : action === "ToggleInlayHints"
-                  ? "InlayHints"
-                  : "Minimap";
-          this.sendEditorSendKeys(new TextEncoder().encode(`:${name}\n`));
-        }
         break;
       case "ClearHistory":
         this.setTerminalInput("");
@@ -3489,19 +2959,6 @@ export class TerminalPanel {
     this.applyBufferTabPolicy(delta < 0 ? "move_previous" : "move_next");
   }
 
-  private sendEditorWindowCommand(command: string): void {
-    const adapter = this.wasmAdapter;
-    if (!adapter) return;
-    if (this.activeSurface() !== "editor") {
-      this.notifyPaletteUnavailable(
-        `Editor window command "${command}" needs an editor buffer.`,
-        adapter,
-      );
-      return;
-    }
-    this.sendEditorSendKeys(new TextEncoder().encode(`:${command}\n`));
-  }
-
   private activePaneExternalId(): number | null {
     return this.paneLayoutPanes.find((pane) => pane.focused)?.external_id ?? null;
   }
@@ -3515,133 +2972,11 @@ export class TerminalPanel {
     return externalId === null ? null : this.editorSurfaceId(externalId);
   }
 
-  private editorInputSurfaceId(): string | null {
-    if (this.liveEditorGridSurfaceId !== null) return this.liveEditorGridSurfaceId;
-    const focused = this.focusedEditorSurfaceId();
-    if (focused !== null) return focused;
-    if (this.paneLayoutPanes.length === 1) {
-      return this.editorSurfaceId(this.paneLayoutPanes[0].external_id);
-    }
-    if (this.editorSurfaceBindings.size === 1) {
-      return this.editorSurfaceBindings.keys().next().value ?? null;
-    }
-    return null;
-  }
-
-  private activeEditorGridSize(
-    surfaceId: string | null = this.focusedEditorSurfaceId(),
-  ): { cols: number; rows: number } {
-    const snapshot = surfaceId ? this.editorGridSnapshotForSurface(surfaceId) : null;
-    const cols = Math.max(
-      1,
-      Math.trunc(snapshot?.width ?? (this.editorGridCols || this.cols)),
-    );
-    const rows = Math.max(
-      1,
-      Math.trunc(snapshot?.height ?? (this.editorGridRows || this.rows)),
-    );
-    return { cols, rows };
-  }
-
-  private shouldApplyEditorRedraw(surfaceId: string | null): boolean {
-    if (!surfaceId) {
-      return true;
-    }
-    const externalId = this.externalIdFromEditorSurface(surfaceId);
-    if (
-      externalId === null ||
-      !this.paneLayoutPanes.some((pane) => pane.external_id === externalId)
-    ) {
-      return false;
-    }
-    const focused = this.focusedEditorSurfaceId();
-    return focused === null || focused === surfaceId;
-  }
-
-  private noteLiveEditorGridSurface(surfaceId: string | null): void {
-    const nextSurface = surfaceId ?? this.focusedEditorSurfaceId();
-    if (this.liveEditorGridSurfaceId === nextSurface) return;
-    this.liveEditorGridSurfaceId = nextSurface;
-    this.nvimLayer.setActiveSurfaceId(nextSurface);
-    this.renderPaneLayoutOverlay();
-  }
-
-  private refreshEditorGridSurfaceSnapshotIds(): void {
-    const idsJson = this.wasmAdapter?.editorGridSurfaceIdsJson?.();
-    if (idsJson) {
-      try {
-        const ids = JSON.parse(idsJson);
-        if (Array.isArray(ids)) {
-          this.cachedEditorGridSurfaceIds.clear();
-          for (const id of ids) {
-            if (typeof id === "string" && id.length > 0) {
-              this.cachedEditorGridSurfaceIds.add(id);
-            }
-          }
-        }
-      } catch {
-        // Cache hint only. The bridge getter below remains authoritative.
-      }
-    }
-    for (const id of this.nvimLayer.surfaceIds()) {
-      this.cachedEditorGridSurfaceIds.add(id);
-    }
-  }
-
-  private hasEditorGridSnapshotForSurface(surfaceId: string): boolean {
-    if (this.cachedEditorGridSurfaceIds.has(surfaceId)) {
-      return true;
-    }
-    const snapshot = this.wasmAdapter?.editorGridSnapshotForSurfaceJson?.(surfaceId);
-    if (snapshot) {
-      this.cachedEditorGridSurfaceIds.add(surfaceId);
-      return true;
-    }
-    if (this.nvimLayer.hasSnapshotForSurface(surfaceId)) {
-      this.cachedEditorGridSurfaceIds.add(surfaceId);
-      return true;
-    }
-    this.refreshEditorGridSurfaceSnapshotIds();
-    return this.cachedEditorGridSurfaceIds.has(surfaceId);
-  }
-
-  private editorGridSnapshotForSurface(surfaceId: string): EditorGridSnapshot | null {
-    const snapshot = parseEditorGridSnapshotJson(
-      this.wasmAdapter?.editorGridSnapshotForSurfaceJson?.(surfaceId),
-    );
-    if (snapshot) {
-      this.cachedEditorGridSurfaceIds.add(surfaceId);
-      return snapshot;
-    }
-    const nvimSnapshot = this.nvimLayer.snapshotForSurface(surfaceId);
-    if (nvimSnapshot) {
-      this.cachedEditorGridSurfaceIds.add(surfaceId);
-      return {
-        width: nvimSnapshot.width,
-        height: nvimSnapshot.height,
-        cells: nvimSnapshot.cells,
-        cursor: nvimSnapshot.cursor,
-        default_fg: nvimSnapshot.default_fg,
-        default_bg: nvimSnapshot.default_bg,
-      };
-    }
-    this.refreshEditorGridSurfaceSnapshotIds();
-    return null;
-  }
-
-  private restoreEditorGridSnapshotForSurface(externalId: number): boolean {
-    const adapter = this.wasmAdapter;
-    const surfaceId = this.editorSurfaceId(externalId);
-    if (!this.hasEditorGridSnapshotForSurface(surfaceId)) {
-      return false;
-    }
-    if (adapter?.activateEditorGridSurface && !adapter.activateEditorGridSurface(surfaceId)) {
-      return false;
-    }
-    this.nvimLayer.setActiveSurfaceId(surfaceId);
-    this.noteLiveEditorGridSurface(surfaceId);
-    this.scheduleDraw();
-    return true;
+  private activeEditorGridSize(): { cols: number; rows: number } {
+    return {
+      cols: Math.max(1, Math.trunc(this.editorGridCols || this.cols)),
+      rows: Math.max(1, Math.trunc(this.editorGridRows || this.rows)),
+    };
   }
 
   private sendEditorMessage(message: EditorClientMessage): void {
@@ -3658,14 +2993,6 @@ export class TerminalPanel {
         exclude_peer_id: this.crdtPeerId,
       },
     });
-  }
-
-  private requestPresenceSnapshotForSurface(surfaceId: string | null): void {
-    const snapshot =
-      this.nvimLayer.snapshotForSurface(surfaceId) ?? this.nvimLayer.activeSnapshot();
-    if (snapshot?.bufferId) {
-      this.requestPresenceSnapshot(presenceBufferIdForPath(snapshot.bufferId));
-    }
   }
 
   /**
@@ -3744,12 +3071,10 @@ export class TerminalPanel {
   }
 
   /**
-   * Where is the local user? Markdown viewer tabs publish their
-   * reading position (top visible source line — the web markdown view
-   * is read-only, so the scroll position IS the cursor). Nvim editor
-   * surfaces publish the real grid cursor. Terminal/agent tabs
-   * publish nothing, which makes the publisher clear any previous
-   * presence.
+   * Where is the local user? Markdown tabs publish their caret (or
+   * reading position on the legacy DOM viewer). Terminal/agent/file
+   * tabs publish nothing, which makes the publisher clear any
+   * previous presence.
    */
   private currentPresenceTarget(): ActivePresenceTarget | null {
     const markdownBufferId = this.activeMarkdownBufferId();
@@ -3770,28 +3095,10 @@ export class TerminalPanel {
         insert: cursor?.insert ?? false,
       };
     }
-    // Editor-like file tabs run through the daemon's nvim plane; the
-    // grid cursor is the genuine local cursor. (Checked off the tab
-    // model, not the wasm adapter, so presence still publishes when
-    // the bridge is running in stub mode.)
-    if (!this.isEditorLikeTab(this.bufferTabs[this.activeTabIndex])) return null;
-    const snapshot =
-      this.nvimLayer.snapshotForSurface(this.focusedEditorSurfaceId()) ??
-      this.nvimLayer.activeSnapshot();
-    if (!snapshot?.bufferId || !snapshot.cursorState?.visible) return null;
-    // Prefer the BUFFER-coordinate caret from win_viewport's
-    // curline/curcol — remote screens with different scroll positions
-    // then draw it at the true line. Screen row/col is the fallback
-    // for older daemons that don't forward them.
-    const line = snapshot.curline ?? snapshot.cursorState.row;
-    const column = snapshot.curcol ?? snapshot.cursorState.col;
-    const mode = (snapshot.mode ?? "normal").toLowerCase();
-    return {
-      bufferId: presenceBufferIdForPath(snapshot.bufferId),
-      cursor: { line, column, offset: null },
-      selection: null,
-      insert: mode.startsWith("insert") || mode === "i" || mode.startsWith("replace"),
-    };
+    // Editor-like file tabs used to publish the embedded-nvim grid
+    // cursor. That plane is gone; the native CodePane will publish a
+    // real caret here.
+    return null;
   }
 
   private activeMarkdownBufferId(): string | null {
@@ -3814,40 +3121,6 @@ export class TerminalPanel {
       }
     }
     return 0;
-  }
-
-  /** 7C-2: feed remote carets for the ACTIVE editor (nvim) surface
-   *  into the wasm grid painter — buffer-coordinate lines; the bridge
-   *  folds the viewport topline out before drawing. */
-  private syncEditorPresenceOverlay(): void {
-    const adapter = this.wasmAdapter as {
-      setEditorRemoteCursors?: (peers: unknown) => void;
-    };
-    if (!adapter?.setEditorRemoteCursors) return;
-    const snapshot =
-      this.nvimLayer.snapshotForSurface(this.focusedEditorSurfaceId()) ??
-      this.nvimLayer.activeSnapshot();
-    const bufferId = snapshot?.bufferId
-      ? presenceBufferIdForPath(snapshot.bufferId)
-      : null;
-    const peers = bufferId
-      ? this.remotePresence.cursorsFor(bufferId).map((p) => ({
-          name: p.display_name,
-          color: [p.color.r, p.color.g, p.color.b],
-          rainbow: p.rainbow ?? false,
-          line: p.cursor.line,
-          col: p.cursor.column,
-          insert: p.insert ?? false,
-        }))
-      : [];
-    const counts = adapter.setEditorRemoteCursors(peers) as
-      | number[]
-      | undefined;
-    if (peers.length > 0 || (counts?.[1] ?? 0) > 0) {
-      console.info(
-        `[carets] buffer=${bufferId} peers=${peers.length} visible=${counts?.[0] ?? "?"} roster=${counts?.[1] ?? "?"}`,
-      );
-    }
   }
 
   /** Repaint the markdown DOM overlay from the presence store. */
@@ -4017,8 +3290,6 @@ export class TerminalPanel {
       this.setMarkdownLayerVisible(false);
       return;
     }
-    this.wasmAdapter?.clearActiveEditorGrid?.();
-    this.liveEditorGridSurfaceId = null;
     if (this.markdownLayerTabIndex === this.activeTabIndex) {
       this.setMarkdownLayerVisible(true);
     } else {
@@ -4028,8 +3299,6 @@ export class TerminalPanel {
   }
 
   private showMarkdownTab(): void {
-    this.wasmAdapter?.clearActiveEditorGrid?.();
-    this.liveEditorGridSurfaceId = null;
     this.syncActiveMarkdownLayer();
   }
 
@@ -4139,14 +3408,10 @@ export class TerminalPanel {
       this.activeTabIndex = tabIndex;
       this.wasmAdapter?.setActiveTab?.(tabIndex);
       const tab = this.bufferTabs[tabIndex];
-      const restored = this.restoreEditorGridSnapshotForSurface(externalId);
       if (openEditorBuffer && tab?.kind === "file" && tab.path) {
         this.openFileTabContent(tab.path);
       } else {
         this.bindEditorSurfaceForTab(externalId, tabIndex);
-      }
-      if (restored) {
-        this.noteLiveEditorGridSurface(this.editorSurfaceId(externalId));
       }
       this.replayBufferTabs();
       return;
@@ -4158,14 +3423,10 @@ export class TerminalPanel {
       this.activeTabIndex = fallback;
       this.wasmAdapter?.setActiveTab?.(fallback);
       const tab = this.bufferTabs[fallback];
-      const restored = this.restoreEditorGridSnapshotForSurface(externalId);
       if (openEditorBuffer && tab?.kind === "file" && tab.path) {
         this.openFileTabContent(tab.path);
       } else {
         this.bindEditorSurfaceForTab(externalId, fallback);
-      }
-      if (restored) {
-        this.noteLiveEditorGridSurface(this.editorSurfaceId(externalId));
       }
       this.replayBufferTabs();
     }
@@ -4228,9 +3489,7 @@ export class TerminalPanel {
   }
 
   private splitEditorPane(axis: WebPaneSplitAxis): void {
-    const command = axis === "horizontal" ? "vsplit" : "split";
     if (this.activeSurface() !== "editor") {
-      this.sendEditorWindowCommand(command);
       return;
     }
     const paneId = this.nextWebPaneId++;
@@ -4250,19 +3509,16 @@ export class TerminalPanel {
       this.activatePaneExternalId(paneId, false);
       this.bindEditorSurfaceForTab(paneId, tabToCarry);
     }
-    this.sendEditorWindowCommand(command);
   }
 
   private focusEditorPane(previous: boolean): void {
     if (this.activeSurface() !== "editor") {
-      this.sendEditorWindowCommand(previous ? "wincmd W" : "wincmd w");
       return;
     }
     const result = this.applySessionLayoutPolicy(previous ? "focus_prev" : "focus_next");
     if (typeof result?.focused_external_id === "number") {
       this.activatePaneExternalId(result.focused_external_id, true);
     }
-    this.sendEditorWindowCommand(previous ? "wincmd W" : "wincmd w");
   }
 
   private closeEditorPaneOrTab(): void {
@@ -4280,7 +3536,6 @@ export class TerminalPanel {
       if (typeof result?.focused_external_id === "number") {
         this.activatePaneExternalId(result.focused_external_id, true);
       }
-      this.sendEditorWindowCommand("close");
       return;
     }
     this.closeActiveBufferTab();
@@ -4298,12 +3553,8 @@ export class TerminalPanel {
     }
     this.paneOverlay.hidden = false;
     for (const pane of this.paneLayoutPanes) {
-      const ownsLiveGrid =
-        this.liveEditorGridSurfaceId === this.editorSurfaceId(pane.external_id);
       const el = document.createElement("div");
-      el.className = `terminal-pane-layout-cell${pane.focused ? " is-focused" : ""}${
-        ownsLiveGrid ? " is-live-grid" : ""
-      }`;
+      el.className = `terminal-pane-layout-cell${pane.focused ? " is-focused" : ""}`;
       el.style.left = `${pane.x * 100}%`;
       el.style.top = `${pane.y * 100}%`;
       el.style.width = `${pane.w * 100}%`;
@@ -4312,84 +3563,14 @@ export class TerminalPanel {
       el.title = this.paneTitle(pane);
       const label = document.createElement("span");
       label.className = "terminal-pane-layout-label";
-      label.textContent = `${this.paneTitle(pane)}${ownsLiveGrid ? " · live" : ""}`;
+      label.textContent = this.paneTitle(pane);
       el.appendChild(label);
-      if (!ownsLiveGrid) {
-        this.appendEditorPanePreview(el, pane);
-      }
       el.addEventListener("pointerdown", (event) => {
         event.preventDefault();
         event.stopPropagation();
         this.focusEditorPaneByExternalId(pane.external_id);
       });
       this.paneOverlay.appendChild(el);
-    }
-  }
-
-  private appendEditorPanePreview(parent: HTMLElement, pane: WebPaneRect): void {
-    const surfaceId = this.editorSurfaceId(pane.external_id);
-    const snapshot = this.editorGridSnapshotForSurface(surfaceId);
-    const preview = document.createElement("div");
-    preview.className = "terminal-pane-editor-preview";
-    if (!snapshot || snapshot.width <= 0 || snapshot.height <= 0) {
-      preview.classList.add("is-empty");
-      preview.textContent = "Waiting for editor grid";
-      parent.appendChild(preview);
-      return;
-    }
-    preview.style.backgroundColor = packedRgbCss(snapshot.default_bg);
-    preview.style.color = packedRgbCss(snapshot.default_fg);
-    this.populateEditorPanePreview(preview, snapshot);
-    parent.appendChild(preview);
-  }
-
-  private populateEditorPanePreview(
-    preview: HTMLElement,
-    snapshot: EditorGridSnapshot,
-  ): void {
-    const maxRows = Math.min(snapshot.height, 80);
-    const maxCols = Math.min(snapshot.width, 160);
-    const cursorRow = snapshot.cursor?.[0] ?? -1;
-    const cursorCol = snapshot.cursor?.[1] ?? -1;
-    for (let row = 0; row < maxRows; row += 1) {
-      const line = document.createElement("div");
-      line.className = "terminal-pane-editor-preview-row";
-      let currentSpan: HTMLSpanElement | null = null;
-      let currentFg = Number.NaN;
-      let currentBg = Number.NaN;
-      let currentAttrs = Number.NaN;
-      for (let col = 0; col < maxCols; col += 1) {
-        const cell = snapshot.cells[row * snapshot.width + col];
-        if (!cell) continue;
-        const isCursor = row === cursorRow && col === cursorCol;
-        if (
-          !currentSpan ||
-          currentFg !== cell.fg ||
-          currentBg !== cell.bg ||
-          currentAttrs !== cell.attrs ||
-          isCursor
-        ) {
-          currentSpan = document.createElement("span");
-          currentSpan.style.color = packedRgbCss(cell.fg || snapshot.default_fg);
-          if (cell.bg !== snapshot.default_bg || isCursor) {
-            currentSpan.style.backgroundColor = isCursor
-              ? "color-mix(in srgb, var(--neoism-accent) 55%, transparent)"
-              : packedRgbCss(cell.bg);
-          }
-          if ((cell.attrs & 1) !== 0) currentSpan.style.fontWeight = "700";
-          if ((cell.attrs & 2) !== 0) currentSpan.style.fontStyle = "italic";
-          if ((cell.attrs & 4) !== 0) currentSpan.style.textDecoration = "underline";
-          line.appendChild(currentSpan);
-          currentFg = cell.fg;
-          currentBg = cell.bg;
-          currentAttrs = cell.attrs;
-        }
-        currentSpan.textContent += cell.ch.length > 0 ? cell.ch : " ";
-        if (isCursor) {
-          currentSpan = null;
-        }
-      }
-      preview.appendChild(line);
     }
   }
 
@@ -4403,18 +3584,9 @@ export class TerminalPanel {
   }
 
   private moveEditorDivider(direction: WebPaneResizeDirection): void {
-    const command =
-      direction === "up"
-        ? "resize -2"
-        : direction === "down"
-          ? "resize +2"
-          : direction === "left"
-            ? "vertical resize -5"
-            : "vertical resize +5";
     if (this.activeSurface() === "editor") {
       this.applySessionLayoutPolicy("resize", direction);
     }
-    this.sendEditorWindowCommand(command);
   }
 
   private setIdeTheme(name: (typeof WEB_IDE_THEMES)[number]): void {
@@ -4429,23 +3601,6 @@ export class TerminalPanel {
     const current = WEB_IDE_THEMES.indexOf(this.activeThemeName);
     const next = (current + delta + WEB_IDE_THEMES.length) % WEB_IDE_THEMES.length;
     this.setIdeTheme(WEB_IDE_THEMES[next]);
-  }
-
-  /// Wrap raw input bytes in an `EditorClientMessage::SendKeys`
-  /// envelope and ship them to the daemon's embedded nvim. Used by the
-  /// finder / palette picks for cursor jumps + ex commands. Matches
-  /// the existing `nvimSendKeys` shape but skips the wasm-bridge round
-  /// trip (the bytes come from JS-side intent processing).
-  private sendEditorSendKeys(bytes: Uint8Array): void {
-    if (bytes.length === 0) return;
-    this.editorSessionStarted = true;
-    const surfaceId = this.editorInputSurfaceId();
-    this.sendEditorMessage({
-      SendKeys: {
-        bytes: Array.from(bytes),
-        ...(surfaceId ? { surface_id: surfaceId } : {}),
-      },
-    });
   }
 
   private drainAgentTabOpens(): void {
@@ -4616,11 +3771,9 @@ export class TerminalPanel {
         // to render when the user lands on the new tab. The reply
         // routes through `pendingServiceMappers` set below.
         this.requestFileContent(raw, this.activeTabIndex);
-        // Also ask the daemon's embedded nvim to open the same path,
-        // so once keystrokes start routing to "editor" the nvim grid
-        // already has the buffer loaded. Fire-and-forget — the daemon
-        // emits its own `BufferOpened` / `GridUpdate` reply that the
-        // bridge consumes via `editor_grid_update`.
+        // Also bind the editor surface + ship the OpenBuffer envelope
+        // (fire-and-forget; the future native CodePane will consume
+        // the replies).
         this.openFileTabContent(raw);
       }
       this.assignActiveTabToFocusedEditorPane();
@@ -5126,10 +4279,8 @@ export class TerminalPanel {
   /// Side panels (git diff, notes, file tree) resize the content
   /// column from INSIDE chrome — Esc-close, the X button, and the
   /// shared Alt+G/Alt+N handlers never pass through `handleResize`.
-  /// Without this, the daemon nvim grid keeps its old cols and the
-  /// editor paint stretches/squeezes glyphs to the new rect. Track the
-  /// terminal rect each frame and re-run the resize contract when it
-  /// moves.
+  /// Track the terminal rect each frame and re-run the resize
+  /// contract when it moves.
   private lastTerminalRectKey = "";
   private keyboardInsetBottom = 0;
   private insetResizeTimer: number | null = null;
@@ -5169,11 +4320,11 @@ export class TerminalPanel {
     this.wasmAdapter?.takePtyWrites();
   }
 
-  /// Build and ship the `Editor` envelope that tells the daemon's
-  /// embedded nvim to `:edit <path>`. The envelope shape matches
-  /// `ServiceClientMessage::Editor { request_id, message }` in the
-  /// daemon's server.rs; we don't wait for a reply (the bridge picks
-  /// up the resulting `GridUpdate` via `editor_grid_update`).
+  /// Build and ship the `Editor` OpenBuffer envelope. The envelope
+  /// shape matches `ServiceClientMessage::Editor { request_id,
+  /// message }` in the daemon's server.rs; we don't wait for a reply.
+  /// The daemon currently answers with "editor backend unavailable";
+  /// the future native CodePane will service this wire.
   private sendEditorOpenBuffer(path: string): void {
     this.syncBreadcrumbsForPath(path);
     this.handleResize(this.root.clientWidth, this.root.clientHeight);
@@ -5187,7 +4338,6 @@ export class TerminalPanel {
       presenceBufferIdForPath(path, this.options.workspaceRoot),
     );
     this.editorResizeBySurface.delete(surfaceId ?? "__primary__");
-    this.assumedNvimInsertMode = false;
     this.sendEditorResize(this.cols, this.rows);
     this.sendEditorMessage({
       OpenBuffer: {
@@ -5214,31 +4364,6 @@ export class TerminalPanel {
       Resize: {
         width,
         height,
-        ...(surfaceId ? { surface_id: surfaceId } : {}),
-      },
-    });
-  }
-
-  private sendEditorMouseInput(args: {
-    button: string;
-    action: string;
-    modifier: string;
-    grid: number;
-    row: number;
-    col: number;
-    count: number;
-  }): void {
-    this.editorSessionStarted = true;
-    const surfaceId = this.editorInputSurfaceId();
-    this.sendEditorMessage({
-      MouseInput: {
-        button: args.button,
-        action: args.action,
-        modifier: args.modifier,
-        grid: Math.trunc(args.grid),
-        row: Math.trunc(args.row),
-        col: Math.trunc(args.col),
-        count: Math.max(1, Math.trunc(args.count)),
         ...(surfaceId ? { surface_id: surfaceId } : {}),
       },
     });
@@ -5371,7 +4496,6 @@ export class TerminalPanel {
     // into buffer-tab bookkeeping updates on the JS side, which we
     // then replay back into the chrome via `set_buffer_tabs`.
     this.drainChromeIntents();
-    this.syncNvimLayerVisibility();
     this.syncTerminalRectDependents();
 
     if (this.isRendered()) {
@@ -5379,10 +4503,7 @@ export class TerminalPanel {
       // canvas2d stub entirely.
       this.wasmAdapter?.render();
       this.syncActiveMarkdownLayer();
-      if (
-        this.wasmAdapter?.animationsActive?.() === true ||
-        this.wasmAdapter?.editorScrollAnimating?.() === true
-      ) {
+      if (this.wasmAdapter?.animationsActive?.() === true) {
         this.scheduleDraw();
       }
       return;
@@ -5457,20 +4578,6 @@ export class TerminalPanel {
     ctx.fillRect(cx, cy, CELL_WIDTH, CELL_HEIGHT);
   }
 
-  private syncNvimLayerVisibility(): void {
-    const focused = this.focusedEditorSurfaceId();
-    if (focused) {
-      this.nvimLayer.setActiveSurfaceId(focused);
-    }
-    // The shared wasm Chrome renderer is the visual source of truth for
-    // nvim grids now. Keep NvimCanvasLayer as a model/cache for smoke
-    // snapshots, presence, and surface bookkeeping, but never let its
-    // DOM canvas paint or capture pointer events on top of the shared
-    // renderer. Leaving it visible caused double cursors and transient
-    // blank bands when it displayed intermediate GridScroll states.
-    this.nvimLayer.setVisible(false);
-  }
-
   private activateCurrentTabContents(openEditorBuffer = true): void {
     const tab = this.bufferTabs[this.activeTabIndex];
     this.wasmAdapter?.setActiveTab?.(this.activeTabIndex);
@@ -5489,8 +4596,6 @@ export class TerminalPanel {
     }
     if (tab.kind === "file" && tab.path) {
       if (isMarkdownPath(tab.path)) {
-        this.wasmAdapter?.clearActiveEditorGrid?.();
-        this.liveEditorGridSurfaceId = null;
         this.requestFileContent(tab.path, this.activeTabIndex);
         this.syncActiveMarkdownLayer();
         this.scheduleDraw();
@@ -5503,7 +4608,6 @@ export class TerminalPanel {
       if (openEditorBuffer) {
         this.openFileTabContent(tab.path);
       }
-      this.syncNvimLayerVisibility();
       this.scheduleDraw();
       return;
     }
@@ -5522,7 +4626,7 @@ export class TerminalPanel {
     // `context.ime.preedit().is_some()` — while the IME owns the
     // keyboard, every keystroke (Enter to commit, Escape to cancel,
     // arrows to navigate the candidate list) belongs to the IME and
-    // must not reach nvim, the pty, or chrome routing. The
+    // must not reach the pty or chrome routing. The
     // `event.isComposing` flag fires for the in-flight composition;
     // our own `imeComposing` field stays true through `compositionend`
     // so the final commit-cycle keydown is also swallowed.
@@ -5586,11 +4690,6 @@ export class TerminalPanel {
       return;
     }
 
-    if (this.routeKeyToEditor(event)) {
-      event.preventDefault();
-      return;
-    }
-
     const bytes = keyEventToBytes(event);
     if (!bytes) {
       return;
@@ -5631,8 +4730,8 @@ export class TerminalPanel {
    * Browser `compositionend` — the composition closed. `event.data`
    * is the committed string (empty on cancel-with-Escape). Forwards
    * `Composition::Commit(text)` followed by `Composition::End`, then
-   * routes the committed bytes through `handleInputBytes` so nvim /
-   * the pty receive the final text via the same path real keystrokes
+   * routes the committed bytes through `handleInputBytes` so the pty
+   * receives the final text via the same path real keystrokes
    * + the system paste flow use. Mirrors the desktop fork's
    * `Ime::Commit -> screen.paste(text, count > 1)` pipeline.
    */
@@ -5645,7 +4744,7 @@ export class TerminalPanel {
       // listen for `UiEvent::Text` (status line, modals) receive
       // the committed string the same way they would for a paste.
       this.forwardChromeEvent(fromTextEvent(dispatch.text));
-      // Route the bytes to the focused surface (nvim / pty / agent
+      // Route the bytes to the focused surface (pty / agent
       // input) via the shared input path. `handleInputBytes` already
       // dispatches on `activeSurface()`, so the IME commit lands
       // wherever a real paste would.
@@ -5684,10 +4783,6 @@ export class TerminalPanel {
           }
         }
       }
-    }
-
-    if (this.handleEditorLeaderShortcut(event)) {
-      return true;
     }
 
     // File-tree CRUD shortcuts (task #68). Only fire when the tree
@@ -5873,7 +4968,7 @@ export class TerminalPanel {
         this.closeCurrentSplitOrTab();
         return true;
       }
-      // Cmd+D / Cmd+Shift+D → split active embedded nvim right / down.
+      // Cmd+D / Cmd+Shift+D → split active editor pane right / down.
       if (!event.shiftKey && matchesKey(event, "KeyD", "d")) {
         this.splitEditorPane("horizontal");
         return true;
@@ -6067,7 +5162,7 @@ export class TerminalPanel {
         this.options.onCreateWorkspace?.();
         return true;
       }
-      // Ctrl+Shift+R / D → split active embedded nvim right / down.
+      // Ctrl+Shift+R / D → split active editor pane right / down.
       if (matchesKey(event, "KeyR", "r")) {
         this.splitEditorPane("horizontal");
         return true;
@@ -6117,10 +5212,8 @@ export class TerminalPanel {
         return true;
       }
     }
-    // Ctrl+Alt+Arrow* → resize the focused nvim split. The desktop
-    // path ultimately delegates to pane-border resize bookkeeping;
-    // web's current editor split authority is embedded nvim, so route
-    // the same intent through `:resize` / `:vertical resize`.
+    // Ctrl+Alt+Arrow* → resize the focused editor split via the
+    // web-side session-layout policy.
     if (event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey) {
       if (event.key === "ArrowUp") {
         this.moveEditorDivider("up");
@@ -6165,11 +5258,8 @@ export class TerminalPanel {
       return;
     }
 
-    let removedActiveEditorLikeTab = false;
     if (typeof result.remove_index === "number") {
       const tab = this.bufferTabs[result.remove_index];
-      removedActiveEditorLikeTab =
-        result.remove_index === this.activeTabIndex && this.isEditorLikeTab(tab);
       if (tab?.kind === "terminal" && tab.sessionId) {
         this.options.pty?.close(tab.sessionId);
         this.ptyReplayBuffers.delete(tab.sessionId);
@@ -6199,25 +5289,12 @@ export class TerminalPanel {
       this.assignActiveTabToFocusedEditorPane();
       this.replayBufferTabs();
     }
-    if (removedActiveEditorLikeTab) {
-      this.liveEditorGridSurfaceId = null;
-      this.wasmAdapter?.clearActiveEditorGrid?.();
-    }
     this.activateCurrentTabContents();
   }
 
   private routeKeyToChrome(event: KeyboardEvent): boolean {
     if (!this.isChromeKeyboardCaptureActive()) return false;
     this.forwardChromeEvent(fromKeyboardEvent(event));
-    return true;
-  }
-
-  private routeKeyToEditor(event: KeyboardEvent): boolean {
-    if (this.activeSurface() !== "editor") return false;
-    const input = editorKeyEventToNvimInput(event);
-    if (input === null) return false;
-    this.editorSessionStarted = true;
-    this.wasmAdapter?.nvimSendKeys?.(bytesToBase64(new TextEncoder().encode(input)));
     return true;
   }
 
@@ -6305,10 +5382,6 @@ export class TerminalPanel {
     return this.wasmAdapter?.chromeKeyboardCaptureActive?.() === true;
   }
 
-  private isEditorInputModalActive(): boolean {
-    return this.wasmAdapter?.editorInputModalActive?.() === true;
-  }
-
   private canvasLogicalPoint(event: { clientX: number; clientY: number }): {
     x: number;
     y: number;
@@ -6327,10 +5400,6 @@ export class TerminalPanel {
     // pointerdown, then closed again on the synthesized tap).
     if (event.pointerType === "touch") return;
     this.updateCustomCursorFromPointer(event, true);
-    if (this.editorPointerDragging && this.routePointerToEditor(event, "drag")) {
-      event.preventDefault();
-      return;
-    }
     if (this.wasmAdapter?.splashMouseMove) {
       const { x, y } = this.canvasLogicalPoint(event);
       this.wasmAdapter.splashMouseMove(x, y);
@@ -6368,16 +5437,6 @@ export class TerminalPanel {
         this.scheduleDraw();
         return;
       }
-    }
-    if (this.routePointerToEditor(event, "press")) {
-      this.editorPointerDragging = true;
-      try {
-        this.canvas.setPointerCapture(event.pointerId);
-      } catch {
-        // Pointer capture can fail for synthetic/browser-cancelled events.
-      }
-      event.preventDefault();
-      return;
     }
     // Splash menu buttons are sticky-positioned in the terminal pane.
     // Hit-test before forwarding to other chrome so a button click
@@ -6447,9 +5506,8 @@ export class TerminalPanel {
         this.renderPaneLayoutOverlay();
         break;
       case "diagnostic_jump":
-        this.sendEditorSendKeys(
-          new TextEncoder().encode(`:normal! ${intent.line}G\n`),
-        );
+        // Jump-to-line was an embedded-nvim SendKeys hop; the native
+        // CodePane will own caret jumps.
         break;
       case "diagnostics_opened":
       case "consumed":
@@ -6462,17 +5520,6 @@ export class TerminalPanel {
   private handlePointerUp(event: PointerEvent): void {
     if (event.pointerType === "touch") return;
     this.updateCustomCursorFromPointer(event, true);
-    if (this.editorPointerDragging && this.routePointerToEditor(event, "release")) {
-      this.editorPointerDragging = false;
-      try {
-        this.canvas.releasePointerCapture(event.pointerId);
-      } catch {
-        // Already released by the browser.
-      }
-      event.preventDefault();
-      return;
-    }
-    this.editorPointerDragging = false;
     this.forwardChromeEvent(fromPointerUpEvent(event, this.canvas));
   }
 
@@ -6534,7 +5581,7 @@ export class TerminalPanel {
     if (target === "text-entry") return true;
     if (target === "buffer-tabs" || target === "file-tree") return false;
     const surface = this.activeSurface();
-    // nvim buffers and markdown docs are type-anywhere surfaces:
+    // Editor and markdown docs are type-anywhere surfaces:
     // any tap inside the content rect keeps/raises the keyboard.
     if (surface === "editor" || surface === "markdown") {
       return pointInRect({ x, y }, layout.terminal);
@@ -6589,45 +5636,6 @@ export class TerminalPanel {
       },
     });
   }
-
-  /** Tap places the nvim cursor at the touched cell — a synthetic
-   *  press+release through the same daemon mouse pipeline desktop
-   *  clicks use. */
-  private editorTapAt(x: number, y: number): boolean {
-    if (this.activeSurface() !== "editor") return false;
-    if (this.isEditorInputModalActive()) return false;
-    const terminal = this.wasmAdapter?.chromeLayout?.()?.terminal;
-    if (!terminal || !pointInRect({ x, y }, terminal)) return false;
-    const hit = this.wasmAdapter?.editorPointerIntent?.(x, y);
-    if (!hit) return false;
-    this.wasmAdapter?.focusEditorInput?.();
-    for (const action of ["press", "release"] as const) {
-      this.sendEditorMouseInput({
-        button: "left",
-        action,
-        modifier: "",
-        grid: 0,
-        row: hit.row,
-        col: hit.col,
-        count: 1,
-      });
-    }
-    // Obsidian-style mobile editing: a tap lands ready to type. nvim
-    // doesn't echo its mode over this transport, so track what we
-    // sent: "i" flips us into insert; an Escape from the soft
-    // keyboard's toolbar flips back (see handleInputBytes).
-    if (this.isMobileViewport() && !this.assumedNvimInsertMode) {
-      this.wasmAdapter?.nvimSendKeys?.(
-        bytesToBase64(new TextEncoder().encode("i")),
-      );
-      this.assumedNvimInsertMode = true;
-    }
-    return true;
-  }
-
-  /** Best-effort mobile-side mirror of nvim's insert state. Only
-   *  consulted (and only mutated) on the touch path. */
-  private assumedNvimInsertMode = false;
 
   /** Tap places the markdown caret (roster dots / checkboxes first,
    *  mirroring the mouse path). */
@@ -6882,18 +5890,6 @@ export class TerminalPanel {
     if (Math.abs(velocity) < 80) return;
     adapter.agentFlingTimeline(velocity);
     this.scheduleDraw();
-  }
-
-  private routeEditorTouchScroll(x: number, y: number, dyPixels: number): boolean {
-    if (this.activeSurface() !== "editor") return false;
-    if (this.isChromeKeyboardCaptureActive()) return false;
-    const terminal = this.wasmAdapter?.chromeLayout?.()?.terminal;
-    if (!terminal || !pointInRect({ x, y }, terminal)) return false;
-
-    // kinetic=true: touch drags ride the editor's pixel-scroll glide
-    // (same spring trackpads use) so release momentum feels like iOS.
-    this.pushEditorWheelIntent(x, y, dyPixels, 0, "", true);
-    return true;
   }
 
   private terminalZone(): TouchZone {
@@ -7313,14 +6309,6 @@ export class TerminalPanel {
           this.agentTapConsumed = true;
           return;
         }
-        // nvim buffer tap: place the cursor at the cell and bring up
-        // the keyboard, same flow as the agent input.
-        if (this.editorTapAt(action.x, action.y)) {
-          this.agentTapConsumed = true;
-          this.requestSoftKeyboard();
-          this.scheduleDraw();
-          return;
-        }
         if (this.statusLineClickAt(action.x, action.y)) {
           return;
         }
@@ -7379,9 +6367,6 @@ export class TerminalPanel {
           return;
         }
         if (this.routeAgentTouchScroll(action.x, action.y, action.dy)) {
-          return;
-        }
-        if (this.routeEditorTouchScroll(action.x, action.y, -action.dy)) {
           return;
         }
         // Anchor chrome's pointer position so the coordinate-less
@@ -7482,10 +6467,6 @@ export class TerminalPanel {
         return;
       }
     }
-    if (this.routeWheelToEditor(event)) {
-      event.preventDefault();
-      return;
-    }
     if (this.routeWheelToAgent(event)) {
       event.preventDefault();
       return;
@@ -7549,139 +6530,6 @@ export class TerminalPanel {
     return pointInRect(this.canvasLogicalPoint(event), layout.buffer_tabs);
   }
 
-  private routeWheelToEditor(event: WheelEvent): boolean {
-    if (this.activeSurface() !== "editor") return false;
-    if (this.isEditorInputModalActive()) return false;
-
-    const terminal = this.wasmAdapter?.chromeLayout?.()?.terminal;
-    if (!terminal) return false;
-
-    const point = this.canvasLogicalPoint(event);
-    if (!pointInRect(point, terminal)) return false;
-
-    if (event.deltaY === 0) return true;
-
-    this.wasmAdapter?.focusEditorInput?.();
-    this.pushEditorWheelIntent(
-      point.x,
-      point.y,
-      event.deltaY,
-      event.deltaMode,
-      nvimMouseModifier(event),
-      event.deltaMode === WheelEvent.DOM_DELTA_PIXEL,
-    );
-    return true;
-  }
-
-  private pushEditorWheelIntent(
-    x: number,
-    y: number,
-    deltaY: number,
-    deltaMode: number,
-    modifier: string,
-    kinetic: boolean,
-  ): void {
-    this.editorWheelAnchor = { x, y, modifier };
-    const intent = this.wasmAdapter?.editorWheelIntent?.(
-      x,
-      y,
-      deltaY,
-      deltaMode,
-    );
-    if (intent) {
-      this.sendEditorWheelRows(intent.row, intent.col, intent.rows, modifier);
-    }
-
-    if (kinetic || this.wasmAdapter?.editorScrollAnimating?.() === true) {
-      this.scheduleEditorWheelGlide();
-    }
-  }
-
-  private sendEditorWheelRows(
-    row: number,
-    col: number,
-    wholeRows: number,
-    modifier: string,
-  ): void {
-    this.sendEditorMouseInput({
-      button: "wheel",
-      action: wholeRows > 0 ? "down" : "up",
-      modifier,
-      grid: 0,
-      row,
-      col,
-      count: Math.abs(wholeRows),
-    });
-  }
-
-  private scheduleEditorWheelGlide(): void {
-    if (this.editorWheelRaf !== null) return;
-    this.editorWheelRaf = requestAnimationFrame(() =>
-      this.tickEditorWheelGlide(),
-    );
-  }
-
-  private tickEditorWheelGlide(): void {
-    this.editorWheelRaf = null;
-    const anchor = this.editorWheelAnchor;
-    if (!anchor || this.activeSurface() !== "editor") {
-      this.resetEditorWheelState();
-      return;
-    }
-    const intent = this.wasmAdapter?.editorTickWheelIntent?.(anchor.x, anchor.y);
-    if (intent) {
-      this.sendEditorWheelRows(
-        intent.row,
-        intent.col,
-        intent.rows,
-        anchor.modifier,
-      );
-    }
-    if (this.wasmAdapter?.editorScrollAnimating?.() === true) {
-      this.scheduleEditorWheelGlide();
-    } else {
-      this.editorWheelAnchor = null;
-    }
-  }
-
-  private resetEditorWheelState(): void {
-    this.wasmAdapter?.editorResetWheel?.();
-    this.editorWheelAnchor = null;
-    if (this.editorWheelRaf !== null) {
-      cancelAnimationFrame(this.editorWheelRaf);
-      this.editorWheelRaf = null;
-    }
-  }
-
-  private routePointerToEditor(
-    event: PointerEvent,
-    action: "press" | "drag" | "release",
-  ): boolean {
-    if (this.activeSurface() !== "editor") return false;
-    if (this.isEditorInputModalActive()) return false;
-    if (event.button !== 0 && action !== "drag") return false;
-
-    const terminal = this.wasmAdapter?.chromeLayout?.()?.terminal;
-    if (!terminal) return false;
-
-    const point = this.canvasLogicalPoint(event);
-    if (!pointInRect(point, terminal)) return false;
-
-    const hit = this.wasmAdapter?.editorPointerIntent?.(point.x, point.y);
-    if (!hit) return false;
-    this.wasmAdapter?.focusEditorInput?.();
-    this.sendEditorMouseInput({
-      button: "left",
-      action,
-      modifier: nvimMouseModifier(event),
-      grid: 0,
-      row: hit.row,
-      col: hit.col,
-      count: Math.max(1, event.detail || 1),
-    });
-    return true;
-  }
-
   private handlePaste(event: ClipboardEvent): void {
     const imageItems = Array.from(event.clipboardData?.items ?? []).filter(
       (item) => item.kind === "file" && item.type.startsWith("image/"),
@@ -7697,10 +6545,8 @@ export class TerminalPanel {
         return;
       }
       if (surface === "editor") {
-        // Materialise the image on the daemon side and `:edit <path>`
-        // it once the daemon replies. Falls back to the text payload
-        // (if any) for the same paste event so users still get the
-        // accompanying caption when the daemon write fails.
+        // Materialise the image on the daemon side; the reply hands
+        // back a daemon HTTP URL the user can open in a fresh tab.
         event.preventDefault();
         void this.submitEditorPastedImages(imageItems);
         return;
@@ -7727,11 +6573,9 @@ export class TerminalPanel {
   /// Send each pasted image file to the daemon as
   /// `MaterializeClipboardImage`. The matching
   /// `ClipboardImageMaterialized` reply is handled in
-  /// `ingestClipboardImageMaterialized`, which dispatches `:edit <path>`
-  /// against the pane that *initiated* the paste (recorded in
-  /// `pendingClipboardImages` against an opaque `request_id`) — not
-  /// the focused pane at reply time, which the user may have switched
-  /// while the daemon was writing.
+  /// `ingestClipboardImageMaterialized` (recorded in
+  /// `pendingClipboardImages` against an opaque `request_id`) so the
+  /// reply can re-focus the pane that initiated the paste.
   private async submitEditorPastedImages(
     items: DataTransferItem[],
   ): Promise<void> {
@@ -7775,49 +6619,39 @@ export class TerminalPanel {
       }
     }
 
-    // Try to activate the originating pane so the `:edit` keystrokes
-    // land in the right nvim. `activatePaneExternalId` is a no-op if
-    // the pane is already focused (or no longer exists).
+    // Re-focus the originating pane, then surface the saved image.
+    // `activatePaneExternalId` is a no-op if the pane is already
+    // focused (or no longer exists).
     if (originPaneId !== null) {
       this.activatePaneExternalId(originPaneId, true);
     }
 
-    const surface = this.activeSurface();
-    if (surface !== "editor") {
-      // Web frontend has no shared filesystem with the daemon and no
-      // sixel/kitty graphics protocol in the wasm terminal renderer, so
-      // we can't preview the bytes inline. Surface a daemon HTTP URL
-      // so the user can pop the image in a fresh tab — this is the
-      // best we can do without bootstrapping a dedicated viewer pane.
-      const filename = payload.path.split(/[\\/]/).pop() ?? "";
-      const httpBase = this.options.client.getDaemonHttpBase();
-      const url =
-        filename && httpBase
-          ? `${httpBase}/clipboard-image/${encodeURIComponent(filename)}`
-          : null;
-      this.wasmAdapter?.pushNotification?.(
-        JSON.stringify({
-          title: "Clipboard image saved",
-          message: url ?? payload.path,
-          severity: "info",
-        }),
-      );
-      if (url) {
-        try {
-          window.open(url, "_blank", "noopener");
-        } catch {
-          // Popups blocked — the notification already carries the URL
-          // so the user can click through manually.
-        }
+    // Web frontend has no shared filesystem with the daemon and no
+    // sixel/kitty graphics protocol in the wasm terminal renderer, so
+    // we can't preview the bytes inline. Surface a daemon HTTP URL
+    // so the user can pop the image in a fresh tab — this is the
+    // best we can do without bootstrapping a dedicated viewer pane.
+    const filename = payload.path.split(/[\\/]/).pop() ?? "";
+    const httpBase = this.options.client.getDaemonHttpBase();
+    const url =
+      filename && httpBase
+        ? `${httpBase}/clipboard-image/${encodeURIComponent(filename)}`
+        : null;
+    this.wasmAdapter?.pushNotification?.(
+      JSON.stringify({
+        title: "Clipboard image saved",
+        message: url ?? payload.path,
+        severity: "info",
+      }),
+    );
+    if (url) {
+      try {
+        window.open(url, "_blank", "noopener");
+      } catch {
+        // Popups blocked — the notification already carries the URL
+        // so the user can click through manually.
       }
-      return;
     }
-    // Send `:edit <path>` to the focused nvim editor surface. Image
-    // plugins (like `image.nvim` / `kitty-image.nvim`) hook into
-    // `BufReadPost` to render the preview inline; without one nvim
-    // simply opens the binary buffer at the saved path.
-    const escaped = payload.path.replace(/ /g, "\\ ").replace(/"/g, '\\"');
-    this.sendEditorSendKeys(new TextEncoder().encode(`:edit ${escaped}\n`));
   }
 
   private pasteTextToActiveSurface(text: string): void {
@@ -7864,10 +6698,9 @@ export class TerminalPanel {
     if (this.routeInputBytesToChrome(bytes)) {
       return;
     }
-    // Buffer-tab routing: tab 0 is the always-present Terminal (shell
-    // PTY); any other tab is a file backed by the daemon's embedded
-    // nvim. The bridge exposes `active_surface()` as the single source
-    // of truth so JS and Rust agree without an extra cache.
+    // Buffer-tab routing: the bridge exposes `active_surface()` as the
+    // single source of truth so JS and Rust agree without an extra
+    // cache.
     const surface = this.activeSurface();
     if (surface === "agent" && this.routeInputBytesToAgent(bytes)) {
       return;
@@ -7875,28 +6708,10 @@ export class TerminalPanel {
     if (surface === "markdown" && this.routeInputBytesToMarkdown(bytes)) {
       return;
     }
-    if (surface === "editor" && bytes.includes(0x1b)) {
-      // Soft-keyboard Esc — nvim leaves insert mode; keep the mobile
-      // tap-to-type mirror in sync.
-      this.assumedNvimInsertMode = false;
-    }
-    if (surface === "editor" && this.wasmAdapter?.nvimSendKeys) {
-      // Soft-keyboard bytes must be rewritten into nvim_input's <>
-      // notation: a raw DEL byte (0x7f) lands as nvim's internal
-      // `<80>ku` keycode — Backspace literally pressed Up.
-      const text = new TextDecoder().decode(bytes);
-      let notated = "";
-      for (const ch of text) {
-        if (ch === "\x7f" || ch === "\b") notated += "<BS>";
-        else if (ch === "\r" || ch === "\n") notated += "<CR>";
-        else if (ch === "\x1b") notated += "<Esc>";
-        else if (ch === "\t") notated += "<Tab>";
-        else if (ch === "<") notated += "<lt>";
-        else notated += ch;
-      }
-      this.wasmAdapter.nvimSendKeys(
-        bytesToBase64(new TextEncoder().encode(notated)),
-      );
+    if (surface === "editor") {
+      // File-viewer tabs are read-only until the native CodePane
+      // lands. Swallow the bytes — leaking them into the PTY would
+      // type into a shell the user isn't looking at.
       return;
     }
     // Prefer the live capture check: it reads shell state directly, so
@@ -8183,15 +6998,6 @@ function debugAgentTimeline(event: string, payload: Record<string, unknown>): vo
   }
 }
 
-function nvimMouseModifier(event: MouseEvent): string {
-  let modifier = "";
-  if (event.shiftKey) modifier += "S-";
-  if (event.ctrlKey) modifier += "C-";
-  if (event.altKey) modifier += "M-";
-  if (event.metaKey) modifier += "D-";
-  return modifier;
-}
-
 function isArrowKey(key: string): boolean {
   return (
     key === "ArrowLeft" ||
@@ -8223,47 +7029,6 @@ function matchesCommandColon(event: KeyboardEvent): boolean {
 function isClearCommand(command: string): boolean {
   const trimmed = command.trim();
   return trimmed === "clear" || trimmed.startsWith("clear ");
-}
-
-function editorKeyEventToNvimInput(event: KeyboardEvent): string | null {
-  if (event.metaKey || event.altKey) return null;
-  if (event.ctrlKey && event.key.length === 1) {
-    return `<C-${event.key.toLowerCase()}>`;
-  }
-  switch (event.key) {
-    case "Enter":
-      return "<CR>";
-    case "Backspace":
-      return "<BS>";
-    case "Tab":
-      return event.shiftKey ? "<S-Tab>" : "<Tab>";
-    case "Escape":
-      return "<Esc>";
-    case "ArrowUp":
-      return "<Up>";
-    case "ArrowDown":
-      return "<Down>";
-    case "ArrowRight":
-      return "<Right>";
-    case "ArrowLeft":
-      return "<Left>";
-    case "PageUp":
-      return "<PageUp>";
-    case "PageDown":
-      return "<PageDown>";
-    case "Home":
-      return "<Home>";
-    case "End":
-      return "<End>";
-    case "Delete":
-      return "<Del>";
-    default:
-      break;
-  }
-  if (event.key.length === 1 && !event.ctrlKey) {
-    return event.key;
-  }
-  return null;
 }
 
 interface ChromeDiffLine {
@@ -8392,21 +7157,6 @@ function keyNameFromTerminalBytes(bytes: Uint8Array): string | null {
     default:
       return null;
   }
-}
-
-/// `btoa`/`atob` are the right primitives for the JsValue boundary,
-/// but feeding `String.fromCharCode(...bytes)` to `btoa` blows the
-/// argument list past `Function.apply` limits on multi-KB chunks. We
-/// build the binary string in a chunked loop so this stays safe for
-/// paste-sized payloads.
-function bytesToBase64(bytes: Uint8Array): string {
-  const CHUNK = 0x8000;
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
-    binary += String.fromCharCode(...slice);
-  }
-  return btoa(binary);
 }
 
 function base64ToBytes(b64: string): Uint8Array {

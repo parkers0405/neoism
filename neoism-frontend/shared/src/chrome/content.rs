@@ -1,11 +1,6 @@
 use super::*;
 
-use crate::editor_snapshot::GridScrollEdgeCapture;
 use crate::panels::buffer_tabs::BufferTabTarget;
-use crate::render_policy::{
-    editor_grid_hit_cell, editor_scroll_render_offset_for_mutated_snapshot,
-    EditorScrollGridRenderState,
-};
 
 impl<A: Send + Copy + 'static> Chrome<A> {
     /// Recompute the status-line `mode` / `primary_kind` from whatever
@@ -20,9 +15,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// because `StatusLine::set_info` starts the animation whenever the
     /// mode changes.
     ///
-    /// For File (nvim) surfaces, the vi mode (`Normal`/`Insert`/…) is a
-    /// host-pushed signal — desktop reads it from nvim, the web host can
-    /// push it via the `set_status_mode_*` bridge setters. We preserve
+    /// For File surfaces, the vi mode (`Normal`/`Insert`/…) is a
+    /// host-pushed signal — the web host can push it via the
+    /// `set_status_mode_*` bridge setters. We preserve
     /// any such editor mode already on the status line so we don't stomp
     /// it back to `Normal` every frame; only the surface KIND is
     /// authoritative here.
@@ -63,10 +58,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     _ => "Markdown".to_string(),
                 };
                 (Mode::Markdown, PrimaryKind::File, primary)
-            } else if matches!(target, Some(BufferTabTarget::File(_)))
-                || self.editor_grid.is_some()
-            {
-                // nvim-backed file viewer. The vi mode is host-driven;
+            } else if matches!(target, Some(BufferTabTarget::File(_))) {
+                // Code-backed file viewer. The vi mode is host-driven;
                 // keep whatever editor mode is already shown (so Insert/
                 // Visual/etc. survive), but fall back to Normal when the
                 // pill is still carrying a non-editor mode (e.g. coming
@@ -128,13 +121,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.tab_content = text;
         self.scroll_offset_px = 0.0;
         self.scroll_spring.reset();
-        if self.is_terminal_tab_active() {
-            self.editor_scroll_render_state = None;
-            self.editor_scrollback_origin = None;
-            self.editor_scrollback_above_rows.clear();
-            self.editor_scrollback_below_rows.clear();
-            self.last_editor_trail_cursor_cell = None;
-        }
     }
 
     pub fn tab_content(&self) -> Option<&str> {
@@ -224,28 +210,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         }
     }
 
-    /// 7C-2: replace the editor grid's remote caret cues (screen
-    /// rows; host converts from buffer lines via the viewport topline).
-    /// Current editor grid dims (cols, rows) — diagnostics.
-    pub fn editor_grid_dims(&self) -> Option<(u32, u32)> {
-        self.editor_grid
-            .as_ref()
-            .map(|grid| (grid.width, grid.height))
-    }
-
-    pub fn set_editor_viewport_topline(&mut self, topline: u64) {
-        self.editor_caret_topline = topline;
-    }
-
-    pub fn set_editor_remote_carets(
-        &mut self,
-        cues: Vec<crate::panels::remote_carets::EditorRemoteCaret>,
-        roster: Vec<crate::panels::remote_carets::EditorRemoteCaret>,
-    ) {
-        self.editor_remote_carets = cues;
-        self.editor_remote_roster = roster;
-    }
-
     /// Wave 7-web: mutable handle to the live markdown pane so the host
     /// bridge can route input (wheel, clicks, cursor keys) into it —
     /// the pane owns its own scroll/cursor state.
@@ -255,221 +219,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.markdown_pane.as_mut()
     }
 
-    /// Push the latest nvim grid snapshot for the active file-viewer
-    /// tab. `Some` enables the grid-cell paint branch in
-    /// [`Chrome::draw`]; `None` falls back to the cached
-    /// `tab_content` + syntax-highlight paint so file-viewer tabs
-    /// without an attached nvim session still render.
-    pub fn set_editor_grid(
-        &mut self,
-        snapshot: Option<crate::editor_snapshot::EditorGridSnapshot>,
-    ) {
-        let dimensions_changed = match (&self.editor_grid, &snapshot) {
-            (Some(prev), Some(next)) => {
-                prev.width != next.width
-                    || prev.height != next.height
-                    || prev.cells.len() != next.cells.len()
-            }
-            _ => false,
-        };
-
-        if snapshot.is_none() || dimensions_changed {
-            self.editor_grid_scrollback = None;
-            self.editor_scroll_render_state = None;
-            self.editor_scrollback_origin = None;
-            self.editor_scrollback_above_rows.clear();
-            self.editor_scrollback_below_rows.clear();
-            self.last_editor_trail_cursor_cell = None;
-        }
-        if snapshot.is_some() && self.editor_scrollback_origin.is_none() {
-            self.editor_scrollback_origin = Some(0);
-        }
-        self.editor_grid = snapshot;
-    }
-
-    pub fn reset_editor_grid_scroll_render_state(&mut self) {
-        self.editor_scroll_render_state = None;
-        self.editor_scrollback_origin = None;
-        self.editor_scrollback_above_rows.clear();
-        self.editor_scrollback_below_rows.clear();
-        self.last_editor_trail_cursor_cell = None;
-        self.editor_grid_scrollback = None;
-        self.editor_scroll.reset_all();
-    }
-
-    pub fn prime_editor_grid_scrollback(
-        &mut self,
-        snapshot: crate::editor_snapshot::EditorGridSnapshot,
-    ) {
-        self.editor_grid_scrollback = Some(snapshot);
-    }
-
-    pub fn prime_editor_grid_scrollback_for_scroll(
-        &mut self,
-        snapshot: crate::editor_snapshot::EditorGridSnapshot,
-        top: u32,
-        bot: u32,
-        rows: i32,
-    ) {
-        const MAX_EDGE_ROWS: usize = 64;
-        match snapshot.capture_grid_scroll_edge_rows(
-            top,
-            bot,
-            rows,
-            MAX_EDGE_ROWS,
-            &mut self.editor_scrollback_above_rows,
-            &mut self.editor_scrollback_below_rows,
-        ) {
-            GridScrollEdgeCapture::Captured => {
-                let origin = self.editor_scrollback_origin.unwrap_or(0);
-                self.editor_scrollback_origin =
-                    Some(origin.saturating_add(rows as isize));
-            }
-            GridScrollEdgeCapture::NoScroll => {}
-            GridScrollEdgeCapture::Invalid => {
-                self.editor_scroll_render_state = None;
-                self.editor_scrollback_origin = None;
-            }
-        }
-
-        self.editor_grid_scrollback = Some(snapshot);
-    }
-
-    /// Read-only accessor for the stashed grid snapshot. Mainly for
-    /// tests and the bridge to verify it parsed the daemon JSON before
-    /// painting.
-    pub fn editor_grid(&self) -> Option<&crate::editor_snapshot::EditorGridSnapshot> {
-        self.editor_grid.as_ref()
-    }
-
-    pub fn set_editor_cursor_shape(
-        &mut self,
-        shape: neoism_terminal_core::ansi::CursorShape,
-    ) {
-        self.editor_cursor_shape = shape;
-    }
-
-    pub fn push_editor_viewport_scroll(&mut self, rows: i32, viewport_rows: usize) {
-        self.editor_scroll.add_grid_scroll(
-            EDITOR_GRID_SCROLL_ID,
-            rows,
-            self.cell_h.max(1.0),
-            viewport_rows.max(1),
-        );
-    }
-
-    pub fn push_editor_wheel_delta(
-        &mut self,
-        delta_pixels: f32,
-        cell_height: f32,
-    ) -> i32 {
-        self.editor_scroll.add_wheel_delta(
-            EDITOR_GRID_SCROLL_ID,
-            delta_pixels,
-            cell_height.max(1.0),
-        )
-    }
-
-    pub fn push_editor_wheel_delta_with_viewport_bounds(
-        &mut self,
-        delta_pixels: f32,
-        cell_height: f32,
-        bounds: Option<EditorScrollViewportBounds>,
-    ) -> i32 {
-        if bounds.is_some_and(|bounds| bounds.rejects_delta(delta_pixels)) {
-            self.reset_editor_wheel();
-            self.push_editor_elastic(-delta_pixels, cell_height);
-            return 0;
-        }
-        self.push_editor_wheel_delta(delta_pixels, cell_height)
-    }
-
-    pub fn tick_editor_wheel(&mut self, cell_height: f32) -> i32 {
-        self.editor_scroll
-            .tick_wheel(EDITOR_GRID_SCROLL_ID, cell_height.max(1.0))
-    }
-
-    pub fn tick_editor_wheel_with_viewport_bounds(
-        &mut self,
-        cell_height: f32,
-        bounds: Option<EditorScrollViewportBounds>,
-    ) -> i32 {
-        let rows = self.tick_editor_wheel(cell_height);
-        if bounds.is_some_and(|bounds| bounds.rejects_delta(rows as f32)) {
-            self.reset_editor_wheel();
-            return 0;
-        }
-        rows
-    }
-
-    pub fn reset_editor_wheel(&mut self) {
-        self.editor_scroll.reset_wheel(EDITOR_GRID_SCROLL_ID);
-    }
-
-    pub fn push_editor_elastic(&mut self, direction_pixels: f32, cell_height: f32) {
-        self.editor_scroll.push_elastic(
-            EDITOR_GRID_SCROLL_ID,
-            direction_pixels,
-            cell_height.max(1.0),
-        );
-    }
-
-    pub(crate) fn editor_grid_render_state(
-        &self,
-        cell_h: f32,
-    ) -> EditorScrollGridRenderState {
-        let offset = editor_scroll_render_offset_for_mutated_snapshot(
-            self.editor_scroll
-                .current_scroll_offset(EDITOR_GRID_SCROLL_ID),
-            self.editor_scroll
-                .current_elastic_offset(EDITOR_GRID_SCROLL_ID),
-            cell_h,
-            self.editor_scroll_render_state
-                .map(|state| state.source_line_offset),
-        );
-        EditorScrollGridRenderState::new(offset, self.editor_scrollback_origin)
-    }
-
-    pub(crate) fn remember_editor_grid_render_state(
-        &mut self,
-        state: EditorScrollGridRenderState,
-    ) {
-        self.editor_scroll_render_state = Some(state);
-    }
-
-    pub fn editor_grid_hit_cell(&self, x: f32, y: f32) -> Option<(u32, u32)> {
-        let grid = self.editor_grid.as_ref()?;
-        let cell_w = (self.layout.terminal.w / grid.width.max(1) as f32).max(1.0);
-        let cell_h = (self.layout.terminal.h / grid.height.max(1) as f32).max(1.0);
-        let scroll_state = self.editor_grid_render_state(cell_h);
-        editor_grid_hit_cell(
-            x,
-            y,
-            [
-                self.layout.terminal.x,
-                self.layout.terminal.y,
-                self.layout.terminal.w,
-                self.layout.terminal.h,
-            ],
-            grid.width,
-            grid.height,
-            cell_w,
-            cell_h,
-            scroll_state,
-        )
-        .map(|hit| (hit.row, hit.col))
-    }
-
-    pub fn editor_grid_scroll_animating(&self) -> bool {
-        self.editor_scroll.is_animating()
-    }
-
     pub fn animations_active(&self) -> bool {
-        self.editor_scroll.is_animating()
-            || self.rainbow_cursor_active()
+        self.rainbow_cursor_active()
             || self.trail_cursor.is_animating()
             || self.yank_flash.is_animating()
-            || self.cursorline_overlay.is_animating()
             || self.status_line.is_animating()
             || self.buffer_tabs.is_animating()
             || self

@@ -50,22 +50,12 @@ impl Screen<'_> {
     }
 
     pub fn jump_to_diagnostic_line(&mut self, lnum: u64) {
-        let grid = self.context_manager.current_grid_mut();
-        let editor_node = grid
-            .contexts()
-            .iter()
-            .find_map(|(node, item)| item.context().editor.is_some().then_some(*node));
-        if let Some(node) = editor_node {
-            grid.current = node;
-            if let Some(item) = grid.contexts_mut().get_mut(&node) {
-                if let Some(editor) = &item.val.editor {
-                    // `:<lnum>` jumps without leaving any side effects;
-                    // wrap in `normal!` to also push to the jumplist
-                    // so `<C-o>` returns the user to where they were.
-                    editor.command(format!("normal! {lnum}G"));
-                }
-            }
-            self.context_manager.select_route_from_current_grid();
+        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            let line = (lnum.saturating_sub(1) as usize)
+                .min(code.buffer.lines.len().saturating_sub(1));
+            code.buffer.set_cursor_position(line, 0, false);
+            code.buffer.follow_cursor = true;
+            self.mark_dirty();
         }
     }
 
@@ -111,33 +101,11 @@ impl Screen<'_> {
         self.renderer.minimap.is_hovered()
     }
 
-    pub(crate) fn reset_editor_scroll_animation_for_jump(&mut self, route_id: usize) {
-        let rich_text_id = self.context_manager.get_by_route_id(route_id).map(|item| {
-            let ctx = item.context_mut();
-            ctx.editor_pending_scroll_lines = 0;
-            let rich_text_id = ctx.rich_text_id;
-            let mut terminal = ctx.terminal.lock();
-            terminal.clear_editor_scrollback();
-            rich_text_id
-        });
-        if let Some(rich_text_id) = rich_text_id {
-            self.renderer.editor_scroll.forget(rich_text_id);
-        }
-    }
-
     pub(crate) fn jump_minimap_to(
         &mut self,
-        hit: neoism_ui::panels::minimap::MinimapHit,
+        _hit: neoism_ui::panels::minimap::MinimapHit,
     ) {
-        if !self.focus_editor_route(hit.route_id) {
-            return;
-        }
-        self.reset_editor_scroll_animation_for_jump(hit.route_id);
-        let cmd = format!(
-            "lua pcall(function() vim.api.nvim_win_set_cursor(0, {{ {}, 0 }}); vim.cmd('normal! zz') end)",
-            hit.line.max(1)
-        );
-        self.send_editor_command_to_route(hit.route_id, cmd);
+        // nvim removed; native editor minimap jump TBD.
         self.mark_dirty();
     }
 
@@ -155,26 +123,6 @@ impl Screen<'_> {
             return None;
         }
         let mut panel_rect = item.layout_rect;
-        // Editor pane: map nvim viewport state into terminal-style
-        // (display_offset, history_size, screen_lines). Mirrors the
-        // push in `chrome/renderer/run.rs` so click hit-test reads
-        // the same numbers the visual thumb was rendered from.
-        if ctx.editor.is_some() {
-            let line_count = ctx.editor_viewport_line_count as usize;
-            let topline = ctx.editor_viewport_topline as usize;
-            let botline = ctx.editor_viewport_botline as usize;
-            let visible = botline.saturating_sub(topline).max(1);
-            if line_count <= visible {
-                return None;
-            }
-            return Some(neoism_ui::widgets::scrollbar::PanelScrollState {
-                rich_text_id: ctx.rich_text_id,
-                panel_rect,
-                display_offset: line_count.saturating_sub(botline),
-                history_size: line_count.saturating_sub(visible),
-                screen_lines: visible,
-            });
-        }
         let terminal = ctx.terminal.try_lock_unfair()?;
         let mut screen_lines = terminal.screen_lines();
         if !ctx.has_non_terminal_surface() {
@@ -219,54 +167,6 @@ impl Screen<'_> {
         rich_text_id: usize,
         new_offset: usize,
     ) -> bool {
-        // Editor pane: translate the terminal-style new_offset back
-        // into an nvim topline and send it via winrestview. The
-        // `<C-\\><C-N>` escape lets the command run from any mode
-        // (insert/visual/normal) — winrestview restores the view
-        // without moving the cursor in the buffer, which is what the
-        // user expects from a scrollbar drag.
-        let editor_target: Option<usize> = {
-            let ctx = self.context_manager.current();
-            if ctx.editor.is_some() && ctx.rich_text_id == rich_text_id {
-                let line_count = ctx.editor_viewport_line_count as usize;
-                let topline = ctx.editor_viewport_topline as usize;
-                let botline = ctx.editor_viewport_botline as usize;
-                let visible = botline.saturating_sub(topline).max(1);
-                if line_count > visible {
-                    let max_topline = line_count - visible;
-                    // new_offset = line_count - botline → topline =
-                    // line_count - visible - new_offset, clamped to
-                    // [0, max_topline].
-                    Some(max_topline.saturating_sub(new_offset).min(max_topline))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-        if let Some(target) = editor_target {
-            if let Some(editor) = self.context_manager.current().editor.as_ref() {
-                // Use `command()` (nvim's RPC Ex-command channel)
-                // instead of `input()`. `input` sends keys, which
-                // would force a mode flip out of insert/visual via
-                // `<C-\><C-N>` and then back, making the drag
-                // bounce between modes every drag event. `command()`
-                // runs the Ex command directly without touching the
-                // user's mode. `winrestview` moves the viewport
-                // without disturbing the cursor's buffer position.
-                //
-                // 1-indexed line number: nvim's win_viewport.topline
-                // is 0-indexed but the lua winrestview API is
-                // 1-indexed.
-                let cmd = format!("lua vim.fn.winrestview({{topline={}}})", target + 1);
-                editor.command(cmd);
-            }
-            self.renderer.scrollbar.notify_scroll(rich_text_id);
-            self.mark_dirty();
-            return true;
-        }
-
         let mut terminal = self.context_manager.current_mut().terminal.lock();
         let current = terminal.display_offset();
         let delta = new_offset as i32 - current as i32;
@@ -312,7 +212,7 @@ impl Screen<'_> {
                     ScrollbarPaneKind::Agent
                 } else if ctx.neoism_tags.is_some() {
                     ScrollbarPaneKind::Tags
-                } else if ctx.editor.is_some() {
+                } else if ctx.code.is_some() {
                     ScrollbarPaneKind::Editor
                 } else {
                     ScrollbarPaneKind::Terminal

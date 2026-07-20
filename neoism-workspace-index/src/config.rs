@@ -440,7 +440,6 @@ const WELCOME_PAGES: &[(&str, &str)] = &[
         "Editor/The Editor.md",
         include_str!("welcome/Editor/The Editor.md"),
     ),
-    ("Editor/Neovim.md", include_str!("welcome/Editor/Neovim.md")),
     (
         "Editor/Languages and LSP.md",
         include_str!("welcome/Editor/Languages and LSP.md"),

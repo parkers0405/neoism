@@ -4,7 +4,7 @@ All set under `[neoism]`, `[cursor]`, and `[fonts]` in [[Configuration|config.js
 
 ## Themes
 
-One `theme` colors everything — chrome, terminal, and the managed nvim syntax palette — so it all matches.
+One `theme` colors everything — chrome, terminal, and the editor's syntax palette — so it all matches.
 
 ```toml
 [neoism]

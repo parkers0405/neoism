@@ -81,6 +81,11 @@ pub struct Neoism {
     pub theme: String,
     #[serde(default)]
     pub minimap: bool,
+    /// Run the language server's formatter on the buffer before every
+    /// save in the code editor. On by default; `[neoism]
+    /// format-on-save = false` opts out.
+    #[serde(default = "default_bool_true", rename = "format-on-save")]
+    pub format_on_save: bool,
     /// Wave 7G: the display name other collaborators see in multiplayer
     /// presence (remote caret tags + the "who's here" roster). The
     /// `NEOISM_DISPLAY_NAME` env var overrides this; when both are
@@ -125,6 +130,7 @@ impl Default for Neoism {
             cursor_style: None,
             blinking_cursor: None,
             mashup_pack: None,
+            format_on_save: true,
             status_fps: true,
         }
     }

@@ -94,7 +94,8 @@ export interface ProtocolClientHandlers {
    * the wasm bridge's `agent_event(...)` method.
    */
   onAgentReply?: (requestId: number, payload: AgentServerMessage) => void;
-  /// Unsolicited editor (nvim) redraw frames. Wired to bridge.editorGridUpdate.
+  /// Unsolicited editor reply frames. The embedded-nvim grid consumer
+  /// is gone; the future native CodePane will consume this channel.
   onEditorReply?: (requestId: number, payload: unknown) => void;
   /**
    * Fired for every daemon-emitted `SearchReply`. The request id
@@ -116,7 +117,7 @@ export interface ProtocolClientHandlers {
   onDiagnosticsReply?: (payload: DiagnosticsServerMessage) => void;
   /**
    * Fired for every daemon-emitted `CursorOverlayReply`. The daemon
-   * translates nvim cursor + yank events into these push-style
+   * translates editor cursor + yank events into these push-style
    * envelopes; the handler routes them through the chrome bridge's
    * `setTrailCursor` / `setCustomCursor` / `setCursorlineOverlay` /
    * `setYankFlash` setters after a cell→pixel translation in the
@@ -370,9 +371,11 @@ export class ProtocolClient {
   }
 
   /**
-   * Ship an embedded-nvim editor request. Returns the allocated
-   * request id so callers that care can correlate daemon errors, while
-   * redraw replies continue to arrive through `onEditorReply`.
+   * Ship an editor-service request. Returns the allocated request id
+   * so callers that care can correlate daemon errors; replies arrive
+   * through `onEditorReply`. The daemon currently answers with an
+   * "editor backend unavailable" error — the native CodePane will
+   * service this wire.
    */
   sendEditor(
     message: EditorClientMessage,

@@ -1,8 +1,7 @@
 use super::*;
 use crate::workspace::extensions::ExtensionStatus;
 use neoism_extensions::{
-    ExtensionManifest, InstallError, InstallHandle, InstalledEntry, InstalledIndex,
-    ProgressEvent,
+    ExtensionManifest, InstallHandle, InstalledIndex, ProgressEvent,
 };
 use neoism_ui::panels::notifications::NotificationLevel;
 use tokio::sync::mpsc::unbounded_channel;
@@ -31,14 +30,13 @@ impl Screen<'_> {
             self.dispatch_rust_kernel_install();
             return;
         }
-        if let Some(lang) = treesitter_lang_from_extension_id(id) {
-            self.dispatch_treesitter_parser_install(lang.to_string());
-            return;
-        }
 
         let Some(manifest) = self.resolve_bundled_manifest(id) else {
             self.renderer.notifications.push(
-                format!("Unknown extension `{}`", id),
+                format!(
+                    "No install plan for `{}` — the package catalog may still be syncing",
+                    id
+                ),
                 NotificationLevel::Error,
             );
             return;
@@ -91,9 +89,6 @@ impl Screen<'_> {
             return false;
         };
         job.install_handle.cancel();
-        if let InstallSource::TreeSitterParser { lang } = &job.source {
-            self.treesitter_installing.remove(lang);
-        }
         if let Some(pane) = self
             .context_manager
             .current_mut()
@@ -152,107 +147,6 @@ impl Screen<'_> {
                 );
             }
         }
-    }
-
-    pub(crate) fn dispatch_treesitter_parser_install(&mut self, lang: String) {
-        let Some(spec) = crate::neoism::ide_tools::treesitter_install_spec(&lang) else {
-            self.renderer.notifications.push(
-                format!("No Treesitter installer for {lang}"),
-                NotificationLevel::Warn,
-            );
-            return;
-        };
-        let id = treesitter_extension_id(spec.lang);
-        if self.renderer.install_tracker.in_flight.contains_key(&id) {
-            return;
-        }
-        self.treesitter_installing.insert(spec.lang.to_string());
-
-        if let Some(pane) = self
-            .context_manager
-            .current_mut()
-            .neoism_extensions
-            .as_mut()
-        {
-            for entry in pane.entries_mut().iter_mut() {
-                if entry.id == id {
-                    entry.status = ExtensionStatus::Installing {
-                        percent: None,
-                        status_text: format!("installing {} parser…", spec.display_name),
-                    };
-                    break;
-                }
-            }
-        }
-
-        self.renderer.notifications.push(
-            format!("Installing {} syntax parser", spec.display_name),
-            NotificationLevel::Info,
-        );
-
-        let install_id = id.clone();
-        let install_lang = spec.lang.to_string();
-        let display_name = spec.display_name.to_string();
-        let parser_path = treesitter_parser_path(spec.lang);
-        let (tx, rx) = unbounded_channel::<ProgressEvent>();
-        let task = ext_runtime_handle().spawn(async move {
-            let _ = tx.send(ProgressEvent::Started);
-            let _ = tx.send(ProgressEvent::Waiting {
-                status: format!("fetching {} grammar", display_name),
-            });
-            let install_lang_for_blocking = install_lang.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                crate::neoism::ide_tools::install_treesitter_parser(
-                    &install_lang_for_blocking,
-                )
-            })
-            .await
-            .map_err(|err| InstallError::ParseManifest(format!("install join: {err}")))?;
-
-            match result {
-                Ok(message) => {
-                    let _ = tx.send(ProgressEvent::Waiting { status: message });
-                    let entry = InstalledEntry {
-                        id: install_id,
-                        version: env!("CARGO_PKG_VERSION").to_string(),
-                        install_kind: "treesitter".to_string(),
-                        bin_path: Some(parser_path),
-                        installed_at: now_millis_i64(),
-                    };
-                    neoism_extensions::record_installed(entry.clone())
-                        .await
-                        .map_err(|error| emit_install_failure(&tx, error))?;
-                    let _ = tx.send(ProgressEvent::Done);
-                    Ok(entry)
-                }
-                Err(message) => {
-                    let _ = tx.send(ProgressEvent::Failed {
-                        message: message.clone(),
-                    });
-                    Err(InstallError::CommandFailed {
-                        command: format!("install treesitter {}", install_lang),
-                        status: 1,
-                        stderr: message,
-                    })
-                }
-            }
-        });
-        let install_handle = InstallHandle::from_task(id.clone(), task);
-
-        self.renderer.install_tracker.in_flight.insert(
-            id,
-            InstallJob {
-                install_handle,
-                progress_rx: rx,
-                last_percent: None,
-                last_status: format!("installing {} parser…", spec.display_name),
-                uninstall: false,
-                source: InstallSource::TreeSitterParser {
-                    lang: spec.lang.to_string(),
-                },
-            },
-        );
-        self.mark_dirty();
     }
 
     pub(crate) fn dispatch_python_kernel_install(&mut self, source: InstallSource) {
@@ -335,37 +229,42 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    /// Mason package name candidates to try, in order, for an lsp.lua
-    /// server name. lsp.lua's `server.name` does not always match the
-    /// Mason package id; this passthrough/alias map covers the nine
-    /// known servers + falls back to the bare name for anything else.
-    fn mason_lookup_candidates_for_server(server: &str) -> Vec<String> {
-        match server {
-            "ts_ls" => vec![
-                "typescript-language-server".to_string(),
-                "ts_ls".to_string(),
-            ],
-            "yamlls" => vec!["yaml-language-server".to_string(), "yamlls".to_string()],
-            "jsonls" => vec![
-                "json-lsp".to_string(),
-                "jsonls".to_string(),
-                "vscode-json-language-server".to_string(),
-            ],
-            "nil_ls" => vec!["nil".to_string(), "nil_ls".to_string()],
-            other => vec![other.to_string()],
+    /// Catalog package-id candidates for a server, sourced from the
+    /// Neoism LSP engine's own adapter registry: each adapter declares
+    /// the exact package/executable pairs that can supply its command,
+    /// so the page and the runtime can never disagree about what an
+    /// install would provide. `server` may be an engine adapter id
+    /// (e.g. `rust`, `typescript`) or already a catalog package id.
+    fn catalog_candidates_for_server(server: &str) -> Vec<String> {
+        let adapters =
+            neoism_agent_server::language_server::language_server_adapters();
+        let mut candidates: Vec<String> = adapters
+            .iter()
+            .find(|adapter| adapter.id == server)
+            .map(|adapter| {
+                adapter
+                    .catalog_packages
+                    .iter()
+                    .map(|package| package.package_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !candidates.iter().any(|candidate| candidate == server) {
+            candidates.push(server.to_string());
         }
+        candidates
     }
 
-    /// Resolve a Mason `ExtensionManifest` for an lsp.lua server name.
-    /// Returns `None` if the Mason cache is missing or no candidate
+    /// Resolve a catalog `ExtensionManifest` for a language server.
+    /// Returns `None` if the catalog cache is missing or no candidate
     /// matches — the modal then tells the user to install manually.
-    pub(crate) fn resolve_mason_manifest_for_server(
+    pub(crate) fn resolve_catalog_manifest_for_server(
         &self,
         server: &str,
     ) -> Option<ExtensionManifest> {
-        let candidates = Self::mason_lookup_candidates_for_server(server);
-        let mason_path = neoism_extensions::mason::mason_cache_path();
-        let registry = neoism_extensions::load_mason_registry(&mason_path).ok()?;
+        let candidates = Self::catalog_candidates_for_server(server);
+        let catalog_path = neoism_extensions::mason::mason_cache_path();
+        let registry = neoism_extensions::load_mason_registry(&catalog_path).ok()?;
         for candidate in &candidates {
             if let Some(pkg) = registry.iter().find(|p| p.name == *candidate) {
                 let manifest = neoism_extensions::package_to_manifest(pkg).ok()?;
@@ -379,10 +278,11 @@ impl Screen<'_> {
 
     /// Modal-driven entry point: spawn an install via the runner and
     /// stash it in the tracker tagged with `MissingLspModal` so the
-    /// per-frame pump knows to close the busy modal and broadcast the
-    /// LSP retry on completion. Reuses the same runner + tracker as
-    /// the Extensions panel so completion bookkeeping (installed.json,
-    /// managed_bin_map refresh) lives in exactly one place.
+    /// per-frame pump knows to close the busy modal and open the
+    /// success/failure modal on completion. Reuses the same runner +
+    /// tracker as the Extensions panel so completion bookkeeping
+    /// (installed.json, managed bin map) lives in exactly one place;
+    /// the LSP engine re-resolves command sources on its next use.
     pub(crate) fn dispatch_install_via_runner(
         &mut self,
         manifest: ExtensionManifest,
@@ -421,11 +321,6 @@ impl Screen<'_> {
     /// `installed.json`, refresh the managed-bin map. The pane row
     /// flips through `Uninstalling` first so the click feels live.
     pub(crate) fn dispatch_uninstall(&mut self, id: &str) {
-        if let Some(lang) = treesitter_lang_from_extension_id(id) {
-            self.dispatch_treesitter_parser_uninstall(id, lang);
-            return;
-        }
-
         if let Some(pane) = self
             .context_manager
             .current_mut()
@@ -500,6 +395,19 @@ impl Screen<'_> {
             }
         }
 
+        // Language-server rows: with the managed binary gone, re-ask the
+        // engine where the command resolves now — a copy on `$PATH` keeps
+        // working, and the row must say so instead of claiming "missing".
+        let post_uninstall_source = manifest
+            .as_ref()
+            .and_then(|m| m.run.as_ref())
+            .filter(|run| !run.command.is_empty())
+            .map(|run| {
+                neoism_agent_server::language_server::command_source(
+                    id,
+                    run.command.clone(),
+                )
+            });
         if let Some(pane) = self
             .context_manager
             .current_mut()
@@ -509,6 +417,16 @@ impl Screen<'_> {
             for entry in pane.entries_mut().iter_mut() {
                 if entry.id == id {
                     entry.status = ExtensionStatus::NotInstalled;
+                    if entry.lsp_source.is_some() {
+                        if let Some(source) = &post_uninstall_source {
+                            use neoism_agent_server::language_server::LspCommandSource;
+                            if !matches!(source, LspCommandSource::Missing) {
+                                entry.status = ExtensionStatus::Detected;
+                            }
+                            entry.lsp_source =
+                                Some(command_source_label(source).to_string());
+                        }
+                    }
                     break;
                 }
             }
@@ -523,47 +441,4 @@ impl Screen<'_> {
             .push(format!("Uninstalled {}", label), NotificationLevel::Info);
     }
 
-    fn dispatch_treesitter_parser_uninstall(&mut self, id: &str, lang: &str) {
-        if let Some(pane) = self
-            .context_manager
-            .current_mut()
-            .neoism_extensions
-            .as_mut()
-        {
-            for entry in pane.entries_mut().iter_mut() {
-                if entry.id == id {
-                    entry.status = ExtensionStatus::Uninstalling;
-                    break;
-                }
-            }
-        }
-
-        let mut index = InstalledIndex::load().unwrap_or_default();
-        index.remove_record(id);
-        let _ = index.save();
-
-        let _ = std::fs::remove_file(treesitter_parser_path(lang));
-        let _ = std::fs::remove_dir_all(treesitter_query_dir(lang));
-
-        if let Some(pane) = self
-            .context_manager
-            .current_mut()
-            .neoism_extensions
-            .as_mut()
-        {
-            for entry in pane.entries_mut().iter_mut() {
-                if entry.id == id {
-                    entry.status = ExtensionStatus::NotInstalled;
-                    break;
-                }
-            }
-        }
-
-        self.retry_treesitter_syntax_in_nvim();
-        self.renderer.notifications.push(
-            format!("Uninstalled {lang} syntax parser"),
-            NotificationLevel::Info,
-        );
-        self.mark_dirty();
-    }
 }

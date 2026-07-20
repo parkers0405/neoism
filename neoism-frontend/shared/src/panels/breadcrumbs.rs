@@ -83,8 +83,8 @@ pub struct Breadcrumbs {
     /// dispatcher decides what root to anchor to (cwd by default).
     segments: Vec<String>,
     /// Trailing "winbar" tail appended after the file leaf — typically
-    /// the enclosing function name + line:col, fed from nvim's
-    /// CursorMoved event. None hides the tail entirely.
+    /// the enclosing function name + line:col, fed from the host's
+    /// cursor-moved updates. None hides the tail entirely.
     tail: Option<String>,
     actions: Vec<BreadcrumbActionItem>,
     action_hits: RefCell<Vec<BreadcrumbActionHit>>,

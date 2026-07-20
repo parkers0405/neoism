@@ -66,9 +66,6 @@ impl Screen<'_> {
         // tripping the borrow checker, so we cache it here.
         let pre_loop_scaled_margin =
             self.context_manager.current_grid().get_scaled_margin();
-        let bottom_chrome_height_phys =
-            self.renderer.status_line_height() * self.sugarloaf.scale_factor();
-        let window_height_phys = self.sugarloaf.window_size().height as f32;
         // Active terminal pane's per-frame block header span
         // capture, used after the loop to render hover icons +
         // populate hit-test rects. Filled inside the loop when
@@ -104,32 +101,13 @@ impl Screen<'_> {
                 continue;
             }
             let ctx = &mut item.val;
-            let editor_row_fit = ctx.editor.as_ref().and_then(|_| {
-                Self::editor_rows_above_bottom_chrome(
-                    item.layout_rect,
-                    pre_loop_scaled_margin,
-                    ctx.dimension,
-                    window_height_phys,
-                    bottom_chrome_height_phys,
-                )
-            });
-            if let Some(fit) = editor_row_fit {
-                let previous_rows = ctx.dimension.lines;
-                ctx.dimension.apply_editor_row_fit(fit);
-                if previous_rows != usize::from(fit.rows) {
-                    ctx.pending_terminal_resize = true;
-                }
-            }
-            if ctx.pending_terminal_resize
-                && !Self::apply_context_resize(ctx, editor_row_fit)
-            {
+            if ctx.pending_terminal_resize && !Self::apply_context_resize(ctx) {
                 continue;
             }
             if ctx.neoism_agent.is_some() || ctx.neoism_tags.is_some() {
                 continue;
             }
             let dim = ctx.dimension;
-            let is_editor_pane = ctx.editor.is_some();
             // Snap to integer pixel cells. `dim.dimension.width`
             // comes from `char_width * scale` (fractional);
             // `dim.dimension.height` is already `.ceil()`'d in
@@ -140,13 +118,7 @@ impl Screen<'_> {
             // Rounding both to the same integer stride the cell
             // grid is actually drawn on removes the drift.
             let cell_w = dim.dimension.width.round().max(1.0);
-            let cell_h = if is_editor_pane {
-                // The fitted editor pitch may be fractional: that is
-                // how complete rows consume the exact pane height.
-                dim.dimension.height.max(1.0)
-            } else {
-                dim.dimension.height.round().max(1.0)
-            };
+            let cell_h = dim.dimension.height.round().max(1.0);
             // Per-panel font size (zoom is per-rich-text, not root).
             // Falls back to root × scale if the text id can't be
             // found — shouldn't happen post-init but keeps the emit
@@ -173,8 +145,6 @@ impl Screen<'_> {
                 _block_input_active,
                 prompt_abs_row,
                 terminal_cursor_abs,
-                locked_editor_scrollback_origin,
-                locked_editor_scrollback_snapshot,
             ) = {
                 let Some(terminal) = ctx.terminal.try_lock_unfair() else {
                     ctx.renderable_content.pending_update.set_dirty();
@@ -203,7 +173,6 @@ impl Screen<'_> {
                             .then(|| terminal.grid[line].clone())
                     });
                 let block_input_active = is_active
-                    && !is_editor_pane
                     && ctx.markdown.is_none()
                     && ctx.neoism_agent.is_none()
                     && ctx.neoism_tags.is_none()
@@ -213,28 +182,6 @@ impl Screen<'_> {
                     .then(|| terminal.absolute_row_for_line(terminal.cursor().pos.row));
                 let terminal_cursor_abs =
                     terminal.absolute_row_for_line(terminal.cursor().pos.row);
-                // Capture the editor scrollback ring inside the SAME
-                // lock that produced `visible_rows`. Acquiring it in a
-                // separate `terminal.lock()` later let the nvim event
-                // pump slip another `flush_editor_scrollback` between
-                // the two snapshots — the ring would advance to the
-                // next viewport while `visible_rows` (and the style /
-                // damage tables sourced from it) still described the
-                // previous one. The renderer then mixed source rows
-                // from two different flushes, producing the "OLD
-                // blocks change on screen" artifact during held-key
-                // scroll. Always grab the origin so cheap ring-aware
-                // planning works at-rest; only clone the full snapshot
-                // when an animation needs it (cloning every frame is
-                // expensive on large viewports).
-                let editor_scrollback_origin = is_editor_pane
-                    .then(|| terminal.editor_scrollback_origin())
-                    .flatten();
-                let editor_scrollback_snapshot = if is_editor_pane {
-                    terminal.editor_scrollback_snapshot()
-                } else {
-                    None
-                };
                 (
                     visible_rows,
                     visible_row_sources,
@@ -249,8 +196,6 @@ impl Screen<'_> {
                     block_input_active,
                     prompt_abs_row,
                     terminal_cursor_abs,
-                    editor_scrollback_origin,
-                    editor_scrollback_snapshot,
                 )
             };
             if ctx.terminal_input.sync_shell_state(shell_prompt_state) {
@@ -263,19 +208,12 @@ impl Screen<'_> {
                 &mut visible_row_sources,
                 prompt_abs_row,
             );
-            if let Some(fit) = editor_row_fit {
-                let visible_cap = usize::from(fit.rows).max(1);
-                if visible_rows.len() > visible_cap {
-                    visible_rows.truncate(visible_cap);
-                    visible_row_sources.truncate(visible_cap);
-                }
-            }
             // File-link hover: if the user's mouse is over a
             // resolvable token in THIS pane's output, mutate the
             // matching cells' style ID to a fg=blue + underline
             // style. The mutation runs BEFORE compose so the
             // styled cells flow through into the rendered frame.
-            if is_active && !is_editor_pane {
+            if is_active {
                 if let Some(link) = hover_link.as_ref() {
                     if let Some(idx) = visible_row_sources
                         .iter()
@@ -748,7 +686,6 @@ impl Screen<'_> {
                 neoism_terminal_core::damage::TerminalDamage::Noop,
             );
             let force_file_link_hover_rebuild = is_active
-                && !is_editor_pane
                 && ctx.markdown.is_none()
                 && ctx.neoism_agent.is_none()
                 && ctx.neoism_tags.is_none()
@@ -803,103 +740,19 @@ impl Screen<'_> {
                 term_colors[neoism_terminal_core::colors::NamedColor::Cursor as usize]
                     .unwrap_or(self.renderer.named_colors.cursor)
             };
-            let (editor_scroll_position_lines, editor_elastic_offset_y) =
-                if is_editor_pane {
-                    (
-                        self.renderer
-                            .editor_scroll
-                            .current_scroll_offset(ctx.rich_text_id),
-                        self.renderer
-                            .editor_scroll
-                            .current_elastic_offset(ctx.rich_text_id),
-                    )
-                } else {
-                    (0.0, 0.0)
-                };
-            let editor_render_offset = if is_editor_pane {
-                let prev_offset = self
-                    .editor_scroll_grid_states
-                    .get(&ctx.route_id)
-                    .map(|s| s.render.source_line_offset);
-                editor_scroll_render_offset(
-                    editor_scroll_position_lines,
-                    editor_elastic_offset_y,
-                    cell_h,
-                    prev_offset,
-                )
-            } else {
-                EditorScrollRenderOffset::default()
-            };
-            let terminal_scroll_offset_y = if is_editor_pane {
-                0.0
-            } else {
-                self.renderer
-                    .terminal_scroll
-                    .current_offset(ctx.rich_text_id)
-            };
-            let editor_has_render_offset = editor_render_offset.source_line_offset != 0
-                || editor_render_offset.pixel_offset_y.abs() > f32::EPSILON;
-            // Both of these came out of the SAME terminal lock that
-            // produced `visible_rows` above — see the comment there.
-            // Re-locking here would re-introduce the snapshot tear.
-            let editor_scrollback_origin = locked_editor_scrollback_origin;
-            let retain_editor_scrollback_for_settle = is_editor_pane
-                && !editor_has_render_offset
-                && self
-                    .editor_scroll_grid_states
-                    .get(&ctx.route_id)
-                    .map(|state| {
-                        state.render.source_line_offset != 0
-                            || state.render.pixel_offset_y.abs() > f32::EPSILON
-                    })
-                    .unwrap_or(false);
-            let editor_scrollback = if is_editor_pane
-                && (editor_has_render_offset || retain_editor_scrollback_for_settle)
-            {
-                locked_editor_scrollback_snapshot
-            } else {
-                None
-            };
-            let panel_cols = if is_editor_pane {
-                visible_rows
-                    .first()
-                    .map(|row| row.len())
-                    .unwrap_or(dim.columns.max(1) as usize)
-            } else {
-                dim.columns.max(1) as usize
-            };
-            let panel_rows = if is_editor_pane {
-                visible_rows.len().max(1)
-            } else {
-                dim.lines.max(1) as usize
-            };
+            let terminal_scroll_offset_y = self
+                .renderer
+                .terminal_scroll
+                .current_offset(ctx.rich_text_id);
+            let panel_cols = dim.columns.max(1) as usize;
+            let panel_rows = dim.lines.max(1) as usize;
             panels.push(PanelFrame {
                 route_id: ctx.route_id,
                 rich_text_id: ctx.rich_text_id,
-                editor_scroll_position_lines,
-                editor_elastic_offset_y,
                 terminal_scroll_offset_y,
-                terminal_reserved_bottom_rows: if is_editor_pane {
-                    0
-                } else {
-                    composer_cell_rows as u32
-                },
-                is_editor: is_editor_pane,
-                editor_scrollback,
-                editor_scrollback_origin,
-                editor_viewport_topline: ctx.editor_viewport_topline,
-                editor_viewport_botline: ctx.editor_viewport_botline,
-                editor_viewport_line_count: ctx.editor_viewport_line_count,
-                terminal_snapshot_above: if is_editor_pane {
-                    None
-                } else {
-                    terminal_snapshot_above
-                },
-                terminal_snapshot_below: if is_editor_pane {
-                    None
-                } else {
-                    terminal_snapshot_below
-                },
+                terminal_reserved_bottom_rows: composer_cell_rows as u32,
+                terminal_snapshot_above,
+                terminal_snapshot_below,
                 layout_rect: item.layout_rect,
                 cols: panel_cols.min(u32::MAX as usize) as u32,
                 rows: panel_rows.min(u32::MAX as usize) as u32,
@@ -926,7 +779,11 @@ impl Screen<'_> {
                     is_active,
                     hide_running_command_cursor,
                     block_input_cursor_present: block_input_cursor.is_some(),
-                    cursor_state_visible: cursor.state.is_visible(),
+                    // Document surfaces (code/markdown/draw/…) sit over a
+                    // dead PTY whose parked cursor must never paint — the
+                    // surface draws its own caret.
+                    cursor_state_visible: cursor.state.is_visible()
+                        && !ctx.has_non_terminal_surface(),
                     tree_focused,
                     trail_cursor_enabled: self.renderer.trail_cursor_enabled,
                 }),
@@ -966,62 +823,10 @@ impl Screen<'_> {
         ctx.scaled_margin = scaled_margin;
     }
 
-    pub(crate) fn mask_editor_seams(&mut self, ctx: &FrameCtx) {
+    pub(crate) fn ensure_panel_grids(&mut self, ctx: &FrameCtx) {
         // --- ensure every panel has a matching GridRenderer ---
         for p in &ctx.panels {
-            self.ensure_grid(p.route_id, p.cols, p.rows, p.is_editor);
-        }
-
-        // Mask the hidden editor scroll-buffer row above the pane with
-        // the active theme background. The bottom is handled entirely
-        // by fitted row geometry + the GPU clip.
-        // Painted via the sugarloaf primitives pipeline AFTER the
-        // grid pass per `render_wgpu`, so it covers the bleed.
-        {
-            let s = self.sugarloaf.scale_factor();
-            let scaled_margin = self.context_manager.current_grid().get_scaled_margin();
-            let chrome_top = self
-                .renderer
-                .island
-                .as_ref()
-                .map_or(0.0, |i| i.effective_height(self.context_manager.len()));
-            let chrome_height_logical = chrome_top
-                + self.renderer.buffer_tabs_height()
-                + self.renderer.breadcrumbs_height();
-            for p in &ctx.panels {
-                if !p.is_editor {
-                    continue;
-                }
-                let panel_left_phys = scaled_margin.left + p.layout_rect[0];
-                // Cover the solved pane width, not merely complete text
-                // columns, so the top safety mask reaches split edges.
-                let panel_w_phys = p.layout_rect[2];
-                let pane_top_phys = scaled_margin.top + p.layout_rect[1];
-                // Only the top hidden scroll-buffer row needs masking.
-                // Fitted editor rows now meet the bottom boundary, so
-                // there is intentionally no bottom filler rectangle.
-                let mask_color = self.renderer.theme.f32(self.renderer.theme.bg);
-                for mask in editor_chrome_mask_rects(EditorChromeMaskInput {
-                    panel_left: panel_left_phys / s,
-                    panel_width: panel_w_phys / s,
-                    pane_top: pane_top_phys / s,
-                    chrome_height: chrome_height_logical,
-                }) {
-                    self.sugarloaf.rect(
-                        None,
-                        mask.x,
-                        mask.y,
-                        mask.width,
-                        mask.height,
-                        mask_color,
-                        0.0,
-                        // ORDER above grid (0) but below chrome
-                        // (4-7) so it doesn't paint over chrome
-                        // glyphs by accident.
-                        2,
-                    );
-                }
-            }
+            self.ensure_grid(p.route_id, p.cols, p.rows);
         }
     }
 }

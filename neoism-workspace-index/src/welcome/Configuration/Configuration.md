@@ -17,7 +17,7 @@ On first launch Neoism writes a default `config.json` (just a comment pointing a
 ```json
 {
   "neoism": {
-    "theme": "pastel_dark",      // unified theme for chrome + terminal + nvim
+    "theme": "pastel_dark",      // unified theme for chrome + terminal + editor
     "minimap": false,
     "display-name": "your-name", // what collaborators see in multiplayer presence
     "status-fps": true           // frame-rate pill on the status bar

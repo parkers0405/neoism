@@ -37,7 +37,7 @@ impl Screen<'_> {
 
     pub(crate) fn close_active_buffer_tab_inner(&mut self, return_to_terminal: bool) {
         let workspace_id = self.current_workspace_id();
-        let current_is_editor = self.context_manager.current().editor.is_some();
+        let current_is_editor = self.context_manager.current().code.is_some();
         if !self.renderer.buffer_tabs.is_visible() {
             tracing::warn!(
                 target: "neoism::editor_tabs",
@@ -160,29 +160,14 @@ impl Screen<'_> {
                     );
                 }
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path) => {
+                    let _ = self
+                        .context_manager
+                        .remove_code_by_path(&path, &mut self.sugarloaf);
                     tracing::info!(
                         target: "neoism::editor_tabs",
                         ?workspace_id,
                         path = %path.display(),
-                        "sending nvim bwipeout for closed tab"
-                    );
-                    self.send_editor_command_raw(
-                        neoism_backend::performer::nvim::vim_bwipeout_command(
-                            &path.display().to_string(),
-                        ),
-                    );
-                }
-                neoism_ui::panels::buffer_tabs::BufferTabTarget::Scratch(scratch_id) => {
-                    tracing::info!(
-                        target: "neoism::editor_tabs",
-                        ?workspace_id,
-                        scratch_id,
-                        "sending nvim scratch delete for closed tab"
-                    );
-                    self.send_editor_command_raw(
-                        neoism_backend::performer::nvim::vim_scratch_delete_command(
-                            scratch_id,
-                        ),
+                        "closed code tab"
                     );
                 }
             }
@@ -214,30 +199,7 @@ impl Screen<'_> {
                     }
                 }
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path) => {
-                    tracing::info!(
-                        target: "neoism::editor_tabs",
-                        ?workspace_id,
-                        path = %path.display(),
-                        "sending nvim edit for next active tab"
-                    );
-                    self.send_editor_command_raw(
-                        neoism_backend::performer::nvim::vim_select_file_command(
-                            &path.display().to_string(),
-                        ),
-                    );
-                }
-                neoism_ui::panels::buffer_tabs::BufferTabTarget::Scratch(scratch_id) => {
-                    tracing::info!(
-                        target: "neoism::editor_tabs",
-                        ?workspace_id,
-                        scratch_id,
-                        "sending nvim scratch select for next active tab"
-                    );
-                    self.send_editor_command_raw(
-                        neoism_backend::performer::nvim::vim_scratch_select_command(
-                            scratch_id,
-                        ),
-                    );
+                    self.activate_code_path(path);
                 }
             }
         } else if self.renderer.buffer_tabs.active_is_terminal() {

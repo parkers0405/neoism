@@ -13,7 +13,7 @@
 // what matters.
 
 import type { CrdtPeerPresence } from "../workspace/types";
-import { colorCss } from "../editor/nvim/NvimPresence";
+import { colorCss } from "../presence/presenceColor";
 
 export interface MarkdownPresenceAnchor {
   /** 0-based first source line covered by the block. */

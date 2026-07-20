@@ -6,7 +6,6 @@ fn terminal(title: &str, route: Option<usize>) -> BufferTab<()> {
         modified: false,
         path: None,
         markdown: false,
-        scratch_id: None,
         terminal_route_id: route,
         neoism_agent_route_id: None,
         chrome_page: None,
@@ -20,7 +19,6 @@ fn file(path: &str) -> BufferTab<()> {
         modified: false,
         path: Some(PathBuf::from(path)),
         markdown: false,
-        scratch_id: None,
         terminal_route_id: None,
         neoism_agent_route_id: None,
         chrome_page: None,
@@ -307,13 +305,9 @@ fn workspace_active_path_markdown_inserts() {
 }
 
 #[test]
-fn workspace_active_path_agent_and_scratch_remove() {
+fn workspace_active_path_agent_removes() {
     assert_eq!(
         workspace_active_path_for_target(Some(&BufferTabTarget::NeoismAgent(7))),
-        WorkspaceActivePathUpdate::Remove
-    );
-    assert_eq!(
-        workspace_active_path_for_target(Some(&BufferTabTarget::Scratch(2))),
         WorkspaceActivePathUpdate::Remove
     );
     assert_eq!(
@@ -377,10 +371,6 @@ fn target_label_covers_all_variants() {
     assert_eq!(
         buffer_tab_target_label(Some(&BufferTabTarget::NeoismAgent(7))),
         "neoism-agent:7"
-    );
-    assert_eq!(
-        buffer_tab_target_label(Some(&BufferTabTarget::Scratch(2))),
-        "scratch:2"
     );
     assert_eq!(buffer_tab_target_label(None), "<none>");
 }
@@ -463,40 +453,6 @@ fn classify_strip_click_passes_through_outside_strip_rect() {
 fn classify_strip_click_passes_through_when_workspace_hidden() {
     let outcome = classify_strip_click(None, None, None, 200.0, 50.0);
     assert_eq!(outcome, StripClickOutcome::Pass);
-}
-
-// ── bwipeout_send_target ────────────────────────────────────────
-
-#[test]
-fn bwipeout_workspace_with_primary_routes_to_primary() {
-    assert_eq!(
-        bwipeout_send_target(StripKey::Workspace, Some(7), None),
-        BwipeoutSendTarget::Route(7)
-    );
-}
-
-#[test]
-fn bwipeout_workspace_without_primary_falls_back_to_raw() {
-    assert_eq!(
-        bwipeout_send_target(StripKey::Workspace, None, None),
-        BwipeoutSendTarget::Raw
-    );
-}
-
-#[test]
-fn bwipeout_pane_with_editor_routes_to_editor() {
-    assert_eq!(
-        bwipeout_send_target(StripKey::Pane(42), Some(7), Some(12)),
-        BwipeoutSendTarget::Route(12)
-    );
-}
-
-#[test]
-fn bwipeout_pane_without_editor_route_skips() {
-    assert_eq!(
-        bwipeout_send_target(StripKey::Pane(42), Some(7), None),
-        BwipeoutSendTarget::None
-    );
 }
 
 // ── reinsert_tab_plan ───────────────────────────────────────────
@@ -676,7 +632,7 @@ fn tab_drag_release_kind_agent_when_no_path_but_agent_kind_set() {
 
 #[test]
 fn tab_drag_release_kind_drop_when_neither_path_nor_agent() {
-    // Scratch-or-terminal tabs that lost their handle land here.
+    // Terminal tabs that lost their handle land here.
     assert_eq!(
         tab_drag_release_kind(false, false, false),
         TabDragReleaseKind::Drop

@@ -347,7 +347,6 @@ impl Screen<'_> {
             self.open_path_in_markdown(path);
         } else {
             self.open_path_in_editor(path);
-            self.send_editor_command_raw("checktime".to_string());
         }
     }
 }

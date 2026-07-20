@@ -9,47 +9,6 @@ impl Screen<'_> {
         neoism_ui::lifecycle_policy::bytes_text_for_log(bytes)
     }
 
-    pub(crate) fn format_key_for_nvim(
-        key: &neoism_window::event::KeyEvent,
-        mods: ModifiersState,
-    ) -> Option<String> {
-        use neoism_ui::lifecycle_policy::{format_nvim_key_token, LifecycleMods};
-        use neoism_window::keyboard::Key;
-
-        // Translate the winit named-key enum to our renderer-neutral
-        // mirror.
-        let named = named_key_to_nvim_kind(&key.logical_key);
-
-        // Resolve the raw text once at the boundary (winit-specific).
-        let text = if named.is_some() {
-            String::new()
-        } else if mods.control_key() || mods.alt_key() || mods.super_key() {
-            match key.key_without_modifiers() {
-                Key::Character(c) => c.to_string(),
-                _ => match &key.logical_key {
-                    Key::Character(c) => c.to_string(),
-                    _ => key.text.as_ref().map(|s| s.to_string())?,
-                },
-            }
-        } else {
-            key.text_with_all_modifiers()
-                .or(key.text.as_deref())
-                .map(str::to_string)
-                .or_else(|| match &key.logical_key {
-                    Key::Character(c) => Some(c.to_string()),
-                    _ => None,
-                })?
-        };
-
-        let pod = LifecycleMods::new(
-            mods.shift_key(),
-            mods.control_key(),
-            mods.alt_key(),
-            mods.super_key(),
-        );
-        format_nvim_key_token(&text, named, pod)
-    }
-
     pub(crate) fn should_build_sequence(
         key: &neoism_window::event::KeyEvent,
         text: &str,
@@ -253,18 +212,6 @@ impl Screen<'_> {
             && !mods.super_key()
             && (matches!(key.logical_key, Key::Named(NamedKey::Insert))
                 || matches!(key.physical_key, PhysicalKey::Code(KeyCode::Insert)))
-    }
-
-    pub(crate) fn is_lsp_quick_fix_key(
-        key: &neoism_window::event::KeyEvent,
-        mods: ModifiersState,
-    ) -> bool {
-        let primary = mods.control_key() ^ mods.super_key();
-        primary
-            && !mods.shift_key()
-            && !mods.alt_key()
-            && (matches!(key.physical_key, PhysicalKey::Code(KeyCode::Period))
-                || matches!(key.key_without_modifiers().as_ref(), Key::Character(ch) if ch == "."))
     }
 
     pub(crate) fn font_size_action_for_key(

@@ -84,15 +84,6 @@ for b in "${BINARIES[@]}"; do
   printf '   %s\n' "$BIN_DIR/$b"
 done
 
-# --- tree-sitter runtime bundle -------------------------------------------
-# Placed next to the binaries; the app's first-run bootstrap installs it
-# into the user's data dir (and terminfo, launcher, config) on launch.
-rt="$(find "$tmp" -type d -name runtime | head -1)"
-if [ -n "$rt" ] && [ -f "$rt/RUNTIME_VERSION" ]; then
-  rm -rf "$BIN_DIR/runtime"
-  cp -r "$rt" "$BIN_DIR/runtime"
-  say "runtime bundle installed"
-fi
 
 # --- terminfo (best effort) ----------------------------------------------
 if command -v tic >/dev/null 2>&1; then

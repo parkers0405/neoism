@@ -245,15 +245,14 @@ impl Screen<'_> {
         if self.context_manager.current().markdown.is_some() {
             return self.save_current_markdown();
         }
+        if self.context_manager.current().code.is_some() {
+            return self.save_current_code();
+        }
         if self.context_manager.current().draw.is_some() {
             return self.save_current_draw();
         }
         if self.context_manager.current().notebook.is_some() {
             return self.save_current_notebook();
-        }
-        if self.context_manager.current().editor.is_some() {
-            self.send_editor_command("write".to_string());
-            return true;
         }
         false
     }

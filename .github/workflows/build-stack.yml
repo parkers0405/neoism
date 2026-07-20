@@ -87,12 +87,6 @@ jobs:
       - name: Build wasm bundle + web app
         run: npm --prefix neoism-frontend/web run build
 
-      # Shipped as `runtime/` next to the binaries; the app's first-run
-      # bootstrap installs it into the user's data dir (see
-      # neoism-frontend/desktop/src/bootstrap.rs).
-      - name: Build Tree-sitter runtime bundle
-        run: ./scripts/build-treesitter-runtime.sh stage-runtime "${{ github.sha }}"
-
       - name: Package binaries
         run: |
           set -euo pipefail
@@ -103,7 +97,6 @@ jobs:
              target/release/neoism-agent \
              "stage/$OUT/"
           cp misc/rio.terminfo "stage/$OUT/" 2>/dev/null || true
-          cp -r stage-runtime "stage/$OUT/runtime"
           tar -C stage -czf "$OUT.tar.gz" "$OUT"
           sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256"
 

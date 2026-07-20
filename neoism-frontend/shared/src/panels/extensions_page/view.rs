@@ -1087,15 +1087,14 @@ fn draw_card_body(
     let chip_iter = entry.categories.iter().chain(entry.languages.iter());
     let chip_clip = clip.unwrap_or([x, y, w, h]);
 
-    // Leading LSP source badge (extension / path / config / missing): where
-    // the Rust engine resolves this server's binary. Colored by
-    // availability — a resolvable source reads green, an unresolved binary
-    // red — so the page reflects what the engine will actually run.
+    // Leading LSP source badge: where the engine resolves this server's
+    // binary. Resolvable sources read green, missing binaries red, and a
+    // package without a registered runtime adapter yellow.
     if let Some(source) = entry.lsp_source.as_deref() {
-        let badge_color = if source == "missing" {
-            theme.red
-        } else {
-            theme.green
+        let badge_color = match source {
+            "missing" => theme.red,
+            "adapter required" => theme.yellow,
+            _ => theme.green,
         };
         let badge_opts = DrawOpts {
             font_size: 11.0 * s,
@@ -1237,10 +1236,12 @@ fn draw_card_body(
     // Hit-rect for 1.3's click dispatch. Pushed after the row Focus
     // entry so click-resolution can prefer the button before falling
     // back to row-level focus.
-    row_hits.push(RowHit {
-        rect: button_rect,
-        action: RowAction::ToggleInstall(entry.id.clone()),
-    });
+    if !matches!(entry.status, ExtensionStatus::BuiltIn) {
+        row_hits.push(RowHit {
+            rect: button_rect,
+            action: RowAction::ToggleInstall(entry.id.clone()),
+        });
+    }
 
     let _ = idx;
 }
@@ -1259,6 +1260,35 @@ fn paint_install_button(
     let [bx, by, bw, bh] = rect;
 
     match status {
+        ExtensionStatus::BuiltIn => {
+            let btn_clip = clip.unwrap_or(rect);
+            draw_rounded_rect_clipped(
+                sugarloaf,
+                [bx, by, bw, bh],
+                theme.f32(theme.bg),
+                BUTTON_RADIUS * s,
+                ORDER_BUTTON,
+                btn_clip,
+            );
+            paint_outline_clipped(sugarloaf, rect, theme.f32(theme.border), s, btn_clip);
+            let label = install_button_label(status);
+            let opts = DrawOpts {
+                font_size: 11.0 * s,
+                color: theme.u8(theme.dim),
+                bold: true,
+                clip_rect: clip,
+                ..DrawOpts::default()
+            };
+            let lw = sugarloaf.text_mut().measure(label, &opts);
+            draw_text_with_occlusion(
+                sugarloaf,
+                bx + (bw - lw) * 0.5,
+                by + (bh - 11.0 * s) * 0.5,
+                label,
+                &opts,
+                occlusion_rects,
+            );
+        }
         ExtensionStatus::NotInstalled => {
             // Filled grey button to match the Zed screenshot. We pick
             // theme.hover so the button reads as raised against the
@@ -1332,7 +1362,7 @@ fn paint_install_button(
         }
         ExtensionStatus::Installing {
             percent,
-            status_text: _,
+            status_text,
         } => {
             let btn_clip = clip.unwrap_or(rect);
             draw_rounded_rect_clipped(
@@ -1344,19 +1374,41 @@ fn paint_install_button(
                 btn_clip,
             );
             paint_outline_clipped(sugarloaf, rect, theme.f32(theme.border), s, btn_clip);
-            let pct = (*percent as f32 / 100.0).clamp(0.0, 1.0);
-            let fill_w = (bw * pct).max(0.0);
-            if fill_w > 0.0 {
+            if let Some(percent) = percent {
+                let pct = (*percent as f32 / 100.0).clamp(0.0, 1.0);
+                let fill_w = (bw * pct).max(0.0);
+                if fill_w > 0.0 {
+                    draw_rounded_rect_clipped(
+                        sugarloaf,
+                        [bx, by, fill_w, bh],
+                        theme.f32_alpha(theme.accent, 0.55),
+                        BUTTON_RADIUS * s,
+                        ORDER_PROGRESS,
+                        btn_clip,
+                    );
+                }
+            } else {
+                // No denominator (DNS, package-manager work, extraction): a
+                // moving segment communicates liveness without fabricating a
+                // percentage. The host already repaints continuously while an
+                // install is in flight.
+                let elapsed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f32();
+                let segment_w = bw * 0.32;
+                let travel = bw + segment_w;
+                let segment_x = bx - segment_w + travel * ((elapsed * 0.8) % 1.0);
                 draw_rounded_rect_clipped(
                     sugarloaf,
-                    [bx, by, fill_w, bh],
+                    [segment_x, by, segment_w, bh],
                     theme.f32_alpha(theme.accent, 0.55),
                     BUTTON_RADIUS * s,
                     ORDER_PROGRESS,
                     btn_clip,
                 );
             }
-            let label = format!("Installing... {}%", percent);
+            let label = installing_label(*percent, status_text, hovered);
             let opts = DrawOpts {
                 font_size: 11.0 * s,
                 color: theme.u8(theme.fg),
@@ -1407,10 +1459,35 @@ fn paint_install_button(
 
 fn install_button_label(status: &ExtensionStatus) -> &'static str {
     match status {
+        ExtensionStatus::BuiltIn => "Built in",
         ExtensionStatus::NotInstalled => "+ Install",
         ExtensionStatus::Installed { .. } => "Uninstall",
         ExtensionStatus::Installing { .. } => "Installing...",
         ExtensionStatus::Uninstalling => "Uninstalling...",
+    }
+}
+
+fn installing_label(percent: Option<u8>, status: &str, hovered: bool) -> String {
+    if hovered {
+        return "Cancel".to_string();
+    }
+    let lower = status.to_ascii_lowercase();
+    let phase = if lower.contains("connect") || lower.contains("resolv") {
+        "Connecting"
+    } else if lower.contains("download") || lower.contains("fetch") {
+        "Downloading"
+    } else if lower.contains("extract") || lower.contains("unpack") {
+        "Extracting"
+    } else if lower.contains("link") || lower.contains("final") {
+        "Finalizing"
+    } else if lower.contains("start") {
+        "Starting"
+    } else {
+        "Installing"
+    };
+    match percent {
+        Some(percent) => format!("{phase} {percent}%"),
+        None => format!("{phase}…"),
     }
 }
 
@@ -1572,7 +1649,7 @@ mod tests {
             entry(
                 "b",
                 ExtensionStatus::Installing {
-                    percent: 42,
+                    percent: Some(42),
                     status_text: "downloading".into(),
                 },
             ),
@@ -1599,6 +1676,10 @@ mod tests {
     #[test]
     fn install_button_label_uses_text_safe_marker() {
         assert_eq!(
+            super::install_button_label(&ExtensionStatus::BuiltIn),
+            "Built in"
+        );
+        assert_eq!(
             super::install_button_label(&ExtensionStatus::NotInstalled),
             "+ Install"
         );
@@ -1611,6 +1692,22 @@ mod tests {
         assert_eq!(
             super::install_button_label(&ExtensionStatus::Uninstalling),
             "Uninstalling..."
+        );
+    }
+
+    #[test]
+    fn install_progress_label_distinguishes_known_and_unknown_progress() {
+        assert_eq!(
+            super::installing_label(None, "connecting to GitHub", false),
+            "Connecting…"
+        );
+        assert_eq!(
+            super::installing_label(Some(42), "downloading 12 MiB", false),
+            "Downloading 42%"
+        );
+        assert_eq!(
+            super::installing_label(Some(42), "downloading 12 MiB", true),
+            "Cancel"
         );
     }
 }

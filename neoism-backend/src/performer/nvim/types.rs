@@ -167,10 +167,28 @@ pub struct LspMessageNotification {
 #[derive(Clone, Debug)]
 pub struct DiagnosticItem {
     pub lnum: u64,
+    pub col: u64,
+    /// Zero-based range end, when the originating LSP supplied it.
+    pub end_line: u64,
+    pub end_col: u64,
     /// 1=error, 2=warn, 3=info, 4=hint (nvim's `vim.diagnostic.severity`).
     pub severity: u8,
     pub message: String,
     pub source: Option<String>,
+    pub code: Option<String>,
+    pub code_description: Option<String>,
+    pub tags: Vec<String>,
+    pub related_information: Vec<DiagnosticRelatedInformation>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DiagnosticRelatedInformation {
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub message: String,
 }
 
 /// Latest snapshot of `vim.diagnostic.get(0)` for the current buffer.

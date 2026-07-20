@@ -19,7 +19,7 @@ pub mod nvim;
 pub mod pairing;
 pub mod permissions;
 pub mod persistence;
-mod rust_lsp;
+mod language_server;
 pub mod search;
 pub mod server;
 pub mod sessions;

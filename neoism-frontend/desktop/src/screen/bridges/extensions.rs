@@ -5,13 +5,15 @@ use super::super::*;
 use crate::notebook_runtime::managed_python_kernel_env;
 use crate::workspace::extensions::{ExtensionEntry, ExtensionStatus};
 use neoism_extensions::{
-    ExtensionManifest, InstallError, InstalledEntry, InstalledIndex, ProgressEvent,
+    ExtensionManifest, InstallError, InstallHandle, InstalledEntry, InstalledIndex,
+    ProgressEvent,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -20,7 +22,8 @@ const NEOISM_MEMORY_MCP_ID: &str = "neoism-memory";
 const NEOISM_PYTHON_KERNEL_ID: &str = "neoism-python-kernel";
 const EVCXR_JUPYTER_KERNEL_ID: &str = "evcxr-jupyter-kernel";
 const TREESITTER_EXTENSION_PREFIX: &str = "treesitter-";
-use tokio::task::JoinHandle;
+const KERNEL_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const KERNEL_VALIDATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Dedicated tokio runtime for extension installs. The desktop UI
 /// thread runs on winit's event loop, not tokio, so `tokio::spawn`
@@ -91,12 +94,12 @@ pub(crate) enum InstallSource {
 /// carrying its progress stream + the most recent event so we can paint
 /// even when no new events landed this frame.
 pub(crate) struct InstallJob {
-    pub join_handle: JoinHandle<Result<InstalledEntry, InstallError>>,
+    pub install_handle: InstallHandle,
     pub progress_rx: UnboundedReceiver<ProgressEvent>,
     /// `None` until the runner emits its first event; once set we keep
     /// the latest snapshot here so the pane row reflects current state
     /// across frames where no new events arrived.
-    pub last_percent: u8,
+    pub last_percent: Option<u8>,
     pub last_status: String,
     /// Whether the user clicked Uninstall (synthesised job — no install
     /// runner). We still keep it in the tracker so a single per-frame
@@ -132,17 +135,13 @@ fn extension_manifest_to_entry(
     }
 }
 
-/// For a language-server manifest, ask the Rust LSP engine where it would
+/// For a language-server manifest, ask the Neoism LSP engine where it would
 /// resolve the binary (`extension`/`path`/`config`/`missing`) so the row
 /// can show a source badge that matches runtime reality — e.g. a server
 /// already on `$PATH` reads as usable even when Mason never installed it.
 /// `None` for non-LSP manifests (MCP servers, parsers, kernels).
 fn lsp_source_label(manifest: &ExtensionManifest) -> Option<String> {
-    let is_lsp = manifest.categories.iter().any(|category| {
-        let category = category.to_lowercase();
-        category.contains("lsp") || category.contains("language server")
-    });
-    if !is_lsp {
+    if !manifest_is_lsp(manifest) {
         return None;
     }
     let command = manifest
@@ -151,15 +150,108 @@ fn lsp_source_label(manifest: &ExtensionManifest) -> Option<String> {
         .map(|run| run.command.clone())
         .filter(|command| !command.is_empty())
         .unwrap_or_else(|| vec![manifest.id.clone()]);
-    use neoism_agent_server::rust_lsp::LspCommandSource;
-    let label = match neoism_agent_server::rust_lsp::command_source(&manifest.id, command)
-    {
-        LspCommandSource::Extension => "extension",
-        LspCommandSource::Config => "config",
-        LspCommandSource::Path => "path",
-        LspCommandSource::Missing => "missing",
-    };
+    if !manifest_has_registered_lsp_adapter(manifest) {
+        return Some("adapter required".to_string());
+    }
+    use neoism_agent_server::language_server::LspCommandSource;
+    let label =
+        match neoism_agent_server::language_server::command_source(&manifest.id, command)
+        {
+            LspCommandSource::BuiltIn => "built-in/socket",
+            LspCommandSource::Extension => "extension",
+            LspCommandSource::Config => "config",
+            LspCommandSource::Path => "path",
+            LspCommandSource::Missing => "missing",
+        };
     Some(label.to_string())
+}
+
+/// Mason is the package catalog, while Neoism's adapter registry determines
+/// whether an installed LSP can attach. Keep host-installable packages visible
+/// even before an adapter exists; their source badge says `adapter required`.
+fn extension_manifest_supported_by_host(manifest: &ExtensionManifest) -> bool {
+    neoism_extensions::supported_on_current_host(manifest)
+}
+
+fn manifest_has_registered_lsp_adapter(manifest: &ExtensionManifest) -> bool {
+    if !manifest_is_lsp(manifest) {
+        return false;
+    }
+    manifest
+        .run
+        .as_ref()
+        .and_then(|run| run.command.first())
+        .is_some_and(|command| {
+            neoism_agent_server::language_server::supports_language_server_package(
+                &manifest.id,
+                command,
+            )
+        })
+}
+
+/// Missing-LSP prompts are stronger than catalog rows: offering an automatic
+/// install promises the result can attach, so both a host install strategy and
+/// a registered runtime adapter are required.
+fn manifest_is_auto_installable_lsp(manifest: &ExtensionManifest) -> bool {
+    extension_manifest_supported_by_host(manifest)
+        && manifest_has_registered_lsp_adapter(manifest)
+}
+
+fn manifest_is_lsp(manifest: &ExtensionManifest) -> bool {
+    manifest.categories.iter().any(|category| {
+        let category = category.to_ascii_lowercase();
+        category.contains("lsp") || category.contains("language server")
+    })
+}
+
+/// Catalog rows for host-provided language-server adapters. These come from
+/// the runtime registry itself rather than Mason, so the page cannot drift
+/// from what the engine can really attach. They deliberately have no
+/// `ExtensionManifest`: there is nothing to install or uninstall.
+fn built_in_language_server_entries() -> Vec<ExtensionEntry> {
+    use neoism_agent_server::language_server::LspAdapterTransport;
+
+    neoism_agent_server::language_server::language_server_adapters()
+        .into_iter()
+        .filter_map(|adapter| {
+            let LspAdapterTransport::Tcp {
+                default_host,
+                default_port,
+                ..
+            } = adapter.transport
+            else {
+                return None;
+            };
+            let routed_languages = adapter
+                .routes
+                .iter()
+                .map(|route| route.document_language_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(ExtensionEntry {
+                id: format!("builtin-lsp-{}", adapter.id),
+                name: format!("{} Language Server", adapter.name),
+                // The adapter follows Neoism's own release and is not a
+                // separately-versioned package. Leaving this blank avoids the
+                // generic card renderer inventing a misleading `vbuilt-in`.
+                version: String::new(),
+                description: format!(
+                    "Built-in connection adapter for {routed_languages}; the host application must be running and provide its language server at {default_host}:{default_port}."
+                ),
+                author: "Neoism".to_string(),
+                downloads: None,
+                categories: vec![
+                    "Language Server".to_string(),
+                    "LSP".to_string(),
+                    "Built-in".to_string(),
+                ],
+                languages: vec![adapter.name],
+                status: ExtensionStatus::BuiltIn,
+                repository_url: None,
+                lsp_source: Some("built-in/socket".to_string()),
+            })
+        })
+        .collect()
 }
 
 /// Whether a manifest represents an MCP server (vs an LSP / theme /
@@ -187,6 +279,7 @@ fn neoism_notes_mcp_manifest() -> ExtensionManifest {
         languages: Vec::new(),
         repository_url: None,
         homepage: None,
+        executables: vec!["neoism-agent".to_string()],
         install: InstallKind::Cargo {
             crate_name: "neoism-agent-server".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -220,6 +313,7 @@ fn neoism_memory_mcp_manifest() -> ExtensionManifest {
         languages: Vec::new(),
         repository_url: None,
         homepage: None,
+        executables: vec!["neoism-agent".to_string()],
         install: InstallKind::Cargo {
             crate_name: "neoism-agent-server".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -247,6 +341,7 @@ fn neoism_python_kernel_manifest() -> ExtensionManifest {
         languages: vec!["Python".to_string()],
         repository_url: None,
         homepage: None,
+        executables: Vec::new(),
         install: InstallKind::Cargo {
             crate_name: "neoism-managed-kernel".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -274,6 +369,7 @@ fn evcxr_jupyter_kernel_manifest() -> ExtensionManifest {
         languages: vec!["Rust".to_string()],
         repository_url: Some("https://github.com/evcxr/evcxr".to_string()),
         homepage: Some("https://github.com/evcxr/evcxr/tree/main/evcxr_jupyter".to_string()),
+        executables: vec!["evcxr_jupyter".to_string()],
         install: InstallKind::Cargo {
             crate_name: "evcxr_jupyter".to_string(),
             version: "latest".to_string(),
@@ -332,9 +428,17 @@ fn treesitter_parser_manifest(lang: &str) -> Option<ExtensionManifest> {
             "Syntax Parser".to_string(),
             "Syntax".to_string(),
         ],
-        languages: vec![spec.display_name.to_string()],
+        languages: match spec.lang {
+            "gdscript" => vec!["Godot".to_string(), "GDScript".to_string()],
+            "godot_resource" => {
+                vec!["Godot".to_string(), "Godot Resources".to_string()]
+            }
+            "glsl" => vec!["GLSL".to_string(), "Godot Shader".to_string()],
+            _ => vec![spec.display_name.to_string()],
+        },
         repository_url: Some(spec.repo.to_string()),
         homepage: Some(spec.repo.to_string()),
+        executables: Vec::new(),
         install: neoism_extensions::InstallKind::Cargo {
             crate_name: format!("tree-sitter-{}", spec.lang),
             version: "managed".to_string(),
@@ -511,8 +615,7 @@ async fn install_managed_python_kernel(
     let python = venv_python(&venv_dir);
 
     if validate_managed_python_kernel(&python).await.is_err() {
-        let _ = progress.send(ProgressEvent::Progress {
-            percent: 8,
+        let _ = progress.send(ProgressEvent::Waiting {
             status: "repairing managed Python kernel".to_string(),
         });
         remove_managed_python_kernelspec()
@@ -526,8 +629,7 @@ async fn install_managed_python_kernel(
     }
 
     if !python.exists() {
-        let _ = progress.send(ProgressEvent::Progress {
-            percent: 12,
+        let _ = progress.send(ProgressEvent::Waiting {
             status: "creating managed Python venv".to_string(),
         });
         run_kernel_install_command(
@@ -539,8 +641,7 @@ async fn install_managed_python_kernel(
         .map_err(|err| emit_install_failure(&progress, err))?;
     }
 
-    let _ = progress.send(ProgressEvent::Progress {
-        percent: 35,
+    let _ = progress.send(ProgressEvent::Waiting {
         status: "upgrading managed Python pip".to_string(),
     });
     run_kernel_install_command(
@@ -559,8 +660,7 @@ async fn install_managed_python_kernel(
     .await
     .map_err(|err| emit_install_failure(&progress, err))?;
 
-    let _ = progress.send(ProgressEvent::Progress {
-        percent: 65,
+    let _ = progress.send(ProgressEvent::Waiting {
         status: "installing ipykernel".to_string(),
     });
     run_kernel_install_command(
@@ -579,22 +679,25 @@ async fn install_managed_python_kernel(
         .await
         .map_err(|err| emit_install_failure(&progress, err))?;
 
-    let _ = progress.send(ProgressEvent::Done);
-    Ok(InstalledEntry {
+    let entry = InstalledEntry {
         id: NEOISM_PYTHON_KERNEL_ID.to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         install_kind: "managed-python-kernel".to_string(),
         bin_path: Some(python),
         installed_at: now_millis_i64(),
-    })
+    };
+    neoism_extensions::record_installed(entry.clone())
+        .await
+        .map_err(|error| emit_install_failure(&progress, error))?;
+    let _ = progress.send(ProgressEvent::Done);
+    Ok(entry)
 }
 
 async fn install_rust_jupyter_kernel(
     progress: UnboundedSender<ProgressEvent>,
 ) -> Result<InstalledEntry, InstallError> {
     let _ = progress.send(ProgressEvent::Started);
-    let _ = progress.send(ProgressEvent::Progress {
-        percent: 10,
+    let _ = progress.send(ProgressEvent::Waiting {
         status: "installing evcxr_jupyter with Cargo".to_string(),
     });
     run_kernel_install_command(
@@ -606,8 +709,7 @@ async fn install_rust_jupyter_kernel(
     .map_err(|err| emit_install_failure(&progress, err))?;
 
     let evcxr = resolve_evcxr_jupyter_bin();
-    let _ = progress.send(ProgressEvent::Progress {
-        percent: 85,
+    let _ = progress.send(ProgressEvent::Waiting {
         status: "registering Rust Jupyter kernelspec".to_string(),
     });
     run_kernel_install_command(
@@ -618,14 +720,18 @@ async fn install_rust_jupyter_kernel(
     .await
     .map_err(|err| emit_install_failure(&progress, err))?;
 
-    let _ = progress.send(ProgressEvent::Done);
-    Ok(InstalledEntry {
+    let entry = InstalledEntry {
         id: EVCXR_JUPYTER_KERNEL_ID.to_string(),
         version: "latest".to_string(),
         install_kind: "cargo-jupyter-kernel".to_string(),
         bin_path: Some(evcxr),
         installed_at: now_millis_i64(),
-    })
+    };
+    neoism_extensions::record_installed(entry.clone())
+        .await
+        .map_err(|error| emit_install_failure(&progress, error))?;
+    let _ = progress.send(ProgressEvent::Done);
+    Ok(entry)
 }
 
 fn resolve_evcxr_jupyter_bin() -> std::path::PathBuf {
@@ -715,14 +821,20 @@ async fn validate_managed_python_kernel(
     python: &std::path::Path,
 ) -> Result<(), InstallError> {
     let env = managed_python_kernel_env();
-    let output = tokio::process::Command::new(python)
+    let mut command = tokio::process::Command::new(python);
+    command
         .args(["-c", "import ipykernel"])
         .envs(&env)
+        .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+        .stderr(Stdio::piped());
+    let output = tokio::time::timeout(KERNEL_VALIDATE_TIMEOUT, command.output())
         .await
+        .map_err(|_| InstallError::TimedOut {
+            tool: "managed Python kernel validation".to_string(),
+            seconds: KERNEL_VALIDATE_TIMEOUT.as_secs(),
+        })?
         .map_err(InstallError::Io)?;
     if output.status.success() {
         return Ok(());
@@ -747,15 +859,21 @@ fn emit_install_failure(
 async fn run_kernel_install_command(
     program: &str,
     args: &[&str],
-    _label: &str,
+    label: &str,
 ) -> Result<(), InstallError> {
-    let output = tokio::process::Command::new(program)
+    let mut command = tokio::process::Command::new(program);
+    command
         .args(args)
+        .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+        .stderr(Stdio::piped());
+    let output = tokio::time::timeout(KERNEL_INSTALL_TIMEOUT, command.output())
         .await
+        .map_err(|_| InstallError::TimedOut {
+            tool: label.to_string(),
+            seconds: KERNEL_INSTALL_TIMEOUT.as_secs(),
+        })?
         .map_err(InstallError::Io)?;
     if output.status.success() {
         return Ok(());

@@ -934,28 +934,16 @@ pub fn apply_redraw_events(
                             sq.set_style_id(default_style_id);
                         }
                     }
-                    // Damage ONLY the freed rows — that's the subset
-                    // whose cell content actually changed (the shift
-                    // moved other cells but their semantics are
-                    // unchanged, and the renderer's editor scroll
-                    // `Shift{delta}` plan handles their visual
-                    // movement via GPU `copy_row`). The earlier
-                    // "damage top..bottom" was a 38× amplification on
-                    // held-arrow scrolls (every 1-row scroll damaged
-                    // the full 38-row visible viewport, forcing the
-                    // renderer to rebuild ~4300 cells / batch). The
-                    // log signature was unmistakable:
-                    //   grid_line_events=1  grid_line_unique_rows=1
-                    //   damage_lines=38  damage_first_line=0  damage_last_line=37
-                    // The 1 row that genuinely needs rebuild was on
-                    // line 37; the other 37 were just-moved cells the
-                    // renderer's GPU copy was about to handle anyway.
-                    for i in freed_from..freed_to {
-                        crosswords.damage_line(i);
-                    }
                     shifted = true;
                 }
                 if shifted {
+                    // The terminal grid is the source of truth. Damage every row whose
+                    // CPU cells moved; the renderer's retained-grid copy is only an
+                    // optimization and is not guaranteed to run when editor scrollback
+                    // and animation offsets cancel each other in the same frame.
+                    for row in top..bottom {
+                        crosswords.damage_line(row);
+                    }
                     applied += 1;
                 }
             }
@@ -1397,20 +1385,16 @@ mod tests {
         assert_eq!(term.grid[Line(0)][Column(0)].c(), '1');
         assert_eq!(term.grid[Line(1)][Column(0)].c(), '2');
         assert_eq!(term.grid[Line(2)][Column(0)].c(), '3');
-        // Damage is now ONLY the freed row (`bottom - n` .. `bottom`,
-        // i.e. row 3 for rows=1, span=4). The shifted rows 0..3
-        // don't carry cell-level damage anymore — the renderer's
-        // editor scroll Shift{delta} GPU `copy_row` handles their
-        // visual movement without touching the cell buffers. This
-        // dropped the per-batch damage from full-rect (38 rows on a
-        // typical viewport) to just 1, which was the actual cause
-        // of the held-arrow flicker.
+        // Every shifted CPU-grid row is damaged. The retained-grid copy is an
+        // optimization and can be skipped when animation offsets cancel.
         match term.peek_damage_event() {
             Some(neoism_terminal_core::damage::TerminalDamage::Partial(lines)) => {
-                assert_eq!(lines.len(), 1);
-                assert!(lines.iter().any(|line| line.line == 3));
+                assert_eq!(lines.len(), 4);
+                for row in 0..4 {
+                    assert!(lines.iter().any(|line| line.line == row));
+                }
             }
-            other => panic!("expected freed-row-only damage, got {other:?}"),
+            other => panic!("expected shifted-row damage, got {other:?}"),
         }
     }
 

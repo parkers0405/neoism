@@ -1,5 +1,33 @@
 use super::*;
 
+/// Return `Some(trigger_character)` when an insert-mode key edits text and
+/// should request completion afterward. The outer `None` means the key is a
+/// cursor/mode/navigation action and should dismiss. Deletions carry an inner
+/// `None`, which maps to LSP CompletionTriggerKind::Invoked.
+fn completion_trigger_after_key(notation: &str) -> Option<Option<String>> {
+    if notation
+        .strip_prefix('<')
+        .and_then(|notation| notation.strip_suffix('>'))
+        .and_then(|notation| notation.rsplit('-').next())
+        .is_some_and(|name| matches!(name, "BS" | "Del"))
+    {
+        return Some(None);
+    }
+    match notation {
+        // The nvim notation formatter escapes literal `<` and represents the
+        // named space key specially; pass the actual inserted character to
+        // the capability-aware agent.
+        "<lt>" => return Some(Some("<".to_string())),
+        "<Space>" | "<S-Space>" => return Some(Some(" ".to_string())),
+        _ => {}
+    }
+    let mut chars = notation.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) if !ch.is_control() => Some(Some(ch.to_string())),
+        _ => None,
+    }
+}
+
 impl Screen<'_> {
     pub(crate) fn step_editor_scroll_for_frame(
         &mut self,
@@ -245,9 +273,9 @@ impl Screen<'_> {
     /// VS Code-style hover: request docs for the editor cell under the mouse
     /// WITHOUT moving the cursor. Deduped by cell so resting the mouse fires a
     /// single request; entering a new cell dismisses the current popup and asks
-    /// again. The buffer line is `viewport_topline + grid_row` (the inverse of
-    /// the inline-diagnostics row math); the column maps 1:1 (horizontal scroll
-    /// is rare in the editor and hover tolerates being anywhere in the token).
+    /// again. The request carries the raw UI grid cell: only Neovim has enough
+    /// display state to map it correctly through gutters, tabs, wide Unicode,
+    /// wrapping, folds, and horizontal scrolling.
     pub(crate) fn request_lsp_hover_at_mouse(&mut self) {
         let display_offset = self.display_offset();
         let point = self.mouse_position(display_offset);
@@ -260,12 +288,6 @@ impl Screen<'_> {
         if ctx.editor_lsp_hover_cell == Some((grid_row, grid_col)) {
             return;
         }
-        let topline = ctx.editor_viewport_topline;
-        let line = topline
-            .saturating_add(u64::from(grid_row))
-            .min(u64::from(u32::MAX)) as u32;
-        let character = grid_col;
-
         let ctx = self.context_manager.current_mut();
         // New cell → the old popup is stale; clear it now and re-request.
         ctx.editor_lsp_hover = None;
@@ -273,12 +295,14 @@ impl Screen<'_> {
         ctx.editor_lsp_hover_seq = ctx.editor_lsp_hover_seq.wrapping_add(1);
         let seq = ctx.editor_lsp_hover_seq;
         if let Some(editor) = ctx.editor.as_ref() {
-            editor.lsp_hover_at(seq, line, character);
+            // This UI is attached without ext_multigrid, so grid 0 asks
+            // Neovim to hit-test root-screen coordinates exactly like all
+            // other GUI mouse input in this module.
+            editor.lsp_hover_at(seq, 0, i64::from(grid_row), i64::from(grid_col));
         }
         if std::env::var_os("NEOISM_LSP_LOG").is_some() {
             eprintln!(
-                "neoism::lsp hover request seq={seq}: cell=({grid_row},{grid_col}) \
-                 buffer=({line},{character}) topline={topline}"
+                "neoism::lsp hover request seq={seq}: grid=0 cell=({grid_row},{grid_col})"
             );
         }
         self.mark_dirty();
@@ -297,6 +321,74 @@ impl Screen<'_> {
             return true;
         }
         false
+    }
+
+    /// Feed logical pointer coordinates into the same-frame inline lens hit
+    /// regions. Diagnostic hover owns the pointer ahead of symbol hover, so a
+    /// full diagnostic card and an unrelated documentation popup never stack.
+    pub(crate) fn update_inline_diagnostic_hover(
+        &mut self,
+    ) -> neoism_ui::panels::inline_diagnostics::InlineDiagnosticHoverOutcome {
+        let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
+        let outcome = self.renderer.inline_diagnostics.hover(mouse_x, mouse_y);
+        if outcome.changed {
+            self.mark_dirty();
+        }
+        outcome
+    }
+
+    /// Pin/unpin an inline detail card, dismiss it from an outside click, or
+    /// invoke Quick Fix at the exact diagnostic location.
+    pub(crate) fn handle_inline_diagnostic_click(&mut self) -> bool {
+        use neoism_ui::panels::inline_diagnostics::InlineDiagnosticClickAction;
+
+        let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
+        match self.renderer.inline_diagnostics.click(mouse_x, mouse_y) {
+            InlineDiagnosticClickAction::None => false,
+            InlineDiagnosticClickAction::Dismissed => {
+                self.mark_dirty();
+                false
+            }
+            InlineDiagnosticClickAction::Consumed => {
+                self.dismiss_lsp_hover();
+                self.mark_dirty();
+                true
+            }
+            InlineDiagnosticClickAction::QuickFix { line, column } => {
+                // LSP code actions are requested at the current cursor. Move it
+                // to the diagnostic first; the daemon preserves command order.
+                self.send_editor_command(format!(
+                    "call cursor({}, {})",
+                    line.max(1),
+                    column.saturating_add(1)
+                ));
+                self.renderer.inline_diagnostics.dismiss_detail();
+                self.execute_lsp_context_action(
+                    neoism_ui::panels::context_menu::LspContextAction::CodeAction,
+                );
+                self.dismiss_lsp_hover();
+                self.mark_dirty();
+                true
+            }
+        }
+    }
+
+    pub(crate) fn dismiss_inline_diagnostic_detail(&mut self) -> bool {
+        if self.renderer.inline_diagnostics.dismiss_detail() {
+            self.mark_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn clear_inline_diagnostic_hover(&mut self) -> bool {
+        if self.renderer.inline_diagnostics.clear_hover() {
+            self.mark_dirty();
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn open_editor_lsp_context_menu(&mut self) {
@@ -322,7 +414,7 @@ impl Screen<'_> {
             ),
             ContextMenuItem::new(
                 "Code Actions",
-                "ca",
+                "Ctrl/Cmd+.",
                 ContextMenuAction::Lsp(LspContextAction::CodeAction),
             ),
             ContextMenuItem::new(
@@ -372,7 +464,15 @@ impl Screen<'_> {
     }
 
     pub(crate) fn dispatch_editor_key(&mut self, notation: String) {
-        // Rust-engine completion popup owns navigation/accept keys while it
+        // Mouse-driven documentation is transient. Once the keyboard changes
+        // cursor/view context (including Ctrl-D/Ctrl-U and normal motions),
+        // the pointer's old cell no longer describes what the user is doing.
+        // A deliberately pinned diagnostic remains pinned; only its hover
+        // state is cleared here.
+        self.dismiss_lsp_hover();
+        self.clear_inline_diagnostic_hover();
+
+        // Neoism LSP completion popup owns navigation/accept keys while it
         // is open: Down/Up/Ctrl-N/Ctrl-P move the selection, Tab/Enter insert,
         // Esc dismisses. Consumed keys must NOT also reach nvim.
         if self.lsp_completion_intercept_key(&notation) {
@@ -488,6 +588,11 @@ impl Screen<'_> {
                 self.renderer.command_palette.enter_search_mode_backward();
                 self.mark_dirty();
             }
+            EditorKeyDispatchPlan::OpenLspHover => {
+                self.execute_lsp_context_action(
+                    neoism_ui::panels::context_menu::LspContextAction::Hover,
+                );
+            }
             EditorKeyDispatchPlan::StartLeader => {
                 self.leader_pending = Some(now);
                 tracing::trace!(
@@ -589,27 +694,29 @@ impl Screen<'_> {
                     notation = %key.escape_debug(),
                     "editor sending key immediately"
                 );
-                // Decide completion follow-up on the pre-send mode/key: an
-                // identifier or member/scope char in insert mode (re)opens
-                // the popup at the new cursor; anything else that reaches
-                // here (space, punctuation, a normal-mode motion) ends the
-                // current completion, so dismiss.
-                let triggers = Self::notation_triggers_completion(&key);
                 let is_insert = matches!(
                     self.context_manager.current().editor_mode,
                     neoism_backend::performer::nvim_events::EditorMode::Insert
                 );
-                let retrigger = is_insert && triggers;
+                // Request after every single printable insertion, not a
+                // hardcoded identifier/punctuation subset: trigger characters
+                // are server capabilities (`>`, `/`, `@`, quotes, etc. are all
+                // legitimate). Backspace/Delete also changed the document and
+                // need an ordinary Invoked requery. Cursor/mode keys dismiss.
+                let completion_trigger = is_insert
+                    .then(|| completion_trigger_after_key(&key))
+                    .flatten();
                 if std::env::var_os("NEOISM_LSP_LOG").is_some() {
                     eprintln!(
                         "neoism::lsp completion trigger decision: key={:?} is_insert={is_insert} \
-                         triggers={triggers} retrigger={retrigger}",
+                         retrigger={}",
                         key,
+                        completion_trigger.is_some(),
                     );
                 }
                 self.send_to_editor(key);
-                if retrigger {
-                    self.request_lsp_completion();
+                if let Some(trigger_character) = completion_trigger {
+                    self.request_lsp_completion(trigger_character);
                 } else {
                     self.dismiss_lsp_completion();
                 }
@@ -652,23 +759,10 @@ impl Screen<'_> {
         }
     }
 
-    /// Whether `notation` is a single character that should (re)open the
-    /// Rust-engine completion popup while in insert mode: an identifier char
-    /// or a member/scope trigger (`.`, `:`).
-    fn notation_triggers_completion(notation: &str) -> bool {
-        let mut chars = notation.chars();
-        match (chars.next(), chars.next()) {
-            (Some(ch), None) => {
-                ch.is_alphanumeric() || ch == '_' || ch == '.' || ch == ':'
-            }
-            _ => false,
-        }
-    }
-
     /// Fire an engine completion request at the current cursor. Bumps the
     /// per-context sequence so a slower earlier reply is discarded. Called
     /// after an identifier/trigger keystroke lands in insert mode.
-    pub(crate) fn request_lsp_completion(&mut self) {
+    pub(crate) fn request_lsp_completion(&mut self, trigger_character: Option<String>) {
         let ctx = self.context_manager.current_mut();
         ctx.editor_lsp_completion_seq = ctx.editor_lsp_completion_seq.wrapping_add(1);
         let seq = ctx.editor_lsp_completion_seq;
@@ -677,7 +771,7 @@ impl Screen<'_> {
             Some(crate::context::tab::EditorBackend::Daemon(_))
         );
         if let Some(editor) = ctx.editor.as_ref() {
-            editor.lsp_complete(seq);
+            editor.lsp_complete(seq, trigger_character);
         }
         if std::env::var_os("NEOISM_LSP_LOG").is_some() {
             eprintln!(
@@ -690,6 +784,13 @@ impl Screen<'_> {
     /// ignored). Call when leaving insert mode, moving the cursor away, or
     /// accepting/cancelling.
     pub(crate) fn dismiss_lsp_completion(&mut self) {
+        // The sequence bump below is the final UI guard for a request already
+        // on the LSP wire. Also tell the daemon to abort a request that is
+        // still in its short per-surface debounce window so dismissing the
+        // popup does not perform needless buffer/LSP work.
+        if let Some(editor) = self.context_manager.current().editor.as_ref() {
+            editor.cancel_lsp_completion();
+        }
         let was_open = {
             let ctx = self.context_manager.current_mut();
             let was_open = ctx.editor_lsp_completion.is_some();
@@ -755,31 +856,26 @@ impl Screen<'_> {
         }
     }
 
-    /// Insert the selected completion: backspace the identifier already typed
-    /// (`replace_prefix`) then type the item's `insert_text`, all as one key
-    /// batch so nvim applies it atomically. Then close the popup.
+    /// Accept the selected completion through the daemon. Keeping the original
+    /// item intact lets the originating server lazily resolve it and lets nvim
+    /// receive exact textEdit/additionalTextEdits instead of guessed
+    /// backspaces. Then close the popup immediately so keyboard input remains
+    /// responsive while any resolve request finishes off-loop.
     fn accept_lsp_completion(&mut self) {
-        let Some((prefix_len, insert_text)) = ({
+        let Some((replace_prefix, item)) = ({
             let ctx = self.context_manager.current();
             ctx.editor_lsp_completion.as_ref().and_then(|state| {
-                state.items.get(state.selected).map(|item| {
-                    (
-                        state.replace_prefix.chars().count(),
-                        item.insert_text.clone(),
-                    )
-                })
+                state
+                    .items
+                    .get(state.selected)
+                    .cloned()
+                    .map(|item| (state.replace_prefix.clone(), item))
             })
         }) else {
             return;
         };
-        for _ in 0..prefix_len {
-            self.send_to_editor("<BS>".to_string());
-        }
-        if !insert_text.is_empty() {
-            // Escape nvim termcodes so literal `<`/backslashes in the insert
-            // text aren't reinterpreted as key notation.
-            let literal = insert_text.replace('\\', "\\\\").replace('<', "\\<");
-            self.send_to_editor(literal);
+        if let Some(editor) = self.context_manager.current().editor.as_ref() {
+            editor.apply_lsp_completion(item, replace_prefix);
         }
         self.dismiss_lsp_completion();
     }
@@ -848,5 +944,40 @@ impl Screen<'_> {
             terminal.scroll_display(Scroll::Bottom);
         }
         drop(terminal);
+    }
+}
+
+#[cfg(test)]
+mod completion_key_tests {
+    use super::completion_trigger_after_key;
+
+    #[test]
+    fn every_printable_literal_can_request_completion() {
+        for (notation, trigger) in [
+            ("a", "a"),
+            (">", ">"),
+            ("/", "/"),
+            ("@", "@"),
+            ("\"", "\""),
+            ("λ", "λ"),
+            ("<lt>", "<"),
+            ("<Space>", " "),
+        ] {
+            assert_eq!(
+                completion_trigger_after_key(notation),
+                Some(Some(trigger.to_string())),
+                "notation {notation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deletion_requeries_invoked_while_motion_dismisses() {
+        for notation in ["<BS>", "<S-BS>", "<Del>", "<M-Del>"] {
+            assert_eq!(completion_trigger_after_key(notation), Some(None));
+        }
+        for notation in ["<Left>", "<Right>", "<Esc>", "<CR>"] {
+            assert_eq!(completion_trigger_after_key(notation), None);
+        }
     }
 }

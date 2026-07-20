@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::lsp_uri::file_uri_to_path;
 use super::{
@@ -156,23 +156,60 @@ pub(crate) fn parse_diagnostics(
     };
     items
         .iter()
-        .filter_map(|item| parse_diagnostic(&path, language, item))
+        .filter_map(|item| parse_diagnostic(root, &path, language, item))
         .take(MAX_SYMBOLS)
         .collect()
 }
 
-fn parse_diagnostic(path: &str, language: &str, item: &Value) -> Option<LspDiagnostic> {
+fn parse_diagnostic(
+    root: &Path,
+    path: &str,
+    language: &str,
+    item: &Value,
+) -> Option<LspDiagnostic> {
     let message = item.get("message")?.as_str()?.to_string();
     Some(LspDiagnostic {
         path: path.to_string(),
         range: item.get("range").and_then(parse_lsp_range),
         severity: diagnostic_severity(item.get("severity").and_then(Value::as_u64)),
         code: item.get("code").and_then(diagnostic_code),
+        code_description: item
+            .pointer("/codeDescription/href")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         source: item
             .get("source")
             .and_then(Value::as_str)
             .map(str::to_string),
         message,
+        tags: item
+            .get("tags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|tag| match tag.as_u64() {
+                Some(1) => Some("unnecessary".to_string()),
+                Some(2) => Some("deprecated".to_string()),
+                _ => None,
+            })
+            .collect(),
+        related_information: item
+            .get("relatedInformation")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|related| {
+                let location = related.get("location")?;
+                let uri = location.get("uri")?.as_str()?;
+                let related_path = path_for_lsp_uri(root, uri);
+                Some(super::LspDiagnosticRelatedInformation {
+                    path: related_path,
+                    range: location.get("range").and_then(parse_lsp_range),
+                    message: related.get("message")?.as_str()?.to_string(),
+                })
+            })
+            .collect(),
+        data: item.get("data").cloned(),
         language: Some(language.to_string()),
     })
 }
@@ -299,28 +336,91 @@ fn parse_location(root: &Path, language: &str, item: &Value) -> Option<LspLocati
 }
 
 /// Parse a `textDocument/completion` response: either a bare
-/// `CompletionItem[]` or a `CompletionList { items }`. Snippet placeholders
-/// are not expanded (client advertises `snippetSupport: false`), so
-/// `insert_text` is inserted verbatim.
+/// `CompletionItem[]` or a `CompletionList { items }`. CompletionList
+/// `itemDefaults` are expanded before the item crosses the engine boundary so
+/// resolve and acceptance see the same effective text edit/data the server
+/// described. Snippet items are rejected because the client advertises
+/// `snippetSupport: false`; inserting placeholder syntax as plain text would
+/// corrupt the document.
 pub(crate) fn parse_completion(result: Value) -> Vec<LspCompletionItem> {
-    let items = match result {
-        Value::Array(items) => items,
-        Value::Object(mut map) => match map.remove("items") {
-            Some(Value::Array(items)) => items,
-            _ => return Vec::new(),
-        },
+    let (items, defaults) = match result {
+        Value::Array(items) => (items, None),
+        Value::Object(mut map) => {
+            let defaults = map.remove("itemDefaults");
+            match map.remove("items") {
+                Some(Value::Array(items)) => (items, defaults),
+                _ => return Vec::new(),
+            }
+        }
         _ => return Vec::new(),
     };
     items
-        .iter()
-        .filter_map(parse_completion_item)
+        .into_iter()
+        .filter_map(|mut item| {
+            expand_completion_item_defaults(&mut item, defaults.as_ref());
+            parse_completion_item(&item)
+        })
         .take(MAX_COMPLETIONS)
         .collect()
+}
+
+fn expand_completion_item_defaults(item: &mut Value, defaults: Option<&Value>) {
+    let (Some(item), Some(defaults)) =
+        (item.as_object_mut(), defaults.and_then(Value::as_object))
+    else {
+        return;
+    };
+    for field in [
+        "commitCharacters",
+        "insertTextFormat",
+        "insertTextMode",
+        "data",
+    ] {
+        if !item.contains_key(field) {
+            if let Some(value) = defaults.get(field) {
+                item.insert(field.to_string(), value.clone());
+            }
+        }
+    }
+
+    // LSP 3.17 permits a list-wide editRange paired with per-item
+    // textEditText. Materialize the ordinary TextEdit/InsertReplaceEdit so the
+    // rest of Neoism has one canonical acceptance shape.
+    if !item.contains_key("textEdit") {
+        if let (Some(new_text), Some(edit_range)) = (
+            item.get("textEditText")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("insertText").and_then(Value::as_str))
+                .or_else(|| item.get("label").and_then(Value::as_str))
+                .map(str::to_string),
+            defaults.get("editRange"),
+        ) {
+            let text_edit = if edit_range.get("insert").is_some()
+                && edit_range.get("replace").is_some()
+            {
+                json!({
+                    "insert": edit_range.get("insert").cloned().unwrap_or(Value::Null),
+                    "replace": edit_range.get("replace").cloned().unwrap_or(Value::Null),
+                    "newText": new_text,
+                })
+            } else {
+                json!({ "range": edit_range, "newText": new_text })
+            };
+            item.insert("textEdit".to_string(), text_edit);
+        }
+    }
 }
 
 fn parse_completion_item(item: &Value) -> Option<LspCompletionItem> {
     let label = item.get("label")?.as_str()?.trim().to_string();
     if label.is_empty() {
+        return None;
+    }
+    if item
+        .get("insertTextFormat")
+        .and_then(Value::as_u64)
+        .is_some_and(|format| format == 2)
+    {
         return None;
     }
     let kind = item
@@ -364,6 +464,7 @@ fn parse_completion_item(item: &Value) -> Option<LspCompletionItem> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     Some(LspCompletionItem {
+        server_id: None,
         label,
         kind,
         detail,
@@ -372,6 +473,7 @@ fn parse_completion_item(item: &Value) -> Option<LspCompletionItem> {
         filter_text,
         sort_text,
         preselect,
+        payload: item.clone(),
     })
 }
 

@@ -167,9 +167,9 @@ impl Screen<'_> {
         // First port that binds; dropped immediately so the daemon can
         // take it (the tiny race is fine — a failed spawn surfaces in
         // the join error).
-        let Some(port) = (9877u16..9900).find(|port| {
-            std::net::TcpListener::bind(("0.0.0.0", *port)).is_ok()
-        }) else {
+        let Some(port) = (9877u16..9900)
+            .find(|port| std::net::TcpListener::bind(("0.0.0.0", *port)).is_ok())
+        else {
             self.renderer.notifications.push(
                 "No free port between 9877 and 9899 — stop an old server first."
                     .to_string(),
@@ -252,10 +252,8 @@ impl Screen<'_> {
         // Hand off to the normal add+join path (it dials with retry, so
         // the daemon's startup wins the race).
         let address = format!("ws://127.0.0.1:{port}/session");
-        let name = name.or_else(|| {
-            dir.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-        });
+        let name =
+            name.or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()));
         self.request_server_add(address, name, password.clone());
 
         // Best-effort LAN address for sharing (UDP connect never sends

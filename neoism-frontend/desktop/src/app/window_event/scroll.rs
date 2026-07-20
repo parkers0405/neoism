@@ -21,6 +21,8 @@ impl Application<'_> {
         }
 
         let hover_dismissed = route.window.screen.dismiss_lsp_hover();
+        let diagnostic_hover_dismissed =
+            route.window.screen.clear_inline_diagnostic_hover();
 
         if self.config.hide_cursor_when_typing {
             route.window.set_cursor_visible(true);
@@ -59,7 +61,7 @@ impl Application<'_> {
         let (completion_wheel_consumed, completion_wheel_changed) =
             route.window.screen.handle_completion_menu_wheel(&delta);
         if completion_wheel_consumed {
-            if completion_wheel_changed || hover_dismissed {
+            if completion_wheel_changed || hover_dismissed || diagnostic_hover_dismissed {
                 route.request_redraw();
             }
             return;

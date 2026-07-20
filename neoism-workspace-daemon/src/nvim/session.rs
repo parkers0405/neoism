@@ -102,6 +102,14 @@ pub struct NvimSessionHandle {
 
 pub(crate) struct ManagedNvimSession {
     session: Mutex<NvimSession>,
+    /// Workspace that owns this session's LSP cache/events. Updated from each
+    /// resolved editor envelope and read by the asynchronous on_lines/CRDT
+    /// bridge, which otherwise has no access to the socket-local root.
+    lsp_workspace_root: Arc<RwLock<PathBuf>>,
+    /// `nvim_input_mouse(move)` followed by `getmousepos()` is one logical
+    /// hit-test. Keep concurrent hover tasks from interleaving those two RPCs
+    /// and observing another request's mouse cell.
+    grid_hit_test: Mutex<()>,
     redraw_tx: broadcast::Sender<EditorServerMessage>,
     cursor_overlay_tx: broadcast::Sender<CursorOverlayServerMessage>,
     /// Latest requested grid size. The dedicated worker never holds the
@@ -146,6 +154,7 @@ impl NvimSessionRegistry {
 
         let (session, mut redraw_rx, mut cursor_overlay_rx, mut buffer_lines_rx) =
             NvimSession::spawn(&[]).await?;
+        let lsp_workspace_root = Arc::new(RwLock::new(crate::files::workspace_root()));
         // The CRDT→nvim applier only needs the rpc client, not the whole
         // session — cloning the inner handle keeps the bridge task free
         // of an `Arc<ManagedNvimSession>` cycle (Drop must still abort
@@ -242,6 +251,7 @@ impl NvimSessionRegistry {
         // while letting peers' edits through.
         let session_origin = generate_session_origin(crdt.daemon_client_id());
         let nvim_to_crdt_hub = crdt.clone();
+        let nvim_to_lsp_root = Arc::clone(&lsp_workspace_root);
         fanout_tasks.push(tokio::spawn(async move {
             while let Some(event) = buffer_lines_rx.recv().await {
                 let change = match event {
@@ -260,15 +270,28 @@ impl NvimSessionRegistry {
                             );
                             continue;
                         }
-                        if let neoism_protocol::crdt::CrdtServerMessage::Error {
-                            message,
-                            ..
-                        } = nvim_to_crdt_hub.save_buffer(&buffer_id)
-                        {
-                            tracing::warn!(
-                                buffer_id = %buffer_id,
-                                error = %message,
-                                "[crdt-trace] daemon-owned save failed"
+                        let saved = match nvim_to_crdt_hub.save_buffer(&buffer_id) {
+                            neoism_protocol::crdt::CrdtServerMessage::Error {
+                                message,
+                                ..
+                            } => {
+                                tracing::warn!(
+                                    buffer_id = %buffer_id,
+                                    error = %message,
+                                    "[crdt-trace] daemon-owned save failed"
+                                );
+                                false
+                            }
+                            _ => true,
+                        };
+                        if saved {
+                            // Save shares the ordered live-document queue with
+                            // edits, so didSave can never overtake the final
+                            // insert-mode didChange.
+                            let workspace_root = nvim_to_lsp_root.read().await.clone();
+                            crate::language_server::save_document(
+                                &workspace_root,
+                                &path,
                             );
                         }
                         continue;
@@ -286,7 +309,7 @@ impl NvimSessionRegistry {
                     );
                     continue;
                 }
-                match nvim_to_crdt_hub.apply_nvim_lines_change(
+                let changed = match nvim_to_crdt_hub.apply_nvim_lines_change(
                     &buffer_id,
                     change.firstline as usize,
                     change.lastline as usize,
@@ -303,6 +326,7 @@ impl NvimSessionRegistry {
                             error = %message,
                             "[crdt-trace] nvim on_lines change rejected by CRDT hub"
                         );
+                        false
                     }
                     Some(_) => {
                         tracing::info!(
@@ -311,12 +335,28 @@ impl NvimSessionRegistry {
                             session_origin,
                             "[crdt-fold] nvim edit folded into doc + broadcast"
                         );
+                        true
                     }
                     None => {
                         tracing::info!(
                             target: "neoism::crdt_fold",
                             buffer_id = %buffer_id,
                             "[crdt-fold] on_lines was a no-op (text already matched)"
+                        );
+                        false
+                    }
+                };
+                if changed {
+                    // `on_lines` is the editor's real-time change event. The
+                    // CRDT snapshot is now authoritative and already includes
+                    // this edit, so queue it directly for didChange instead of
+                    // waiting for the active-buffer diagnostics poll.
+                    if let Ok(text) = nvim_to_crdt_hub.buffers().text(&buffer_id) {
+                        let workspace_root = nvim_to_lsp_root.read().await.clone();
+                        crate::language_server::sync_document(
+                            &workspace_root,
+                            &change.path,
+                            text,
                         );
                     }
                 }
@@ -328,6 +368,7 @@ impl NvimSessionRegistry {
         // are the ones we just produced FROM nvim above; skipping them is
         // echo guard #2.
         let crdt_to_nvim_hub = crdt.clone();
+        let crdt_to_lsp_root = Arc::clone(&lsp_workspace_root);
         fanout_tasks.push(tokio::spawn(async move {
             let mut rx = crdt_to_nvim_hub.subscribe();
             'outer: loop {
@@ -401,6 +442,16 @@ impl NvimSessionRegistry {
                     let Ok(text) = crdt_to_nvim_hub.buffers().text(&buffer_id) else {
                         continue;
                     };
+                    // Collaborative changes are live buffer changes too. Feed
+                    // the same authoritative snapshot through the ordered LSP
+                    // queue; the service deduplicates it if another attached
+                    // view already submitted the identical revision.
+                    let workspace_root = crdt_to_lsp_root.read().await.clone();
+                    crate::language_server::sync_document(
+                        &workspace_root,
+                        Path::new(path),
+                        text.clone(),
+                    );
                     match apply_authoritative_text_to_nvim(
                         &nvim_for_apply,
                         path,
@@ -431,6 +482,8 @@ impl NvimSessionRegistry {
         }));
         let managed = Arc::new(ManagedNvimSession {
             session: Mutex::new(session),
+            lsp_workspace_root,
+            grid_hit_test: Mutex::new(()),
             redraw_tx,
             cursor_overlay_tx,
             resize_tx,
@@ -562,7 +615,9 @@ impl NvimSessionHandle {
             .lock()
             .await
             .set_workspace_root(root)
-            .await
+            .await?;
+        *self.inner.lsp_workspace_root.write().await = root.to_path_buf();
+        Ok(())
     }
 
     pub async fn snapshot_diagnostics(&self) -> Option<Vec<ProtoDiagnosticItem>> {
@@ -603,9 +658,35 @@ impl NvimSessionHandle {
         read_active_buffer_rpc(&nvim, MAX_BACKGROUND_DOCUMENT_BYTES).await
     }
 
-    /// Cheap periodic LSP probe. Neovim returns full text only when the
-    /// buffer's `changedtick` advanced; idle polls carry a few scalar fields.
-    /// Large buffers never cross the RPC boundary as one giant string.
+    /// Resolve a zero-based UI grid cell through Neovim's own display model.
+    ///
+    /// A rendered column is not a buffer column: tabs occupy multiple cells,
+    /// wide Unicode occupies two, gutters shift the text origin, and wrapping
+    /// changes both axes. Forwarding the GUI's mouse position to Neovim and
+    /// reading `getmousepos()` gives us the authoritative 1-based buffer line
+    /// and UTF-8 byte column without moving the editor cursor.
+    pub async fn buffer_position_at_grid_cell(
+        &self,
+        grid: i64,
+        row: i64,
+        col: i64,
+    ) -> Result<Option<BufferPosition>, NvimError> {
+        if row < 0 || col < 0 {
+            return Ok(None);
+        }
+        let _hit_test = self.inner.grid_hit_test.lock().await;
+        let nvim = self.inner.session.lock().await.nvim.clone();
+        if let Some(client) = nvim.lock().await.clone() {
+            if nvim_is_blocked(&client).await {
+                return Ok(None);
+            }
+        }
+        buffer_position_at_grid_cell_rpc(&nvim, grid, row, col).await
+    }
+
+    /// Cheap periodic LSP status/cache probe. It returns only file identity,
+    /// cursor, and size metadata; live document text travels through the
+    /// event-driven OpenBuffer + on_lines/CRDT path.
     pub(crate) async fn poll_active_buffer(
         &self,
     ) -> Result<Option<LspBufferPoll>, NvimError> {
@@ -648,6 +729,29 @@ impl NvimSessionHandle {
         let nvim = self.inner.session.lock().await.nvim.clone();
         apply_authoritative_text_to_nvim(&nvim, &path.to_string_lossy(), text).await
     }
+
+    /// Apply a user-initiated semantic edit (completion/code action) to the
+    /// loaded buffer and place the caret at its logical result. Unlike CRDT
+    /// reconciliation this deliberately does **not** raise
+    /// `neoism_crdt_applying`: Neovim's `on_lines` event must feed the edit
+    /// through the normal CRDT + ordered LSP didChange pipeline.
+    pub async fn apply_user_text(
+        &self,
+        path: &Path,
+        text: &str,
+        cursor_line: u32,
+        cursor_col: u32,
+    ) -> Result<bool, NvimError> {
+        let nvim = self.inner.session.lock().await.nvim.clone();
+        apply_user_text_to_nvim(
+            &nvim,
+            &path.to_string_lossy(),
+            text,
+            cursor_line,
+            cursor_col,
+        )
+        .await
+    }
 }
 
 /// Snapshot of an nvim buffer's text + identity, used to seed the
@@ -664,12 +768,20 @@ pub struct BufferText {
     pub cursor_col: u32,
 }
 
-/// Revision-aware buffer snapshot used by the periodic Rust-LSP bridge.
+/// Zero-based buffer position reported by Neovim. `character` is a UTF-8 byte
+/// offset, matching `nvim_win_get_cursor()` and the LSP bridge's input model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferPosition {
+    pub line: u32,
+    pub character: u32,
+}
+
+/// Lightweight active-buffer identity used by the periodic status/cache
+/// recovery bridge. Live text is deliberately absent: didOpen/didChange use
+/// the event-driven OpenBuffer + on_lines/CRDT path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LspBufferPoll {
     pub path: PathBuf,
-    /// `Some` only on the first poll or after `changedtick` advances.
-    pub text: Option<String>,
     pub cursor_line: u32,
     pub cursor_col: u32,
     pub byte_len: u64,
@@ -792,6 +904,75 @@ pub(crate) async fn apply_authoritative_text_to_nvim(
     let value = nvim_rpc_timeout(
         "apply authoritative text",
         nvim.exec_lua(lua, vec![Value::from(path), Value::from(text)]),
+    )
+    .await?;
+    Ok(value.as_bool().unwrap_or(false))
+}
+
+async fn apply_user_text_to_nvim(
+    nvim_slot: &Arc<Mutex<Option<Neovim<NeovimWriter>>>>,
+    path: &str,
+    text: &str,
+    cursor_line: u32,
+    cursor_col: u32,
+) -> Result<bool, NvimError> {
+    let nvim = nvim_slot.lock().await.clone().ok_or(NvimError::Closed)?;
+    let lua = r#"
+        local path, text, cursor_line, cursor_col = ...
+        local target = nil
+        for _, b in ipairs(vim.api.nvim_list_bufs()) do
+            if vim.api.nvim_buf_is_loaded(b) and vim.api.nvim_buf_get_name(b) == path then
+                target = b
+                break
+            end
+        end
+        if target == nil then return false end
+        local new_lines = vim.split(text, "\n", { plain = true })
+        local old_lines = vim.api.nvim_buf_get_lines(target, 0, -1, false)
+        local n_old, n_new = #old_lines, #new_lines
+        local prefix = 0
+        while prefix < n_old and prefix < n_new
+            and old_lines[prefix + 1] == new_lines[prefix + 1] do
+            prefix = prefix + 1
+        end
+        local suffix = 0
+        while suffix < (n_old - prefix) and suffix < (n_new - prefix)
+            and old_lines[n_old - suffix] == new_lines[n_new - suffix] do
+            suffix = suffix + 1
+        end
+        if prefix ~= n_old or n_old ~= n_new then
+            local replacement = {}
+            for i = prefix + 1, n_new - suffix do
+                table.insert(replacement, new_lines[i])
+            end
+            -- This is a local user edit: leave the on_lines bridge enabled so
+            -- CRDT state and didChange observe the same transaction.
+            vim.api.nvim_buf_set_lines(
+                target, prefix, n_old - suffix, false, replacement
+            )
+        end
+        local line = math.max(1, math.min(tonumber(cursor_line) + 1, #new_lines))
+        local line_text = new_lines[line] or ""
+        local col = math.max(0, math.min(tonumber(cursor_col), #line_text))
+        for _, win in ipairs(vim.api.nvim_list_wins()) do
+            if vim.api.nvim_win_get_buf(win) == target then
+                vim.api.nvim_win_set_cursor(win, { line, col })
+                break
+            end
+        end
+        return true
+    "#;
+    let value = nvim_rpc_timeout(
+        "apply user text",
+        nvim.exec_lua(
+            lua,
+            vec![
+                Value::from(path),
+                Value::from(text),
+                Value::from(u64::from(cursor_line)),
+                Value::from(u64::from(cursor_col)),
+            ],
+        ),
     )
     .await?;
     Ok(value.as_bool().unwrap_or(false))
@@ -1056,10 +1237,13 @@ impl NvimSession {
                 self.ensure_nvim_on_surface(surface_id.as_deref()).await?;
                 self.resize(width as u64, height as u64).await
             }
-            EditorClientMessage::LspAction { .. } => Ok(()),
+            EditorClientMessage::LspAction { .. }
+            | EditorClientMessage::ApplyLspCodeAction { .. } => Ok(()),
             // These LSP requests are intercepted in the socket loop (they call
             // the Rust engine directly, never nvim); no-op if one reaches here.
             EditorClientMessage::LspComplete { .. }
+            | EditorClientMessage::ApplyLspCompletion { .. }
+            | EditorClientMessage::CancelLspCompletion { .. }
             | EditorClientMessage::LspHoverAt { .. } => Ok(()),
             EditorClientMessage::Close => self.close().await,
         }
@@ -1392,22 +1576,54 @@ async fn read_active_buffer_rpc(
     }))
 }
 
-/// Revision-aware active-buffer probe used by the periodic LSP bridge.
+/// Translate a GUI grid cell into a buffer position using Neovim's mouse hit
+/// testing. `nvim_input_mouse` is an API-fast notification; the following
+/// ordered RPC observes that event and returns the exact byte-oriented
+/// position from `getmousepos()`.
+async fn buffer_position_at_grid_cell_rpc(
+    handle: &Arc<Mutex<Option<Neovim<NeovimWriter>>>>,
+    grid: i64,
+    row: i64,
+    col: i64,
+) -> Result<Option<BufferPosition>, NvimError> {
+    let nvim = handle.lock().await.clone().ok_or(NvimError::Closed)?;
+    nvim_rpc_timeout(
+        "hover mouse position",
+        nvim.input_mouse("move", "", "", grid, row, col),
+    )
+    .await?;
+    let value = nvim_rpc_timeout(
+        "resolve hover mouse position",
+        nvim.exec_lua("return vim.fn.getmousepos()", vec![]),
+    )
+    .await?;
+    let Some(map) = value.as_map() else {
+        return Ok(None);
+    };
+    let line = map_get_u64(map, "line").unwrap_or(0);
+    let column = map_get_u64(map, "column").unwrap_or(0);
+    if line == 0 || column == 0 {
+        return Ok(None);
+    }
+    Ok(Some(BufferPosition {
+        line: line.saturating_sub(1).min(u64::from(u32::MAX)) as u32,
+        character: column.saturating_sub(1).min(u64::from(u32::MAX)) as u32,
+    }))
+}
+
+/// Active-buffer identity probe used by the periodic LSP status/cache recovery
+/// bridge. It intentionally never materializes buffer text: editor changes are
+/// synchronized by nvim's event stream rather than this timer.
 /// The rpc handle is cloned before awaiting so this never owns either the
 /// managed-session mutex or the nvim-slot mutex while Neovim executes Lua.
 async fn poll_active_buffer_rpc(
     handle: &Arc<Mutex<Option<Neovim<NeovimWriter>>>>,
 ) -> Result<Option<LspBufferPoll>, NvimError> {
     let nvim = handle.lock().await.clone().ok_or(NvimError::Closed)?;
-    // `b:neoism_lsp_polled_tick` is buffer-local, so switching between
-    // files with equal changedtick values still performs one full sync for
-    // each file. Byte length is computed by Neovim without materializing
-    // every line into msgpack.
     let lua = r#"
         local buf = vim.api.nvim_get_current_buf()
         local path = vim.api.nvim_buf_get_name(buf)
         local cursor = vim.api.nvim_win_get_cursor(0)
-        local changedtick = vim.api.nvim_buf_get_changedtick(buf)
         local line_count = vim.api.nvim_buf_line_count(buf)
         local byte_len = vim.api.nvim_buf_get_offset(buf, line_count)
         if byte_len == nil or byte_len < 0 then
@@ -1415,15 +1631,8 @@ async fn poll_active_buffer_rpc(
         end
         local max_bytes = ...
         local too_large = byte_len > max_bytes
-        local changed = vim.b[buf].neoism_lsp_polled_tick ~= changedtick
-        vim.b[buf].neoism_lsp_polled_tick = changedtick
-        local text = nil
-        if changed and not too_large then
-            text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-        end
         return {
             path = path,
-            text = text,
             cursor_line = math.max((cursor[1] or 1) - 1, 0),
             cursor_col = cursor[2] or 0,
             byte_len = byte_len,
@@ -1449,7 +1658,6 @@ async fn poll_active_buffer_rpc(
         .unwrap_or(false);
     Ok(Some(LspBufferPoll {
         path: PathBuf::from(path),
-        text: map_get_str(map, "text"),
         cursor_line: map_get_u64(map, "cursor_line").unwrap_or(0) as u32,
         cursor_col: map_get_u64(map, "cursor_col").unwrap_or(0) as u32,
         byte_len: map_get_u64(map, "byte_len").unwrap_or(0),

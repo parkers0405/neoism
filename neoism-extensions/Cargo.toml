@@ -22,6 +22,9 @@ dirs = "5"
 reqwest = { workspace = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
+xz2 = "0.1"
+zstd = "0.13"
+bzip2 = "0.5"
 tar = "0.4"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 

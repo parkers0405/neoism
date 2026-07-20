@@ -150,7 +150,7 @@ impl Screen<'_> {
         let notes_manifest = neoism_notes_mcp_manifest();
         let memory_manifest = neoism_memory_mcp_manifest();
         let builtins = vec![notes_manifest.clone(), memory_manifest.clone()];
-        let installed = ensure_builtin_mcp_installed(&builtins);
+        let mut installed = ensure_builtin_mcp_installed(&builtins);
 
         // MCP entries: tag each with the literal "MCP Server" category
         // so the panel's `McpServers` tab filter (which substring-
@@ -188,10 +188,15 @@ impl Screen<'_> {
             Ok(reg) => {
                 let translated = neoism_extensions::translate_registry(&reg);
                 let mut tool_manifests: Vec<ExtensionManifest> = Vec::new();
+                let mut unsupported_count = 0usize;
                 let mut lsp_count = 0usize;
                 let mut fmt_count = 0usize;
                 let mut lint_count = 0usize;
                 for mut m in translated {
+                    if !extension_manifest_supported_by_host(&m) {
+                        unsupported_count += 1;
+                        continue;
+                    }
                     let is_lsp =
                         m.categories.iter().any(|c| c.eq_ignore_ascii_case("LSP"));
                     let is_fmt = m
@@ -234,6 +239,7 @@ impl Screen<'_> {
                     lsp = lsp_count,
                     formatters = fmt_count,
                     linters = lint_count,
+                    unsupported = unsupported_count,
                     "loaded mason registry"
                 );
                 mcp_manifests.extend(tool_manifests);
@@ -258,6 +264,26 @@ impl Screen<'_> {
         manifests.insert(0, memory_manifest);
         manifests.insert(0, notes_manifest);
 
+        match neoism_extensions::reconcile_managed_installs(&manifests) {
+            Ok(report) => {
+                if !report.recovered.is_empty() {
+                    tracing::info!(
+                        target: "neoism::extensions",
+                        recovered = ?report.recovered,
+                        "recovered managed installs missing from installed index"
+                    );
+                }
+                installed = report.index;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "neoism::extensions",
+                    ?error,
+                    "could not reconcile managed extension installs"
+                );
+            }
+        }
+
         // Populate the manifest cache keyed by id BEFORE consuming the
         // vec into entries — needed by the install/uninstall dispatch.
         self.renderer.bundled_manifests = manifests
@@ -265,7 +291,7 @@ impl Screen<'_> {
             .map(|m| (m.id.clone(), m.clone()))
             .collect();
 
-        manifests
+        let mut entries: Vec<ExtensionEntry> = manifests
             .into_iter()
             .map(|m| {
                 let installed_version =
@@ -276,7 +302,9 @@ impl Screen<'_> {
                     });
                 extension_manifest_to_entry(m, installed_version)
             })
-            .collect()
+            .collect();
+        entries.extend(built_in_language_server_entries());
+        entries
     }
 
     /// First-time-open trigger to background-fetch the Mason registry
@@ -327,6 +355,22 @@ impl Screen<'_> {
         self.renderer.bundled_manifests.get(id).cloned()
     }
 
+    /// Resolve an install action against the live registry, rebuilding the
+    /// manifest cache once if a long-lived Extensions pane outlasted its host
+    /// renderer. The pane stores row ids while the renderer owns manifests, so
+    /// restoring/reusing the pane could previously leave a perfectly visible
+    /// row whose Install button only produced `Unknown extension`.
+    pub(crate) fn resolve_bundled_manifest(
+        &mut self,
+        id: &str,
+    ) -> Option<ExtensionManifest> {
+        if let Some(manifest) = self.lookup_bundled_manifest(id) {
+            return Some(manifest);
+        }
+        let _ = self.load_bundled_extension_entries();
+        self.lookup_bundled_manifest(id)
+    }
+
     /// Drain the install tracker, applying the latest progress to each
     /// row and finalising completed jobs (write `installed.json`, agent
     /// config, refresh nvim's managed bin map, flip row status). Called
@@ -346,32 +390,46 @@ impl Screen<'_> {
             while let Ok(event) = job.progress_rx.try_recv() {
                 match event {
                     ProgressEvent::Progress { percent, status } => {
-                        job.last_percent = percent;
+                        job.last_percent = Some(percent);
+                        job.last_status = status;
+                    }
+                    ProgressEvent::Waiting { status } => {
+                        job.last_percent = None;
                         job.last_status = status;
                     }
                     ProgressEvent::Downloading { bytes, total } => {
-                        if let Some(t) = total {
-                            if t > 0 {
-                                job.last_percent = ((bytes * 75) / t).min(75) as u8 + 5;
+                        job.last_percent =
+                            total.filter(|total| *total > 0).map(|total| {
+                                bytes
+                                    .saturating_mul(100)
+                                    .checked_div(total)
+                                    .unwrap_or(0)
+                                    .min(100) as u8
+                            });
+                        job.last_status = match total {
+                            Some(total) if total > 0 => {
+                                format!("downloading {bytes} of {total} bytes")
                             }
-                        }
-                        job.last_status = format!("downloading ({bytes} bytes)");
+                            _ => format!("downloading {bytes} bytes"),
+                        };
                     }
                     ProgressEvent::Started => {
+                        job.last_percent = None;
                         job.last_status = "starting…".to_string();
                     }
                     ProgressEvent::Extracting => {
+                        job.last_percent = None;
                         job.last_status = "extracting".to_string();
-                        job.last_percent = job.last_percent.max(85);
                     }
                     ProgressEvent::Linking => {
+                        job.last_percent = None;
                         job.last_status = "linking".to_string();
-                        job.last_percent = job.last_percent.max(95);
                     }
                     ProgressEvent::Done => {
-                        job.last_percent = 100;
+                        job.last_percent = Some(100);
                     }
                     ProgressEvent::Failed { message } => {
+                        job.last_percent = None;
                         job.last_status = format!("failed: {message}");
                     }
                 }
@@ -381,7 +439,10 @@ impl Screen<'_> {
                         .open(neoism_ui::widgets::modal::ModalSpec {
                             title: "Installing Python Kernel".to_string(),
                             body: job.last_status.clone(),
-                            meta: format!("{}% complete", job.last_percent),
+                            meta: job
+                                .last_percent
+                                .map(|percent| format!("{percent}% complete"))
+                                .unwrap_or_else(|| "Working…".to_string()),
                             input: None,
                             buttons: vec![neoism_ui::widgets::modal::ModalButton::new(
                                 "Keep Working",
@@ -406,7 +467,7 @@ impl Screen<'_> {
                 }
             }
 
-            if job.join_handle.is_finished() {
+            if job.install_handle.is_finished() {
                 completed.push(id.clone());
             }
         }
@@ -429,7 +490,7 @@ impl Screen<'_> {
             // futures::executor::block_on is safe here: the JoinHandle
             // already reports finished, so the underlying task completed
             // and the await is just a synchronous unwrap of its result.
-            let outcome = futures::executor::block_on(job.join_handle);
+            let outcome = futures::executor::block_on(job.install_handle.join());
             match outcome {
                 Ok(Ok(installed_entry)) => {
                     let mut index = match InstalledIndex::load() {
@@ -489,14 +550,14 @@ impl Screen<'_> {
                     }
                     self.finalize_install_success(&id, &source);
                     // A newly-installed LSP/formatter binary needs no nvim
-                    // push anymore: the Rust LSP engine re-reads the managed
+                    // push anymore: the Neoism LSP engine re-reads the managed
                     // bin map on every `status()`. Only tree-sitter parsers
                     // still need an nvim-side syntax retry.
                     if matches!(source, InstallSource::TreeSitterParser { .. }) {
                         retry_treesitter_syntax = true;
                     }
                     // A newly-installed LSP server needs no nvim re-attach: the
-                    // Rust engine discovers it from the managed bin map on its
+                    // Neoism's LSP engine discovers it from the managed bin map on its
                     // next status()/completion query.
                 }
                 Ok(Err(err)) => {

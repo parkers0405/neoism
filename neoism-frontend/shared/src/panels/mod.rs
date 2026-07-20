@@ -44,6 +44,7 @@ pub mod trail_cursor;
 pub mod yank_flash;
 
 pub mod context_menu;
+pub mod diagnostic_detail;
 pub mod diagnostics_popup;
 pub mod extensions_page;
 pub mod hover_popup;

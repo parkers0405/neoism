@@ -69,6 +69,42 @@ impl Screen<'_> {
             .as_ref()
             .map(|diagnostics| diagnostics.items.as_slice())
             .unwrap_or(&[]);
+        let active_inline_identities: Vec<_> = active_editor_diagnostics
+            .iter()
+            .filter_map(|item| {
+                let severity = neoism_ui::panels::inline_diagnostics::InlineDiagnosticSeverity::from_nvim(
+                    item.severity,
+                )?;
+                Some(
+                    neoism_ui::panels::inline_diagnostics::InlineDiagnosticIdentity {
+                        severity,
+                        message: item.message.clone(),
+                        line: item.lnum,
+                        column: item.col.min(u32::MAX as u64) as u32,
+                        end_line: item.end_line,
+                        end_column: item.end_col.min(u32::MAX as u64) as u32,
+                        source: item.source.clone(),
+                        code: item.code.clone(),
+                    },
+                )
+            })
+            .collect();
+        let paint_inline_lenses =
+            neoism_ui::panels::inline_diagnostics::inline_lenses_should_paint(
+                self.renderer.inline_diagnostics.has_selected_detail(),
+                self.context_manager.current().lsp_hover_popup().is_some()
+                    || self
+                        .context_manager
+                        .current()
+                        .editor_lsp_completion
+                        .is_some(),
+            );
+        // Rebuild inline hit regions from this frame's exact scrolled lens
+        // geometry. Clearing here also prevents a diagnostic removed by an
+        // edit from leaving a stale hover/click target behind.
+        self.renderer
+            .inline_diagnostics
+            .begin_frame(&active_inline_identities);
         for (route_id, grid) in self.grids.iter_mut() {
             let route_key = *route_id;
             let Some(p) = ctx.panels.iter().find(|p| p.route_id == *route_id) else {
@@ -821,7 +857,6 @@ impl Screen<'_> {
                 let visible_top_px =
                     grid_geometry.panel_top + EDITOR_BUFFER_ABOVE as f32 * p.cell_h;
                 let visible_rows = p.visible_rows.len().min(u32::MAX as usize) as u32;
-                let visible_len = p.visible_rows.len() as i64;
                 let inline_items: Vec<_> = active_editor_diagnostics
                         .iter()
                         .filter_map(|item| {
@@ -829,51 +864,54 @@ impl Screen<'_> {
                                 neoism_ui::panels::inline_diagnostics::InlineDiagnosticSeverity::from_nvim(
                                     item.severity,
                                 )?;
-                            let zero_indexed_source_y =
-                                item.lnum as i64 - 1 - p.editor_viewport_topline as i64;
-                            let source_y = if zero_indexed_source_y >= 0
-                                && zero_indexed_source_y < visible_len
-                            {
-                                zero_indexed_source_y
-                            } else {
-                                let one_indexed_source_y =
-                                    item.lnum as i64 - p.editor_viewport_topline as i64;
-                                if one_indexed_source_y >= 0
-                                    && one_indexed_source_y < visible_len
-                                {
-                                    one_indexed_source_y
-                                } else {
-                                    return None;
-                                }
-                            };
-                            // `source_y` is ALREADY the screen row relative to
-                            // nvim's authoritative viewport topline
-                            // (`lnum - 1 - editor_viewport_topline`). Do NOT
-                            // also subtract the smooth-scroll spring residual
-                            // (`editor_source_line_offset`): after a grid_line
-                            // jump (Ctrl-D / Ctrl-U) the spring settles non-zero
-                            // while the scrollback ring compensates, so
-                            // double-counting it shoved every chip out of
-                            // `[-1, visible_rows]` — the error/diagnostic chips
-                            // drew on load, then vanished after scrolling past
-                            // and back and never redrew until the buffer was
-                            // reopened. Sub-row glide still rides
-                            // `editor_pixel_offset_y` in the layout below.
-                            let row = source_y;
-                            if row < -1 || row > p.visible_rows.len() as i64 {
+                            // Diagnostics and grid rows must use the same
+                            // source→output inversion. The resident grid paints
+                            // source `output + editor_source_line_offset`; the
+                            // lens for that source therefore belongs at
+                            // `source - editor_source_line_offset`. Omitting
+                            // this integer term made lenses float during scroll
+                            // and filtered them out when returning to a line.
+                            let Some(placement) = editor_inline_diagnostic_placement(
+                                item.lnum,
+                                p.editor_viewport_topline,
+                                editor_source_line_offset,
+                                editor_pixel_offset_y,
+                                p.cell_h,
+                                p.visible_rows.len(),
+                            ) else {
                                 return None;
-                            }
-                            let text_end_col = p.visible_rows[source_y as usize]
-                                .line_length()
-                                .0
-                                .min(p.cols as usize)
-                                .min(u32::MAX as usize)
-                                as u32;
+                            };
+                            let text_end_col = editor_row_text_end_col(
+                                source_row_for(placement.source_row)?,
+                                p.cols as usize,
+                            );
                             Some(
                                 neoism_ui::panels::inline_diagnostics::InlineDiagnosticItem {
-                                    row: row as i32,
+                                    row: placement.output_row,
                                     severity,
                                     message: item.message.clone(),
+                                    line: item.lnum,
+                                    column: item.col.min(u32::MAX as u64) as u32,
+                                    end_line: item.end_line,
+                                    end_column: item.end_col.min(u32::MAX as u64) as u32,
+                                    source: item.source.clone(),
+                                    code: item.code.clone(),
+                                    code_description: item.code_description.clone(),
+                                    tags: item.tags.clone(),
+                                    related_information: item
+                                        .related_information
+                                        .iter()
+                                        .map(|related| {
+                                            neoism_ui::panels::inline_diagnostics::InlineDiagnosticRelatedInformation {
+                                                path: related.path.clone(),
+                                                line: related.line,
+                                                column: related.col,
+                                                end_line: related.end_line,
+                                                end_column: related.end_col,
+                                                message: related.message.clone(),
+                                            }
+                                        })
+                                        .collect(),
                                     text_end_col,
                                 },
                             )
@@ -906,6 +944,7 @@ impl Screen<'_> {
                         scale_factor,
                         chrome_scale: self.renderer.chrome_scale(),
                     },
+                    paint_inline_lenses,
                     &self.renderer.theme,
                 );
             }

@@ -451,9 +451,29 @@ impl Screen<'_> {
             .diagnostic_pill_at(mouse_x, mouse_y)
         {
             let items = self.collect_popup_items(pill);
+            let total_count = self
+                .context_manager
+                .current()
+                .editor_diagnostics
+                .as_ref()
+                .map(|diagnostics| match pill {
+                    neoism_ui::panels::status_line::DiagnosticPill::Error => {
+                        diagnostics.error
+                    }
+                    neoism_ui::panels::status_line::DiagnosticPill::Warn => {
+                        diagnostics.warn
+                    }
+                })
+                .unwrap_or(0);
             if let Some((ax, ay)) = self.renderer.status_line.diagnostic_pill_anchor(pill)
             {
-                self.renderer.diagnostics_popup.open(pill, items, ax, ay);
+                self.renderer.diagnostics_popup.open_with_total(
+                    pill,
+                    items,
+                    total_count,
+                    ax,
+                    ay,
+                );
                 self.mark_dirty();
                 return true;
             }

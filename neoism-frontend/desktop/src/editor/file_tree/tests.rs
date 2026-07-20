@@ -203,10 +203,24 @@ fn icon_for_routes_extensions() {
     let rs = icon_for(&make("lib.rs"));
     let py = icon_for(&make("main.py"));
     let dock = icon_for(&make("Dockerfile"));
+    let gd = icon_for(&make("player.gd"));
+    let shader = icon_for(&make("water.gdshader"));
+    let shader_include = icon_for(&make("common.gdshaderinc"));
+    let tscn = icon_for(&make("world.tscn"));
+    let tres = icon_for(&make("material.tres"));
+    let gd_uid = icon_for(&make("player.gd.uid"));
+    let project = icon_for(&make("project.godot"));
     let unknown = icon_for(&make("weird.xyz"));
     assert_ne!(rs.0, py.0);
     assert_ne!(rs.1, py.1);
     assert_eq!(dock.0, "\u{f308}");
+    assert_eq!(gd.0, "\u{e65f}");
+    assert_eq!(shader, gd);
+    assert_eq!(shader_include, gd);
+    assert_eq!(tscn, gd);
+    assert_eq!(tres, gd);
+    assert_eq!(gd_uid, gd);
+    assert_eq!(project, gd);
     assert_eq!(unknown.0, "\u{f15b}");
 }
 

@@ -255,6 +255,18 @@ impl Screen<'_> {
                 || matches!(key.physical_key, PhysicalKey::Code(KeyCode::Insert)))
     }
 
+    pub(crate) fn is_lsp_quick_fix_key(
+        key: &neoism_window::event::KeyEvent,
+        mods: ModifiersState,
+    ) -> bool {
+        let primary = mods.control_key() ^ mods.super_key();
+        primary
+            && !mods.shift_key()
+            && !mods.alt_key()
+            && (matches!(key.physical_key, PhysicalKey::Code(KeyCode::Period))
+                || matches!(key.key_without_modifiers().as_ref(), Key::Character(ch) if ch == "."))
+    }
+
     pub(crate) fn font_size_action_for_key(
         key: &neoism_window::event::KeyEvent,
         mods: ModifiersState,

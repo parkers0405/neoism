@@ -18,6 +18,8 @@ local filetypes = {
   yaml = { "yaml" },
   markdown = { "markdown" },
   nix = { "nix" },
+  gdscript = { "gdscript" },
+  gdresource = { "godot_resource" },
   sh = { "bash" },
   bash = { "bash" },
   zsh = { "bash" },
@@ -290,6 +292,24 @@ end
 
 function M.setup()
   register_query_predicates()
+  -- Keep Godot routing self-contained instead of relying on whichever
+  -- filetype plugins happen to exist in the user's Neovim installation.
+  -- The resource grammar covers serialized scenes/resources and the project
+  -- manifest; GDScript uses its own grammar.
+  if vim.filetype and vim.filetype.add then
+    vim.filetype.add({
+      extension = {
+        gd = "gdscript",
+        gdshader = "glsl",
+        gdshaderinc = "glsl",
+        tscn = "gdresource",
+        tres = "gdresource",
+      },
+      filename = {
+        ["project.godot"] = "gdresource",
+      },
+    })
+  end
   vim.api.nvim_create_autocmd("FileType", {
     callback = function(args)
       M.start_for_buffer(args.buf)

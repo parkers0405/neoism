@@ -187,11 +187,11 @@ pub struct Context<T: EventListener> {
     pub editor_popup_menu: Option<PopupMenu>,
     /// Latest managed nvim LSP lifecycle state for the status line.
     pub editor_lsp_status: Option<String>,
-    /// Latest Rust-owned LSP action result. Kept structured so references,
+    /// Latest Neoism LSP action result. Kept structured so references,
     /// symbols, and hover UI can render from data instead of parsing status text.
     pub editor_lsp_action_result: Option<neoism_protocol::editor::EditorServerMessage>,
     pub editor_lsp_action_result_modal_seen: bool,
-    /// Active Rust-engine completion popup (fed by `LspCompletions`), or
+    /// Active Neoism LSP completion popup (fed by `LspCompletions`), or
     /// `None` when no completion is showing. Owned entirely by the frontend:
     /// nav/accept/dismiss are handled here, insertion via `SendKeys`.
     pub editor_lsp_completion: Option<LspCompletionState>,
@@ -295,7 +295,7 @@ impl<T: neoism_backend::event::EventListener> Drop for Context<T> {
 mod context_editor;
 mod context_pump;
 
-/// One active Rust-engine completion popup. Owned by the frontend so
+/// One active Neoism LSP completion popup. Owned by the frontend so
 /// navigation/accept/dismiss stay snappy (no round trip), with insertion
 /// applied via `SendKeys`.
 #[derive(Clone, Debug)]

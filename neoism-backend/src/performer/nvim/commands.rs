@@ -520,7 +520,7 @@ fn legacy_ide_init_commands() -> Vec<String> {
         r#"lua vim.notify = function(msg, level) if not msg or msg == '' then return end; local s = 'info'; if level == 3 then s = 'warn' elseif level == 4 then s = 'error' end; pcall(vim.rpcnotify, 1, 'rio_notify', tostring(msg), s) end"#,
     ));
 
-    // No nvim-side LSP clients. The Rust LSP engine owns every language-server
+    // No nvim-side LSP clients. The Neoism LSP engine owns every language-server
     // feature (hover/definition/references/diagnostics/completion/…), so nvim
     // runs purely as the text-editing substrate — no `vim.lsp.start`, no
     // duplicated servers, no orphaned rust-analyzers.

@@ -43,6 +43,7 @@ struct ExtensionManifest {
     downloads: Option<u64>,
     categories: Vec<String>,
     repository_url: Option<String>,
+    executables: Vec<String>,
     install: InstallKind,
     run: Option<RunSpec>,
     env_keys: Vec<String>,
@@ -98,6 +99,7 @@ fn enrich(agent: &ureq::Agent, entry: CuratedEntry) -> ExtensionManifest {
     let mut command = Vec::with_capacity(1 + entry.command_args.len());
     command.push(entry.bin_name.clone());
     command.extend(entry.command_args.iter().cloned());
+    let executables = vec![entry.bin_name.clone()];
     let run = Some(RunSpec {
         command,
         env: BTreeMap::new(),
@@ -150,6 +152,7 @@ fn enrich(agent: &ureq::Agent, entry: CuratedEntry) -> ExtensionManifest {
         downloads,
         categories: entry.categories,
         repository_url,
+        executables,
         install,
         run,
         env_keys: entry.env_keys,

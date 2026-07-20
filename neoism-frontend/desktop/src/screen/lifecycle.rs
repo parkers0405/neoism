@@ -67,6 +67,7 @@ fn modal_action_policy_tag(
         A::RunEditorCommand { .. } => Tag::RunEditorCommand,
         A::RunEditorCommandWithInput { .. } => Tag::RunEditorCommandWithInput,
         A::OpenLspLocation { .. } => Tag::OpenLspLocation,
+        A::ApplyLspCodeAction { .. } => Tag::ApplyLspCodeAction,
         A::InstallAgent { .. } => Tag::InstallAgent,
         A::RunAgent { .. } => Tag::RunAgent,
         A::AcpPermission { .. } => Tag::AcpPermission,

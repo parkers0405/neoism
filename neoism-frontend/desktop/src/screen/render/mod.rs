@@ -5,7 +5,6 @@
 pub mod welcome;
 
 use super::*;
-use neoism_terminal_core::crosswords::square::LineLength;
 use neoism_ui::chrome_policy::{
     editor_chrome_mask_rects, grid_panel_chrome_geometry, trail_cursor_overlay_draw_kind,
     trail_cursor_overlay_target, EditorChromeMaskInput, GridPanelChromeGeometryInput,

@@ -57,7 +57,26 @@ pub fn diagnostic_item_from_nvim(d: &NvimDiagnosticItem) -> SnapshotDiagnosticIt
         // back to `u64` at the next boundary. `line` (0-based) is best-
         // effort derived from `lnum` (1-based).
         line: d.lnum.saturating_sub(1).min(u32::MAX as u64) as u32,
-        col: 0,
+        col: d.col.min(u32::MAX as u64) as u32,
+        end_line: d.end_line.min(u32::MAX as u64) as u32,
+        end_col: d.end_col.min(u32::MAX as u64) as u32,
         lnum: d.lnum.min(u32::MAX as u64) as u32,
+        code: d.code.clone(),
+        code_description: d.code_description.clone(),
+        tags: d.tags.clone(),
+        related_information: d
+            .related_information
+            .iter()
+            .map(|related| {
+                neoism_ui::editor_snapshot::DiagnosticRelatedInformation {
+                    path: related.path.clone(),
+                    line: related.line,
+                    col: related.col,
+                    end_line: related.end_line,
+                    end_col: related.end_col,
+                    message: related.message.clone(),
+                }
+            })
+            .collect(),
     }
 }

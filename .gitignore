@@ -45,6 +45,9 @@ sugarloaf/src/**/*.spv
 # MCP / browser-automation scratch dumps
 .playwright-mcp/
 
+# Upstream editor implementation used only as a local engineering reference.
+/.reference/zed/
+
 # Local scratch: manual test docs and personal notes vault (never ship)
 /auth
 /Vaults/

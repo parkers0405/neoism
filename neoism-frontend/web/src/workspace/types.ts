@@ -235,13 +235,28 @@ export interface PopupMenuItem {
 
 export type DiagnosticSeverity = "Error" | "Warn" | "Info" | "Hint";
 
+export interface DiagnosticRelatedInformation {
+  path: string;
+  line: number;
+  col: number;
+  end_line: number;
+  end_col: number;
+  message: string;
+}
+
 export interface DiagnosticItem {
   severity: DiagnosticSeverity;
   message: string;
   source: string | null;
   line: number;
   col: number;
+  end_line: number;
+  end_col: number;
   lnum: number;
+  code?: string | null;
+  code_description?: string | null;
+  tags?: string[];
+  related_information?: DiagnosticRelatedInformation[];
 }
 
 export interface LspSnapshotServer {
@@ -266,6 +281,45 @@ export interface HighlightAttrs {
   reverse: boolean;
 }
 
+export type EditorLspAction =
+  | "hover"
+  | "definition"
+  | "references"
+  | "implementation"
+  | "document_symbols"
+  | "workspace_symbols"
+  | "info"
+  | "format"
+  | "code_actions"
+  | "rename"
+  | "toggle_inlay_hints";
+
+export interface EditorLspCodeAction {
+  server_id: string;
+  file_path: string;
+  document_revision: string;
+  title: string;
+  kind?: string | null;
+  preferred: boolean;
+  disabled_reason?: string | null;
+  payload: unknown;
+}
+
+export interface EditorLspCompletionItem {
+  server_id?: string | null;
+  file_path: string;
+  document_revision: string;
+  label: string;
+  kind: string;
+  detail?: string | null;
+  documentation?: string | null;
+  insert_text: string;
+  filter_text?: string | null;
+  sort_text?: string | null;
+  preselect: boolean;
+  payload?: unknown;
+}
+
 export type EditorClientMessage =
   | { OpenBuffer: { path: string; surface_id?: string | null } }
   | { SendKeys: { bytes: number[]; surface_id?: string | null } }
@@ -282,6 +336,47 @@ export type EditorClientMessage =
       };
     }
   | { Resize: { width: number; height: number; surface_id?: string | null } }
+  | {
+      LspAction: {
+        action: EditorLspAction;
+        text?: string | null;
+        surface_id?: string | null;
+      };
+    }
+  | {
+      ApplyLspCodeAction: {
+        action: EditorLspCodeAction;
+        surface_id?: string | null;
+      };
+    }
+  | {
+      LspComplete: {
+        seq: number;
+        trigger_character?: string | null;
+        surface_id?: string | null;
+      };
+    }
+  | {
+      ApplyLspCompletion: {
+        item: EditorLspCompletionItem;
+        replace_prefix: string;
+        surface_id?: string | null;
+      };
+    }
+  | {
+      CancelLspCompletion: {
+        surface_id?: string | null;
+      };
+    }
+  | {
+      LspHoverAt: {
+        seq: number;
+        grid: number;
+        row: number;
+        col: number;
+        surface_id?: string | null;
+      };
+    }
   | "Close";
 
 export type EditorServerMessage =
@@ -403,6 +498,7 @@ export type EditorServerMessage =
   | {
       LspSnapshot: {
         surface_id?: string | null;
+        file_path?: string | null;
         filetype: string;
         servers: LspSnapshotServer[];
       };
@@ -413,6 +509,45 @@ export type EditorServerMessage =
         server: string;
         text: string;
         level: string;
+      };
+    }
+  | {
+      LspActionResult: {
+        surface_id?: string | null;
+        action: EditorLspAction;
+        line: number;
+        character: number;
+        summary: string;
+        hover?: string | null;
+        locations: Array<{ uri: string; line: number; character: number }>;
+        symbol_count: number;
+        symbols: Array<{
+          name: string;
+          kind: string;
+          detail?: string | null;
+          uri: string;
+          line: number;
+          character: number;
+          depth: number;
+        }>;
+        code_actions: EditorLspCodeAction[];
+      };
+    }
+  | {
+      LspCompletions: {
+        surface_id?: string | null;
+        seq: number;
+        replace_prefix: string;
+        items: EditorLspCompletionItem[];
+      };
+    }
+  | {
+      LspHoverResult: {
+        surface_id?: string | null;
+        seq: number;
+        line: number;
+        character: number;
+        contents: string;
       };
     }
   | { ModeChange: { surface_id?: string | null; mode: string; mode_idx: number } }
@@ -1457,9 +1592,15 @@ export type LspState =
 export interface LspDiagnosticItem {
   line: number;
   col: number;
+  end_line: number;
+  end_col: number;
   severity: number;
   message: string;
   source: string | null;
+  code?: string | null;
+  code_description?: string | null;
+  tags?: string[];
+  related_information?: DiagnosticRelatedInformation[];
 }
 
 export type DiagnosticsClientMessage =

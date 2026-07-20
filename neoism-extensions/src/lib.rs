@@ -9,7 +9,10 @@ pub mod paths;
 pub use agent_config::{
     agent_config_path, disable_builtin_mcp_entry, install_mcp_entry, uninstall_mcp_entry,
 };
-pub use install_runner::{install, InstallError, ProgressEvent};
+pub use install_runner::{
+    install, reconcile_managed_installs, record_installed, supported_on_current_host,
+    InstallError, InstallHandle, ProgressEvent, ReconcileReport,
+};
 pub use installed::{InstalledEntry, InstalledIndex};
 pub use managed_bin::{
     managed_bin_map, managed_bin_map_from, managed_bin_map_json,
@@ -60,7 +63,9 @@ mod registry_tests {
                 e.id
             );
             match &e.install {
-                InstallKind::Npm { package, version }
+                InstallKind::Npm {
+                    package, version, ..
+                }
                 | InstallKind::Pip { package, version } => {
                     assert!(
                         !package.is_empty(),
@@ -73,7 +78,10 @@ mod registry_tests {
                         e.id
                     );
                 }
-                InstallKind::GithubRelease { .. } | InstallKind::Cargo { .. } => {
+                InstallKind::GithubRelease { .. }
+                | InstallKind::Cargo { .. }
+                | InstallKind::Go { .. }
+                | InstallKind::Gem { .. } => {
                     // Other kinds aren't used by the bundled list today.
                 }
             }

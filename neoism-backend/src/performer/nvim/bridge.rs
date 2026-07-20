@@ -264,9 +264,16 @@ where
                         .map(ToOwned::to_owned);
                     items.push(DiagnosticItem {
                         lnum,
+                        col: 0,
+                        end_line: lnum.saturating_sub(1),
+                        end_col: 0,
                         severity,
                         message,
                         source,
+                        code: None,
+                        code_description: None,
+                        tags: Vec::new(),
+                        related_information: Vec::new(),
                     });
                 }
             }

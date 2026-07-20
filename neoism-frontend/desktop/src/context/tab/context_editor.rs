@@ -192,6 +192,41 @@ impl<T: EventListener> Context<T> {
         self.editor_daemon_messages.push_back(message);
     }
 
+    /// Legacy/local nvim LSP notifications do not carry a file path. Accept
+    /// them only when their filetype is one of the runtime routes for the
+    /// active path; otherwise a late Rust notification can repopulate the
+    /// status pill after the user has switched to a Dockerfile.
+    pub(crate) fn unscoped_lsp_filetype_targets_active_file(
+        &self,
+        reported_filetype: Option<&str>,
+    ) -> bool {
+        unscoped_lsp_filetype_targets_path(reported_filetype, self.editor_path.as_deref())
+    }
+
+    /// Path-tagged diagnostics are authoritative. Once an active path is
+    /// known, untagged or differently-tagged payloads are unsafe to display.
+    pub(crate) fn diagnostics_target_active_file(
+        &self,
+        reported_path: Option<&std::path::Path>,
+    ) -> bool {
+        editor_message_targets_active_file(reported_path, self.editor_path.as_deref())
+    }
+
+    /// An unscoped server message is relevant only when the current snapshot
+    /// or attachment tally already names that server. This prevents late
+    /// stderr from a previous buffer from manufacturing a badge of its own.
+    pub(crate) fn lsp_server_targets_active_file(&self, server: &str) -> bool {
+        self.lsp_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .servers
+                .iter()
+                .any(|candidate| candidate.name == server || candidate.binary == server)
+        }) || self.attached_lsps.iter().any(|candidate| {
+            candidate.name.as_deref() == Some(server)
+                || candidate.binary.as_deref() == Some(server)
+        })
+    }
+
     pub(crate) fn apply_daemon_editor_sideband(&mut self, message: &EditorServerMessage) {
         match message {
             EditorServerMessage::Batch { messages, .. } => {
@@ -208,6 +243,13 @@ impl<T: EventListener> Context<T> {
                 items,
                 ..
             } => {
+                // A diagnostics poll can finish after the user switched
+                // buffers. Reject a payload that names a different file
+                // instead of flashing its counts and inline rows over the
+                // active buffer.
+                if !self.diagnostics_target_active_file(file_path.as_deref()) {
+                    return;
+                }
                 let mut diags = DiagnosticsNotification::default();
                 diags.error = *error;
                 diags.warn = *warn;
@@ -241,9 +283,29 @@ impl<T: EventListener> Context<T> {
                         .items
                         .push(neoism_backend::performer::nvim::DiagnosticItem {
                             lnum: item.lnum as u64,
+                            col: item.col as u64,
+                            end_line: item.end_line as u64,
+                            end_col: item.end_col as u64,
                             severity,
                             message: item.message.clone(),
                             source: item.source.clone(),
+                            code: item.code.clone(),
+                            code_description: item.code_description.clone(),
+                            tags: item.tags.clone(),
+                            related_information: item
+                                .related_information
+                                .iter()
+                                .map(|related| {
+                                    neoism_backend::performer::nvim::DiagnosticRelatedInformation {
+                                        path: related.path.clone(),
+                                        line: related.line,
+                                        col: related.col,
+                                        end_line: related.end_line,
+                                        end_col: related.end_col,
+                                        message: related.message.clone(),
+                                    }
+                                })
+                                .collect(),
                         });
                 }
                 if diags.error + diags.warn + diags.info + diags.hint == 0
@@ -270,6 +332,11 @@ impl<T: EventListener> Context<T> {
                     binary: binary.clone(),
                     filetype: filetype.clone(),
                 };
+                if !self
+                    .unscoped_lsp_filetype_targets_active_file(status.filetype.as_deref())
+                {
+                    return;
+                }
                 if state == "none" {
                     self.attached_lsps.clear();
                 } else if let Some(key) = name.as_deref().or(binary.as_deref()) {
@@ -288,8 +355,17 @@ impl<T: EventListener> Context<T> {
                 self.editor_lsp_status = Some(state.clone());
             }
             EditorServerMessage::LspSnapshot {
-                filetype, servers, ..
+                file_path,
+                filetype,
+                servers,
+                ..
             } => {
+                if !editor_message_targets_active_file(
+                    file_path.as_deref(),
+                    self.editor_path.as_deref(),
+                ) {
+                    return;
+                }
                 self.lsp_snapshot = Some(LspSnapshotNotification {
                     filetype: filetype.clone(),
                     servers: servers
@@ -312,6 +388,9 @@ impl<T: EventListener> Context<T> {
                 level,
                 ..
             } => {
+                if !self.lsp_server_targets_active_file(server) {
+                    return;
+                }
                 self.lsp_messages.insert(
                     server.clone(),
                     LspMessageNotification {
@@ -325,7 +404,18 @@ impl<T: EventListener> Context<T> {
                 path, line_count, ..
             } => {
                 self.editor_total_lines = *line_count;
-                self.editor_lsp_status = Some("active".into());
+                // A buffer-open event says nothing about LSP attachment. Drop
+                // the previous file's server/diagnostic snapshot immediately
+                // so a Rust badge or error lens cannot flash over a Dockerfile,
+                // flake, or other newly selected buffer while the daemon is
+                // producing its file-scoped snapshot.
+                if self.editor_path.as_ref() != Some(path) {
+                    self.attached_lsps.clear();
+                    self.lsp_snapshot = None;
+                    self.lsp_messages.clear();
+                    self.editor_diagnostics = None;
+                }
+                self.editor_lsp_status = Some("none".into());
                 // The presence plane keys this pane's published caret —
                 // and matches inbound remote carets — by this path.
                 // It was DECLARED but never assigned, which silently
@@ -429,8 +519,9 @@ impl<T: EventListener> Context<T> {
     }
 
     /// Install a completion reply as the active popup, unless a newer request
-    /// already superseded it. Items are ordered preselect-first, then by the
-    /// server's `sort_text`, then label — the same ranking Zed/VS Code use.
+    /// already superseded it. The daemon has already filtered and ranked the
+    /// combined semantic + buffer candidates against this exact prefix; keep
+    /// that order intact instead of alphabetically undoing its relevance.
     fn apply_lsp_completions(
         &mut self,
         seq: u64,
@@ -454,19 +545,10 @@ impl<T: EventListener> Context<T> {
             self.editor_lsp_completion = None;
             return;
         }
-        let mut items = items.to_vec();
-        items.sort_by(|a, b| {
-            b.preselect
-                .cmp(&a.preselect)
-                .then_with(|| {
-                    a.sort_text
-                        .as_deref()
-                        .unwrap_or(&a.label)
-                        .cmp(b.sort_text.as_deref().unwrap_or(&b.label))
-                })
-                .then_with(|| a.label.cmp(&b.label))
-        });
-        let selected = items.iter().position(|item| item.preselect).unwrap_or(0);
+        let items = items.to_vec();
+        // `preselect` is one of the daemon ranker's tie-breakers, so the first
+        // row is both the highest quality match and the safe initial choice.
+        let selected = 0;
         self.editor_lsp_completion = Some(LspCompletionState {
             replace_prefix: replace_prefix.to_string(),
             items,
@@ -507,7 +589,7 @@ impl<T: EventListener> Context<T> {
         Some((row, col))
     }
 
-    /// Build the shared popup-menu model for the active Rust-engine
+    /// Build the shared popup-menu model for the active Neoism LSP-engine
     /// completion, anchored under the identifier being typed. Reuses the same
     /// `CompletionMenu` renderer nvim's `ext_popupmenu` uses. `None` when no
     /// completion is showing.
@@ -546,4 +628,56 @@ impl<T: EventListener> Context<T> {
             max_word_chars,
         })
     }
+}
+
+fn editor_message_targets_active_file(
+    reported: Option<&std::path::Path>,
+    active: Option<&std::path::Path>,
+) -> bool {
+    let Some(active) = active else {
+        return true;
+    };
+    let Some(reported) = reported else {
+        return false;
+    };
+    if reported == active {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(reported),
+        std::fs::canonicalize(active),
+    ) {
+        (Ok(reported), Ok(active)) => reported == active,
+        _ => false,
+    }
+}
+
+fn unscoped_lsp_filetype_targets_path(
+    reported_filetype: Option<&str>,
+    active_path: Option<&std::path::Path>,
+) -> bool {
+    let Some(active_path) = active_path else {
+        return true;
+    };
+    let Some(reported_filetype) = reported_filetype.filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Some(logical_language) =
+        neoism_agent_server::language_server::language_id_for_path(active_path)
+    else {
+        return false;
+    };
+    if reported_filetype.eq_ignore_ascii_case(logical_language) {
+        return true;
+    }
+    neoism_agent_server::language_server::language_server_adapters()
+        .iter()
+        .flat_map(|adapter| adapter.routes.iter())
+        .any(|route| {
+            route.id.eq_ignore_ascii_case(logical_language)
+                && route
+                    .document_language_id
+                    .eq_ignore_ascii_case(reported_filetype)
+        })
 }

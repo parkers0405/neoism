@@ -187,6 +187,8 @@ fn presence(buffer_id: &str, peer_id: &str, line: u32, column: u32) -> CrdtPeerP
             offset: None,
         },
         selection: None,
+        insert: false,
+        rainbow: false,
         // Deliberately bogus: the daemon must re-stamp with its own
         // clock on receipt (client clocks are advisory) or the TTL
         // sweep would expire this instantly.

@@ -84,10 +84,26 @@ pub struct DiagnosticItem {
     /// 0-based line number (aligns with the rest of the snapshot model).
     pub line: u32,
     pub col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
     /// 1-based line number — matches nvim's `vim.diagnostic.get`
     /// representation so the popup can pass it straight to `:<lnum>`
     /// jumps.
     pub lnum: u32,
+    pub code: Option<String>,
+    pub code_description: Option<String>,
+    pub tags: Vec<String>,
+    pub related_information: Vec<DiagnosticRelatedInformation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagnosticRelatedInformation {
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub message: String,
 }
 
 // -----------------------------------------------------------------------

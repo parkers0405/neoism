@@ -268,6 +268,13 @@ pub const TREESITTER_INSTALL_SPECS: &[TreesitterInstallSpec] = &[
         branch: None,
     },
     TreesitterInstallSpec {
+        lang: "godot_resource",
+        display_name: "Godot Resources",
+        repo: "https://github.com/PrestonKnopp/tree-sitter-godot-resource",
+        subdir: ".",
+        branch: None,
+    },
+    TreesitterInstallSpec {
         lang: "html",
         display_name: "HTML",
         repo: "https://github.com/tree-sitter/tree-sitter-html",

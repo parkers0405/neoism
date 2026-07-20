@@ -4,6 +4,7 @@ use crate::event::VoidListener;
 use crate::layout::ContextDimension;
 use neoism_protocol::editor::GridCell;
 use neoism_terminal_core::crosswords::pos::{Column, Line};
+use std::path::PathBuf;
 
 #[test]
 fn daemon_grid_clear_maps_to_nvim_clear_redraw_event() {
@@ -113,6 +114,219 @@ fn daemon_editor_messages_drain_without_local_redraw_receiver() {
     assert!(applied > 0);
     assert!(!limited);
     assert_eq!(context.terminal.lock().grid[Line(0)][Column(0)].c(), 'Z');
+}
+
+#[test]
+fn viewport_round_trip_preserves_daemon_diagnostic_cache() {
+    let mut context = create_dead_context(
+        VoidListener,
+        unsafe { neoism_backend::event::WindowId::dummy() },
+        46,
+        0,
+        ContextDimension::default(),
+    );
+    context.editor_path = Some(PathBuf::from("/repo/main.gd"));
+    context.apply_daemon_editor_sideband(&EditorServerMessage::Diagnostics {
+        surface_id: Some("46".into()),
+        error: 1,
+        warn: 0,
+        info: 0,
+        hint: 0,
+        file_path: Some(PathBuf::from("/repo/main.gd")),
+        items: vec![neoism_protocol::editor::DiagnosticItem {
+            severity: neoism_protocol::editor::DiagnosticSeverity::Error,
+            message: "broken expression".into(),
+            source: Some("godot".into()),
+            line: 122,
+            col: 4,
+            end_line: 122,
+            end_col: 10,
+            lnum: 123,
+            code: Some("parse-error".into()),
+            code_description: None,
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        }],
+    });
+
+    let update_viewport = |context: &mut Context<VoidListener>, topline| {
+        context.enqueue_daemon_editor_message(EditorServerMessage::WinViewport {
+            surface_id: Some("46".into()),
+            grid_id: 1,
+            topline,
+            botline: topline + 10,
+            line_count: 200,
+            scroll_delta: 0.0,
+            curline: topline,
+            curcol: 0,
+            textoff: 0,
+        });
+        let _ = context.pump_editor_redraws();
+    };
+
+    update_viewport(&mut context, 120);
+    assert_eq!(context.editor_diagnostics.as_ref().unwrap().items.len(), 1);
+    assert_eq!(
+        context.editor_diagnostics.as_ref().unwrap().items[0].lnum,
+        123
+    );
+
+    update_viewport(&mut context, 150);
+    assert_eq!(
+        context.editor_diagnostics.as_ref().unwrap().items[0].lnum,
+        123,
+        "virtualizing the diagnostic offscreen must not evict it",
+    );
+
+    update_viewport(&mut context, 120);
+    assert_eq!(
+        context.editor_diagnostics.as_ref().unwrap().items[0].lnum,
+        123,
+        "returning to the original viewport must reuse the cached item",
+    );
+}
+
+#[test]
+fn opening_a_different_buffer_clears_stale_lsp_and_diagnostics_immediately() {
+    let mut context = create_dead_context(
+        VoidListener,
+        unsafe { neoism_backend::event::WindowId::dummy() },
+        47,
+        0,
+        ContextDimension::default(),
+    );
+    context.editor_path = Some(PathBuf::from("/repo/src/main.rs"));
+    context.editor_lsp_status = Some("active".into());
+    context.lsp_snapshot = Some(LspSnapshotNotification {
+        filetype: "rust".into(),
+        servers: vec![LspSnapshotServer {
+            name: "Rust".into(),
+            binary: "rust-analyzer".into(),
+            filetype: "rust".into(),
+            state: "attached".into(),
+            source: Some("extension".into()),
+            message: None,
+            level: None,
+        }],
+    });
+    context.editor_diagnostics = Some(DiagnosticsNotification {
+        error: 1,
+        ..DiagnosticsNotification::default()
+    });
+
+    context.apply_daemon_editor_sideband(&EditorServerMessage::BufferOpened {
+        surface_id: Some("47".into()),
+        path: PathBuf::from("/repo/Dockerfile"),
+        line_count: 216,
+    });
+
+    assert_eq!(context.editor_path, Some(PathBuf::from("/repo/Dockerfile")));
+    assert_eq!(context.editor_lsp_status.as_deref(), Some("none"));
+    assert!(context.attached_lsps.is_empty());
+    assert!(context.lsp_snapshot.is_none());
+    assert!(context.lsp_messages.is_empty());
+    assert!(context.editor_diagnostics.is_none());
+
+    context.apply_daemon_editor_sideband(&EditorServerMessage::Diagnostics {
+        surface_id: Some("47".into()),
+        error: 99,
+        warn: 0,
+        info: 0,
+        hint: 0,
+        file_path: Some(PathBuf::from("/repo/src/main.rs")),
+        items: Vec::new(),
+    });
+    context.apply_daemon_editor_sideband(&EditorServerMessage::LspStatus {
+        surface_id: Some("47".into()),
+        state: "active".into(),
+        name: Some("Rust".into()),
+        binary: Some("rust-analyzer".into()),
+        filetype: Some("rust".into()),
+    });
+    context.apply_daemon_editor_sideband(&EditorServerMessage::LspMessage {
+        surface_id: Some("47".into()),
+        server: "Rust".into(),
+        text: "late rust-analyzer stderr".into(),
+        level: "error".into(),
+    });
+    assert!(context.editor_diagnostics.is_none());
+    assert_eq!(context.editor_lsp_status.as_deref(), Some("none"));
+    assert!(context.attached_lsps.is_empty());
+    assert!(context.lsp_messages.is_empty());
+
+    context.apply_daemon_editor_sideband(&EditorServerMessage::LspSnapshot {
+        surface_id: Some("47".into()),
+        file_path: Some(PathBuf::from("/repo/src/main.rs")),
+        filetype: "rust".into(),
+        servers: Vec::new(),
+    });
+    assert!(
+        context.lsp_snapshot.is_none(),
+        "a late snapshot for the prior buffer must be rejected",
+    );
+
+    context.apply_daemon_editor_sideband(&EditorServerMessage::LspSnapshot {
+        surface_id: Some("47".into()),
+        file_path: Some(PathBuf::from("/repo/Dockerfile")),
+        filetype: "dockerfile".into(),
+        servers: vec![neoism_protocol::editor::LspSnapshotServer {
+            name: "Docker".into(),
+            binary: "docker-language-server".into(),
+            filetype: "dockerfile".into(),
+            state: "attached".into(),
+            source: Some("extension".into()),
+            message: None,
+            level: None,
+        }],
+    });
+    assert_eq!(
+        context
+            .lsp_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.filetype.as_str()),
+        Some("dockerfile"),
+    );
+
+    context.apply_daemon_editor_sideband(&EditorServerMessage::LspStatus {
+        surface_id: Some("47".into()),
+        state: "active".into(),
+        name: Some("Docker".into()),
+        binary: Some("docker-language-server".into()),
+        filetype: Some("dockerfile".into()),
+    });
+    context.apply_daemon_editor_sideband(&EditorServerMessage::LspMessage {
+        surface_id: Some("47".into()),
+        server: "Docker".into(),
+        text: "ready".into(),
+        level: "info".into(),
+    });
+    assert_eq!(context.attached_lsps.len(), 1);
+    assert!(context.lsp_messages.contains_key("Docker"));
+
+    context.apply_daemon_editor_sideband(&EditorServerMessage::LspMessage {
+        surface_id: Some("47".into()),
+        server: "Rust".into(),
+        text: "even later rust-analyzer stderr".into(),
+        level: "error".into(),
+    });
+    assert!(!context.lsp_messages.contains_key("Rust"));
+}
+
+#[test]
+fn unscoped_lsp_filetypes_use_runtime_routes_not_a_rust_special_case() {
+    let mut context = create_dead_context(
+        VoidListener,
+        unsafe { neoism_backend::event::WindowId::dummy() },
+        48,
+        0,
+        ContextDimension::default(),
+    );
+    context.editor_path = Some(PathBuf::from("/repo/web/view.tsx"));
+
+    assert!(context.unscoped_lsp_filetype_targets_active_file(Some("typescript")));
+    assert!(context.unscoped_lsp_filetype_targets_active_file(Some("typescriptreact")));
+    assert!(!context.unscoped_lsp_filetype_targets_active_file(Some("rust")));
+    assert!(!context.unscoped_lsp_filetype_targets_active_file(None));
 }
 
 #[test]

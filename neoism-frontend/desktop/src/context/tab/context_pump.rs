@@ -166,7 +166,7 @@ impl<T: EventListener> Context<T> {
         for event in all_events.iter().rev() {
             if let RedrawEvent::ModeChange { mode, .. } = event {
                 self.editor_mode = mode.clone();
-                // The Rust-engine completion popup only lives in insert mode;
+                // The Neoism LSP completion popup only lives in insert mode;
                 // leaving it (Esc, `:`, etc.) closes the popup.
                 if !matches!(self.editor_mode, EditorMode::Insert)
                     && self.editor_lsp_completion.is_some()

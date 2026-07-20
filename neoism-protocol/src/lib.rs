@@ -28,7 +28,8 @@ pub use cursor::{
     CursorOverlayClientMessage, CursorOverlayServerMessage, CursorShape, YankFlashRegion,
 };
 pub use diagnostics::{
-    DiagnosticItem as LspDiagnosticItem, DiagnosticsClientMessage,
+    DiagnosticItem as LspDiagnosticItem, DiagnosticRelatedInformation,
+    DiagnosticsClientMessage,
     DiagnosticsServerMessage, LspState, RouteId,
 };
 pub use workspace::{

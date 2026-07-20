@@ -164,6 +164,12 @@ impl Screen<'_> {
                     editor.open_buffer_at_location(uri, line, character);
                 }
             }
+            ModalAction::ApplyLspCodeAction { action } => {
+                self.renderer.modal.close();
+                if let Some(editor) = self.context_manager.current().editor.as_ref() {
+                    editor.apply_lsp_code_action(action);
+                }
+            }
             ModalAction::InstallAgent { kind } => {
                 if let Some(ak) = crate::neoism::icon::AgentKind::from_id(&kind) {
                     self.start_agent_install(ak);
@@ -307,11 +313,7 @@ impl Screen<'_> {
                 // (no address — we spawn the server ourselves and join).
                 if let Some(dir) = value("create_dir") {
                     self.renderer.modal.close();
-                    self.create_and_join_local_server(
-                        dir,
-                        value("name"),
-                        value("token"),
-                    );
+                    self.create_and_join_local_server(dir, value("name"), value("token"));
                     // Land back on the Servers list so the new entry
                     // (and its connect status) is visible, instead of
                     // dumping the user to whatever was behind.
@@ -639,6 +641,7 @@ impl Screen<'_> {
             locations,
             symbol_count,
             symbols,
+            code_actions,
             ..
         }) = current.editor_lsp_action_result.clone()
         else {
@@ -651,7 +654,10 @@ impl Screen<'_> {
                 | neoism_protocol::editor::EditorLspAction::DocumentSymbols
                 | neoism_protocol::editor::EditorLspAction::WorkspaceSymbols
                 | neoism_protocol::editor::EditorLspAction::Hover
-        );
+        ) || (matches!(
+            action,
+            neoism_protocol::editor::EditorLspAction::CodeActions
+        ) && !code_actions.is_empty());
         if !should_open {
             current.editor_lsp_action_result_modal_seen = true;
             return;
@@ -665,7 +671,39 @@ impl Screen<'_> {
         use neoism_ui::widgets::modal::{ModalAction, ModalButton};
         let mut buttons: Vec<ModalButton> = Vec::new();
 
-        let body = if let Some(hover) = hover {
+        let body = if matches!(
+            action,
+            neoism_protocol::editor::EditorLspAction::CodeActions
+        ) {
+            let mut disabled = Vec::new();
+            for code_action in code_actions.iter().take(MAX_PICKER_ITEMS) {
+                let preferred = if code_action.preferred { "★ " } else { "" };
+                if let Some(reason) = code_action.disabled_reason.as_deref() {
+                    disabled.push(format!("{preferred}{} — {reason}", code_action.title));
+                    continue;
+                }
+                let hint = match (code_action.kind.as_deref(), code_action.preferred) {
+                    (Some(kind), true) => format!("{kind} · preferred"),
+                    (Some(kind), false) => kind.to_string(),
+                    (None, true) => "preferred".to_string(),
+                    (None, false) => String::new(),
+                };
+                buttons.push(ModalButton::new(
+                    format!("{preferred}{}", code_action.title),
+                    hint,
+                    ModalAction::ApplyLspCodeAction {
+                        action: code_action.clone(),
+                    },
+                ));
+            }
+            let mut body =
+                picker_summary("code action", code_actions.len(), MAX_PICKER_ITEMS);
+            if !disabled.is_empty() {
+                body.push_str("\n\nDisabled:\n");
+                body.push_str(&disabled.join("\n"));
+            }
+            body
+        } else if let Some(hover) = hover {
             hover
         } else if matches!(
             action,
@@ -712,7 +750,14 @@ impl Screen<'_> {
         self.renderer
             .modal
             .open(neoism_ui::widgets::modal::ModalSpec {
-                title: format!("Rust LSP {action:?}"),
+                title: if matches!(
+                    action,
+                    neoism_protocol::editor::EditorLspAction::CodeActions
+                ) {
+                    "Quick Fixes".to_string()
+                } else {
+                    format!("Neoism LSP {action:?}")
+                },
                 body,
                 meta: summary,
                 input: None,

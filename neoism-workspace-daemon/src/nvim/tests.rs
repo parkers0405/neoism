@@ -82,9 +82,15 @@ fn hash_items_is_stable_for_identical_input() {
     let a = vec![ProtoDiagnosticItem {
         line: 1,
         col: 2,
+        end_line: 1,
+        end_col: 3,
         severity: 1,
         message: "x".into(),
         source: None,
+        code: Some("E1".into()),
+        code_description: None,
+        tags: Vec::new(),
+        related_information: Vec::new(),
     }];
     let b = a.clone();
     assert_eq!(hash_items(&a), hash_items(&b));
@@ -401,6 +407,94 @@ async fn nvim_spawn_insert_roundtrip_when_available() {
         recv_grid_cell(&mut rx, "H").await,
         "expected grid output for inserted text"
     );
+    let _ = handle.handle(EditorClientMessage::Close).await;
+    registry.remove(handle.key()).await;
+}
+
+#[tokio::test]
+async fn grid_cell_hit_testing_uses_utf8_byte_columns_when_available() {
+    if which_nvim().is_none() {
+        eprintln!("skipping nvim grid hit-test: `nvim` not found on PATH");
+        return;
+    }
+
+    let fixture_dir = tempfile::tempdir().expect("fixture tempdir");
+    let path = fixture_dir.path().join("hover.txt");
+    std::fs::write(&path, "\talpha 中 😀 tail\n").expect("write hover fixture");
+
+    let registry = NvimSessionRegistry::new();
+    let handle = registry
+        .get_or_spawn("test:hover-grid".into(), &CrdtSyncHub::default())
+        .await
+        .expect("spawn nvim");
+    handle
+        .handle(EditorClientMessage::OpenBuffer {
+            path,
+            line: None,
+            character: None,
+            surface_id: Some("test:hover-grid".into()),
+        })
+        .await
+        .expect("open hover fixture");
+    handle
+        .handle(EditorClientMessage::Command {
+            command: "setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 nowrap tabstop=4 | call cursor(1, 16)"
+                .into(),
+            surface_id: Some("test:hover-grid".into()),
+        })
+        .await
+        .expect("normalize fixture window");
+    let cursor_before = handle
+        .read_active_buffer()
+        .await
+        .expect("read cursor before hit-test")
+        .expect("active fixture")
+        .cursor_col;
+
+    // The tab fills cells 0..=3 and maps to byte 0. CJK and emoji each
+    // occupy two cells but map both cells back to the first byte of their
+    // UTF-8 encoding (byte offsets 7 and 11 respectively).
+    assert_eq!(
+        handle
+            .buffer_position_at_grid_cell(0, 0, 2)
+            .await
+            .expect("tab hit-test"),
+        Some(BufferPosition {
+            line: 0,
+            character: 0,
+        })
+    );
+    assert_eq!(
+        handle
+            .buffer_position_at_grid_cell(0, 0, 11)
+            .await
+            .expect("CJK hit-test"),
+        Some(BufferPosition {
+            line: 0,
+            character: 7,
+        })
+    );
+    assert_eq!(
+        handle
+            .buffer_position_at_grid_cell(0, 0, 14)
+            .await
+            .expect("emoji hit-test"),
+        Some(BufferPosition {
+            line: 0,
+            character: 11,
+        })
+    );
+    assert_eq!(
+        handle
+            .read_active_buffer()
+            .await
+            .expect("read cursor after hit-test")
+            .expect("active fixture")
+            .cursor_col,
+        cursor_before,
+        "hover hit-testing must not move the editor cursor"
+    );
+
     let _ = handle.handle(EditorClientMessage::Close).await;
     registry.remove(handle.key()).await;
 }

@@ -404,7 +404,15 @@ impl Screen<'_> {
                     // single-value drain collapsed those into the last
                     // one and the popup ended up with at most one row
                     // even for multi-LSP buffers (e.g. ruff + pyright).
-                    let statuses = editor.drain_all_lsp_statuses();
+                    let statuses = editor
+                        .drain_all_lsp_statuses()
+                        .into_iter()
+                        .filter(|status| {
+                            current.unscoped_lsp_filetype_targets_active_file(
+                                status.filetype.as_deref(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
                     if !statuses.is_empty() {
                         // First event in this batch comes from BufEnter
                         // OR a single LspAttach — when it's "active"
@@ -486,7 +494,13 @@ impl Screen<'_> {
             {
                 let current = self.context_manager.current_mut();
                 if let Some(editor) = current.editor.as_ref() {
-                    if let Some(snapshot) = editor.drain_lsp_snapshot() {
+                    if let Some(snapshot) =
+                        editor.drain_lsp_snapshot().filter(|snapshot| {
+                            current.unscoped_lsp_filetype_targets_active_file(Some(
+                                snapshot.filetype.as_str(),
+                            ))
+                        })
+                    {
                         let server_states = snapshot
                             .servers
                             .iter()
@@ -527,6 +541,9 @@ impl Screen<'_> {
                     if !messages.is_empty() {
                         snapshot_refresh = true;
                         for msg in messages {
+                            if !current.lsp_server_targets_active_file(&msg.server) {
+                                continue;
+                            }
                             let text = if msg.text.chars().count() > 180 {
                                 let prefix: String = msg.text.chars().take(180).collect();
                                 format!("{prefix}...")
@@ -733,11 +750,25 @@ impl Screen<'_> {
                 let popup_visible = self.renderer.diagnostics_popup.is_visible();
                 let popup_pill = self.renderer.diagnostics_popup.pill();
                 let current = self.context_manager.current_mut();
-                let mut refreshed_items: Option<
+                let mut refreshed_items: Option<(
                     Vec<neoism_ui::panels::diagnostics_popup::PopupItem>,
-                > = None;
+                    u64,
+                )> = None;
+                if popup_visible && current.editor_diagnostics.is_none() {
+                    // BufferOpened clears the file-scoped cache immediately.
+                    // Clear an already-open popup in the same frame too; it
+                    // must not retain rows from the previous buffer while the
+                    // new file's first diagnostics snapshot is in flight.
+                    refreshed_items = Some((Vec::new(), 0));
+                }
                 if let Some(editor) = current.editor.as_ref() {
-                    if let Some(diags) = editor.drain_diagnostics() {
+                    if let Some(diags) =
+                        editor.drain_diagnostics().filter(|diagnostics| {
+                            current.diagnostics_target_active_file(
+                                diagnostics.file_path.as_deref(),
+                            )
+                        })
+                    {
                         if popup_visible {
                             // Re-apply the popup's existing severity
                             // filter so a snapshot update doesn't blow
@@ -747,15 +778,20 @@ impl Screen<'_> {
                                 DiagnosticPill::Error => 1,
                                 DiagnosticPill::Warn => 2,
                             };
-                            refreshed_items = Some(
+                            let total_count = match popup_pill {
+                                DiagnosticPill::Error => diags.error,
+                                DiagnosticPill::Warn => diags.warn,
+                            };
+                            refreshed_items = Some((
                                 diags
                                     .items
                                     .iter()
                                     .filter(|d| d.severity == target)
                                     .map(|d| crate::bridges::translate::diagnostic_item_from_nvim(d))
                                     .map(|snap| neoism_ui::panels::diagnostics_popup::PopupItem::from(&snap))
-                                .collect(),
-                            );
+                                    .collect(),
+                                total_count,
+                            ));
                         }
                         current.editor_diagnostics = Some(diags);
                         // Diagnostics are Rust chrome, not terminal cell
@@ -767,8 +803,10 @@ impl Screen<'_> {
                         current.renderable_content.pending_update.set_dirty();
                     }
                 }
-                if let Some(items) = refreshed_items {
-                    self.renderer.diagnostics_popup.refresh_items(items);
+                if let Some((items, total_count)) = refreshed_items {
+                    self.renderer
+                        .diagnostics_popup
+                        .refresh_items_with_total(items, total_count);
                 }
             }
 
@@ -1067,12 +1105,10 @@ impl Screen<'_> {
                         }
                     }
                     for msg in current.lsp_messages.values() {
-                        if !msg.server.is_empty()
-                            && !names.iter().any(|name| name == &msg.server)
-                        {
-                            names.push(msg.server.clone());
-                        }
-                        if msg.level == "error" {
+                        let belongs_to_snapshot = snapshot.servers.iter().any(|server| {
+                            server.name == msg.server || server.binary == msg.server
+                        });
+                        if belongs_to_snapshot && msg.level == "error" {
                             has_error = true;
                         }
                     }

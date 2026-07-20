@@ -100,6 +100,19 @@ pub async fn seed_crdt_from_open_buffer(
     session: &NvimSessionHandle,
     request_id: u64,
 ) {
+    let workspace_root = crate::files::workspace_root();
+    seed_crdt_from_open_buffer_in_workspace(crdt, session, &workspace_root, request_id)
+        .await;
+}
+
+/// Root-explicit production variant for sockets that can address a workspace
+/// other than the daemon process's default root.
+pub async fn seed_crdt_from_open_buffer_in_workspace(
+    crdt: &CrdtSyncHub,
+    session: &NvimSessionHandle,
+    workspace_root: &std::path::Path,
+    request_id: u64,
+) {
     match session.read_active_buffer().await {
         Ok(Some(buffer)) => {
             let buffer_id = crdt_buffer_id_for_path(&buffer.path);
@@ -121,6 +134,17 @@ pub async fn seed_crdt_from_open_buffer(
                     }
                 }
                 _ => {}
+            }
+            // Opening a file is the first event in its LSP document lifecycle.
+            // Submit the authoritative CRDT text immediately; insert-mode
+            // changes continue through nvim's on_lines bridge in strict FIFO
+            // order, with no diagnostics polling requirement.
+            if let Ok(authoritative) = crdt.buffers().text(&buffer_id) {
+                crate::language_server::sync_document(
+                    workspace_root,
+                    &buffer.path,
+                    authoritative,
+                );
             }
             match session.attach_buffer_change_events().await {
                 Ok(newly_attached) => {

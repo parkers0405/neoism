@@ -7,8 +7,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use neoism_workspace_daemon::{
-    auth, handshake, nvim::NvimSessionRegistry, persistence, server,
-    workspace::WorkspaceManager,
+    auth, handshake, persistence, server, workspace::WorkspaceManager,
 };
 
 #[derive(Debug, Parser)]
@@ -150,7 +149,6 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         sessions: neoism_workspace_daemon::sessions::SessionRegistry::shared(),
         workspaces: workspaces.clone(),
         pairing_tokens,
-        nvim_sessions: NvimSessionRegistry::new(),
         crdt: neoism_workspace_daemon::crdt::sync::CrdtSyncHub::default(),
         paired_hosts,
     });

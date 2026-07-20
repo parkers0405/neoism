@@ -13,8 +13,7 @@
 //! pre-existing websocket auth path (`?token=` against `NEOISM_DAEMON_TOKEN`)
 //! is unchanged. We document each addition with the route comment above.
 
-use std::collections::{hash_map::DefaultHasher, HashMap};
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf as StdPathBuf;
 
@@ -52,10 +51,6 @@ use crate::files as files_handler;
 use crate::git as git_handler;
 use crate::handshake::{self, PairingTokenStore};
 use crate::hosts::{self, PairedHost, PairedHostStore};
-use crate::nvim::{
-    DiagnosticsFetch, DiagnosticsSubscriptions, NvimError, NvimSessionHandle,
-    NvimSessionRegistry,
-};
 use crate::search::{self as search_handler, SearchRegistry};
 use crate::sessions::SessionRegistry;
 use crate::workspace::{
@@ -71,119 +66,6 @@ use crate::workspace_provision::{
     self, GitWorkspaceRequest, GitWorkspaceResponse, ProvisionError,
 };
 use crate::workspace_snapshot::{self, ApplyReport, WorkspaceSnapshot};
-
-use crate::crdt::crdt_buffer_id_for_path;
-
-/// Seed (or refresh) the daemon-authoritative CRDT replica from nvim's
-/// freshly-opened buffer, then wire the Wave 6C bidirectional cutover
-/// for it.
-///
-/// Strictly additive to the working redraw path: by the time this runs,
-/// the client has already received the nvim grid redraw. We read the
-/// buffer text out of the embedded nvim and open it in the `CrdtSyncHub`,
-/// making the document shareable. `open_buffer` on the hub is idempotent —
-/// re-opening an already-tracked buffer keeps the existing CRDT history
-/// (so this is safe to call on every `OpenBuffer`, including tab switches).
-///
-/// Wave 6C cutover, on top of the 5A seed:
-/// 1. If the authoritative replica already drifted ahead of nvim (remote
-///    clients edited while the buffer was closed / on another tab), the
-///    CRDT wins: replay its text into nvim through the suppressed apply
-///    path so on_lines never echoes the reconcile back into the doc.
-/// 2. Attach the `on_lines` → CRDT bridge (idempotent), after which
-///    every nvim-side edit streams into the hub as a minimal
-///    daemon-origin update and every remote client update is replayed
-///    into nvim by the per-session applier task (see
-///    `NvimSessionRegistry::get_or_spawn`).
-pub async fn seed_crdt_from_open_buffer(
-    crdt: &CrdtSyncHub,
-    session: &NvimSessionHandle,
-    request_id: u64,
-) {
-    let workspace_root = crate::files::workspace_root();
-    seed_crdt_from_open_buffer_in_workspace(crdt, session, &workspace_root, request_id)
-        .await;
-}
-
-/// Root-explicit production variant for sockets that can address a workspace
-/// other than the daemon process's default root.
-pub async fn seed_crdt_from_open_buffer_in_workspace(
-    crdt: &CrdtSyncHub,
-    session: &NvimSessionHandle,
-    workspace_root: &std::path::Path,
-    request_id: u64,
-) {
-    match session.read_active_buffer().await {
-        Ok(Some(buffer)) => {
-            let buffer_id = crdt_buffer_id_for_path(&buffer.path);
-            crdt.open_buffer(buffer_id.clone(), &buffer.text);
-            // Re-open of a tracked buffer: the live CRDT state wins, so
-            // reconcile nvim to it before attaching the change stream.
-            match crdt.buffers().text(&buffer_id) {
-                Ok(authoritative) if authoritative != buffer.text => {
-                    if let Err(err) = session
-                        .apply_authoritative_text(&buffer.path, &authoritative)
-                        .await
-                    {
-                        tracing::warn!(
-                            request_id,
-                            buffer_id = %buffer_id,
-                            error = %err,
-                            "[crdt-trace] failed to reconcile nvim to authoritative CRDT text"
-                        );
-                    }
-                }
-                _ => {}
-            }
-            // Opening a file is the first event in its LSP document lifecycle.
-            // Submit the authoritative CRDT text immediately; insert-mode
-            // changes continue through nvim's on_lines bridge in strict FIFO
-            // order, with no diagnostics polling requirement.
-            if let Ok(authoritative) = crdt.buffers().text(&buffer_id) {
-                crate::language_server::sync_document(
-                    workspace_root,
-                    &buffer.path,
-                    authoritative,
-                );
-            }
-            match session.attach_buffer_change_events().await {
-                Ok(newly_attached) => {
-                    tracing::info!(
-                        request_id,
-                        buffer_id = %buffer_id,
-                        bytes = buffer.text.len(),
-                        newly_attached,
-                        "[crdt-trace] CRDT replica seeded + on_lines bridge attached"
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        request_id,
-                        buffer_id = %buffer_id,
-                        error = %err,
-                        "[crdt-trace] CRDT replica seeded but on_lines attach failed; \
-                         nvim→CRDT streaming disabled for this buffer"
-                    );
-                }
-            }
-        }
-        Ok(None) => {
-            tracing::debug!(
-                request_id,
-                "[crdt-trace] OpenBuffer landed on unnamed buffer; no CRDT seed"
-            );
-        }
-        Err(err) => {
-            // Non-fatal: the redraw path already drove the client's view.
-            // A failed CRDT seed must never break the working editor.
-            tracing::warn!(
-                request_id,
-                error = %err,
-                "[crdt-trace] failed to read buffer for CRDT seed; editor unaffected"
-            );
-        }
-    }
-}
 
 fn resolve_request_workspace_root(
     workspace_root: Option<&str>,
@@ -224,10 +106,6 @@ pub struct AppState {
     /// in this set; with the env var unset the store is consulted but
     /// always degrades to "trust local" (legacy clients still connect).
     pub pairing_tokens: PairingTokenStore,
-    /// Daemon-owned embedded nvim sessions keyed by editor surface id.
-    /// WebSocket tasks subscribe to these shared sessions instead of
-    /// owning private nvim subprocesses.
-    pub nvim_sessions: NvimSessionRegistry,
     /// Daemon-authoritative CRDT sync and presence hub. The hub is
     /// process-wide so every websocket sees the same buffer replicas
     /// and ephemeral peer-presence channel.
@@ -388,7 +266,6 @@ pub fn router_from_registry(sessions: SessionRegistry) -> Router {
         sessions,
         workspaces,
         pairing_tokens,
-        nvim_sessions: NvimSessionRegistry::new(),
         crdt: CrdtSyncHub::default(),
         paired_hosts: PairedHostStore::in_memory(),
     })

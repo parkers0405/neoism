@@ -3,7 +3,7 @@ export type MobileKeyboardContext =
   | "text"
   | "url"
   | "search"
-  /** Multi-line buffer editing (nvim / markdown): Enter is a newline,
+  /** Multi-line buffer editing (markdown / editor): Enter is a newline,
    *  so the iOS return key must say "return", not "send". */
   | "editor";
 
@@ -214,8 +214,8 @@ export class MobileKeyboard {
             : "text",
     );
     // Hint Enter as "go" / "send" on one-line surfaces; buffer editing
-    // (nvim / markdown) inserts newlines, so it keeps the plain return
-    // key.
+    // (markdown / editor) inserts newlines, so it keeps the plain
+    // return key.
     this.capture.setAttribute(
       "enterkeyhint",
       this.currentContext === "search"

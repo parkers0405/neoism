@@ -1,10 +1,10 @@
 # Languages & LSP
 
-Neoism has a **Rust-owned LSP engine** that talks to language servers directly — not through an nvim plugin and not through Mason.nvim. It drives hover, diagnostics, go-to-definition, references, rename, and symbols, and the same engine backs the [[../The Neoism Agent|agent]]'s `lsp` tool.
+Neoism has a **Rust-owned LSP engine** that talks to language servers directly. It drives hover, diagnostics, go-to-definition, references, rename, and symbols, and the same engine backs the [[../The Neoism Agent|agent]]'s `lsp` tool.
 
 ## Two layers
 
-- **Syntax (Treesitter)** — automatic. Open a file and the parser installs itself (see [[Neovim|Managed Neovim]]).
+- **Syntax (Tree-sitter)** — built into the editor, nothing to install. Whole-buffer parsing keeps multi-line strings and comments colored correctly.
 - **Semantics (LSP)** — a one-click install per language server.
 
 ## Supported servers

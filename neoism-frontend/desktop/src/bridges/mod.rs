@@ -2,5 +2,4 @@
 // Each submodule converts between desktop-only types and the shared
 // `neoism-ui` / backend representations.
 pub mod island;
-pub mod translate;
 pub mod utils;

@@ -85,6 +85,10 @@ pub struct Renderer {
     pub finder_search: finder_search::NativeSearchService,
     pub context_menu: context_menu::ContextMenu,
     pub completion_menu: completion_menu::CompletionMenu,
+    /// Native code pane LSP popup state (completion session + hover
+    /// card), fed by `screen/bridges/code/lsp.rs` and drawn by the
+    /// completion-menu / hover-popup sites in `run.rs`.
+    pub code_lsp: crate::screen::bridges::code::lsp::CodeLspUiState,
     pub(super) unfocused_split_opacity: f32,
     pub(super) unfocused_split_fill: Option<ColorArray>,
     pub(super) last_active: Option<NodeId>,
@@ -123,6 +127,9 @@ pub struct Renderer {
     /// line's right cluster. The counter ticks regardless so flipping
     /// the flag on shows a reading within half a second.
     pub status_fps_enabled: bool,
+    /// `[neoism] format-on-save` — the code pane formats via LSP
+    /// before each save (default true).
+    pub code_format_on_save: bool,
     pub fps_counter: fps::FpsCounter,
     pub terminal_block_prompt_animating: bool,
     pub notebook_animating: bool,
@@ -174,11 +181,6 @@ pub struct Renderer {
     /// keyed by the pane's `route_id`. Sits directly below the pane's
     /// `pane_tabs` strip and shows the path of its active tab.
     pub pane_breadcrumbs: rustc_hash::FxHashMap<usize, breadcrumbs::Breadcrumbs>,
-    /// Editor `route_id` of the workspace's primary editor pane —
-    /// the one whose strip is `self.buffer_tabs`. Set when the first
-    /// editor context is created in a workspace; stays pinned across
-    /// splits so we know which pane "owns" the workspace strip.
-    pub primary_editor_route: Option<usize>,
     /// Which strip the active drag belongs to. Set in
     /// `handle_buffer_tabs_click` when a drag is armed; consumed in
     /// `handle_buffer_tabs_drag_move` / `..._release` so updates go
@@ -214,12 +216,6 @@ pub struct Renderer {
     pub lsp_popup: neoism_ui::panels::lsp_popup::LspPopup,
     pub minimap: minimap::Minimap,
     pub yank_flash: yank_flash::YankFlash,
-    /// Animated cursorline overlay — Rust-side replacement for nvim's
-    /// built-in `cursorline` (disabled in the nvim startup so we own
-    /// the highlight). Slides between rows on cursor move instead of
-    /// snapping; held-arrow scroll then reads as a smooth glide rather
-    /// than a per-row "spaz".
-    pub cursorline_overlay: neoism_ui::panels::cursorline_overlay::CursorlineOverlay,
     pub modal: modal::UniversalModal,
     pub git_diff_panel: git_diff_panel::GitDiffPanel,
     pub notifications: notifications::Notifications,
@@ -264,16 +260,18 @@ pub struct Renderer {
     /// channels and update pane status without sweeping every grid for
     /// transient state.
     pub install_tracker: crate::screen::bridges::extensions::InstallTracker,
-    /// Cache of bundled+Mason `ExtensionManifest`s keyed by id, populated
-    /// by `bridges/extensions.rs::load_bundled_extension_entries`. Lets
-    /// the install/uninstall dispatcher re-resolve a full manifest from
-    /// the panel's `ExtensionEntry` id without re-parsing the registry.
+    /// Cache of bundled + catalog `ExtensionManifest`s keyed by id,
+    /// populated by `bridges/extensions.rs::load_bundled_extension_entries`.
+    /// Lets the install/uninstall dispatcher re-resolve a full manifest
+    /// from the panel's `ExtensionEntry` id without re-parsing the
+    /// registry.
     pub bundled_manifests:
         std::collections::BTreeMap<String, neoism_extensions::ExtensionManifest>,
-    /// One-shot guard preventing repeated Mason snapshot fetches. Set
-    /// the first time the Extensions panel opens; the seeded LSP rows
-    /// land on the next open if the snapshot wasn't already cached.
-    pub mason_seeded: bool,
+    /// One-shot guard preventing repeated package-catalog snapshot
+    /// fetches. Set the first time the Extensions panel opens; the
+    /// language-server rows' install plans resolve once the snapshot
+    /// is cached.
+    pub catalog_seeded: bool,
 }
 
 pub(super) const AGENT_DETECT_INTERVAL: std::time::Duration =
@@ -380,6 +378,7 @@ impl Renderer {
             finder_search: finder_search::NativeSearchService::new(),
             context_menu: context_menu::ContextMenu::new(),
             completion_menu: completion_menu::CompletionMenu::new(),
+            code_lsp: Default::default(),
             named_colors,
             dynamic_background,
             search: search::SearchOverlay::default(),
@@ -390,6 +389,7 @@ impl Renderer {
             trail_cursor_enabled: config.effects.trail_cursor,
             trail_cursor: trail_cursor::TrailCursor::new(),
             status_fps_enabled: config.neoism.status_fps,
+            code_format_on_save: config.neoism.format_on_save,
             fps_counter: fps::FpsCounter::default(),
             terminal_block_prompt_animating: false,
             notebook_animating: false,
@@ -404,7 +404,6 @@ impl Renderer {
             buffer_tabs: buffer_tabs::BufferTabs::new(),
             pane_tabs: rustc_hash::FxHashMap::default(),
             pane_breadcrumbs: rustc_hash::FxHashMap::default(),
-            primary_editor_route: None,
             drag_source: None,
             drag_drop_preview: None,
             breadcrumbs: breadcrumbs::Breadcrumbs::new(),
@@ -416,8 +415,6 @@ impl Renderer {
             lsp_popup: neoism_ui::panels::lsp_popup::LspPopup::new(),
             minimap: minimap::Minimap::new(),
             yank_flash: yank_flash::YankFlash::new(),
-            cursorline_overlay:
-                neoism_ui::panels::cursorline_overlay::CursorlineOverlay::new(),
             modal: modal::UniversalModal::new(),
             git_diff_panel: {
                 let mut p = git_diff_panel::GitDiffPanel::new();
@@ -447,7 +444,7 @@ impl Renderer {
             install_tracker: crate::screen::bridges::extensions::InstallTracker::default(
             ),
             bundled_manifests: std::collections::BTreeMap::new(),
-            mason_seeded: false,
+            catalog_seeded: false,
         }
     }
 

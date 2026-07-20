@@ -28,6 +28,10 @@ impl AcpUsage {
         let Some(usage) = value.get("usage") else {
             return;
         };
+        self.merge_usage(usage);
+    }
+
+    pub(super) fn merge_usage(&mut self, usage: &Value) {
         self.total_tokens = usage
             .get("totalTokens")
             .or_else(|| usage.get("total_tokens"))
@@ -61,6 +65,31 @@ impl AcpUsage {
             .or_else(|| usage.get("cache_write_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(self.cache_write_tokens);
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn merges_acp_usage_update_payload() {
+        let mut usage = AcpUsage::default();
+        usage.merge_usage(&json!({
+            "totalTokens": 42,
+            "inputTokens": 30,
+            "outputTokens": 7,
+            "thoughtTokens": 3,
+            "cachedReadTokens": 2,
+            "cachedWriteTokens": 0
+        }));
+
+        assert_eq!(usage.total_tokens, Some(42));
+        assert_eq!(usage.input_tokens, 30);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.reasoning_tokens, 3);
+        assert_eq!(usage.cache_read_tokens, 2);
+        assert_eq!(usage.cache_write_tokens, 0);
     }
 }
 

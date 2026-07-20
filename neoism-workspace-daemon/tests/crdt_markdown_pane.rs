@@ -6,22 +6,18 @@
 //!
 //! - a markdown-pane edit reaches the authoritative doc as ONE minimal
 //!   client-origin op and broadcasts exactly once (no daemon echo),
-//! - a daemon-origin (nvim `on_lines`) change lands in the pane as an
-//!   incremental splice with the caret transformed through it,
-//! - a remote-applied change is never re-emitted as a local op,
-//! - (gated on `nvim`) markdown-pane edits and nvim edits converge on
-//!   the same document bidirectionally.
+//! - a daemon-origin lines change lands in the pane as an incremental
+//!   splice with the caret transformed through it,
+//! - a remote-applied change is never re-emitted as a local op.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use neoism_protocol::crdt::{CrdtClientMessage, CrdtServerMessage, CrdtSyncEnvelope};
 use neoism_ui::editor::crdt::CrdtTextUpdate;
 use neoism_ui::editor::markdown::doc_sync::{lines_to_text, MarkdownDocBinding};
 use neoism_ui::editor::markdown::MarkdownPane;
 use neoism_workspace_daemon::crdt::sync::CrdtSyncHub;
-use neoism_workspace_daemon::crdt::{crdt_buffer_id_for_path, CrdtBufferRegistry};
-use neoism_workspace_daemon::nvim::NvimSessionRegistry;
+use neoism_workspace_daemon::crdt::CrdtBufferRegistry;
 
 fn drain_syncs(
     rx: &mut tokio::sync::broadcast::Receiver<CrdtServerMessage>,
@@ -311,156 +307,4 @@ fn open_buffer_is_idempotent_and_existing_doc_wins_over_disk_text() {
     assert_eq!(lines_to_text(&pane_b.lines), "base plus edits");
     assert_eq!(binding_b.doc_text(), "base plus edits");
     assert_eq!(hub.buffers().text(buffer_id).unwrap(), "base plus edits");
-}
-
-// ---------------------------------------------------------------------
-// Full markdown-pane ↔ nvim convergence through a real embedded nvim
-// (gated: skipped when the nvim binary is missing).
-// ---------------------------------------------------------------------
-
-async fn read_nvim_text(
-    handle: &neoism_workspace_daemon::nvim::NvimSessionHandle,
-) -> Option<String> {
-    handle
-        .read_active_buffer()
-        .await
-        .ok()
-        .flatten()
-        .map(|buffer| buffer.text)
-}
-
-#[tokio::test]
-async fn markdown_pane_and_nvim_converge_on_one_document() {
-    if std::process::Command::new("nvim")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("nvim not installed; skipping markdown↔nvim round trip");
-        return;
-    }
-
-    let work = tempfile::TempDir::new().unwrap();
-    let file = work.path().join("shared.md");
-    std::fs::write(&file, "# Title\n\nalpha\nbravo\n").unwrap();
-    let abs = file.canonicalize().unwrap();
-
-    let hub = CrdtSyncHub::new(CrdtBufferRegistry::with_daemon_client_id(914));
-    let registry = NvimSessionRegistry::new();
-    let handle = registry
-        .get_or_spawn("test:md-bidi".into(), &hub)
-        .await
-        .expect("spawn nvim");
-
-    handle
-        .handle(neoism_protocol::editor::EditorClientMessage::OpenBuffer {
-            path: PathBuf::from(&abs),
-            line: None,
-            character: None,
-            surface_id: Some("test:md-bidi".into()),
-        })
-        .await
-        .expect("open buffer");
-    neoism_workspace_daemon::server::seed_crdt_from_open_buffer(&hub, &handle, 0).await;
-
-    let buffer_id = crdt_buffer_id_for_path(&abs);
-    let seed_text = hub.buffers().text(&buffer_id).unwrap();
-    assert_eq!(seed_text, "# Title\n\nalpha\nbravo");
-
-    let mut rx = hub.subscribe();
-    // The markdown pane joins the SAME document (idempotent OpenBuffer).
-    let (mut binding, mut pane) = open_markdown_client(&hub, &buffer_id, 71, &seed_text);
-
-    // ---- markdown pane → nvim ----
-    pane.cursor_line = 2;
-    pane.cursor_col = 5;
-    pane.insert_text(" FROM-MD-PANE");
-    let update = binding.flush_local(&pane).expect("pane edit emits op");
-    hub.handle_client_message(apply_sync(&buffer_id, update));
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if read_nvim_text(&handle)
-            .await
-            .is_some_and(|text| text.contains("FROM-MD-PANE"))
-        {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "markdown-pane edit never reached the nvim buffer; nvim text = {:?}",
-            read_nvim_text(&handle).await
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    // Echo guard across the full loop: applying the pane's op into nvim
-    // must not re-broadcast it as a daemon-origin update.
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    let syncs = drain_syncs(&mut rx);
-    assert_eq!(
-        syncs.iter().filter(|s| s.origin_client_id == 71).count(),
-        1,
-        "the pane edit broadcasts exactly once: {syncs:?}"
-    );
-    assert!(
-        !syncs
-            .iter()
-            .any(|s| s.origin_client_id == hub.daemon_client_id()),
-        "echo loop: nvim re-emitted the pane's edit as daemon-origin: {syncs:?}"
-    );
-
-    // ---- nvim → markdown pane ----
-    handle
-        .handle(neoism_protocol::editor::EditorClientMessage::SendKeys {
-            bytes: b"GoFROM-NVIM<Esc>".to_vec(),
-            surface_id: Some("test:md-bidi".into()),
-        })
-        .await
-        .expect("send keys");
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if hub
-            .buffers()
-            .text(&buffer_id)
-            .unwrap_or_default()
-            .contains("FROM-NVIM")
-        {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "nvim edit never reached the doc; doc = {:?}",
-            hub.buffers().text(&buffer_id)
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // The pane converges from broadcast updates alone (skipping its own
-    // origin), with no fresh ops emitted.
-    for envelope in drain_syncs(&mut rx) {
-        binding
-            .apply_remote(envelope.origin_client_id, &envelope.update_v1, &mut pane)
-            .expect("remote applies");
-    }
-    let doc = hub.buffers().text(&buffer_id).unwrap();
-    assert!(doc.contains("FROM-MD-PANE") && doc.contains("FROM-NVIM"));
-    assert_eq!(
-        lines_to_text(&pane.lines),
-        doc,
-        "markdown pane and the authoritative doc agree after edits from both sides"
-    );
-    assert_eq!(
-        read_nvim_text(&handle).await.as_deref(),
-        Some(doc.as_str()),
-        "nvim and the authoritative doc agree after edits from both sides"
-    );
-    assert!(binding.flush_local(&pane).is_none(), "no echo op pending");
-
-    let _ = handle
-        .handle(neoism_protocol::editor::EditorClientMessage::Close)
-        .await;
-    registry.remove(handle.key()).await;
 }

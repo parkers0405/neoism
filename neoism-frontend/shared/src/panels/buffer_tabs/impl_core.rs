@@ -337,11 +337,11 @@ impl<A> BufferTabs<A> {
 
     /// Resolve the active close command before host-side IO runs.
     ///
-    /// Desktop can have the nvim editor focused while the strip still points at
+    /// Desktop can have the editor focused while the strip still points at
     /// a terminal tab, usually after a route transition. In that case closing
     /// should target the remembered editor buffer when possible, then the first
     /// non-terminal tab, and only ignore if the strip truly has no closeable
-    /// editor/agent/scratch/markdown target. Web uses the same state rule for
+    /// editor/agent/markdown target. Web uses the same state rule for
     /// tab close commands before replaying PTY/editor content.
     pub fn active_close_plan(
         &mut self,
@@ -415,9 +415,7 @@ impl<A> BufferTabs<A> {
             .is_some_and(|target| {
                 matches!(
                     target,
-                    BufferTabTarget::File(_)
-                        | BufferTabTarget::Markdown(_)
-                        | BufferTabTarget::Scratch(_)
+                    BufferTabTarget::File(_) | BufferTabTarget::Markdown(_)
                 )
             })
     }
@@ -426,7 +424,7 @@ impl<A> BufferTabs<A> {
         self.tabs.iter().any(|tab| tab.modified)
     }
 
-    /// Modified tabs whose buffer lives SERVER-side (nvim files) —
+    /// Modified tabs whose buffer lives SERVER-side (code files) —
     /// the only ones a server switch would actually lose. Markdown
     /// panes are client-owned: their unsaved lines ride along across
     /// a connection swap, so counting them in the switch gate traps
@@ -562,7 +560,6 @@ impl<A> BufferTabs<A> {
                 modified: false,
                 path: None,
                 markdown: false,
-                scratch_id: None,
                 terminal_route_id: None,
                 neoism_agent_route_id: None,
                 chrome_page: None,
@@ -592,7 +589,6 @@ impl<A> BufferTabs<A> {
             modified: false,
             path: None,
             markdown: false,
-            scratch_id: None,
             terminal_route_id: Some(route_id),
             neoism_agent_route_id: None,
             chrome_page: None,
@@ -631,7 +627,6 @@ impl<A> BufferTabs<A> {
             modified: false,
             path: None,
             markdown: false,
-            scratch_id: None,
             terminal_route_id: None,
             neoism_agent_route_id: Some(route_id),
             chrome_page: None,
@@ -668,7 +663,6 @@ impl<A> BufferTabs<A> {
             modified: false,
             path: None,
             markdown: false,
-            scratch_id: None,
             terminal_route_id: None,
             neoism_agent_route_id: None,
             chrome_page: Some(ChromePageRef { kind, route_id }),
@@ -743,7 +737,6 @@ impl<A> BufferTabs<A> {
                 modified: false,
                 path: Some(path),
                 markdown: false,
-                scratch_id: None,
                 terminal_route_id: None,
                 neoism_agent_route_id: None,
                 chrome_page: None,
@@ -775,7 +768,6 @@ impl<A> BufferTabs<A> {
                 modified: false,
                 path: Some(path),
                 markdown: true,
-                scratch_id: None,
                 terminal_route_id: None,
                 neoism_agent_route_id: None,
                 chrome_page: None,
@@ -788,41 +780,6 @@ impl<A> BufferTabs<A> {
         };
         self.pending_ensure_active = true;
         ix
-    }
-
-    pub fn open_scratch(&mut self, scratch_id: usize) -> usize {
-        if let Some(ix) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.scratch_id == Some(scratch_id))
-        {
-            self.active = ix;
-            self.pending_ensure_active = true;
-            return ix;
-        }
-
-        let number = self
-            .tabs
-            .iter()
-            .filter(|tab| tab.scratch_id.is_some())
-            .count()
-            + 1;
-        self.tabs.push(BufferTab {
-            title: format!("Untitled {number}"),
-            modified: false,
-            path: None,
-            markdown: false,
-            scratch_id: Some(scratch_id),
-            terminal_route_id: None,
-            neoism_agent_route_id: None,
-            chrome_page: None,
-            agent_kind: None,
-        });
-        self.active = self.tabs.len() - 1;
-        self.visible = true;
-        self.layout.clear();
-        self.pending_ensure_active = true;
-        self.active
     }
 
     /// Close the tab at `ix`. Returns `(removed_target, new_active_target)`.

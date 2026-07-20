@@ -152,6 +152,14 @@ impl LspPopup {
         Self::default()
     }
 
+    /// Rect for the host's text-occlusion registry.
+    pub fn occlusion_rect(&self) -> Option<[f32; 4]> {
+        if !self.is_visible() || self.last_rect[2] <= 0.0 {
+            return None;
+        }
+        Some(self.last_rect)
+    }
+
     pub fn is_visible(&self) -> bool {
         self.visible
     }

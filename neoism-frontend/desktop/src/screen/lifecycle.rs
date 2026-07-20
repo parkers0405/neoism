@@ -15,32 +15,6 @@ mod key_bindings;
 mod modal;
 mod splash_island;
 
-/// Compact, readable label for an LSP location row in the picker: the
-/// file's last two path components plus a 1-based line number (e.g.
-/// `src/main.rs:42`). Keeps rows scannable without the full absolute
-/// path blowing out the modal width.
-fn lsp_location_label(uri: &str, line: u32) -> String {
-    let path = uri.strip_prefix("file://").unwrap_or(uri);
-    let mut parts = path.rsplit('/');
-    let last = parts.next().unwrap_or(path);
-    let label = match parts.next() {
-        Some(parent) if !parent.is_empty() => format!("{parent}/{last}"),
-        _ => last.to_string(),
-    };
-    format!("{label}:{}", line.saturating_add(1))
-}
-
-/// One-line summary shown under an LSP picker, noting truncation when the
-/// result set exceeds the row cap. `noun` is singularized ("symbol",
-/// "location") and pluralized here.
-fn picker_summary(noun: &str, total: usize, cap: usize) -> String {
-    if total > cap {
-        format!("{total} {noun}s · showing first {cap}")
-    } else {
-        format!("{total} {noun}{}", if total == 1 { "" } else { "s" })
-    }
-}
-
 /// Map the host-owned [`neoism_ui::widgets::modal::ModalAction`] enum
 /// onto the shared-policy [`neoism_ui::chrome_policy::ModalActionTag`].
 ///
@@ -60,7 +34,6 @@ fn modal_action_policy_tag(
         A::NotesOpenGraph | A::NotesOpenCreateMenu => Tag::Close,
         A::InstallLsp { .. } => Tag::InstallLsp,
         A::InstallPythonKernel => Tag::InstallPythonKernel,
-        A::InstallTreesitter { .. } => Tag::InstallTreesitter,
         A::ApplyTheme { .. } => Tag::ApplyTheme,
         A::ApplyShaderOverlay { .. } => Tag::ApplyShaderOverlay,
         A::ApplyMashupPack { .. } => Tag::ApplyMashupPack,

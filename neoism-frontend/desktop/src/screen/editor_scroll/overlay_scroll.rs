@@ -238,93 +238,6 @@ impl Screen<'_> {
         false
     }
 
-    pub fn handle_completion_menu_wheel(
-        &mut self,
-        delta: &neoism_window::event::MouseScrollDelta,
-    ) -> (bool, bool) {
-        let input_overlay_active = self.renderer.finder.is_enabled()
-            || self.renderer.command_palette.is_enabled()
-            || self.renderer.modal.owns_editor_focus();
-        let window_size = self.sugarloaf.window_size();
-        let scale_factor = self.sugarloaf.scale_factor();
-        let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
-        // Build the popup/anchor snapshot the shared panel expects.
-        // Mirrors the host translation in `host/run.rs` so the hit-test
-        // reads the same geometry the popup was rendered from.
-        let completion_anchor = {
-            let grid = self.context_manager.current_grid();
-            let scaled_margin = grid.get_scaled_margin();
-            if let Some(item) = grid.current_item() {
-                let dim = item.val.dimension;
-                neoism_ui::panels::completion_menu::EditorAnchor {
-                    cell_w: dim.dimension.width,
-                    cell_h: dim.dimension.height,
-                    panel_left_phys: item.layout_rect[0] + scaled_margin.left,
-                    panel_top_phys: item.layout_rect[1] + scaled_margin.top,
-                    panel_lines: dim.lines as u32,
-                    editor_focused: item.val.editor.is_some(),
-                }
-            } else {
-                neoism_ui::panels::completion_menu::EditorAnchor {
-                    cell_w: 1.0,
-                    cell_h: 1.0,
-                    panel_left_phys: 0.0,
-                    panel_top_phys: 0.0,
-                    panel_lines: 0,
-                    editor_focused: false,
-                }
-            }
-        };
-        let completion_popup = self
-            .context_manager
-            .current_grid()
-            .current_item()
-            .and_then(|item| item.val.editor_popup_menu.as_ref())
-            .map(|native| neoism_ui::editor_snapshot::PopupMenu {
-                items: native
-                    .items
-                    .iter()
-                    .map(|it| neoism_ui::editor_snapshot::PopupMenuItem {
-                        word: it.word.clone(),
-                        kind: it.kind.clone(),
-                        menu: it.menu.clone(),
-                        info: it.info.clone(),
-                    })
-                    .collect(),
-                selected: if native.selected < 0 {
-                    None
-                } else {
-                    Some(native.selected as usize)
-                },
-                anchor_row: native.row as u32,
-                anchor_col: native.col as u32,
-                grid: native.grid,
-                max_word_chars: native.max_word_chars,
-            });
-        if !self.renderer.completion_menu.contains_point(
-            completion_popup.as_ref(),
-            &completion_anchor,
-            (window_size.width, window_size.height, scale_factor),
-            input_overlay_active,
-            mouse_x,
-            mouse_y,
-        ) {
-            return (false, false);
-        }
-
-        let shared_delta = shared_scroll_delta(delta);
-        let steps = self.renderer.completion_menu.wheel_steps(&shared_delta);
-
-        if steps != 0 {
-            let key = if steps > 0 { "<C-n>" } else { "<C-p>" };
-            self.send_to_editor(key.repeat(steps.unsigned_abs() as usize));
-            self.mark_dirty();
-            return (true, true);
-        }
-
-        (true, false)
-    }
-
     pub fn handle_diagnostics_click(&mut self, clipboard: &mut Clipboard) -> bool {
         let scale_factor = self.sugarloaf.scale_factor();
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
@@ -451,20 +364,15 @@ impl Screen<'_> {
             .diagnostic_pill_at(mouse_x, mouse_y)
         {
             let items = self.collect_popup_items(pill);
-            let total_count = self
-                .context_manager
-                .current()
-                .editor_diagnostics
-                .as_ref()
-                .map(|diagnostics| match pill {
-                    neoism_ui::panels::status_line::DiagnosticPill::Error => {
-                        diagnostics.error
-                    }
-                    neoism_ui::panels::status_line::DiagnosticPill::Warn => {
-                        diagnostics.warn
-                    }
-                })
-                .unwrap_or(0);
+            let aggregate = self.renderer.status_line.info().diagnostics;
+            let total_count = match pill {
+                neoism_ui::panels::status_line::DiagnosticPill::Error => {
+                    aggregate.error as u64
+                }
+                neoism_ui::panels::status_line::DiagnosticPill::Warn => {
+                    aggregate.warn as u64
+                }
+            };
             if let Some((ax, ay)) = self.renderer.status_line.diagnostic_pill_anchor(pill)
             {
                 self.renderer.diagnostics_popup.open_with_total(
@@ -487,115 +395,32 @@ impl Screen<'_> {
     /// the per-buffer LSP set changes between buffers and a stale list
     /// would mislead.
     pub(crate) fn populate_lsp_popup_for_current_buffer(&mut self) {
-        use neoism_ui::panels::lsp_popup::{LspServerRow, LspServerState};
-        let current = self.context_manager.current();
-        // Prefer the comprehensive snapshot lua emits on BufEnter — it
-        // includes every server registered for the filetype, not just
-        // the ones that successfully attached. Falls back to the
-        // running `attached_lsps` tally only when no snapshot has
-        // landed yet (first frame after open).
-        let diagnostics = current.editor_diagnostics.as_ref();
-        let aggregate_diagnostics = self.renderer.status_line.info().diagnostics;
-        let single_server = current
-            .lsp_snapshot
+        // Server rows come from the code LSP bridge's worker cache
+        // (populated after each document sync).
+        let rows = self
+            .context_manager
+            .current()
+            .code
             .as_ref()
-            .map(|snapshot| snapshot.servers.len() == 1)
-            .unwrap_or_else(|| current.attached_lsps.len() == 1);
-        let servers: Vec<LspServerRow> =
-            if let Some(snapshot) = current.lsp_snapshot.as_ref() {
-                snapshot
-                    .servers
-                    .iter()
-                    .map(|entry| {
-                        let mut row = LspServerRow {
-                            name: entry.name.clone(),
-                            binary: if entry.binary.is_empty() {
-                                None
-                            } else {
-                                Some(entry.binary.clone())
-                            },
-                            filetype: if entry.filetype.is_empty() {
-                                None
-                            } else {
-                                Some(entry.filetype.clone())
-                            },
-                            state: LspServerState::from_str(&entry.state),
-                            message: entry.message.clone(),
-                            level: entry.level.clone(),
-                            source: entry.source.clone(),
-                            diagnostics: diagnostic_counts_for_lsp(
-                                diagnostics,
-                                &entry.name,
-                                single_server,
-                                aggregate_diagnostics,
-                            ),
-                        };
-                        // If lua didn't attach a message but we
-                        // captured a vim.notify later for this server,
-                        // use the captured one (latest wins).
-                        if let Some(latest) = current.lsp_messages.get(&entry.name) {
-                            row.message = Some(latest.text.clone());
-                            row.level = Some(latest.level.clone());
-                            if latest.level == "error" {
-                                row.state = LspServerState::Errored;
-                            }
-                        }
-                        row
-                    })
-                    .collect()
-            } else {
-                current
-                    .attached_lsps
-                    .iter()
-                    .map(|notif| {
-                        let name = notif
-                            .name
-                            .clone()
-                            .or_else(|| notif.binary.clone())
-                            .unwrap_or_else(|| "(unknown)".to_string());
-                        let latest = current.lsp_messages.get(&name).cloned();
-                        LspServerRow {
-                            diagnostics: diagnostic_counts_for_lsp(
-                                diagnostics,
-                                &name,
-                                single_server,
-                                aggregate_diagnostics,
-                            ),
-                            name,
-                            binary: notif.binary.clone(),
-                            filetype: notif.filetype.clone(),
-                            state: LspServerState::Active,
-                            message: latest.as_ref().map(|m| m.text.clone()),
-                            level: latest.as_ref().map(|m| m.level.clone()),
-                            source: None,
-                        }
-                    })
-                    .collect()
-            };
-        self.renderer.lsp_popup.set_servers(servers);
-        if std::env::var_os("NEOISM_LSP_LOG").is_some() {
-            let rows = self.renderer.lsp_popup.server_count();
-            tracing::info!(
-                target: "neoism::lsp",
-                rows,
-                source = if current.lsp_snapshot.is_some() { "snapshot" } else { "attached_fallback" },
-                "lsp popup rows"
-            );
-        }
+            .map(|code| self.code_lsp_server_rows(&code.path))
+            .unwrap_or_default();
+        self.renderer.lsp_popup.set_servers(rows);
         self.renderer
             .lsp_popup
             .set_status(self.renderer.status_line.info().lsp_status);
         self.renderer
             .lsp_popup
             .set_diagnostics(self.renderer.status_line.info().diagnostics);
-        // Header label: prefer the active file's filename for clarity;
-        // fall back to the status_line's primary label.
-        let label = current
-            .editor
+        let label = self
+            .context_manager
+            .current()
+            .code
             .as_ref()
-            .and_then(|_| current.editor_path.clone())
-            .as_ref()
-            .and_then(|path| path.file_name().map(|s| s.to_string_lossy().into_owned()))
+            .and_then(|pane| {
+                pane.path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
             .or_else(|| {
                 let info = self.renderer.status_line.info();
                 if info.primary.is_empty() {

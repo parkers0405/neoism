@@ -185,7 +185,7 @@ impl<A> AgentIconProvider<A> for NoopAgentIcons<A> {
 
 // ── BufferTab / BufferTabTarget ────────────────────────────────────
 
-/// One row in the strip. Identity is whichever of `path`, `scratch_id`,
+/// One row in the strip. Identity is whichever of `path`,
 /// `neoism_agent_route_id`, or `terminal_route_id` is set — see
 /// `target()` for resolution order.
 #[derive(Clone, Debug)]
@@ -193,19 +193,14 @@ pub struct BufferTab<A> {
     pub title: String,
     pub modified: bool,
     /// Backing file path. Tabs created from a tree click carry their
-    /// path so a click on the tab can re-issue `:edit <path>` (which
-    /// switches to the existing buffer in nvim).
+    /// path so a click on the tab can re-activate the existing buffer.
     pub path: Option<PathBuf>,
     /// Rust-rendered markdown document tab. Uses `path` as its backing
-    /// file but activates a MarkdownPane instead of nvim.
+    /// file but activates a MarkdownPane instead of the code editor.
     pub markdown: bool,
-    /// Rust-owned unnamed nvim buffer created by `:tabnew` / `:enew`.
-    /// Kept separate from `path` because `path == None` already
-    /// identifies terminal tabs.
-    pub scratch_id: Option<usize>,
     /// Backing terminal route. `None` with `path == None` is the root
     /// workspace terminal; `Some(route)` is an extra workspace-local
-    /// terminal tab stacked beside nvim.
+    /// terminal tab stacked beside the editor.
     pub terminal_route_id: Option<usize>,
     /// Rust-rendered Neoism agent route. This is a native surface, not
     /// a PTY-backed agent CLI.
@@ -259,7 +254,6 @@ pub enum BufferTabTarget {
     Markdown(PathBuf),
     NeoismAgent(usize),
     ChromePage(ChromePageRef),
-    Scratch(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -362,7 +356,7 @@ fn reorder_tab_policy_result(
 /// Shared tab-strip operation policy used by native and web hosts.
 ///
 /// The host still owns side effects (closing PTYs, replaying terminal
-/// buffers, opening nvim files), but selection, movement, and removal
+/// buffers, opening code files), but selection, movement, and removal
 /// bookkeeping should all flow through this policy so desktop and web
 /// agree on edge cases.
 pub fn apply_buffer_tab_policy(
@@ -452,13 +446,12 @@ impl<A> BufferTab<A> {
                 Some(BufferTabTarget::File(path))
             }
         } else {
-            self.scratch_id.map(BufferTabTarget::Scratch)
+            None
         }
     }
 
     pub fn is_terminal(&self) -> bool {
         self.path.is_none()
-            && self.scratch_id.is_none()
             && self.neoism_agent_route_id.is_none()
             && self.chrome_page.is_none()
     }
@@ -470,7 +463,7 @@ impl<A> BufferTab<A> {
 /// map after the active buffer tab changes (activate/close/move).
 ///
 /// The desktop fork keeps a `BTreeMap<workspace_id, PathBuf>` of the
-/// last path nvim was pointed at so chrome (file tree highlight,
+/// last path the editor was pointed at so chrome (file tree highlight,
 /// breadcrumbs, search-bar pre-fill) can repaint independently of the
 /// PTY event loop. Web has the same need. Routing the decision through
 /// this enum keeps the "which target keeps a path; which target wipes
@@ -480,8 +473,8 @@ impl<A> BufferTab<A> {
 pub enum WorkspaceActivePathUpdate {
     /// Insert/overwrite the workspace's remembered path.
     Insert(PathBuf),
-    /// Wipe the workspace's remembered path (terminal-only tab,
-    /// scratch buffer, or no editor target at all).
+    /// Wipe the workspace's remembered path (terminal-only tab or no
+    /// editor target at all).
     Remove,
     /// Leave the workspace map untouched — e.g. there's no active
     /// workspace id yet so the host has nothing to update.
@@ -490,9 +483,9 @@ pub enum WorkspaceActivePathUpdate {
 
 impl WorkspaceActivePathUpdate {
     /// Path that should be passed to `guard_workspace_buf_enter` so the
-    /// host suppresses spurious nvim `BufEnter` echoes for the upcoming
+    /// host suppresses spurious buffer-enter echoes for the upcoming
     /// activation. Only File/Markdown targets surface as a Some(path);
-    /// scratch/agent/terminal flows return None.
+    /// agent/terminal flows return None.
     pub fn buf_enter_guard(&self) -> Option<PathBuf> {
         match self {
             WorkspaceActivePathUpdate::Insert(path) => Some(path.clone()),
@@ -506,7 +499,7 @@ impl WorkspaceActivePathUpdate {
 ///
 /// File and Markdown targets remember their path so the editor chrome
 /// (file tree highlight, breadcrumbs) can rehydrate when the workspace
-/// is refocused. Scratch buffers and Neoism agent tabs clear the entry
+/// is refocused. Neoism agent and chrome-page tabs clear the entry
 /// because they don't correspond to a filesystem path.
 pub fn workspace_active_path_for_target(
     target: Option<&BufferTabTarget>,
@@ -517,7 +510,6 @@ pub fn workspace_active_path_for_target(
         }
         Some(BufferTabTarget::NeoismAgent(_))
         | Some(BufferTabTarget::ChromePage(_))
-        | Some(BufferTabTarget::Scratch(_))
         | None => WorkspaceActivePathUpdate::Remove,
     }
 }
@@ -552,60 +544,18 @@ pub fn buffer_tab_target_label(target: Option<&BufferTabTarget>) -> String {
                 page.route_id
             )
         }
-        Some(BufferTabTarget::Scratch(id)) => format!("scratch:{id}"),
         None => "<none>".to_string(),
     }
 }
 
 // ── Cross-strip drag / close policy ────────────────────────────────
 //
-// The desktop fork's `bwipeout_in_strip`, `reinsert_tab_into_strip`,
-// and `tear_out_file_tab_to_pane` each fork on (workspace vs pane) and
+// The desktop fork's `reinsert_tab_into_strip` and
+// `tear_out_file_tab_to_pane` each fork on (workspace vs pane) and
 // (primary vs lookup) inline. Lifting the decision part here lets web
 // reuse the same rules and lets these paths be unit-tested without
-// spinning up a host. The host still owns the actual IO (nvim
-// commands, BufferTabs mutations, Sugarloaf side effects).
-
-/// Routing decision for a buffer-close `:bwipeout` triggered from a
-/// strip. The host translates the result into the appropriate
-/// nvim-command send.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BwipeoutSendTarget {
-    /// Send the command to a specific editor route. The host calls
-    /// `send_editor_command_to_route(route, cmd)`.
-    Route(usize),
-    /// Send the command via the renderer's raw editor channel. Used
-    /// only on the workspace strip when there is no pinned primary
-    /// editor route yet.
-    Raw,
-    /// No editor route owns the buffer in that strip — nothing to
-    /// send. Pane strips with no editor context land here.
-    None,
-}
-
-/// Decide which editor route a `:bwipeout` should target for the
-/// given strip.
-///
-/// `primary_editor_route` is the workspace's pinned primary editor
-/// route (`Some` once any split has been opened). `pane_editor_route`
-/// is the host's lookup of the editor route attached to a pane strip
-/// (`None` if the pane is terminal-only or the strip is unknown).
-pub fn bwipeout_send_target(
-    source: StripKey,
-    primary_editor_route: Option<usize>,
-    pane_editor_route: Option<usize>,
-) -> BwipeoutSendTarget {
-    match source {
-        StripKey::Workspace => match primary_editor_route {
-            Some(route) => BwipeoutSendTarget::Route(route),
-            None => BwipeoutSendTarget::Raw,
-        },
-        StripKey::Pane(_) => match pane_editor_route {
-            Some(route) => BwipeoutSendTarget::Route(route),
-            None => BwipeoutSendTarget::None,
-        },
-    }
-}
+// spinning up a host. The host still owns the actual IO (BufferTabs
+// mutations, Sugarloaf side effects).
 
 /// What the host should re-open in the strip when a tab tear-out
 /// fails and the dragged tab needs to be restored.
@@ -719,7 +669,7 @@ pub enum TabDragReleaseKind {
     /// tear-out / move routines (preserves markdown state).
     Markdown,
     /// Tab represents a plain file buffer — host uses the file
-    /// tear-out / move routines (nvim bwipeout + open in dest).
+    /// tear-out / move routines (close in source + open in dest).
     File,
     /// Tab represents an agent surface — host uses the agent
     /// tear-out / move routines (preserves PTY/session).

@@ -28,7 +28,6 @@ pub mod status_line;
 
 pub mod breadcrumbs;
 pub mod completion_menu;
-pub mod cursorline_overlay;
 pub mod custom_cursor;
 pub mod editor_scroll;
 pub mod git_branch;

@@ -33,7 +33,6 @@ pub(crate) async fn session_upgrade(
                 let workspaces = state.workspaces.clone();
                 let registry = state.sessions.clone();
                 let pairing_tokens = state.pairing_tokens.clone();
-                let nvim_sessions = state.nvim_sessions.clone();
                 let crdt = state.crdt.clone();
                 return ws.on_upgrade(move |socket| async move {
                     let output_rx = registry.subscribe();
@@ -46,7 +45,6 @@ pub(crate) async fn session_upgrade(
                         Some(peer_ip),
                         workspaces,
                         pairing_tokens,
-                        nvim_sessions,
                         crdt,
                     )
                     .await;
@@ -82,7 +80,6 @@ pub(crate) async fn session_upgrade(
     let workspaces = state.workspaces.clone();
     let registry = state.sessions.clone();
     let pairing_tokens = state.pairing_tokens.clone();
-    let nvim_sessions = state.nvim_sessions.clone();
     let crdt = state.crdt.clone();
     ws.on_upgrade(move |socket| async move {
         let output_rx = registry.subscribe();
@@ -97,7 +94,6 @@ pub(crate) async fn session_upgrade(
             Some(peer_ip),
             workspaces,
             pairing_tokens,
-            nvim_sessions,
             crdt,
         )
         .await;

@@ -7,12 +7,12 @@
 //!
 //! Commands are organised Zed-style: each command belongs to a logical
 //! [`CommandService`] namespace and the palette renders entries as
-//! `{service}: {command}` (e.g. `nvim: Write File`, `markdown: ...`,
+//! `{service}: {command}` (e.g. `code: Write File`, `markdown: ...`,
 //! `neoism-agent: Neoism Agent`). The namespace is purely a display +
 //! grouping concern today; routing of a logical verb (e.g. "save") to
 //! the focused surface is handled by `command_visible_for_surface` +
 //! the host's `save_current_document` dispatch, which already picks the
-//! markdown / nvim / draw handler based on which surface owns focus.
+//! markdown / code / draw handler based on which surface owns focus.
 
 use super::actions::PaletteAction;
 
@@ -23,8 +23,8 @@ use super::actions::PaletteAction;
 pub(crate) enum CommandService {
     /// App-level / window / tab / split commands with no narrower owner.
     Neoism,
-    /// nvim ex-style buffer commands (write, search in a code buffer, …).
-    Nvim,
+    /// Native code-editor buffer commands (write, go to line, …).
+    Code,
     /// Markdown-note commands.
     Markdown,
     /// Jupyter-compatible notebook commands.
@@ -41,13 +41,13 @@ pub(crate) enum CommandService {
 
 impl CommandService {
     /// The lowercase namespace shown before the command, Zed-style
-    /// (`nvim: w`, `neoism-agent: start chat`). Stable identifiers — the
-    /// fuzzy matcher also scores against this so `nvim ` narrows to the
-    /// nvim namespace.
+    /// (`code: w`, `neoism-agent: start chat`). Stable identifiers — the
+    /// fuzzy matcher also scores against this so `code ` narrows to the
+    /// code namespace.
     pub(crate) const fn prefix(self) -> &'static str {
         match self {
             CommandService::Neoism => "neoism",
-            CommandService::Nvim => "nvim",
+            CommandService::Code => "code",
             CommandService::Markdown => "markdown",
             CommandService::Notebook => "notebook",
             CommandService::Draw => "draw",
@@ -67,7 +67,7 @@ impl CommandService {
     pub(crate) fn from_prefix(prefix: &str) -> Option<CommandService> {
         match prefix {
             "neoism" => Some(CommandService::Neoism),
-            "nvim" => Some(CommandService::Nvim),
+            "code" => Some(CommandService::Code),
             "markdown" => Some(CommandService::Markdown),
             "notebook" => Some(CommandService::Notebook),
             "draw" => Some(CommandService::Draw),
@@ -85,7 +85,7 @@ impl CommandService {
     pub(crate) const fn icon(self) -> &'static str {
         match self {
             CommandService::Neoism => "\u{f0c9}",
-            CommandService::Nvim => "\u{f121}",
+            CommandService::Code => "\u{f121}",
             CommandService::Markdown => "\u{f15c}",
             CommandService::Notebook => "\u{f02d}",
             CommandService::Draw => "\u{f303}",
@@ -101,7 +101,7 @@ impl CommandService {
     pub(crate) fn icon_themed(self) -> &'static str {
         let key = match self {
             CommandService::Neoism => "palette.neoism",
-            CommandService::Nvim => "palette.nvim",
+            CommandService::Code => "palette.code",
             CommandService::Markdown => "palette.markdown",
             CommandService::Notebook => "palette.notebook",
             CommandService::Draw => "palette.draw",
@@ -223,7 +223,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         title: "Toggle Vi Mode",
         shortcut: "",
         action: PaletteAction::ToggleViMode,
-        service: CommandService::Nvim,
+        service: CommandService::Code,
     },
     Command {
         title: "Toggle Fullscreen",
@@ -269,223 +269,23 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         // "save" verb: routes to whichever surface owns focus (markdown
-        // note, nvim buffer, or .neodraw) — see `save_current_document`.
+        // note, code buffer, or .neodraw) — see `save_current_document`.
         title: "Write File",
         shortcut: ":w",
         action: PaletteAction::SaveDocument,
-        service: CommandService::Nvim,
+        service: CommandService::Code,
     },
     Command {
         title: "Go to Line…",
         shortcut: ":42",
         action: PaletteAction::GoToLine,
-        service: CommandService::Nvim,
+        service: CommandService::Code,
     },
     Command {
-        title: "Go to File Start",
-        shortcut: "gg",
-        action: PaletteAction::NvimEx("normal! gg"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Go to File End",
-        shortcut: "G",
-        action: PaletteAction::NvimEx("normal! G"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Save All",
-        shortcut: ":wall",
-        action: PaletteAction::NvimEx("wall"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Close Buffer",
-        shortcut: ":bdelete",
-        action: PaletteAction::NvimEx("bdelete"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Close Other Buffers",
-        shortcut: "",
-        action: PaletteAction::NvimEx("%bdelete|edit #|bdelete #"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Reload File",
-        shortcut: ":edit!",
-        action: PaletteAction::NvimEx("edit!"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Discard Changes",
-        shortcut: ":edit!",
-        action: PaletteAction::NvimEx("edit!"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Next Buffer",
-        shortcut: ":bnext",
-        action: PaletteAction::NvimEx("bnext"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Previous Buffer",
-        shortcut: ":bprevious",
-        action: PaletteAction::NvimEx("bprevious"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Jump Back",
-        shortcut: "Ctrl+O",
-        action: PaletteAction::NvimEx("execute \"normal! \\<C-o>\""),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Jump Forward",
-        shortcut: "Ctrl+I",
-        action: PaletteAction::NvimEx("execute \"normal! \\<C-i>\""),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Last Edit Location",
-        shortcut: "`.",
-        action: PaletteAction::NvimEx("normal! `."),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Undo",
-        shortcut: "u",
-        action: PaletteAction::NvimEx("undo"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Redo",
-        shortcut: "Ctrl+R",
-        action: PaletteAction::NvimEx("redo"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Repeat Last Change",
-        shortcut: ".",
-        action: PaletteAction::NvimEx("normal! ."),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Toggle Line Numbers",
-        shortcut: ":set number!",
-        action: PaletteAction::NvimEx("set number!"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Toggle Relative Numbers",
-        shortcut: ":set relativenumber!",
-        action: PaletteAction::NvimEx("set relativenumber!"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Toggle Wrap",
-        shortcut: ":set wrap!",
-        action: PaletteAction::NvimEx("set wrap!"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Toggle Spell",
-        shortcut: ":set spell!",
-        action: PaletteAction::NvimEx("set spell!"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Clear Search Highlight",
-        shortcut: ":nohlsearch",
-        action: PaletteAction::NvimEx("nohlsearch"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Search Word Under Cursor",
-        shortcut: "*",
-        action: PaletteAction::NvimEx("normal! *"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Search Word Under Cursor Backward",
-        shortcut: "#",
-        action: PaletteAction::NvimEx("normal! #"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Select All",
-        shortcut: "ggVG",
-        action: PaletteAction::NvimEx("normal! ggVG"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Reindent File",
-        shortcut: "gg=G",
-        action: PaletteAction::NvimEx("normal! gg=G"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Sort File",
-        shortcut: ":%sort",
-        action: PaletteAction::NvimEx("%sort"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        // Esc first so an in-flight Visual selection writes `'<`/`'>`
-        // before the range sort reads them.
-        title: "Sort Selection",
-        shortcut: ":'<,'>sort",
-        action: PaletteAction::NvimEx("execute \"normal! \\<Esc>\" | '<,'>sort"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Delete Trailing Whitespace",
-        shortcut: "",
-        action: PaletteAction::NvimEx("%s/\\s\\+$//e"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Show Registers",
-        shortcut: ":registers",
-        action: PaletteAction::NvimEx("registers"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Show Marks",
-        shortcut: ":marks",
-        action: PaletteAction::NvimEx("marks"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Show Jumps",
-        shortcut: ":jumps",
-        action: PaletteAction::NvimEx("jumps"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Move Line Up",
-        shortcut: ":move -2",
-        action: PaletteAction::NvimEx("move -2"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Move Line Down",
-        shortcut: ":move +1",
-        action: PaletteAction::NvimEx("move +1"),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Duplicate Line",
-        shortcut: ":copy .",
-        action: PaletteAction::NvimEx("copy ."),
-        service: CommandService::Nvim,
-    },
-    Command {
-        title: "Join Lines",
-        shortcut: "J",
-        action: PaletteAction::NvimEx("normal! J"),
-        service: CommandService::Nvim,
+        title: "Go to Symbol…",
+        shortcut: "@",
+        action: PaletteAction::GoToSymbol,
+        service: CommandService::Code,
     },
     Command {
         title: "Run Current Cell",
@@ -575,13 +375,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         title: "Search Forward",
         shortcut: "Cmd+F",
         action: PaletteAction::SearchForward,
-        service: CommandService::Nvim,
+        service: CommandService::Neoism,
     },
     Command {
         title: "Search Backward",
         shortcut: "",
         action: PaletteAction::SearchBackward,
-        service: CommandService::Nvim,
+        service: CommandService::Neoism,
     },
     Command {
         title: "Search Files",
@@ -713,7 +513,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         title: "Toggle Minimap",
         shortcut: ":minimap",
         action: PaletteAction::ToggleMinimap,
-        service: CommandService::Nvim,
+        service: CommandService::Code,
     },
     Command {
         title: "Clear History",
@@ -771,15 +571,16 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
 ];
 
-/// Curated set of common nvim ex commands surfaced as live suggestions
-/// while the user types in `:` mode. Not exhaustive — the ones a user
-/// would actually want autocompleted from the first 1–3 keystrokes.
+/// Curated set of ex commands surfaced as live suggestions while the
+/// user types in `:` mode. Every entry here is intercepted natively
+/// (`MarkdownExCommandPlan` / `GlobalExCommandPlan` / the router's
+/// picker special-cases) — there is no nvim fallback anymore, so a
+/// suggestion that nothing intercepts would be a dead row.
 /// The `hint` column is a one-word reminder of what the command does
 /// (rendered in the right-side shortcut slot of the palette row).
 pub(crate) const EX_COMMANDS: &[(&str, &str)] = &[
     ("w", "save"),
     ("write", "save"),
-    ("wall", "save all"),
     ("wq", "save+quit"),
     ("wqall", "save+quit all"),
     ("q", "quit current"),
@@ -787,46 +588,19 @@ pub(crate) const EX_COMMANDS: &[(&str, &str)] = &[
     ("qall", "quit all"),
     ("qall!", "force quit all"),
     ("quit!", "force quit"),
-    ("edit", "open file"),
-    ("edit!", "reload+discard"),
-    ("undo", "undo"),
-    ("redo", "redo"),
-    ("sort", "sort lines"),
     ("split", "horiz split"),
     ("vsplit", "vert split"),
     ("tabnew", "new tab"),
-    ("tabclose", "close tab"),
-    ("bnext", "next buffer"),
-    ("bprev", "prev buffer"),
-    ("bdelete", "close buffer"),
     ("buffers", "list buffers"),
     ("ls", "list buffers"),
     ("files", "list buffers"),
-    ("nohlsearch", "clear hl"),
-    ("source", "run vim file"),
-    ("set", "option"),
-    ("help", "help"),
-    ("colorscheme", "theme"),
+    ("theme", "apply theme"),
     ("ThemePicker", "theme picker"),
     ("Shaders", "shaders"),
     ("ShaderPicker", "shader picker"),
-    ("LspInfo", "lsp status"),
-    ("LspRestart", "restart lsp"),
-    ("LspFormat", "format"),
-    ("Hover", "docs"),
-    ("CodeAction", "actions"),
-    ("Definition", "goto"),
-    ("References", "refs"),
-    ("Rename", "symbol"),
-    ("DocumentSymbols", "symbols"),
-    ("WorkspaceSymbols", "symbols"),
-    ("InlayHints", "toggle"),
     ("minimap", "toggle"),
     ("minimap on", "show"),
     ("minimap off", "hide"),
-    ("SyntaxInfo", "syntax status"),
-    ("checkhealth", "diagnose"),
-    ("messages", "log"),
     ("runcell", "notebook"),
     ("runbelow", "notebook"),
     ("runall", "notebook"),
@@ -836,7 +610,6 @@ pub(crate) const EX_COMMANDS: &[(&str, &str)] = &[
     ("restartkernel", "notebook"),
     ("Search Files", "<leader>ff"),
     ("Search Words", "<leader>fw"),
-    ("Search Git Changes", "<leader>fg"),
     ("terminal", "open term"),
     ("tree", "file tree"),
     ("claude", "agent"),
@@ -844,7 +617,4 @@ pub(crate) const EX_COMMANDS: &[(&str, &str)] = &[
     ("opencode", "agent"),
     ("opencode-acp", "agent protocol"),
     ("opencode-terminal", "agent tui"),
-    ("registers", "yanks"),
-    ("marks", "marks"),
-    ("jumps", "jump list"),
 ];

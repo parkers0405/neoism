@@ -22,6 +22,11 @@ impl ChromeBridge {
     pub fn set_clipboard_write(&self, cb: js_sys::Function) {
         self.services_state.0.borrow_mut().clipboard_write = Some(cb);
     }
+    /// JS pushes the latest clipboard contents here so the sync
+    /// `ClipboardService::read()` shim has something to return.
+    pub fn set_clipboard_value(&self, text: Option<String>) {
+        self.services_state.0.borrow_mut().clipboard_cached = text;
+    }
     pub fn set_command_run(&self, cb: js_sys::Function) {
         self.services_state.0.borrow_mut().command_run = Some(cb);
     }

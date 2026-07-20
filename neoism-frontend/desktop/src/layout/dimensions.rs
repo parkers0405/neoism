@@ -87,14 +87,6 @@ impl ContextDimension {
         }
     }
 
-    /// Apply a pane-local editor row fit calculated after tabs,
-    /// breadcrumbs, splits, and status chrome are known.
-    #[inline]
-    pub fn apply_editor_row_fit(&mut self, fit: neoism_ui::chrome_policy::EditorRowFit) {
-        self.lines = usize::from(fit.rows).max(1);
-        self.dimension.height = fit.cell_height.max(1.0);
-    }
-
     #[inline]
     pub fn restore_nominal_cell_height(&mut self) {
         self.dimension.height = self.base_cell_height().max(1.0);

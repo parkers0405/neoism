@@ -201,10 +201,11 @@ export interface GitReplyEnvelope {
   message: GitServerMessage;
 }
 
-// Editor (nvim proxy) messages -----------------------------------------
-// Mirrors `neoism-protocol/src/editor.rs`. The daemon spawns
-// `nvim --embed` per session and pipes parsed `ext_linegrid` redraw
-// events back over the existing socket.
+// Editor messages -------------------------------------------------------
+// Mirrors `neoism-protocol/src/editor.rs`. The embedded-nvim backend is
+// gone (the daemon answers editor requests with an "editor backend
+// unavailable" error); the wire types stay because the future native
+// Rust CodePane will reuse this envelope.
 
 export interface GridCell {
   row: number;
@@ -1579,8 +1580,8 @@ export interface WorkspaceReplyEnvelope {
 
 // Diagnostics messages ------------------------------------------------
 // Mirrors `neoism-protocol/src/diagnostics.rs`. The web frontend has no
-// local nvim, so the daemon forwards LSP diagnostics across the
-// WebSocket per-route.
+// local language servers, so the daemon forwards LSP diagnostics across
+// the WebSocket per-route.
 
 export type LspState =
   | "Starting"
@@ -1627,7 +1628,7 @@ export interface DiagnosticsReplyEnvelope {
 
 // Cursor-overlay messages -------------------------------------------
 // Mirrors `neoism-protocol/src/cursor.rs`. The daemon translates
-// nvim's `grid_cursor_goto`, `mode_change`, and `TextYankPost` events
+// editor cursor / mode / yank events
 // into these push-style envelopes; the dispatcher in
 // `terminal/TerminalPanel.ts` translates cell coordinates to physical
 // pixels via the chrome bridge's `cell_metrics()` before forwarding to
@@ -1661,8 +1662,8 @@ export type CursorOverlayServerMessage =
       CustomCursor: {
         /**
          * Pointer position, physical pixels. `null` / missing on
-         * visibility-only frames (e.g. daemon `mouse_on` / `mouse_off`
-         * relays from nvim); the dispatcher preserves the last known
+         * visibility-only frames (daemon `mouse_on` / `mouse_off`
+         * relays); the dispatcher preserves the last known
          * coordinate when omitted so the sprite doesn't snap to (0,0).
          */
         x?: number | null;

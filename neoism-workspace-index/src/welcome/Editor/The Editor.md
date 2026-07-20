@@ -1,10 +1,7 @@
 # The Editor
 
-Neoism embeds **managed Neovim** inside the workspace instead of replacing it. You get real nvim, wrapped in Rust-owned chrome — file tree, buffer tabs, command palette, finder, diagnostics, and workspace tabs.
+Neoism ships its **own native code editor** — built in Rust, rendered by the same engine as the rest of the workspace, and styled after a tuned nvim setup: line-number gutter, cursorline, `~` past the end of the buffer, modal editing if you want it.
 
-Two pages go deeper:
-
-- [[Neovim]] — how the managed runtime works and what's handled for you.
 - [[Languages and LSP|Languages & LSP]] — syntax and language servers.
 
 ## Opening files
@@ -12,7 +9,10 @@ Two pages go deeper:
 - **Alt + E** toggles the file tree; click a file (or press Enter) to open it.
 - **Alt + S** opens project search.
 - The **command palette** (`Ctrl + P`) has a fuzzy file finder — start typing a filename.
-- `:tabnew`, `:enew`, and `:new` create Neoism-owned editor tabs when no path is given.
+
+## Editing your way
+
+Standard editing works out of the box — arrows, Shift-select, `Ctrl+C/X/V`, `Ctrl+Z/Y`, Tab/Shift-Tab indent, smart Home. Prefer modal editing? Toggle **Vim mode** from the palette and you get operators (`d`, `c`, `y`, `>`), motions (`w b e f t % gg G { }`), text objects (`iw`, `i"`, `i(`, `ip`), Visual mode, registers via the system clipboard, and dot-repeat.
 
 ## Buffer tabs & panes
 
@@ -28,6 +28,6 @@ Ctrl+Shift+D                split down
 
 ## Diagnostics
 
-Errors and warnings surface inline and in a status-bar pill. Syntax highlighting (Treesitter) and language intelligence (LSP) install on demand — details in [[Languages and LSP|Languages & LSP]].
+Errors and warnings surface as underlines in the buffer, inline chips at the end of the line, and a status-bar pill. Syntax highlighting (Tree-sitter, whole-buffer accurate) is built in; language intelligence (LSP) installs on demand — details in [[Languages and LSP|Languages & LSP]].
 
-The goal isn't a fake VS Code — it's terminal-native editing with enough chrome that navigation, diagnostics, agents, and notes feel like one workspace.
+The goal isn't a fake VS Code — it's a fast, native editor with enough chrome that navigation, diagnostics, agents, and notes feel like one workspace.

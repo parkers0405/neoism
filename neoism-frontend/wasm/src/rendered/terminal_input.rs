@@ -270,7 +270,7 @@ impl ChromeBridge {
     /// Drive the status-line mode pill + primary glyph off the now-active
     /// surface so it reads TERMINAL / MARKDOWN / AGENT / NORMAL and plays
     /// the cross-fade scramble, matching desktop's `render` mapping
-    /// (editor→nvim mode, agent→Agent, markdown→Markdown, else Terminal).
+    /// (agent→Agent, markdown→Markdown, else Terminal).
     /// The web never called the `set_status_mode_*` setters, so the pill
     /// was stuck on the initial `Terminal` for every tab.
     pub(crate) fn sync_status_mode_for_active_tab_index(&mut self) {
@@ -301,8 +301,8 @@ impl ChromeBridge {
         } else if kind == "terminal" {
             (Mode::Terminal, PrimaryKind::Terminal)
         } else {
-            // A non-markdown file/editor surface (nvim). NORMAL until the
-            // editor's mode push refines it (see set_status_mode_insert).
+            // A non-markdown file/editor surface. NORMAL until a
+            // mode push refines it (see set_status_mode_insert).
             (Mode::Normal, PrimaryKind::File)
         };
         let current = self.chrome.status_line.info();
@@ -314,54 +314,29 @@ impl ChromeBridge {
         }
     }
 
-    /// True when the active tab is an nvim editor surface (not a
-    /// terminal, markdown, or agent tab) — the surface whose live mode
-    /// owns the status pill.
-    pub(crate) fn active_tab_is_editor(&self) -> bool {
-        let key = self.active_tab_index;
-        let kind = self
+    /// Which surface should receive raw keystrokes on the next
+    /// input event. `"terminal"` when the user is viewing the
+    /// always-present Terminal tab; `"agent"` for the Neoism Agent
+    /// tab; `"editor"` for any other buffer tab (a file surface).
+    ///
+    /// Exposed as a `String` rather than a `u8` discriminant so
+    /// the JS host can `===` against the literal name without
+    /// pulling in a wasm-bindgen enum.
+    pub fn active_surface(&self) -> String {
+        if self.chrome.is_neoism_agent_tab_active() {
+            "agent".to_string()
+        } else if self
             .tab_kinds
-            .get(&key)
-            .map(String::as_str)
-            .unwrap_or("terminal");
-        if kind == "neoism-agent" || kind == "terminal" {
-            return false;
-        }
-        let is_markdown = self
-            .tab_paths
-            .get(&key)
-            .map(|p| {
-                neoism_ui::syntax::Lang::from_path(p) == neoism_ui::syntax::Lang::Markdown
-            })
-            .unwrap_or(false);
-        !is_markdown
-    }
-
-    /// Reflect a live nvim mode string in the status pill while an editor
-    /// surface is active (NORMAL / INSERT / VISUAL / REPLACE / COMMAND).
-    /// Mirrors desktop's `EditorMode` → `status_line::Mode` mapping and
-    /// the short/long mode codes `cursor_shape_for_nvim_mode` accepts.
-    pub(crate) fn sync_status_mode_from_editor(&mut self, nvim_mode: &str) {
-        use neoism_ui::panels::status_line::Mode;
-        if !self.active_tab_is_editor() {
-            return;
-        }
-        let m = nvim_mode.trim().to_ascii_lowercase();
-        let mode = if m.starts_with("insert") || m == "i" || m == "ic" || m == "ix" {
-            Mode::Insert
-        } else if m.starts_with("visual") || m == "v" || m == "\u{16}" {
-            Mode::Visual
-        } else if m.starts_with("replace") || m == "r" || m == "rx" || m == "rvc" {
-            Mode::Replace
-        } else if m.starts_with("cmdline") || m.starts_with("command") || m == "c" {
-            Mode::Cmd
+            .get(&self.active_tab_index)
+            // Unknown kind (pre-first-replay boot) defaults to the
+            // terminal surface. No index-0 special case: restored
+            // strips put file tabs first and fresh terminals last.
+            .map(|kind| kind == "terminal")
+            .unwrap_or(true)
+        {
+            "terminal".to_string()
         } else {
-            Mode::Normal
-        };
-        if self.chrome.status_line.info().mode != mode {
-            let mut info = self.chrome.status_line.info().clone();
-            info.mode = mode;
-            self.chrome.status_line.set_info(info);
+            "editor".to_string()
         }
     }
 

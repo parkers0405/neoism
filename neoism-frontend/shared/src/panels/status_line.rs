@@ -191,11 +191,14 @@ pub struct StatusInfo {
     /// `pyright+1`. When absent, the pill falls back to `LSP`.
     pub lsp_label: Option<String>,
     pub project: Option<String>,
-    /// nvim-style ruler for the right cluster: cursor line / total
-    /// lines of the active *editor* surface (nvim buffer or markdown
+    /// Vim-style ruler for the right cluster: cursor line / total
+    /// lines of the active *editor* surface (code buffer or markdown
     /// pane). `None` on terminal panes — a terminal has no meaningful
     /// line position, so the pill hides entirely.
     pub cursor_lines: Option<(usize, usize)>,
+    /// nvim-style showcmd: in-progress vim keys appended to the mode
+    /// chip (`NORMAL · 2d`). `None`/empty hides the segment.
+    pub pending_keys: Option<String>,
     pub diagnostics: DiagnosticCounts,
     /// Directory shown in the cwd pill on the left cluster. Populated
     /// for every active-pane kind (editor / markdown / terminal) — the
@@ -203,11 +206,6 @@ pub struct StatusInfo {
     /// parent for editors, terminal cwd for shells) and abbreviating
     /// it zsh-style (`~`, `~/sub`, or absolute).
     pub cwd_label: Option<String>,
-    /// nvim's `showcmd` tail — the half-typed normal-mode command
-    /// ("2d", a bare count, a register prefix). Shown next to the mode
-    /// label so a pending count reads as "waiting for a motion"
-    /// instead of a hang; the UI hides nvim's own cmdline entirely.
-    pub pending_keys: Option<String>,
     /// Measured frames-per-second of the host window's render loop,
     /// already smoothed by the host. `None` hides the pill (config off
     /// or no measurement yet). Purely display — the pill never drives
@@ -972,12 +970,16 @@ impl StatusLine {
 
         let mut x = x_left;
 
-        let mode_label_text = match self.info.pending_keys.as_deref() {
-            Some(keys) if !keys.is_empty() => {
-                format!("{} · {keys}", mode_label(self.info.mode))
-            }
-            _ => mode_label(self.info.mode).to_string(),
-        };
+        let mut mode_label_text = mode_label(self.info.mode).to_string();
+        if let Some(pending) = self
+            .info
+            .pending_keys
+            .as_deref()
+            .filter(|pending| !pending.is_empty())
+        {
+            mode_label_text.push_str(" · ");
+            mode_label_text.push_str(pending);
+        }
         let mode_text_opts = DrawOpts {
             font_size,
             color: palette.u8(palette.black),

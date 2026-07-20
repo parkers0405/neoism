@@ -4,7 +4,7 @@
 // (`neoism-frontend/shared/src/editor/crdt/remote_presence.rs`): feed
 // it every `CrdtServerMessage` the daemon pushes; it keeps a
 // per-buffer map of remote peer cursors/selections that render code
-// (markdown DOM overlay, nvim canvas) can query cheaply. It
+// (markdown DOM overlay) can query cheaply. It
 // deliberately stops at queryable state — drawing carets is the
 // renderer's job.
 

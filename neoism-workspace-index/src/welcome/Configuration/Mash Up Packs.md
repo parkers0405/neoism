@@ -85,7 +85,7 @@ Two example packs are installed on first run and double as templates:
    ```
 
    The theme reaches *everything*: chrome, tabs, markdown render,
-   agent pane, terminal ANSI colors, embedded nvim syntax — and a few
+   agent pane, terminal ANSI colors, editor syntax — and a few
    derived surfaces follow automatically:
 
    - the **splash wordmark** is tinted to your theme's `fg`, and the

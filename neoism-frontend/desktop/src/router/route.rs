@@ -331,15 +331,7 @@ impl Route<'_> {
             self.preview_palette_search_match_if_any();
             return;
         }
-        // No-op when there's no editor pane attached — `send_editor_command`
-        // already handles that, but skipping avoids an alloc on terminal-
-        // only routes.
-        let cmd = neoism_backend::performer::nvim::vim_search_query_command(query);
-        self.window.screen.send_editor_command(cmd);
-        // nvim answers `rio_search_matches` asynchronously; keep the frame
-        // loop alive so the reply is drained + previewed live (each
-        // keystroke) instead of only on the next input event.
-        self.window.screen.arm_search_reply_pump();
+        // nvim removed; native editor buffer search TBD.
     }
 
     /// Send the lua side a preview-line command for whichever buffer
@@ -368,13 +360,8 @@ impl Route<'_> {
             }
             return;
         }
-        if let Some((lnum, col)) = location {
-            let query = self.window.screen.renderer.command_palette.query.clone();
-            let cmd = neoism_backend::performer::nvim::vim_search_preview_command(
-                lnum, col, &query,
-            );
-            self.window.screen.send_editor_command(cmd);
-        }
+        // nvim removed; native editor search preview TBD.
+        let _ = location;
     }
 
     #[inline]
@@ -456,21 +443,6 @@ impl Route<'_> {
             file_tree_focused = self.window.screen.renderer.file_tree.is_focused(),
             "route key-wait entered"
         );
-
-        if key_event.state == ElementState::Pressed
-            && matches!(
-                key_event.logical_key,
-                Key::Named(
-                    NamedKey::ArrowUp
-                        | NamedKey::ArrowDown
-                        | NamedKey::PageUp
-                        | NamedKey::PageDown
-                )
-            )
-            && self.window.screen.dismiss_lsp_hover()
-        {
-            self.request_overlay_redraw();
-        }
 
         // A pinned diagnostic behaves like an editor popover: Escape closes
         // it but still reaches the editor so normal-mode semantics remain
@@ -768,11 +740,16 @@ impl Route<'_> {
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::Escape) => {
-                        self.window.screen.renderer.finder.close();
+                        // Mode-aware: BufferLines (`/` in-buffer
+                        // search) restores the pre-search cursor.
+                        self.window.screen.close_finder_overlay();
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::ArrowUp) => {
                         self.window.screen.renderer.finder.move_selection_up();
+                        // BufferLines: live-preview the newly selected
+                        // row in the code pane (no-op in other modes).
+                        self.window.screen.finder_buffer_preview_selected();
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::ArrowDown) => {
@@ -781,6 +758,7 @@ impl Route<'_> {
                         // overlay height each frame, but for navigation
                         // bookkeeping a generous default is fine.
                         self.window.screen.renderer.finder.move_selection_down(18);
+                        self.window.screen.finder_buffer_preview_selected();
                         self.request_overlay_redraw();
                     }
                     key if is_enter_key(key) => {
@@ -797,6 +775,9 @@ impl Route<'_> {
                                 .renderer
                                 .finder
                                 .set_query(chars.into_iter().collect());
+                            // BufferLines: incsearch — drive the code
+                            // pane live (no-op in other modes).
+                            self.window.screen.finder_buffer_query_changed();
                             self.request_overlay_redraw();
                         }
                     }
@@ -816,6 +797,7 @@ impl Route<'_> {
                                     .renderer
                                     .finder
                                     .set_query(format!("{}{}", current, text_str));
+                                self.window.screen.finder_buffer_query_changed();
                                 self.request_overlay_redraw();
                             }
                         }
@@ -915,11 +897,6 @@ impl Route<'_> {
                                     md.search_cancel();
                                 }
                                 self.window.screen.mark_dirty();
-                            } else {
-                                self.window.screen.send_editor_command(
-                                    neoism_backend::performer::nvim::vim_search_clear_command(
-                                    ),
-                                );
                             }
                         }
                         self.request_overlay_redraw();
@@ -1023,15 +1000,6 @@ impl Route<'_> {
                                                 md.search_commit(location.0, location.1);
                                             }
                                             self.window.screen.mark_dirty();
-                                        } else {
-                                            let cmd = self
-                                                .window
-                                                .screen
-                                                .palette_search_commit_command(
-                                                    &typed,
-                                                    Some(location),
-                                                );
-                                            self.window.screen.send_editor_command(cmd);
                                         }
                                     }
                                     self.request_overlay_redraw();
@@ -1104,17 +1072,9 @@ impl Route<'_> {
                                 return true;
                             }
                             if ex && !ex_payload.is_empty() {
-                                let cmd =
-                                    neoism_backend::performer::nvim::vim_run_ex_command(
-                                        ex_payload,
-                                    );
-                                tracing::trace!(
-                                    target: "neoism::input",
-                                    mode = "ex",
-                                    cmd = %cmd,
-                                    "palette dispatching to nvim"
-                                );
-                                self.window.screen.send_editor_command(cmd);
+                                // nvim removed; unhandled ex commands are
+                                // dropped until the native editor grows an
+                                // equivalent.
                             } else if search && !payload.is_empty() {
                                 // Record the search so it appears as a
                                 // recent next time. Stored pre-`/` so
@@ -1148,18 +1108,6 @@ impl Route<'_> {
                                         }
                                     }
                                     self.window.screen.mark_dirty();
-                                } else {
-                                    let cmd = self
-                                        .window
-                                        .screen
-                                        .palette_search_commit_command(&payload, None);
-                                    tracing::trace!(
-                                        target: "neoism::input",
-                                        mode = "search",
-                                        cmd = %cmd,
-                                        "palette dispatching to nvim"
-                                    );
-                                    self.window.screen.send_editor_command(cmd);
                                 }
                             }
                             self.request_overlay_redraw();

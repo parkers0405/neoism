@@ -14,9 +14,6 @@ use crate::neoism::agent::NeoismAgentPane;
 use crate::workspace::tags_view::NeoismTagsPane;
 use neoism_backend::config::Shell;
 use neoism_backend::event::WindowId;
-use neoism_backend::performer::nvim_events::{
-    Colors as NvimColors, EditorMode, HighlightTable,
-};
 use neoism_terminal_core::crosswords::Crosswords;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,16 +31,6 @@ pub(super) static RICH_TEXT_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Generate a unique rich text ID for terminal contexts
 pub fn next_rich_text_id() -> usize {
     RICH_TEXT_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
-pub(super) fn ide_init_commands(theme: &str) -> Vec<String> {
-    let mut commands = neoism_backend::performer::nvim::ide_init_commands();
-    if !theme.trim().is_empty() {
-        // Resolves custom (Mash Up Pack) themes to a full-palette
-        // apply — a fresh nvim only knows the builtin palettes.
-        commands.push(crate::mashup::vim_theme_command(theme));
-    }
-    commands
 }
 
 pub fn create_dead_context<T: neoism_backend::event::EventListener>(
@@ -87,52 +74,28 @@ pub fn create_dead_context<T: neoism_backend::event::EventListener>(
         ime: Ime::new(),
         remote_pty: None,
         _io_thread: None,
-        editor: None,
-        editor_redraw_rx: None,
-        editor_daemon_messages: Default::default(),
-        editor_hl_table: HighlightTable::new(),
-        editor_default_colors: NvimColors::default(),
-        editor_mode: EditorMode::default(),
-        editor_pending_scroll_lines: 0,
-        editor_predicted_cells: Vec::new(),
-        editor_pending_grid_scroll_lines: 0,
-        editor_scroll_reset_pending: false,
-        editor_viewport_topline: 0,
-        editor_presence_line: 0,
-        editor_presence_col: 0,
-        editor_textoff: 0,
-        editor_viewport_botline: 0,
-        editor_viewport_line_count: 0,
-        editor_grid_id: None,
-        editor_cursor_line: 0,
-        editor_total_lines: 0,
-        editor_pending_keys: String::new(),
-        editor_pending_elastic_lines: 0,
-        editor_popup_menu: None,
-        editor_lsp_status: None,
-        editor_lsp_action_result: None,
-        editor_lsp_action_result_modal_seen: true,
-        editor_lsp_completion: None,
-        editor_lsp_completion_seq: 0,
-        editor_lsp_hover: None,
-        editor_lsp_hover_seq: 0,
-        editor_lsp_hover_cell: None,
-        editor_buf_modified: Default::default(),
-        editor_buf_enter: Default::default(),
-        editor_notifications: Default::default(),
-        editor_yank_flashes: Default::default(),
-        editor_diagnostics: None,
-        attached_lsps: Vec::new(),
-        lsp_snapshot: None,
-        lsp_messages: std::collections::BTreeMap::new(),
-        editor_path: None,
         markdown: None,
+        code: None,
         draw: None,
         notebook: None,
         neoism_agent: None,
         neoism_tags: None,
         neoism_extensions: None,
     }
+}
+
+pub fn create_code_context<T: neoism_backend::event::EventListener>(
+    event_proxy: T,
+    window_id: WindowId,
+    rich_text_id: usize,
+    dimension: ContextDimension,
+    path: PathBuf,
+) -> Context<T> {
+    let route_id = ROUTE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mut context =
+        create_dead_context(event_proxy, window_id, route_id, rich_text_id, dimension);
+    context.code = Some(neoism_ui::editor::code::CodePane::load(path));
+    context
 }
 
 pub fn create_markdown_context<T: neoism_backend::event::EventListener>(
@@ -462,27 +425,6 @@ pub fn create_mock_context<
         None,
     )
     .unwrap()
-}
-
-pub(super) fn resolve_editor_file_and_cwd(
-    file: PathBuf,
-    cwd: Option<PathBuf>,
-) -> (PathBuf, Option<PathBuf>) {
-    let cwd = cwd.map(|p| p.canonicalize().unwrap_or(p));
-    let file = if file.is_absolute() {
-        file.canonicalize().unwrap_or(file)
-    } else if let Some(root) = cwd.as_ref() {
-        let joined = root.join(&file);
-        joined.canonicalize().unwrap_or(joined)
-    } else {
-        file.canonicalize()
-            .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(&file)))
-            .unwrap_or(file)
-    };
-    let cwd = cwd
-        .or_else(|| std::env::current_dir().ok())
-        .or_else(|| file.parent().map(|p| p.to_path_buf()));
-    (file, cwd)
 }
 
 pub fn process_open_url(

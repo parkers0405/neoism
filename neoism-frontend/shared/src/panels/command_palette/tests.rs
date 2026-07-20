@@ -252,7 +252,7 @@ fn command_visibility_tracks_active_surface() {
 }
 
 #[test]
-fn nvim_ex_commands_are_visible_only_on_editor_surface() {
+fn code_buffer_commands_are_visible_only_on_editor_surface() {
     let mut palette = CommandPalette::new();
 
     palette.set_surface(PaletteSurface::Editor);
@@ -262,9 +262,7 @@ fn nvim_ex_commands_are_visible_only_on_editor_surface() {
         .map(|(_, row)| row.title())
         .collect();
     assert!(editor_titles.contains(&"Go to Line…"));
-    assert!(editor_titles.contains(&"Save All"));
-    assert!(editor_titles.contains(&"Show Registers"));
-    assert!(editor_titles.contains(&"Move Line Up"));
+    assert!(editor_titles.contains(&"Toggle Minimap"));
 
     for surface in [
         PaletteSurface::Terminal,
@@ -278,42 +276,22 @@ fn nvim_ex_commands_are_visible_only_on_editor_surface() {
             .map(|(_, row)| row.title())
             .collect();
         assert!(!titles.contains(&"Go to Line…"), "{surface:?}");
-        assert!(!titles.contains(&"Save All"), "{surface:?}");
-        assert!(!titles.contains(&"Show Registers"), "{surface:?}");
-        assert!(!titles.contains(&"Move Line Up"), "{surface:?}");
+        assert!(!titles.contains(&"Toggle Minimap"), "{surface:?}");
     }
 }
 
 #[test]
-fn nvim_ex_catalog_dispatch_strings_are_registered() {
-    for (title, ex) in [
-        ("Go to File Start", "normal! gg"),
-        ("Go to File End", "normal! G"),
-        ("Save All", "wall"),
-        ("Close Buffer", "bdelete"),
-        ("Clear Search Highlight", "nohlsearch"),
-        ("Delete Trailing Whitespace", "%s/\\s\\+$//e"),
-        ("Move Line Up", "move -2"),
-        ("Move Line Down", "move +1"),
-        ("Duplicate Line", "copy ."),
-    ] {
-        let cmd = COMMANDS
-            .iter()
-            .find(|cmd| cmd.title == title)
-            .unwrap_or_else(|| panic!("{title} registered"));
-        assert_eq!(cmd.action, PaletteAction::NvimEx(ex), "{title}");
-    }
-
+fn ex_catalog_registers_native_intercepts() {
     let goto = COMMANDS
         .iter()
         .find(|cmd| cmd.title == "Go to Line…")
         .expect("Go to Line… registered");
     assert_eq!(goto.action, PaletteAction::GoToLine);
 
-    assert!(EX_COMMANDS.iter().any(|(name, _)| *name == "wall"));
-    assert!(EX_COMMANDS.iter().any(|(name, _)| *name == "undo"));
-    assert!(EX_COMMANDS.iter().any(|(name, _)| *name == "redo"));
-    assert!(EX_COMMANDS.iter().any(|(name, _)| *name == "jumps"));
+    assert!(EX_COMMANDS.iter().any(|(name, _)| *name == "w"));
+    assert!(EX_COMMANDS.iter().any(|(name, _)| *name == "wq"));
+    assert!(EX_COMMANDS.iter().any(|(name, _)| *name == "buffers"));
+    assert!(EX_COMMANDS.iter().any(|(name, _)| *name == "tree"));
 }
 
 #[test]

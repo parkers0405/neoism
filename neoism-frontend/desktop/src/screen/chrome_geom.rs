@@ -22,30 +22,6 @@ impl Screen<'_> {
             .set_dirty();
     }
 
-    /// Arm the live-`/`-search redraw pump: keep the frame loop running
-    /// for a short window so an async `rio_search_matches` reply is drained
-    /// + previewed within a frame or two of the keystroke that requested it
-    /// (rather than waiting for the next input event). Pure scheduling — no
-    /// nvim RPC is issued per frame, so this can never wedge input.
-    pub fn arm_search_reply_pump(&mut self) {
-        self.search_reply_pump_until =
-            Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
-        self.mark_dirty();
-    }
-
-    /// While the pump deadline is live, keep the frame loop alive. Returns
-    /// `true` while pumping so the caller marks dirty; expires itself.
-    pub(crate) fn search_reply_pump_active(&mut self) -> bool {
-        match self.search_reply_pump_until {
-            Some(deadline) if std::time::Instant::now() < deadline => true,
-            Some(_) => {
-                self.search_reply_pump_until = None;
-                false
-            }
-            None => false,
-        }
-    }
-
     pub fn touch_purpose(&mut self) -> &mut TouchPurpose {
         &mut self.touchpurpose
     }
@@ -102,7 +78,6 @@ impl Screen<'_> {
         let old_buffer_tabs = std::mem::take(&mut self.renderer.buffer_tabs);
         let old_pane_tabs = std::mem::take(&mut self.renderer.pane_tabs);
         let old_pane_breadcrumbs = std::mem::take(&mut self.renderer.pane_breadcrumbs);
-        let old_primary_editor_route = self.renderer.primary_editor_route;
         let old_breadcrumbs = std::mem::take(&mut self.renderer.breadcrumbs);
         let old_status_line = std::mem::take(&mut self.renderer.status_line);
         tracing::info!(
@@ -120,7 +95,6 @@ impl Screen<'_> {
         renderer.buffer_tabs = old_buffer_tabs;
         renderer.pane_tabs = old_pane_tabs;
         renderer.pane_breadcrumbs = old_pane_breadcrumbs;
-        renderer.primary_editor_route = old_primary_editor_route;
         renderer.breadcrumbs = old_breadcrumbs;
         renderer.status_line = old_status_line;
         renderer.set_chrome_scale(chrome_scale);
@@ -139,7 +113,6 @@ impl Screen<'_> {
         }
 
         if previous_theme.name != config_theme.name {
-            let cmd = crate::mashup::vim_theme_command(config_theme.name.as_str());
             for grid in self.context_manager.contexts_mut() {
                 for item in grid.contexts_mut().values_mut() {
                     let context = item.context_mut();
@@ -151,36 +124,16 @@ impl Screen<'_> {
                         neoism_terminal_core::colors::term::TermColors::default();
                     drop(terminal);
 
-                    if let Some(editor) = context.editor.as_ref() {
-                        // `rio.theme.apply` synchronously invalidates and
-                        // flushes nvim's external line-grid. Let those fresh
-                        // grid_line events drive damage; repainting here
-                        // races ahead with the old resolved StyleIds and is
-                        // exactly how chrome changed while code stayed black.
-                        editor.command(cmd.clone());
-                    } else {
-                        context
-                            .renderable_content
-                            .pending_update
-                            .set_terminal_damage(
-                                neoism_terminal_core::damage::TerminalDamage::Full,
-                            );
-                    }
+                    context
+                        .renderable_content
+                        .pending_update
+                        .set_terminal_damage(
+                            neoism_terminal_core::damage::TerminalDamage::Full,
+                        );
                 }
             }
         }
-
-        if previous_minimap_enabled {
-            let cmd =
-                neoism_backend::performer::nvim::vim_minimap_set_enabled_command(false);
-            for grid in self.context_manager.contexts_mut() {
-                for item in grid.contexts_mut().values_mut() {
-                    if let Some(editor) = item.context().editor.as_ref() {
-                        editor.command(cmd.clone());
-                    }
-                }
-            }
-        }
+        let _ = previous_minimap_enabled;
 
         let scale = self.sugarloaf.scale_factor();
         let chrome_offset = self.chrome_x_offset();
@@ -190,7 +143,7 @@ impl Screen<'_> {
 
             let reserves_editor_chrome = {
                 let current = context_grid.current();
-                current.editor.is_some()
+                current.code.is_some()
                     || current.markdown.is_some()
                     || current.notebook.is_some()
                     || current.draw.is_some()
@@ -394,7 +347,7 @@ impl Screen<'_> {
             // strip read as translucent until the next layout pass.
             let reserves_editor_chrome = {
                 let current = context_grid.current();
-                current.editor.is_some()
+                current.code.is_some()
                     || current.markdown.is_some()
                     || current.notebook.is_some()
                     || current.draw.is_some()
@@ -449,15 +402,6 @@ impl Screen<'_> {
         self.renderer.editor_scroll.reset_all();
         self.renderer.trail_cursor.reset();
         self.last_editor_trail_cursor_cell = None;
-        self.editor_scroll_grid_states.clear();
-        for grid in self.context_manager.contexts_mut() {
-            for item in grid.contexts_mut().values_mut() {
-                let context = item.context_mut();
-                context.editor_pending_scroll_lines = 0;
-                context.editor_pending_grid_scroll_lines = 0;
-                context.editor_scroll_reset_pending = false;
-            }
-        }
         {
             let _span = crate::app::freeze_watchdog::global_span(
                 "screen.resize.sugarloaf_resize",
@@ -541,32 +485,7 @@ impl Screen<'_> {
         self
     }
 
-    pub(crate) fn editor_rows_above_bottom_chrome(
-        layout_rect: [f32; 4],
-        scaled_margin: Margin,
-        dimension: ContextDimension,
-        window_height_phys: f32,
-        bottom_chrome_height_phys: f32,
-    ) -> Option<neoism_ui::chrome_policy::EditorRowFit> {
-        Some(neoism_ui::chrome_policy::fit_editor_rows(
-            neoism_ui::chrome_policy::EditorRowFitInput {
-                scaled_margin_top: scaled_margin.top,
-                layout_top: layout_rect[1],
-                layout_height: layout_rect[3],
-                window_height: window_height_phys,
-                status_line_height: bottom_chrome_height_phys,
-                nominal_cell_height: dimension.base_cell_height(),
-            },
-        ))
-    }
-
-    pub(crate) fn apply_context_resize(
-        ctx: &mut context::Context<EventProxy>,
-        editor_row_fit: Option<neoism_ui::chrome_policy::EditorRowFit>,
-    ) -> bool {
-        if let Some(fit) = editor_row_fit {
-            ctx.dimension.apply_editor_row_fit(fit);
-        }
+    pub(crate) fn apply_context_resize(ctx: &mut context::Context<EventProxy>) -> bool {
         let Some(mut terminal) = ctx.terminal.try_lock_unfair() else {
             ctx.pending_terminal_resize = true;
             ctx.renderable_content.pending_update.set_dirty();
@@ -576,26 +495,11 @@ impl Screen<'_> {
         let winsize = crate::bridges::utils::terminal_dimensions(&ctx.dimension);
         let cols = winsize.cols;
         let rows = winsize.rows;
-        let editor_rows = ctx.editor.as_ref().map(|_| {
-            editor_row_fit
-                .map(|fit| fit.rows)
-                .unwrap_or_else(|| {
-                    crate::bridges::utils::editor_rows_for_terminal_rows(rows)
-                })
-                .max(1)
-        });
-        let terminal_rows = editor_rows.unwrap_or(rows);
-        terminal.resize(crate::bridges::utils::resize_dimensions(
-            cols,
-            terminal_rows,
-        ));
+        terminal.resize(crate::bridges::utils::resize_dimensions(cols, rows));
         drop(terminal);
 
         ctx.pending_terminal_resize = false;
         let _ = ctx.messenger.send_resize(winsize);
-        if let Some(editor) = ctx.editor.as_ref() {
-            editor.resize(cols as u64, u64::from(terminal_rows));
-        }
 
         true
     }
@@ -605,23 +509,10 @@ impl Screen<'_> {
         // the next layout, so once the messenger.send_resize triggers
         // the wakeup from pty it will also trigger a sugarloaf.render()
         // and then eventually a render with the new layout computation.
-        let scale = self.sugarloaf.scale_factor();
-        let window_height_phys = self.sugarloaf.window_size().height as f32;
-        let bottom_chrome_height_phys = self.renderer.status_line_height() * scale;
         for context_grid in self.context_manager.contexts_mut() {
-            let scaled_margin = context_grid.get_scaled_margin();
             for context in context_grid.contexts_mut().values_mut() {
-                let editor_row_fit = context.context().editor.as_ref().and_then(|_| {
-                    Self::editor_rows_above_bottom_chrome(
-                        context.layout_rect,
-                        scaled_margin,
-                        context.context().dimension,
-                        window_height_phys,
-                        bottom_chrome_height_phys,
-                    )
-                });
                 let ctx = context.context_mut();
-                Self::apply_context_resize(ctx, editor_row_fit);
+                Self::apply_context_resize(ctx);
             }
         }
     }
@@ -728,7 +619,7 @@ impl Screen<'_> {
 
     fn chrome_layout_signature(&self) -> ChromeLayoutSignature {
         let current = self.context_manager.current();
-        let reserves_editor_chrome = current.editor.is_some()
+        let reserves_editor_chrome = current.code.is_some()
             || current.markdown.is_some()
             || current.notebook.is_some()
             || current.draw.is_some();
@@ -756,7 +647,7 @@ impl Screen<'_> {
         let scale = self.sugarloaf.scale_factor();
         let margin_stale = self.context_manager.all_grids().iter().any(|grid| {
             let current = grid.current();
-            let reserves_editor_chrome = current.editor.is_some()
+            let reserves_editor_chrome = current.code.is_some()
                 || current.markdown.is_some()
                 || current.notebook.is_some()
                 || current.draw.is_some();
@@ -821,7 +712,7 @@ impl Screen<'_> {
         for grid in self.context_manager.contexts_mut() {
             let reserves_editor_chrome = {
                 let current = grid.current();
-                current.editor.is_some()
+                current.code.is_some()
                     || current.markdown.is_some()
                     || current.notebook.is_some()
                     || current.draw.is_some()
@@ -913,7 +804,6 @@ impl Screen<'_> {
             return;
         }
         let scale = self.sugarloaf.scale_factor();
-        let window_height = self.sugarloaf.window_size().height as f32;
         let min_top = self.current_grid_min_pane_top();
 
         let routes: Vec<usize> = self.renderer.pane_tabs.keys().copied().collect();
@@ -1030,19 +920,6 @@ impl Screen<'_> {
                 item.layout_rect[3] = new_height;
                 item.val.dimension.restore_nominal_cell_height();
                 item.val.dimension.update_height(new_height);
-                if item.val.editor.is_some() {
-                    let fit = neoism_ui::chrome_policy::fit_editor_rows(
-                        neoism_ui::chrome_policy::EditorRowFitInput {
-                            scaled_margin_top: scaled_margin.top,
-                            layout_top: body_top,
-                            layout_height: new_height,
-                            window_height,
-                            status_line_height: scaled_margin.bottom,
-                            nominal_cell_height: item.val.dimension.base_cell_height(),
-                        },
-                    );
-                    item.val.dimension.apply_editor_row_fit(fit);
-                }
                 let winsize =
                     crate::bridges::utils::terminal_dimensions(&item.val.dimension);
                 let cols = winsize.cols;
@@ -1057,9 +934,6 @@ impl Screen<'_> {
                 }
                 if visible {
                     let _ = item.val.messenger.send_resize(winsize);
-                    if let Some(editor) = item.val.editor.as_ref() {
-                        editor.resize(cols as u64, u64::from(terminal_rows));
-                    }
                 }
             }
         }
@@ -1128,11 +1002,6 @@ impl Screen<'_> {
             tracing::warn!(target: "neoism::config", "failed to persist theme: {err}");
         }
 
-        // Custom (runtime-registered) themes push their whole palette —
-        // the lua runtime only ships the builtin four.
-        let apply_theme_cmd = crate::mashup::vim_theme_command(theme_name);
-        let mut themed_editors = 0usize;
-
         for context_grid in self.context_manager.contexts_mut() {
             for context_item in context_grid.contexts_mut().values_mut() {
                 let context = context_item.context_mut();
@@ -1144,28 +1013,14 @@ impl Screen<'_> {
                     neoism_terminal_core::colors::term::TermColors::default();
                 drop(terminal);
 
-                if let Some(editor) = context.editor.as_ref() {
-                    // The managed Lua command performs a synchronous forced
-                    // redraw. Its new grid_line payload is the authoritative
-                    // repaint point for resolved nvim StyleIds.
-                    editor.command(apply_theme_cmd.clone());
-                    themed_editors += 1;
-                } else {
-                    context
-                        .renderable_content
-                        .pending_update
-                        .set_terminal_damage(
-                            neoism_terminal_core::damage::TerminalDamage::Full,
-                        );
-                }
+                context
+                    .renderable_content
+                    .pending_update
+                    .set_terminal_damage(
+                        neoism_terminal_core::damage::TerminalDamage::Full,
+                    );
             }
         }
-        tracing::info!(
-            target: "neoism::theme",
-            theme = theme_name,
-            themed_editors,
-            "applied theme to embedded editors"
-        );
         self.renderer.notifications.push(
             format!("Applied theme: {theme_name}"),
             neoism_ui::panels::notifications::NotificationLevel::Info,

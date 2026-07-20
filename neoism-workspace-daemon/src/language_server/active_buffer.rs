@@ -1,55 +1,13 @@
 use std::path::Path;
 
 use neoism_agent_server::language_server;
-use neoism_protocol::{
-    diagnostics::{DiagnosticItem, LspState},
-    editor::{EditorServerMessage, LspSnapshotServer},
-};
+use neoism_protocol::{diagnostics::DiagnosticItem, editor::EditorServerMessage};
 
-use crate::nvim::{DiagnosticsFetch, NvimSessionHandle};
-
-#[derive(Debug, Clone)]
-struct LanguageServerSnapshot {
-    diagnostics: Vec<DiagnosticItem>,
-    states: Vec<(String, LspState)>,
-    /// Servers relevant to the active buffer's language, mapped for the
-    /// status-bar pill / popup (`EditorServerMessage::LspSnapshot`).
-    servers: Vec<LspSnapshotServer>,
-    /// The active buffer's language id (empty when no bundled spec claims
-    /// its extension).
-    filetype: String,
-    /// Active buffer path, used as the `file_path` on the desktop
-    /// `EditorServerMessage::Diagnostics`.
-    file: std::path::PathBuf,
-}
-
-/// One poll of the Neoism LSP runtime for the active buffer, producing BOTH
-/// the diagnostics fetch (web pill / diagnostics gutter) and the editor
-/// `LspSnapshot` message (desktop status-bar pill + popup). Reads the
-/// buffer and queries the engine once so the two surfaces stay in sync
-/// without a double round-trip. Returns no messages when there is no
-/// file-backed active buffer.
-pub(crate) async fn poll(
-    session: &NvimSessionHandle,
-    workspace_root: &Path,
-) -> (Option<DiagnosticsFetch>, Vec<EditorServerMessage>) {
-    let Some(snapshot) = snapshot(session, workspace_root).await else {
-        return (None, Vec::new());
-    };
-    let snapshot_message = EditorServerMessage::LspSnapshot {
-        surface_id: None,
-        file_path: Some(snapshot.file.clone()),
-        filetype: snapshot.filetype,
-        servers: snapshot.servers,
-    };
-    let diagnostics_message = diagnostics_message(&snapshot.diagnostics, &snapshot.file);
-    let fetch =
-        DiagnosticsFetch::from_parts(Some(snapshot.diagnostics), Some(snapshot.states));
-    // Diagnostics are pushed immediately through `subscribe_diagnostics`, but
-    // also replayed here from the active-buffer cache so a missed/early push
-    // recovers on the next poll instead of leaving stale inline errors.
-    (Some(fetch), vec![snapshot_message, diagnostics_message])
-}
+// The active-buffer snapshot poll (`poll`/`read_active_file_buffer`) was fed
+// by the embedded nvim session and was deleted with it. The engine's
+// event-driven `publishDiagnostics` bus below is editor-agnostic and remains
+// the live diagnostics path; the active-buffer text source returns with the
+// native editor.
 
 /// Subscribe to the engine's real-time `publishDiagnostics` bus. The socket
 /// loop drains this and forwards to the editor with zero polling.
@@ -117,147 +75,6 @@ fn diagnostics_message(
         hint,
         file_path: Some(file.to_path_buf()),
         items,
-    }
-}
-
-pub(super) async fn read_active_file_buffer(
-    session: &NvimSessionHandle,
-) -> Result<crate::nvim::BufferText, String> {
-    match session.read_active_buffer().await {
-        Ok(Some(buffer)) if !buffer.path.as_os_str().is_empty() => Ok(buffer),
-        Ok(Some(_)) | Ok(None) => {
-            Err("Neoism LSP needs a file-backed active buffer".to_string())
-        }
-        Err(error) => Err(format!("Neoism LSP active buffer read failed: {error}")),
-    }
-}
-
-async fn snapshot(
-    session: &NvimSessionHandle,
-    workspace_root: &Path,
-) -> Option<LanguageServerSnapshot> {
-    let buffer = match session.poll_active_buffer().await {
-        Ok(Some(buffer)) => buffer,
-        Ok(None) => return None,
-        Err(error) => {
-            tracing::debug!(error = %error, "language-server active buffer read failed");
-            return None;
-        }
-    };
-    if buffer.path.as_os_str().is_empty() {
-        return None;
-    }
-
-    // didOpen/didChange are fed directly by OpenBuffer + nvim's on_lines/CRDT
-    // event stream. This poll is only a status/cache recovery snapshot; it
-    // never reads or transmits document text and is not part of edit latency.
-    let diagnostics = if buffer.too_large {
-        Vec::new()
-    } else {
-        language_server::cached_diagnostics(workspace_root, &buffer.path)
-    };
-    let statuses = language_server::status(workspace_root, Some(buffer.path.as_path()));
-    let filetype = language_server::language_id_for_path_in(workspace_root, &buffer.path)
-        .unwrap_or_default();
-
-    // States feed the diagnostics-gutter/web pill and cover every
-    // workspace server; the popup `servers` are narrowed to the ones that
-    // handle the open buffer's language so the pill reflects "active for
-    // this file".
-    let states = statuses
-        .iter()
-        .map(|status| (status.id.clone(), map_lsp_state(status.status.clone())))
-        .collect();
-    let mut servers: Vec<LspSnapshotServer> = statuses
-        .iter()
-        .filter(|status| filetype.is_empty() || status.language == filetype)
-        .map(map_snapshot_server)
-        .collect();
-    if buffer.too_large {
-        let limit_mib = crate::nvim::MAX_LSP_DOCUMENT_BYTES / (1024 * 1024);
-        let size_mib = buffer.byte_len as f64 / (1024.0 * 1024.0);
-        for server in &mut servers {
-            server.state = "disabled".to_string();
-            server.message = Some(format!(
-                "Large-file mode: {:.1} MiB document exceeds the {limit_mib} MiB LSP limit",
-                size_mib
-            ));
-        }
-    }
-
-    let diagnostics: Vec<DiagnosticItem> =
-        diagnostics.into_iter().map(map_diagnostic).collect();
-    if std::env::var_os("NEOISM_LSP_LOG").is_some() {
-        eprintln!(
-            "neoism::lsp snapshot: file={} filetype={} bytes={} large={} servers={} diagnostics={} states={:?}",
-            buffer.path.display(),
-            filetype,
-            buffer.byte_len,
-            buffer.too_large,
-            servers.len(),
-            diagnostics.len(),
-            servers.iter().map(|s| format!("{}:{}", s.name, s.state)).collect::<Vec<_>>(),
-        );
-    }
-
-    Some(LanguageServerSnapshot {
-        diagnostics,
-        states,
-        servers,
-        filetype,
-        file: buffer.path.clone(),
-    })
-}
-
-/// Map an engine `LspStatus` onto the wire `LspSnapshotServer` the
-/// status-bar popup renders, carrying the resolution source
-/// (extension/config/path/missing) so the popup can show where the binary
-/// came from.
-fn map_snapshot_server(status: &language_server::LspStatus) -> LspSnapshotServer {
-    LspSnapshotServer {
-        name: status.name.clone(),
-        binary: status.command.first().cloned().unwrap_or_default(),
-        filetype: status.language.clone(),
-        state: snapshot_state_label(&status.status, &status.command_source).to_string(),
-        source: Some(command_source_label(&status.command_source).to_string()),
-        message: status.detected.message.clone(),
-        level: None,
-    }
-}
-
-/// Popup state label (mirrors `lsp_popup::LspServerState::from_str`). The
-/// engine status already identifies the exact workspace/project/server key;
-/// never infer attachment from another client's matching language id.
-fn snapshot_state_label(
-    state: &language_server::LspServerState,
-    source: &language_server::LspCommandSource,
-) -> &'static str {
-    use language_server::{LspCommandSource as C, LspServerState as S};
-    match (state, source) {
-        (S::Error, _) => "error",
-        (_, C::Missing) => "missing",
-        (S::Connected, _) => "attached",
-        (S::Available, _) => "available",
-    }
-}
-
-fn command_source_label(source: &language_server::LspCommandSource) -> &'static str {
-    match source {
-        language_server::LspCommandSource::BuiltIn => "built-in/socket",
-        language_server::LspCommandSource::Extension => "extension",
-        language_server::LspCommandSource::Config => "config",
-        language_server::LspCommandSource::Path => "path",
-        language_server::LspCommandSource::Missing => "missing",
-    }
-}
-
-fn map_lsp_state(state: language_server::LspServerState) -> LspState {
-    match state {
-        language_server::LspServerState::Available
-        | language_server::LspServerState::Connected => LspState::Ready,
-        language_server::LspServerState::Error => LspState::Failed {
-            message: "language server unavailable".to_string(),
-        },
     }
 }
 

@@ -193,9 +193,9 @@ pub(crate) fn context_title_or_fallback<T: EventListener>(
         .filter(|title| !title.is_empty())
         .or_else(|| {
             context
-                .editor_path
+                .code
                 .as_ref()
-                .and_then(|path| path.file_name())
+                .and_then(|pane| pane.path.file_name())
                 .and_then(|name| name.to_str())
                 .map(str::to_string)
         })
@@ -206,8 +206,8 @@ pub(crate) fn context_workspace_tab_kind_and_path<T: EventListener>(
     context: &Context<T>,
     fallback_root: Option<PathBuf>,
 ) -> (String, Option<PathBuf>) {
-    if let Some(path) = context.editor_path.clone() {
-        return ("editor".to_string(), Some(path));
+    if let Some(code) = context.code.as_ref() {
+        return ("editor".to_string(), Some(code.path.clone()));
     }
     if let Some(markdown) = context.markdown.as_ref() {
         return ("markdown".to_string(), Some(markdown.path.clone()));
@@ -224,7 +224,7 @@ pub(crate) fn context_workspace_tab_kind_and_path<T: EventListener>(
 pub(crate) fn session_leaf_spec_for_context<T: EventListener>(
     context: &Context<T>,
 ) -> SessionLeafSpec {
-    let kind = if context.editor.is_some() {
+    let kind = if context.code.is_some() {
         SessionLeafKind::Editor
     } else if context.neoism_agent.is_some() {
         SessionLeafKind::Agent

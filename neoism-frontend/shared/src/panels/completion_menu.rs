@@ -831,7 +831,7 @@ fn truncate(text: &str, budget_px: f32, font_size: f32) -> String {
 /// range the rest of the UI draws from. Empty string ⇒ no icon, caller shows
 /// the text tag instead. Accepts both the engine's lowercase LSP kind words
 /// (`function`, `struct`, …) and nvim's capitalized variants.
-fn kind_icon(kind: &str) -> &'static str {
+pub(crate) fn kind_icon(kind: &str) -> &'static str {
     match kind {
         "Function" | "function" | "Method" | "method" | "Constructor" | "constructor" => {
             "\u{f121}" // </>  code
@@ -901,7 +901,7 @@ fn snap_to_device_px(value: f32, scale_factor: f32) -> f32 {
     }
 }
 
-fn kind_color(kind: &str, theme: &IdeTheme) -> [u8; 4] {
+pub(crate) fn kind_color(kind: &str, theme: &IdeTheme) -> [u8; 4] {
     match kind {
         "Function" | "function" | "Method" | "method" | "Constructor" | "constructor" => {
             theme.u8(theme.blue)

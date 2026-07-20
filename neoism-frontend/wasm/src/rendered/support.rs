@@ -87,6 +87,7 @@ pub(crate) fn palette_action_name(
         A::RemoveServer { .. } => "RemoveServer",
         A::AddServer => "AddServer",
         A::CreateServer => "CreateServer",
+        A::GoToSymbol => "GoToSymbol",
         A::TabCreate => "TabCreate",
         A::TabClose => "TabClose",
         A::TabCloseUnfocused => "TabCloseUnfocused",
@@ -126,10 +127,6 @@ pub(crate) fn palette_action_name(
         A::RestartNotebookKernel => "RestartNotebookKernel",
         A::SearchForward => "SearchForward",
         A::SearchBackward => "SearchBackward",
-        // NvimEx never reaches TS as a named action —
-        // `pick_palette_action` rewrites it into an `ExCommand`
-        // intent so the web host reuses its ex dispatch path.
-        A::NvimEx(_) => "NvimEx",
         A::GoToLine => "GoToLine",
         A::SearchFiles => "SearchFiles",
         A::SearchWords => "SearchWords",

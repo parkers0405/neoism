@@ -162,12 +162,12 @@ impl Screen<'_> {
         // this, paths that route through `resize_top_or_bottom_line`
         // (closing a sibling tab via shell `exit`, toggling the
         // search bar) overwrite the editor grid's `scaled_margin.top`
-        // with island-only, and nvim's first ~4 rows get hidden
+        // with island-only, and the pane's first ~4 rows get hidden
         // behind the still-painted buffer-tabs/breadcrumbs strips.
         // CHROME_SAFETY_PAD must match `reapply_chrome_layout`.
         let chrome_extra = neoism_ui::chrome_policy::resize_chrome_extra(
             neoism_ui::chrome_policy::ResizeChromeExtraInput {
-                current_is_editor: self.context_manager.current().editor.is_some(),
+                current_is_editor: self.context_manager.current().code.is_some(),
                 has_buffer_tabs: !self.renderer.buffer_tabs.tabs().is_empty(),
                 buffer_tabs_height: self.renderer.buffer_tabs_height(),
                 breadcrumbs_height: self.renderer.breadcrumbs_height(),

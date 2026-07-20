@@ -686,7 +686,7 @@ pub(crate) fn vim_paragraph_object(
 
 /// Forward document search for a plain pattern, starting strictly after
 /// `from`, wrapping around. `whole_word` requires word-class boundaries.
-pub(crate) fn vim_search_forward(
+pub fn vim_search_forward(
     lines: &[String],
     from: MarkdownPosition,
     pattern: &str,
@@ -830,7 +830,8 @@ pub(crate) fn is_whole_word_match(line: &str, start: usize, len: usize) -> bool 
 }
 
 /// The word-class run at (or, vim-style, after) the cursor on its line.
-pub(crate) fn vim_word_under_cursor(line: &str, col: usize) -> Option<(usize, usize)> {
+/// Pub: the desktop rename prompt prefills with the word under cursor.
+pub fn vim_word_under_cursor(line: &str, col: usize) -> Option<(usize, usize)> {
     let mut col = floor_char_boundary(line, col.min(line.len()));
     if col >= line.len() {
         if line.is_empty() {

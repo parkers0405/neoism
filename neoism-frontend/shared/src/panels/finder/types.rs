@@ -17,6 +17,44 @@ pub(super) struct GrepResult {
     pub(super) text: String,
 }
 
+/// One matching line of the active code buffer (BufferLines mode).
+/// No path — the row always refers to the pane the finder was opened
+/// from.
+#[derive(Clone)]
+pub(super) struct BufferLineResult {
+    /// 1-based line number, matching the pane's gutter.
+    pub(super) line: u32,
+    /// Trimmed line text.
+    pub(super) text: String,
+}
+
+/// One find-references hit handed to `Finder::open_references` by the
+/// host (LSP results). `path` is relative to the finder cwd when the
+/// hit lives under it; `line` is 1-based, `column` is a 0-based byte
+/// column.
+#[derive(Clone)]
+pub struct ReferenceRow {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    pub text: String,
+}
+
+/// One document symbol handed to `Finder::set_symbol_rows` by the
+/// host (flattened LSP document symbols, Symbols mode). No path — the
+/// row always refers to the pane the finder was opened from. `line`
+/// is 1-based, `column` is a 0-based byte column of the symbol's
+/// selection start.
+#[derive(Clone)]
+pub struct SymbolRow {
+    /// Lowercase LSP kind word (`function`, `struct`, …) — mapped to
+    /// the completion menu's kind glyph/color at render time.
+    pub kind: String,
+    pub name: String,
+    pub line: u32,
+    pub column: u32,
+}
+
 #[derive(Clone)]
 pub(super) struct GitResult {
     pub(super) path: String,
@@ -30,6 +68,8 @@ pub(super) enum Result_ {
     File(FileResult),
     Grep(GrepResult),
     Git(GitResult),
+    Buffer(BufferLineResult),
+    Symbol(SymbolRow),
 }
 
 impl Result_ {
@@ -38,6 +78,10 @@ impl Result_ {
             Result_::File(f) => &f.path,
             Result_::Grep(g) => &g.path,
             Result_::Git(g) => &g.path,
+            // Buffer/Symbol rows have no path — they always refer to
+            // the pane the finder was opened from.
+            Result_::Buffer(_) => "",
+            Result_::Symbol(_) => "",
         }
     }
 
@@ -46,6 +90,8 @@ impl Result_ {
             Result_::File(_) => None,
             Result_::Grep(g) => Some(g.line),
             Result_::Git(g) => Some(g.line),
+            Result_::Buffer(b) => Some(b.line),
+            Result_::Symbol(s) => Some(s.line),
         }
     }
 }

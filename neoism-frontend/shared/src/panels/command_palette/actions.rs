@@ -56,15 +56,12 @@ pub enum PaletteAction {
     RestartNotebookKernel,
     SearchForward,
     SearchBackward,
-    /// Dispatch a fixed nvim ex command through the palette's existing
-    /// ex pipeline (`try_intercept_ex_command` → `vim_run_ex_command`),
-    /// so the entry behaves exactly like typing `:{0}` by hand — modal
-    /// output commands (`registers`, `marks`, …) surface in the rio
-    /// modal, errors report the same way.
-    NvimEx(&'static str),
     /// Switch the palette into `:` ex mode so the user can type a bare
     /// line number — the existing `:N` dispatch jumps there.
     GoToLine,
+    /// Open the finder in document-symbols quick-jump mode — the same
+    /// mode typing `@` as the first char of the Ctrl+P query enters.
+    GoToSymbol,
     SearchFiles,
     SearchWords,
     SearchGitChanges,
@@ -376,7 +373,7 @@ pub fn theme_picker_modal_spec() -> ModalSpec {
 
     ModalSpec {
         title: "Theme Picker".to_string(),
-        body: "Pick a unified IDE theme. This applies live to Neoism chrome, terminal defaults, and the managed nvim syntax palette.".to_string(),
+        body: "Pick a unified IDE theme. This applies live to Neoism chrome, terminal defaults, and the editor syntax palette.".to_string(),
         meta: "Enter applies, Esc closes.".to_string(),
         input: None,
         buttons,
@@ -483,9 +480,12 @@ pub(crate) fn command_visible_for_surface(
     surface: PaletteSurface,
 ) -> bool {
     match action {
-        PaletteAction::ToggleViMode | PaletteAction::ClearHistory => {
-            surface == PaletteSurface::Terminal
+        // Vi mode toggles the code pane's vim input when a code buffer
+        // owns focus, and the terminal's scrollback vi mode otherwise.
+        PaletteAction::ToggleViMode => {
+            matches!(surface, PaletteSurface::Terminal | PaletteSurface::Editor)
         }
+        PaletteAction::ClearHistory => surface == PaletteSurface::Terminal,
         PaletteAction::SaveDocument => {
             matches!(
                 surface,
@@ -511,9 +511,9 @@ pub(crate) fn command_visible_for_surface(
         PaletteAction::SearchForward | PaletteAction::SearchBackward => {
             !matches!(surface, PaletteSurface::Markdown | PaletteSurface::Notebook)
         }
-        // nvim-buffer commands only make sense (and are only safe) when
-        // the focused pane actually hosts an embedded nvim editor.
-        PaletteAction::NvimEx(_) | PaletteAction::GoToLine => {
+        // Line/symbol jumps only make sense when the focused pane
+        // hosts a code buffer.
+        PaletteAction::GoToLine | PaletteAction::GoToSymbol => {
             surface == PaletteSurface::Editor
         }
         PaletteAction::LspHover

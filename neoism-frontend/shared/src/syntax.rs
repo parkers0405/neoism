@@ -41,11 +41,17 @@ const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
     "comment.note",
     "comment.todo",
     "comment.warning",
+    "conditional",
     "constant",
     "constant.builtin",
+    "constant.macro",
     "constructor",
+    "define",
+    "delimiter",
+    "directive",
     "embedded",
     "escape",
+    "exception",
     "field",
     "function",
     "function.builtin",
@@ -66,6 +72,9 @@ const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
     "keyword.repeat",
     "keyword.return",
     "keyword.type",
+    "include",
+    "label",
+    "macro",
     "module",
     "module.builtin",
     "namespace",
@@ -74,6 +83,7 @@ const TREE_SITTER_HIGHLIGHT_NAMES: &[&str] = &[
     "property",
     "punctuation",
     "punctuation.bracket",
+    "repeat",
     "punctuation.delimiter",
     "punctuation.special",
     "string",
@@ -108,6 +118,33 @@ pub enum SynTok {
     Punct,
 }
 
+/// The tree-sitter grammars compiled into Neoism, as `(grammar id,
+/// display language)` pairs. This is presentation data for the
+/// Extensions page's Syntax Parsers tab; keep it in sync with
+/// [`ParserLang`] below (the actual compiled-in parser set).
+pub fn built_in_grammars() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("rust", "Rust"),
+        ("javascript", "JavaScript"),
+        ("jsx", "JSX"),
+        ("typescript", "TypeScript"),
+        ("tsx", "TSX"),
+        ("python", "Python"),
+        ("go", "Go"),
+        ("lua", "Lua"),
+        ("toml", "TOML"),
+        ("json", "JSON"),
+        ("nix", "Nix"),
+        ("make", "Makefile"),
+        ("bash", "Bash"),
+        ("c", "C"),
+        ("cpp", "C++"),
+        ("yaml", "YAML"),
+        ("css", "CSS"),
+        ("html", "HTML"),
+    ]
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ParserLang {
@@ -116,6 +153,19 @@ enum ParserLang {
     Jsx,
     Typescript,
     Tsx,
+    Python,
+    Go,
+    Lua,
+    Toml,
+    Json,
+    Nix,
+    Make,
+    Bash,
+    C,
+    Cpp,
+    Yaml,
+    Css,
+    Html,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -186,6 +236,14 @@ pub enum Lang {
     Lua,
     Toml,
     Json,
+    Nix,
+    Make,
+    Bash,
+    C,
+    Cpp,
+    Yaml,
+    Css,
+    Html,
     /// Markdown source. The file-viewer in chrome.rs branches on this
     /// to render block-aware markdown (headings, lists, code blocks,
     /// quotes) via the lifted `editor::markdown::MarkdownPane` parser
@@ -212,6 +270,16 @@ impl Lang {
             "lua" => Lang::Lua,
             "toml" => Lang::Toml,
             "json" | "jsonc" => Lang::Json,
+            "nix" => Lang::Nix,
+            "mk" | "makefile" | "gnumakefile" => Lang::Make,
+            "sh" | "bash" | "zsh" => Lang::Bash,
+            // `.h` headers are overwhelmingly C in the wild; C++ headers
+            // use the unambiguous `.hpp`/`.hh`/`.hxx` spellings.
+            "c" | "h" => Lang::C,
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Lang::Cpp,
+            "yaml" | "yml" => Lang::Yaml,
+            "css" => Lang::Css,
+            "html" | "htm" => Lang::Html,
             "md" | "markdown" => Lang::Markdown,
             _ => Lang::Other,
         }
@@ -320,7 +388,47 @@ impl Lang {
                 "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat",
                 "return", "then", "true", "until", "while",
             ],
-            Lang::Toml | Lang::Json | Lang::Markdown | Lang::Other => &[],
+            Lang::C => &[
+                "auto", "break", "case", "char", "const", "continue", "default",
+                "do", "double", "else", "enum", "extern", "float", "for", "goto",
+                "if", "inline", "int", "long", "register", "restrict", "return",
+                "short", "signed", "sizeof", "static", "struct", "switch",
+                "typedef", "union", "unsigned", "void", "volatile", "while",
+                "NULL", "true", "false",
+            ],
+            Lang::Cpp => &[
+                "auto", "bool", "break", "case", "catch", "char", "class",
+                "const", "constexpr", "continue", "default", "delete", "do",
+                "double", "else", "enum", "explicit", "extern", "false", "float",
+                "for", "friend", "goto", "if", "inline", "int", "long",
+                "mutable", "namespace", "new", "noexcept", "nullptr", "operator",
+                "override", "private", "protected", "public", "return", "short",
+                "signed", "sizeof", "static", "struct", "switch", "template",
+                "this", "throw", "true", "try", "typedef", "typename", "union",
+                "unsigned", "using", "virtual", "void", "volatile", "while",
+            ],
+            Lang::Bash => &[
+                "if", "then", "elif", "else", "fi", "for", "while", "until",
+                "do", "done", "case", "esac", "in", "function", "select",
+                "time", "return", "break", "continue", "local", "export",
+                "readonly", "declare", "unset", "shift", "exit", "trap",
+                "source", "alias", "eval", "exec",
+            ],
+            Lang::Make => &[
+                "ifeq", "ifneq", "ifdef", "ifndef", "else", "endif", "include",
+                "define", "endef", "export", "unexport", "override",
+            ],
+            Lang::Nix => &[
+                "let", "in", "if", "then", "else", "with", "inherit", "rec",
+                "assert", "or", "true", "false", "null",
+            ],
+            Lang::Yaml => &["true", "false", "null", "yes", "no"],
+            Lang::Css
+            | Lang::Html
+            | Lang::Toml
+            | Lang::Json
+            | Lang::Markdown
+            | Lang::Other => &[],
         }
     }
 
@@ -333,6 +441,8 @@ impl Lang {
                 | Lang::Typescript
                 | Lang::Tsx
                 | Lang::Go
+                | Lang::C
+                | Lang::Cpp
         )
     }
 
@@ -343,10 +453,19 @@ impl Lang {
             | Lang::Jsx
             | Lang::Typescript
             | Lang::Tsx
-            | Lang::Go => Some("//"),
-            Lang::Python | Lang::Toml => Some("#"),
+            | Lang::Go
+            | Lang::C
+            | Lang::Cpp => Some("//"),
+            Lang::Python | Lang::Toml | Lang::Bash | Lang::Nix | Lang::Yaml
+            | Lang::Make => {
+                Some("#")
+            }
             Lang::Lua => Some("--"),
-            Lang::Json | Lang::Markdown | Lang::Other => None,
+            // CSS/HTML only have block comments, which the per-line
+            // fallback can't carry across lines anyway.
+            Lang::Css | Lang::Html | Lang::Json | Lang::Markdown | Lang::Other => {
+                None
+            }
         }
     }
 }
@@ -518,6 +637,19 @@ impl ParserLang {
             Lang::Jsx => Some(ParserLang::Jsx),
             Lang::Typescript => Some(ParserLang::Typescript),
             Lang::Tsx => Some(ParserLang::Tsx),
+            Lang::Python => Some(ParserLang::Python),
+            Lang::Go => Some(ParserLang::Go),
+            Lang::Lua => Some(ParserLang::Lua),
+            Lang::Toml => Some(ParserLang::Toml),
+            Lang::Json => Some(ParserLang::Json),
+            Lang::Nix => Some(ParserLang::Nix),
+            Lang::Make => Some(ParserLang::Make),
+            Lang::Bash => Some(ParserLang::Bash),
+            Lang::C => Some(ParserLang::C),
+            Lang::Cpp => Some(ParserLang::Cpp),
+            Lang::Yaml => Some(ParserLang::Yaml),
+            Lang::Css => Some(ParserLang::Css),
+            Lang::Html => Some(ParserLang::Html),
             _ => None,
         }
     }
@@ -575,7 +707,7 @@ fn tree_sitter_highlight_ranges(
                 let kind = TREE_SITTER_HIGHLIGHT_NAMES
                     .get(highlight.0)
                     .copied()
-                    .map(tree_sitter_capture_kind)
+                    .map(|name| tree_sitter_capture_kind(name, lang))
                     .unwrap_or(SynTok::Plain);
                 active.push(kind);
             }
@@ -648,11 +780,148 @@ fn tree_sitter_config(lang: ParserLang) -> Option<HighlightConfiguration> {
             tree_sitter_typescript::LOCALS_QUERY,
         )
         .ok(),
+        ParserLang::Python => HighlightConfiguration::new(
+            tree_sitter_python::LANGUAGE.into(),
+            "python",
+            tree_sitter_python::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::Go => HighlightConfiguration::new(
+            tree_sitter_go::LANGUAGE.into(),
+            "go",
+            tree_sitter_go::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::Lua => HighlightConfiguration::new(
+            tree_sitter_lua::LANGUAGE.into(),
+            "lua",
+            tree_sitter_lua::HIGHLIGHTS_QUERY,
+            tree_sitter_lua::INJECTIONS_QUERY,
+            tree_sitter_lua::LOCALS_QUERY,
+        )
+        .ok(),
+        ParserLang::Toml => HighlightConfiguration::new(
+            tree_sitter_toml_ng::LANGUAGE.into(),
+            "toml",
+            tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::Json => HighlightConfiguration::new(
+            tree_sitter_json::LANGUAGE.into(),
+            "json",
+            tree_sitter_json::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::Make => HighlightConfiguration::new(
+            tree_sitter_make::LANGUAGE.into(),
+            "make",
+            tree_sitter_make::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::Nix => HighlightConfiguration::new(
+            tree_sitter_nix::LANGUAGE.into(),
+            "nix",
+            tree_sitter_nix::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::Bash => HighlightConfiguration::new(
+            tree_sitter_bash::LANGUAGE.into(),
+            "bash",
+            tree_sitter_bash::HIGHLIGHT_QUERY,
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::C => HighlightConfiguration::new(
+            tree_sitter_c::LANGUAGE.into(),
+            "c",
+            tree_sitter_c::HIGHLIGHT_QUERY,
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::Cpp => HighlightConfiguration::new(
+            tree_sitter_cpp::LANGUAGE.into(),
+            "cpp",
+            &format!(
+                "{}\n{}",
+                tree_sitter_c::HIGHLIGHT_QUERY,
+                tree_sitter_cpp::HIGHLIGHT_QUERY
+            ),
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::Yaml => HighlightConfiguration::new(
+            tree_sitter_yaml::LANGUAGE.into(),
+            "yaml",
+            tree_sitter_yaml::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::Css => HighlightConfiguration::new(
+            tree_sitter_css::LANGUAGE.into(),
+            "css",
+            tree_sitter_css::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )
+        .ok(),
+        ParserLang::Html => HighlightConfiguration::new(
+            tree_sitter_html::LANGUAGE.into(),
+            "html",
+            tree_sitter_html::HIGHLIGHTS_QUERY,
+            tree_sitter_html::INJECTIONS_QUERY,
+            "",
+        )
+        .ok(),
     }
 }
 
+/// Whole-source tree-sitter highlight: global byte spans over the full
+/// text, correct across multi-line constructs (block comments, raw
+/// strings, triple-quoted strings) that the per-line path mis-colors.
+/// Returns None when no parser exists for `lang` (caller falls back to
+/// the per-line highlighter).
 #[cfg(not(target_arch = "wasm32"))]
-fn tree_sitter_capture_kind(capture: &str) -> SynTok {
+pub fn highlight_source(source: &str, lang: Lang) -> Option<Vec<(SynTok, usize, usize)>> {
+    let parser_lang = ParserLang::from_lang(lang)?;
+    TREE_SITTER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let config = cache.config(parser_lang)?;
+        tree_sitter_highlight_ranges(source, lang, config)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn highlight_source(
+    _source: &str,
+    _lang: Lang,
+) -> Option<Vec<(SynTok, usize, usize)>> {
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn tree_sitter_capture_kind(capture: &str, lang: Lang) -> SynTok {
+    // Nix's query captures nearly every identifier as the broad
+    // `@variable` (last-pattern-wins over `@property`), which left
+    // whole files plain white; the classic nix look colors them.
+    if matches!(lang, Lang::Nix) && capture.starts_with("variable") {
+        return SynTok::Function;
+    }
     match capture {
         "comment"
         | "comment.documentation"
@@ -690,8 +959,10 @@ fn tree_sitter_capture_kind(capture: &str) -> SynTok {
         | "punctuation.delimiter"
         | "punctuation.special"
         | "operator"
+        | "delimiter"
         | "tag.delimiter" => SynTok::Punct,
-        "constant" | "variable.builtin" | "variable.super" => SynTok::Type,
+        "constant" | "constant.macro" | "macro" | "label" | "variable.builtin"
+        | "variable.super" => SynTok::Type,
         "property" | "field" | "variable.member" | "tag.attribute" | "attribute" => {
             SynTok::Function
         }
@@ -754,6 +1025,99 @@ mod tests {
         assert!(has_token(&spans, SynTok::Type, "User"));
         assert!(has_token(&spans, SynTok::Number, "true"));
         assert!(has_token(&spans, SynTok::Punct, "("));
+    }
+
+    /// `tree_sitter_config` returns `None` (silent scanner fallback) when a
+    /// grammar's highlight query fails to load — so every compiled-in parser
+    /// must prove its config constructs, or a bad query ships invisibly.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[test]
+    fn nix_attr_keys_color_as_property() {
+        let src = "{\n  name = \"x\";\n  services.foo.enable = true;\n}\n";
+        let toks = highlight_source(src, Lang::Nix).unwrap_or_default();
+        let name_pos = src.find("name").unwrap();
+        let hit = toks
+            .iter()
+            .find(|(_, s, e)| *s <= name_pos && name_pos < *e)
+            .map(|(k, _, _)| *k);
+        eprintln!("nix tokens: {toks:?}");
+        assert_eq!(hit, Some(SynTok::Function), "attr key should color as property");
+    }
+
+    #[test]
+    fn new_grammars_produce_real_tokens() {
+        // A grammar can "construct" yet yield zero styled tokens when
+        // its query captures miss the configured name list — assert
+        // actual output per language on a representative snippet.
+        let cases: &[(Lang, &str)] = &[
+            (Lang::Make, "# c\nall: build\n\t$(CC) -o out main.c\n.PHONY: all\n"),
+            (Lang::Nix, "{ pkgs, ... }:\n{\n  # comment\n  services.foo.enable = true;\n  environment.systemPackages = [ pkgs.hello ];\n}\n"),
+            (Lang::Bash, "#!/bin/bash\n# c\nfor f in *.txt; do\n  echo \"$f\"\ndone\n"),
+            (Lang::C, "// c\nint main(void) {\n  return 42;\n}\n"),
+            (Lang::Cpp, "// c\nclass Foo {\n public:\n  int bar() { return 1; }\n};\n"),
+            (Lang::Yaml, "# c\nname: test\nitems:\n  - one\n  - two\n"),
+            (Lang::Css, "/* c */\n.foo { color: red; }\n"),
+            (Lang::Html, "<!-- c -->\n<div class=\"x\">hi</div>\n"),
+        ];
+        for (lang, src) in cases {
+            let toks = highlight_source(src, *lang);
+            assert!(
+                toks.as_ref().is_some_and(|t| t.len() >= 3),
+                "{lang:?} produced {:?} tokens",
+                toks.map(|t| t.len())
+            );
+        }
+    }
+
+    fn every_compiled_parser_config_constructs() {
+        for lang in [
+            ParserLang::Rust,
+            ParserLang::Javascript,
+            ParserLang::Jsx,
+            ParserLang::Typescript,
+            ParserLang::Tsx,
+            ParserLang::Python,
+            ParserLang::Go,
+            ParserLang::Lua,
+            ParserLang::Toml,
+            ParserLang::Json,
+            ParserLang::Nix,
+            ParserLang::Bash,
+            ParserLang::C,
+            ParserLang::Cpp,
+            ParserLang::Yaml,
+            ParserLang::Css,
+            ParserLang::Html,
+        ] {
+            assert!(
+                tree_sitter_config(lang).is_some(),
+                "{lang:?} highlight query failed to load"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_and_c_use_parser_backed_highlighting() {
+        let bash = highlight_line("if [ -f x ]; then echo \"hi\"; fi", Lang::Bash);
+        assert!(has_token(&bash, SynTok::Keyword, "if"));
+        assert!(has_token(&bash, SynTok::String, "\"hi\""));
+
+        let c = highlight_line("static unsigned count = 42;", Lang::C);
+        assert!(has_token(&c, SynTok::Number, "42"));
+        assert!(c
+            .iter()
+            .any(|(kind, text)| *kind == SynTok::Keyword && *text == "static"));
+    }
+
+    #[test]
+    fn header_extensions_split_between_c_and_cpp() {
+        assert_eq!(Lang::from_path("src/list.h"), Lang::C);
+        assert_eq!(Lang::from_path("src/list.hpp"), Lang::Cpp);
+        assert_eq!(Lang::from_path("src/list.hh"), Lang::Cpp);
+        assert_eq!(Lang::from_path("flake.nix"), Lang::Nix);
+        assert_eq!(Lang::from_path("run.zsh"), Lang::Bash);
+        assert_eq!(Lang::from_path("ci.yml"), Lang::Yaml);
     }
 
     #[test]

@@ -456,8 +456,7 @@ pub enum EarlyKeyDispatchAction {
     /// Switch workspace buffer tab; `shift` selects the direction.
     SelectWorkspaceBufferTab { shift: bool },
     /// Ctrl+Insert (Hyprland Super+C → Ctrl+Insert) — copy active
-    /// selection to the system clipboard, routing through nvim when an
-    /// editor pane owns input.
+    /// selection to the system clipboard.
     ControlInsert,
     /// Shift+Insert — paste from the system clipboard into the active
     /// surface (editor / markdown / terminal).
@@ -564,9 +563,9 @@ pub const fn early_key_event_dispatch(
 
 /// POD inputs to [`mid_key_event_dispatch`].
 ///
-/// Captures the four mutually-exclusive consumption gates the desktop
+/// Captures the mutually-exclusive consumption gates the desktop
 /// fork runs after `process_key_bindings` and the early dispatcher have
-/// already had their chance: search-bar input, the editor pane, the
+/// already had their chance: search-bar input, the code surface, the
 /// markdown surface, and the vi-mode no-op short-circuit. Each gate is
 /// represented by a single `bool` the caller has already resolved.
 ///
@@ -579,9 +578,9 @@ pub struct MidKeyDispatchInput {
     /// resolved key `text` into the search input one char at a time and
     /// marks dirty.
     pub search_active: bool,
-    /// `true` when the active context owns an editor pane (`editor.is_some()`).
-    /// Routes the raw `KeyEvent` to nvim via `format_key_for_nvim`.
-    pub editor_active: bool,
+    /// `true` when the active context owns a native code surface
+    /// (`code.is_some()`). Routes the key to `dispatch_code_key`.
+    pub code_active: bool,
     /// `true` when the active context owns a markdown surface
     /// (`markdown.is_some()`). Routes the key to `dispatch_markdown_key`.
     pub markdown_active: bool,
@@ -606,9 +605,9 @@ pub enum MidKeyDispatchAction {
     /// Feed each char of the resolved key text into the search input
     /// and mark the screen dirty.
     RouteToSearch,
-    /// Forward the key event to the editor pane (nvim) via
-    /// `format_key_for_nvim` + `dispatch_editor_key`.
-    RouteToEditor,
+    /// Forward the key event to the native code surface via
+    /// `dispatch_code_key`.
+    RouteToCode,
     /// Forward the key event to the markdown surface via
     /// `dispatch_markdown_key`.
     RouteToMarkdown,
@@ -622,7 +621,7 @@ pub enum MidKeyDispatchAction {
 /// original chained `if`s):
 ///
 /// 1. `search_active` → [`MidKeyDispatchAction::RouteToSearch`]
-/// 2. `editor_active` → [`MidKeyDispatchAction::RouteToEditor`]
+/// 2. `code_active` → [`MidKeyDispatchAction::RouteToCode`]
 /// 3. `markdown_active` → [`MidKeyDispatchAction::RouteToMarkdown`]
 /// 4. `vi_mode` → [`MidKeyDispatchAction::ConsumeViMode`]
 /// 5. otherwise → [`MidKeyDispatchAction::PassThrough`]
@@ -630,8 +629,8 @@ pub const fn mid_key_event_dispatch(input: MidKeyDispatchInput) -> MidKeyDispatc
     if input.search_active {
         return MidKeyDispatchAction::RouteToSearch;
     }
-    if input.editor_active {
-        return MidKeyDispatchAction::RouteToEditor;
+    if input.code_active {
+        return MidKeyDispatchAction::RouteToCode;
     }
     if input.markdown_active {
         return MidKeyDispatchAction::RouteToMarkdown;
@@ -789,32 +788,21 @@ pub fn build_non_kitty_terminal_bytes(text: &str, alt: bool) -> Vec<u8> {
 /// Captures the post-build decision in `Screen::process_key_event`:
 /// once the byte stream has been assembled (either via kitty's CSI
 /// builder or the raw UTF-8 path), the caller decides whether to feed
-/// the bytes to the PTY, route to the editor pane (nvim wants
-/// notation, not escape sequences), or skip the write entirely (empty
-/// output).
+/// the bytes to the PTY or skip the write entirely (empty output).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TerminalOutputDispatchInput {
     /// `true` when the byte stream returned by either branch of the
     /// kitty-vs-raw decision was empty. Empty output skips the
     /// scroll/clear-selection side effects entirely.
     pub bytes_empty: bool,
-    /// `true` when the active context owns an editor pane
-    /// (`editor.is_some()`). Editor panes ignore the assembled bytes
-    /// and route the raw `KeyEvent` to nvim via `format_key_for_nvim`.
-    pub editor_active: bool,
 }
 
 /// Action returned by [`terminal_output_dispatch`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalOutputDispatchAction {
-    /// Bytes were empty — caller skips PTY/editor and only emits a
+    /// Bytes were empty — caller skips the PTY write and only emits a
     /// trace log noting the no-op.
     SkipEmpty,
-    /// Editor pane is active — caller runs the scroll-to-bottom +
-    /// clear-selection side effects, then re-translates the key event
-    /// to nvim notation and dispatches via `dispatch_editor_key`,
-    /// ignoring the assembled bytes.
-    RouteToEditor,
     /// Default terminal output — caller runs the scroll-to-bottom +
     /// clear-selection side effects, then writes the assembled bytes
     /// to the PTY messenger.
@@ -823,12 +811,11 @@ pub enum TerminalOutputDispatchAction {
 
 /// Resolve the post-build output dispatch in `Screen::process_key_event`.
 ///
-/// Precedence mirrors the original `if !bytes.is_empty() { … editor
-/// branch … else PTY } else { trace no-op }`:
+/// Precedence mirrors the original `if !bytes.is_empty() { … PTY }
+/// else { trace no-op }`:
 ///
 /// 1. `bytes_empty` → [`TerminalOutputDispatchAction::SkipEmpty`]
-/// 2. `editor_active` → [`TerminalOutputDispatchAction::RouteToEditor`]
-/// 3. otherwise → [`TerminalOutputDispatchAction::SendToPty`]
+/// 2. otherwise → [`TerminalOutputDispatchAction::SendToPty`]
 ///
 /// The desktop fork (and the web frontend) still owns the side effects
 /// — this helper just collapses the decision tree into a single match.
@@ -837,9 +824,6 @@ pub const fn terminal_output_dispatch(
 ) -> TerminalOutputDispatchAction {
     if input.bytes_empty {
         return TerminalOutputDispatchAction::SkipEmpty;
-    }
-    if input.editor_active {
-        return TerminalOutputDispatchAction::RouteToEditor;
     }
     TerminalOutputDispatchAction::SendToPty
 }
@@ -1396,7 +1380,7 @@ mod tests {
         let mut input = MidKeyDispatchInput::default();
         input.search_active = true;
         // Even when other gates are set, search wins.
-        input.editor_active = true;
+        input.code_active = true;
         input.markdown_active = true;
         input.vi_mode = true;
         assert_eq!(
@@ -1406,14 +1390,14 @@ mod tests {
     }
 
     #[test]
-    fn mid_dispatch_editor_outranks_markdown_and_vi() {
+    fn mid_dispatch_code_outranks_markdown_and_vi() {
         let mut input = MidKeyDispatchInput::default();
-        input.editor_active = true;
+        input.code_active = true;
         input.markdown_active = true;
         input.vi_mode = true;
         assert_eq!(
             mid_key_event_dispatch(input),
-            MidKeyDispatchAction::RouteToEditor
+            MidKeyDispatchAction::RouteToCode
         );
     }
 
@@ -1540,46 +1524,16 @@ mod tests {
 
     #[test]
     fn terminal_output_dispatch_empty_skips() {
-        let input = TerminalOutputDispatchInput {
-            bytes_empty: true,
-            editor_active: false,
-        };
+        let input = TerminalOutputDispatchInput { bytes_empty: true };
         assert_eq!(
             terminal_output_dispatch(input),
             TerminalOutputDispatchAction::SkipEmpty
-        );
-    }
-
-    #[test]
-    fn terminal_output_dispatch_empty_skips_even_when_editor_active() {
-        let input = TerminalOutputDispatchInput {
-            bytes_empty: true,
-            editor_active: true,
-        };
-        assert_eq!(
-            terminal_output_dispatch(input),
-            TerminalOutputDispatchAction::SkipEmpty
-        );
-    }
-
-    #[test]
-    fn terminal_output_dispatch_routes_editor_when_active() {
-        let input = TerminalOutputDispatchInput {
-            bytes_empty: false,
-            editor_active: true,
-        };
-        assert_eq!(
-            terminal_output_dispatch(input),
-            TerminalOutputDispatchAction::RouteToEditor
         );
     }
 
     #[test]
     fn terminal_output_dispatch_sends_to_pty_by_default() {
-        let input = TerminalOutputDispatchInput {
-            bytes_empty: false,
-            editor_active: false,
-        };
+        let input = TerminalOutputDispatchInput { bytes_empty: false };
         assert_eq!(
             terminal_output_dispatch(input),
             TerminalOutputDispatchAction::SendToPty

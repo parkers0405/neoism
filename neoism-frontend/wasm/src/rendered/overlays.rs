@@ -649,12 +649,11 @@ impl ChromeBridge {
 
     // ----- cursor overlays --------------------------------------------
     //
-    // Four state-push surfaces for the cursor-trail, custom mouse
-    // cursor sprite, animated cursorline rectangle, and yank-flash
-    // overlay. The desktop renderer drives these locally from its
-    // editor / mouse loop; the web bridge has no equivalent host
-    // hook, so JS pushes server-resolved cursor state through these
-    // methods. Wire-shapes are documented inline alongside each
+    // State-push surfaces for the cursor-trail, custom mouse cursor
+    // sprite, and yank-flash overlay. The desktop renderer drives
+    // these locally from its editor / mouse loop; the web bridge has
+    // no equivalent host hook, so JS pushes server-resolved cursor
+    // state through these methods. Wire-shapes are documented inline alongside each
     // setter — they mirror the underlying panel API but live in
     // this crate (not `neoism-protocol`) because the bridge
     // boundary is host↔chrome, not daemon↔frontend.
@@ -662,9 +661,8 @@ impl ChromeBridge {
     /// Return the chrome's current cell metrics as
     /// `[cell_w, cell_h]` (physical pixels). The web dispatcher
     /// reads these to translate daemon-side cell coordinates
-    /// (`CursorOverlayServerMessage::TrailCursor.col/row`,
-    /// `CursorlineOverlay.target_row`) into the physical-pixel
-    /// `x`/`y`/`target_y` the underlying setters expect. Returned
+    /// (`CursorOverlayServerMessage::TrailCursor.col/row`) into the
+    /// physical-pixel `x`/`y` the underlying setters expect. Returned
     /// as a `Vec<f32>` so the JS side can index `[0]`/`[1]`
     /// without an extra `js_sys::Array` allocation.
     pub fn cell_metrics(&self) -> Vec<f32> {
@@ -789,50 +787,6 @@ impl ChromeBridge {
         self.chrome
             .custom_cursor
             .set_position(parsed.x, parsed.y, parsed.visible);
-        Ok(())
-    }
-
-    /// Push the cursorline-overlay target for one editor pane.
-    /// JSON shape:
-    ///
-    /// ```text
-    /// {
-    ///   "rich_text_id": u32,       // 0-based pane / rich-text id
-    ///   "target_y": f32,           // top of highlighted row (phys px)
-    ///   "snap": bool,              // optional, defaults false
-    ///   "forget": bool             // optional, defaults false
-    /// }
-    /// ```
-    ///
-    /// `snap = true` pins the highlight to `target_y` with no glide
-    /// (mirrors the scroll-spring-active path in
-    /// `CursorlineOverlay::set_target`). `forget = true` drops the
-    /// cached state for the pane id — call when the pane is
-    /// closed/destroyed.
-    pub fn set_cursorline_overlay(&mut self, json: &str) -> Result<(), JsValue> {
-        #[derive(serde::Deserialize)]
-        struct JsCursorline {
-            #[serde(default)]
-            rich_text_id: u32,
-            #[serde(default)]
-            target_y: f32,
-            #[serde(default)]
-            snap: bool,
-            #[serde(default)]
-            forget: bool,
-        }
-
-        let parsed: JsCursorline = serde_json::from_str(json)
-            .map_err(|e| JsValue::from_str(&format!("cursorline parse: {e}")))?;
-
-        let id = parsed.rich_text_id as usize;
-        if parsed.forget {
-            self.chrome.cursorline_overlay.forget(id);
-            return Ok(());
-        }
-        self.chrome
-            .cursorline_overlay
-            .set_target(id, parsed.target_y, parsed.snap);
         Ok(())
     }
 

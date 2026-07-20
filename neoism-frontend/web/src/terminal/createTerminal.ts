@@ -166,16 +166,6 @@ export interface TerminalAdapter {
     chromeKeyboardCaptureActive?(): boolean;
     editorInputModalActive?(): boolean;
     focusEditorInput?(): void;
-    editorScrollAnimating?(): boolean;
-    editorWheelIntent?(
-        x: number,
-        y: number,
-        deltaY: number,
-        deltaMode: number,
-    ): EditorWheelIntent | null;
-    editorTickWheelIntent?(x: number, y: number): EditorWheelIntent | null;
-    editorResetWheel?(): void;
-    editorPointerIntent?(x: number, y: number): EditorCellHit | null;
     animationsActive?(): boolean;
     /** Push a daemon-resolved branch name into the status line. */
     setStatusBranch?(branch: string | null): void;
@@ -223,9 +213,6 @@ export interface TerminalAdapter {
     crdtApply?(json: string): boolean;
     /** Queue a daemon-owned save of the active markdown doc. */
     markdownRequestSave?(): boolean;
-    /** 7C-2: remote carets for the active editor (nvim) grid.
-     *  Returns `[visible, roster]` counts for diagnostics. */
-    setEditorRemoteCursors?(peers: unknown): number[] | Uint32Array | undefined;
     /** Swap a fresh host→workspace tree into the already-open
      *  Workspaces modal without resetting query/selection. */
     refreshWorkspacesPalette?(payloadJson: string): void;
@@ -286,24 +273,6 @@ export interface TerminalAdapter {
     agentMovePermissionSelection?(delta: number): boolean;
     agentSubmitPermission?(): boolean;
     agentReplyPermission?(decision: "Yes" | "Always" | "No"): boolean;
-    /** Hand an `EditorServerMessage` JSON envelope (daemon nvim redraw
-     *  frames) to the bridge for grid snapshot updates. */
-    editorGridUpdate?(eventJson: string): void;
-    /** Cache a background surface's redraw without touching the live
-     *  grid (prevents other tabs flashing through on resize). */
-    editorGridUpdatePassive?(eventJson: string): void;
-    /** Return the currently active merged editor grid snapshot, if the
-     *  bridge has one. */
-    activeEditorGridSnapshotJson?(): string | undefined;
-    /** Return the merged editor grid snapshot for one pane/editor
-     *  surface id, if that surface has received redraws. */
-    editorGridSnapshotForSurfaceJson?(surfaceId: string): string | undefined;
-    /** Return the list of pane/editor surface ids with cached snapshots. */
-    editorGridSurfaceIdsJson?(): string;
-    /** Make a cached surface snapshot the bridge's live editor grid. */
-    activateEditorGridSurface?(surfaceId: string | null): boolean;
-    /** Blank the live editor grid without deleting cached surface snapshots. */
-    clearActiveEditorGrid?(): void;
     /** Install the JS-side callback the bridge fires when the chrome
      *  wants to emit an `AgentClientMessage`. Signature is
      *  `(requestId: number, envelopeJson: string)`. */
@@ -322,25 +291,15 @@ export interface TerminalAdapter {
     /** Trigger the Neoism Agent home wordmark click animation. */
     agentWordmarkClick?(x: number, y: number): boolean;
     /** Which surface should consume the next raw keystroke. Returns
-     *  `"terminal"` for the shell tab, `"editor"` for nvim/file tabs,
+     *  `"terminal"` for the shell tab, `"editor"` for file tabs,
      *  and `"agent"` for the Neoism Agent tab. Stub / data-only adapters
      *  can omit this. */
     activeSurface?(): string;
-    /** Forward base64-encoded keystroke bytes to the embedded nvim via
-     *  the daemon. The bridge re-emits them on the callback installed by
-     *  `setNvimSend` so the host can wrap them in an `EditorClientMessage`
-     *  envelope. */
-    nvimSendKeys?(b64: string): void;
-    /** Install the JS-side callback the bridge fires when `nvim_send_keys`
-     *  needs to ship bytes back to the daemon. The bridge's stub passes a
-     *  single base64 string; the host wraps it in an
-     *  `EditorClientMessage::SendKeys` envelope and ships via `sendRaw`. */
-    setNvimSend?(cb: (bytesB64: string) => void): void;
     /** Install the JS-side callback the bridge fires when the terminal
      *  emits PTY response bytes (DSR / OSC / cursor pos). The bridge
      *  auto-calls this after every `feed_pty_output`, so hosts using
      *  the outbox path don't need to poll `takePtyWrites()`. Payload
-     *  is the same base64 string format as `setNvimSend`. */
+     *  is a base64 string. */
     setPtyOutbox?(cb: (bytesB64: string) => void): void;
     /** Search service setters — installed by `SearchService.install()`.
      *  Wasm passes `(reqId, envelopeJson)` for every search flavor. */
@@ -425,15 +384,6 @@ export interface ChromeRect {
     y: number;
     w: number;
     h: number;
-}
-
-export interface EditorCellHit {
-    row: number;
-    col: number;
-}
-
-export interface EditorWheelIntent extends EditorCellHit {
-    rows: number;
 }
 
 /** Output of `drainBufferTabIntents`. `activate` is the index of the
@@ -777,7 +727,6 @@ interface ChromeBridgeInstance {
     crdt_pump?(bufferId: string | null): string | undefined;
     crdt_apply?(json: string): boolean;
     markdown_request_save?(): boolean;
-    set_editor_remote_cursors?(peers: unknown): number[] | Uint32Array | undefined;
     resize(
         cols: number,
         rows: number,
@@ -911,16 +860,6 @@ interface ChromeBridgeInstance {
     keyboard_capture_active?(): boolean;
     editor_input_modal_active?(): boolean;
     focus_editor_input?(): void;
-    editor_scroll_animating?(): boolean;
-    editor_wheel_intent?(
-        x: number,
-        y: number,
-        deltaY: number,
-        deltaMode: number,
-    ): unknown;
-    editor_tick_wheel_intent?(x: number, y: number): unknown;
-    editor_reset_wheel?(): void;
-    editor_pointer_intent?(x: number, y: number): unknown;
     animations_active?(): boolean;
     set_status_branch(branch: string | null): void;
     set_status_git_changes(added: number, deleted: number): void;
@@ -937,13 +876,6 @@ interface ChromeBridgeInstance {
     markdown_cursor?(): Uint32Array | number[] | undefined;
     toggle_vi_mode?(): void;
     font_scale(): number;
-    editor_grid_update(eventJson: string): void;
-    editor_grid_update_passive?(eventJson: string): void;
-    active_editor_grid_snapshot_json?(): string | undefined;
-    editor_grid_snapshot_for_surface_json?(surfaceId: string): string | undefined;
-    editor_grid_surface_ids_json?(): string;
-    activate_editor_grid_surface?(surfaceId?: string | null): boolean;
-    clear_active_editor_grid?(): void;
     agent_event(eventJson: string): void;
     agent_set_input(text: string): void;
     agent_input(): string;
@@ -984,8 +916,6 @@ interface ChromeBridgeInstance {
     agent_new_thread(directory?: string | null): void;
     agent_wordmark_click?(x: number, y: number): boolean;
     active_surface(): string;
-    nvim_send_keys(b64: string): void;
-    set_nvim_send(cb: (bytesB64: string) => void): void;
     /** Install the PTY outbox callback. Optional because the wasm
      *  bundle may pre-date the outbox method; JS guards with `?.()`.
      *  When installed, `feed_pty_output` auto-flushes pending PTY
@@ -1398,11 +1328,6 @@ class ChromeAdapter implements TerminalAdapter {
     markdownRequestSave(): boolean {
         return this.inner.markdown_request_save?.() ?? false;
     }
-    /** 7C-2: remote carets for the active editor (nvim) grid —
-     *  `[{name, color:[r,g,b], line, col}]` in BUFFER coordinates. */
-    setEditorRemoteCursors(peers: unknown): number[] | Uint32Array | undefined {
-        return this.inner.set_editor_remote_cursors?.(peers);
-    }
     setFileTreeEntries(entriesJson: string) {
         this.inner.set_file_tree_entries(entriesJson);
     }
@@ -1728,41 +1653,6 @@ class ChromeAdapter implements TerminalAdapter {
     focusEditorInput(): void {
         this.inner.focus_editor_input?.();
     }
-    editorScrollAnimating(): boolean {
-        return this.inner.editor_scroll_animating?.() === true;
-    }
-    editorWheelIntent(
-        x: number,
-        y: number,
-        deltaY: number,
-        deltaMode: number,
-    ): EditorWheelIntent | null {
-        if (!this.inner.editor_wheel_intent) {
-            throw new Error("[neoism] ChromeBridge is missing editor_wheel_intent; rebuild neoism-frontend/wasm");
-        }
-        const intent = this.inner.editor_wheel_intent(x, y, deltaY, deltaMode);
-        return isEditorWheelIntent(intent) ? intent : null;
-    }
-    editorTickWheelIntent(x: number, y: number): EditorWheelIntent | null {
-        if (!this.inner.editor_tick_wheel_intent) {
-            throw new Error("[neoism] ChromeBridge is missing editor_tick_wheel_intent; rebuild neoism-frontend/wasm");
-        }
-        const intent = this.inner.editor_tick_wheel_intent(x, y);
-        return isEditorWheelIntent(intent) ? intent : null;
-    }
-    editorResetWheel(): void {
-        if (!this.inner.editor_reset_wheel) {
-            throw new Error("[neoism] ChromeBridge is missing editor_reset_wheel; rebuild neoism-frontend/wasm");
-        }
-        this.inner.editor_reset_wheel();
-    }
-    editorPointerIntent(x: number, y: number): EditorCellHit | null {
-        if (!this.inner.editor_pointer_intent) {
-            throw new Error("[neoism] ChromeBridge is missing editor_pointer_intent; rebuild neoism-frontend/wasm");
-        }
-        const hit = this.inner.editor_pointer_intent(x, y);
-        return isEditorCellHit(hit) ? hit : null;
-    }
     animationsActive(): boolean {
         return this.inner.animations_active?.() === true;
     }
@@ -1922,31 +1812,6 @@ class ChromeAdapter implements TerminalAdapter {
     agentReplyPermission(decision: "Yes" | "Always" | "No"): boolean {
         return this.inner.agent_reply_permission(decision);
     }
-    editorGridUpdate(eventJson: string): void {
-        this.inner.editor_grid_update(eventJson);
-    }
-    editorGridUpdatePassive(eventJson: string): void {
-        if (this.inner.editor_grid_update_passive) {
-            this.inner.editor_grid_update_passive(eventJson);
-        } else {
-            this.inner.editor_grid_update(eventJson);
-        }
-    }
-    activeEditorGridSnapshotJson(): string | undefined {
-        return this.inner.active_editor_grid_snapshot_json?.();
-    }
-    editorGridSnapshotForSurfaceJson(surfaceId: string): string | undefined {
-        return this.inner.editor_grid_snapshot_for_surface_json?.(surfaceId);
-    }
-    editorGridSurfaceIdsJson(): string {
-        return this.inner.editor_grid_surface_ids_json?.() ?? "[]";
-    }
-    activateEditorGridSurface(surfaceId: string | null): boolean {
-        return this.inner.activate_editor_grid_surface?.(surfaceId) === true;
-    }
-    clearActiveEditorGrid(): void {
-        this.inner.clear_active_editor_grid?.();
-    }
     setAgentSend(cb: (requestId: number, envelopeJson: string) => void): void {
         this.inner.set_agent_send(cb);
     }
@@ -1970,12 +1835,6 @@ class ChromeAdapter implements TerminalAdapter {
     }
     activeSurface(): string {
         return this.inner.active_surface();
-    }
-    nvimSendKeys(b64: string): void {
-        this.inner.nvim_send_keys(b64);
-    }
-    setNvimSend(cb: (bytesB64: string) => void): void {
-        this.inner.set_nvim_send(cb);
     }
     setPtyOutbox(cb: (bytesB64: string) => void): void {
         this.inner.set_pty_outbox?.(cb);
@@ -2110,18 +1969,6 @@ function isChromeLayout(value: unknown): value is ChromeLayout {
         isChromeRect(rec.status_line) &&
         isChromeRect(rec.terminal)
     );
-}
-
-function isEditorCellHit(value: unknown): value is EditorCellHit {
-    if (!value || typeof value !== "object") return false;
-    const rec = value as Record<string, unknown>;
-    return typeof rec.row === "number" && typeof rec.col === "number";
-}
-
-function isEditorWheelIntent(value: unknown): value is EditorWheelIntent {
-    if (!isEditorCellHit(value)) return false;
-    const rec = value as unknown as Record<string, unknown>;
-    return typeof rec.rows === "number";
 }
 
 /**

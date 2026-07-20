@@ -5,9 +5,7 @@ use crate::layout::ContextGrid;
 use neoism_backend::config::Shell;
 use neoism_backend::event::EventListener;
 use neoism_backend::event::WindowId;
-use neoism_backend::performer::nvim::ContextSource;
 use neoism_protocol::diagnostics::RouteId;
-use neoism_protocol::editor::EditorClientMessage;
 use neoism_protocol::pty::ClientMessage as PtyClientMessage;
 use neoism_protocol::workspace::{
     HostSummary, PaneLayoutSnapshot, SessionSummary, WorkplacePreferences,
@@ -50,9 +48,6 @@ pub struct ContextManagerConfig {
     /// renders, so workspace restore on startup was seeding restored
     /// panes with blinking permanently off.
     pub cursor_blinking: bool,
-    /// Selects the backend driving this context — conventional shell PTY
-    /// (default) or an embedded `nvim --embed` editor instance.
-    pub source: ContextSource,
 }
 
 pub struct ContextManager<T: EventListener> {
@@ -66,6 +61,14 @@ pub struct ContextManager<T: EventListener> {
     pub config: ContextManagerConfig,
     pub titles: ContextManagerTitles,
     daemon: ContextManagerDaemonState,
+}
+
+impl<T: EventListener + Clone> ContextManager<T> {
+    /// Clone of the event proxy for background workers that need to
+    /// wake the render loop (e.g. the code pane's LSP bridge).
+    pub fn event_proxy_clone(&self) -> T {
+        self.event_proxy.clone()
+    }
 }
 
 #[derive(Clone)]
@@ -364,27 +367,6 @@ impl ContextManagerDaemonLink {
         }
     }
 
-    fn send_editor_sequence(&self, messages: Vec<EditorClientMessage>) {
-        if messages.is_empty() {
-            return;
-        }
-
-        let handle = self.handle.clone();
-        if let Some(runtime) = self.runtime.clone() {
-            runtime.spawn(async move {
-                for message in messages {
-                    if let Err(error) = handle.send_editor(message).await {
-                        tracing::warn!(
-                            target: "neoism::context_daemon",
-                            %error,
-                            "daemon editor request failed during ordered bootstrap"
-                        );
-                        break;
-                    }
-                }
-            });
-        }
-    }
 }
 
 #[derive(Clone, Default)]

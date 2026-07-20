@@ -781,6 +781,14 @@ fn lang_cache_tag(lang: Lang) -> u8 {
         Lang::Json => 10,
         Lang::Markdown => 11,
         Lang::Other => 12,
+        Lang::Nix => 13,
+        Lang::Make => 20,
+        Lang::Bash => 14,
+        Lang::C => 15,
+        Lang::Cpp => 16,
+        Lang::Yaml => 17,
+        Lang::Css => 18,
+        Lang::Html => 19,
     }
 }
 

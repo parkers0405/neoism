@@ -180,34 +180,7 @@ impl Renderer {
                         screen_lines = screen_lines.saturating_sub(composer_rows).max(1);
                     }
                 }
-                if ctx.editor.is_some() {
-                    // Editor: map nvim's win_viewport state to the
-                    // terminal-style scrollbar tuple — same widget
-                    // renders both, same hit-test handles both.
-                    //   display_offset = line_count - botline
-                    //   history_size  = line_count - visible
-                    //   screen_lines  = visible
-                    // Top-of-file → display_offset hits its max →
-                    // thumb pinned to top. Bottom-of-file → thumb
-                    // pinned to bottom. Drag handling translates the
-                    // resulting `display_offset` back to a target
-                    // topline and sends it to nvim via
-                    // `apply_scrollbar_display_offset`.
-                    let line_count = ctx.editor_viewport_line_count as usize;
-                    let topline = ctx.editor_viewport_topline as usize;
-                    let botline = ctx.editor_viewport_botline as usize;
-                    let visible = botline.saturating_sub(topline).max(1);
-                    if line_count > visible {
-                        self.scrollbar
-                            .push_panel_state(scrollbar::PanelScrollState {
-                                rich_text_id: ctx.rich_text_id,
-                                panel_rect,
-                                display_offset: line_count.saturating_sub(botline),
-                                history_size: line_count.saturating_sub(visible),
-                                screen_lines: visible,
-                            });
-                    }
-                } else if ctx.markdown.is_none()
+                if ctx.markdown.is_none()
                     && ctx.neoism_agent.is_none()
                     && ctx.neoism_tags.is_none()
                 {
@@ -626,8 +599,7 @@ impl Renderer {
         let mut overlay_active = false;
         if let Some(grid_context) = grid.contexts_mut().get_mut(&active_key) {
             let ctx = grid_context.context_mut();
-            let is_terminal_pane = ctx.editor.is_none()
-                && ctx.markdown.is_none()
+            let is_terminal_pane = ctx.markdown.is_none()
                 && ctx.neoism_agent.is_none()
                 && ctx.neoism_tags.is_none();
             let injection = ctx.splash_injection;
@@ -925,8 +897,7 @@ impl Renderer {
                         let mut probes = Vec::new();
                         for (_, item) in grid.contexts() {
                             let ctx = item.context();
-                            if ctx.editor.is_some()
-                                || ctx.markdown.is_some()
+                            if ctx.markdown.is_some()
                                 || ctx.neoism_agent.is_some()
                                 || ctx.neoism_tags.is_some()
                             {
@@ -1130,7 +1101,7 @@ impl Renderer {
                     panel_left_phys: item.layout_rect[0] + scaled_margin.left,
                     panel_top_phys: item.layout_rect[1] + scaled_margin.top,
                     panel_lines: dim.lines as u32,
-                    editor_focused: item.val.editor.is_some(),
+                    editor_focused: item.val.code.is_some(),
                 }
             } else {
                 neoism_ui::panels::completion_menu::EditorAnchor {
@@ -1143,40 +1114,91 @@ impl Renderer {
                 }
             }
         };
-        let completion_popup =
-            context_manager
-                .current_grid()
-                .current_item()
-                .and_then(|item| {
-                    // The Neoism LSP completion popup takes precedence; nvim's
-                    // ext_popupmenu (keyword completion via Ctrl-P) still shows
-                    // when no engine completion is active.
-                    item.val.lsp_completion_popup().or_else(|| {
-                        item.val.editor_popup_menu.as_ref().map(|native| {
-                            neoism_ui::editor_snapshot::PopupMenu {
-                                items: native
-                                    .items
-                                    .iter()
-                                    .map(|it| neoism_ui::editor_snapshot::PopupMenuItem {
-                                        word: it.word.clone(),
-                                        kind: it.kind.clone(),
-                                        menu: it.menu.clone(),
-                                        info: it.info.clone(),
-                                    })
-                                    .collect(),
-                                selected: if native.selected < 0 {
-                                    None
-                                } else {
-                                    Some(native.selected as usize)
-                                },
-                                anchor_row: native.row as u32,
-                                anchor_col: native.col as u32,
-                                grid: native.grid,
-                                max_word_chars: native.max_word_chars,
-                            }
-                        })
-                    })
-                });
+        // Native code pane completion: the session lives on
+        // `self.code_lsp` (fed by `screen/bridges/code/lsp.rs`). The
+        // anchor is rebuilt per frame from the pane's live geometry so
+        // the menu tracks scrolling; `PopupMenu::{anchor_row,anchor_col}`
+        // stay 0 and the word-start cell goes straight into the anchor's
+        // panel origin instead.
+        let code_completion = self.code_lsp.completion.as_ref().and_then(|session| {
+            let grid = context_manager.current_grid();
+            let item = grid.current_item()?;
+            let code = item.val.code.as_ref()?;
+            if code.path != session.path || session.display.items.is_empty() {
+                return None;
+            }
+            let geometry = &code.geometry;
+            if geometry.cell_w <= 0.0 || geometry.row_h <= 0.0 {
+                return None;
+            }
+            let line_text = code.buffer.lines.get(session.line)?;
+            let word_col = neoism_ui::editor::code::layout::display_col_for_byte(
+                line_text,
+                session.anchor_col,
+                neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
+            ) as f32;
+            let anchor_x = geometry.text_x + word_col * geometry.cell_w;
+            let anchor_y = geometry.rect[1] + session.line as f32 * geometry.row_h
+                - code.scroll_y;
+            let pane_bottom = geometry.rect[1] + geometry.rect[3];
+            let lines_below =
+                (((pane_bottom - anchor_y) / geometry.row_h).floor()).max(1.0) as u32;
+            Some((
+                &session.display,
+                neoism_ui::panels::completion_menu::EditorAnchor {
+                    cell_w: geometry.cell_w * scale_factor,
+                    cell_h: geometry.row_h * scale_factor,
+                    panel_left_phys: anchor_x * scale_factor,
+                    panel_top_phys: anchor_y * scale_factor,
+                    panel_lines: lines_below,
+                    editor_focused: true,
+                },
+            ))
+        });
+        // Code-action menu (`<Space>a` / Ctrl+.): same popup panel,
+        // anchored at the request position instead of the word start.
+        // At most one of the two sessions is open (opening one
+        // dismisses the other), and actions take precedence.
+        let code_actions = self.code_lsp.actions.as_ref().and_then(|session| {
+            let grid = context_manager.current_grid();
+            let item = grid.current_item()?;
+            let code = item.val.code.as_ref()?;
+            if code.path != session.path || session.display.items.is_empty() {
+                return None;
+            }
+            let geometry = &code.geometry;
+            if geometry.cell_w <= 0.0 || geometry.row_h <= 0.0 {
+                return None;
+            }
+            let line_text = code.buffer.lines.get(session.line)?;
+            let col_cells = neoism_ui::editor::code::layout::display_col_for_byte(
+                line_text,
+                session.col,
+                neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
+            ) as f32;
+            let anchor_x = geometry.text_x + col_cells * geometry.cell_w;
+            let anchor_y = geometry.rect[1] + session.line as f32 * geometry.row_h
+                - code.scroll_y;
+            let pane_bottom = geometry.rect[1] + geometry.rect[3];
+            let lines_below =
+                (((pane_bottom - anchor_y) / geometry.row_h).floor()).max(1.0) as u32;
+            Some((
+                &session.display,
+                neoism_ui::panels::completion_menu::EditorAnchor {
+                    cell_w: geometry.cell_w * scale_factor,
+                    cell_h: geometry.row_h * scale_factor,
+                    panel_left_phys: anchor_x * scale_factor,
+                    panel_top_phys: anchor_y * scale_factor,
+                    panel_lines: lines_below,
+                    editor_focused: true,
+                },
+            ))
+        });
+        let (completion_popup, completion_anchor) =
+            match code_actions.or(code_completion) {
+                Some((popup, anchor)) => (Some(popup), anchor),
+                None => (None, completion_anchor),
+            };
         // Log ONLY when a popup is actually built — this runs every frame, so
         // logging the `present=false` case floods 60/s and buries the rest of
         // the completion chain. eprintln, NOT tracing::info (desktop subscriber
@@ -1185,17 +1207,17 @@ impl Renderer {
             eprintln!(
                 "neoism::lsp completion popup render input: present=true items={} selected={:?} \
                  anchor=({:?},{:?}) editor_focused={} input_overlay_active={}",
-                completion_popup.as_ref().map(|popup| popup.items.len()).unwrap_or(0),
-                completion_popup.as_ref().and_then(|popup| popup.selected),
-                completion_popup.as_ref().map(|popup| popup.anchor_row),
-                completion_popup.as_ref().map(|popup| popup.anchor_col),
+                completion_popup.map(|popup| popup.items.len()).unwrap_or(0),
+                completion_popup.and_then(|popup| popup.selected),
+                completion_popup.map(|popup| popup.anchor_row),
+                completion_popup.map(|popup| popup.anchor_col),
                 completion_anchor.editor_focused,
                 input_overlay_active,
             );
         }
         self.completion_menu.render(
             sugarloaf,
-            completion_popup.as_ref(),
+            completion_popup,
             &completion_anchor,
             (window_size.width, window_size.height, scale_factor),
             input_overlay_active,
@@ -1221,29 +1243,63 @@ impl Renderer {
             );
         }
 
-        // VS Code-style hover doc popup, anchored under the mouse cell. Owned
-        // data is extracted first so the `context_manager` borrow is released
-        // before `sugarloaf` is borrowed mutably by the renderer.
-        let hover_render = context_manager
-            .current()
-            .lsp_hover_popup()
-            .map(|hover| (hover.anchor_row, hover.anchor_col, hover.lines.clone()));
-        if let Some((anchor_row, anchor_col, lines)) = hover_render {
+        // Native code pane hover card: pinned to the buffer position it
+        // was requested at (`self.code_lsp.hover`); the anchor is
+        // recomputed from live pane geometry so the card tracks
+        // scrolling, and the pump dismisses it once the cursor moves.
+        let code_hover = self.code_lsp.hover.as_ref().and_then(|card| {
+            if card.lines.is_empty() {
+                return None;
+            }
+            let grid = context_manager.current_grid();
+            let item = grid.current_item()?;
+            let code = item.val.code.as_ref()?;
+            if code.path != card.path {
+                return None;
+            }
+            // Keyboard cards pin to the cursor; mouse cards pin to the
+            // hovered cell (dismissed by pointer-cell change instead —
+            // requiring cursor equality made them never render).
+            let cursor = code.buffer.cursor();
+            if !card.from_mouse
+                && (cursor.line != card.line || cursor.col != card.col)
+            {
+                return None;
+            }
+            let geometry = &code.geometry;
+            if geometry.cell_w <= 0.0 || geometry.row_h <= 0.0 {
+                return None;
+            }
+            let line_text = code.buffer.lines.get(card.line)?;
+            // Wrap-aware anchor: the card position maps through the
+            // wrap index to a VISUAL row + column-within-segment
+            // (identity when wrap is off, honoring scroll_x).
+            let (seg, local_col) = neoism_ui::editor::code::layout::wrap_visual_position(
+                line_text,
+                card.col,
+                geometry.wrap.cols(),
+                neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
+            );
+            let vrow = geometry.wrap.first_row_of_line(card.line) + seg;
+            Some((
+                geometry.text_x + local_col as f32 * geometry.cell_w
+                    - geometry.scroll_x,
+                geometry.rect[1] + vrow as f32 * geometry.row_h - code.scroll_y,
+                geometry.row_h,
+                &card.lines,
+            ))
+        });
+        if let Some((anchor_x, anchor_y, cell_h, lines)) = code_hover {
             if completion_anchor.editor_focused
                 && !input_overlay_active
                 && !self.modal.is_active()
                 && !diagnostic_detail_active
+                && completion_popup.is_none()
             {
                 let inv = 1.0 / scale_factor;
-                let cell_w = completion_anchor.cell_w * inv;
-                let cell_h = completion_anchor.cell_h * inv;
-                let anchor_x =
-                    completion_anchor.panel_left_phys * inv + anchor_col as f32 * cell_w;
-                let anchor_y =
-                    completion_anchor.panel_top_phys * inv + anchor_row as f32 * cell_h;
                 neoism_ui::panels::hover_popup::render(
                     sugarloaf,
-                    &lines,
+                    lines,
                     neoism_ui::panels::hover_popup::HoverPopupLayout {
                         anchor_x,
                         anchor_y,
@@ -1375,8 +1431,7 @@ impl Renderer {
             let status_h = self.status_line.scaled_height();
             let status_y = (logical_height - status_h).max(0.0);
             let current = context_manager.current();
-            let is_terminal_context = current.editor.is_none()
-                && current.markdown.is_none()
+            let is_terminal_context = current.markdown.is_none()
                 && current.neoism_agent.is_none()
                 && current.neoism_tags.is_none();
             let guard_overlap = if is_terminal_context {

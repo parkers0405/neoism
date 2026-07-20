@@ -7,7 +7,7 @@ impl Screen<'_> {
     pub(crate) fn emit_and_present_grids(
         &mut self,
         ctx: &FrameCtx,
-        animation_dt: std::time::Duration,
+        _animation_dt: std::time::Duration,
         is_fullscreen: bool,
         before_present: &mut dyn FnMut(),
     ) {
@@ -16,14 +16,12 @@ impl Screen<'_> {
         let _ = is_fullscreen;
         let current_route = ctx.current_route;
         let window_id = ctx.window_id;
-        let render_started = ctx.render_started;
-        let editor_scroll_was_animating = ctx.editor_scroll_was_animating;
+
         let scaled_margin = ctx.scaled_margin;
         let any_panel_dirty = ctx.any_panel_dirty;
         let has_animation = ctx.has_animation;
         let initial_redraw_reason = ctx.initial_redraw_reason;
         let late_redraw_reason = ctx.late_redraw_reason;
-        let scale_factor = ctx.scale_factor;
         // --- emit cells + build uniforms per panel ---
         let window_size = self.sugarloaf.window_size();
         let font_library = self.sugarloaf.font_library().clone();
@@ -42,95 +40,22 @@ impl Screen<'_> {
 
         let rasterizer = &mut self.grid_rasterizer;
         let renderer_ref = &self.renderer;
-        let editor_geometry_log_enabled =
-            std::env::var_os(EDITOR_GEOMETRY_LOG_ENV).is_some();
-        let editor_geometry_chrome = editor_geometry_log_enabled.then(|| {
-            (
-                self.renderer
-                    .buffer_tabs
-                    .tabs()
-                    .len()
-                    .min(u32::MAX as usize) as u32,
-                self.renderer.buffer_tabs.is_visible(),
-                self.renderer.breadcrumbs.is_visible(),
-                self.context_manager
-                    .current_grid_len()
-                    .min(u32::MAX as usize) as u32,
-            )
-        });
         crate::app::freeze_watchdog::mark_render_stage(
             window_id,
             "screen.render.emit_grids.begin",
         );
-        let active_editor_diagnostics = self
-            .context_manager
-            .current()
-            .editor_diagnostics
-            .as_ref()
-            .map(|diagnostics| diagnostics.items.as_slice())
-            .unwrap_or(&[]);
-        let active_inline_identities: Vec<_> = active_editor_diagnostics
-            .iter()
-            .filter_map(|item| {
-                let severity = neoism_ui::panels::inline_diagnostics::InlineDiagnosticSeverity::from_nvim(
-                    item.severity,
-                )?;
-                Some(
-                    neoism_ui::panels::inline_diagnostics::InlineDiagnosticIdentity {
-                        severity,
-                        message: item.message.clone(),
-                        line: item.lnum,
-                        column: item.col.min(u32::MAX as u64) as u32,
-                        end_line: item.end_line,
-                        end_column: item.end_col.min(u32::MAX as u64) as u32,
-                        source: item.source.clone(),
-                        code: item.code.clone(),
-                    },
-                )
-            })
-            .collect();
-        let paint_inline_lenses =
-            neoism_ui::panels::inline_diagnostics::inline_lenses_should_paint(
-                self.renderer.inline_diagnostics.has_selected_detail(),
-                self.context_manager.current().lsp_hover_popup().is_some()
-                    || self
-                        .context_manager
-                        .current()
-                        .editor_lsp_completion
-                        .is_some(),
-            );
         // Rebuild inline hit regions from this frame's exact scrolled lens
         // geometry. Clearing here also prevents a diagnostic removed by an
         // edit from leaving a stale hover/click target behind.
-        self.renderer
-            .inline_diagnostics
-            .begin_frame(&active_inline_identities);
+        let no_inline_identities: [neoism_ui::panels::inline_diagnostics::InlineDiagnosticIdentity; 0] = [];
+        self.renderer.inline_diagnostics.begin_frame(&no_inline_identities);
         for (route_id, grid) in self.grids.iter_mut() {
-            let route_key = *route_id;
             let Some(p) = ctx.panels.iter().find(|p| p.route_id == *route_id) else {
                 continue;
             };
 
             let cols = p.cols as usize;
-            let editor_scroll_offset = if p.is_editor {
-                let prev_offset = self
-                    .editor_scroll_grid_states
-                    .get(&route_key)
-                    .map(|s| s.render.source_line_offset);
-                editor_scroll_render_offset(
-                    p.editor_scroll_position_lines,
-                    p.editor_elastic_offset_y,
-                    p.cell_h,
-                    prev_offset,
-                )
-            } else {
-                EditorScrollRenderOffset::default()
-            };
-            let editor_source_line_offset = editor_scroll_offset.source_line_offset;
-            let editor_pixel_offset_y = editor_scroll_offset.pixel_offset_y;
-            let terminal_pixel_offset_y = if p.is_editor {
-                0.0
-            } else {
+            let terminal_pixel_offset_y = {
                 let offset = p.terminal_scroll_offset_y;
                 if offset.abs() < f32::EPSILON {
                     0.0
@@ -142,36 +67,9 @@ impl Screen<'_> {
                         .clamp(i32::MIN as f32, i32::MAX as f32)
                 }
             };
-            let previous_scroll_state = self.editor_scroll_grid_states.get(&route_key);
-            let editor_has_scroll_offset = p.is_editor
-                && (editor_source_line_offset != 0
-                    || editor_pixel_offset_y.abs() > f32::EPSILON);
             let grid_or_damage_full = grid.needs_full_rebuild()
                 || matches!(p.damage, neoism_terminal_core::damage::TerminalDamage::Full);
-            let editor_scrollback_origin = p.editor_scrollback_origin;
-            let editor_frame_plan = editor_scroll_frame_plan(
-                previous_scroll_state.map(|state| state.render),
-                editor_scroll_offset,
-                editor_scrollback_origin,
-                p.visible_rows.len(),
-                grid_or_damage_full,
-            );
-            let current_source_base = editor_frame_plan.current_source_base;
-            let previous_source_base = editor_frame_plan.previous_source_base;
-            let editor_source_changed = p.is_editor && editor_frame_plan.source_changed;
-            let editor_pixel_changed = p.is_editor && editor_frame_plan.pixel_changed;
-            let editor_scrollback_origin_changed =
-                p.is_editor && editor_frame_plan.scrollback_origin_changed;
-            let editor_source_plan = if p.is_editor {
-                editor_frame_plan.source_plan
-            } else {
-                EditorScrollSourcePlan::None
-            };
-            let force_full = if p.is_editor {
-                editor_frame_plan.force_full
-            } else {
-                grid_or_damage_full
-            };
+            let force_full = grid_or_damage_full;
 
             enum RowsToRebuild<'a> {
                 None,
@@ -215,44 +113,13 @@ impl Screen<'_> {
             // hidden buffer rows above the visible viewport so
             // fractional smooth scroll can reveal partial rows
             // instead of exposing blank bands.
-            let row_shift = if p.is_editor {
-                EDITOR_BUFFER_ABOVE
-            } else {
-                TERMINAL_BUFFER_ABOVE
-            };
+            let row_shift = TERMINAL_BUFFER_ABOVE;
 
-            let editor_scrollback = p.editor_scrollback.as_ref();
             let terminal_above = p.terminal_snapshot_above.as_ref();
             let terminal_below = p.terminal_snapshot_below.as_ref();
             let visible_len = p.visible_rows.len() as i32;
-            let missing_editor_row_samples = std::cell::Cell::new(0u32);
-            let first_missing_editor_source_y = std::cell::Cell::new(None::<i32>);
-            let last_missing_editor_source_y = std::cell::Cell::new(None::<i32>);
             let source_row_for = |source_y: i32| {
-                let row = if p.is_editor {
-                    if let Some((scrollback, scrollback_origin)) = editor_scrollback {
-                        if !scrollback.is_empty() {
-                            let idx = (*scrollback_origin + source_y as isize)
-                                .rem_euclid(scrollback.len() as isize)
-                                as usize;
-                            scrollback.get(idx).and_then(|row| row.as_ref()).or_else(
-                                || {
-                                    (0..visible_len)
-                                        .contains(&source_y)
-                                        .then(|| p.visible_rows.get(source_y as usize))
-                                        .flatten()
-                                },
-                            )
-                        } else {
-                            None
-                        }
-                    } else {
-                        (0..visible_len)
-                            .contains(&source_y)
-                            .then(|| p.visible_rows.get(source_y as usize))
-                            .flatten()
-                    }
-                } else if source_y < 0 {
+                if source_y < 0 {
                     if source_y == -1 {
                         terminal_above
                     } else {
@@ -260,35 +127,20 @@ impl Screen<'_> {
                     }
                 } else if source_y < visible_len {
                     p.visible_rows.get(source_y as usize)
+                } else if source_y == visible_len {
+                    terminal_below
                 } else {
-                    if source_y == visible_len {
-                        terminal_below
-                    } else {
-                        None
-                    }
-                };
-                if p.is_editor && row.is_none() {
-                    missing_editor_row_samples
-                        .set(missing_editor_row_samples.get().saturating_add(1));
-                    if first_missing_editor_source_y.get().is_none() {
-                        first_missing_editor_source_y.set(Some(source_y));
-                    }
-                    last_missing_editor_source_y.set(Some(source_y));
+                    None
                 }
-                row
             };
             let source_selection_y = |source_y: i32| {
                 if source_y < 0 || source_y >= visible_len {
                     return None;
                 }
-                if p.is_editor {
-                    Some(source_y as usize)
-                } else {
-                    p.source_row_indices
-                        .get(source_y as usize)
-                        .copied()
-                        .flatten()
-                }
+                p.source_row_indices
+                    .get(source_y as usize)
+                    .copied()
+                    .flatten()
             };
             let mut emit_grid_row = |row: &neoism_terminal_core::crosswords::grid::row::Row<
                     neoism_terminal_core::crosswords::square::Square,
@@ -359,11 +211,7 @@ impl Screen<'_> {
             let mut rebuild_row = |y: usize,
                                        grid: &mut neoism_backend::sugarloaf::grid::GridRenderer,
                                        rasterizer: &mut crate::terminal::grid_emit::GridGlyphRasterizer| {
-                    let source_y = if p.is_editor {
-                        y as i32 + editor_source_line_offset
-                    } else {
-                        y as i32
-                    };
+                    let source_y = y as i32;
                     let grid_y = y as u32 + row_shift;
                     let Some(row) = source_row_for(source_y) else {
                         grid.clear_row(grid_y);
@@ -379,43 +227,6 @@ impl Screen<'_> {
                     );
                 };
 
-            let mut rebuilt_rows = 0u32;
-            let mut exposed_rebuilt_rows = 0u32;
-            let mut damage_rebuilt_rows = 0u32;
-            let mut full_rebuilt_rows = 0u32;
-            let mut shifted_rows =
-                editor_scroll_shifted_row_count(editor_source_plan, p.visible_rows.len());
-
-            if let EditorScrollSourcePlan::Shift { delta, exposed } = editor_source_plan {
-                let amount = delta.unsigned_abs() as usize;
-                let visible_rows = p.visible_rows.len();
-                if amount > 0 && amount < visible_rows {
-                    if delta > 0 {
-                        for y in 0..(visible_rows - amount) {
-                            grid.copy_row(
-                                (y + amount) as u32 + row_shift,
-                                y as u32 + row_shift,
-                            );
-                        }
-                    } else {
-                        for y in (amount..visible_rows).rev() {
-                            grid.copy_row(
-                                (y - amount) as u32 + row_shift,
-                                y as u32 + row_shift,
-                            );
-                        }
-                    }
-
-                    for y in exposed.0..exposed.1 {
-                        rebuild_row(y, grid, rasterizer);
-                        rebuilt_rows = rebuilt_rows.saturating_add(1);
-                        exposed_rebuilt_rows = exposed_rebuilt_rows.saturating_add(1);
-                    }
-                } else {
-                    shifted_rows = 0;
-                }
-            }
-
             match rows_to_rebuild {
                 RowsToRebuild::None => {
                     // Nothing to rebuild — previous frame's
@@ -427,24 +238,11 @@ impl Screen<'_> {
                     for y in 0..p.visible_rows.len() {
                         rebuild_row(y, grid, rasterizer);
                     }
-                    rebuilt_rows = p.visible_rows.len() as u32;
-                    full_rebuilt_rows = rebuilt_rows;
                     grid.mark_full_rebuild_done();
                 }
                 RowsToRebuild::Only(lines) => {
                     for ld in lines {
-                        let output_line = if p.is_editor {
-                            let y = ld.line as i32 - editor_source_line_offset;
-                            if y < 0 || y >= p.visible_rows.len() as i32 {
-                                continue;
-                            }
-                            y as usize
-                        } else {
-                            ld.line
-                        };
-                        rebuild_row(output_line, grid, rasterizer);
-                        rebuilt_rows = rebuilt_rows.saturating_add(1);
-                        damage_rebuilt_rows = damage_rebuilt_rows.saturating_add(1);
+                        rebuild_row(ld.line, grid, rasterizer);
                     }
                 }
             }
@@ -470,115 +268,7 @@ impl Screen<'_> {
             // (integer line crossing) or when the spring switches
             // direction (sign flip). That's typically 0 work per
             // fractional-only frame.
-            let mut new_edge_above: Option<i32> = None;
-            let mut new_edge_below: Option<i32> = None;
-            let mut edge_above_changed = false;
-            let mut edge_below_changed = false;
-            let mut edge_above_damaged = false;
-            let mut edge_below_damaged = false;
-            let mut edge_force_refresh = false;
-            if p.is_editor {
-                let top_slot = EDITOR_BUFFER_ABOVE.saturating_sub(1);
-                let visible = p.visible_rows.len() as u32;
-                let bottom_slot = EDITOR_BUFFER_ABOVE + visible;
-                let prev_above =
-                    previous_scroll_state.and_then(|s| s.edge_above_source_y);
-                let prev_below =
-                    previous_scroll_state.and_then(|s| s.edge_below_source_y);
-                let (desired_above, desired_below) = editor_edge_slot_source_y(
-                    editor_pixel_offset_y,
-                    editor_source_line_offset,
-                    visible_len,
-                );
-
-                let damaged_source = |source_y: i32| {
-                    if let neoism_terminal_core::damage::TerminalDamage::Partial(lines) =
-                        &p.damage
-                    {
-                        lines.iter().any(|ld| ld.line as i32 == source_y)
-                    } else {
-                        false
-                    }
-                };
-                let above_damaged = desired_above
-                    .map(|source_y| damaged_source(source_y))
-                    .unwrap_or(false);
-                let below_damaged = desired_below
-                    .map(|source_y| damaged_source(source_y))
-                    .unwrap_or(false);
-
-                // Re-emit the edge slot only when its source row
-                // ACTUALLY changes (`prev_above != desired_above`)
-                // or the damage set explicitly lists it, or a
-                // scrollback origin advance + full rebuild lands.
-                // The previous "force on every animating frame"
-                // path was the silent flicker source: every
-                // animation frame called `write_row` for the edge
-                // slot → `bg_dirty[slot] = [true; FRAMES_IN_FLIGHT]`
-                // → next render memcpy'd the FULL bg/fg buffers
-                // (~60 KB combined) to the GPU. At 165 Hz that's
-                // ~10 MB/sec of redundant upload during pure
-                // spring decay between integer line crossings,
-                // even though the cell content hadn't changed.
-                // Confirmed by the user's GPU upload log: every
-                // `frame: stepped editor scroll spring` was
-                // accompanied by a `GPU upload: bg buffer
-                // re-uploaded` even with `nvim_topline` unchanged
-                // for the entire decay. The "off-screen buffer
-                // content changed without damage" case the
-                // always-refresh was guarding doesn't actually
-                // happen — nvim emits grid_line only for visible
-                // rows, so there's nothing for the refresh to
-                // catch.
-                let force_refresh = force_full
-                    || grid.needs_full_rebuild()
-                    || editor_scrollback_origin_changed;
-                let (above_action, below_action, planned_above, planned_below) =
-                    editor_edge_slot_actions(
-                        editor_pixel_offset_y,
-                        editor_source_line_offset,
-                        visible_len,
-                        prev_above,
-                        prev_below,
-                        above_damaged,
-                        below_damaged,
-                        force_refresh,
-                    );
-                debug_assert_eq!(planned_above, desired_above);
-                debug_assert_eq!(planned_below, desired_below);
-                edge_above_changed = prev_above != desired_above;
-                edge_below_changed = prev_below != desired_below;
-                edge_above_damaged = above_damaged;
-                edge_below_damaged = below_damaged;
-                edge_force_refresh = force_refresh;
-
-                match above_action {
-                    TerminalEdgeSlotAction::Emit { source_y } => {
-                        if let Some(row) = source_row_for(source_y) {
-                            emit_grid_row(row, None, top_slot, 0, grid, rasterizer);
-                        } else {
-                            grid.clear_row(top_slot);
-                        }
-                    }
-                    TerminalEdgeSlotAction::Clear => grid.clear_row(top_slot),
-                    TerminalEdgeSlotAction::Leave => {}
-                }
-
-                match below_action {
-                    TerminalEdgeSlotAction::Emit { source_y } => {
-                        if let Some(row) = source_row_for(source_y) {
-                            emit_grid_row(row, None, bottom_slot, 0, grid, rasterizer);
-                        } else {
-                            grid.clear_row(bottom_slot);
-                        }
-                    }
-                    TerminalEdgeSlotAction::Clear => grid.clear_row(bottom_slot),
-                    TerminalEdgeSlotAction::Leave => {}
-                }
-
-                new_edge_above = desired_above;
-                new_edge_below = desired_below;
-            } else {
+            {
                 let top_slot = TERMINAL_BUFFER_ABOVE.saturating_sub(1);
                 let bottom_slot = TERMINAL_BUFFER_ABOVE + p.visible_rows.len() as u32;
                 let force_refresh = force_full || grid.needs_full_rebuild();
@@ -626,11 +316,6 @@ impl Screen<'_> {
             // instances per FRAMES_IN_FLIGHT slot — the cost was
             // exactly the 165Hz miss the user was reporting
             // (~70-77 fps instead of 165).
-            let pixel_offset_updated = if p.is_editor {
-                editor_pixel_changed
-            } else {
-                terminal_pixel_offset_y.abs() > f32::EPSILON
-            };
 
             // Cursor pipeline (`addCursor` /
             // `cursor.style()`):
@@ -661,17 +346,7 @@ impl Screen<'_> {
             // sprite itself receives `editor_pixel_offset_y` so it
             // follows the buffer content without moving the pane
             // origin.
-            let cursor_grid_row = if p.is_editor {
-                editor_cursor_grid_row(
-                    p.cursor_row as i32,
-                    editor_source_line_offset,
-                    p.rows,
-                    EDITOR_BUFFER_ABOVE,
-                    EDITOR_BUFFER_BELOW,
-                )
-            } else {
-                p.cursor_row as u32 + TERMINAL_BUFFER_ABOVE
-            };
+            let cursor_grid_row = p.cursor_row as u32 + TERMINAL_BUFFER_ABOVE;
             let terminal_cursor_pixel_offset_y = 0;
             // emit_cursor_sprite below clears the *other* sprite
             // slot in the same call, so the prior unconditional
@@ -725,7 +400,7 @@ impl Screen<'_> {
             // about where cell boundaries are → visible seams.
             let grid_geometry =
                 grid_panel_chrome_geometry(GridPanelChromeGeometryInput {
-                    is_editor: p.is_editor,
+                    is_editor: false,
                     scaled_margin_left: scaled_margin.left,
                     scaled_margin_top: scaled_margin.top,
                     layout_left: p.layout_rect[0],
@@ -740,214 +415,9 @@ impl Screen<'_> {
                     terminal_buffer_above: TERMINAL_BUFFER_ABOVE,
                     terminal_bottom_clip_bleed_px: TERMINAL_BOTTOM_CLIP_BLEED_PX,
                 });
-            if let (
-                true,
-                Some((
-                    buffer_tab_count,
-                    buffer_tabs_visible,
-                    breadcrumbs_visible,
-                    split_count,
-                )),
-            ) = (p.is_editor, editor_geometry_chrome)
-            {
-                let status_h_px =
-                    self.renderer.status_line_height() * self.sugarloaf.scale_factor();
-                let status_top_px = (window_size.height as f32 - status_h_px).round();
-                let clip_bottom_px =
-                    (grid_geometry.clip_rect[1] + grid_geometry.clip_rect[3]).round();
-                let visible_grid_top_px =
-                    grid_geometry.panel_top + EDITOR_BUFFER_ABOVE as f32 * p.cell_h;
-                let visible_rows = p.visible_rows.len().min(p.rows as usize);
-                let last_row_bottom_px =
-                    (visible_grid_top_px + visible_rows as f32 * p.cell_h).round();
-                let layout_bottom_px =
-                    (scaled_margin.top + p.layout_rect[1] + p.layout_rect[3]).round();
-                let row_status_delta_px = last_row_bottom_px - status_top_px;
-                let layout_status_delta_px = layout_bottom_px - status_top_px;
-                let class = if row_status_delta_px < -1.0 {
-                    1
-                } else if row_status_delta_px > 1.0 {
-                    2
-                } else {
-                    0
-                };
-                let bottom_row_clear = p
-                    .visible_rows
-                    .last()
-                    .map(|row| row.is_clear())
-                    .unwrap_or(true);
-                let penultimate_row_clear = p
-                    .visible_rows
-                    .len()
-                    .checked_sub(2)
-                    .and_then(|idx| p.visible_rows.get(idx))
-                    .map(|row| row.is_clear())
-                    .unwrap_or(true);
-                let state = EditorGeometryLogState {
-                    class,
-                    route_id: p.route_id,
-                    current_route,
-                    rows: p.rows,
-                    visible_rows: visible_rows.min(u32::MAX as usize) as u32,
-                    cols: p.cols,
-                    status_top_px: status_top_px as i32,
-                    clip_bottom_px: clip_bottom_px as i32,
-                    last_row_bottom_px: last_row_bottom_px as i32,
-                    row_status_delta_px: row_status_delta_px as i32,
-                    layout_bottom_px: layout_bottom_px as i32,
-                    layout_status_delta_px: layout_status_delta_px as i32,
-                    bottom_row_clear,
-                    penultimate_row_clear,
-                    buffer_tab_count,
-                    buffer_tabs_visible,
-                    breadcrumbs_visible,
-                    split_count,
-                };
-                if self.editor_geometry_log_last.get(&p.route_id).copied() != Some(state)
-                {
-                    self.editor_geometry_log_last.insert(p.route_id, state);
-                    let class_label = match class {
-                        1 => "gap_above_status",
-                        2 => "row_under_status",
-                        _ => "aligned",
-                    };
-                    tracing::info!(
-                        target: "neoism::editor_geometry",
-                        route_id = p.route_id,
-                        current_route,
-                        class = class_label,
-                        row_status_delta_px,
-                        gap_px = (-row_status_delta_px).max(0.0),
-                        row_under_status_px = row_status_delta_px.max(0.0),
-                        layout_status_delta_px,
-                        clip_status_delta_px = clip_bottom_px - status_top_px,
-                        clip_last_row_delta_px = clip_bottom_px - last_row_bottom_px,
-                        status_top_px,
-                        status_h_px,
-                        clip_top_px = grid_geometry.clip_rect[1],
-                        clip_bottom_px,
-                        clip_h_px = grid_geometry.clip_rect[3],
-                        visible_grid_top_px,
-                        last_row_bottom_px,
-                        layout_top_px = scaled_margin.top + p.layout_rect[1],
-                        layout_height_px = p.layout_rect[3],
-                        layout_bottom_px,
-                        cell_h = p.cell_h,
-                        rows = p.rows,
-                        visible_rows,
-                        cols = p.cols,
-                        bottom_row_clear,
-                        penultimate_row_clear,
-                        buffer_tab_count,
-                        buffer_tabs_visible,
-                        breadcrumbs_visible,
-                        split_count,
-                        viewport_topline = p.editor_viewport_topline,
-                        viewport_botline = p.editor_viewport_botline,
-                        viewport_line_count = p.editor_viewport_line_count,
-                        scrollback_origin = ?p.editor_scrollback_origin,
-                        "editor bottom geometry changed"
-                    );
-                }
-            }
             let panel_left = grid_geometry.panel_left;
             let panel_top = grid_geometry.panel_top;
             let clip_rect = grid_geometry.clip_rect;
-            if p.is_editor && p.is_active && !active_editor_diagnostics.is_empty() {
-                let visible_top_px =
-                    grid_geometry.panel_top + EDITOR_BUFFER_ABOVE as f32 * p.cell_h;
-                let visible_rows = p.visible_rows.len().min(u32::MAX as usize) as u32;
-                let inline_items: Vec<_> = active_editor_diagnostics
-                        .iter()
-                        .filter_map(|item| {
-                            let severity =
-                                neoism_ui::panels::inline_diagnostics::InlineDiagnosticSeverity::from_nvim(
-                                    item.severity,
-                                )?;
-                            // Diagnostics and grid rows must use the same
-                            // source→output inversion. The resident grid paints
-                            // source `output + editor_source_line_offset`; the
-                            // lens for that source therefore belongs at
-                            // `source - editor_source_line_offset`. Omitting
-                            // this integer term made lenses float during scroll
-                            // and filtered them out when returning to a line.
-                            let Some(placement) = editor_inline_diagnostic_placement(
-                                item.lnum,
-                                p.editor_viewport_topline,
-                                editor_source_line_offset,
-                                editor_pixel_offset_y,
-                                p.cell_h,
-                                p.visible_rows.len(),
-                            ) else {
-                                return None;
-                            };
-                            let text_end_col = editor_row_text_end_col(
-                                source_row_for(placement.source_row)?,
-                                p.cols as usize,
-                            );
-                            Some(
-                                neoism_ui::panels::inline_diagnostics::InlineDiagnosticItem {
-                                    row: placement.output_row,
-                                    severity,
-                                    message: item.message.clone(),
-                                    line: item.lnum,
-                                    column: item.col.min(u32::MAX as u64) as u32,
-                                    end_line: item.end_line,
-                                    end_column: item.end_col.min(u32::MAX as u64) as u32,
-                                    source: item.source.clone(),
-                                    code: item.code.clone(),
-                                    code_description: item.code_description.clone(),
-                                    tags: item.tags.clone(),
-                                    related_information: item
-                                        .related_information
-                                        .iter()
-                                        .map(|related| {
-                                            neoism_ui::panels::inline_diagnostics::InlineDiagnosticRelatedInformation {
-                                                path: related.path.clone(),
-                                                line: related.line,
-                                                column: related.col,
-                                                end_line: related.end_line,
-                                                end_column: related.end_col,
-                                                message: related.message.clone(),
-                                            }
-                                        })
-                                        .collect(),
-                                    text_end_col,
-                                },
-                            )
-                        })
-                        .collect();
-                if std::env::var_os("NEOISM_LSP_LOG").is_some() {
-                    tracing::info!(
-                        target: "neoism::lsp",
-                        raw = active_editor_diagnostics.len(),
-                        inline = inline_items.len(),
-                        viewport_topline = p.editor_viewport_topline,
-                        visible_rows,
-                        editor_source_line_offset,
-                        "inline diagnostics render input"
-                    );
-                }
-                self.renderer.inline_diagnostics.render(
-                    &mut self.sugarloaf,
-                    &inline_items,
-                    neoism_ui::panels::inline_diagnostics::InlineDiagnosticsLayout {
-                        pane_left_px: grid_geometry.panel_left,
-                        visible_top_px,
-                        pane_width_px: p.cols as f32 * p.cell_w,
-                        pane_height_px: visible_rows as f32 * p.cell_h,
-                        cell_width_px: p.cell_w,
-                        cell_height_px: p.cell_h,
-                        columns: p.cols,
-                        visible_rows,
-                        editor_pixel_offset_y,
-                        scale_factor,
-                        chrome_scale: self.renderer.chrome_scale(),
-                    },
-                    paint_inline_lenses,
-                    &self.renderer.theme,
-                );
-            }
             // Bg-tint uniforms fire ONLY for the active block
             // style — the bg shader paints the cursor cell in
             // `cursor_bg_color` and the text shader swaps glyph
@@ -962,8 +432,7 @@ impl Screen<'_> {
                 render_style,
                 Some(crate::terminal::grid_emit::CursorRenderStyle::Block)
             );
-            let suppress_static_cursor_bg =
-                p.is_editor && editor_pixel_offset_y.abs() > f32::EPSILON;
+            let suppress_static_cursor_bg = false;
             // During smooth scroll the cursor BG paint is already
             // suppressed below; the matching FG SWAP (cursor_col_u
             // = bg_col, used by the text shader to invert the glyph
@@ -1024,14 +493,7 @@ impl Screen<'_> {
                 cell_size: [p.cell_w, p.cell_h],
                 // GPU grid size includes the hidden edge slots for
                 // editor/terminal fractional scroll.
-                grid_size: [
-                    p.cols,
-                    if p.is_editor {
-                        p.rows + EDITOR_BUFFER_ABOVE + EDITOR_BUFFER_BELOW
-                    } else {
-                        p.rows + TERMINAL_BUFFER_ABOVE + TERMINAL_BUFFER_BELOW
-                    },
-                ],
+                grid_size: [p.cols, p.rows + TERMINAL_BUFFER_ABOVE + TERMINAL_BUFFER_BELOW],
                 cursor_pos,
                 _pad_cursor: [0; 2],
                 min_contrast: 0.0,
@@ -1041,347 +503,9 @@ impl Screen<'_> {
                 // Smooth-scroll offset is uniform per-pane: zero
                 // for terminal panes, the spring's current pixel
                 // offset for editor panes.
-                editor_pixel_offset_y: if p.is_editor {
-                    editor_pixel_offset_y
-                } else {
-                    terminal_pixel_offset_y
-                },
+                editor_pixel_offset_y: terminal_pixel_offset_y,
                 _pad_editor_offset: [0; 3],
             };
-
-            if p.is_editor {
-                let should_log_scroll = editor_scroll_was_animating
-                    || editor_has_scroll_offset
-                    || editor_source_changed
-                    || editor_pixel_changed;
-                let state = self.editor_scroll_grid_states.entry(route_key).or_default();
-                let retained_origin =
-                    editor_scrollback_origin.or(state.render.scrollback_origin);
-                state.render = EditorScrollGridRenderState::new(
-                    editor_scroll_offset,
-                    retained_origin,
-                );
-                state.edge_above_source_y = new_edge_above;
-                state.edge_below_source_y = new_edge_below;
-
-                if should_log_scroll {
-                    state.log_frames = state.log_frames.saturating_add(1);
-                    state.log_rebuilt_rows =
-                        state.log_rebuilt_rows.saturating_add(rebuilt_rows);
-                    state.log_exposed_rows =
-                        state.log_exposed_rows.saturating_add(exposed_rebuilt_rows);
-                    state.log_damage_rows =
-                        state.log_damage_rows.saturating_add(damage_rebuilt_rows);
-                    state.log_full_rows =
-                        state.log_full_rows.saturating_add(full_rebuilt_rows);
-                    state.log_shifted_rows =
-                        state.log_shifted_rows.saturating_add(shifted_rows);
-                    state.log_source_changes = state
-                        .log_source_changes
-                        .saturating_add(if editor_source_changed { 1 } else { 0 });
-                    state.log_offset_updates = state
-                        .log_offset_updates
-                        .saturating_add(if pixel_offset_updated { 1 } else { 0 });
-                    // Two timings here, side by side:
-                    //   render_us — duration of render() up to this
-                    //   point (CPU emission + setup, before the
-                    //   trailing `sugarloaf.render_with_grids`).
-                    //   full_render_us — total duration of the
-                    //   *previous* frame, set at end of last
-                    //   render(); this includes Vulkan acquire,
-                    //   submit, queue_present and is the number to
-                    //   compare with `1000/fps`. The gap between
-                    //   `1000/fps` and `mean_full_render_ms` tells
-                    //   us how much we're spending parked in
-                    //   between frames waiting for vsync /
-                    //   RedrawRequested.
-                    let render_us =
-                        render_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
-                    let full_us = self.last_full_render_us;
-                    let animation_dt_us =
-                        animation_dt.as_micros().min(u64::MAX as u128) as u64;
-                    let (damage_kind, damage_lines, damage_first_line, damage_last_line) =
-                        match &p.damage {
-                            neoism_terminal_core::damage::TerminalDamage::Full => {
-                                ("full", 0u32, None, None)
-                            }
-                            neoism_terminal_core::damage::TerminalDamage::CursorOnly => {
-                                ("cursor_only", 0u32, None, None)
-                            }
-                            neoism_terminal_core::damage::TerminalDamage::Noop => {
-                                ("noop", 0u32, None, None)
-                            }
-                            neoism_terminal_core::damage::TerminalDamage::Partial(
-                                lines,
-                            ) => {
-                                let first = lines.iter().next().map(|line| line.line);
-                                let last = lines.iter().next_back().map(|line| line.line);
-                                (
-                                    "partial",
-                                    lines.len().min(u32::MAX as usize) as u32,
-                                    first,
-                                    last,
-                                )
-                            }
-                        };
-                    let source_step_lines = previous_source_base
-                        .map(|previous| (current_source_base - previous).unsigned_abs())
-                        .unwrap_or(0)
-                        .min(u32::MAX as u64)
-                        as u32;
-                    let scroll_log_enabled = std::env::var_os(SCROLL_LOG_ENV).is_some();
-                    let missing_rows = missing_editor_row_samples.get();
-                    let pacing_spike = animation_dt_us >= 9_000;
-                    let render_spike = render_us >= 2_500;
-                    let previous_full_frame_spike = full_us >= 9_000;
-                    let rebuild_spike = damage_rebuilt_rows >= 8
-                        || full_rebuilt_rows > 0
-                        || matches!(
-                            editor_source_plan,
-                            EditorScrollSourcePlan::RebuildAll
-                        );
-                    let source_step_spike = source_step_lines > 1;
-                    let missing_row_spike = missing_rows > 0;
-                    if scroll_log_enabled
-                        && (pacing_spike
-                            || render_spike
-                            || previous_full_frame_spike
-                            || rebuild_spike
-                            || source_step_spike
-                            || missing_row_spike)
-                    {
-                        tracing::info!(
-                            target: "neoism::scroll_spike",
-                            route_id = route_key,
-                            render_ms = render_us as f32 / 1000.0,
-                            previous_full_ms = full_us as f32 / 1000.0,
-                            animation_dt_ms = animation_dt_us as f32 / 1000.0,
-                            render_spike,
-                            pacing_spike,
-                            previous_full_frame_spike,
-                            rebuild_spike,
-                            source_step_spike,
-                            missing_row_spike,
-                            rebuilt_rows,
-                            exposed_rows = exposed_rebuilt_rows,
-                            damage_rows = damage_rebuilt_rows,
-                            full_rows = full_rebuilt_rows,
-                            shifted_rows,
-                            missing_rows,
-                            first_missing_source_y = ?first_missing_editor_source_y.get(),
-                            last_missing_source_y = ?last_missing_editor_source_y.get(),
-                            source_changed = editor_source_changed,
-                            source_step_lines,
-                            pixel_changed = editor_pixel_changed,
-                            pixel_offset_updated,
-                            source_line_offset = editor_source_line_offset,
-                            pixel_offset_y = editor_pixel_offset_y,
-                            scroll_lines = p.editor_scroll_position_lines,
-                            scroll_px = p.editor_scroll_position_lines * p.cell_h,
-                            elastic_px = p.editor_elastic_offset_y,
-                            scrollback_origin = ?editor_scrollback_origin,
-                            current_source_base = ?current_source_base,
-                            previous_source_base = ?previous_source_base,
-                            source_plan = ?editor_source_plan,
-                            damage_kind,
-                            damage_lines,
-                            damage_first_line = ?damage_first_line,
-                            damage_last_line = ?damage_last_line,
-                            edge_above_changed,
-                            edge_below_changed,
-                            edge_above_damaged,
-                            edge_below_damaged,
-                            edge_force_refresh,
-                            edge_above_source_y = ?new_edge_above,
-                            edge_below_source_y = ?new_edge_below,
-                            cols = p.cols,
-                            rows = p.rows,
-                            visible_rows = p.visible_rows.len(),
-                            "editor scroll frame spike"
-                        );
-                    }
-                    if scroll_log_enabled {
-                        tracing::trace!(
-                            target: "neoism::scroll_frame",
-                            route_id = route_key,
-                            render_ms = render_us as f32 / 1000.0,
-                            previous_full_ms = full_us as f32 / 1000.0,
-                            animation_dt_ms = animation_dt_us as f32 / 1000.0,
-                            rebuilt_rows,
-                            exposed_rows = exposed_rebuilt_rows,
-                            damage_rows = damage_rebuilt_rows,
-                            full_rows = full_rebuilt_rows,
-                            shifted_rows,
-                            missing_rows,
-                            first_missing_source_y = ?first_missing_editor_source_y.get(),
-                            last_missing_source_y = ?last_missing_editor_source_y.get(),
-                            source_changed = editor_source_changed,
-                            source_step_lines,
-                            pixel_changed = editor_pixel_changed,
-                            pixel_offset_updated,
-                            source_line_offset = editor_source_line_offset,
-                            pixel_offset_y = editor_pixel_offset_y,
-                            scroll_lines = p.editor_scroll_position_lines,
-                            scroll_px = p.editor_scroll_position_lines * p.cell_h,
-                            elastic_px = p.editor_elastic_offset_y,
-                            scrollback_origin = ?editor_scrollback_origin,
-                            current_source_base = ?current_source_base,
-                            previous_source_base = ?previous_source_base,
-                            source_plan = ?editor_source_plan,
-                            damage_kind,
-                            damage_lines,
-                            damage_first_line = ?damage_first_line,
-                            damage_last_line = ?damage_last_line,
-                            edge_above_changed,
-                            edge_below_changed,
-                            edge_above_damaged,
-                            edge_below_damaged,
-                            edge_force_refresh,
-                            edge_above_source_y = ?new_edge_above,
-                            edge_below_source_y = ?new_edge_below,
-                            cols = p.cols,
-                            rows = p.rows,
-                            visible_rows = p.visible_rows.len(),
-                            "editor scroll frame"
-                        );
-                    }
-                    state.log_render_us = state.log_render_us.saturating_add(render_us);
-                    if render_us > state.log_render_us_max {
-                        state.log_render_us_max = render_us;
-                    }
-                    state.log_full_render_us =
-                        state.log_full_render_us.saturating_add(full_us);
-                    if full_us > state.log_full_render_us_max {
-                        state.log_full_render_us_max = full_us;
-                    }
-                    state.log_animation_dt_us =
-                        state.log_animation_dt_us.saturating_add(animation_dt_us);
-                    if animation_dt_us > state.log_animation_dt_us_max {
-                        state.log_animation_dt_us_max = animation_dt_us;
-                    }
-
-                    let now = std::time::Instant::now();
-                    let started = *state.log_started_at.get_or_insert(now);
-                    let elapsed = now.duration_since(started).as_secs_f32();
-                    if elapsed >= 0.5 {
-                        let stats = neoism_ui::render_policy::frame_pacing_stats(
-                            neoism_ui::render_policy::FramePacingCounters {
-                                frames: state.log_frames,
-                                elapsed_secs: elapsed,
-                                render_us_sum: state.log_render_us,
-                                render_us_max: state.log_render_us_max,
-                                full_render_us_sum: state.log_full_render_us,
-                                full_render_us_max: state.log_full_render_us_max,
-                                animation_dt_us_sum: state.log_animation_dt_us,
-                                animation_dt_us_max: state.log_animation_dt_us_max,
-                            },
-                        );
-                        let fps = stats.fps;
-                        let mean_render_ms = stats.mean_render_ms;
-                        let max_render_ms = stats.max_render_ms;
-                        let mean_full_ms = stats.mean_full_ms;
-                        let max_full_ms = stats.max_full_ms;
-                        let mean_animation_dt_ms = stats.mean_animation_dt_ms;
-                        let max_animation_dt_ms = stats.max_animation_dt_ms;
-                        let wait_outside_render_ms = stats.wait_outside_render_ms;
-                        let pacing_jitter_ms = stats.pacing_jitter_ms;
-                        if std::env::var_os(SCROLL_LOG_ENV).is_some() {
-                            tracing::info!(
-                                target: "neoism::scroll_fps",
-                                route_id = route_key,
-                                fps,
-                                frames = state.log_frames,
-                                mean_render_ms,
-                                max_render_ms,
-                                mean_full_ms,
-                                max_full_ms,
-                                mean_animation_dt_ms,
-                                max_animation_dt_ms,
-                                pacing_jitter_ms,
-                                wait_outside_render_ms,
-                                rebuilt_rows = state.log_rebuilt_rows,
-                                exposed_rows = state.log_exposed_rows,
-                                damage_rows = state.log_damage_rows,
-                                full_rows = state.log_full_rows,
-                                shifted_rows = state.log_shifted_rows,
-                                source_changes = state.log_source_changes,
-                                offset_updates = state.log_offset_updates,
-                                source_line_offset = editor_source_line_offset,
-                                pixel_offset_y = editor_pixel_offset_y,
-                                scroll_lines = p.editor_scroll_position_lines,
-                                scroll_px = p.editor_scroll_position_lines * p.cell_h,
-                                elastic_px = p.editor_elastic_offset_y,
-                                cols = p.cols,
-                                rows = p.rows,
-                                "editor scroll frame stats"
-                            );
-                        } else {
-                            tracing::debug!(
-                                target: "neoism::scroll_fps",
-                                route_id = route_key,
-                                fps,
-                                frames = state.log_frames,
-                                mean_render_ms,
-                                max_render_ms,
-                                mean_full_ms,
-                                max_full_ms,
-                                mean_animation_dt_ms,
-                                max_animation_dt_ms,
-                                pacing_jitter_ms,
-                                wait_outside_render_ms,
-                                rebuilt_rows = state.log_rebuilt_rows,
-                                exposed_rows = state.log_exposed_rows,
-                                damage_rows = state.log_damage_rows,
-                                full_rows = state.log_full_rows,
-                                shifted_rows = state.log_shifted_rows,
-                                source_changes = state.log_source_changes,
-                                offset_updates = state.log_offset_updates,
-                                source_line_offset = editor_source_line_offset,
-                                pixel_offset_y = editor_pixel_offset_y,
-                                scroll_lines = p.editor_scroll_position_lines,
-                                scroll_px = p.editor_scroll_position_lines * p.cell_h,
-                                elastic_px = p.editor_elastic_offset_y,
-                                cols = p.cols,
-                                rows = p.rows,
-                                "editor scroll frame stats"
-                            );
-                        }
-                        state.log_started_at = Some(now);
-                        state.log_frames = 0;
-                        state.log_rebuilt_rows = 0;
-                        state.log_exposed_rows = 0;
-                        state.log_damage_rows = 0;
-                        state.log_full_rows = 0;
-                        state.log_shifted_rows = 0;
-                        state.log_source_changes = 0;
-                        state.log_offset_updates = 0;
-                        state.log_render_us = 0;
-                        state.log_render_us_max = 0;
-                        state.log_full_render_us = 0;
-                        state.log_full_render_us_max = 0;
-                        state.log_animation_dt_us = 0;
-                        state.log_animation_dt_us_max = 0;
-                    }
-                } else {
-                    state.log_started_at = None;
-                    state.log_frames = 0;
-                    state.log_rebuilt_rows = 0;
-                    state.log_exposed_rows = 0;
-                    state.log_damage_rows = 0;
-                    state.log_full_rows = 0;
-                    state.log_shifted_rows = 0;
-                    state.log_source_changes = 0;
-                    state.log_offset_updates = 0;
-                    state.log_render_us = 0;
-                    state.log_render_us_max = 0;
-                    state.log_full_render_us = 0;
-                    state.log_full_render_us_max = 0;
-                    state.log_animation_dt_us = 0;
-                    state.log_animation_dt_us_max = 0;
-                }
-            } else {
-                self.editor_scroll_grid_states.remove(&route_key);
-            }
 
             frame_grids.push((grid, uniforms));
         }
@@ -1396,7 +520,7 @@ impl Screen<'_> {
             let theme = self.renderer.theme;
             for p in &ctx.panels {
                 if !neoism_ui::render_policy::pane_overlay_is_paintable(
-                    p.is_editor,
+                    false,
                     p.cols,
                     p.rows,
                     p.cell_w,
@@ -1424,7 +548,7 @@ impl Screen<'_> {
                     logical.width,
                     logical.height,
                     p.rows,
-                    p.editor_scroll_position_lines,
+                    0.0,
                     theme,
                 );
             }
@@ -1484,7 +608,6 @@ impl Screen<'_> {
                 has_animation,
                 initial_redraw_reason,
                 late_redraw_reason,
-                editor_scroll_was_animating,
                 grid_count = frame_grids.len(),
                 "presenting dirty frame"
             );

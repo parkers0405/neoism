@@ -1350,9 +1350,6 @@ pub struct ChromeBridge {
     /// Random, non-zero, below 2^53 — same constraints as the
     /// desktop's `MarkdownCrdtState::client_id`.
     markdown_crdt_client_id: u64,
-    /// Gutter width (cells) of the active editor surface — added
-    /// to buffer-column carets at conversion time.
-    editor_viewport_textoff: u64,
     /// CRDT binding for the ACTIVE markdown pane's shared document
     /// (the chrome renders one markdown pane at a time, so one
     /// binding suffices; switching tabs re-binds via `crdt_pump`).
@@ -1375,45 +1372,13 @@ pub struct ChromeBridge {
     /// / Ctrl+- on the JS side fold against this value so repeated
     /// presses ramp up/down geometrically.
     active_font_scale: f32,
-    /// Latest editor grid snapshot received from the daemon's
-    /// embedded nvim proxy. Kept as raw JSON for diagnostics and
-    /// compatibility; the active structured snapshot is stored in
-    /// `editor_grid_snapshots` and painted by shared Chrome.
-    editor_grid_snapshot: Option<String>,
-    /// Running nvim grid snapshots keyed by editor surface id.
-    /// Surface-less redraws keep using the legacy single snapshot;
-    /// surface-scoped redraws update this store so web panes can
-    /// render independent editor grids in a follow-up UI pass.
-    editor_grid_snapshots: neoism_ui::editor_snapshot::EditorGridSnapshotStore,
-    /// Surface id carried by the latest editor redraw frame. The
-    /// current bridge still paints one visible grid, but preserving
-    /// this lets JS/rust follow-up work route independent grids by
-    /// pane route without changing the wire path again.
-    editor_grid_surface_id: Option<String>,
-    editor_default_fg: u32,
-    editor_default_bg: u32,
-    editor_viewport_topline: u64,
-    editor_viewport_botline: u64,
-    editor_viewport_line_count: u64,
-    /// Row deltas already animated from `GridScroll` and waiting
-    /// for the matching `WinViewport.scroll_delta`. The daemon can
-    /// deliver both for one nvim movement; animating both makes
-    /// held-arrow scroll feel doubled and choppy.
-    pending_grid_scroll_animation_rows: i32,
-    /// JS callback shipping nvim input bytes back to the daemon
-    /// over the WebSocket. Installed by `set_nvim_send` shortly
-    /// after `ChromeBridge::new`. `None` until installed; calls to
-    /// `nvim_send_keys` are dropped silently in that case (matches
-    /// the existing service-callback pattern).
-    nvim_send: Option<js_sys::Function>,
     /// JS callback shipping PTY response bytes (DSR / OSC / cursor
     /// pos / clipboard reply) back to the daemon. When installed,
     /// `feed_pty_output` automatically drains
     /// `Terminal::take_pty_writes` and pushes the bytes through
-    /// this callback so JS hosts don't need to poll. Mirrors the
-    /// existing `nvim_send` pattern. `None` until installed; the
-    /// `take_pty_writes` polling path still works (JS can keep
-    /// using it for back-compat).
+    /// this callback so JS hosts don't need to poll. `None` until
+    /// installed; the `take_pty_writes` polling path still works
+    /// (JS can keep using it for back-compat).
     pty_outbox: Option<js_sys::Function>,
     /// Device pixel ratio from the last `resize()` call. Cached so
     /// `render()` can re-derive and apply grid dimensions after the
@@ -1477,7 +1442,6 @@ mod chrome_bridge_core;
 mod construct;
 mod file_tree_workspace;
 mod frame;
-mod nvim_editor_grid;
 mod overlays;
 mod palettes_finder;
 mod panels;

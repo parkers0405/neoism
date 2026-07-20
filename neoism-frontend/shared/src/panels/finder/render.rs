@@ -236,17 +236,59 @@ impl Finder {
         let input_pad_x = INPUT_PADDING_X * scale;
         let mode_glyph = match self.mode {
             FinderMode::Files => "› ",
-            FinderMode::Grep => "/ ",
+            FinderMode::Grep | FinderMode::BufferLines => "/ ",
             FinderMode::GitChanges => "git ",
+            FinderMode::References => "ref ",
+            FinderMode::Symbols => "@ ",
         };
         let placeholder = match self.mode {
             FinderMode::Files => "Find file in project...",
             FinderMode::Grep => "Grep across project...",
             FinderMode::GitChanges => "Filter git changes...",
+            FinderMode::BufferLines => "Search in buffer...",
+            FinderMode::References => "Filter references...",
+            FinderMode::Symbols => "Go to symbol...",
         };
         let display_owned;
         let search_mode_label = self.search_mode_label();
-        let badge_text = format!("[{}]", search_mode_label);
+        // BufferLines swaps the search-mode badge for a live match
+        // count (with the uncapped total when rows were truncated).
+        let badge_text = if matches!(self.mode, FinderMode::BufferLines)
+            && !self.query.is_empty()
+        {
+            let shown = self.results.len();
+            if self.buffer_match_total > shown {
+                format!("[{}/{} matches]", shown, self.buffer_match_total)
+            } else if self.buffer_match_total == 1 {
+                "[1 match]".to_string()
+            } else {
+                format!("[{} matches]", self.buffer_match_total)
+            }
+        } else if matches!(self.mode, FinderMode::References) {
+            // Reference count badge; `shown/total` while filtering.
+            let shown = self.results.len();
+            let total = self.reference_rows.len();
+            if shown < total {
+                format!("[{shown}/{total} refs]")
+            } else if total == 1 {
+                "[1 ref]".to_string()
+            } else {
+                format!("[{total} refs]")
+            }
+        } else if matches!(self.mode, FinderMode::Symbols) {
+            // Symbol count badge; `shown/total` while filtering.
+            let shown = self.results.len();
+            let total = self.symbol_rows.len();
+            if shown < total {
+                format!("[{shown}/{total} syms]")
+            } else if total == 1 {
+                "[1 sym]".to_string()
+            } else {
+                format!("[{total} syms]")
+            }
+        } else {
+            format!("[{}]", search_mode_label)
+        };
         let badge_font = (input_font * 0.92).max(1.0);
         let badge_opts = DrawOpts {
             font_size: badge_font,
@@ -345,9 +387,11 @@ impl Finder {
         }
 
         // Result list.
-        let results_y = sep_y + SEPARATOR_HEIGHT + 4.0 * scale;
         let row_h = RESULT_ITEM_HEIGHT * scale;
         let row_font = RESULT_FONT_SIZE * scale;
+        // (No prefix cheatsheet row — it pushed the empty-state line
+        // out of the card. `@` / `:` / `/` keep working undocumented.)
+        let results_y = sep_y + SEPARATOR_HEIGHT + 4.0 * scale;
         let icon_font = row_font;
         let icon_gap = 8.0 * scale;
         let visible_rows =
@@ -528,6 +572,89 @@ impl Finder {
                         .overlay_text_mut()
                         .draw(body_x, baseline, &body, &text_opts);
                 }
+                Result_::Buffer(b) => {
+                    // line:  text — same header/body split as grep
+                    // rows, minus the file icon (no path to derive
+                    // one from; every row is the active buffer).
+                    let header = format!("{}:", b.line);
+                    let header_opts = DrawOpts {
+                        font_size: row_font,
+                        color: theme.u8(theme.muted),
+                        clip_rect: Some(list_clip),
+                        ..DrawOpts::default()
+                    };
+                    let text_opts = DrawOpts {
+                        font_size: row_font,
+                        color: theme.u8(theme.fg),
+                        clip_rect: Some(list_clip),
+                        ..DrawOpts::default()
+                    };
+                    let cursor_x = inner_x + input_pad_x;
+                    let header_w = sugarloaf.overlay_text_mut().draw(
+                        cursor_x,
+                        baseline,
+                        &header,
+                        &header_opts,
+                    );
+                    let body_x = cursor_x + header_w + (8.0 * scale);
+                    let body_w = (cursor_x + available_w) - body_x;
+                    let body = truncate_to_fit(
+                        b.text.trim_start(),
+                        body_w,
+                        sugarloaf,
+                        &text_opts,
+                    );
+                    sugarloaf
+                        .overlay_text_mut()
+                        .draw(body_x, baseline, &body, &text_opts);
+                }
+                Result_::Symbol(s) => {
+                    // {kind glyph} {name}  {line} — References-style
+                    // row without a path (every row is the active
+                    // buffer); the kind glyph stands in for the file
+                    // icon.
+                    let (icon_glyph, icon_color) = symbol_kind_visual(&s.kind, theme);
+                    let icon_opts = DrawOpts {
+                        font_size: icon_font,
+                        color: icon_color,
+                        clip_rect: Some(list_clip),
+                        ..DrawOpts::default()
+                    };
+                    let name_opts = DrawOpts {
+                        font_size: row_font,
+                        color: theme.u8(theme.fg),
+                        clip_rect: Some(list_clip),
+                        ..DrawOpts::default()
+                    };
+                    let line_opts = DrawOpts {
+                        font_size: row_font,
+                        color: theme.u8(theme.muted),
+                        clip_rect: Some(list_clip),
+                        ..DrawOpts::default()
+                    };
+                    let icon_x = inner_x + input_pad_x;
+                    let icon_w = sugarloaf
+                        .overlay_text_mut()
+                        .draw(icon_x, icon_y, icon_glyph, &icon_opts);
+                    let cursor_x = icon_x + icon_w + icon_gap;
+                    let text_w = (available_w - icon_w - icon_gap).max(0.0);
+                    let line_text = format!("  {}", s.line);
+                    let line_w = sugarloaf
+                        .overlay_text_mut()
+                        .measure(&line_text, &line_opts);
+                    let name_budget = (text_w - line_w).max(0.0);
+                    let name =
+                        truncate_to_fit(&s.name, name_budget, sugarloaf, &name_opts);
+                    let name_w = sugarloaf.overlay_text_mut().draw(
+                        cursor_x, baseline, &name, &name_opts,
+                    );
+                    sugarloaf.overlay_text_mut().draw(
+                        cursor_x + name_w,
+                        baseline,
+                        &line_text,
+                        &line_opts,
+                    );
+                }
                 Result_::Git(g) => {
                     let file_name = leaf_name(&g.path);
                     let (icon_glyph, icon_color) = icon_for_file(file_name);
@@ -597,11 +724,27 @@ impl Finder {
 
         // Empty state hint when no results yet.
         if total == 0 {
-            let hint = if self.query.is_empty() {
+            let hint = if matches!(self.mode, FinderMode::Symbols)
+                && self.symbol_rows.is_empty()
+            {
+                // No rows installed yet: distinguish "still fetching"
+                // from "the server returned nothing" regardless of
+                // any already-typed filter query.
+                if self.symbols_loading {
+                    "Waiting for language server…"
+                } else {
+                    "No symbols in this file"
+                }
+            } else if self.query.is_empty() {
                 match self.mode {
                     FinderMode::Files => "Start typing to search files…",
                     FinderMode::Grep => "Start typing to grep…",
                     FinderMode::GitChanges => "No git changes",
+                    FinderMode::BufferLines => "Start typing to search buffer…",
+                    FinderMode::References => "No references",
+                    // Rows exist (guard above) but the empty query
+                    // filtered none — unreachable; keep exhaustive.
+                    FinderMode::Symbols => "No symbols in this file",
                 }
             } else if matches!(self.mode, FinderMode::Grep)
                 && self.grep_query_too_short(&self.effective_search_key())
@@ -849,6 +992,17 @@ fn parent_path(path: &str) -> &str {
     } else {
         ""
     }
+}
+
+/// Kind glyph + color for a Symbols row — reuses the completion
+/// menu's LSP-kind mapping so `@` rows read like the completion
+/// popup. Unknown kinds fall back to the generic code glyph (the
+/// menu shows a text tag instead, which the finder row has no room
+/// for).
+fn symbol_kind_visual(kind: &str, theme: &IdeTheme) -> (&'static str, [u8; 4]) {
+    let glyph = crate::panels::completion_menu::kind_icon(kind);
+    let glyph = if glyph.is_empty() { "\u{f121}" } else { glyph };
+    (glyph, crate::panels::completion_menu::kind_color(kind, theme))
 }
 
 /// Squeeze a long path to a `…/last_two_segments` form so it fits the

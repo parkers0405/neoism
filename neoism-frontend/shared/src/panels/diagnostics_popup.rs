@@ -1,7 +1,7 @@
 // Diagnostics popup — small floating panel that pops up above a status
-// line pill when the user clicks it. Lists the items vim.diagnostic.get()
-// returned for the current buffer, grouped by severity. Clicking a row
-// returns the line number; the screen layer then sends `:<lnum>` to nvim.
+// line pill when the user clicks it. Lists the diagnostics reported
+// for the current buffer, grouped by severity. Clicking a row returns
+// the line number; the screen layer jumps the editor there.
 //
 // Lifecycle / animation: handled by the shared `Popover<T>` widget —
 // this file owns only the diagnostics-specific content (items, message
@@ -155,6 +155,17 @@ impl DiagnosticsPopup {
 
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.clamp(0.5, 3.0);
+    }
+
+    /// Rect for the host's text-occlusion registry (pane text must not
+    /// draw beneath the popup). One-frame lag from `last_rect` is the
+    /// same convention every other overlay uses.
+    pub fn occlusion_rect(&self) -> Option<[f32; 4]> {
+        if !self.is_visible() || self.last_rect.2 <= 0.0 {
+            return None;
+        }
+        let (x, y, w, h) = self.last_rect;
+        Some([x, y, w, h])
     }
 
     pub fn is_visible(&self) -> bool {

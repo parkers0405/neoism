@@ -97,13 +97,6 @@ jobs:
           env -u CI cargo build --release --locked --target ${{ matrix.target }} \
             -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
 
-      # Shipped as `runtime/` next to the binaries; the app's first-run
-      # bootstrap installs it into the user's data dir.
-      - name: Build Tree-sitter runtime bundle
-        if: matrix.goos != 'windows'
-        shell: bash
-        run: ./scripts/build-treesitter-runtime.sh stage-runtime "${{ github.ref_name }}"
-
       - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
         if: matrix.goos != 'windows'
         shell: bash
@@ -114,7 +107,6 @@ jobs:
           BIN="target/${{ matrix.target }}/release"
           cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "stage/$OUT/"
           cp misc/rio.terminfo "stage/$OUT/" 2>/dev/null || true
-          cp -r stage-runtime "stage/$OUT/runtime"
           tar -C stage -czf "$OUT.tar.gz" "$OUT"
           if command -v sha256sum >/dev/null; then sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256";
           else shasum -a 256 "$OUT.tar.gz" > "$OUT.tar.gz.sha256"; fi

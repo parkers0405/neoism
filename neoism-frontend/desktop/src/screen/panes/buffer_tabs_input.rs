@@ -91,7 +91,6 @@ impl Screen<'_> {
             classify_strip_click, StripClickOutcome, StripKey, WorkspaceStripGeometry,
         };
 
-        self.ensure_primary_editor_route();
         let scale_factor = self.sugarloaf.scale_factor();
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
 
@@ -280,16 +279,14 @@ impl Screen<'_> {
                 new_active.as_ref(),
             );
         self.guard_workspace_buf_enter(path_update.buf_enter_guard());
-        let primary = self.renderer.primary_editor_route;
         if let Some(removed) = removed {
-            let cmd = match removed {
+            match removed {
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path) => {
                     self.notebook_runtime.shutdown_kernel(path.clone());
                     self.context_manager
                         .remove_markdown_by_path(&path, &mut self.sugarloaf);
                     self.context_manager
                         .remove_neoism_tags_by_path(&path, &mut self.sugarloaf);
-                    String::new()
                 }
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::NeoismAgent(
                     route_id,
@@ -297,30 +294,16 @@ impl Screen<'_> {
                     let _ = self
                         .context_manager
                         .remove_neoism_agent_route(route_id, &mut self.sugarloaf);
-                    String::new()
                 }
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::ChromePage(page) => {
                     let _ = self
                         .context_manager
                         .remove_chrome_page_route(page.route_id, &mut self.sugarloaf);
-                    String::new()
                 }
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path) => {
-                    neoism_backend::performer::nvim::vim_bwipeout_command(
-                        &path.display().to_string(),
-                    )
-                }
-                neoism_ui::panels::buffer_tabs::BufferTabTarget::Scratch(scratch_id) => {
-                    neoism_backend::performer::nvim::vim_scratch_delete_command(
-                        scratch_id,
-                    )
-                }
-            };
-            if !cmd.is_empty() {
-                if let Some(p) = primary {
-                    self.send_editor_command_to_route(p, cmd);
-                } else {
-                    self.send_editor_command_raw(cmd);
+                    let _ = self
+                        .context_manager
+                        .remove_code_by_path(&path, &mut self.sugarloaf);
                 }
             }
         }
@@ -386,7 +369,6 @@ impl Screen<'_> {
         let scaled_margin = self.context_manager.current_grid().scaled_margin;
         let chrome_top = self.island_chrome_top();
         let min_top = self.current_grid_min_pane_top();
-        let primary = self.renderer.primary_editor_route;
         for (node, item) in self.context_manager.current_grid().contexts().iter() {
             if !self
                 .context_manager
@@ -397,9 +379,6 @@ impl Screen<'_> {
             }
             let ctx = item.context();
             let route = ctx.route_id;
-            if Some(route) == primary {
-                continue;
-            }
             let Some(tabs) = self.renderer.pane_tabs.get(&route) else {
                 continue;
             };
@@ -444,9 +423,10 @@ impl Screen<'_> {
             Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::NeoismAgent(
                 route_id,
             )) => Some(*route_id),
-            Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path)) => {
-                self.ensure_pane_editor_route_for_file(route_id, path)
-            }
+            Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path)) => self
+                .context_manager
+                .code_node_by_path(path)
+                .map(|(route, _node)| route),
             _ => None,
         };
         let Some(node) = self
@@ -465,12 +445,6 @@ impl Screen<'_> {
         }
         match target {
             Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path)) => {
-                let cmd = neoism_backend::performer::nvim::vim_select_file_command(
-                    &path.display().to_string(),
-                );
-                if let Some(editor_route) = target_route {
-                    self.send_editor_command_to_route(editor_route, cmd);
-                }
                 let cwd = self.active_pane_workspace_root();
                 if let Some(crumbs) = self.renderer.pane_breadcrumbs.get_mut(&route_id) {
                     crumbs.set_from_path(&path, cwd.as_deref());
@@ -623,26 +597,9 @@ impl Screen<'_> {
                         .remove_chrome_page_route(page.route_id, &mut self.sugarloaf);
                 }
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path) => {
-                    if let Some(editor_route) = self.pane_editor_route_for_strip(route_id)
-                    {
-                        self.send_editor_command_to_route(
-                            editor_route,
-                            neoism_backend::performer::nvim::vim_bwipeout_command(
-                                &path.display().to_string(),
-                            ),
-                        );
-                    }
-                }
-                neoism_ui::panels::buffer_tabs::BufferTabTarget::Scratch(scratch_id) => {
-                    if let Some(editor_route) = self.pane_editor_route_for_strip(route_id)
-                    {
-                        self.send_editor_command_to_route(
-                            editor_route,
-                            neoism_backend::performer::nvim::vim_scratch_delete_command(
-                                scratch_id,
-                            ),
-                        );
-                    }
+                    let _ = self
+                        .context_manager
+                        .remove_code_by_path(&path, &mut self.sugarloaf);
                 }
             }
         }

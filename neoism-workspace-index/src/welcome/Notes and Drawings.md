@@ -22,7 +22,7 @@ Neoism speaks **wiki links**. Type `[[` and a completion menu suggests notes; th
 
 Clicking a wiki link opens the target note — and **creates it if it doesn't exist yet**, so you can link forward as you think. Every note tracks its **backlinks** (what links here), and the whole vault is queryable by the [[The Neoism Agent|agent]] too, so your notes can become persistent project context.
 
-> Tip: wiki links resolve relative to the current note's folder. Use a path like `[[Editor/Neovim|Neovim]]` to point across folders.
+> Tip: wiki links resolve relative to the current note's folder. Use a path like `[[Editor/The Editor|The Editor]]` to point across folders.
 
 ## Drawings
 

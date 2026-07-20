@@ -28,7 +28,7 @@ mod motions;
 mod pane;
 
 pub use model::*;
-pub(crate) use motions::*;
+pub use motions::*;
 
 #[cfg(test)]
 mod tests;

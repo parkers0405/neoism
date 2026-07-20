@@ -66,9 +66,7 @@ use crate::panels::agent_pane::state::NeoismAgentPane;
 use crate::panels::breadcrumbs::Breadcrumbs;
 use crate::panels::completion_menu::CompletionMenu;
 use crate::panels::context_menu::ContextMenu;
-use crate::panels::cursorline_overlay::CursorlineOverlay;
 use crate::panels::diagnostics_popup::DiagnosticsPopup;
-use crate::panels::editor_scroll::EditorScroll;
 use crate::panels::file_tree::FILE_TREE_WIDTH;
 use crate::panels::minimap::Minimap;
 use crate::panels::notifications::Notifications;
@@ -76,7 +74,6 @@ use crate::panels::search::SearchOverlay;
 use crate::panels::splash_overlay::SplashOverlay;
 use crate::panels::trail_cursor::TrailCursor;
 use crate::panels::yank_flash::YankFlash;
-use crate::render_policy::EditorScrollGridRenderState;
 
 mod config;
 mod content;
@@ -100,9 +97,6 @@ impl GitBranch {
         Self
     }
 }
-
-#[cfg(test)]
-mod tests;
 
 /// State holder for the custom mouse-cursor sprite. The module exposes
 /// a free `draw(sugarloaf, x, y, scale)`; the desktop renderer feeds it
@@ -190,8 +184,6 @@ pub const DEFAULT_FILE_TREE_WIDTH: f32 = FILE_TREE_WIDTH;
 /// Default fixed height of the command composer above the status line.
 pub const COMMAND_COMPOSER_HEIGHT: f32 = 56.0;
 
-const EDITOR_GRID_SCROLL_ID: usize = 1;
-
 /// Default centered-modal width for command palette / finder. Hosts
 /// can override on a per-frame basis if they want a different modal
 /// width by post-mutating `layout.command_palette` / `layout.finder`.
@@ -226,10 +218,8 @@ pub enum PanelKey {
     Search,
     GitBranch,
     CustomCursor,
-    CursorlineOverlay,
     TrailCursor,
     YankFlash,
-    EditorScroll,
 }
 
 /// Full cross-platform chrome assembly. Generic over the host's agent
@@ -286,17 +276,6 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// Source language for the active tab — drives syntax-highlight
     /// token colors when painting the file-viewer pane.
     tab_lang: crate::syntax::Lang,
-    /// 7C-2: remote collaborator carets for the ACTIVE editor (nvim)
-    /// grid, already converted to SCREEN rows by the host (the wasm
-    /// bridge folds `win_viewport.topline` out of the buffer-coordinate
-    /// presence before pushing). Painted over `paint_editor_grid`.
-    editor_remote_carets: Vec<crate::panels::remote_carets::EditorRemoteCaret>,
-    /// Every peer in the buffer (roster chips), including ones whose
-    /// caret is scrolled out of MY viewport this frame.
-    editor_remote_roster: Vec<crate::panels::remote_carets::EditorRemoteCaret>,
-    /// Live topline of the active editor viewport — the caret painter
-    /// converts buffer lines to rows per frame against this.
-    editor_caret_topline: u64,
     /// Lazily-constructed markdown pane for `.md` tabs. The file-viewer
     /// branch in `Chrome::draw` renders block-aware markdown (headings,
     /// lists, code, quotes, dividers) by walking
@@ -306,37 +285,6 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// for a `.md` path; cleared when the host pushes a non-markdown
     /// tab.
     markdown_pane: Option<crate::editor::markdown::MarkdownPane>,
-    /// Latest nvim grid snapshot the daemon proxy has pushed. When
-    /// `Some`, the file-viewer paint branch (`active_tab_index != 0`)
-    /// renders the grid cells directly instead of the cached
-    /// `tab_content` plain-text + syntax-highlight fallback. `None`
-    /// means no nvim session is attached for this tab; the legacy
-    /// text path continues to render. Hosts push via
-    /// [`Chrome::set_editor_grid`].
-    editor_grid: Option<crate::editor_snapshot::EditorGridSnapshot>,
-    /// Pre-scroll grid kept for web/daemon nvim scroll animation.
-    /// Native desktop has a retained scrollback ring; daemon snapshots
-    /// arrive as the already-scrolled visible grid, so this underlay
-    /// supplies the outgoing partial rows while the shared scroll
-    /// spring decays.
-    editor_grid_scrollback: Option<crate::editor_snapshot::EditorGridSnapshot>,
-    /// Cursor shape for the daemon-fed editor grid. Nvim sends mode
-    /// changes separately from cursor moves, so Chrome keeps the last
-    /// resolved shape beside the grid snapshot.
-    editor_cursor_shape: neoism_terminal_core::ansi::CursorShape,
-    /// Previous desktop-style editor scroll render state for the
-    /// daemon-fed web grid. Native keeps this per route; shared chrome
-    /// currently has one active daemon grid, so carry the same state
-    /// beside that grid.
-    editor_scroll_render_state: Option<EditorScrollGridRenderState>,
-    /// Logical scrollback ring origin for the active daemon-fed editor
-    /// grid. Native reads this from Crosswords; web advances it from
-    /// nvim GridScroll deltas so retained source-base decisions use
-    /// the same unwrapped origin model instead of a hard-coded zero.
-    editor_scrollback_origin: Option<isize>,
-    editor_scrollback_above_rows: Vec<crate::editor_snapshot::GridCell>,
-    editor_scrollback_below_rows: Vec<crate::editor_snapshot::GridCell>,
-    last_editor_trail_cursor_cell: Option<(usize, usize, usize)>,
 
     pub status_line: StatusLine,
     pub buffer_tabs: BufferTabs<A>,
@@ -392,7 +340,6 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     pub minimap: Minimap,
     pub yank_flash: YankFlash,
     pub trail_cursor: TrailCursor,
-    pub editor_scroll: EditorScroll,
     /// LSP diagnostics popover anchored under the cursor. Data-driven
     /// — stays hidden until the host pushes `PopupItem`s via the
     /// panel's `refresh_items` / `open` calls.
@@ -400,9 +347,6 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// Right-click / completion context menu. Data-driven — stays
     /// hidden until the host opens it.
     pub context_menu: ContextMenu,
-    /// Animated highlight of the current editor line. Data-driven —
-    /// idle until the host calls `set_target` with the row's y.
-    pub cursorline_overlay: CursorlineOverlay,
     /// Installable handle for the stateless `git_branch` module
     /// (free-function helpers; no per-instance state). Owned here
     /// so the bridge's install ordering matches the other panels.
@@ -479,32 +423,6 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// neovide-style beam spring advances regardless of the host's
     /// frame cadence.
     last_draw_time: Option<Duration>,
-}
-
-/// Visible editor viewport bounds used to reject wheel/glide commits
-/// at hard file edges. `delta > 0` means scroll down; `delta < 0`
-/// means scroll up. Hosts with opposite wheel polarity should invert
-/// before calling this shared policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EditorScrollViewportBounds {
-    pub topline: u64,
-    pub botline: u64,
-    pub line_count: u64,
-}
-
-impl EditorScrollViewportBounds {
-    pub fn known(self) -> bool {
-        self.line_count > 0
-    }
-
-    pub fn rejects_delta(self, delta: f32) -> bool {
-        if !self.known() {
-            return false;
-        }
-        let at_top = self.topline == 0;
-        let at_bottom = self.botline >= self.line_count;
-        (delta < 0.0 && at_top) || (delta > 0.0 && at_bottom)
-    }
 }
 
 impl<A: Send + Copy + 'static> Default for Chrome<A> {

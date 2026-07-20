@@ -51,6 +51,13 @@ pub enum ExtensionStatus {
     /// shown in the catalog, but clicking/pressing Enter must never dispatch
     /// an install or uninstall job.
     BuiltIn,
+    /// The binary exists on this machine but is NOT managed by Neoism's
+    /// installer (found on `$PATH` or via explicit config). Uninstalling it
+    /// is not ours to offer, so the row is informational only.
+    Detected,
+    /// No binary anywhere and no managed installer can supply one. The row
+    /// stays visible (honesty about the gap) but has no lifecycle actions.
+    Unavailable,
     /// `None` means the current phase has no trustworthy denominator (DNS,
     /// package-manager work, extraction, linking). The view renders an
     /// animated indeterminate bar instead of lying with a frozen `0%`.
@@ -68,8 +75,6 @@ pub enum ExtensionStatus {
 pub enum ExtensionTab {
     McpServers,
     LanguageServers,
-    Formatters,
-    Linters,
     TreeSitterParsers,
     Kernels,
 }
@@ -89,21 +94,21 @@ pub struct ExtensionEntry {
     pub author: String,
     pub downloads: Option<u64>,
     pub categories: Vec<String>,
-    /// Languages this extension targets (Mason puts the language list on
-    /// each package — Rust language-server entries carry `["Rust"]`, etc.). Used by
+    /// Languages this extension targets (language-server rows carry the
+    /// languages their engine adapter routes, e.g. `["Rust"]`). Used by
     /// the card chips and search index. Empty for entries without a
     /// language association (e.g. most MCP servers).
     pub languages: Vec<String>,
     pub status: ExtensionStatus,
     pub repository_url: Option<String>,
-    /// For language-server rows: where the Neoism LSP engine resolves the
-    /// binary/endpoint — `"built-in/socket"`, `"extension"` (managed
-    /// install), `"path"` (found on `$PATH`), `"config"`, `"missing"`, or
-    /// `"adapter required"` when Mason can install the package but the runtime
-    /// does not yet know how to attach it.
+    /// For language-server rows: the adapter's live runtime state as the
+    /// Neoism LSP engine reports it — `"connected"` when a client is
+    /// attached, otherwise where the binary/endpoint resolves:
+    /// `"built-in/socket"`, `"extension"` (managed install), `"path"`
+    /// (found on `$PATH`), `"config"`, or `"missing"`.
     /// `None` for non-LSP entries.
     /// Drives the source badge so the page reflects what the engine will
-    /// actually run, not just what the Mason registry lists.
+    /// actually run.
     pub lsp_source: Option<String>,
 }
 
@@ -247,15 +252,13 @@ impl NeoismExtensionsPane {
         }
     }
 
-    /// Cycle the active category tab (MCP -> Language -> Formatters ->
-    /// Linters -> Syntax, wrapping). `forward` advances; otherwise steps back.
+    /// Cycle the active category tab (MCP -> Language -> Syntax ->
+    /// Kernels, wrapping). `forward` advances; otherwise steps back.
     /// Resets selection + scroll so the new tab starts at the top.
     pub fn cycle_tab(&mut self, forward: bool) {
-        const ORDER: [ExtensionTab; 6] = [
+        const ORDER: [ExtensionTab; 4] = [
             ExtensionTab::McpServers,
             ExtensionTab::LanguageServers,
-            ExtensionTab::Formatters,
-            ExtensionTab::Linters,
             ExtensionTab::TreeSitterParsers,
             ExtensionTab::Kernels,
         ];
@@ -581,12 +584,15 @@ impl NeoismExtensionsPane {
             ExtensionFilter::Installed => matches!(
                 entry.status,
                 ExtensionStatus::BuiltIn
+                    | ExtensionStatus::Detected
                     | ExtensionStatus::Installed { .. }
                     | ExtensionStatus::Uninstalling
             ),
             ExtensionFilter::NotInstalled => matches!(
                 entry.status,
-                ExtensionStatus::NotInstalled | ExtensionStatus::Installing { .. }
+                ExtensionStatus::NotInstalled
+                    | ExtensionStatus::Unavailable
+                    | ExtensionStatus::Installing { .. }
             ),
         }
     }
@@ -906,7 +912,12 @@ impl NeoismExtensionsPane {
                 let clamped = self.selected_index.min(last);
                 let entry_idx = visible[clamped];
                 let entry = &self.entries[entry_idx];
-                if matches!(entry.status, ExtensionStatus::BuiltIn) {
+                if matches!(
+                    entry.status,
+                    ExtensionStatus::BuiltIn
+                        | ExtensionStatus::Detected
+                        | ExtensionStatus::Unavailable
+                ) {
                     return KeyResponse::handled();
                 }
                 KeyResponse::with_action(PaneAction::InstallToggleRequested {
@@ -1004,10 +1015,11 @@ impl Default for NeoismExtensionsPane {
 
 use super::view;
 
-/// Liberal substring match from a Mason-style category string to a
-/// tab. Mason categories use various spellings (`mcp`, `MCP`, `LSP`,
-/// `language server`, `theme`, ...) — we lowercase + substring-match
-/// so all spellings collapse to one tab.
+/// Liberal substring match from an entry category string to a tab.
+/// Category strings come from several sources (engine adapters, MCP
+/// registry, kernel manifests) with various spellings (`mcp`, `MCP`,
+/// `LSP`, `language server`, ...) — we lowercase + substring-match so
+/// all spellings collapse to one tab.
 fn matches_tab(category: &str, tab: ExtensionTab) -> bool {
     let c = category.to_lowercase();
     match tab {
@@ -1015,8 +1027,6 @@ fn matches_tab(category: &str, tab: ExtensionTab) -> bool {
         ExtensionTab::LanguageServers => {
             c.contains("lsp") || c.contains("language server")
         }
-        ExtensionTab::Formatters => c.contains("formatter"),
-        ExtensionTab::Linters => c.contains("linter"),
         ExtensionTab::TreeSitterParsers => {
             c.contains("tree-sitter")
                 || c.contains("treesitter")

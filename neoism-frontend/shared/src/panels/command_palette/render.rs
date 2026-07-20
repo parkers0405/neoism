@@ -342,7 +342,7 @@ impl CommandPalette {
                 .overlay_text_mut()
                 .draw(text_x, text_y, display_text, &input_opts);
 
-        // `/`-search: nvim-style `[cur/total]` match count, right-aligned
+        // `/`-search: vim-style `[cur/total]` match count, right-aligned
         // + muted in the input row. `cur` = highlighted match position
         // (1-based), `total` = live buffer-match count; both update as
         // matches stream in. Zero matches renders `[0/0]`. Only shown
@@ -820,7 +820,7 @@ impl CommandPalette {
                 result_opts
             };
             // Zed-style namespaced display: command rows read
-            // `{service}: {command}` (e.g. `nvim: Write File`).
+            // `{service}: {command}` (e.g. `code: Write File`).
             let display_title = row.display_title();
             let title =
                 truncate_to_fit(&display_title, title_budget, sugarloaf, &title_opts);

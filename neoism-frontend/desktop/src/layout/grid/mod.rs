@@ -494,12 +494,6 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
             .find_map(|(node, item)| (item.val.route_id == route_id).then_some(*node))
     }
 
-    pub fn editor_node(&self) -> Option<NodeId> {
-        self.inner
-            .iter()
-            .find_map(|(node, item)| item.val.editor.is_some().then_some(*node))
-    }
-
     #[inline]
     pub fn get_scaled_margin(&self) -> Margin {
         self.scaled_margin
@@ -518,27 +512,6 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
     #[inline]
     pub fn contexts(&self) -> &FxHashMap<NodeId, ContextGridItem<T>> {
         &self.inner
-    }
-
-    pub fn pump_editor_redraws(&mut self) -> (usize, bool, bool) {
-        let mut applied = 0usize;
-        let mut hit_frame_limit = false;
-        let mut visible_hit_frame_limit = false;
-        let visibility = self
-            .inner
-            .keys()
-            .map(|node| (*node, self.is_context_visible(*node)))
-            .collect::<Vec<_>>();
-        for (node, visible) in visibility {
-            let Some(item) = self.inner.get_mut(&node) else {
-                continue;
-            };
-            let (n, limited) = item.val.pump_editor_redraws();
-            applied = applied.saturating_add(n);
-            hit_frame_limit |= limited;
-            visible_hit_frame_limit |= visible && limited;
-        }
-        (applied, hit_frame_limit, visible_hit_frame_limit)
     }
 
     pub fn stacked_children_of(&self, parent: NodeId) -> Vec<NodeId> {
@@ -699,7 +672,7 @@ pub(crate) fn session_leaf_spec_for_grid_item<T: EventListener>(
     item: &ContextGridItem<T>,
 ) -> SessionLeafSpec {
     let context = item.context();
-    let kind = if context.editor.is_some() {
+    let kind = if context.code.is_some() {
         SessionLeafKind::Editor
     } else if context.neoism_agent.is_some() {
         SessionLeafKind::Agent

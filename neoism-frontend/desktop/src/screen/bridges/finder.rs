@@ -6,10 +6,10 @@ use neoism_backend::clipboard::{Clipboard, ClipboardType};
 use neoism_terminal_core::crosswords::pos::{Boundary, Direction, Line};
 use neoism_terminal_core::selection::SelectionType;
 use neoism_ui::panels::finder::policy::{
-    build_finder_edit_lua, finder_cwd_decision, finder_target_route_decision,
-    plan_finder_open, search_input_action, FinderCwdInputs, FinderOpenAction,
-    FinderTargetRouteInputs, SearchEdit, SearchInputAction,
+    finder_cwd_decision, plan_finder_open, search_input_action, FinderCwdInputs,
+    FinderOpenAction, SearchEdit, SearchInputAction,
 };
+use neoism_ui::panels::finder::FinderMode;
 
 impl Screen<'_> {
     pub fn search_active(&self) -> bool {
@@ -121,11 +121,29 @@ impl Screen<'_> {
             }
             Ok(None) => true,
             Err(()) => {
-                self.renderer.finder.close();
+                // Click-outside dismisses; BufferLines mode restores
+                // the pre-search cursor like Esc would.
+                self.close_finder_overlay();
                 self.finder_target_route = None;
                 self.mark_dirty();
                 true
             }
+        }
+    }
+
+    /// Mode-aware finder dismissal: BufferLines cancels like Esc
+    /// (restores the pre-search cursor, drops hlsearch); Symbols
+    /// restores the pre-open cursor; every other mode just closes.
+    /// Safe to call when the finder is already closed.
+    pub(crate) fn close_finder_overlay(&mut self) {
+        if !self.renderer.finder.is_enabled() {
+            self.renderer.finder.close();
+            return;
+        }
+        match self.renderer.finder.mode() {
+            FinderMode::BufferLines => self.cancel_finder_buffer_search(),
+            FinderMode::Symbols => self.cancel_finder_symbols(),
+            _ => self.renderer.finder.close(),
         }
     }
 
@@ -173,67 +191,15 @@ impl Screen<'_> {
     }
 
     pub(crate) fn finder_target_route_for_current_focus(&self) -> Option<usize> {
-        let active_pane_strip_route = self.active_pane_strip_route();
-        finder_target_route_decision(FinderTargetRouteInputs {
-            file_tree_focused: self.renderer.file_tree.is_focused(),
-            primary_editor_route: self.renderer.primary_editor_route,
-            active_pane_strip_route,
-            pane_editor_route_for_strip: active_pane_strip_route
-                .and_then(|route| self.pane_editor_route_for_strip(route)),
-            current_context_has_editor: self.context_manager.current().editor.is_some(),
-            current_route: self.context_manager.current_route(),
-        })
+        // No editor routes exist anymore — finder results open through
+        // the native code/markdown panes, never a routed editor.
+        None
     }
 
-    pub(crate) fn editor_cwd_for_route(
-        &self,
-        route_id: usize,
-    ) -> Option<std::path::PathBuf> {
-        let grid = self.context_manager.current_grid();
-        let node = grid.node_by_route_id(route_id)?;
-        grid.contexts()
-            .get(&node)?
-            .context()
-            .editor
-            .as_ref()?
-            .config()
-            .cwd
-            .clone()
-    }
-
-    pub(crate) fn focus_editor_route(&mut self, route_id: usize) -> bool {
-        let Some(node) = self
-            .context_manager
-            .current_grid()
-            .node_by_route_id(route_id)
-        else {
-            return false;
-        };
-        let changed = self
-            .context_manager
-            .current_grid_mut()
-            .set_current_node(node, &mut self.sugarloaf);
-        self.context_manager.select_route_from_current_grid();
-        self.renderer.file_tree.set_focused(false);
-        if changed {
-            self.renderer.trail_cursor.reset();
-            self.reapply_chrome_layout();
-        }
-        true
-    }
-
-    pub(crate) fn finder_cwd(&self, target_route: Option<usize>) -> std::path::PathBuf {
+    pub(crate) fn finder_cwd(&self, _target_route: Option<usize>) -> std::path::PathBuf {
         finder_cwd_decision(FinderCwdInputs {
             active_pane_workspace_root: self.active_pane_workspace_root(),
             active_workspace_root: self.active_workspace_root.clone(),
-            target_route_editor_cwd: target_route
-                .and_then(|route| self.editor_cwd_for_route(route)),
-            current_editor_cwd: self
-                .context_manager
-                .current()
-                .editor
-                .as_ref()
-                .and_then(|editor| editor.config().cwd.clone()),
             working_dir_config: self
                 .context_manager
                 .config
@@ -306,6 +272,36 @@ impl Screen<'_> {
     }
 
     pub fn open_finder_selection(&mut self) {
+        // BufferLines rows have no path — Enter (and row clicks)
+        // commit the in-buffer search instead of opening a file.
+        if self.renderer.finder.mode() == FinderMode::BufferLines {
+            self.confirm_finder_buffer_search();
+            return;
+        }
+        // Symbols rows have no path either — Enter jumps the active
+        // code pane to the selected symbol.
+        if self.renderer.finder.mode() == FinderMode::Symbols {
+            self.confirm_finder_symbols();
+            return;
+        }
+        // References rows carry an exact byte column — jump straight
+        // through the code-pane open path (the gd cross-file pattern)
+        // instead of the generic line-only open plan.
+        if self.renderer.finder.mode() == FinderMode::References {
+            let target = self.renderer.finder.selected_reference_target();
+            self.renderer.finder.close();
+            self.finder_target_route = None;
+            self.renderer.file_tree.set_focused(false);
+            if let Some((path, line, col)) = target {
+                self.open_code_location(
+                    path,
+                    (line as usize).saturating_sub(1),
+                    col as usize,
+                );
+            }
+            self.mark_dirty();
+            return;
+        }
         let Some((path, line)) = self.renderer.finder.selected_open_target() else {
             return;
         };
@@ -322,12 +318,10 @@ impl Screen<'_> {
         // would steer the tree, not the buffer.
         self.renderer.file_tree.set_focused(false);
 
-        // POD decision: route + lua-command construction all live in
-        // `neoism_ui::panels::finder::policy`. The chained `pcall`
-        // wraps edit + cursor-set + (optional) hlsearch / git preview
-        // in ONE call because splitting them previously raced the
-        // buffer load — see `build_finder_edit_lua` for the full
-        // rationale.
+        // POD decision: the open plan lives in
+        // `neoism_ui::panels::finder::policy`. nvim removed — non-markdown
+        // targets open in the native code pane; a grep/git hit jumps the
+        // code cursor to the matched line.
         let request = neoism_ui::panels::finder::policy::FinderOpenRequest {
             path,
             line,
@@ -350,34 +344,23 @@ impl Screen<'_> {
                 path,
                 line,
                 target_route,
-                grep_query,
-                is_git,
+                grep_query: _,
+                is_git: _,
             } => {
                 self.open_finder_target_tab(target_route, &path);
-                let cmd =
-                    build_finder_edit_lua(&path, line, grep_query.as_deref(), is_git);
-                if let Some(route) = target_route {
-                    self.focus_editor_route(route);
-                    self.send_editor_command_to_route(route, cmd);
-                } else {
-                    self.open_path_in_editor(path.clone());
-                    self.ensure_primary_editor_route();
-                    if let Some(route) = self.renderer.primary_editor_route {
-                        self.send_editor_command_to_route(route, cmd);
-                    }
+                self.open_path_in_editor(path.clone());
+                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    code.buffer.set_cursor_position(
+                        (line as usize).saturating_sub(1),
+                        0,
+                        false,
+                    );
+                    self.renderer.trail_cursor.reset();
                 }
             }
             FinderOpenAction::EditFile { path, target_route } => {
                 self.open_finder_target_tab(target_route, &path);
-                let cmd = neoism_backend::performer::nvim::vim_select_file_command(
-                    &path.display().to_string(),
-                );
-                if let Some(route) = target_route {
-                    self.focus_editor_route(route);
-                    self.send_editor_command_to_route(route, cmd);
-                } else {
-                    self.open_path_in_editor(path.clone());
-                }
+                self.open_path_in_editor(path.clone());
             }
         }
         self.mark_dirty();
@@ -410,6 +393,285 @@ impl Screen<'_> {
 
         self.renderer.buffer_tabs.ensure_terminal_tab();
         self.renderer.buffer_tabs.open_path(path.to_path_buf());
+    }
+
+    /// `/` on the code pane: open the finder in BufferLines mode over
+    /// a snapshot of the buffer (the same centered floating bar as
+    /// Ctrl+P). Typing live-jumps from the origin (incsearch) and
+    /// lists matching lines; Enter commits and arms `n`/`N`; Esc
+    /// restores the origin. No-op when no code pane is active.
+    pub(crate) fn open_finder_buffer_search(&mut self) {
+        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            return;
+        };
+        code.search_origin = Some((code.buffer.cursor_line, code.buffer.cursor_col));
+        let lines = code.buffer.lines.clone();
+        self.finder_target_route = None;
+        self.renderer.file_tree.set_focused(false);
+        self.renderer.finder.open_buffer_lines(lines);
+        self.mark_dirty();
+    }
+
+    /// BufferLines query changed: live-drive the pane — hlsearch bands
+    /// for every occurrence, cursor on the first match at/after the
+    /// origin (wrapping). Empty query restores the origin. No-op in
+    /// other finder modes.
+    pub(crate) fn finder_buffer_query_changed(&mut self) {
+        use neoism_ui::editor::markdown::vim::vim_search_forward;
+        use neoism_ui::editor::markdown::MarkdownPosition;
+        if self.renderer.finder.mode() != FinderMode::BufferLines {
+            return;
+        }
+        let query = self.renderer.finder.query.clone();
+        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            return;
+        };
+        let Some((origin_line, origin_col)) = code.search_origin else {
+            return;
+        };
+        if query.is_empty() {
+            code.buffer.set_cursor_position(origin_line, origin_col, false);
+            code.buffer.follow_cursor = true;
+            code.search_highlight = None;
+            self.mark_dirty();
+            return;
+        }
+        code.search_highlight = Some(query.clone());
+        // Search from just before the origin so a match AT the origin
+        // is found (vim_search_forward starts strictly after `pos`).
+        let start = if origin_col > 0 {
+            MarkdownPosition {
+                line: origin_line,
+                col: origin_col - 1,
+            }
+        } else if origin_line > 0 {
+            MarkdownPosition {
+                line: origin_line - 1,
+                col: usize::MAX,
+            }
+        } else {
+            MarkdownPosition { line: 0, col: 0 }
+        };
+        if let Some(found) = vim_search_forward(&code.buffer.lines, start, &query, false)
+        {
+            code.buffer.set_cursor_position(found.line, found.col, false);
+            code.buffer.follow_cursor = true;
+        }
+        self.mark_dirty();
+    }
+
+    /// BufferLines selection moved (arrows / wheel): live-preview by
+    /// jumping the pane to the selected row's match. No-op in other
+    /// finder modes.
+    pub(crate) fn finder_buffer_preview_selected(&mut self) {
+        if self.renderer.finder.mode() != FinderMode::BufferLines {
+            return;
+        }
+        let query = self.renderer.finder.query.clone();
+        let Some(row_line) = self.renderer.finder.selected_line() else {
+            return;
+        };
+        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            return;
+        };
+        let line_ix = (row_line as usize).saturating_sub(1);
+        let col = code
+            .buffer
+            .lines
+            .get(line_ix)
+            .and_then(|line| line.find(&query))
+            .unwrap_or(0);
+        code.buffer.set_cursor_position(line_ix, col, false);
+        code.buffer.follow_cursor = true;
+        self.mark_dirty();
+    }
+
+    /// Enter in BufferLines mode: jump to the selected row's match,
+    /// arm `n`/`N` with the committed pattern, keep hlsearch bands,
+    /// forget the origin, close the finder. An empty query behaves
+    /// like Esc (nothing to commit).
+    fn confirm_finder_buffer_search(&mut self) {
+        let query = self.renderer.finder.query.clone();
+        let selected_line = self.renderer.finder.selected_line();
+        self.renderer.finder.close();
+        self.renderer.file_tree.set_focused(false);
+        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            self.mark_dirty();
+            return;
+        };
+        if query.is_empty() {
+            if let Some((line, col)) = code.search_origin.take() {
+                code.buffer.set_cursor_position(line, col, false);
+                code.buffer.follow_cursor = true;
+            }
+            code.search_highlight = None;
+            self.mark_dirty();
+            return;
+        }
+        if let Some(row_line) = selected_line {
+            let line_ix = (row_line as usize).saturating_sub(1);
+            let col = code
+                .buffer
+                .lines
+                .get(line_ix)
+                .and_then(|line| line.find(&query))
+                .unwrap_or(0);
+            code.buffer.set_cursor_position(line_ix, col, false);
+            code.buffer.follow_cursor = true;
+        }
+        // No selected row (no matches): keep the cursor where the
+        // live incsearch left it, but still commit the pattern.
+        code.search_highlight = Some(query.clone());
+        code.buffer.vim.search = Some(neoism_ui::editor::markdown::vim::VimSearch {
+            pattern: query,
+            forward: true,
+            whole_word: false,
+        });
+        code.search_origin = None;
+        self.mark_dirty();
+    }
+
+    /// Esc in BufferLines mode: restore the pre-search cursor, drop
+    /// the hlsearch bands, close the finder.
+    pub(crate) fn cancel_finder_buffer_search(&mut self) {
+        self.renderer.finder.close();
+        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            if let Some((line, col)) = code.search_origin.take() {
+                code.buffer.set_cursor_position(line, col, false);
+                code.buffer.follow_cursor = true;
+            }
+            code.search_highlight = None;
+        }
+        self.mark_dirty();
+    }
+
+    /// Palette "Go to Symbol…" / direct entry point: open the finder
+    /// in Symbols mode over the active code pane's document symbols
+    /// (VS Code Ctrl+P `@`). The rows are fetched on the code-LSP
+    /// worker; the drain installs them into the finder when they
+    /// land. Remembers the pre-open cursor so Esc restores it (the
+    /// search_origin pattern).
+    pub(crate) fn open_finder_symbols(&mut self) {
+        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            code.search_origin = Some((code.buffer.cursor_line, code.buffer.cursor_col));
+        }
+        self.finder_target_route = None;
+        self.renderer.file_tree.set_focused(false);
+        self.renderer.finder.open_symbols();
+        let requested = self.request_code_document_symbols();
+        self.renderer.finder.set_symbols_loading(requested);
+        self.mark_dirty();
+    }
+
+    /// Files-mode `@` prefix (VS Code Ctrl+P `@`): when the typed
+    /// query starts with `@`, flip the open finder into Symbols mode
+    /// live, keeping whatever followed the `@` as the effective
+    /// query. No-op in every other state.
+    pub(crate) fn finder_symbols_switch_from_prefix(&mut self) {
+        if !self.renderer.finder.is_enabled()
+            || self.renderer.finder.mode() != FinderMode::Files
+        {
+            return;
+        }
+        let Some(rest) = self
+            .renderer
+            .finder
+            .query
+            .strip_prefix('@')
+            .map(str::to_string)
+        else {
+            return;
+        };
+        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            code.search_origin = Some((code.buffer.cursor_line, code.buffer.cursor_col));
+        }
+        self.renderer.finder.switch_to_symbols(rest);
+        let requested = self.request_code_document_symbols();
+        self.renderer.finder.set_symbols_loading(requested);
+        self.mark_dirty();
+    }
+
+    /// Backspace on an EMPTY Symbols query: backspacing the `@` away
+    /// returns to Files mode — the inverse of the prefix switch.
+    /// Restores the pre-open cursor (arrow previews may have moved
+    /// it). Returns true when the switch happened.
+    pub(crate) fn finder_symbols_backspace_to_files(&mut self) -> bool {
+        if !self.renderer.finder.is_enabled()
+            || self.renderer.finder.mode() != FinderMode::Symbols
+            || !self.renderer.finder.query.is_empty()
+        {
+            return false;
+        }
+        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            if let Some((line, col)) = code.search_origin.take() {
+                code.buffer.set_cursor_position(line, col, false);
+                code.buffer.follow_cursor = true;
+            }
+        }
+        let cwd = self.finder_cwd(self.finder_target_route);
+        self.renderer.finder.switch_to_files(cwd);
+        self.mark_dirty();
+        true
+    }
+
+    /// Symbols selection moved (arrows): live-preview by jumping the
+    /// pane to the selected symbol's line, like the BufferLines
+    /// preview. No-op in other finder modes.
+    pub(crate) fn finder_symbols_preview_selected(&mut self) {
+        if self.renderer.finder.mode() != FinderMode::Symbols {
+            return;
+        }
+        let Some((line, col)) = self.renderer.finder.selected_symbol_target() else {
+            return;
+        };
+        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            return;
+        };
+        let line_ix = (line as usize).saturating_sub(1);
+        code.buffer.set_cursor_position(line_ix, col as usize, false);
+        code.buffer.follow_cursor = true;
+        self.mark_dirty();
+    }
+
+    /// Enter in Symbols mode: jump to the selected symbol, forget the
+    /// pre-open origin, close the finder. No selection behaves like
+    /// Esc (restores the pre-open cursor).
+    fn confirm_finder_symbols(&mut self) {
+        let target = self.renderer.finder.selected_symbol_target();
+        self.renderer.finder.close();
+        self.renderer.file_tree.set_focused(false);
+        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            self.mark_dirty();
+            return;
+        };
+        match target {
+            Some((line, col)) => {
+                code.search_origin = None;
+                let line_ix = (line as usize).saturating_sub(1);
+                code.buffer.set_cursor_position(line_ix, col as usize, false);
+                code.buffer.follow_cursor = true;
+            }
+            None => {
+                if let Some((line, col)) = code.search_origin.take() {
+                    code.buffer.set_cursor_position(line, col, false);
+                    code.buffer.follow_cursor = true;
+                }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    /// Esc in Symbols mode: restore the pre-open cursor, close the
+    /// finder. hlsearch state is untouched — Symbols never sets it.
+    pub(crate) fn cancel_finder_symbols(&mut self) {
+        self.renderer.finder.close();
+        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            if let Some((line, col)) = code.search_origin.take() {
+                code.buffer.set_cursor_position(line, col, false);
+                code.buffer.follow_cursor = true;
+            }
+        }
+        self.mark_dirty();
     }
 
     pub(crate) fn start_search(&mut self, direction: Direction) {

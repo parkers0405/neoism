@@ -46,9 +46,6 @@ pub enum ModalAction {
         server: String,
     },
     InstallPythonKernel,
-    InstallTreesitter {
-        lang: String,
-    },
     ApplyTheme {
         name: String,
     },

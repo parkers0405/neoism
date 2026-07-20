@@ -2,9 +2,6 @@
 //!
 //! On every launch a background thread checks for and installs anything a
 //! `./install.sh` run would have set up that a plain binary drop is missing:
-//!   - bundled Tree-sitter parsers + highlight queries (shipped as a
-//!     `runtime/` dir next to the binary by the release tarball; see
-//!     `scripts/build-treesitter-runtime.sh`)
 //!   - the `xterm-rio`/`rio` terminfo entry (compiled into `~/.terminfo`)
 //!   - the Linux desktop launcher + icons
 //!
@@ -26,84 +23,12 @@ pub fn spawn() {
     std::thread::Builder::new()
         .name("neoism-bootstrap".into())
         .spawn(|| {
-            install_bundled_treesitter_runtime();
             #[cfg(unix)]
             install_terminfo();
             #[cfg(target_os = "linux")]
             install_desktop_entry();
         })
         .ok();
-}
-
-//  Bundled Tree-sitter runtime
-
-fn bundled_runtime_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?.to_path_buf();
-    [dir.join("runtime"), dir.join("../share/neoism/runtime")]
-        .into_iter()
-        .find(|candidate| candidate.join("RUNTIME_VERSION").is_file())
-}
-
-fn install_bundled_treesitter_runtime() {
-    let Some(bundle) = bundled_runtime_dir() else {
-        return;
-    };
-    let version = match fs::read_to_string(bundle.join("RUNTIME_VERSION")) {
-        Ok(version) => version.trim().to_string(),
-        Err(_) => return,
-    };
-
-    let dest = neoism_backend::performer::nvim::rio_nvim_runtime_dir();
-    let marker = dest.join(".bundled-runtime-version");
-    if fs::read_to_string(&marker)
-        .map(|installed| installed.trim() == version)
-        .unwrap_or(false)
-    {
-        return;
-    }
-
-    let mut copied = 0usize;
-    for sub in ["parser", "queries"] {
-        let src = bundle.join(sub);
-        if !src.is_dir() {
-            continue;
-        }
-        if let Err(err) = copy_tree(&src, &dest.join(sub), &mut copied) {
-            tracing::warn!(%err, sub, "bootstrap: bundled tree-sitter copy failed");
-            return; // no marker on failure — retry next launch
-        }
-    }
-
-    if let Err(err) = fs::write(&marker, format!("{version}\n")) {
-        tracing::warn!(%err, "bootstrap: failed writing runtime version marker");
-        return;
-    }
-    tracing::info!(
-        files = copied,
-        version = %version,
-        "bootstrap: installed bundled tree-sitter runtime"
-    );
-}
-
-pub(crate) fn copy_tree(
-    src: &Path,
-    dest: &Path,
-    copied: &mut usize,
-) -> std::io::Result<()> {
-    fs::create_dir_all(dest)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let to = dest.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_tree(&entry.path(), &to, copied)?;
-        } else if file_type.is_file() {
-            fs::copy(entry.path(), &to)?;
-            *copied += 1;
-        }
-    }
-    Ok(())
 }
 
 //  Terminfo

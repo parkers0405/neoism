@@ -95,6 +95,11 @@ pub(crate) enum ServiceServerMessage {
         request_id: u64,
         message: WorkspaceServerMessage,
     },
+    /// Wire-protocol variant kept for clients that still parse it; the
+    /// nvim-fed diagnostics poller that produced these pushes is gone,
+    /// so nothing constructs it until the native editor's daemon path
+    /// lands.
+    #[allow(dead_code)]
     DiagnosticsReply {
         request_id: u64,
         message: DiagnosticsServerMessage,
@@ -200,141 +205,6 @@ impl Drop for SocketPresenceGuard {
     }
 }
 
-pub(crate) struct SocketNvimForwarders {
-    redraw: HashMap<String, tokio::task::JoinHandle<()>>,
-    cursor_overlay: HashMap<String, tokio::task::JoinHandle<()>>,
-}
-
-impl SocketNvimForwarders {
-    fn new() -> Self {
-        Self {
-            redraw: HashMap::new(),
-            cursor_overlay: HashMap::new(),
-        }
-    }
-
-    fn ensure(
-        &mut self,
-        key: &str,
-        handle: &NvimSessionHandle,
-        redraw_tx: &tokio::sync::mpsc::UnboundedSender<(String, EditorServerMessage)>,
-        cursor_overlay_tx: &tokio::sync::mpsc::UnboundedSender<(
-            String,
-            CursorOverlayServerMessage,
-        )>,
-    ) {
-        if !self.redraw.contains_key(key) {
-            let mut rx = handle.subscribe_redraw();
-            let tx = redraw_tx.clone();
-            let task_key = key.to_string();
-            let send_key = task_key.clone();
-            self.redraw.insert(
-                task_key,
-                tokio::spawn(async move {
-                    while let Some(message) = recv_broadcast(&mut rx, "nvim redraw").await
-                    {
-                        if tx.send((send_key.clone(), message)).is_err() {
-                            break;
-                        }
-                    }
-                }),
-            );
-        }
-
-        if !self.cursor_overlay.contains_key(key) {
-            let mut rx = handle.subscribe_cursor_overlay();
-            let tx = cursor_overlay_tx.clone();
-            let task_key = key.to_string();
-            let send_key = task_key.clone();
-            self.cursor_overlay.insert(
-                task_key,
-                tokio::spawn(async move {
-                    while let Some(message) =
-                        recv_broadcast(&mut rx, "nvim cursor overlay").await
-                    {
-                        if tx.send((send_key.clone(), message)).is_err() {
-                            break;
-                        }
-                    }
-                }),
-            );
-        }
-    }
-
-    fn abort_key(&mut self, key: &str) {
-        if let Some(task) = self.redraw.remove(key) {
-            task.abort();
-        }
-        if let Some(task) = self.cursor_overlay.remove(key) {
-            task.abort();
-        }
-    }
-}
-
-impl Drop for SocketNvimForwarders {
-    fn drop(&mut self) {
-        for task in self.redraw.values() {
-            task.abort();
-        }
-        for task in self.cursor_overlay.values() {
-            task.abort();
-        }
-    }
-}
-
-/// Auto-completion is intentionally a short-lived, latest-value operation.
-/// Keep one pending task per editor surface so a fast `d` → `de` → `det`
-/// burst does not enqueue three full buffer reads and three serialized LSP
-/// round-trips. Aborting during the short debounce happens before the blocking
-/// language-server call starts; once a server request is on the wire it may
-/// finish, but all intermediate requests that have not started are coalesced.
-struct SocketCompletionTasks {
-    pending: HashMap<String, tokio::task::JoinHandle<()>>,
-}
-
-impl SocketCompletionTasks {
-    fn new() -> Self {
-        Self {
-            pending: HashMap::new(),
-        }
-    }
-
-    fn replace(&mut self, key: String, task: tokio::task::JoinHandle<()>) {
-        if let Some(superseded) = self.pending.insert(key, task) {
-            superseded.abort();
-        }
-    }
-
-    fn abort_key(&mut self, key: &str) {
-        if let Some(task) = self.pending.remove(key) {
-            task.abort();
-        }
-    }
-
-    fn abort_all(&mut self) {
-        for (_, task) in self.pending.drain() {
-            task.abort();
-        }
-    }
-}
-
-impl Drop for SocketCompletionTasks {
-    fn drop(&mut self) {
-        self.abort_all();
-    }
-}
-
-const LSP_COMPLETION_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(24);
-
-pub(crate) fn socket_scoped_nvim_key(
-    socket_namespace: uuid::Uuid,
-    message: &EditorClientMessage,
-) -> String {
-    format!(
-        "{socket_namespace}:{}",
-        NvimSessionRegistry::key_for_message(message)
-    )
-}
 pub(crate) async fn handle_socket(
     socket: WebSocket,
     registry: SessionRegistry,
@@ -344,44 +214,10 @@ pub(crate) async fn handle_socket(
     peer_ip: Option<String>,
     workspace_manager: WorkspaceManager,
     pairing_tokens: PairingTokenStore,
-    nvim_sessions: NvimSessionRegistry,
     crdt: CrdtSyncHub,
 ) {
     let (mut sink, mut stream) = socket.split();
-    let nvim_socket_namespace = uuid::Uuid::new_v4();
-    tracing::debug!(
-        nvim_socket_namespace = %nvim_socket_namespace,
-        "websocket connection established"
-    );
-
-    /// Reaps this connection's nvim sessions on EVERY exit path of the
-    /// websocket task (there are a dozen `return`s). Without it, each
-    /// reconnect left orphan sessions whose CRDT appliers kept
-    /// replaying every edit into headless nvims nobody rendered.
-    struct NvimNamespaceGuard {
-        registry: NvimSessionRegistry,
-        namespace: uuid::Uuid,
-    }
-    impl Drop for NvimNamespaceGuard {
-        fn drop(&mut self) {
-            let registry = self.registry.clone();
-            let prefix = format!("{}:", self.namespace);
-            tokio::spawn(async move {
-                let reaped = registry.remove_prefix(&prefix).await;
-                if reaped > 0 {
-                    tracing::info!(
-                        prefix = %prefix,
-                        reaped,
-                        "reaped nvim sessions for closed connection"
-                    );
-                }
-            });
-        }
-    }
-    let _nvim_namespace_guard = NvimNamespaceGuard {
-        registry: nvim_sessions.clone(),
-        namespace: nvim_socket_namespace,
-    };
+    tracing::debug!("websocket connection established");
 
     // Unsolicited status snapshot: the chrome status line wants a real
     // branch on first paint without having to query. We send a `GitReply`
@@ -408,11 +244,6 @@ pub(crate) async fn handle_socket(
     // value has changed since the last tick. We send through a local
     // mpsc so the polling task doesn't have to share the sink with the
     // main client-frame loop below.
-    //
-    // TODO(wave-cutover-pending): lsp + diagnostics need an editor-side
-    // Neoism-owned LSP diagnostics/status source. Neovim still supplies
-    // active buffer text during migration, but LSP server ownership,
-    // diagnostics, and lifecycle state come from the Rust runtime.
     let (push_tx, mut push_rx) =
         tokio::sync::mpsc::unbounded_channel::<ServiceServerMessage>();
     let poll_task = tokio::spawn(status_poll_loop(
@@ -420,25 +251,15 @@ pub(crate) async fn handle_socket(
         initial_branch_name(&initial_branch),
     ));
 
-    // Daemon-owned embedded nvim sessions. The websocket may touch
-    // multiple editor surface ids during its lifetime, so each acquired
-    // session gets a small forwarder task that keeps its redraw stream
-    // connected to this socket even after focus moves to another surface.
-    let mut nvim_session: Option<NvimSessionHandle> = None;
-    let (nvim_redraw_tx, mut nvim_redraw_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, EditorServerMessage)>();
     // Real-time `publishDiagnostics` bus (event-driven — no polling). The
     // engine pushes here the instant a language server publishes; we forward
     // to the editor from the select loop below. `active_editor_file` gates it
     // so a workspace-wide push for a non-focused buffer isn't shown.
     let mut lsp_diagnostics_rx = crate::language_server::subscribe_diagnostics();
     let mut active_editor_file: Option<String> = None;
-    let (nvim_cursor_overlay_tx, mut nvim_cursor_overlay_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, CursorOverlayServerMessage)>();
-    let mut nvim_forwarders = SocketNvimForwarders::new();
-    let mut completion_tasks = SocketCompletionTasks::new();
-    let mut nvim_request_ids: HashMap<String, u64> = HashMap::new();
-    let mut nvim_request_id: u64 = 0;
+    // Latest `Editor` envelope request id. Unsolicited engine pushes are
+    // tagged with it so the client's reply-correlation routing still works.
+    let mut editor_request_id: u64 = 0;
 
     // Per-socket Claude API proxy. Spawned eagerly so the chrome
     // sees an immediate `Disabled` event when `NEOISM_AGENT_API_KEY`
@@ -467,40 +288,6 @@ pub(crate) async fn handle_socket(
     // Workspace dispatch: per-connection cwd / session pointer. The
     // cross-connection registry lives on `workspace_manager`.
     let mut connection_workspace = ConnectionWorkspace::default();
-
-    // Diagnostics dispatch: subscription set keyed by `RouteId`.
-    // Pushed events arrive on `diagnostics_rx`; the `diagnostics_tick`
-    // interval below spawns a `DiagnosticsSubscriptions::fetch` on a
-    // 2-second cadence so subscribers see hash-suppressed diagnostic +
-    // LSP-state pushes whenever nvim surfaces a change. The
-    // subscription table is owned directly (no Mutex needed) because
-    // every mutation point lives inside this single-task `select!`
-    // loop — subscribe/unsubscribe arms and the fetch-result `apply`
-    // run in strict sequence here.
-    let (diagnostics_tx, mut diagnostics_rx) =
-        tokio::sync::mpsc::unbounded_channel::<DiagnosticsServerMessage>();
-    let mut diagnostics_subscriptions = DiagnosticsSubscriptions::new();
-    // This timer is status/cache recovery only. OpenBuffer and on_lines/CRDT
-    // events feed didOpen/didChange immediately through the ordered live-sync
-    // worker, so insert-mode diagnostic latency never waits for this tick.
-    // The probe reads only file identity/cursor/size metadata, not buffer text.
-    let mut diagnostics_tick =
-        tokio::time::interval(std::time::Duration::from_millis(400));
-    // Skip the spurious immediate-first-tick that `interval` emits; we
-    // don't want a synchronous tick the instant a client connects with
-    // zero subscriptions and no nvim session.
-    diagnostics_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut diagnostics_request_id: u64 = 0;
-    // Single-flight snapshot poll, spawned OFF this loop. The fetch
-    // round-trips into nvim, and nvim defers non-fast RPC while the
-    // user has a count/operator pending — awaiting it inline here kept
-    // `stream.next()` from reading the very keys that would unblock
-    // nvim (the digit-key freeze). One flight at a time also keeps
-    // deferred polls from stacking up behind each other.
-    let mut diagnostics_fetch: Option<
-        tokio::task::JoinHandle<(DiagnosticsFetch, Vec<EditorServerMessage>)>,
-    > = None;
-    let mut last_language_server_messages_hash: Option<u64> = None;
 
     // F3: subscribe this websocket to per-workplace preferences updates
     // so a `SetWorkplacePreferences` from any client (this socket
@@ -579,22 +366,6 @@ pub(crate) async fn handle_socket(
                 }
                 continue;
             }
-            Some((key, cursor_overlay)) = nvim_cursor_overlay_rx.recv() => {
-                let request_id = nvim_request_ids
-                    .get(&key)
-                    .copied()
-                    .unwrap_or(nvim_request_id);
-                let resp = ServiceServerMessage::CursorOverlayReply {
-                    request_id,
-                    message: cursor_overlay,
-                };
-                if let Err(err) = send_json(&mut sink, &resp).await {
-                    tracing::warn!(error = %err, "websocket send error draining cursor overlay");
-                    poll_task.abort();
-                    return;
-                }
-                continue;
-            }
             diag = lsp_diagnostics_rx.recv() => {
                 // Event-driven inline diagnostics: forward the instant the
                 // engine gets a `publishDiagnostics` push. Only the active
@@ -616,7 +387,7 @@ pub(crate) async fn handle_socket(
                         if matches_active {
                             let message = crate::language_server::diagnostics_event_message(event);
                             let resp = ServiceServerMessage::EditorReply {
-                                request_id: nvim_request_id,
+                                request_id: editor_request_id,
                                 message,
                             };
                             if let Err(err) = send_json(&mut sink, &resp).await {
@@ -631,31 +402,6 @@ pub(crate) async fn handle_socket(
                     // gone — stop listening.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
-                }
-                continue;
-            }
-            Some((key, redraw)) = nvim_redraw_rx.recv() => {
-                let request_id = nvim_request_ids
-                    .get(&key)
-                    .copied()
-                    .unwrap_or(nvim_request_id);
-                if let EditorServerMessage::BufferOpened { path, .. } = &redraw {
-                    active_editor_file = Some(path.to_string_lossy().into_owned());
-                }
-                tracing::debug!(
-                    request_id,
-                    key = %key,
-                    variant = std::any::type_name_of_val(&redraw),
-                    "[nvim-trace] forwarding redraw frame over WebSocket"
-                );
-                let resp = ServiceServerMessage::EditorReply {
-                    request_id,
-                    message: redraw,
-                };
-                if let Err(err) = send_json(&mut sink, &resp).await {
-                    tracing::warn!(error = %err, "websocket send error draining nvim redraw");
-                    poll_task.abort();
-                    return;
                 }
                 continue;
             }
@@ -678,18 +424,6 @@ pub(crate) async fn handle_socket(
                 };
                 if let Err(err) = send_json(&mut sink, &resp).await {
                     tracing::warn!(error = %err, "websocket send error draining search reply");
-                    poll_task.abort();
-                    return;
-                }
-                continue;
-            }
-            Some(diag_event) = diagnostics_rx.recv() => {
-                let resp = ServiceServerMessage::DiagnosticsReply {
-                    request_id: diagnostics_request_id,
-                    message: diag_event,
-                };
-                if let Err(err) = send_json(&mut sink, &resp).await {
-                    tracing::warn!(error = %err, "websocket send error draining diagnostics push");
                     poll_task.abort();
                     return;
                 }
@@ -862,72 +596,6 @@ pub(crate) async fn handle_socket(
                 let _ = crdt.prune_stale_presence(presence_now_ms(), presence_ttl);
                 continue;
             }
-            _ = diagnostics_tick.tick() => {
-                // Only poll when (a) we have an active nvim session,
-                // (b) at least one route is subscribed, and (c) the
-                // previous poll already finished. The `snapshot_*`
-                // round-trip into nvim runs detached so it can never
-                // block this loop's SendKeys dispatch.
-                if diagnostics_fetch.is_none() {
-                    if let Some(session) = nvim_session.as_ref() {
-                        // Poll whenever an editor session is live — NOT only
-                        // when a (web-only) diagnostics route is subscribed.
-                        // The desktop editor never sends SubscribeDiagnostics,
-                        // yet it consumes the Neoism-owned pill snapshot AND the
-                        // inline diagnostics this poll emits as
-                        // `EditorServerMessage`s. Gating on the web
-                        // subscription meant the desktop got neither (and the
-                        // legacy nvim `rio_diagnostics` is now retired).
-                        let session = session.clone();
-                        let workspace_root = files_handler::workspace_root();
-                        diagnostics_fetch = Some(tokio::spawn(async move {
-                            // The Neoism language-server engine owns both surfaces: one poll yields
-                            // the diagnostics fetch AND the status-bar
-                            // `LspSnapshot` + inline `Diagnostics`. Fall back
-                            // to the nvim diagnostics snapshot only when the
-                            // engine has no file-backed buffer to read.
-                            let (rust_fetch, messages) =
-                                crate::language_server::poll(&session, &workspace_root).await;
-                            let fetch = match rust_fetch {
-                                Some(fetch) => fetch,
-                                None => DiagnosticsSubscriptions::fetch(&session).await,
-                            };
-                            (fetch, messages)
-                        }));
-                    }
-                }
-                continue;
-            }
-            fetched = async { diagnostics_fetch.as_mut().expect("guarded by is_some").await }, if diagnostics_fetch.is_some() => {
-                diagnostics_fetch = None;
-                if let Ok((fetch, messages)) = fetched {
-                    diagnostics_subscriptions.apply(fetch, &diagnostics_tx);
-                    // Push the Neoism-owned LSP snapshot + inline diagnostics to
-                    // the editor client so the status-bar pill/popup AND the
-                    // inline error chips reflect the real engine (not the
-                    // legacy nvim/Lua `rio_lsp_snapshot`/`rio_diagnostics`).
-                    let current_hash = editor_messages_hash(&messages);
-                    let changed = !messages.is_empty()
-                        && current_hash
-                            .map(|hash| Some(hash) != last_language_server_messages_hash)
-                            .unwrap_or(true);
-                    if changed {
-                        last_language_server_messages_hash = current_hash;
-                        for message in messages {
-                            let resp = ServiceServerMessage::EditorReply {
-                                request_id: nvim_request_id,
-                                message,
-                            };
-                            if let Err(err) = send_json(&mut sink, &resp).await {
-                                tracing::warn!(error = %err, "websocket send error draining rust lsp message");
-                                poll_task.abort();
-                                return;
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
             frame = stream.next() => frame,
         };
         let Some(frame) = frame else { break };
@@ -1071,41 +739,25 @@ pub(crate) async fn handle_socket(
                     message,
                 } => {
                     let surface_id = message.surface_id().map(str::to_owned);
-                    // Wave 5 item 5A: an `OpenBuffer` is the seam where the
-                    // daemon learns a buffer's authoritative content. Capture
-                    // the flag before `message` is consumed by `session.handle`
-                    // so we can seed the CRDT hub afterward without re-parsing.
-                    let is_open_buffer =
-                        matches!(message, EditorClientMessage::OpenBuffer { .. });
-                    tracing::info!(
-                        request_id,
-                        surface_id = surface_id.as_deref(),
-                        variant = std::any::type_name_of_val(&message),
-                        "[nvim-trace] Editor envelope received from client"
-                    );
-                    // Editor proxy reuses the file-read permission —
-                    // a session that can read files can also open
-                    // them in nvim. Write permissions are checked
-                    // separately on `nvim_buf_set_lines` etc. once we
-                    // expose a "save buffer" surface.
+                    // Editor envelopes reuse the file-read permission — a
+                    // session that can read files can also drive the editor.
                     if let Err(denial) = check_permission(&device, Permission::ReadFiles)
                     {
                         let _ = send_json(&mut sink, &denial).await;
                         continue;
                     }
-                    // Track the latest request_id so unsolicited
-                    // redraw pushes route through the same channel
+                    // Track the latest request_id so unsolicited engine
+                    // pushes (diagnostics) route through the same channel
                     // on the JS side.
-                    nvim_request_id = request_id;
-                    if matches!(message, EditorClientMessage::Close) {
-                        completion_tasks.abort_all();
-                        if let Some(session) = nvim_session.take() {
-                            let key = session.key().to_string();
-                            let _ = session.handle(EditorClientMessage::Close).await;
-                            nvim_sessions.remove(&key).await;
-                            nvim_forwarders.abort_key(&key);
-                            nvim_request_ids.remove(&key);
-                        }
+                    editor_request_id = request_id;
+                    // Fire-and-forget teardown/cancel: nothing to tear down
+                    // without a backing editor session, and no reply is
+                    // expected.
+                    if matches!(
+                        message,
+                        EditorClientMessage::Close
+                            | EditorClientMessage::CancelLspCompletion { .. }
+                    ) {
                         continue;
                     }
 
@@ -1125,118 +777,34 @@ pub(crate) async fn handle_socket(
                             }
                         };
 
-                    let desired_key =
-                        socket_scoped_nvim_key(nvim_socket_namespace, &message);
-                    nvim_request_ids.insert(desired_key.clone(), request_id);
-                    let needs_session = nvim_session
-                        .as_ref()
-                        .map(|session| session.key() != desired_key)
-                        .unwrap_or(true);
-                    if needs_session {
-                        match nvim_sessions.get_or_spawn(desired_key.clone(), &crdt).await
-                        {
-                            Ok(handle) => {
-                                tracing::info!(
-                                    request_id,
-                                    key = %desired_key,
-                                    "[nvim-trace] embedded nvim session acquired"
-                                );
-                                nvim_forwarders.ensure(
-                                    &desired_key,
-                                    &handle,
-                                    &nvim_redraw_tx,
-                                    &nvim_cursor_overlay_tx,
-                                );
-                                nvim_session = Some(handle);
-                            }
-                            Err(NvimError::NotImplemented) => {
-                                tracing::error!(
-                                    request_id,
-                                    "[nvim-trace] nvim not installed on daemon host; \
-                                     emitting EditorServerMessage::Error to client"
-                                );
-                                let resp = ServiceServerMessage::EditorReply {
-                                    request_id,
-                                    message: EditorServerMessage::Error {
-                                        surface_id: surface_id.clone(),
-                                        message: "nvim not installed on daemon host"
-                                            .into(),
-                                    },
-                                };
-                                let _ = send_json(&mut sink, &resp).await;
-                                continue;
-                            }
-                            Err(err) => {
-                                tracing::error!(
-                                    request_id,
-                                    error = %err,
-                                    "[nvim-trace] nvim spawn failed; emitting Error to client"
-                                );
-                                let resp = ServiceServerMessage::EditorReply {
-                                    request_id,
-                                    message: EditorServerMessage::Error {
-                                        surface_id: surface_id.clone(),
-                                        message: format!("nvim spawn failed: {err}"),
-                                    },
-                                };
-                                let _ = send_json(&mut sink, &resp).await;
-                                continue;
-                            }
-                        }
+                    // Track the focused editor file so real-time diagnostics
+                    // pushes are shown only for the buffer the user is in.
+                    if let EditorClientMessage::OpenBuffer { path, .. } = &message {
+                        active_editor_file = Some(path.to_string_lossy().into_owned());
                     }
 
-                    let session = nvim_session.as_ref().expect("just acquired");
-                    // A failed `:cd` (bad root, or nvim deferring the
-                    // command behind a pending count) must NOT eat the
-                    // user's message — dropping keystrokes here is how
-                    // a pending count became unclearable. Log and
-                    // deliver the message regardless; absolute-path
-                    // opens still work without the cwd anchor.
-                    if let Err(err) = session.set_workspace_root(&root).await {
-                        tracing::error!(
-                            request_id,
-                            error = %err,
-                            workspace_root = %root.display(),
-                            "[nvim-trace] failed to set nvim workspace root; \
-                             delivering message anyway"
-                        );
-                    }
-                    if let EditorClientMessage::LspAction {
-                        action,
-                        text,
-                        surface_id,
-                    } = message.clone()
-                    {
-                        let reply = match crate::language_server::run_action(
-                            session,
+                    // The embedded-nvim backend behind this envelope is gone.
+                    // LSP requests are still answered by the Neoism engine
+                    // where that is possible without a live buffer; grid and
+                    // input messages get the standard error reply until the
+                    // native editor's daemon path lands and rewires them.
+                    let reply = match message {
+                        EditorClientMessage::LspAction {
+                            action,
+                            text,
+                            surface_id,
+                        } => match crate::language_server::run_action(
                             &root,
                             action,
                             text.as_deref(),
-                        )
-                        .await
-                        {
+                        ) {
                             Ok(mut message) => {
                                 if let EditorServerMessage::LspActionResult {
                                     surface_id: target,
                                     ..
                                 } = &mut message
                                 {
-                                    *target = surface_id.clone();
-                                }
-                                if matches!(action, neoism_protocol::editor::EditorLspAction::Definition | neoism_protocol::editor::EditorLspAction::Implementation) {
-                                    if let EditorServerMessage::LspActionResult { locations, .. } = &message {
-                                        if let Some(first) = locations.first() {
-                                            let path = std::path::PathBuf::from(first.uri.clone());
-                                            let _ = session
-                                                .handle(EditorClientMessage::OpenBuffer {
-                                                    path,
-                                                    line: Some(first.line),
-                                                    character: Some(first.character),
-                                                    surface_id: surface_id.clone(),
-                                                })
-                                                .await;
-                                        }
-                                    }
+                                    *target = surface_id;
                                 }
                                 message
                             }
@@ -1244,26 +812,11 @@ pub(crate) async fn handle_socket(
                                 surface_id,
                                 message,
                             },
-                        };
-                        let resp = ServiceServerMessage::EditorReply {
-                            request_id,
-                            message: reply,
-                        };
-                        if let Err(err) = send_json(&mut sink, &resp).await {
-                            tracing::warn!(error = %err, "websocket send error");
-                            return;
-                        }
-                        continue;
-                    }
-                    if let EditorClientMessage::ApplyLspCodeAction {
-                        action,
-                        surface_id,
-                    } = message.clone()
-                    {
-                        let reply = match crate::language_server::run_code_action(
-                            session, &root, action,
-                        )
-                        .await
+                        },
+                        EditorClientMessage::ApplyLspCodeAction {
+                            action,
+                            surface_id,
+                        } => match crate::language_server::run_code_action(&root, action)
                         {
                             Ok(mut message) => {
                                 if let EditorServerMessage::LspActionResult {
@@ -1271,7 +824,7 @@ pub(crate) async fn handle_socket(
                                     ..
                                 } = &mut message
                                 {
-                                    *target = surface_id.clone();
+                                    *target = surface_id;
                                 }
                                 message
                             }
@@ -1279,87 +832,34 @@ pub(crate) async fn handle_socket(
                                 surface_id,
                                 message,
                             },
-                        };
-                        let resp = ServiceServerMessage::EditorReply {
-                            request_id,
-                            message: reply,
-                        };
-                        if let Err(err) = send_json(&mut sink, &resp).await {
-                            tracing::warn!(error = %err, "websocket send error");
-                            return;
-                        }
-                        continue;
-                    }
-                    if let EditorClientMessage::ApplyLspCompletion {
-                        item,
-                        replace_prefix,
-                        surface_id,
-                    } = message.clone()
-                    {
-                        // Resolve/application may perform a server round-trip;
-                        // never hold the websocket input loop behind it. The
-                        // nvim edit itself produces the normal redraw/on_lines
-                        // stream. Only failures need an explicit reply.
-                        let session = session.clone();
-                        let root = root.clone();
-                        let tx = nvim_redraw_tx.clone();
-                        let key = surface_id.clone().unwrap_or_default();
-                        completion_tasks.abort_key(&key);
-                        let send_key = key.clone();
-                        tokio::spawn(async move {
-                            if let Err(message) = crate::language_server::run_completion(
-                                &session,
-                                &root,
-                                item,
-                                &replace_prefix,
-                            )
-                            .await
-                            {
-                                let _ = tx.send((
-                                    send_key,
-                                    EditorServerMessage::Error {
-                                        surface_id,
-                                        message,
-                                    },
-                                ));
-                            }
-                        });
-                        continue;
-                    }
-                    if let EditorClientMessage::CancelLspCompletion { surface_id } =
-                        message.clone()
-                    {
-                        let key = surface_id.unwrap_or_default();
-                        completion_tasks.abort_key(&key);
-                        continue;
-                    }
-                    if let EditorClientMessage::LspComplete {
-                        seq,
-                        trigger_character,
-                        surface_id,
-                    } = message.clone()
-                    {
-                        // Serve completion OFF the socket loop and coalesce a
-                        // typing burst per editor surface. The small debounce
-                        // is shorter than two 60 Hz frames, but prevents each
-                        // intermediate character from starting an expensive
-                        // buffer read + language-server request. `seq` remains
-                        // the final frontend guard for a request that was
-                        // already on the LSP wire when it was superseded.
-                        let session = session.clone();
-                        let root = root.clone();
-                        let tx = nvim_redraw_tx.clone();
-                        let key = surface_id.clone().unwrap_or_default();
-                        let send_key = key.clone();
-                        let task = tokio::spawn(async move {
-                            tokio::time::sleep(LSP_COMPLETION_DEBOUNCE).await;
+                        },
+                        EditorClientMessage::ApplyLspCompletion {
+                            item,
+                            replace_prefix,
+                            surface_id,
+                        } => match crate::language_server::run_completion(
+                            &root,
+                            item,
+                            &replace_prefix,
+                        ) {
+                            // Success needs no reply (the edit stream is the
+                            // acknowledgement); only failures are reported.
+                            Ok(()) => continue,
+                            Err(message) => EditorServerMessage::Error {
+                                surface_id,
+                                message,
+                            },
+                        },
+                        EditorClientMessage::LspComplete {
+                            seq,
+                            trigger_character,
+                            surface_id,
+                        } => {
                             let mut reply = crate::language_server::completion(
-                                &session,
                                 &root,
                                 seq,
                                 trigger_character.as_deref(),
-                            )
-                            .await;
+                            );
                             if let EditorServerMessage::LspCompletions {
                                 surface_id: target,
                                 ..
@@ -1367,31 +867,18 @@ pub(crate) async fn handle_socket(
                             {
                                 *target = surface_id;
                             }
-                            let _ = tx.send((send_key, reply));
-                        });
-                        completion_tasks.replace(key, task);
-                        continue;
-                    }
-                    if let EditorClientMessage::LspHoverAt {
-                        seq,
-                        grid,
-                        row,
-                        col,
-                        surface_id,
-                    } = message.clone()
-                    {
-                        // Same off-loop pattern as completion: hover at the
-                        // mouse's cell must never block the socket loop, and the
-                        // `seq` guard drops it if the mouse already moved on.
-                        let session = session.clone();
-                        let root = root.clone();
-                        let tx = nvim_redraw_tx.clone();
-                        let key = surface_id.clone().unwrap_or_default();
-                        tokio::spawn(async move {
+                            reply
+                        }
+                        EditorClientMessage::LspHoverAt {
+                            seq,
+                            grid,
+                            row,
+                            col,
+                            surface_id,
+                        } => {
                             let mut reply = crate::language_server::hover_at(
-                                &session, &root, seq, grid, row, col,
-                            )
-                            .await;
+                                &root, seq, grid, row, col,
+                            );
                             if let EditorServerMessage::LspHoverResult {
                                 surface_id: target,
                                 ..
@@ -1399,43 +886,26 @@ pub(crate) async fn handle_socket(
                             {
                                 *target = surface_id;
                             }
-                            let _ = tx.send((key, reply));
-                        });
-                        continue;
-                    }
-                    // Track the focused editor file so real-time diagnostics
-                    // pushes are shown only for the buffer the user is in.
-                    if let EditorClientMessage::OpenBuffer { path, .. } = &message {
-                        active_editor_file = Some(path.to_string_lossy().into_owned());
-                    }
-                    if let Err(err) = session.handle(message).await {
-                        tracing::error!(
-                            request_id,
-                            error = %err,
-                            "[nvim-trace] session.handle() failed; emitting Error to client"
-                        );
-                        let resp = ServiceServerMessage::EditorReply {
-                            request_id,
-                            message: EditorServerMessage::Error {
-                                surface_id,
-                                message: format!("nvim rpc failed: {err}"),
-                            },
-                        };
-                        if let Err(err) = send_json(&mut sink, &resp).await {
-                            tracing::warn!(error = %err, "websocket send error");
-                            return;
+                            reply
                         }
-                    } else if is_open_buffer {
-                        // Wave 5 item 5A: seed/refresh the daemon-authoritative
-                        // CRDT replica from nvim's freshly-opened buffer. This is
-                        // strictly additive — the redraw path above already drove
-                        // the client's view; here we make the buffer *shareable*
-                        // so a future second client (web/peer) can subscribe over
-                        // `/crdt` and receive the same authoritative document.
-                        seed_crdt_from_open_buffer_in_workspace(
-                            &crdt, session, &root, request_id,
-                        )
-                        .await;
+                        // OpenBuffer / SendKeys / Command / MouseInput /
+                        // Resize drove the embedded nvim grid. The native
+                        // editor will reuse this wire; until then the client
+                        // gets the standard error shape instead of hanging.
+                        other => EditorServerMessage::Error {
+                            surface_id: other.surface_id().map(str::to_owned),
+                            message: "editor backend unavailable: embedded nvim was \
+                                      removed; the native editor daemon path is pending"
+                                .to_string(),
+                        },
+                    };
+                    let resp = ServiceServerMessage::EditorReply {
+                        request_id,
+                        message: reply,
+                    };
+                    if let Err(err) = send_json(&mut sink, &resp).await {
+                        tracing::warn!(error = %err, "websocket send error");
+                        return;
                     }
                 }
                 ServiceClientMessage::Agent {
@@ -1523,25 +993,16 @@ pub(crate) async fn handle_socket(
                     request_id,
                     message,
                 } => {
-                    if let Err(denial) = check_permission(&device, Permission::ReadFiles)
-                    {
-                        let _ = send_json(&mut sink, &denial).await;
-                        continue;
-                    }
-                    diagnostics_request_id = request_id;
-                    match message {
-                        DiagnosticsClientMessage::SubscribeDiagnostics { route_id } => {
-                            diagnostics_subscriptions.subscribe(route_id);
-                            // First push lands on the next
-                            // `diagnostics_tick` interval (≤2s); the
-                            // `tick` impl hashes the snapshot so we
-                            // don't re-publish unchanged frames.
-                            let _ = &diagnostics_tx;
-                        }
-                        DiagnosticsClientMessage::UnsubscribeDiagnostics { route_id } => {
-                            diagnostics_subscriptions.unsubscribe(route_id);
-                        }
-                    }
+                    // The diagnostics-route poller was fed by the embedded
+                    // nvim session, which is gone. Subscribe/unsubscribe are
+                    // accepted and ignored (no reply is expected); real-time
+                    // engine diagnostics still flow through the Editor
+                    // envelope's publishDiagnostics forwarding above.
+                    tracing::trace!(
+                        request_id,
+                        ?message,
+                        "diagnostics subscription ignored (native editor path pending)"
+                    );
                 }
                 ServiceClientMessage::CursorOverlay {
                     request_id,
@@ -1768,59 +1229,3 @@ where
     sink.send(Message::Text(payload)).await
 }
 
-pub(crate) fn editor_messages_hash(messages: &[EditorServerMessage]) -> Option<u64> {
-    let bytes = serde_json::to_vec(messages).ok()?;
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    Some(hasher.finish())
-}
-
-pub(crate) async fn recv_broadcast<T: Clone>(
-    rx: &mut tokio::sync::broadcast::Receiver<T>,
-    label: &'static str,
-) -> Option<T> {
-    loop {
-        match rx.recv().await {
-            Ok(message) => return Some(message),
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, stream = label, "websocket broadcast lagged");
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-        }
-    }
-}
-
-#[cfg(test)]
-mod completion_task_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn replacing_completion_task_aborts_debounced_predecessor() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut tasks = SocketCompletionTasks::new();
-
-        let old_tx = tx.clone();
-        tasks.replace(
-            "pane:editor".to_string(),
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                let _ = old_tx.send(1u8);
-            }),
-        );
-        tasks.replace(
-            "pane:editor".to_string(),
-            tokio::spawn(async move {
-                let _ = tx.send(2u8);
-            }),
-        );
-
-        assert_eq!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
-                .await
-                .expect("replacement task should run"),
-            Some(2)
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        assert!(rx.try_recv().is_err(), "superseded task still ran");
-    }
-}

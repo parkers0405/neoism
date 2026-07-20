@@ -1,6 +1,3 @@
-pub mod nvim;
-pub mod nvim_events;
-
 // Phase 3b: the ANSI `Handler` impl moved into
 // `neoism_terminal_core::handler`. The native parser driver below
 // keeps a `handler::Processor` so the backend's event-loop integration
@@ -116,6 +113,7 @@ pub struct Machine<U: EventListener> {
 pub struct State {
     parser: handler::Processor,
 }
+
 
 impl<U> Machine<U>
 where

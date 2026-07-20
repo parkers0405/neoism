@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use neoism_terminal_core::crosswords::pos::Pos;
 use neoism_terminal_core::crosswords::search::Match;
@@ -59,47 +59,6 @@ pub fn search_close_action(
     }
 }
 
-/// Pure inputs for the finder's "which editor route should I open into?"
-/// decision. Lives here so both the desktop and web frontends produce
-/// identical routing fallbacks for `:Files` / `:Grep` / `:GitChanges`.
-///
-/// Resolution order:
-///   1. If the file tree currently holds focus → the primary editor route
-///      (we never open files into the tree itself).
-///   2. If a pane strip is active → the pane's editor route.
-///   3. Otherwise the primary editor route.
-///   4. As a final fallback, the current context's route if that
-///      context owns an editor at all.
-#[derive(Debug, Clone, Copy)]
-pub struct FinderTargetRouteInputs {
-    pub file_tree_focused: bool,
-    pub primary_editor_route: Option<usize>,
-    /// `Some(route)` when a pane strip is the active focus target.
-    pub active_pane_strip_route: Option<usize>,
-    /// Resolved editor route for the active pane strip, if any. Caller
-    /// pre-computes this because the strip → editor mapping is a desktop
-    /// renderer-side lookup.
-    pub pane_editor_route_for_strip: Option<usize>,
-    /// True when `context_manager.current().editor.is_some()` — controls
-    /// whether the current route is a usable final fallback.
-    pub current_context_has_editor: bool,
-    pub current_route: usize,
-}
-
-pub fn finder_target_route_decision(inputs: FinderTargetRouteInputs) -> Option<usize> {
-    if inputs.file_tree_focused {
-        return inputs.primary_editor_route;
-    }
-    if inputs.active_pane_strip_route.is_some() {
-        return inputs.pane_editor_route_for_strip;
-    }
-    inputs.primary_editor_route.or_else(|| {
-        inputs
-            .current_context_has_editor
-            .then_some(inputs.current_route)
-    })
-}
-
 /// Pure inputs for the finder's cwd-resolution fallback chain. Each
 /// optional field is the candidate from the corresponding stage; the
 /// first one set wins, otherwise we fall back to `working_dir_config`
@@ -109,8 +68,6 @@ pub fn finder_target_route_decision(inputs: FinderTargetRouteInputs) -> Option<u
 pub struct FinderCwdInputs {
     pub active_pane_workspace_root: Option<PathBuf>,
     pub active_workspace_root: Option<PathBuf>,
-    pub target_route_editor_cwd: Option<PathBuf>,
-    pub current_editor_cwd: Option<PathBuf>,
     pub working_dir_config: Option<PathBuf>,
     pub fallback: PathBuf,
 }
@@ -119,15 +76,13 @@ pub fn finder_cwd_decision(inputs: FinderCwdInputs) -> PathBuf {
     inputs
         .active_pane_workspace_root
         .or(inputs.active_workspace_root)
-        .or(inputs.target_route_editor_cwd)
-        .or(inputs.current_editor_cwd)
         .or(inputs.working_dir_config)
         .unwrap_or(inputs.fallback)
 }
 
 /// What kind of editor we should dispatch a freshly-selected finder
 /// result into. The desktop side is responsible for actually steering
-/// the buffer (markdown viewer vs nvim) — this enum just captures the
+/// the buffer (markdown viewer vs code pane) — this enum just captures the
 /// branching decision so it can be unit-tested without touching the
 /// renderer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,8 +107,8 @@ pub enum FinderOpenAction {
 }
 
 /// Compute the open-action for a finder selection. `target_route` is the
-/// caller's chosen editor route (typically the cached
-/// `finder_target_route` or a fresh `finder_target_route_decision`).
+/// caller's chosen editor route (the cached `finder_target_route`,
+/// `None` when no editor route is targeted).
 pub fn plan_finder_open(
     request: FinderOpenRequest,
     target_route: Option<usize>,
@@ -187,44 +142,6 @@ pub fn plan_finder_open(
         }
         None => FinderOpenAction::EditFile { path, target_route },
     }
-}
-
-/// Build the chained lua command that edits `path`, jumps to `line`,
-/// and optionally seeds `hlsearch` (for grep results) or invokes the
-/// git-changes preview helper. Kept pure so both frontends can produce
-/// the identical nvim payload — see the long comment on `open_finder_selection`
-/// in the desktop bridge for why this has to be a single pcall.
-pub fn build_finder_edit_lua(
-    path: &Path,
-    line: u32,
-    grep_query: Option<&str>,
-    is_git: bool,
-) -> String {
-    let path_lit = lua_string_literal(&path.display().to_string());
-    let mut cmd = format!(
-        r#"lua pcall(function() vim.cmd.edit({path_lit}); vim.api.nvim_win_set_cursor(0, {{ {line}, 0 }}); vim.cmd('normal! zz')"#
-    );
-    if let Some(query) = grep_query {
-        // `\V` (very-nomagic) makes the rest of the pattern literal so
-        // regex metachars in the user's query match themselves.
-        let lit_query = lua_string_literal(&format!(r"\V{}", query));
-        cmd.push_str(&format!(
-            r#"; vim.fn.setreg('/', {lit_query}); vim.o.hlsearch = true"#
-        ));
-    }
-    if is_git {
-        cmd.push_str(&format!(r#"; require('rio.search').preview({line})"#));
-    }
-    cmd.push_str(" end)");
-    cmd
-}
-
-/// Quote `s` as a Lua double-quoted string literal — escape `\` and
-/// `"`. Mirrors `neoism_backend::performer::nvim::lua_string_literal`;
-/// duplicated here because `neoism-ui` does not depend on `neoism-backend`.
-fn lua_string_literal(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
 }
 
 /// What `search_input` should do for a typed character given the
@@ -283,64 +200,10 @@ mod tests {
     }
 
     #[test]
-    fn target_route_prefers_primary_when_file_tree_focused() {
-        let route = finder_target_route_decision(FinderTargetRouteInputs {
-            file_tree_focused: true,
-            primary_editor_route: Some(7),
-            active_pane_strip_route: Some(3),
-            pane_editor_route_for_strip: Some(4),
-            current_context_has_editor: true,
-            current_route: 99,
-        });
-        assert_eq!(route, Some(7));
-    }
-
-    #[test]
-    fn target_route_uses_pane_strip_when_active() {
-        let route = finder_target_route_decision(FinderTargetRouteInputs {
-            file_tree_focused: false,
-            primary_editor_route: Some(7),
-            active_pane_strip_route: Some(3),
-            pane_editor_route_for_strip: Some(4),
-            current_context_has_editor: true,
-            current_route: 99,
-        });
-        assert_eq!(route, Some(4));
-    }
-
-    #[test]
-    fn target_route_falls_back_to_current_route_when_editor_present() {
-        let route = finder_target_route_decision(FinderTargetRouteInputs {
-            file_tree_focused: false,
-            primary_editor_route: None,
-            active_pane_strip_route: None,
-            pane_editor_route_for_strip: None,
-            current_context_has_editor: true,
-            current_route: 42,
-        });
-        assert_eq!(route, Some(42));
-    }
-
-    #[test]
-    fn target_route_none_without_any_editor() {
-        let route = finder_target_route_decision(FinderTargetRouteInputs {
-            file_tree_focused: false,
-            primary_editor_route: None,
-            active_pane_strip_route: None,
-            pane_editor_route_for_strip: None,
-            current_context_has_editor: false,
-            current_route: 42,
-        });
-        assert_eq!(route, None);
-    }
-
-    #[test]
     fn cwd_uses_active_pane_workspace_root_first() {
         let cwd = finder_cwd_decision(FinderCwdInputs {
             active_pane_workspace_root: Some(PathBuf::from("/a")),
             active_workspace_root: Some(PathBuf::from("/b")),
-            target_route_editor_cwd: Some(PathBuf::from("/c")),
-            current_editor_cwd: Some(PathBuf::from("/d")),
             working_dir_config: Some(PathBuf::from("/e")),
             fallback: PathBuf::from("/f"),
         });
@@ -348,16 +211,14 @@ mod tests {
     }
 
     #[test]
-    fn cwd_falls_through_to_target_route_when_no_workspace() {
+    fn cwd_falls_through_to_config_when_no_workspace() {
         let cwd = finder_cwd_decision(FinderCwdInputs {
             active_pane_workspace_root: None,
             active_workspace_root: None,
-            target_route_editor_cwd: Some(PathBuf::from("/c")),
-            current_editor_cwd: Some(PathBuf::from("/d")),
-            working_dir_config: None,
+            working_dir_config: Some(PathBuf::from("/e")),
             fallback: PathBuf::from("/f"),
         });
-        assert_eq!(cwd, PathBuf::from("/c"));
+        assert_eq!(cwd, PathBuf::from("/e"));
     }
 
     #[test]
@@ -365,8 +226,6 @@ mod tests {
         let cwd = finder_cwd_decision(FinderCwdInputs {
             active_pane_workspace_root: None,
             active_workspace_root: None,
-            target_route_editor_cwd: None,
-            current_editor_cwd: None,
             working_dir_config: None,
             fallback: PathBuf::from("/tmp"),
         });
@@ -468,37 +327,6 @@ mod tests {
                 target_route: None,
             }
         );
-    }
-
-    #[test]
-    fn lua_command_plain_edit_includes_zz() {
-        let cmd = build_finder_edit_lua(Path::new("/repo/a.rs"), 3, None, false);
-        assert!(cmd.contains(r#"vim.cmd.edit("/repo/a.rs")"#));
-        assert!(cmd.contains("nvim_win_set_cursor(0, { 3, 0 })"));
-        assert!(cmd.contains("normal! zz"));
-        assert!(!cmd.contains("hlsearch"));
-        assert!(!cmd.contains("rio.search"));
-    }
-
-    #[test]
-    fn lua_command_grep_seeds_hlsearch_with_very_nomagic() {
-        let cmd =
-            build_finder_edit_lua(Path::new("/repo/a.rs"), 3, Some("vec[0]"), false);
-        // `\V` in the lua source becomes `\\V` after string-literal
-        // escaping — that's what nvim sees back as `\V` (very-nomagic).
-        assert!(cmd.contains(r#"setreg('/', "\\Vvec[0]")"#), "cmd: {cmd}");
-        assert!(cmd.contains("hlsearch = true"));
-    }
-
-    #[test]
-    fn lua_command_git_invokes_preview() {
-        let cmd = build_finder_edit_lua(Path::new("/repo/a.rs"), 9, None, true);
-        assert!(cmd.contains("require('rio.search').preview(9)"));
-    }
-
-    #[test]
-    fn lua_string_escapes_backslashes_and_quotes() {
-        assert_eq!(lua_string_literal(r#"a\b"c"#), r#""a\\b\"c""#);
     }
 
     #[test]

@@ -71,16 +71,13 @@ impl Screen<'_> {
         }
     }
 
-    /// Open `~/.config/neoism/config.toml` as a buffer tab WITHOUT
-    /// touching the workspace's cwd or nvim's `:cd`. The settings
-    /// editor is a one-off look at a global file; the user's actual
-    /// project root should stay put so navigation / file-tree /
-    /// status-line stay scoped to the project they were working in.
+    /// Open the unified config file as a buffer tab WITHOUT touching
+    /// the workspace's cwd. The settings editor is a one-off look at a
+    /// global file; the user's actual project root should stay put so
+    /// navigation / file-tree / status-line stay scoped to the project
+    /// they were working in.
     pub fn open_settings_config_tab(&mut self) {
         let path = neoism_backend::config::config_file_path();
-        let workspace_root = self
-            .active_pane_workspace_root()
-            .or_else(|| self.active_workspace_root.clone());
         let already_active = self
             .renderer
             .buffer_tabs
@@ -92,52 +89,9 @@ impl Screen<'_> {
         } else {
             self.renderer.file_tree.set_active_path(Some(path.clone()));
         }
-
-        // Path A: there's already a primary editor pane in this
-        // workspace — just switch to it and tell nvim to `:edit` the
-        // config file. No `:cd` so the project's cwd stays put.
-        if let Some((editor_node, editor_route)) = self.primary_editor_node_and_route() {
-            self.context_manager
-                .current_grid_mut()
-                .set_current_node(editor_node, &mut self.sugarloaf);
-            self.context_manager.select_route_from_current_grid();
-            self.send_editor_command_to_route(
-                editor_route,
-                neoism_backend::performer::nvim::vim_edit_command(
-                    &path.display().to_string(),
-                ),
-            );
-            self.reapply_chrome_layout();
-            self.renderer.trail_cursor.reset();
-            self.mark_dirty();
-            return;
-        }
-
-        // Path B: no editor pane exists yet — spawn one as a stacked
-        // peer of the terminal and open the config file in it. The
-        // editor inherits the workspace root so its `getcwd()` keeps
-        // matching the project the user opened.
-        let rich_text_id = next_rich_text_id();
-        let _ = self.sugarloaf.text(Some(rich_text_id));
-        let old_index = self.context_manager.current_index();
-        if self.context_manager.add_stacked_editor(
-            path.clone(),
-            rich_text_id,
-            &mut self.sugarloaf,
-            workspace_root.clone(),
-        ) {
-            self.reapply_chrome_layout();
-        } else if let Some(new_ix) = self.context_manager.add_editor_tab(
-            path.clone(),
-            rich_text_id,
-            workspace_root,
-        ) {
-            self.context_manager.switch_context_visibility(
-                &mut self.sugarloaf,
-                old_index,
-                new_ix,
-            );
-        }
+        // Native code editor hosts the config buffer now (nvim removed).
+        self.activate_code_path(path);
+        self.reapply_chrome_layout();
         self.renderer.trail_cursor.reset();
         self.mark_dirty();
     }

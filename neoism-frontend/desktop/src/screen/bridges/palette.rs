@@ -293,7 +293,7 @@ impl Screen<'_> {
             PaletteSurface::Notebook
         } else if current.markdown.is_some() || current.draw.is_some() {
             PaletteSurface::Markdown
-        } else if current.editor.is_some() {
+        } else if current.code.is_some() {
             PaletteSurface::Editor
         } else {
             PaletteSurface::Terminal
@@ -311,31 +311,6 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    /// Direction-aware `/`-palette commit command. Forward sessions use
-    /// the stock `vim_search_commit_command`; a `?` session routes the
-    /// same `rio.search.commit` with the backward flag so the jump goes
-    /// to the previous match and `n`/`N` stay reversed afterwards.
-    pub(crate) fn palette_search_commit_command(
-        &self,
-        query: &str,
-        location: Option<(u64, u64)>,
-    ) -> String {
-        if !self.renderer.command_palette.search_is_backward() {
-            return neoism_backend::performer::nvim::vim_search_commit_command(
-                query, location,
-            );
-        }
-        let query = neoism_backend::performer::nvim::lua_string_literal(query);
-        match location {
-            Some((lnum, col)) => format!(
-                "lua pcall(function() require('rio.search').commit({query}, {lnum}, {col}, true) end)"
-            ),
-            None => format!(
-                "lua pcall(function() require('rio.search').commit({query}, nil, nil, true) end)"
-            ),
-        }
-    }
-
     pub fn run_palette_ex_query(&mut self, query: &str) -> bool {
         let cmd = query.trim().trim_start_matches(':').trim();
         if cmd.is_empty() {
@@ -346,13 +321,7 @@ impl Screen<'_> {
             return true;
         }
 
-        if self.context_manager.current().editor.is_some() {
-            self.send_editor_command_raw(
-                neoism_backend::performer::nvim::vim_run_ex_command(cmd),
-            );
-            return true;
-        }
-
+        // nvim removed; unhandled ex commands have no target.
         false
     }
 
@@ -395,26 +364,13 @@ impl Screen<'_> {
         &self,
         pill: neoism_ui::panels::status_line::DiagnosticPill,
     ) -> Vec<neoism_ui::panels::diagnostics_popup::PopupItem> {
-        use neoism_ui::panels::status_line::DiagnosticPill;
-        let current = self.context_manager.current();
-        let Some(diags) = current.editor_diagnostics.as_ref() else {
-            return Vec::new();
-        };
-        // nvim's `vim.diagnostic.severity`: 1=error, 2=warn. The popup
-        // only opens for those two pills.
-        let target_severity: u8 = match pill {
-            DiagnosticPill::Error => 1,
-            DiagnosticPill::Warn => 2,
-        };
-        // Lift each backend `DiagnosticItem` into the shared POD shape
-        // first so the lifted `PopupItem::From<&_>` impl picks it up.
-        diags
-            .items
-            .iter()
-            .filter(|d| d.severity == target_severity)
-            .map(|d| crate::bridges::translate::diagnostic_item_from_nvim(d))
-            .map(|snap| neoism_ui::panels::diagnostics_popup::PopupItem::from(&snap))
-            .collect()
+        self.context_manager
+            .current()
+            .code
+            .as_ref()
+            .map(|code| code.path.clone())
+            .map(|path| self.code_diagnostic_popup_items(&path, pill))
+            .unwrap_or_default()
     }
 
     pub(crate) fn open_lsp_rename_prompt(&mut self) {
@@ -612,14 +568,8 @@ impl Screen<'_> {
                             || trimmed.eq_ignore_ascii_case("shader picker")
                         {
                             self.open_shader_picker();
-                        } else if !self.try_intercept_ex_command(trimmed)
-                            && !trimmed.is_empty()
-                        {
-                            self.send_editor_command(
-                                neoism_backend::performer::nvim::vim_run_ex_command(
-                                    trimmed,
-                                ),
-                            );
+                        } else {
+                            let _ = self.try_intercept_ex_command(trimmed);
                         }
                         self.mark_dirty();
                     }
@@ -648,12 +598,6 @@ impl Screen<'_> {
                                 {
                                     md.search_commit(location.0, location.1);
                                 }
-                            } else {
-                                let cmd = self.palette_search_commit_command(
-                                    &query,
-                                    Some(location),
-                                );
-                                self.send_editor_command(cmd);
                             }
                         }
                         self.mark_dirty();
@@ -680,9 +624,6 @@ impl Screen<'_> {
                                         None => md.search_cancel(),
                                     }
                                 }
-                            } else {
-                                let cmd = self.palette_search_commit_command(&term, None);
-                                self.send_editor_command(cmd);
                             }
                         }
                         self.mark_dirty();
@@ -915,17 +856,24 @@ impl Screen<'_> {
             PaletteAction::ResetFontSize => {
                 self.change_font_size(FontSizeAction::Reset);
             }
+            PaletteAction::GoToSymbol => {
+                self.open_finder_symbols();
+            }
             PaletteAction::ToggleViMode => {
-                let context = self.context_manager.current_mut();
-                let mut terminal = context.terminal.lock();
-                terminal.toggle_vi_mode();
-                drop(terminal);
-                context
-                    .renderable_content
-                    .pending_update
-                    .set_terminal_damage(
-                        neoism_terminal_core::damage::TerminalDamage::Full,
-                    );
+                // Code pane: flip between standard and vim input.
+                // Terminal pane: the classic scrollback vi mode.
+                if !self.toggle_code_vim_mode() {
+                    let context = self.context_manager.current_mut();
+                    let mut terminal = context.terminal.lock();
+                    terminal.toggle_vi_mode();
+                    drop(terminal);
+                    context
+                        .renderable_content
+                        .pending_update
+                        .set_terminal_damage(
+                            neoism_terminal_core::damage::TerminalDamage::Full,
+                        );
+                }
             }
             PaletteAction::ToggleFullscreen => {
                 self.context_manager.toggle_full_screen();
@@ -943,13 +891,7 @@ impl Screen<'_> {
                 self.open_mashup_picker();
             }
             PaletteAction::Copy => {
-                if self.context_manager.current().editor.is_some() {
-                    self.send_editor_command(
-                        neoism_backend::performer::nvim::vim_copy_active_command(),
-                    );
-                } else {
-                    self.copy_selection(ClipboardType::Clipboard, clipboard);
-                }
+                self.copy_selection(ClipboardType::Clipboard, clipboard);
             }
             PaletteAction::Paste => {
                 let content = clipboard.get(ClipboardType::Clipboard);
@@ -1011,23 +953,10 @@ impl Screen<'_> {
                 self.restart_current_notebook_kernel();
             }
             PaletteAction::SearchForward => {
-                if self.context_manager.current().editor.is_some() {
-                    self.renderer.command_palette.enter_search_mode();
-                    self.mark_dirty();
-                } else {
-                    self.start_search(Direction::Right);
-                }
+                self.start_search(Direction::Right);
             }
             PaletteAction::SearchBackward => {
-                if self.context_manager.current().editor.is_some() {
-                    self.renderer.command_palette.enter_search_mode_backward();
-                    self.mark_dirty();
-                } else {
-                    self.start_search(Direction::Left);
-                }
-            }
-            PaletteAction::NvimEx(cmd) => {
-                self.run_palette_ex_query(cmd);
+                self.start_search(Direction::Left);
             }
             PaletteAction::GoToLine => {
                 self.renderer.command_palette.enter_ex_mode();
@@ -1240,7 +1169,6 @@ impl Screen<'_> {
             PaletteAction::Quit => {
                 tracing::info!(
                     target: "neoism::editor_tabs",
-                    current_is_editor = self.context_manager.current().editor.is_some(),
                     active_tab_is_terminal = self.renderer.buffer_tabs.active_is_terminal(),
                     workspace_id = ?self.current_workspace_id(),
                     grid_panes = self.context_manager.current_grid_len(),

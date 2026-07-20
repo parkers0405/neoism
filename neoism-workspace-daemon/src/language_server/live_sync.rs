@@ -73,7 +73,7 @@ fn live_document_sender(
 /// Queue an authoritative live buffer snapshot immediately after an editor or
 /// collaborative edit. This is the production `didOpen`/`didChange` path; it
 /// is event-driven and never waits for the diagnostics/status recovery poll.
-pub(crate) fn sync_document(workspace_root: &Path, file: &Path, text: String) {
+pub fn sync_document(workspace_root: &Path, file: &Path, text: String) {
     if language_server::language_id_for_path_in(workspace_root, file).is_none() {
         return;
     }
@@ -91,7 +91,7 @@ pub(crate) fn sync_document(workspace_root: &Path, file: &Path, text: String) {
 /// Queue `didSave` behind every preceding edit for this document. Keeping save
 /// on the same FIFO prevents a fast `:w` from reaching a build-backed server
 /// before the final insert-mode `didChange`.
-pub(crate) fn save_document(workspace_root: &Path, file: &Path) {
+pub fn save_document(workspace_root: &Path, file: &Path) {
     if language_server::language_id_for_path_in(workspace_root, file).is_none() {
         return;
     }
@@ -110,7 +110,7 @@ pub(crate) fn save_document(workspace_root: &Path, file: &Path) {
 /// LSP service. Interactive queries use this barrier instead of re-sending a
 /// full snapshot on a separate thread, which could otherwise overtake queued
 /// insert edits and regress the server to older text.
-pub(crate) fn flush_document_sync(workspace_root: &Path, file: &Path) {
+pub fn flush_document_sync(workspace_root: &Path, file: &Path) {
     if language_server::language_id_for_path_in(workspace_root, file).is_none() {
         return;
     }

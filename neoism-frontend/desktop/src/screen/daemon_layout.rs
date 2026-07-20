@@ -9,7 +9,6 @@
 use std::collections::VecDeque;
 
 use crate::daemon_client::DaemonClientHandle;
-use neoism_protocol::editor::EditorServerMessage;
 use neoism_protocol::workspace::{
     PaneFocusDir, PaneLayoutOp, PaneLayoutSnapshot, PaneLayoutSnapshotNode,
     PaneSplitAxis, PaneSplitPlacement, WorkspaceClientMessage, WorkspaceServerMessage,
@@ -305,61 +304,6 @@ impl Screen<'_> {
         }
     }
 
-    pub fn apply_daemon_editor_message(&mut self, message: EditorServerMessage) -> bool {
-        let target_surface = editor_message_surface_id(&message);
-        let mut applied = false;
-        let lsp_log_enabled = std::env::var_os("NEOISM_LSP_LOG").is_some()
-            && matches!(
-                &message,
-                EditorServerMessage::PopupMenu { .. }
-                    | EditorServerMessage::PopupMenuSelect { .. }
-                    | EditorServerMessage::PopupHide { .. }
-                    | EditorServerMessage::Diagnostics { .. }
-                    | EditorServerMessage::LspStatus { .. }
-                    | EditorServerMessage::LspSnapshot { .. }
-                    | EditorServerMessage::LspMessage { .. }
-            );
-
-        for grid in self.context_manager.all_grids_mut() {
-            let current_route_id = grid.current().route_id;
-            for item in grid.contexts_mut().values_mut() {
-                let context = item.context_mut();
-                if context.editor.is_none() {
-                    continue;
-                }
-                let surface_matches = match (target_surface, context.editor_surface_id())
-                {
-                    (Some(target), Some(surface)) => target == surface,
-                    (None, Some(_)) => current_route_id == context.route_id,
-                    _ => false,
-                };
-                if surface_matches {
-                    context.enqueue_daemon_editor_message(message.clone());
-                    context.renderable_content.pending_update.set_dirty();
-                    applied = true;
-                    if lsp_log_enabled {
-                        tracing::info!(
-                            target: "neoism::lsp",
-                            target_surface = ?target_surface,
-                            route_id = context.route_id,
-                            current_route_id,
-                            "applied daemon editor message"
-                        );
-                    }
-                }
-            }
-        }
-        if lsp_log_enabled && !applied {
-            tracing::info!(
-                target: "neoism::lsp",
-                target_surface = ?target_surface,
-                "dropped daemon editor message"
-            );
-        }
-
-        applied
-    }
-
     pub fn drain_daemon_pane_layout_requests(
         &mut self,
     ) -> impl Iterator<Item = WorkspaceClientMessage> + '_ {
@@ -523,39 +467,6 @@ impl Screen<'_> {
     }
 }
 
-fn editor_message_surface_id(message: &EditorServerMessage) -> Option<&str> {
-    match message {
-        EditorServerMessage::Batch { surface_id, .. }
-        | EditorServerMessage::GridUpdate { surface_id, .. }
-        | EditorServerMessage::GridResize { surface_id, .. }
-        | EditorServerMessage::GridClear { surface_id, .. }
-        | EditorServerMessage::GridScroll { surface_id, .. }
-        | EditorServerMessage::CursorGoto { surface_id, .. }
-        | EditorServerMessage::HighlightDefined { surface_id, .. }
-        | EditorServerMessage::WinViewport { surface_id, .. }
-        | EditorServerMessage::DefaultColors { surface_id, .. }
-        | EditorServerMessage::PopupMenu { surface_id, .. }
-        | EditorServerMessage::PopupMenuSelect { surface_id, .. }
-        | EditorServerMessage::PopupHide { surface_id, .. }
-        | EditorServerMessage::MouseMode { surface_id, .. }
-        | EditorServerMessage::Diagnostics { surface_id, .. }
-        | EditorServerMessage::LspStatus { surface_id, .. }
-        | EditorServerMessage::LspSnapshot { surface_id, .. }
-        | EditorServerMessage::LspMessage { surface_id, .. }
-        | EditorServerMessage::LspActionResult { surface_id, .. }
-        | EditorServerMessage::LspCompletions { surface_id, .. }
-        | EditorServerMessage::LspHoverResult { surface_id, .. }
-        | EditorServerMessage::ModeChange { surface_id, .. }
-        | EditorServerMessage::BufferOpened { surface_id, .. }
-        | EditorServerMessage::CursorLine { surface_id, .. }
-        | EditorServerMessage::BufferModified { surface_id, .. }
-        | EditorServerMessage::Message { surface_id, .. }
-        | EditorServerMessage::Notification { surface_id, .. }
-        | EditorServerMessage::YankFlash { surface_id, .. }
-        | EditorServerMessage::Closed { surface_id, .. }
-        | EditorServerMessage::Error { surface_id, .. } => surface_id.as_deref(),
-    }
-}
 
 fn collect_leaves(snapshot: &PaneLayoutSnapshot) -> Vec<ScreenPaneLeaf> {
     let mut leaves = Vec::new();

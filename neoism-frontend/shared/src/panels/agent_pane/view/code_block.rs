@@ -491,6 +491,13 @@ pub fn syntax_lang(lang: &str) -> crate::syntax::Lang {
         "lua" => crate::syntax::Lang::Lua,
         "toml" => crate::syntax::Lang::Toml,
         "json" | "jsonc" => crate::syntax::Lang::Json,
+        "nix" => crate::syntax::Lang::Nix,
+        "bash" | "sh" | "shell" | "zsh" => crate::syntax::Lang::Bash,
+        "c" | "h" => crate::syntax::Lang::C,
+        "cpp" | "c++" | "cc" | "cxx" | "hpp" => crate::syntax::Lang::Cpp,
+        "yaml" | "yml" => crate::syntax::Lang::Yaml,
+        "css" => crate::syntax::Lang::Css,
+        "html" | "htm" => crate::syntax::Lang::Html,
         _ => crate::syntax::Lang::Other,
     }
 }
@@ -606,6 +613,14 @@ fn lang_cache_tag(lang: Lang) -> u8 {
         Lang::Json => 10,
         Lang::Markdown => 11,
         Lang::Other => 12,
+        Lang::Nix => 13,
+        Lang::Make => 20,
+        Lang::Bash => 14,
+        Lang::C => 15,
+        Lang::Cpp => 16,
+        Lang::Yaml => 17,
+        Lang::Css => 18,
+        Lang::Html => 19,
     }
 }
 

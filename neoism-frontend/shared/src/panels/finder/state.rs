@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use web_time::Instant;
 
 use super::modes::{FileSearchMode, FinderMode, GrepSearchMode};
-use super::types::GitResult;
+use super::types::{GitResult, GrepResult, SymbolRow};
 use super::Result_;
 
 pub(super) const FINDER_WIDTH: f32 = 880.0;
@@ -50,6 +50,9 @@ pub(super) const ORDER: u8 = 22;
 pub(super) const FILE_DEBOUNCE_MS: u128 = 75;
 pub(super) const GREP_DEBOUNCE_MS: u128 = 220;
 pub(super) const MIN_GREP_QUERY_CHARS: usize = 2;
+/// Row cap for BufferLines mode — the badge shows `shown/total` when
+/// the buffer has more matching lines than this.
+pub(super) const BUFFER_MAX_RESULTS: usize = 200;
 
 pub struct Finder {
     pub(super) enabled: bool,
@@ -63,6 +66,22 @@ pub struct Finder {
     /// SearchService cannot return fuzzy results.
     pub(super) files: Option<Vec<String>>,
     pub(super) git_changes: Vec<GitResult>,
+    /// Snapshot of the active code pane's lines, taken when the
+    /// finder opens in BufferLines mode. Searched in-memory.
+    pub(super) buffer_lines: Vec<String>,
+    /// Total matching lines for the current BufferLines query (may
+    /// exceed `results.len()` when capped at `BUFFER_MAX_RESULTS`).
+    pub(super) buffer_match_total: usize,
+    /// Master list for References mode, installed by
+    /// `open_references`; `results` is the fuzzy-filtered view.
+    pub(super) reference_rows: Vec<GrepResult>,
+    /// Master list for Symbols mode, installed by `set_symbol_rows`;
+    /// `results` is the fuzzy-filtered view.
+    pub(super) symbol_rows: Vec<SymbolRow>,
+    /// True while the host's document-symbols request is in flight —
+    /// the empty state shows "Waiting for language server…" instead
+    /// of "No symbols in this file".
+    pub(super) symbols_loading: bool,
     pub(super) results: Vec<(i32, Result_)>,
     pub selected_index: usize,
     pub(super) scroll_offset: usize,
@@ -104,6 +123,11 @@ impl Default for Finder {
             query: String::new(),
             files: None,
             git_changes: Vec::new(),
+            buffer_lines: Vec::new(),
+            buffer_match_total: 0,
+            reference_rows: Vec::new(),
+            symbol_rows: Vec::new(),
+            symbols_loading: false,
             results: Vec::new(),
             selected_index: 0,
             scroll_offset: 0,
@@ -176,11 +200,24 @@ impl Finder {
         match self.mode {
             FinderMode::Files | FinderMode::GitChanges => FILE_DEBOUNCE_MS,
             FinderMode::Grep => GREP_DEBOUNCE_MS,
+            // In-memory substring scan — cheap enough to run every
+            // keystroke, and the pane live-jump should never lag rows.
+            FinderMode::BufferLines => 0,
+            // In-memory fuzzy filter over pre-computed rows.
+            FinderMode::References => 0,
+            // Same — pre-computed symbol rows, filtered in-memory.
+            FinderMode::Symbols => 0,
         }
     }
 
+    /// Files-mode empty-query prefix cheatsheet ("@ symbols   : line
+    /// / search in buffer") — a single muted row rendered between
+    /// the input and the results.
     pub(super) fn preview_enabled(&self) -> bool {
-        matches!(self.mode, FinderMode::Grep | FinderMode::GitChanges)
+        matches!(
+            self.mode,
+            FinderMode::Grep | FinderMode::GitChanges | FinderMode::References
+        )
     }
 
     pub(super) fn overlay_width(&self) -> f32 {
@@ -216,6 +253,9 @@ impl Finder {
         match self.mode {
             FinderMode::Files | FinderMode::GitChanges => self.file_search_mode.label(),
             FinderMode::Grep => self.grep_search_mode.label(),
+            FinderMode::BufferLines => "buffer",
+            FinderMode::References => "refs",
+            FinderMode::Symbols => "symbols",
         }
     }
 
@@ -231,6 +271,12 @@ impl Finder {
                     self.query.trim_end().to_string()
                 }
             },
+            // Raw, case-sensitive substring — spaces are significant.
+            FinderMode::BufferLines => self.query.clone(),
+            // Fuzzy over `path:line text` — raw query.
+            FinderMode::References => self.query.clone(),
+            // Fuzzy over symbol names — raw query.
+            FinderMode::Symbols => self.query.clone(),
         }
     }
 
@@ -252,5 +298,42 @@ impl Finder {
         let mut p = self.cwd.clone();
         p.push(r.path());
         Some((p, r.line()))
+    }
+
+    /// 1-based line number of the currently-selected row, when the row
+    /// carries one (grep / git / buffer hits). Used by the desktop
+    /// bridge to live-preview / commit BufferLines selections.
+    pub fn selected_line(&self) -> Option<u32> {
+        let (_, r) = self.results.get(self.selected_index)?;
+        r.line()
+    }
+
+    /// `(absolute path, 1-based line, 0-based byte column)` of the
+    /// selected References row. `None` outside References mode.
+    pub fn selected_reference_target(&self) -> Option<(PathBuf, u32, u32)> {
+        if !matches!(self.mode, FinderMode::References) {
+            return None;
+        }
+        let (_, r) = self.results.get(self.selected_index)?;
+        let Result_::Grep(hit) = r else {
+            return None;
+        };
+        let mut path = self.cwd.clone();
+        path.push(&hit.path);
+        Some((path, hit.line, hit.column))
+    }
+
+    /// `(1-based line, 0-based byte column)` of the selected Symbols
+    /// row. `None` outside Symbols mode — rows have no path, they
+    /// always refer to the pane the finder was opened from.
+    pub fn selected_symbol_target(&self) -> Option<(u32, u32)> {
+        if !matches!(self.mode, FinderMode::Symbols) {
+            return None;
+        }
+        let (_, r) = self.results.get(self.selected_index)?;
+        let Result_::Symbol(row) = r else {
+            return None;
+        };
+        Some((row.line, row.column))
     }
 }

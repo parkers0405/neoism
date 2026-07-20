@@ -105,20 +105,6 @@ pub fn terminal_dimensions(layout: &ContextDimension) -> teletypewriter::Winsize
 /// This used to add one extra "overshoot" row so nvim's grid met the
 /// status line. That row was necessarily partial. Editors now keep the
 /// conservative complete-row count; the pane-specific renderer distributes
-/// any fractional remainder across their row pitch instead.
-///
-/// Kept as the single seam for the editor row rule so an overshoot can be
-/// reintroduced in one place if ever needed.
-#[inline]
-pub fn editor_rows_for_terminal_rows(rows: u16) -> u16 {
-    rows.max(1)
-}
-
-#[inline]
-pub fn editor_rows_for_dimension_lines(lines: usize) -> u32 {
-    lines.min(u16::MAX as usize).max(1) as u32
-}
-
 /// Translate a `neoism_window::window::Theme` into the shared `ThemeHint`.
 #[inline]
 pub fn theme_hint_from_window(theme: Theme) -> ThemeHint {

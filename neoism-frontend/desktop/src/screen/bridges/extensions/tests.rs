@@ -63,48 +63,36 @@ fn install_command_output_detail_preserves_stderr_and_stdout() {
 }
 
 #[test]
-fn godot_syntax_catalog_contains_scripts_and_resources() {
-    let gdscript = treesitter_parser_manifest("gdscript").unwrap();
-    assert_eq!(gdscript.name, "GDScript Syntax Parser");
-    assert!(gdscript
-        .languages
+fn built_in_syntax_entries_reflect_compiled_in_grammars() {
+    let entries = built_in_syntax_entries();
+    assert!(!entries.is_empty());
+    // Every grammar ships in the binary: no install/uninstall lifecycle.
+    assert!(entries
         .iter()
-        .any(|language| language == "Godot"));
-    assert!(gdscript
-        .languages
+        .all(|entry| entry.status == ExtensionStatus::BuiltIn));
+    let rust = entries
         .iter()
-        .any(|language| language == "GDScript"));
-
-    let resources = treesitter_parser_manifest("godot_resource").unwrap();
-    assert_eq!(resources.name, "Godot Resources Syntax Parser");
-    assert!(resources
-        .languages
+        .find(|entry| entry.id == "grammar-rust")
+        .expect("compiled-in Rust grammar should be listed");
+    assert_eq!(rust.name, "Rust Syntax");
+    assert!(rust
+        .categories
         .iter()
-        .any(|language| language == "Godot"));
-    assert!(resources
-        .languages
-        .iter()
-        .any(|language| language == "Godot Resources"));
-    assert!(resources
-        .repository_url
-        .as_deref()
-        .is_some_and(|url| url.ends_with("tree-sitter-godot-resource")));
-
-    let shader = treesitter_parser_manifest("glsl").unwrap();
-    assert!(shader
-        .languages
-        .iter()
-        .any(|language| language == "Godot Shader"));
+        .any(|category| category == "Tree-sitter"));
+    assert!(rust.languages.iter().any(|language| language == "Rust"));
+    assert!(rust.description.contains("compiled into Neoism"));
 }
 
 #[test]
-fn built_in_lsp_catalog_is_derived_from_runtime_adapters() {
-    let entries = built_in_language_server_entries();
+fn language_server_catalog_is_derived_from_runtime_adapters() {
+    let installed = InstalledIndex::default();
+    let entries = language_server_entries(None, &installed);
+
+    // TCP endpoint adapters (host application provides the server).
     let godot = entries
         .iter()
         .find(|entry| entry.id == "builtin-lsp-godot")
         .expect("Godot TCP adapter should be visible in the LSP catalog");
-
     assert_eq!(godot.status, ExtensionStatus::BuiltIn);
     assert_eq!(godot.lsp_source.as_deref(), Some("built-in/socket"));
     assert!(godot.version.is_empty());
@@ -112,18 +100,67 @@ fn built_in_lsp_catalog_is_derived_from_runtime_adapters() {
     assert!(godot.languages.iter().any(|language| language == "Godot"));
     assert!(godot.description.contains("127.0.0.1:6005"));
     assert!(godot.description.contains("must be running"));
+
+    // Stdio adapters are keyed by their catalog package so the install
+    // dispatcher and installed.json line up.
+    let rust = entries
+        .iter()
+        .find(|entry| entry.id == "rust-analyzer")
+        .expect("Rust adapter should be visible in the LSP catalog");
+    assert!(rust.categories.iter().any(|category| category == "LSP"));
+    // rust-analyzer advertises formatting, but the Formatters tab is
+    // curated for format-first tools — general servers carry the
+    // badge-only "Formatting" category instead (see adapter_tab_roles).
+    assert!(rust
+        .categories
+        .iter()
+        .any(|category| category == "Formatting"));
+    assert!(rust
+        .categories
+        .iter()
+        .all(|category| category != "Formatter"));
+    assert!(rust.languages.iter().any(|language| language == "Rust"));
+    assert!(rust.description.contains("rust-analyzer"));
+    // The source badge always reflects a real engine resolution.
+    assert!(matches!(
+        rust.lsp_source.as_deref(),
+        Some("extension" | "config" | "path" | "missing")
+    ));
 }
 
 #[test]
-fn lsp_catalog_keeps_packages_visible_and_marks_adapter_capability_truthfully() {
+fn formatter_and_linter_tabs_are_curated_not_capability_driven() {
+    let installed = InstalledIndex::default();
+    let entries = language_server_entries(None, &installed);
+
+    // taplo (the TOML adapter) is the only format-first tool in the
+    // built-in registry, so it alone joins the Formatters tab.
+    let formatters: Vec<&str> = entries
+        .iter()
+        .filter(|entry| entry.categories.iter().any(|c| c == "Formatter"))
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(formatters, ["taplo"]);
+
+    // No lint-first adapter ships built-in, so the Linters tab holds no
+    // language-server cards (the page shows its empty-state hint).
+    assert!(entries
+        .iter()
+        .all(|entry| entry.categories.iter().all(|c| c != "Linter")));
+
+    // Every card still lands on the Language Servers tab.
+    assert!(entries.iter().all(|entry| entry
+        .categories
+        .iter()
+        .any(|c| c == "Language Server" || c == "LSP")));
+}
+
+#[test]
+fn lsp_install_capability_requires_package_and_adapter_agreement() {
     let docker = installable_manifest("docker-language-server", &["LSP"]);
     assert!(extension_manifest_supported_by_host(&docker));
     assert!(manifest_has_registered_lsp_adapter(&docker));
     assert!(manifest_is_auto_installable_lsp(&docker));
-    assert_ne!(
-        lsp_source_label(&docker).as_deref(),
-        Some("adapter required")
-    );
 
     let mut json = installable_manifest("vscode-json-language-server", &["LSP"]);
     json.id = "json-lsp".to_string();
@@ -144,19 +181,11 @@ fn lsp_catalog_keeps_packages_visible_and_marks_adapter_capability_truthfully() 
     assert!(extension_manifest_supported_by_host(&unknown));
     assert!(!manifest_has_registered_lsp_adapter(&unknown));
     assert!(!manifest_is_auto_installable_lsp(&unknown));
-    assert_eq!(
-        lsp_source_label(&unknown).as_deref(),
-        Some("adapter required")
-    );
 
     let spelled_out =
         installable_manifest("not-a-real-language-server", &["Language Server"]);
     assert!(extension_manifest_supported_by_host(&spelled_out));
     assert!(!manifest_is_auto_installable_lsp(&spelled_out));
-    assert_eq!(
-        lsp_source_label(&spelled_out).as_deref(),
-        Some("adapter required")
-    );
 
     let unrelated_tool = installable_manifest("not-an-lsp", &["Formatter"]);
     assert!(extension_manifest_supported_by_host(&unrelated_tool));

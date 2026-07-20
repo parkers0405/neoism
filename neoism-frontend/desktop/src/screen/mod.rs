@@ -20,9 +20,6 @@ pub(crate) const BUILTIN_SHADER_OVERLAY_CHOICES: &[&str] = &["builtin:ctv_round"
 // "builtin:hypno_crt" remains shipped in Sugarloaf, but is hidden from the
 // picker for now.
 
-/// Symmetric to `EDITOR_BUFFER_ABOVE`: one hidden row below the visible
-/// viewport for the fractional row entering from the bottom.
-pub const EDITOR_BUFFER_BELOW: u32 = 1;
 pub const TERMINAL_BUFFER_BELOW: u32 = 1;
 const TERMINAL_BOTTOM_CLIP_BLEED_PX: f32 = 2.0;
 const TERMINAL_TOP_BREATHING_PX: f32 = 6.0;
@@ -31,37 +28,12 @@ const TERMINAL_TOP_BREATHING_PX: f32 = 6.0;
 /// handled by clearing/masking the scroll-buffer rows, not by reserving
 /// a black safety band the user can see.
 const CHROME_SAFETY_PAD: f32 = 0.0;
-const SCROLL_LOG_ENV: &str = "NEOISM_SCROLL_LOG";
-const EDITOR_GEOMETRY_LOG_ENV: &str = "NEOISM_EDITOR_GEOMETRY_LOG";
-const LSP_LOG_ENV: &str = "NEOISM_LSP_LOG";
 const BLOCK_LOG_ENV: &str = "NEOISM_BLOCK_LOG";
 
 pub(crate) type WorkspaceKey = String;
 
 fn block_log_enabled() -> bool {
     std::env::var_os(BLOCK_LOG_ENV).is_some()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EditorGeometryLogState {
-    class: u8,
-    route_id: usize,
-    current_route: usize,
-    rows: u32,
-    visible_rows: u32,
-    cols: u32,
-    status_top_px: i32,
-    clip_bottom_px: i32,
-    last_row_bottom_px: i32,
-    row_status_delta_px: i32,
-    layout_bottom_px: i32,
-    layout_status_delta_px: i32,
-    bottom_row_clear: bool,
-    penultimate_row_clear: bool,
-    buffer_tab_count: u32,
-    buffer_tabs_visible: bool,
-    breadcrumbs_visible: bool,
-    split_count: u32,
 }
 
 fn block_snapshot_debug(
@@ -162,56 +134,10 @@ fn acp_pretty_json(value: &serde_json::Value, max_chars: usize) -> String {
 use neoism_ui::render_policy::{
     animation_phase_from_unix_secs, block_header_panel_geometry,
     block_header_row_metrics, block_hover_icon_anchor_row, block_hover_icon_layout,
-    block_status_color_token, block_status_glyph,
-    editor_scroll_render_offset_for_mutated_snapshot as ui_editor_scroll_render_offset,
-    editor_scroll_shifted_row_count, loader_animation_frame, loader_orbit_position,
-    loader_pastel_color, BlockHeaderPanelGeometryInput, BlockHoverIconLayoutInput,
-    BlockStatusColorToken, EditorScrollGridRenderState, EditorScrollRenderOffset,
+    block_status_color_token, block_status_glyph, loader_animation_frame,
+    loader_orbit_position, loader_pastel_color, BlockHeaderPanelGeometryInput,
+    BlockHoverIconLayoutInput, BlockStatusColorToken,
 };
-#[cfg(test)]
-use neoism_ui::render_policy::{
-    editor_cursor_output_row, editor_scroll_effective_source_base,
-    editor_scroll_render_state_changes as ui_editor_scroll_render_state_changes,
-    editor_scroll_source_plan as ui_editor_scroll_source_plan, EditorScrollSourcePlan,
-};
-
-#[derive(Debug, Default)]
-struct EditorScrollGridState {
-    render: EditorScrollGridRenderState,
-    /// `source_y` whose row content is currently emitted at the
-    /// top edge slot (`EDITOR_BUFFER_ABOVE - 1`). `None` means the
-    /// slot is currently cleared. We only rewrite the slot when this
-    /// value would change between frames — re-emitting the same source
-    /// row every frame for a smooth fractional scroll was costing
-    /// hundreds of redundant cell writes plus a full bg/fg re-upload.
-    edge_above_source_y: Option<i32>,
-    /// Same idea for the bottom edge slot (`EDITOR_BUFFER_ABOVE +
-    /// visible_rows`).
-    edge_below_source_y: Option<i32>,
-    log_started_at: Option<std::time::Instant>,
-    log_frames: u32,
-    log_rebuilt_rows: u32,
-    log_exposed_rows: u32,
-    log_damage_rows: u32,
-    log_full_rows: u32,
-    log_shifted_rows: u32,
-    log_source_changes: u32,
-    log_offset_updates: u32,
-    /// Microseconds spent inside `Screen::render` summed across the
-    /// scroll log window. Divide by `log_frames` for mean ms/frame.
-    log_render_us: u64,
-    /// Worst single-frame render duration in microseconds inside the
-    /// scroll log window. Surfaces stalls that the mean would hide.
-    log_render_us_max: u64,
-    /// Sum of *full* render durations (the previous frame's complete
-    /// CPU+Vulkan-present time) over the log window.
-    log_full_render_us: u64,
-    /// Worst full-frame duration over the log window.
-    log_full_render_us_max: u64,
-    /// Sum/worst animation deltas fed into the editor scroll spring.
-    log_animation_dt_us: u64,
-    log_animation_dt_us_max: u64,
-}
 
 /// Which splash menu option is being opened — used by
 /// `dismiss_other_modals` to know which floating panel NOT to
@@ -221,107 +147,6 @@ enum SplashModalKind {
     None,
     Finder,
     CommandPalette,
-}
-
-// Thin shim: forward to the shared pure-policy helper in neoism-ui.
-// The signature/return type are unchanged so call sites compile as-is.
-fn editor_scroll_render_offset(
-    scroll_position_lines: f32,
-    elastic_offset_y: f32,
-    cell_h: f32,
-    previous_source_line_offset: Option<i32>,
-) -> EditorScrollRenderOffset {
-    ui_editor_scroll_render_offset(
-        scroll_position_lines,
-        elastic_offset_y,
-        cell_h,
-        previous_source_line_offset,
-    )
-}
-
-/// Project a 1-based buffer diagnostic into the same resident output row
-/// that the editor grid paints for this animation frame.
-///
-/// `win_viewport.topline` and the diagnostic line describe the latest nvim
-/// snapshot. The retained GPU grid deliberately lags behind that snapshot:
-/// output row `y` samples source row `y + source_line_offset`, then every
-/// row receives `pixel_offset_y`. Inverting that integer relation here and
-/// carrying the identical pixel residual in the inline layout keeps code and
-/// its diagnostic locked together throughout the spring.
-fn editor_inline_diagnostic_placement(
-    line_one_based: u64,
-    viewport_topline_zero_based: u64,
-    source_line_offset: i32,
-    pixel_offset_y: f32,
-    cell_height_px: f32,
-    visible_rows: usize,
-) -> Option<neoism_ui::panels::inline_diagnostics::InlineDiagnosticPlacement> {
-    neoism_ui::panels::inline_diagnostics::inline_diagnostic_placement(
-        line_one_based,
-        neoism_ui::panels::inline_diagnostics::InlineDiagnosticViewport {
-            topline: viewport_topline_zero_based,
-            source_line_offset,
-            pixel_offset_y,
-            cell_height_px,
-            visible_rows: visible_rows.min(u32::MAX as usize) as u32,
-            buffer_above: EDITOR_BUFFER_ABOVE,
-            buffer_below: EDITOR_BUFFER_BELOW,
-        },
-    )
-}
-
-/// Occupied editor text width for inline-diagnostic placement.
-///
-/// Daemon-fed Neovim grids send explicit `" "` cells when clearing the
-/// remainder of a row. The terminal-oriented `LineLength` helper considers
-/// those cells occupied, which put every diagnostic lens at `columns` and
-/// made the renderer reject it for having no remaining width. Ignore trailing
-/// whitespace here while preserving wide-character spacer cells and grapheme
-/// extras as real visual content.
-fn editor_row_text_end_col(row: &Row<Square>, columns: usize) -> u32 {
-    use neoism_terminal_core::crosswords::square::Wide;
-
-    let limit = row.len().min(columns);
-    row[..Column(limit)]
-        .iter()
-        .rposition(|cell| {
-            let ch = cell.c();
-            (!ch.is_whitespace() && ch != '\0')
-                || cell.has_extras()
-                || cell.has_graphics()
-                || matches!(cell.wide(), Wide::Spacer | Wide::LeadingSpacer)
-        })
-        .map(|index| index.saturating_add(1))
-        .unwrap_or(0)
-        .min(u32::MAX as usize) as u32
-}
-
-// Native-side wrapper that adapts the shared 3-value previous-state
-// signature to the `EditorScrollGridState` reference we carry per
-// grid. Pure forwarding logic — no state mutation.
-#[cfg(test)]
-fn editor_scroll_state_changes(
-    previous: Option<&EditorScrollGridState>,
-    current: EditorScrollRenderOffset,
-    current_scrollback_origin: Option<isize>,
-) -> (bool, bool) {
-    ui_editor_scroll_render_state_changes(
-        previous.map(|s| s.render),
-        current,
-        current_scrollback_origin,
-    )
-}
-
-// `editor_scroll_source_plan` is re-exported from `neoism_ui::render_policy`
-// at the top of the file (aliased to `ui_editor_scroll_source_plan` so we
-// can wrap it here without name clash).
-#[cfg(test)]
-fn editor_scroll_source_plan(
-    previous_source_base: Option<i64>,
-    current_source_base: i64,
-    visible_rows: usize,
-) -> EditorScrollSourcePlan {
-    ui_editor_scroll_source_plan(previous_source_base, current_source_base, visible_rows)
 }
 
 fn line_for_absolute_row(abs_row: usize, history_size: usize) -> Line {
@@ -568,10 +393,9 @@ use neoism_terminal_core::crosswords::{
 use neoism_ui::terminal_blocks::hint::HintMatches;
 use neoism_ui::utils::padding_top_from_config;
 use neoism_window::event::Modifiers;
-use neoism_window::event::MouseButton;
 #[cfg(target_os = "macos")]
 use neoism_window::keyboard::ModifiersKeyState;
-use neoism_window::keyboard::{KeyCode, KeyLocation, ModifiersState, PhysicalKey};
+use neoism_window::keyboard::{KeyCode, KeyLocation, PhysicalKey};
 use neoism_window::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use notify::Watcher as _;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
@@ -580,7 +404,6 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -596,7 +419,6 @@ const FILE_TREE_GIT_SELF_EVENT_SUPPRESS: Duration = Duration::from_millis(1200);
 
 /// Maximum number of search terms stored in the history.
 const MAX_SEARCH_HISTORY_SIZE: usize = 255;
-static SCRATCH_BUFFER_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 /// A decoded `cover:` banner registered with sugarloaf — see
 /// `markdown_cover_cache`.
@@ -718,15 +540,6 @@ pub struct Screen<'screen> {
     /// sidebar with `Welcome/` expanded, gated further by the on-disk
     /// first-run marker. See [`Self::reveal_welcome_notes_first_run`].
     welcome_reveal_pending: bool,
-    /// Live-`/`-search redraw pump. `dispatch_palette_search_query` sets
-    /// this to a short deadline when it fires an async `rio_search_matches`
-    /// query at nvim; the per-frame status-sync loop keeps marking dirty
-    /// until then so the async reply is drained + previewed within a frame
-    /// or two of each keystroke instead of only on the next input event
-    /// (the "search only updates on Enter" bug). Pure redraw scheduling —
-    /// it issues NO nvim RPC per frame, so it can't wedge input on a
-    /// pending count.
-    search_reply_pump_until: Option<std::time::Instant>,
     pending_notebook_executions: Vec<
         std::sync::mpsc::Receiver<(
             std::path::PathBuf,
@@ -796,8 +609,6 @@ pub struct Screen<'screen> {
     pub markdown_crdt: markdown_crdt::MarkdownCrdtState,
     last_ime_cursor_pos: Option<(f32, f32)>,
     last_editor_trail_cursor_cell: Option<(usize, usize, usize)>,
-    last_editor_key_log_at: Option<std::time::Instant>,
-    last_editor_key_log_notation: Option<String>,
     hints_config: Vec<std::rc::Rc<neoism_backend::config::hints::Hint>>,
     pub resize_state: Option<crate::layout::ResizeState>,
     file_tree_resize_state: Option<FileTreeResizeState>,
@@ -811,14 +622,6 @@ pub struct Screen<'screen> {
     /// char → font resolution cache; the per-panel atlas lives on
     /// each `GridRenderer`.
     pub grid_rasterizer: crate::terminal::grid_emit::GridGlyphRasterizer,
-    /// Per editor grid render state used to avoid reshaping/rebuilding
-    /// every row for pure fractional scroll frames. Keyed by route_id,
-    /// same as `grids`.
-    editor_scroll_grid_states: rustc_hash::FxHashMap<usize, EditorScrollGridState>,
-    /// Last bottom-boundary geometry signature logged for each editor
-    /// pane. Keeps `NEOISM_EDITOR_GEOMETRY_LOG` useful without emitting
-    /// every frame.
-    editor_geometry_log_last: rustc_hash::FxHashMap<usize, EditorGeometryLogState>,
     shader_overlay_paths: Vec<String>,
     active_shader_overlay: Option<String>,
     /// Full render duration of the *previous* frame in microseconds —
@@ -831,37 +634,18 @@ pub struct Screen<'screen> {
     /// difference `1000/fps - full_render_ms` ≈ time spent waiting
     /// for the next vsync / RedrawRequested).
     last_full_render_us: u64,
-    /// Leader-sequence buffer for editor panes. When the user presses
-    /// `<space>` inside an editor, we hold it briefly to see if `e`
-    /// follows (→ toggle file tree, nvim-tree style). Anything else
-    /// flushes the buffered space and the new key through to nvim.
-    leader_pending: Option<std::time::Instant>,
-    /// Markdown normal-mode leader buffer. Mirrors the editor
+    /// Markdown normal-mode leader buffer. Mirrors the old editor
     /// `<space>x` close-tab shortcut while keeping plain Space as the
     /// page-down action when the sequence does not match.
     markdown_leader_pending: Option<std::time::Instant>,
-    /// Second-stage leader for the `<space>f` finder prefix. Set when
-    /// the user presses `<space>` then `f` and cleared on the next
-    /// key (`f` → files finder, `w` → grep finder, anything else →
-    /// flush `<Space>f<key>` through to nvim).
-    finder_leader_pending: Option<std::time::Instant>,
-    editor_mouse_dragging: bool,
     mouse_hidden_by_typing: bool,
     /// Editor route selected when finder opens, so accepting a result
     /// edits the pane that launched it instead of whichever split is
     /// currently first in the grid map.
     finder_target_route: Option<usize>,
-    /// LSP install prompts already shown this session. Prevents a
-    /// missing server from reopening the modal on every render/FileType
-    /// event after the user dismisses it.
-    lsp_missing_prompts: BTreeSet<String>,
-    /// Treesitter parsers Rio is already installing/has attempted this
-    /// session. Missing parser notifications can repeat on FileType and
-    /// BufEnter, but installs should run once per language.
-    treesitter_installing: BTreeSet<String>,
     /// Active workspace root for Rust-owned IDE chrome. Terminal panes
-    /// update this from OSC 7 cwd, editor panes from their embedded
-    /// nvim cwd. The file tree mirrors this root when visible.
+    /// update this from OSC 7 cwd; the file tree mirrors this root when
+    /// visible.
     active_workspace_root: Option<PathBuf>,
     /// A Workspaces-modal pick of a workspace that lives on a tailnet
     /// PEER's daemon: `(workspace_id, daemon_url)`. The app layer
@@ -1230,32 +1014,6 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn nvim_mouse_button(button: MouseButton) -> Option<&'static str> {
-    match button {
-        MouseButton::Left => Some("left"),
-        MouseButton::Middle => Some("middle"),
-        MouseButton::Right => Some("right"),
-        _ => None,
-    }
-}
-
-fn nvim_mouse_modifier(mods: ModifiersState) -> String {
-    let mut modifier = String::new();
-    if mods.shift_key() {
-        modifier.push_str("S-");
-    }
-    if mods.control_key() {
-        modifier.push_str("C-");
-    }
-    if mods.alt_key() {
-        modifier.push_str("M-");
-    }
-    if mods.super_key() {
-        modifier.push_str("D-");
-    }
-    modifier
 }
 
 fn git_state_event_kind(kind: &notify::EventKind) -> bool {
@@ -1689,7 +1447,6 @@ impl Screen<'_> {
             scrollback_history_limit: config.scrollback_history_limit,
             ide_theme: config.neoism.theme.clone(),
             cursor_blinking: config.cursor.blinking,
-            source: neoism_backend::performer::nvim::ContextSource::Pty,
         };
 
         // Create rich text with initial position accounting for island
@@ -1803,15 +1560,12 @@ impl Screen<'_> {
             renderer,
             last_chrome_layout_signature: None,
             welcome_reveal_pending: true,
-            search_reply_pump_until: None,
             pending_notebook_executions: Vec::new(),
             pending_python_kernel_retry: None,
             notebook_runtime: crate::notebook_runtime::NotebookRuntimeManager::new(),
             bindings,
             last_ime_cursor_pos: None,
             last_editor_trail_cursor_cell: None,
-            last_editor_key_log_at: None,
-            last_editor_key_log_notation: None,
             resize_state: None,
             file_tree_resize_state: None,
             notes_sidebar_resize_state: None,
@@ -1819,19 +1573,12 @@ impl Screen<'_> {
             git_diff_panel_scrollbar_drag: None,
             grids: rustc_hash::FxHashMap::default(),
             grid_rasterizer: crate::terminal::grid_emit::GridGlyphRasterizer::new(),
-            editor_scroll_grid_states: rustc_hash::FxHashMap::default(),
-            editor_geometry_log_last: rustc_hash::FxHashMap::default(),
             shader_overlay_paths,
             active_shader_overlay: startup_shader_overlay,
             last_full_render_us: 0,
-            leader_pending: None,
             markdown_leader_pending: None,
-            finder_leader_pending: None,
-            editor_mouse_dragging: false,
             mouse_hidden_by_typing: false,
             finder_target_route: None,
-            lsp_missing_prompts: BTreeSet::new(),
-            treesitter_installing: BTreeSet::new(),
             active_workspace_root: config
                 .working_dir
                 .clone()
@@ -1936,46 +1683,4 @@ impl Screen<'_> {
         let unwarped_y = ((p_y * factor) * 0.5 + 0.5) * height;
         (unwarped_x, unwarped_y)
     }
-}
-
-/// Translate a winit named key to the shared
-/// `neoism_ui::lifecycle_policy::NvimNamedKey` POD enum that the nvim
-/// key formatter consumes. Returns `None` for keys nvim has no special
-/// token for (letters, digits, modifier-only events).
-fn named_key_to_nvim_kind(
-    key: &neoism_window::keyboard::Key,
-) -> Option<neoism_ui::lifecycle_policy::NvimNamedKey> {
-    use neoism_ui::lifecycle_policy::NvimNamedKey;
-    use neoism_window::keyboard::{Key, NamedKey};
-    let Key::Named(named) = key else { return None };
-    Some(match named {
-        NamedKey::ArrowDown => NvimNamedKey::ArrowDown,
-        NamedKey::ArrowLeft => NvimNamedKey::ArrowLeft,
-        NamedKey::ArrowRight => NvimNamedKey::ArrowRight,
-        NamedKey::ArrowUp => NvimNamedKey::ArrowUp,
-        NamedKey::Backspace => NvimNamedKey::Backspace,
-        NamedKey::Delete => NvimNamedKey::Delete,
-        NamedKey::End => NvimNamedKey::End,
-        NamedKey::Enter => NvimNamedKey::Enter,
-        NamedKey::Escape => NvimNamedKey::Escape,
-        NamedKey::Home => NvimNamedKey::Home,
-        NamedKey::Insert => NvimNamedKey::Insert,
-        NamedKey::PageDown => NvimNamedKey::PageDown,
-        NamedKey::PageUp => NvimNamedKey::PageUp,
-        NamedKey::Space => NvimNamedKey::Space,
-        NamedKey::Tab => NvimNamedKey::Tab,
-        NamedKey::F1 => NvimNamedKey::F1,
-        NamedKey::F2 => NvimNamedKey::F2,
-        NamedKey::F3 => NvimNamedKey::F3,
-        NamedKey::F4 => NvimNamedKey::F4,
-        NamedKey::F5 => NvimNamedKey::F5,
-        NamedKey::F6 => NvimNamedKey::F6,
-        NamedKey::F7 => NvimNamedKey::F7,
-        NamedKey::F8 => NvimNamedKey::F8,
-        NamedKey::F9 => NvimNamedKey::F9,
-        NamedKey::F10 => NvimNamedKey::F10,
-        NamedKey::F11 => NvimNamedKey::F11,
-        NamedKey::F12 => NvimNamedKey::F12,
-        _ => return None,
-    })
 }

@@ -1,119 +1,6 @@
 use super::*;
 
 impl Screen<'_> {
-    pub(crate) fn send_editor_command_to_route(&mut self, route_id: usize, cmd: String) {
-        let started_at = std::time::Instant::now();
-        let Some(node) = self
-            .context_manager
-            .current_grid()
-            .node_by_route_id(route_id)
-        else {
-            return;
-        };
-        if let Some(item) = self
-            .context_manager
-            .current_grid_mut()
-            .contexts_mut()
-            .get_mut(&node)
-        {
-            if let Some(editor) = item.val.editor.as_ref() {
-                editor.command(cmd);
-            }
-        }
-        let total_ms = started_at.elapsed().as_millis();
-        if total_ms >= 50 {
-            tracing::warn!(
-                target: "neoism::activation_timing",
-                route_id,
-                total_ms,
-                "slow editor command send to route"
-            );
-        }
-    }
-
-    pub(crate) fn send_editor_command_to_any_route(
-        &mut self,
-        route_id: usize,
-        cmd: String,
-    ) {
-        for grid in self.context_manager.contexts_mut() {
-            for item in grid.contexts_mut().values_mut() {
-                let context = item.context_mut();
-                if context.route_id != route_id {
-                    continue;
-                }
-                if let Some(editor) = context.editor.as_ref() {
-                    editor.command(cmd);
-                }
-                return;
-            }
-        }
-    }
-
-    pub(crate) fn pane_editor_route_for_strip(
-        &self,
-        strip_route: usize,
-    ) -> Option<usize> {
-        let grid = self.context_manager.current_grid();
-        let node = grid.node_by_route_id(strip_route)?;
-        if grid
-            .contexts()
-            .get(&node)
-            .is_some_and(|item| item.context().editor.is_some())
-        {
-            return Some(strip_route);
-        }
-        grid.stacked_children_of(node)
-            .into_iter()
-            .find_map(|child| {
-                grid.contexts().get(&child).and_then(|item| {
-                    item.context()
-                        .editor
-                        .is_some()
-                        .then_some(item.context().route_id)
-                })
-            })
-    }
-
-    pub(crate) fn ensure_pane_editor_route_for_file(
-        &mut self,
-        strip_route: usize,
-        path: &std::path::Path,
-    ) -> Option<usize> {
-        if let Some(route) = self.pane_editor_route_for_strip(strip_route) {
-            return Some(route);
-        }
-
-        let current_grid = self.context_manager.current_grid();
-        let (_context, margin) = current_grid.current_context_with_computed_dimension();
-        let padding_x = margin.left;
-        let padding_y_top = self.renderer.margin.top
-            + self
-                .renderer
-                .island
-                .as_ref()
-                .map_or(0.0, |i| i.effective_height(self.context_manager.len()));
-        let rich_text_id = next_rich_text_id();
-        let _ = self.sugarloaf.text(Some(rich_text_id));
-        self.sugarloaf
-            .set_position(rich_text_id, padding_x, padding_y_top);
-        let cwd = self.active_pane_workspace_root();
-        self.context_manager.add_stacked_editor_on_route(
-            path.to_path_buf(),
-            strip_route,
-            rich_text_id,
-            &mut self.sugarloaf,
-            cwd,
-        )
-    }
-
-    pub fn send_editor_command(&mut self, cmd: String) {
-        if self.try_intercept_ex_command(&cmd) {
-            return;
-        }
-        self.send_editor_command_to_preferred(cmd);
-    }
-
     pub(crate) fn toggle_minimap(&mut self) {
         let enabled = !self.renderer.minimap.is_enabled();
         self.set_minimap_enabled(enabled);
@@ -126,21 +13,11 @@ impl Screen<'_> {
 
         if enabled {
             self.renderer.minimap.set_enabled(true);
-            self.sync_minimap_subscriptions();
             self.renderer.notifications.push(
                 "Minimap enabled",
                 neoism_ui::panels::notifications::NotificationLevel::Info,
             );
         } else {
-            let cmd =
-                neoism_backend::performer::nvim::vim_minimap_set_enabled_command(false);
-            for grid in self.context_manager.all_grids_mut() {
-                for item in grid.contexts_mut().values_mut() {
-                    if let Some(editor) = item.val.editor.as_ref() {
-                        editor.command(cmd.clone());
-                    }
-                }
-            }
             self.renderer.minimap.set_enabled(false);
             self.renderer.notifications.push(
                 "Minimap hidden",
@@ -153,111 +30,6 @@ impl Screen<'_> {
             tracing::warn!(target: "neoism::config", "failed to persist minimap preference: {err}");
         }
         self.mark_dirty();
-    }
-
-    pub(crate) fn sync_minimap_subscriptions(&mut self) {
-        if !self.renderer.minimap.is_enabled() {
-            return;
-        }
-
-        let routes: Vec<usize> = {
-            let grid = self.context_manager.current_grid();
-            grid.contexts()
-                .iter()
-                .filter_map(|(node, item)| {
-                    (grid.is_context_visible(*node) && item.context().editor.is_some())
-                        .then_some(item.context().route_id)
-                })
-                .collect()
-        };
-
-        let (enable_routes, disable_routes) =
-            self.renderer.minimap.sync_visible_routes(&routes);
-
-        if !disable_routes.is_empty() {
-            let cmd =
-                neoism_backend::performer::nvim::vim_minimap_set_enabled_command(false);
-            for route_id in disable_routes {
-                self.send_editor_command_to_any_route(route_id, cmd.clone());
-            }
-        }
-
-        if !enable_routes.is_empty() {
-            let cmd =
-                neoism_backend::performer::nvim::vim_minimap_set_enabled_command(true);
-            for route_id in enable_routes {
-                self.send_editor_command_to_any_route(route_id, cmd.clone());
-            }
-        }
-    }
-
-    pub(crate) fn preferred_editor_node(&self) -> Option<taffy::NodeId> {
-        let grid = self.context_manager.current_grid();
-        let current = grid.current;
-        if grid.is_context_visible(current)
-            && grid
-                .contexts()
-                .get(&current)
-                .is_some_and(|item| item.context().editor.is_some())
-        {
-            return Some(current);
-        }
-
-        if let Some(primary_route) = self.renderer.primary_editor_route {
-            if let Some(node) = grid.node_by_route_id(primary_route) {
-                if grid.is_context_visible(node)
-                    && grid
-                        .contexts()
-                        .get(&node)
-                        .is_some_and(|item| item.context().editor.is_some())
-                {
-                    return Some(node);
-                }
-            }
-        }
-
-        if let Some((node, _)) = grid.contexts().iter().find(|(node, item)| {
-            grid.is_context_visible(**node) && item.context().editor.is_some()
-        }) {
-            return Some(*node);
-        }
-
-        if let Some(primary_route) = self.renderer.primary_editor_route {
-            if let Some(node) = grid.node_by_route_id(primary_route) {
-                if grid
-                    .contexts()
-                    .get(&node)
-                    .is_some_and(|item| item.context().editor.is_some())
-                {
-                    return Some(node);
-                }
-            }
-        }
-
-        grid.contexts()
-            .iter()
-            .find_map(|(node, item)| item.context().editor.is_some().then_some(*node))
-    }
-
-    pub(crate) fn send_editor_command_to_preferred(&mut self, cmd: String) {
-        let Some(node) = self.preferred_editor_node() else {
-            return;
-        };
-        let mut selected_editor = false;
-        {
-            let grid = self.context_manager.current_grid_mut();
-            grid.set_current_node(node, &mut self.sugarloaf);
-            if let Some(item) = grid.contexts_mut().get_mut(&node) {
-                if let Some(editor) = &item.val.editor {
-                    editor.command(cmd);
-                    selected_editor = true;
-                }
-            }
-        }
-        if selected_editor {
-            self.context_manager.select_route_from_current_grid();
-            self.reapply_chrome_layout();
-        }
     }
 
     pub fn try_intercept_ex_command(&mut self, cmd: &str) -> bool {
@@ -274,11 +46,49 @@ impl Screen<'_> {
             target: "neoism::editor_tabs",
             command = %trimmed,
             head = %head,
-            current_is_editor = self.context_manager.current().editor.is_some(),
             active_tab_is_terminal = self.renderer.buffer_tabs.active_is_terminal(),
             workspace_id = ?self.current_workspace_id(),
             "intercepting editor ex command"
         );
+
+        // Code panes reuse the ex line-jump/save heads (`:42`, `:$`,
+        // `:w`, `:wq`); the notebook-only plans stay markdown-gated.
+        if self.context_manager.current().code.is_some() {
+            match MarkdownExCommandPlan::classify(&head) {
+                MarkdownExCommandPlan::JumpToLastLine => {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
+                    {
+                        let last = code.buffer.line_count().saturating_sub(1);
+                        code.buffer.set_cursor_position(last, 0, false);
+                        code.buffer.follow_cursor = true;
+                    }
+                    self.mark_dirty();
+                    return true;
+                }
+                MarkdownExCommandPlan::JumpToLine(line) => {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
+                    {
+                        let line = line
+                            .saturating_sub(1)
+                            .min(code.buffer.line_count().saturating_sub(1));
+                        code.buffer.set_cursor_position(line, 0, false);
+                        code.buffer.follow_cursor = true;
+                    }
+                    self.mark_dirty();
+                    return true;
+                }
+                MarkdownExCommandPlan::Save => {
+                    self.save_current_code();
+                    return true;
+                }
+                MarkdownExCommandPlan::SaveAndCloseFocusedBuffer => {
+                    self.save_current_code();
+                    let _ = self.close_focused_buffer_tab();
+                    return true;
+                }
+                _ => {}
+            }
+        }
 
         if self.context_manager.current().markdown.is_some()
             || self.context_manager.current().notebook.is_some()
@@ -520,15 +330,7 @@ impl Screen<'_> {
                     command = %trimmed,
                     "routing ex write+quit command to Rust buffer close"
                 );
-                if let Some(route) = self
-                    .active_pane_strip_route()
-                    .and_then(|route| self.pane_editor_route_for_strip(route))
-                    .or(self.renderer.primary_editor_route)
-                {
-                    self.send_editor_command_to_route(route, "write".to_string());
-                } else {
-                    self.send_editor_command_raw("write".to_string());
-                }
+                self.save_current_document();
                 let _ = self.close_focused_buffer_tab();
                 true
             }
@@ -548,7 +350,9 @@ impl Screen<'_> {
                 true
             }
             GlobalExCommandPlan::WriteAllAndCloseAllBuffers => {
-                self.send_editor_command_raw("wall".to_string());
+                // nvim removed; native editor write-all TBD — save the
+                // focused document before closing.
+                self.save_current_document();
                 if self.try_close_focused_pane_all() {
                     return true;
                 }
@@ -580,33 +384,6 @@ impl Screen<'_> {
         }
     }
 
-    pub(crate) fn send_editor_command_raw(&mut self, cmd: String) {
-        let started_at = std::time::Instant::now();
-        self.send_editor_command_to_preferred(cmd);
-        let total_ms = started_at.elapsed().as_millis();
-        if total_ms >= 50 {
-            tracing::warn!(
-                target: "neoism::activation_timing",
-                total_ms,
-                "slow editor command send to preferred route"
-            );
-        }
-    }
-
-    pub(crate) fn clear_editor_edge_snapshots(
-        &mut self,
-        clear_above: bool,
-        clear_below: bool,
-    ) {
-        if !clear_above && !clear_below {
-            return;
-        }
-
-        let current = self.context_manager.current_mut();
-        let mut terminal = current.terminal.lock();
-        terminal.clear_editor_scrollback_edges(clear_above, clear_below);
-    }
-
     pub fn scroll(&mut self, new_scroll_x_px: f64, new_scroll_y_px: f64) {
         // Extensions panel (chrome helper page) — wheel only; horizontal
         // is ignored. It still uses the older overlay convention where
@@ -614,6 +391,20 @@ impl Screen<'_> {
         if self.context_manager.current().neoism_extensions.is_some() {
             let _ = new_scroll_x_px;
             self.handle_extensions_wheel(-(new_scroll_y_px as f32));
+            return;
+        }
+        if self.context_manager.current().code.is_some() {
+            let scale = self.sugarloaf.scale_factor();
+            let viewport_height = self
+                .context_manager
+                .current_grid()
+                .current_item()
+                .map(|item| item.layout_rect[3] / scale)
+                .unwrap_or_else(|| self.sugarloaf.window_size().height as f32 / scale);
+            if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                code.scroll_pixels(new_scroll_y_px as f32, viewport_height);
+            }
+            self.mark_dirty();
             return;
         }
         if self.context_manager.current().markdown.is_some()
@@ -682,117 +473,6 @@ impl Screen<'_> {
         };
         let width = layout.dimensions.width as f64;
         let height = layout.dimensions.height as f64;
-
-        // Editor pane (nvim): wheel pixels accumulate separately;
-        // whole rows commit to nvim as GUI mouse-wheel events. The
-        // visual slide is driven by nvim's `win_viewport` response,
-        // then rendered with the already-mutated snapshot policy so the
-        // spring glides over the current viewport instead of replaying
-        // stale rows.
-        if self.context_manager.current().editor.is_some() {
-            // The editor may distribute a fractional pane remainder
-            // across its complete rows. Use that fitted physical pitch,
-            // not sugarloaf's nominal font cell height, so wheel commits
-            // and the GPU grid advance in the same units.
-            let cell_height = self
-                .context_manager
-                .current()
-                .dimension
-                .dimension
-                .height
-                .max(1.0);
-            let rich_text_id = self.context_manager.current().rich_text_id;
-
-            // Edge resistance must use the raw pixel delta, not only
-            // whole committed rows. Otherwise precision touchpads do
-            // nothing at the file boundary until a full cell's worth of
-            // rejected input accumulates, then jump by a whole row.
-            let cur = self.context_manager.current();
-            let viewport_known = cur.editor_viewport_line_count > 0;
-            let at_top = viewport_known && cur.editor_viewport_topline == 0;
-            let at_bottom = viewport_known
-                && cur.editor_viewport_botline >= cur.editor_viewport_line_count;
-            let raw_rejected =
-                (new_scroll_y_px > 0.0 && at_top) || (new_scroll_y_px < 0.0 && at_bottom);
-            if raw_rejected {
-                self.clear_editor_edge_snapshots(
-                    new_scroll_y_px > 0.0,
-                    new_scroll_y_px < 0.0,
-                );
-                self.renderer.editor_scroll.reset_wheel(rich_text_id);
-                self.renderer.editor_scroll.push_elastic(
-                    rich_text_id,
-                    new_scroll_y_px as f32,
-                    cell_height,
-                );
-                self.mark_dirty();
-                return;
-            }
-
-            let committed_rows = self.renderer.editor_scroll.add_wheel_delta(
-                rich_text_id,
-                new_scroll_y_px as f32,
-                cell_height,
-            );
-            if committed_rows != 0 {
-                // Detect "at edge" using the latest win_viewport
-                // state. If user is wheeling UP but topline==0, OR
-                // wheeling DOWN but botline >= line_count, the
-                // commits we send to nvim won't cause a scroll —
-                // route the rejected delta into elastic edge bounce
-                // instead so the user gets the Apple-style rubber-
-                // band feel.
-                let rejected =
-                    (committed_rows > 0 && at_top) || (committed_rows < 0 && at_bottom);
-
-                if rejected {
-                    self.clear_editor_edge_snapshots(
-                        committed_rows > 0,
-                        committed_rows < 0,
-                    );
-                    self.renderer.editor_scroll.reset_wheel(rich_text_id);
-                    // Push elastic in the direction the user
-                    // wanted to scroll — visual stretch only, no
-                    // nvim keystroke. Cell-height units get
-                    // converted to physical pixels by the module.
-                    self.renderer.editor_scroll.push_elastic(
-                        rich_text_id,
-                        committed_rows as f32 * cell_height,
-                        cell_height,
-                    );
-                } else {
-                    // Match Neovide's wheel path: send GUI mouse-wheel
-                    // RPC events with the current cell position instead
-                    // of key notation. This preserves plugin/floating-
-                    // window semantics and keeps nvim's win_viewport
-                    // scroll_delta aligned with actual mouse input.
-                    let direction = if committed_rows > 0 { "up" } else { "down" };
-                    let display_offset = self.display_offset();
-                    let point = self.mouse_position(display_offset);
-                    let row = i64::from(point.row.0.max(0));
-                    let col = point.col.0 as i64;
-                    let modifier = nvim_mouse_modifier(self.modifiers.state());
-                    if let Some(editor) = self.context_manager.current().editor.as_ref() {
-                        editor.mouse_input_many(
-                            "wheel",
-                            direction,
-                            modifier,
-                            0,
-                            row,
-                            col,
-                            committed_rows.unsigned_abs(),
-                        );
-                    }
-                }
-            }
-            // Mark dirty so the next render frame ticks the spring +
-            // applies the offset to the cell grid's `panel_top`.
-            // `Renderer::needs_redraw` reports the spring as animating
-            // so the event loop keeps requesting frames until the
-            // spring settles.
-            self.mark_dirty();
-            return;
-        }
 
         let mode = self.get_mode();
 

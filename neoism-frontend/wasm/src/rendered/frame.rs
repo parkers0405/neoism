@@ -1,7 +1,7 @@
 use super::*;
 use neoism_ui::layout::Rect as ChromeRect;
 use neoism_ui::services::Services;
-use neoism_ui::{EditorScrollViewportBounds, PanelKey};
+use neoism_ui::PanelKey;
 use web_time::Duration;
 
 #[wasm_bindgen]
@@ -272,6 +272,38 @@ impl ChromeBridge {
         self.rendered.take_pty_writes()
     }
 
+    /// Install the JS callback that forwards PTY response bytes
+    /// (DSR / OSC / cursor pos / OSC-52 clipboard write) to the
+    /// daemon. The host passes a function of shape
+    /// `(bytesBase64: string) => void`; once installed,
+    /// `feed_pty_output` auto-flushes pending PTY writes through
+    /// this callback so JS hosts don't have to poll
+    /// `take_pty_writes`.
+    pub fn set_pty_outbox(&mut self, cb: js_sys::Function) {
+        self.pty_outbox = Some(cb);
+    }
+
+    /// Drain `take_pty_writes` once and push the bytes through the
+    /// installed `pty_outbox` callback. No-op when no callback is
+    /// installed or nothing is queued. Called automatically by
+    /// `feed_pty_output`; exposed so JS hosts that need to flush
+    /// after their own out-of-band feed paths (e.g. clipboard
+    /// paste injected via wasm) can opt in.
+    pub fn flush_pty_outbox(&mut self) {
+        let bytes = self.rendered.take_pty_writes();
+        if bytes.is_empty() {
+            return;
+        }
+        let Some(cb) = self.pty_outbox.as_ref() else {
+            return;
+        };
+        let b64 = base64_encode(&bytes);
+        // Callback receives a single JsString argument so the bytes
+        // survive structured clone / postMessage paths without
+        // UTF-8 sanitisation.
+        let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&b64));
+    }
+
     /// Feed PTY output from the daemon into the terminal grid.
     /// After the feed lands, any DSR / OSC responses the terminal
     /// emitted are auto-flushed through the installed `pty_outbox`
@@ -357,122 +389,30 @@ impl ChromeBridge {
         self.chrome.focus_content_surface();
     }
 
-    pub fn editor_scroll_animating(&self) -> bool {
-        self.chrome.editor_grid_scroll_animating()
+    /// Replace the active IdeTheme by name (e.g. `"pastel_dark"`,
+    /// `"nvchad_one"`, `"tokyo_night"`, `"catppuccin_mocha"`).
+    /// Unknown names fall back to `pastel_dark`.
+    ///
+    /// Flows the new theme to:
+    ///   1. `Chrome::set_ide_theme` — derives `ChromeTheme` and
+    ///      publishes the active theme so shim panels read the
+    ///      same palette.
+    ///   2. `RenderedTerminal::apply_ide_theme` — reseeds the
+    ///      terminal's named-color palette and pushes the resolved
+    ///      bg into sugarloaf's swapchain clear color.
+    pub fn set_ide_theme(&mut self, name: &str) {
+        self.chrome.set_ide_theme(name);
+        self.rendered.apply_ide_theme(name);
+        self.relayout_chrome();
     }
 
-    pub(crate) fn editor_add_wheel_delta(
-        &mut self,
-        delta_pixels: f32,
-        cell_height: f32,
-    ) -> i32 {
-        self.chrome.push_editor_wheel_delta_with_viewport_bounds(
-            delta_pixels,
-            cell_height,
-            self.editor_viewport_bounds(),
-        )
-    }
-
-    pub(crate) fn editor_cell_height(&self) -> Option<f32> {
-        let grid = self.chrome.editor_grid()?;
-        if grid.height == 0 {
-            return None;
-        }
-        Some((self.chrome.layout().terminal.h / grid.height as f32).max(1.0))
-    }
-
-    pub(crate) fn editor_wheel_delta_pixels(
-        &self,
-        delta_y: f32,
-        delta_mode: u32,
-    ) -> Option<f32> {
-        let cell_height = self.editor_cell_height()?;
-        let terminal_height = self.chrome.layout().terminal.h;
-        Some(match delta_mode {
-            1 => delta_y * cell_height,
-            2 => delta_y * terminal_height,
-            _ => delta_y,
-        })
-    }
-
-    pub(crate) fn editor_viewport_bounds(&self) -> Option<EditorScrollViewportBounds> {
-        (self.editor_viewport_line_count > 0).then_some(EditorScrollViewportBounds {
-            topline: self.editor_viewport_topline,
-            botline: self.editor_viewport_botline,
-            line_count: self.editor_viewport_line_count,
-        })
-    }
-
-    pub(crate) fn editor_wheel_intent_value(&self, x: f32, y: f32, rows: i32) -> JsValue {
-        #[derive(serde::Serialize)]
-        struct WheelIntent {
-            row: u32,
-            col: u32,
-            rows: i32,
-        }
-
-        if rows == 0 {
-            return JsValue::NULL;
-        }
-
-        match self.chrome.editor_grid_hit_cell(x, y) {
-            Some((row, col)) => {
-                serde_wasm_bindgen::to_value(&WheelIntent { row, col, rows })
-                    .unwrap_or(JsValue::NULL)
-            }
-            None => JsValue::NULL,
-        }
-    }
-
-    pub fn editor_wheel_intent(
-        &mut self,
-        x: f32,
-        y: f32,
-        delta_y: f32,
-        delta_mode: u32,
-    ) -> JsValue {
-        let Some(cell_height) = self.editor_cell_height() else {
-            return JsValue::NULL;
-        };
-        let Some(delta_pixels) = self.editor_wheel_delta_pixels(delta_y, delta_mode)
-        else {
-            return JsValue::NULL;
-        };
-        if delta_pixels == 0.0 {
-            return JsValue::NULL;
-        }
-
-        let rows = self.editor_add_wheel_delta(delta_pixels, cell_height);
-        self.editor_wheel_intent_value(x, y, rows)
-    }
-
-    pub fn editor_tick_wheel_intent(&mut self, x: f32, y: f32) -> JsValue {
-        let Some(cell_height) = self.editor_cell_height() else {
-            return JsValue::NULL;
-        };
-        let rows = self.chrome.tick_editor_wheel_with_viewport_bounds(
-            cell_height,
-            self.editor_viewport_bounds(),
-        );
-        self.editor_wheel_intent_value(x, y, rows)
-    }
-
-    pub fn editor_reset_wheel(&mut self) {
-        self.chrome.reset_editor_wheel();
-    }
-
-    pub fn editor_pointer_intent(&self, x: f32, y: f32) -> JsValue {
-        #[derive(serde::Serialize)]
-        struct Cell {
-            row: u32,
-            col: u32,
-        }
-        match self.chrome.editor_grid_hit_cell(x, y) {
-            Some((row, col)) => {
-                serde_wasm_bindgen::to_value(&Cell { row, col }).unwrap_or(JsValue::NULL)
-            }
-            None => JsValue::NULL,
-        }
+    /// Configure the user cursor style: an optional `#RRGGBB`
+    /// override (beats the theme cursor color, survives theme
+    /// switches) and a preset name (`"rainbow"` animates through
+    /// hues and ignores the color; anything else is solid).
+    pub fn set_cursor_style(&mut self, color_hex: Option<String>, style: String) {
+        self.chrome
+            .set_cursor_style_config(color_hex.as_deref(), &style);
     }
 
     pub fn animations_active(&self) -> bool {

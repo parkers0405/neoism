@@ -45,7 +45,7 @@ pub mod user_event_policy;
 pub mod utils;
 pub mod widgets;
 
-pub use chrome::{Chrome, CustomCursor, EditorScrollViewportBounds, GitBranch, PanelKey};
+pub use chrome::{Chrome, CustomCursor, GitBranch, PanelKey};
 pub use event::*;
 pub use input::{CompletionFlashState, InputBuffer, TerminalShellKind};
 pub use layout::{ChromeLayout, PanelLayout, Rect};

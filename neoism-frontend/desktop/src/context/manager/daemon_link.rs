@@ -598,10 +598,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                     title: context_title_or_fallback(context, route_id),
                     kind: Some(kind),
                     session_id,
-                    surface_id: context
-                        .editor_path
-                        .as_ref()
-                        .map(|_| route_id.to_string()),
+                    surface_id: None,
                     cwd: path,
                     active: route_id == active_route_id,
                     last_active: now,

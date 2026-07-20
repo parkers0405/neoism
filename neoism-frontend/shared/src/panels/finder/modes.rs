@@ -12,6 +12,19 @@ pub enum FinderMode {
     /// Git porcelain changed files for the current repository.
     #[allow(dead_code)]
     GitChanges,
+    /// In-buffer line search over the active code pane's lines
+    /// (nvim `/`). Plain case-sensitive substring, fully in-memory —
+    /// no ripgrep, no services.
+    BufferLines,
+    /// LSP find-references results (`gr` on the code pane). Rows are
+    /// pre-computed `path:line  text` hits installed by the host;
+    /// typing fuzzy-filters them in-memory — no services.
+    References,
+    /// LSP document symbols of the active code pane (VS Code Ctrl+P
+    /// `@`). Rows are pre-computed `{kind} {name} {line}` entries
+    /// installed by the host; typing fuzzy-filters them in-memory —
+    /// no services.
+    Symbols,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

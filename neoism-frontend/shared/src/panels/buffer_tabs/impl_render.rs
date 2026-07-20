@@ -795,7 +795,6 @@ impl<A: Copy> BufferTabs<A> {
                     modified: false,
                     path: None,
                     markdown: false,
-                    scratch_id: None,
                     terminal_route_id: None,
                     neoism_agent_route_id: None,
                     chrome_page: None,

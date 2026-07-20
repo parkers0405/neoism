@@ -80,7 +80,6 @@ impl Screen<'_> {
                 && !mods.control_key()
                 && !mods.alt_key()
                 && !mods.shift_key()
-                && self.context_manager.current().editor.is_none()
             {
                 let key_without_mods = key.key_without_modifiers();
                 let is_copy = matches!(
@@ -112,7 +111,13 @@ impl Screen<'_> {
                         }
                     }
                     let content = clipboard.get(ClipboardType::Clipboard);
-                    if let Some(markdown) =
+                    if let Some(code) =
+                        self.context_manager.current_mut().code.as_mut()
+                    {
+                        code.buffer.insert_text(&content);
+                        self.sync_active_code_modified();
+                        self.mark_dirty();
+                    } else if let Some(markdown) =
                         self.context_manager.current_mut().active_markdown_mut()
                     {
                         markdown.enter_insert();
@@ -252,18 +257,17 @@ impl Screen<'_> {
                     binding.is_triggered_by(binding_mode.to_owned(), mods, key_match)
                 })
             {
-                // Editor (nvim) panes have no PTY, so default
+                // Editor-surface panes have no PTY, so default
                 // terminal-escape bindings (`Act::Esc("\x1b[A")` for
                 // arrows, `\x7f` for Backspace, etc.) would consume
                 // the key without producing useful output. Skip them
-                // here so the editor early-dispatch in
-                // `process_key_event` sees the raw KeyEvent and turns
-                // it into nvim notation. Other binding actions (font
-                // size, copy/paste, splits) still fire normally.
+                // so the surface dispatch sees the raw KeyEvent.
+                // Other binding actions (font size, copy/paste,
+                // splits) still fire normally.
                 if matches!(action, Act::Esc(_))
-                    && (self.context_manager.current().editor.is_some()
-                        || self.context_manager.current().markdown.is_some()
-                        || self.context_manager.current().notebook.is_some())
+                    && (self.context_manager.current().markdown.is_some()
+                        || self.context_manager.current().notebook.is_some()
+                        || self.context_manager.current().code.is_some())
                 {
                     tracing::trace!(
                         target: "neoism::input",
@@ -312,12 +316,12 @@ impl Screen<'_> {
                             return true;
                         }
                         let content = clipboard.get(ClipboardType::Clipboard);
-                        if self.context_manager.current().editor.is_some() {
-                            self.send_editor_command(
-                                neoism_backend::performer::nvim::vim_paste_command(
-                                    &content,
-                                ),
-                            );
+                        if let Some(code) =
+                            self.context_manager.current_mut().code.as_mut()
+                        {
+                            code.buffer.insert_text(&content);
+                            self.sync_active_code_modified();
+                            self.mark_dirty();
                         } else if let Some(markdown) =
                             self.context_manager.current_mut().active_markdown_mut()
                         {
@@ -338,7 +342,13 @@ impl Screen<'_> {
                     }
                     Act::PasteSelection => {
                         let content = clipboard.get(ClipboardType::Selection);
-                        if let Some(markdown) =
+                        if let Some(code) =
+                            self.context_manager.current_mut().code.as_mut()
+                        {
+                            code.buffer.insert_text(&content);
+                            self.sync_active_code_modified();
+                            self.mark_dirty();
+                        } else if let Some(markdown) =
                             self.context_manager.current_mut().active_markdown_mut()
                         {
                             markdown.enter_insert();
@@ -354,11 +364,11 @@ impl Screen<'_> {
                         }
                     }
                     Act::Copy => {
-                        if self.context_manager.current().editor.is_some() {
-                            self.send_editor_command(
-                                neoism_backend::performer::nvim::vim_copy_active_command(
-                                ),
-                            );
+                        if let Some(code) =
+                            self.context_manager.current_mut().code.as_mut()
+                        {
+                            let (payload, _linewise) = code.buffer.copy_payload();
+                            clipboard.set(ClipboardType::Clipboard, payload);
                         } else {
                             self.copy_selection(ClipboardType::Clipboard, clipboard);
                         }
@@ -582,7 +592,7 @@ impl Screen<'_> {
                     Act::Quit => {
                         tracing::info!(
                             target: "neoism::editor_tabs",
-                            current_is_editor = self.context_manager.current().editor.is_some(),
+                            current_is_editor = self.context_manager.current().code.is_some(),
                             active_tab_is_terminal = self.renderer.buffer_tabs.active_is_terminal(),
                             workspace_id = ?self.current_workspace_id(),
                             "Quit binding invoked"

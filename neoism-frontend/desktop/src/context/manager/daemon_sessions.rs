@@ -4,25 +4,19 @@ use crate::app::ime::Ime;
 use crate::app::messenger::Messenger;
 #[cfg(not(target_os = "windows"))]
 use crate::context::factories::neoism_block_shell_for_spawn;
-use crate::context::factories::{create_dead_context, ROUTE_ID_COUNTER};
+use crate::context::factories::ROUTE_ID_COUNTER;
 use crate::context::renderable::{Cursor, RenderableContent};
-use crate::context::tab::{Context, EditorBackend};
+use crate::context::tab::Context;
 use crate::event::sync::FairMutex;
 use crate::layout::{ContextDimension, ContextGrid};
 use crate::performer::Machine;
 use crate::terminal::blocks::input::TerminalInputBufferHostExt;
 use neoism_backend::event::EventListener;
 use neoism_backend::event::WindowId;
-use neoism_backend::performer::nvim::{ContextSource, NvimSpawnConfig};
-use neoism_backend::performer::nvim_events::{
-    Colors as NvimColors, EditorMode, HighlightTable,
-};
 use neoism_backend::sugarloaf::Sugarloaf;
-use neoism_protocol::editor::EditorClientMessage;
 use neoism_protocol::pty::ClientMessage as PtyClientMessage;
 use neoism_protocol::workspace::{
-    surface_id_for_pane_external_id, PaneLayoutOp, WorkspaceClientMessage,
-    WorkspaceTabSummary,
+    PaneLayoutOp, WorkspaceClientMessage, WorkspaceTabSummary,
 };
 use neoism_terminal_core::crosswords::{Crosswords, MIN_COLUMNS, MIN_LINES};
 use std::error::Error;
@@ -612,18 +606,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let cols: u16 = dimension.columns.try_into().unwrap_or(MIN_COLUMNS as u16);
         let rows: u16 = dimension.lines.try_into().unwrap_or(MIN_LINES as u16);
 
-        let terminal_dimension = if matches!(config.source, ContextSource::Editor(_)) {
-            crate::bridges::utils::ResizeDimensions {
-                columns: dimension.columns.max(1),
-                lines: crate::bridges::utils::editor_rows_for_dimension_lines(
-                    dimension.lines,
-                ) as usize,
-            }
-        } else {
-            crate::bridges::utils::ResizeDimensions {
-                columns: dimension.columns.max(1),
-                lines: dimension.lines.max(1),
-            }
+        let terminal_dimension = crate::bridges::utils::ResizeDimensions {
+            columns: dimension.columns.max(1),
+            lines: dimension.lines.max(1),
         };
         let mut terminal = Crosswords::new(
             terminal_dimension,
@@ -637,111 +622,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         terminal.default_blinking_cursor = cursor_state.1;
 
         let terminal: Arc<FairMutex<Crosswords>> = Arc::new(FairMutex::new(terminal));
-
-        // Editor-source contexts skip the PTY/Machine path entirely. They
-        // boot an `nvim --embed` runtime instead; redraw events will be
-        // applied to `terminal` in Phase 2d once the parser lands.
-        if let ContextSource::Editor(spawn_cfg) = &config.source {
-            let mut spawn_cfg = spawn_cfg.clone();
-            // Inherit the pane's current geometry if the caller didn't
-            // pin one explicitly — avoids the embedded UI booting at the
-            // 80×24 default and reflowing on first resize.
-            if spawn_cfg.initial_cols == 0 {
-                spawn_cfg.initial_cols = cols as u64;
-            }
-            if spawn_cfg.initial_rows == 0 {
-                spawn_cfg.initial_rows =
-                    u64::from(crate::bridges::utils::editor_rows_for_terminal_rows(rows));
-            }
-            let editor_machine =
-                neoism_backend::performer::nvim::NvimEmbedMachine::spawn(
-                    spawn_cfg,
-                    event_proxy.clone(),
-                    window_id,
-                    route_id,
-                )
-                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
-            // Take the receiver eagerly so the hot-path drain doesn't
-            // touch the machine's internal Mutex on every render.
-            let editor_redraw_rx = editor_machine.take_redraw_rx();
-
-            let (sender, _receiver) = corcovado::channel::channel();
-            let messenger = Messenger::new(sender);
-
-            tracing::info!(
-                target: "neoism::nvim_trace",
-                route_id,
-                "[nvim-trace] opened file via LOCAL nvim editor backend"
-            );
-            return Ok(Context {
-                route_id,
-                #[cfg(not(target_os = "windows"))]
-                main_fd: Arc::new(-1),
-                #[cfg(not(target_os = "windows"))]
-                shell_pid: 1,
-                messenger,
-                terminal,
-                terminal_input: crate::terminal::blocks::TerminalInputBuffer::default(),
-                terminal_shell_kind: crate::terminal::blocks::TerminalShellKind::Unknown,
-                rich_text_id,
-                renderable_content: RenderableContent::new(cursor_state.0.clone()),
-                dimension,
-                pending_terminal_resize: false,
-                pending_splash: false,
-                splash_dim_stable_frames: 0,
-                splash_last_dim: (0, 0),
-                splash_last_cursor_row: 0,
-                splash_injection: None,
-                ime: Ime::new(),
-                remote_pty: None,
-                _io_thread: None,
-                editor: Some(EditorBackend::Local(editor_machine)),
-                editor_redraw_rx,
-                editor_daemon_messages: Default::default(),
-                editor_hl_table: HighlightTable::new(),
-                editor_default_colors: NvimColors::default(),
-                editor_mode: EditorMode::default(),
-                editor_pending_scroll_lines: 0,
-                editor_predicted_cells: Vec::new(),
-                editor_pending_grid_scroll_lines: 0,
-                editor_scroll_reset_pending: false,
-                editor_viewport_topline: 0,
-                editor_presence_line: 0,
-                editor_presence_col: 0,
-                editor_textoff: 0,
-                editor_viewport_botline: 0,
-                editor_viewport_line_count: 0,
-                editor_grid_id: None,
-                editor_cursor_line: 0,
-                editor_total_lines: 0,
-                editor_pending_keys: String::new(),
-                editor_pending_elastic_lines: 0,
-                editor_popup_menu: None,
-                editor_lsp_status: Some("initializing".to_string()),
-                editor_lsp_action_result: None,
-                editor_lsp_action_result_modal_seen: true,
-                editor_lsp_completion: None,
-                editor_lsp_completion_seq: 0,
-                editor_lsp_hover: None,
-                editor_lsp_hover_seq: 0,
-                editor_lsp_hover_cell: None,
-                editor_buf_modified: Default::default(),
-                editor_buf_enter: Default::default(),
-                editor_notifications: Default::default(),
-                editor_yank_flashes: Default::default(),
-                editor_diagnostics: None,
-                attached_lsps: Vec::new(),
-                lsp_snapshot: None,
-                lsp_messages: std::collections::BTreeMap::new(),
-                editor_path: None,
-                markdown: None,
-                draw: None,
-                notebook: None,
-                neoism_agent: None,
-                neoism_tags: None,
-                neoism_extensions: None,
-            });
-        }
 
         let pty;
         let mut remote_binding = None;
@@ -855,46 +735,8 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             ime: Ime::new(),
             remote_pty: remote_binding,
             _io_thread: io_thread,
-            editor: None,
-            editor_redraw_rx: None,
-            editor_daemon_messages: Default::default(),
-            editor_hl_table: HighlightTable::new(),
-            editor_default_colors: NvimColors::default(),
-            editor_mode: EditorMode::default(),
-            editor_pending_scroll_lines: 0,
-            editor_predicted_cells: Vec::new(),
-            editor_pending_grid_scroll_lines: 0,
-            editor_scroll_reset_pending: false,
-            editor_viewport_topline: 0,
-            editor_presence_line: 0,
-            editor_presence_col: 0,
-            editor_textoff: 0,
-            editor_viewport_botline: 0,
-            editor_viewport_line_count: 0,
-            editor_grid_id: None,
-            editor_cursor_line: 0,
-            editor_total_lines: 0,
-            editor_pending_keys: String::new(),
-            editor_pending_elastic_lines: 0,
-            editor_popup_menu: None,
-            editor_lsp_status: None,
-            editor_lsp_action_result: None,
-            editor_lsp_action_result_modal_seen: true,
-            editor_lsp_completion: None,
-            editor_lsp_completion_seq: 0,
-            editor_lsp_hover: None,
-            editor_lsp_hover_seq: 0,
-            editor_lsp_hover_cell: None,
-            editor_buf_modified: Default::default(),
-            editor_buf_enter: Default::default(),
-            editor_notifications: Default::default(),
-            editor_yank_flashes: Default::default(),
-            editor_diagnostics: None,
-            attached_lsps: Vec::new(),
-            lsp_snapshot: None,
-            lsp_messages: std::collections::BTreeMap::new(),
-            editor_path: None,
             markdown: None,
+            code: None,
             draw: None,
             notebook: None,
             neoism_agent: None,
@@ -903,156 +745,4 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         })
     }
 
-    pub(crate) fn create_daemon_editor_context(
-        &mut self,
-        file: Option<PathBuf>,
-        rich_text_id: usize,
-        dimension: ContextDimension,
-        cwd: Option<PathBuf>,
-        init_commands: Vec<String>,
-    ) -> Option<Context<T>> {
-        let link = self.daemon.link.clone()?;
-        // PEER-DAEMON GUARD: while dialled into another host's daemon
-        // (joined workspace), daemon-hosted nvim is only correct for
-        // grids that live THERE. Routing a LOCAL workspace's file to
-        // the peer spawned nvim on the other machine against a path
-        // that doesn't exist there — black frozen panes all showing
-        // the wrong buffer. Returning None makes every caller fall
-        // back to a local nvim spawn.
-        if self.daemon.link_is_peer && !self.current_workspace_is_remote_joined() {
-            return None;
-        }
-        let route_id = ROUTE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-        // Plain numeric surface id. Cross-client collision on a shared
-        // daemon is handled SERVER-side: the daemon scopes nvim
-        // sessions per websocket (`socket_scoped_nvim_key`), so two
-        // desktops both naming surface "7" get separate nvims. (A
-        // client-side namespace prefix was tried here and broke grid
-        // rendering — parts of the pipeline treat surface ids as
-        // numeric pane external ids.)
-        let surface_id = surface_id_for_pane_external_id(route_id as u64);
-        let config = neoism_backend::performer::nvim::NvimSpawnConfig {
-            initial_file: file.clone(),
-            cwd: cwd.clone(),
-            init_commands: init_commands.clone(),
-            ..Default::default()
-        };
-        let mut context = create_dead_context(
-            self.event_proxy.clone(),
-            self.window_id,
-            route_id,
-            rich_text_id,
-            dimension,
-        );
-        context.editor = Some(EditorBackend::daemon(
-            surface_id.clone(),
-            link.handle.clone(),
-            link.runtime.clone(),
-            config,
-        ));
-        context.editor_lsp_status = Some("active".into());
-
-        tracing::info!(
-            target: "neoism::nvim_trace",
-            surface_id = %surface_id,
-            file = ?file,
-            route_id,
-            "[nvim-trace] opened file via DAEMON editor backend"
-        );
-        Some(context)
-    }
-
-    fn active_daemon_session_id(&self) -> Option<String> {
-        self.daemon.cache.active_session_id.clone().or_else(|| {
-            self.daemon
-                .cache
-                .sessions
-                .first()
-                .map(|session| session.id.clone())
-        })
-    }
-
-    pub(crate) fn bootstrap_daemon_editor_route(&self, route_id: usize) {
-        let Some(link) = self.daemon.link.clone() else {
-            return;
-        };
-        let Some((surface_id, config, dimension)) =
-            self.daemon_editor_bootstrap_for_route(route_id)
-        else {
-            return;
-        };
-
-        if let Some(session_id) = self.active_daemon_session_id() {
-            link.send(WorkspaceClientMessage::BindEditorSurface {
-                surface_id: surface_id.clone(),
-                session_id,
-                path: config.initial_file.clone(),
-            });
-        }
-
-        let mut messages = Vec::new();
-        messages.push(EditorClientMessage::Resize {
-            width: dimension.columns.min(u16::MAX as usize) as u32,
-            height: crate::bridges::utils::editor_rows_for_dimension_lines(
-                dimension.lines,
-            ),
-            surface_id: Some(surface_id.clone()),
-        });
-        if let Some(cwd) = config.cwd.as_ref() {
-            messages.push(EditorClientMessage::Command {
-                command: neoism_backend::performer::nvim::vim_cd_command(
-                    &cwd.display().to_string(),
-                ),
-                surface_id: Some(surface_id.clone()),
-            });
-        }
-        for command in config.init_commands {
-            messages.push(EditorClientMessage::Command {
-                command,
-                surface_id: Some(surface_id.clone()),
-            });
-        }
-        if let Some(path) = config.initial_file.clone() {
-            messages.push(EditorClientMessage::OpenBuffer {
-                path,
-                line: None,
-                character: None,
-                surface_id: Some(surface_id.clone()),
-            });
-        }
-        tracing::info!(
-            target: "neoism::nvim_trace",
-            surface_id = %surface_id,
-            file = ?config.initial_file,
-            message_count = messages.len(),
-            has_session = self.active_daemon_session_id().is_some(),
-            columns = dimension.columns,
-            lines = dimension.lines,
-            "[nvim-trace] bootstrapping DAEMON editor route (Resize/cd/OpenBuffer)"
-        );
-        link.send_editor_sequence(messages);
-    }
-
-    fn daemon_editor_bootstrap_for_route(
-        &self,
-        route_id: usize,
-    ) -> Option<(String, NvimSpawnConfig, ContextDimension)> {
-        for grid in &self.contexts {
-            for item in grid.contexts().values() {
-                let context = item.context();
-                if context.route_id != route_id {
-                    continue;
-                }
-                let Some((surface_id, config)) = context
-                    .editor
-                    .as_ref()
-                    .and_then(EditorBackend::daemon_bootstrap)
-                else {
-                    continue;
-                };
-                return Some((surface_id, config, context.dimension));
-            }
-        }
-        None
-    }
 }

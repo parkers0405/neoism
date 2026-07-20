@@ -23,54 +23,6 @@ pub struct WorkspaceChromeMargins {
     pub bottom: f32,
 }
 
-/// Physical editor-row geometry after all surrounding chrome has been
-/// accounted for. `cell_height` is a pane-local pitch: glyph metrics stay
-/// unchanged, but the row origins share any otherwise-unused pixels so the
-/// last complete row lands exactly on the pane/status boundary.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EditorRowFit {
-    pub rows: u16,
-    pub cell_height: f32,
-    pub usable_height: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EditorRowFitInput {
-    pub scaled_margin_top: f32,
-    pub layout_top: f32,
-    pub layout_height: f32,
-    pub window_height: f32,
-    pub status_line_height: f32,
-    pub nominal_cell_height: f32,
-}
-
-/// Fit only complete editor rows into the exact physical surface between the
-/// pane's top chrome and either its own bottom edge or the global status bar.
-///
-/// The row count remains conservative (`floor` at the nominal font pitch),
-/// while the sub-row remainder is distributed across those rows. This avoids
-/// both failure modes of the old policy: an extra clipped nvim row and a solid
-/// remainder band below the last row.
-pub fn fit_editor_rows(input: EditorRowFitInput) -> EditorRowFit {
-    let pane_top = (input.scaled_margin_top + input.layout_top).round();
-    let layout_bottom = (pane_top + input.layout_height.max(0.0)).round();
-    let status_top = (input.window_height - input.status_line_height.max(0.0)).round();
-    let pane_bottom = layout_bottom.min(status_top).max(pane_top);
-    let usable_height = (pane_bottom - pane_top).round().max(1.0);
-    let nominal_cell_height = input.nominal_cell_height.round().max(1.0);
-    let rows = (usable_height / nominal_cell_height)
-        .floor()
-        .max(1.0)
-        .min(u16::MAX as f32) as u16;
-    let cell_height = usable_height / f32::from(rows);
-
-    EditorRowFit {
-        rows,
-        cell_height,
-        usable_height,
-    }
-}
-
 /// Extra logical pixels that `resize_top_or_bottom_line` must add on
 /// top of `padding_top_from_config` to make room for the chrome bands
 /// above the active context (buffer tabs, breadcrumbs, terminal pad).
@@ -289,6 +241,9 @@ pub enum TrailCursorOverlayTarget {
     SuppressedByInputOverlay,
     AgentInput,
     Markdown,
+    /// Native code pane caret — the trail glides into the buffer and
+    /// draws the caret itself (the pane only publishes `cursor_rect`).
+    Code,
     TerminalBlockInput,
     TerminalGrid,
 }
@@ -322,9 +277,10 @@ pub fn trail_cursor_overlay_draw_kind(
         | Target::Tabs
         | Target::GitDiffPanel => DrawKind::ChromeRect,
         Target::SuppressedByInputOverlay => DrawKind::Suppressed,
-        Target::AgentInput | Target::Markdown | Target::TerminalBlockInput => {
-            DrawKind::ContentCursor
-        }
+        Target::AgentInput
+        | Target::Markdown
+        | Target::Code
+        | Target::TerminalBlockInput => DrawKind::ContentCursor,
         Target::TerminalGrid => DrawKind::TerminalGrid,
     }
 }
@@ -344,6 +300,8 @@ pub struct TrailCursorOverlayState {
     pub modal_owns_editor_focus: bool,
     pub agent_input_cursor_available: bool,
     pub markdown_cursor_available: bool,
+    /// Focused code pane published a caret rect this frame.
+    pub code_cursor_available: bool,
     pub terminal_block_input_active: bool,
     pub trail_cursor_enabled: bool,
 }
@@ -378,6 +336,8 @@ pub fn trail_cursor_overlay_target(
         Some(Target::SuppressedByInputOverlay)
     } else if state.agent_input_cursor_available {
         Some(Target::AgentInput)
+    } else if state.code_cursor_available {
+        Some(Target::Code)
     } else if state.markdown_cursor_available {
         Some(Target::Markdown)
     } else if state.trail_cursor_enabled && state.terminal_block_input_active {
@@ -501,8 +461,8 @@ pub fn lsp_missing_modal_descriptor(
 }
 
 /// Categorizes a [`neoism_ui::widgets::modal::ModalAction`] dispatch
-/// into a coarse outcome class. The actual side effects (talking to
-/// nvim, opening installers, mutating file trees) stay on the host —
+/// into a coarse outcome class. The actual side effects (opening
+/// installers, mutating file trees, editor commands) stay on the host —
 /// the policy just answers "should the modal stay open, close before
 /// the action runs, or close on completion?" so multiple frontends can
 /// share the same dispatch contract.
@@ -531,7 +491,6 @@ pub enum ModalActionTag {
     Close,
     InstallLsp,
     InstallPythonKernel,
-    InstallTreesitter,
     ApplyTheme,
     ApplyShaderOverlay,
     ApplyMashupPack,
@@ -587,7 +546,6 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         T::Close => D::Close,
         T::InstallLsp
         | T::InstallPythonKernel
-        | T::InstallTreesitter
         | T::ApplyTheme
         | T::ApplyShaderOverlay
         | T::ApplyMashupPack
@@ -675,45 +633,6 @@ pub fn island_drag_move_outcome(input: IslandDragMoveInput) -> IslandDragMoveOut
         perform_swap: input.swap,
         mark_dirty: input.is_dragging,
         drag_was_live: input.is_dragging,
-    }
-}
-
-/// Pure formatter for `ModalAction::RunEditorCommandWithInput`'s
-/// embedded-nvim command string.
-///
-/// `command` is the modal's command label (`"Rename"`,
-/// `"WorkspaceSymbols"`, ...) and `value` is the user's already-trimmed
-/// input. The host calls `lua_string_literal` on its end of the wire to
-/// quote-escape `value`; the policy supplies the lua wrapper for known
-/// labels and the bare `"<cmd> <value>"` fallback for the rest. Returns
-/// either a [`ModalEditorCommand::LuaCall`] (which the host renders with
-/// its lua-string-literal helper) or a [`ModalEditorCommand::Raw`]
-/// passthrough.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModalEditorCommand {
-    /// `lua require('rio.lsp').<method>(<lua_string_literal(value)>)`.
-    /// The host concatenates `lua_call_prefix` + literal + `")"`.
-    LuaCall {
-        lua_call_prefix: String,
-        value: String,
-    },
-    /// `"<command> <value>"` — direct passthrough for unknown labels.
-    Raw(String),
-}
-
-/// Decide which embedded-nvim command an input-modal commit should
-/// dispatch. Pure projection — host owns `send_editor_command`.
-pub fn modal_input_editor_command(command: &str, value: &str) -> ModalEditorCommand {
-    match command {
-        "Rename" => ModalEditorCommand::LuaCall {
-            lua_call_prefix: "lua require('rio.lsp').rename_apply(".to_string(),
-            value: value.to_string(),
-        },
-        "WorkspaceSymbols" => ModalEditorCommand::LuaCall {
-            lua_call_prefix: "lua require('rio.lsp').workspace_symbols(".to_string(),
-            value: value.to_string(),
-        },
-        other => ModalEditorCommand::Raw(format!("{other} {value}")),
     }
 }
 
@@ -831,39 +750,6 @@ mod tests {
         });
 
         assert!(masks.is_empty());
-    }
-
-    #[test]
-    fn editor_rows_fit_exactly_between_breadcrumbs_and_status() {
-        let fit = fit_editor_rows(EditorRowFitInput {
-            scaled_margin_top: 110.0,
-            layout_top: 0.0,
-            layout_height: 613.7143,
-            window_height: 752.0,
-            status_line_height: 47.142857,
-            nominal_cell_height: 35.0,
-        });
-
-        assert_eq!(fit.rows, 17);
-        assert_eq!(fit.usable_height, 595.0);
-        assert_eq!(fit.cell_height, 35.0);
-    }
-
-    #[test]
-    fn editor_rows_distribute_fractional_remainder_instead_of_leaving_band() {
-        let fit = fit_editor_rows(EditorRowFitInput {
-            scaled_margin_top: 140.0,
-            layout_top: 0.0,
-            layout_height: 564.0,
-            window_height: 752.0,
-            status_line_height: 47.0,
-            nominal_cell_height: 35.0,
-        });
-
-        assert_eq!(fit.rows, 16);
-        assert_eq!(fit.usable_height, 564.0);
-        assert_eq!(fit.cell_height, 35.25);
-        assert_eq!(f32::from(fit.rows) * fit.cell_height, fit.usable_height);
     }
 
     #[test]
@@ -1198,7 +1084,6 @@ mod tests {
     fn modal_action_dispatch_install_paths_keep_modal_open() {
         for tag in [
             ModalActionTag::InstallLsp,
-            ModalActionTag::InstallTreesitter,
             ModalActionTag::ApplyTheme,
             ModalActionTag::ApplyShaderOverlay,
             ModalActionTag::InstallAgent,
@@ -1307,42 +1192,6 @@ mod tests {
         });
         assert!(outcome.mark_dirty);
         assert!(outcome.drag_was_live);
-    }
-
-    #[test]
-    fn modal_input_editor_command_rename_wraps_in_lua_call() {
-        let cmd = modal_input_editor_command("Rename", "new_name");
-        match cmd {
-            ModalEditorCommand::LuaCall {
-                lua_call_prefix,
-                value,
-            } => {
-                assert_eq!(lua_call_prefix, "lua require('rio.lsp').rename_apply(");
-                assert_eq!(value, "new_name");
-            }
-            other => panic!("expected LuaCall, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn modal_input_editor_command_workspace_symbols_wraps_in_lua_call() {
-        let cmd = modal_input_editor_command("WorkspaceSymbols", "Foo");
-        match cmd {
-            ModalEditorCommand::LuaCall {
-                lua_call_prefix,
-                value,
-            } => {
-                assert_eq!(lua_call_prefix, "lua require('rio.lsp').workspace_symbols(");
-                assert_eq!(value, "Foo");
-            }
-            other => panic!("expected LuaCall, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn modal_input_editor_command_unknown_falls_through_to_raw() {
-        let cmd = modal_input_editor_command("Edit", "src/lib.rs");
-        assert_eq!(cmd, ModalEditorCommand::Raw("Edit src/lib.rs".to_string()));
     }
 
     #[test]

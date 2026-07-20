@@ -21,7 +21,6 @@ const NEOISM_NOTES_MCP_ID: &str = "neoism-notes";
 const NEOISM_MEMORY_MCP_ID: &str = "neoism-memory";
 const NEOISM_PYTHON_KERNEL_ID: &str = "neoism-python-kernel";
 const EVCXR_JUPYTER_KERNEL_ID: &str = "evcxr-jupyter-kernel";
-const TREESITTER_EXTENSION_PREFIX: &str = "treesitter-";
 const KERNEL_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const KERNEL_VALIDATE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -35,16 +34,15 @@ const KERNEL_VALIDATE_TIMEOUT: Duration = Duration::from_secs(30);
 /// and the runtime lives until process exit.
 static EXT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-/// Flipped to `true` by the detached `kick_mason_seed_if_needed` task
-/// once the Mason registry has been fetched (or refreshed from the
-/// 24h-stale cache). The per-frame `render_neoism_extensions_panels`
-/// observes the flag, re-seeds the visible Extensions pane with the
-/// newly available LSP rows, and clears it back to `false`. This is the
-/// "show LSPs on first launch without blocking the UI" hand-off — on
-/// cache hit the flag flips before the pane even opens, so no re-seed
-/// happens; on cache miss the flag flips a few seconds in and the
-/// pane updates in place.
-static MASON_CACHE_FRESH: AtomicBool = AtomicBool::new(false);
+/// Flipped to `true` by the detached `kick_catalog_seed_if_needed` task
+/// once the package-catalog snapshot has been fetched (or refreshed from
+/// the 24h-stale cache). The per-frame `render_neoism_extensions_panels`
+/// observes the flag, re-seeds the visible Extensions pane (so the
+/// language-server rows' Install buttons resolve real install plans),
+/// and clears it back to `false`. On cache hit the flag flips before
+/// the pane even opens, so no re-seed happens; on cache miss the flag
+/// flips a few seconds in and the pane updates in place.
+static CATALOG_CACHE_FRESH: AtomicBool = AtomicBool::new(false);
 
 fn ext_runtime_handle() -> tokio::runtime::Handle {
     EXT_RUNTIME
@@ -70,23 +68,22 @@ pub(crate) struct InstallTracker {
 
 /// Where the install was triggered from. Drives completion UX: the
 /// Extensions panel just flips a row and pushes a notification; the
-/// missing-LSP modal also needs to close the busy modal, open a
-/// success/failure modal, and ask nvim to retry the LSP attach.
+/// missing-LSP modal also needs to close the busy modal and open a
+/// success/failure modal.
 #[derive(Clone, Debug)]
 pub(crate) enum InstallSource {
     ExtensionsPanel,
     PythonKernelModal {
         retry_notebook_cell: Option<(PathBuf, usize)>,
     },
-    /// Triggered by `maybe_open_lsp_missing_modal` → "Install <server>"
-    /// button. `server` is the lsp.lua server name (e.g. `rust-analyzer`,
-    /// `ts_ls`). The `display` string is the user-facing label.
+    /// Triggered by an "Install <server>" modal button. `server` is the
+    /// Neoism LSP engine's adapter id (e.g. `rust`, `typescript`). The
+    /// `display` string is the user-facing label. The engine re-resolves
+    /// its command sources on every status read, so the freshly managed
+    /// binary is picked up with no extra plumbing.
     MissingLspModal {
         server: String,
         display: String,
-    },
-    TreeSitterParser {
-        lang: String,
     },
 }
 
@@ -111,6 +108,8 @@ pub(crate) struct InstallJob {
 /// Translate a bundled `ExtensionManifest` into the panel's `ExtensionEntry`.
 /// Status is derived from whether the manifest's id appears in
 /// `installed.json` — fresh users see everything as `NotInstalled`.
+/// Language-server rows never come through here (they are built straight
+/// from the engine's adapter registry), so `lsp_source` is always `None`.
 fn extension_manifest_to_entry(
     manifest: ExtensionManifest,
     installed_version: Option<String>,
@@ -119,7 +118,6 @@ fn extension_manifest_to_entry(
         Some(version) => ExtensionStatus::Installed { version },
         None => ExtensionStatus::NotInstalled,
     };
-    let lsp_source = lsp_source_label(&manifest);
     ExtensionEntry {
         id: manifest.id,
         name: manifest.name,
@@ -131,44 +129,14 @@ fn extension_manifest_to_entry(
         languages: manifest.languages,
         repository_url: manifest.repository_url,
         status,
-        lsp_source,
+        lsp_source: None,
     }
 }
 
-/// For a language-server manifest, ask the Neoism LSP engine where it would
-/// resolve the binary (`extension`/`path`/`config`/`missing`) so the row
-/// can show a source badge that matches runtime reality — e.g. a server
-/// already on `$PATH` reads as usable even when Mason never installed it.
-/// `None` for non-LSP manifests (MCP servers, parsers, kernels).
-fn lsp_source_label(manifest: &ExtensionManifest) -> Option<String> {
-    if !manifest_is_lsp(manifest) {
-        return None;
-    }
-    let command = manifest
-        .run
-        .as_ref()
-        .map(|run| run.command.clone())
-        .filter(|command| !command.is_empty())
-        .unwrap_or_else(|| vec![manifest.id.clone()]);
-    if !manifest_has_registered_lsp_adapter(manifest) {
-        return Some("adapter required".to_string());
-    }
-    use neoism_agent_server::language_server::LspCommandSource;
-    let label =
-        match neoism_agent_server::language_server::command_source(&manifest.id, command)
-        {
-            LspCommandSource::BuiltIn => "built-in/socket",
-            LspCommandSource::Extension => "extension",
-            LspCommandSource::Config => "config",
-            LspCommandSource::Path => "path",
-            LspCommandSource::Missing => "missing",
-        };
-    Some(label.to_string())
-}
-
-/// Mason is the package catalog, while Neoism's adapter registry determines
-/// whether an installed LSP can attach. Keep host-installable packages visible
-/// even before an adapter exists; their source badge says `adapter required`.
+/// The package catalog resolves install plans (download URL, version,
+/// layout), while Neoism's LSP engine registry determines whether an
+/// installed server can attach. Both must agree before we offer a
+/// one-click install.
 fn extension_manifest_supported_by_host(manifest: &ExtensionManifest) -> bool {
     neoism_extensions::supported_on_current_host(manifest)
 }
@@ -204,54 +172,309 @@ fn manifest_is_lsp(manifest: &ExtensionManifest) -> bool {
     })
 }
 
-/// Catalog rows for host-provided language-server adapters. These come from
-/// the runtime registry itself rather than Mason, so the page cannot drift
-/// from what the engine can really attach. They deliberately have no
-/// `ExtensionManifest`: there is nothing to install or uninstall.
-fn built_in_language_server_entries() -> Vec<ExtensionEntry> {
-    use neoism_agent_server::language_server::LspAdapterTransport;
+/// Extra tab memberships for a language-server card, curated by adapter
+/// id. Nearly every server advertises the `formatting` and `diagnostics`
+/// capability bits, so flag-driven membership made the Formatters and
+/// Linters tabs near-copies of Language Servers. Tab placement is earned
+/// by what a tool is FOR, not by what its capability bits say:
+/// - format-first tools (taplo — the TOML formatter/toolkit whose LSP is
+///   the delivery vehicle) also join the Formatters tab;
+/// - lint-first tools (eslint, ruff, oxlint, …) also join the Linters
+///   tab — none ship in the built-in registry today, but workspace-
+///   configured adapters carrying these ids classify correctly;
+/// - everything else stays on Language Servers only, with formatting
+///   support rendered as a card badge (`Formatting`) instead of a tab
+///   membership.
+struct AdapterTabRoles {
+    formatter: bool,
+    linter: bool,
+}
 
-    neoism_agent_server::language_server::language_server_adapters()
+fn adapter_tab_roles(adapter_id: &str) -> AdapterTabRoles {
+    match adapter_id {
+        // taplo: format-first TOML toolkit.
+        "toml" => AdapterTabRoles {
+            formatter: true,
+            linter: false,
+        },
+        // Lint-first ids, recognised for workspace-configured adapters.
+        "eslint" | "ruff" | "oxlint" | "ts_standard" | "standardjs" => {
+            AdapterTabRoles {
+                formatter: false,
+                linter: true,
+            }
+        }
+        // biome is a formatter+linter combo.
+        "biome" => AdapterTabRoles {
+            formatter: true,
+            linter: true,
+        },
+        _ => AdapterTabRoles {
+            formatter: false,
+            linter: false,
+        },
+    }
+}
+
+/// Human badge for where the engine resolves an adapter's command.
+fn command_source_label(
+    source: &neoism_agent_server::language_server::LspCommandSource,
+) -> &'static str {
+    use neoism_agent_server::language_server::LspCommandSource;
+    match source {
+        LspCommandSource::BuiltIn => "built-in/socket",
+        LspCommandSource::Extension => "extension",
+        LspCommandSource::Config => "config",
+        LspCommandSource::Path => "path",
+        LspCommandSource::Missing => "missing",
+    }
+}
+
+/// Language-server rows for the Extensions page: exactly one card per
+/// adapter in the Neoism LSP engine's runtime registry, so the page can
+/// never drift from what the engine can really attach. State is real:
+/// `connected` comes from the engine's live client map (a cheap lock
+/// read — deliberately NOT `status()`, which walks the workspace), the
+/// source badge from where the engine resolves the binary right now,
+/// and the install button only appears when the engine's managed
+/// download can actually supply the adapter's executable.
+///
+/// Formatters / Linters tab membership is curated per adapter id (see
+/// [`adapter_tab_roles`]) rather than derived from the ubiquitous
+/// capability flags — formatting and lint diagnostics flow through the
+/// language servers (there is no separate formatter registry to install
+/// from), so servers that merely *support* formatting carry a badge-only
+/// `Formatting` category on their card instead of flooding those tabs.
+fn language_server_entries(
+    workspace_root: Option<&std::path::Path>,
+    installed: &InstalledIndex,
+) -> Vec<ExtensionEntry> {
+    use neoism_agent_server::language_server::{
+        LspAdapterOrigin, LspAdapterTransport, LspCommandSource,
+    };
+
+    let adapters = match workspace_root {
+        Some(root) => {
+            neoism_agent_server::language_server::language_server_adapters_for(root)
+        }
+        None => neoism_agent_server::language_server::language_server_adapters(),
+    };
+    let live = workspace_root
+        .map(neoism_agent_server::language_server::live_languages)
+        .unwrap_or_default();
+
+    adapters
         .into_iter()
-        .filter_map(|adapter| {
-            let LspAdapterTransport::Tcp {
-                default_host,
-                default_port,
-                ..
-            } = adapter.transport
-            else {
-                return None;
-            };
+        .map(|adapter| {
+            let connected = live.contains(&adapter.id)
+                || adapter.routes.iter().any(|route| live.contains(&route.id));
             let routed_languages = adapter
                 .routes
                 .iter()
                 .map(|route| route.document_language_id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            Some(ExtensionEntry {
-                id: format!("builtin-lsp-{}", adapter.id),
-                name: format!("{} Language Server", adapter.name),
-                // The adapter follows Neoism's own release and is not a
-                // separately-versioned package. Leaving this blank avoids the
-                // generic card renderer inventing a misleading `vbuilt-in`.
-                version: String::new(),
-                description: format!(
-                    "Built-in connection adapter for {routed_languages}; the host application must be running and provide its language server at {default_host}:{default_port}."
-                ),
-                author: "Neoism".to_string(),
-                downloads: None,
-                categories: vec![
-                    "Language Server".to_string(),
-                    "LSP".to_string(),
-                    "Built-in".to_string(),
-                ],
-                languages: vec![adapter.name],
-                status: ExtensionStatus::BuiltIn,
-                repository_url: None,
-                lsp_source: Some("built-in/socket".to_string()),
-            })
+            let roles = adapter_tab_roles(&adapter.id);
+            let mut categories =
+                vec!["Language Server".to_string(), "LSP".to_string()];
+            if roles.formatter {
+                categories.push("Formatter".to_string());
+            } else if adapter.capabilities.formatting {
+                // Badge only: "Formatting" renders as a card chip but
+                // matches no tab (`matches_tab` looks for "formatter"),
+                // so ubiquitous formatting support stays visible without
+                // flooding the Formatters tab.
+                categories.push("Formatting".to_string());
+            }
+            if roles.linter {
+                categories.push("Linter".to_string());
+            }
+
+            match &adapter.transport {
+                LspAdapterTransport::Tcp {
+                    default_host,
+                    default_port,
+                    ..
+                } => {
+                    categories.push("Built-in".to_string());
+                    ExtensionEntry {
+                        id: format!("builtin-lsp-{}", adapter.id),
+                        name: format!("{} Language Server", adapter.name),
+                        // The adapter follows Neoism's own release and is not a
+                        // separately-versioned package. Leaving this blank avoids
+                        // the generic card renderer inventing a misleading
+                        // `vbuilt-in`.
+                        version: String::new(),
+                        description: format!(
+                            "Built-in connection adapter for {routed_languages}; the host application must be running and provide its language server at {default_host}:{default_port}."
+                        ),
+                        author: "Neoism".to_string(),
+                        downloads: None,
+                        categories,
+                        languages: vec![adapter.name],
+                        status: ExtensionStatus::BuiltIn,
+                        repository_url: None,
+                        lsp_source: Some(
+                            if connected { "connected" } else { "built-in/socket" }
+                                .to_string(),
+                        ),
+                    }
+                }
+                LspAdapterTransport::Stdio { command } => {
+                    let executable = command.first().cloned().unwrap_or_default();
+                    let source = neoism_agent_server::language_server::command_source(
+                        &adapter.id,
+                        command.clone(),
+                    );
+                    // Row id doubles as the install/uninstall key, so it must
+                    // match the catalog package the engine's managed download
+                    // would install (`installed.json` is keyed the same way).
+                    let package_id = adapter
+                        .catalog_packages
+                        .first()
+                        .map(|package| package.package_id.clone());
+                    let id = package_id
+                        .clone()
+                        .unwrap_or_else(|| format!("lsp-{}", adapter.id));
+                    let installed_version =
+                        installed.get(&id).map(|entry| entry.version.clone());
+                    let status = if adapter.configuration_error.is_some() {
+                        ExtensionStatus::Unavailable
+                    } else {
+                        match source {
+                            LspCommandSource::Extension => ExtensionStatus::Installed {
+                                version: installed_version
+                                    .clone()
+                                    .unwrap_or_else(|| "managed".to_string()),
+                            },
+                            LspCommandSource::Path
+                            | LspCommandSource::Config
+                            | LspCommandSource::BuiltIn => ExtensionStatus::Detected,
+                            LspCommandSource::Missing => {
+                                if package_id.is_some() {
+                                    ExtensionStatus::NotInstalled
+                                } else {
+                                    ExtensionStatus::Unavailable
+                                }
+                            }
+                        }
+                    };
+                    let mut description = format!(
+                        "Language server for {routed_languages}; the Neoism LSP engine runs `{executable}` over stdio."
+                    );
+                    if adapter.capabilities.formatting {
+                        description.push_str(" Provides document formatting.");
+                    }
+                    if matches!(adapter.origin, LspAdapterOrigin::Configured) {
+                        description
+                            .push_str(" Defined by this workspace's configuration.");
+                    }
+                    if let Some(error) = &adapter.configuration_error {
+                        description.push_str(&format!(" Configuration error: {error}"));
+                    }
+                    ExtensionEntry {
+                        id,
+                        name: format!("{} Language Server", adapter.name),
+                        version: installed_version.unwrap_or_default(),
+                        description,
+                        author: "Neoism".to_string(),
+                        downloads: None,
+                        categories,
+                        languages: vec![adapter.name],
+                        status,
+                        repository_url: None,
+                        lsp_source: Some(
+                            if connected {
+                                "connected"
+                            } else {
+                                command_source_label(&source)
+                            }
+                            .to_string(),
+                        ),
+                    }
+                }
+                LspAdapterTransport::Invalid => ExtensionEntry {
+                    id: format!("lsp-{}", adapter.id),
+                    name: format!("{} Language Server", adapter.name),
+                    version: String::new(),
+                    description: adapter
+                        .configuration_error
+                        .clone()
+                        .map(|error| format!("Adapter configuration error: {error}"))
+                        .unwrap_or_else(|| {
+                            format!(
+                                "Adapter for {routed_languages} has an invalid transport configuration."
+                            )
+                        }),
+                    author: "Neoism".to_string(),
+                    downloads: None,
+                    categories,
+                    languages: vec![adapter.name],
+                    status: ExtensionStatus::Unavailable,
+                    repository_url: None,
+                    lsp_source: Some("missing".to_string()),
+                },
+            }
         })
         .collect()
+}
+
+/// Cards for the tree-sitter grammars compiled into Neoism itself.
+/// Nothing to download: the old per-parser installer died with the
+/// embedded editor, and syntax highlighting now ships in the binary.
+fn built_in_syntax_entries() -> Vec<ExtensionEntry> {
+    neoism_ui::syntax::built_in_grammars()
+        .iter()
+        .map(|(grammar_id, language)| ExtensionEntry {
+            id: format!("grammar-{grammar_id}"),
+            name: format!("{language} Syntax"),
+            // Grammars version with the Neoism release itself; a blank
+            // version keeps the card from inventing a fake package version.
+            version: String::new(),
+            description: format!(
+                "Tree-sitter grammar for {language}, compiled into Neoism. Powers editor highlighting with nothing to install."
+            ),
+            author: "Neoism".to_string(),
+            downloads: None,
+            categories: vec![
+                "Syntax Parser".to_string(),
+                "Tree-sitter".to_string(),
+                "Built-in".to_string(),
+            ],
+            languages: vec![(*language).to_string()],
+            status: ExtensionStatus::BuiltIn,
+            repository_url: None,
+            lsp_source: None,
+        })
+        .collect()
+}
+
+/// Resolve catalog install manifests for every engine adapter whose
+/// executable the managed download can supply. These back the
+/// language-server rows' Install/Uninstall actions; rows whose package
+/// is absent from the (possibly not-yet-fetched) catalog cache simply
+/// resolve nothing and the dispatcher reports it honestly.
+fn catalog_manifests_for_engine_adapters() -> Vec<ExtensionManifest> {
+    let catalog_path = neoism_extensions::mason::mason_cache_path();
+    let Ok(registry) = neoism_extensions::load_mason_registry(&catalog_path) else {
+        return Vec::new();
+    };
+    let mut manifests = Vec::new();
+    for adapter in neoism_agent_server::language_server::language_server_adapters() {
+        for package in &adapter.catalog_packages {
+            let Some(pkg) = registry.iter().find(|p| p.name == package.package_id)
+            else {
+                continue;
+            };
+            let Ok(manifest) = neoism_extensions::package_to_manifest(pkg) else {
+                continue;
+            };
+            if manifest_is_auto_installable_lsp(&manifest) {
+                manifests.push(manifest);
+            }
+        }
+    }
+    manifests
 }
 
 /// Whether a manifest represents an MCP server (vs an LSP / theme /
@@ -385,75 +608,6 @@ fn evcxr_jupyter_kernel_manifest() -> ExtensionManifest {
         }),
         env_keys: Vec::new(),
     }
-}
-
-fn treesitter_extension_id(lang: &str) -> String {
-    format!("{TREESITTER_EXTENSION_PREFIX}{lang}")
-}
-
-fn treesitter_lang_from_extension_id(id: &str) -> Option<&str> {
-    let lang = id.strip_prefix(TREESITTER_EXTENSION_PREFIX)?;
-    crate::neoism::ide_tools::treesitter_install_spec(lang).map(|_| lang)
-}
-
-fn treesitter_parser_path(lang: &str) -> PathBuf {
-    neoism_backend::performer::nvim::rio_nvim_parser_dir().join(format!("{lang}.so"))
-}
-
-fn treesitter_query_dir(lang: &str) -> PathBuf {
-    neoism_backend::performer::nvim::rio_nvim_runtime_dir()
-        .join("queries")
-        .join(lang)
-}
-
-fn treesitter_parser_installed(lang: &str) -> bool {
-    treesitter_parser_path(lang).is_file()
-        && treesitter_query_dir(lang).join("highlights.scm").is_file()
-}
-
-fn treesitter_parser_manifest(lang: &str) -> Option<ExtensionManifest> {
-    let spec = crate::neoism::ide_tools::treesitter_install_spec(lang)?;
-    Some(ExtensionManifest {
-        id: treesitter_extension_id(spec.lang),
-        name: format!("{} Syntax Parser", spec.display_name),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        description: format!(
-            "Tree-sitter parser and highlight queries for {} files in Neoism's embedded editor.",
-            spec.display_name
-        ),
-        author: "Tree-sitter".to_string(),
-        downloads: None,
-        categories: vec![
-            "Tree-sitter Parser".to_string(),
-            "Syntax Parser".to_string(),
-            "Syntax".to_string(),
-        ],
-        languages: match spec.lang {
-            "gdscript" => vec!["Godot".to_string(), "GDScript".to_string()],
-            "godot_resource" => {
-                vec!["Godot".to_string(), "Godot Resources".to_string()]
-            }
-            "glsl" => vec!["GLSL".to_string(), "Godot Shader".to_string()],
-            _ => vec![spec.display_name.to_string()],
-        },
-        repository_url: Some(spec.repo.to_string()),
-        homepage: Some(spec.repo.to_string()),
-        executables: Vec::new(),
-        install: neoism_extensions::InstallKind::Cargo {
-            crate_name: format!("tree-sitter-{}", spec.lang),
-            version: "managed".to_string(),
-            features: Vec::new(),
-        },
-        run: None,
-        env_keys: Vec::new(),
-    })
-}
-
-fn treesitter_parser_manifests() -> Vec<ExtensionManifest> {
-    crate::neoism::ide_tools::treesitter_install_specs()
-        .iter()
-        .filter_map(|spec| treesitter_parser_manifest(spec.lang))
-        .collect()
 }
 
 fn is_builtin_extension_id(id: &str) -> bool {

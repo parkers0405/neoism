@@ -1241,10 +1241,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             | PanelKey::Search
             | PanelKey::GitBranch
             | PanelKey::CustomCursor
-            | PanelKey::CursorlineOverlay
             | PanelKey::TrailCursor
-            | PanelKey::YankFlash
-            | PanelKey::EditorScroll => None,
+            | PanelKey::YankFlash => None,
         }
     }
 
@@ -1361,10 +1359,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             | PanelKey::Search
             | PanelKey::GitBranch
             | PanelKey::CustomCursor
-            | PanelKey::CursorlineOverlay
             | PanelKey::TrailCursor
-            | PanelKey::YankFlash
-            | PanelKey::EditorScroll => {}
+            | PanelKey::YankFlash => {}
         }
     }
 }

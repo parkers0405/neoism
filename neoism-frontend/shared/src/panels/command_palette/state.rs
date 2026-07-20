@@ -240,7 +240,7 @@ impl CommandPalette {
 
     /// Open the palette in raw ex-command mode. The shared command list
     /// owns normal `:`/Cmd+Shift+; now; this is for callers that
-    /// intentionally want to forward the typed command to nvim — e.g.
+    /// intentionally want the typed command dispatched verbatim — e.g.
     /// the `Go to Line…` command, whose typed `:N` payload jumps there.
     pub fn enter_ex_mode(&mut self) {
         self.enabled = true;
@@ -257,7 +257,7 @@ impl CommandPalette {
 
     /// `true` while the palette is capturing an ex command. The router
     /// reads this on Enter to decide between executing a `PaletteAction`
-    /// and forwarding the query to nvim as `:<query>`.
+    /// and dispatching the query as a typed `:<query>`.
     pub fn is_ex_mode(&self) -> bool {
         matches!(self.mode, PaletteMode::Ex)
     }
@@ -272,7 +272,7 @@ impl CommandPalette {
     /// Open the palette in `?` backward search mode. Identical to
     /// [`Self::enter_search_mode`] except the commit direction flips —
     /// the dispatcher jumps to the previous match and points `n`/`N`
-    /// backward, mirroring nvim's native `?`.
+    /// backward, mirroring vim's native `?`.
     pub fn enter_search_mode_backward(&mut self) {
         self.enter_search_mode_with_direction(true);
     }

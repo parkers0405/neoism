@@ -9,7 +9,6 @@ impl Screen<'_> {
         ctx: &mut FrameCtx,
         animation_dt: std::time::Duration,
     ) {
-        let editor_scroll_was_animating = ctx.editor_scroll_was_animating;
         // Hover underline for terminal file links — runs AFTER the
         // grid pass so the underline lands on top of the cell text.
         // No persistent state: detect on demand from the live mouse
@@ -22,8 +21,7 @@ impl Screen<'_> {
         self.renderer.remote_rainbow_active = self.remote_presence.any_rainbow();
 
         let initial_redraw_reason = self.renderer.redraw_reason();
-        let mut has_animation =
-            initial_redraw_reason.is_some() || editor_scroll_was_animating;
+        let mut has_animation = initial_redraw_reason.is_some();
 
         if self.renderer.custom_mouse_cursor {
             let scale = self.sugarloaf.scale_factor();
@@ -107,6 +105,13 @@ impl Screen<'_> {
                     .and_then(|notebook| notebook.markdown.cursor_rect)
             })
             .is_some();
+        let code_cursor_available = self
+            .context_manager
+            .current()
+            .code
+            .as_ref()
+            .and_then(|code| code.cursor_rect)
+            .is_some();
         let markdown_active = self.context_manager.current().markdown.is_some()
             || self.context_manager.current().notebook.is_some();
         let terminal_block_input_active = {
@@ -142,6 +147,7 @@ impl Screen<'_> {
             modal_owns_editor_focus: self.renderer.modal.owns_editor_focus(),
             agent_input_cursor_available,
             markdown_cursor_available,
+            code_cursor_available,
             terminal_block_input_active,
             trail_cursor_enabled: self.renderer.trail_cursor_enabled && !markdown_active,
         });
@@ -173,6 +179,47 @@ impl Screen<'_> {
                         animation_dt_secs,
                         cursor_blink_visible,
                     );
+                }
+            }
+            Some(TrailCursorOverlayTarget::Code) => {
+                if let Some((rect, shape)) =
+                    self.context_manager.current().code.as_ref().and_then(|code| {
+                        code.cursor_rect.map(|rect| (rect, code.cursor_shape()))
+                    })
+                {
+                    let [x, y, w, h] = rect;
+                    self.renderer.trail_cursor.set_cursor_shape(shape);
+                    self.renderer.trail_cursor.set_destination(
+                        x * scale_factor,
+                        y * scale_factor,
+                        w * scale_factor,
+                        h * scale_factor,
+                    );
+                    if self.renderer.trail_cursor_enabled {
+                        self.renderer.trail_cursor.animate(
+                            w * scale_factor,
+                            h * scale_factor,
+                            animation_dt_secs,
+                        );
+                    } else {
+                        self.renderer
+                            .trail_cursor
+                            .snap_to_destination(w * scale_factor, h * scale_factor);
+                    }
+                    let cursor_color = self.renderer.live_cursor_color();
+                    if self.renderer.trail_cursor.is_animating() {
+                        self.renderer.trail_cursor.draw(
+                            &mut self.sugarloaf,
+                            scale_factor,
+                            cursor_color,
+                        );
+                    } else if cursor_blink_visible {
+                        self.renderer.trail_cursor.draw_always(
+                            &mut self.sugarloaf,
+                            scale_factor,
+                            cursor_color,
+                        );
+                    }
                 }
             }
             Some(TrailCursorOverlayTarget::Markdown) => {
@@ -271,11 +318,7 @@ impl Screen<'_> {
                     // (line_height − 1) × row_index pixels below the GPU
                     // block — visible as TWO cursors during animation.
                     let cell_width = layout.dimension.width.round().max(1.0);
-                    let cell_height = if current_item.val.editor.is_some() {
-                        layout.dimension.height.max(1.0)
-                    } else {
-                        layout.dimension.height.round().max(1.0)
-                    };
+                    let cell_height = layout.dimension.height.round().max(1.0);
                     let panel_rect = current_item.layout_rect;
 
                     let cursor =
@@ -283,25 +326,7 @@ impl Screen<'_> {
                     let cursor_row = cursor.state.pos.row.0 as usize;
                     let cursor_col = cursor.state.pos.col.0;
 
-                    let editor_scroll = current_item.val.editor.as_ref().map(|_| {
-                        let scroll_lines = self
-                            .renderer
-                            .editor_scroll
-                            .current_scroll_offset(current_item.val.rich_text_id);
-                        let elastic_px = self
-                            .renderer
-                            .editor_scroll
-                            .current_elastic_offset(current_item.val.rich_text_id);
-                        let prev_offset = self
-                            .editor_scroll_grid_states
-                            .get(&current_item.val.route_id)
-                            .map(|s| s.render.source_line_offset);
-                        neoism_ui::render_policy::EditorScrollState {
-                            scroll_position_lines: scroll_lines,
-                            elastic_offset_y: elastic_px,
-                            previous_source_line_offset: prev_offset,
-                        }
-                    });
+                    let editor_scroll = None;
                     // Read `screen_lines` via the terminal lock outside
                     // the policy so the policy stays Mutex-free.
                     let visible_rows = current_item
@@ -410,90 +435,6 @@ impl Screen<'_> {
         let late_redraw_reason = self.renderer.redraw_reason();
         has_animation |= late_redraw_reason.is_some();
 
-        // Animated cursorline overlay — Rust-side replacement for
-        // nvim's `cursorline` (disabled in the nvim startup). Targets
-        // the same cursor destination y the trail-cursor uses, so the
-        // tinted row and the cursor block animate to the same place
-        // together instead of the row bg jumping per cursor move.
-        {
-            let current_grid = self.context_manager.current_grid();
-            let scaled_margin = current_grid.get_scaled_margin();
-            if let Some(current_item) = current_grid.current_item() {
-                if current_item.val.editor.is_some() {
-                    let layout = current_item.val.dimension;
-                    let cell_height = layout.dimension.height.max(1.0);
-                    let cell_width = layout.dimension.width.round().max(1.0);
-                    let panel_rect = current_item.layout_rect;
-
-                    let scroll_lines = self
-                        .renderer
-                        .editor_scroll
-                        .current_scroll_offset(current_item.val.rich_text_id);
-                    let elastic_px = self
-                        .renderer
-                        .editor_scroll
-                        .current_elastic_offset(current_item.val.rich_text_id);
-                    let prev_offset = self
-                        .editor_scroll_grid_states
-                        .get(&current_item.val.route_id)
-                        .map(|s| s.render.source_line_offset);
-
-                    let cursor =
-                        &self.context_manager.current().renderable_content.cursor;
-                    let cursor_row = cursor.state.pos.row.0 as i32;
-
-                    let plan = neoism_ui::render_policy::editor_cursorline_plan(
-                        neoism_ui::render_policy::CursorlinePlanInput {
-                            geometry: neoism_ui::render_policy::GridPanelGeometry {
-                                panel_rect,
-                                scaled_margin:
-                                    neoism_ui::render_policy::ScaledMargin::from_trbl(
-                                        scaled_margin.top,
-                                        scaled_margin.right,
-                                        scaled_margin.bottom,
-                                        scaled_margin.left,
-                                    ),
-                                cell_width,
-                                cell_height,
-                                columns: layout.columns as u32,
-                            },
-                            cursor_row,
-                            visible_rows: layout.lines as f32,
-                            editor_scroll: neoism_ui::render_policy::EditorScrollState {
-                                scroll_position_lines: scroll_lines,
-                                elastic_offset_y: elastic_px,
-                                previous_source_line_offset: prev_offset,
-                            },
-                        },
-                    );
-
-                    self.renderer.cursorline_overlay.set_target(
-                        current_item.val.rich_text_id,
-                        plan.target_y,
-                        plan.editor_scroll_animating,
-                    );
-                    let still = self.renderer.cursorline_overlay.tick();
-                    if still {
-                        has_animation = true;
-                    }
-                    self.renderer.cursorline_overlay.render(
-                        &mut self.sugarloaf,
-                        current_item.val.rich_text_id,
-                        plan.pane_x,
-                        plan.pane_w,
-                        plan.cell_height,
-                        scale_factor,
-                        &self.renderer.theme,
-                    );
-                    // Editor scrollbar rendering is handled by the
-                    // chrome `Scrollbar` widget through the panel-
-                    // state push in `chrome/renderer/run.rs`. Living
-                    // there keeps hit-test + drag using the SAME
-                    // geometry the visual thumb is drawn from.
-                }
-            }
-        }
-
         // Yank flash overlay — independent of `trail_cursor_enabled`,
         // since the flash is its own UX (confirmation of a yank, not a
         // cursor effect). Reads pane geometry the same way the
@@ -505,33 +446,10 @@ impl Screen<'_> {
             if let Some(current_item) = current_grid.current_item() {
                 let layout = current_item.val.dimension;
                 let cell_width = layout.dimension.width.round().max(1.0);
-                let cell_height = if current_item.val.editor.is_some() {
-                    layout.dimension.height.max(1.0)
-                } else {
-                    layout.dimension.height.round().max(1.0)
-                };
+                let cell_height = layout.dimension.height.round().max(1.0);
                 let panel_rect = current_item.layout_rect;
-                let scroll_lines = self
-                    .renderer
-                    .editor_scroll
-                    .current_scroll_offset(current_item.val.rich_text_id);
-                let elastic_px = self
-                    .renderer
-                    .editor_scroll
-                    .current_elastic_offset(current_item.val.rich_text_id);
-                let prev_offset = self
-                    .editor_scroll_grid_states
-                    .get(&current_item.val.route_id)
-                    .map(|s| s.render.source_line_offset);
-                let scroll_off = editor_scroll_render_offset(
-                    scroll_lines,
-                    elastic_px,
-                    cell_height,
-                    prev_offset,
-                )
-                .pixel_offset_y;
                 let pane_x = panel_rect[0] + scaled_margin.left;
-                let pane_y = panel_rect[1] + scaled_margin.top + scroll_off;
+                let pane_y = panel_rect[1] + scaled_margin.top;
                 let pane_w =
                     (panel_rect[2] - scaled_margin.left - scaled_margin.right).max(0.0);
                 self.renderer.yank_flash.render(
@@ -547,99 +465,6 @@ impl Screen<'_> {
             }
         }
 
-        // 7C-2: remote collaborator carets over the focused editor
-        // pane — the same colored bar + name flag markdown panes draw.
-        // Geometry mirrors the yank-flash block above so both overlays
-        // share one physical-pixel reference frame.
-        {
-            let (cues, roster, caret_topline) = self.editor_remote_caret_cues();
-            if !cues.is_empty() || !roster.is_empty() {
-                let current_grid = self.context_manager.current_grid();
-                let scaled_margin = current_grid.get_scaled_margin();
-                if let Some(current_item) = current_grid.current_item() {
-                    let layout = current_item.val.dimension;
-                    let cell_width = layout.dimension.width.round().max(1.0);
-                    let cell_height = layout.dimension.height.max(1.0);
-                    let panel_rect = current_item.layout_rect;
-                    let pane_x = panel_rect[0] + scaled_margin.left;
-                    let pane_y = panel_rect[1] + scaled_margin.top;
-                    // md-roster parity, derived from bridges/markdown.rs:
-                    // its pane rect is x = margin.left + layout[0] with
-                    // w = layout[2] — the right edge INCLUDES the left
-                    // (file-tree) margin. pane_x above already adds
-                    // margin.left, so the width must be the FULL
-                    // layout width, no subtraction (the previous two
-                    // attempts each sat one margin short with the tree
-                    // open).
-                    let pane_w = panel_rect[2].max(0.0);
-                    let pane_h = panel_rect[3].max(0.0);
-                    // Same live smooth-scroll offset the yank flash and
-                    // the grid cells use — carets stick to their line
-                    // through the scroll spring instead of bouncing.
-                    let scroll_lines = self
-                        .renderer
-                        .editor_scroll
-                        .current_scroll_offset(current_item.val.rich_text_id);
-                    let elastic_px = self
-                        .renderer
-                        .editor_scroll
-                        .current_elastic_offset(current_item.val.rich_text_id);
-                    let prev_offset = self
-                        .editor_scroll_grid_states
-                        .get(&current_item.val.route_id)
-                        .map(|s| s.render.source_line_offset);
-                    let render_offset = editor_scroll_render_offset(
-                        scroll_lines,
-                        elastic_px,
-                        cell_height,
-                        prev_offset,
-                    );
-                    let scroll_off = render_offset.pixel_offset_y;
-                    let row_shift = render_offset.source_line_offset;
-                    // NEOISM_CARET_LOG=1: decisive off-by-one triage.
-                    // Park the LOCAL cursor on the same buffer line the
-                    // peer is typing on — if `cue_lines` differs from
-                    // `local_curline` the publisher side is off; if
-                    // they match but the beam paints wrong, it's this
-                    // painter's transform.
-                    if std::env::var_os("NEOISM_CARET_LOG").is_some() {
-                        let current = self.context_manager.current();
-                        tracing::info!(
-                            target: "neoism::presence_caret",
-                            topline = caret_topline,
-                            cue_lines = ?cues.iter().map(|c| c.line).collect::<Vec<_>>(),
-                            cue_cols = ?cues.iter().map(|c| c.col).collect::<Vec<_>>(),
-                            local_curline = current.editor_presence_line,
-                            local_topline = current.editor_viewport_topline,
-                            row_shift,
-                            scroll_off,
-                            pane_top = panel_rect[1] + scaled_margin.top,
-                            cell_height,
-                            "remote caret paint input"
-                        );
-                    }
-                    let inv = if scale_factor > 0.0 {
-                        1.0 / scale_factor
-                    } else {
-                        1.0
-                    };
-                    neoism_ui::panels::remote_carets::render_editor_remote_carets(
-                        &mut self.sugarloaf,
-                        &cues,
-                        &roster,
-                        caret_topline,
-                        pane_x * inv,
-                        pane_y * inv,
-                        pane_w * inv,
-                        pane_h * inv,
-                        cell_width * inv,
-                        cell_height * inv,
-                        row_shift,
-                        scroll_off * inv,
-                    );
-                }
-            }
-        }
         ctx.has_animation = has_animation;
         ctx.scale_factor = scale_factor;
         ctx.trail_cursor_target = trail_cursor_target;

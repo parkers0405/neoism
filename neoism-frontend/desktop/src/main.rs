@@ -910,30 +910,6 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
         println!("  ✓ {}", dst.display());
     }
 
-    // Carry the bundled tree-sitter runtime forward too: the first-run
-    // bootstrap installs from `runtime/` next to the exe, so an update that
-    // only swaps binaries would leave parsers pinned to the old build.
-    let runtime_src = extracted.join("runtime");
-    if runtime_src.is_dir() {
-        let runtime_dst = dir.join("runtime");
-        let staged = dir.join(".runtime.new");
-        let _ = std::fs::remove_dir_all(&staged);
-        let mut copied = 0usize;
-        match crate::bootstrap::copy_tree(&runtime_src, &staged, &mut copied) {
-            Ok(()) => {
-                let _ = std::fs::remove_dir_all(&runtime_dst);
-                match std::fs::rename(&staged, &runtime_dst) {
-                    Ok(()) => println!("  ✓ {}", runtime_dst.display()),
-                    Err(err) => eprintln!("  ! runtime bundle skipped: {err}"),
-                }
-            }
-            Err(err) => {
-                let _ = std::fs::remove_dir_all(&staged);
-                eprintln!("  ! runtime bundle skipped: {err}");
-            }
-        }
-    }
-
     let _ = std::fs::remove_dir_all(&tmp);
     println!("Updated to {latest}. Restart neoism to use it.");
     Ok(())

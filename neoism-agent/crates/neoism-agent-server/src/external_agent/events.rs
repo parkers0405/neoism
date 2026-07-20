@@ -147,7 +147,14 @@ async fn handle_acp_session_update(
             update_external_activity(&ctx.state, &ctx.child_id, ctx.runtime, update)
                 .await?;
         }
-        "plan" | "status" | "usage_update" => {
+        "usage_update" => {
+            if let Some(usage) = update.get("usage") {
+                ctx.collector.lock().await.usage.merge_usage(usage);
+            }
+            update_external_activity(&ctx.state, &ctx.child_id, ctx.runtime, update)
+                .await?;
+        }
+        "plan" | "status" => {
             update_external_activity(&ctx.state, &ctx.child_id, ctx.runtime, update)
                 .await?;
         }

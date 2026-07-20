@@ -85,54 +85,6 @@ impl Screen<'_> {
         self.remote_presence.cursors_for(&buffer_id)
     }
 
-    /// 7C-2: remote collaborator carets for the FOCUSED editor (nvim)
-    /// pane, converted from buffer lines to screen rows through the
-    /// pane's `win_viewport` topline. Peers scrolled out of MY view
-    /// simply don't draw this frame.
-    pub fn editor_remote_caret_cues(
-        &self,
-    ) -> (
-        Vec<neoism_ui::panels::remote_carets::EditorRemoteCaret>,
-        Vec<neoism_ui::panels::remote_carets::EditorRemoteCaret>,
-        u64,
-    ) {
-        let current = self.context_manager.current();
-        if current.editor.is_none() {
-            return (Vec::new(), Vec::new(), 0);
-        }
-        let Some(path) = current.editor_path.as_ref() else {
-            return (Vec::new(), Vec::new(), 0);
-        };
-        let topline = current.editor_viewport_topline;
-        let textoff = current.editor_textoff as u32;
-        let buffer_id = presence_buffer_id_for_path(path);
-        let mut cues = Vec::new();
-        let mut roster = Vec::new();
-        for presence in self.remote_presence.cursors_for(&buffer_id) {
-            let color = [presence.color.r, presence.color.g, presence.color.b];
-            roster.push(neoism_ui::panels::remote_carets::EditorRemoteCaret {
-                name: presence.display_name.clone(),
-                color,
-                rainbow: presence.rainbow,
-                insert: false,
-                line: 0,
-                col: 0,
-            });
-            cues.push(neoism_ui::panels::remote_carets::EditorRemoteCaret {
-                name: presence.display_name.clone(),
-                color,
-                rainbow: presence.rainbow,
-                insert: presence.insert,
-                // BUFFER line — the painter converts to a screen row
-                // per frame from the live topline (scroll-glued).
-                line: presence.cursor.line as u64,
-                // Buffer column + MY gutter width = grid cell.
-                col: presence.cursor.column.saturating_add(textoff),
-            });
-        }
-        (cues, roster, topline)
-    }
-
     /// Outbound presence pump: coalesce the focused markdown pane's
     /// cursor into at most a couple of `CrdtClientMessage`s. Called by
     /// the app's daemon pump; returns an empty vec almost always.
@@ -164,24 +116,6 @@ impl Screen<'_> {
                             == neoism_ui::editor::markdown::MarkdownMode::Insert,
                     )
                 })
-            })
-            .or_else(|| {
-                // 7C-2: nvim (code) panes publish too — the buffer-
-                // coordinate caret from win_viewport's curline/curcol,
-                // so remote screens draw it at the true line regardless
-                // of their own scroll position.
-                current.editor.as_ref()?;
-                let path = current.editor_path.as_ref()?;
-                use neoism_backend::performer::nvim_events::EditorMode as EM;
-                let insert = matches!(current.editor_mode, EM::Insert | EM::Replace);
-                Some((
-                    presence_buffer_id_for_path(path),
-                    PeerCursor::new(
-                        current.editor_presence_line as u32,
-                        current.editor_presence_col as u32,
-                    ),
-                    insert,
-                ))
             });
 
         if self.presence_publisher.is_none() {

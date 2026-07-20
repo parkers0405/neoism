@@ -162,28 +162,6 @@ fn convert_look(look: &LookConfig) -> LookStyle {
     }
 }
 
-/// The nvim command that applies `name` — safe for FRESH nvim
-/// instances. Builtins apply by name (the lua runtime ships their
-/// palettes); custom themes must push their full palette, because a
-/// by-name apply of an unknown name silently falls back to
-/// pastel_dark inside `rio.theme` — that was the "editor loads black
-/// on a light pack" bug. Callers must have synced the theme registry
-/// (Screen::new / update_config do).
-pub fn vim_theme_command(name: &str) -> String {
-    let theme = IdeTheme::by_name(name);
-    match theme.name {
-        neoism_ui::primitives::ide_theme::IdeThemeName::Custom(_) => {
-            neoism_backend::performer::nvim::vim_apply_custom_theme_command(
-                theme.name.as_str(),
-                &theme.lua_palette_pairs(),
-            )
-        }
-        _ => {
-            neoism_backend::performer::nvim::vim_apply_theme_command(theme.name.as_str())
-        }
-    }
-}
-
 /// Seed the example packs, once each. A marker file
 /// (`packs/.seeded`) records which example ids have been installed,
 /// so NEW examples arrive on upgrade while a deleted or edited

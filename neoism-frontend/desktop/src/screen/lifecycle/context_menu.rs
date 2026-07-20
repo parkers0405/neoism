@@ -12,7 +12,7 @@ impl Screen<'_> {
 
     pub(crate) fn close_global_shortcut_overlays(&mut self) {
         self.renderer.context_menu.close();
-        self.renderer.finder.close();
+        self.close_finder_overlay();
         self.renderer.command_palette.set_enabled(false);
         self.renderer.modal.close();
         self.renderer.diagnostics_popup.close();

@@ -5,11 +5,10 @@
 #
 # This script only builds and places files:
 #   - neoism, neoism-workspace-daemon, neoism-agent  -> BIN_DIR
-#   - Tree-sitter runtime bundle                     -> BIN_DIR/runtime
 #   - wasm bundle + Vite web build (optional)        -> neoism-frontend/web/dist
 #
 # Everything user-facing (terminfo entry, desktop launcher + icons, default
-# config, installing the runtime bundle into the data dir) is handled by the
+# config) is handled by the
 # app's first-run bootstrap on launch — see
 # neoism-frontend/desktop/src/bootstrap.rs. Prebuilt installs use
 # scripts/install.sh (download) or `neoism update` instead.
@@ -21,8 +20,6 @@ BIN_DIR="${BIN_DIR:-$PREFIX/bin}"
 PROFILE="release"
 INSTALL_SYSTEM_DEPS=1
 BUILD_WEB=1
-BUILD_RUNTIME=1
-REFRESH_RUNTIME=0
 
 usage() {
   cat <<'USAGE'
@@ -30,8 +27,6 @@ Usage: ./install.sh [options]
 
 Builds and installs the Neoism stack from source:
   - neoism desktop, neoism-workspace-daemon, neoism-agent -> BIN_DIR
-  - Tree-sitter runtime bundle -> BIN_DIR/runtime (installed to your data
-    dir automatically by the app's first-run bootstrap)
   - web wasm bundle + Vite web build (optional)
 
 Options:
@@ -40,8 +35,6 @@ Options:
   --debug               Build debug binaries instead of release
   --skip-system-deps    Do not install/check OS packages
   --skip-web            Do not build wasm/web assets
-  --skip-runtime        Do not build the Tree-sitter runtime bundle
-  --refresh-runtime     Rebuild the runtime bundle even if already present
   -h, --help            Show this help
 USAGE
 }
@@ -93,15 +86,7 @@ while [ "$#" -gt 0 ]; do
       BUILD_WEB=0
       shift
       ;;
-    --skip-runtime)
-      BUILD_RUNTIME=0
-      shift
-      ;;
-    --refresh-runtime)
-      REFRESH_RUNTIME=1
-      shift
-      ;;
-    --skip-terminfo|--skip-treesitter|--skip-desktop|--with-tree-sitter-cli)
+    --skip-terminfo|--skip-treesitter|--skip-desktop|--with-tree-sitter-cli|--skip-runtime|--refresh-runtime)
       warn "$1 is obsolete — the app's first-run bootstrap handles this now"
       shift
       ;;
@@ -213,25 +198,6 @@ build_binaries() {
   run install -m 0755 "$target_dir/neoism-agent" "$BIN_DIR/neoism-agent"
 }
 
-build_runtime_bundle() {
-  [ "$BUILD_RUNTIME" -eq 1 ] || return 0
-
-  if [ "$REFRESH_RUNTIME" -eq 0 ] && [ -f "$BIN_DIR/runtime/RUNTIME_VERSION" ]; then
-    log "Runtime bundle already present at $BIN_DIR/runtime (use --refresh-runtime to rebuild)"
-    return 0
-  fi
-
-  local version
-  version="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || date +%Y%m%d)"
-  log "Building Tree-sitter runtime bundle -> $BIN_DIR/runtime"
-  local staging
-  staging="$(mktemp -d)"
-  "$ROOT_DIR/scripts/build-treesitter-runtime.sh" "$staging" "local-$version"
-  rm -rf "$BIN_DIR/runtime"
-  mkdir -p "$BIN_DIR"
-  mv "$staging" "$BIN_DIR/runtime"
-}
-
 build_web() {
   [ "$BUILD_WEB" -eq 1 ] || return 0
 
@@ -248,7 +214,6 @@ install_system_deps
 ensure_rust
 ensure_web_tools
 build_binaries
-build_runtime_bundle
 build_web
 
 cat <<EOF
@@ -259,8 +224,6 @@ Binaries:
   $BIN_DIR/neoism
   $BIN_DIR/neoism-workspace-daemon
   $BIN_DIR/neoism-agent
-Runtime bundle:
-  $BIN_DIR/runtime  (parsers/queries — installed to your data dir on first launch)
 EOF
 
 if [ "$BUILD_WEB" -eq 1 ]; then

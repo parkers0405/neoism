@@ -29,16 +29,17 @@ impl Screen<'_> {
             )
         };
 
-        // If the background Mason seed has finished since the last
-        // frame, re-seed visible Extensions panes so newly-fetched LSPs
-        // appear in place (no need for the user to reopen the tab).
-        self.drain_mason_cache_refresh();
+        // If the background catalog seed has finished since the last
+        // frame, re-seed visible Extensions panes so the language-server
+        // rows' install plans resolve in place (no need for the user to
+        // reopen the tab).
+        self.drain_catalog_cache_refresh();
 
         // Pump install progress into the active extensions pane(s).
         // We do this OUTSIDE the contexts_mut borrow loop so the pump
         // can call back into Screen (notifications, lookup_bundled_manifest,
-        // broadcast nvim commands). A second sweep below handles
-        // rendering with a fresh borrow.
+        // modal updates). A second sweep below handles rendering with a
+        // fresh borrow.
         if !self.renderer.install_tracker.in_flight.is_empty() {
             // Lift the pane out via swap, pump, then put it back. If no
             // Extensions pane is currently visible, still pump with

@@ -1857,10 +1857,7 @@ fn compact_path_label(
         format!("{prefix}…{separator}")
     };
     for start in 0..components.len() {
-        let candidate = format!(
-            "{marker}{}",
-            components[start..].join(&separator_text)
-        );
+        let candidate = format!("{marker}{}", components[start..].join(&separator_text));
         if measure(&candidate) <= max_width {
             return candidate;
         }

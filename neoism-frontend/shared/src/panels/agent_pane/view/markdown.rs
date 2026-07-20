@@ -1340,7 +1340,11 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
     // retro_95 Mash Up look, bg luminance high) `white` is near-white and
     // unreadable on the light panel, so fall back to the theme foreground,
     // which is dark there. Keeps the dim intent on both without hardcoding.
-    let reasoning_dim = if theme.is_dark() { theme.white } else { theme.fg };
+    let reasoning_dim = if theme.is_dark() {
+        theme.white
+    } else {
+        theme.fg
+    };
     let body_color = if body_muted { reasoning_dim } else { theme.fg };
     // Reasoning blocks render in italic so the "inner monologue" reads
     // distinctly from the assistant's final answer. `body_muted` is the

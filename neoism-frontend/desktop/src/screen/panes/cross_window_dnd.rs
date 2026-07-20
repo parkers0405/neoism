@@ -762,7 +762,9 @@ impl Screen<'_> {
         // destination window owns the file now, so drop this window's
         // code context for it.
         if let Some(path) = path_opt.as_deref() {
-            let _ = self.context_manager.remove_code_by_path(path, &mut self.sugarloaf);
+            let _ = self
+                .context_manager
+                .remove_code_by_path(path, &mut self.sugarloaf);
         }
         self.activate_remaining_tab_in_strip(source);
         if let crate::host::StripRef::Pane(src_route) = source {

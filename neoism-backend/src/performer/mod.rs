@@ -114,7 +114,6 @@ pub struct State {
     parser: handler::Processor,
 }
 
-
 impl<U> Machine<U>
 where
     U: EventListener + Send + 'static,

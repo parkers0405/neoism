@@ -119,8 +119,7 @@ pub fn render(
         0 // NoWrap sentinel: identity index, horizontal caret-follow.
     };
     let wrap_key = (pane.buffer.revision, cols);
-    if pane.wrap_index_key != Some(wrap_key)
-        || !pane.wrap_index.is_valid_for(line_count)
+    if pane.wrap_index_key != Some(wrap_key) || !pane.wrap_index.is_valid_for(line_count)
     {
         pane.wrap_index = std::sync::Arc::new(WrapIndex::build(
             &pane.buffer.lines,
@@ -235,13 +234,11 @@ pub fn render(
         pane.scroll_velocity_px_s = 0.0;
     }
     let delta = pane.target_scroll_y - pane.scroll_y;
-    let scroll_animating =
-        delta.abs() > 0.5 || pane.scroll_velocity_px_s.abs() > 1.0;
+    let scroll_animating = delta.abs() > 0.5 || pane.scroll_velocity_px_s.abs() > 1.0;
     if scroll_animating {
         // ω of the critically-damped spring; higher = snappier.
         const OMEGA: f32 = 16.0;
-        let accel =
-            OMEGA * OMEGA * delta - 2.0 * OMEGA * pane.scroll_velocity_px_s;
+        let accel = OMEGA * OMEGA * delta - 2.0 * OMEGA * pane.scroll_velocity_px_s;
         pane.scroll_velocity_px_s += accel * dt;
         pane.scroll_y += pane.scroll_velocity_px_s * dt;
         if (pane.target_scroll_y - pane.scroll_y).abs() < 0.5
@@ -307,8 +304,7 @@ pub fn render(
             let starts = wrap_segment_starts(line, cols, TAB_DISPLAY_WIDTH);
             while seg < starts.len() && vrow < last_row {
                 let (seg_start, base_col) = starts[seg];
-                let seg_end =
-                    starts.get(seg + 1).map(|s| s.0).unwrap_or(line.len());
+                let seg_end = starts.get(seg + 1).map(|s| s.0).unwrap_or(line.len());
                 visible.push(RowView {
                     vrow,
                     line: line_ix,
@@ -401,9 +397,7 @@ pub fn render(
                 ) else {
                     continue;
                 };
-                sugarloaf.rect(
-                    None, bx, ry, bw, row_h, hl_color, DEPTH, ORDER_BG,
-                );
+                sugarloaf.rect(None, bx, ry, bw, row_h, hl_color, DEPTH, ORDER_BG);
             }
         }
     }
@@ -441,8 +435,7 @@ pub fn render(
 
     let selection_color = theme.f32_alpha(theme.accent, 0.28);
     for rv in &visible {
-        let Some((sel_start, sel_end)) = pane.buffer.selection_on_line(rv.line)
-        else {
+        let Some((sel_start, sel_end)) = pane.buffer.selection_on_line(rv.line) else {
             continue;
         };
         let band_y = row_screen_y(rv.vrow);
@@ -476,12 +469,18 @@ pub fn render(
             continue;
         };
         if band_w > 0.0 {
-            if let Some((bx, bw)) = clamp_band(
-                text_x + band_col as f32 * cell_w - scroll_x,
-                band_w,
-            ) {
+            if let Some((bx, bw)) =
+                clamp_band(text_x + band_col as f32 * cell_w - scroll_x, band_w)
+            {
                 sugarloaf.rect(
-                    None, bx, band_y, bw, row_h, selection_color, DEPTH, ORDER_BG,
+                    None,
+                    bx,
+                    band_y,
+                    bw,
+                    row_h,
+                    selection_color,
+                    DEPTH,
+                    ORDER_BG,
                 );
             }
         }
@@ -546,16 +545,11 @@ pub fn render(
             if sub_start >= sub_end {
                 continue;
             }
-            let start_col =
-                display_col_for_byte(line, sub_start, TAB_DISPLAY_WIDTH);
-            let run_x = text_x
-                + (start_col.saturating_sub(rv.base_col)) as f32 * cell_w
+            let start_col = display_col_for_byte(line, sub_start, TAB_DISPLAY_WIDTH);
+            let run_x = text_x + (start_col.saturating_sub(rv.base_col)) as f32 * cell_w
                 - scroll_x;
-            let display = expand_tabs_from(
-                &line[sub_start..sub_end],
-                start_col,
-                TAB_DISPLAY_WIDTH,
-            );
+            let display =
+                expand_tabs_from(&line[sub_start..sub_end], start_col, TAB_DISPLAY_WIDTH);
             let run_opts = DrawOpts {
                 color: syn_color(run.token, theme, false),
                 clip_rect: Some(text_clip),
@@ -563,17 +557,15 @@ pub fn render(
             };
             draw_text(sugarloaf, run_x, ty, &display, &run_opts, text_occlusions);
             if let Some(severity) = run.severity {
-                let end_col =
-                    display_col_for_byte(line, sub_end, TAB_DISPLAY_WIDTH);
+                let end_col = display_col_for_byte(line, sub_end, TAB_DISPLAY_WIDTH);
                 let underline_color = match severity {
                     CodeDiagnosticSeverity::Error => theme.f32_alpha(theme.red, 0.9),
                     CodeDiagnosticSeverity::Warn => theme.f32_alpha(theme.yellow, 0.9),
                     _ => theme.f32_alpha(theme.blue, 0.8),
                 };
-                if let Some((bx, bw)) = clamp_band(
-                    run_x,
-                    (end_col.saturating_sub(start_col)) as f32 * cell_w,
-                ) {
+                if let Some((bx, bw)) =
+                    clamp_band(run_x, (end_col.saturating_sub(start_col)) as f32 * cell_w)
+                {
                     sugarloaf.rect(
                         None,
                         bx,
@@ -618,8 +610,7 @@ pub fn render(
                     continue;
                 }
                 if message.chars().count() > max_chars {
-                    message =
-                        message.chars().take(max_chars).collect::<String>() + "…";
+                    message = message.chars().take(max_chars).collect::<String>() + "…";
                 }
                 let virt = format!("■ {message}");
                 let virt_opts = DrawOpts {
@@ -722,11 +713,16 @@ pub fn render(
         let bar_w = style.width_or(SCROLLBAR_W).max(1.0);
         let min_thumb = style.min_thumb_or(SCROLLBAR_MIN_THUMB_H);
         let track_h = (h_content - BAR_MARGIN * 2.0).max(1.0);
-        let thumb_h = (track_h * (h_content / content_h))
-            .clamp(min_thumb.min(track_h), track_h);
+        let thumb_h =
+            (track_h * (h_content / content_h)).clamp(min_thumb.min(track_h), track_h);
         let progress = (pane.scroll_y / max_scroll.max(1.0)).clamp(0.0, 1.0);
         let thumb_y = grid_y + BAR_MARGIN + (track_h - thumb_h) * progress;
-        let track_rect = [x + w - bar_w - BAR_MARGIN, grid_y + BAR_MARGIN, bar_w, track_h];
+        let track_rect = [
+            x + w - bar_w - BAR_MARGIN,
+            grid_y + BAR_MARGIN,
+            bar_w,
+            track_h,
+        ];
         let thumb_rect = [track_rect[0], thumb_y, bar_w, thumb_h];
         pane.scrollbar_track = Some(track_rect);
         pane.scrollbar_thumb = Some(thumb_rect);
@@ -739,10 +735,9 @@ pub fn render(
                     && my <= track_rect[1] + track_rect[3]
             });
         let radius = style.radius(bar_w, 0.5);
-        if let Some(track_color) = style.track_or(Some(theme.f32_alpha(
-            theme.border,
-            if hovered { 0.22 } else { 0.10 },
-        ))) {
+        if let Some(track_color) = style.track_or(Some(
+            theme.f32_alpha(theme.border, if hovered { 0.22 } else { 0.10 }),
+        )) {
             draw_rounded_rect_clipped(
                 sugarloaf,
                 clip,
@@ -759,10 +754,8 @@ pub fn render(
         let thumb_color = if dragging {
             style.thumb_drag_or(theme.f32_alpha(theme.accent, 0.85))
         } else {
-            style.thumb_or(theme.f32_alpha(
-                theme.border,
-                if hovered { 0.95 } else { 0.7 },
-            ))
+            style
+                .thumb_or(theme.f32_alpha(theme.border, if hovered { 0.95 } else { 0.7 }))
         };
         draw_rounded_rect_clipped(
             sugarloaf,

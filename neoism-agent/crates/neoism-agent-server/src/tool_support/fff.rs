@@ -264,8 +264,8 @@ fn ffgrep_tool_sync(
     // fff's fuzzy needle = the query's joined non-constraint text tokens
     // (`FFFQuery::grep_text()`): our `!exclude` globs are constraints, so the
     // needle is the pattern plus any positive `include` glob. Bound on both.
-    let fuzzy_safe = pattern.len() + include.as_deref().map_or(0, str::len)
-        <= MAX_FUZZY_NEEDLE;
+    let fuzzy_safe =
+        pattern.len() + include.as_deref().map_or(0, str::len) <= MAX_FUZZY_NEEDLE;
     let mode = if mode == GrepMode::Fuzzy && !fuzzy_safe {
         GrepMode::PlainText
     } else {
@@ -321,8 +321,11 @@ fn ffgrep_tool_sync(
             if let Some(terms) = &alternation {
                 let constraints = parser.parse(&constraint_text);
                 let refs: Vec<&str> = terms.iter().map(String::as_str).collect();
-                let results =
-                    picker.multi_grep(&refs, &constraints.constraints, &options(GrepMode::PlainText));
+                let results = picker.multi_grep(
+                    &refs,
+                    &constraints.constraints,
+                    &options(GrepMode::PlainText),
+                );
                 return (
                     grep_items(picker, &results),
                     results.files_with_matches,
@@ -333,19 +336,17 @@ fn ffgrep_tool_sync(
             }
             let query = parser.parse(&query_text);
             let mut results = picker.grep(&query, &options(mode));
-            let used_mode = if results.matches.is_empty()
-                && mode != GrepMode::Fuzzy
-                && fuzzy_safe
-            {
-                results = picker.grep(&query, &options(GrepMode::Fuzzy));
-                if results.matches.is_empty() {
-                    mode_label(mode)
+            let used_mode =
+                if results.matches.is_empty() && mode != GrepMode::Fuzzy && fuzzy_safe {
+                    results = picker.grep(&query, &options(GrepMode::Fuzzy));
+                    if results.matches.is_empty() {
+                        mode_label(mode)
+                    } else {
+                        "fuzzy"
+                    }
                 } else {
-                    "fuzzy"
-                }
-            } else {
-                mode_label(mode)
-            };
+                    mode_label(mode)
+                };
             (
                 grep_items(picker, &results),
                 results.files_with_matches,

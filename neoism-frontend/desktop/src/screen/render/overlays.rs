@@ -182,8 +182,12 @@ impl Screen<'_> {
                 }
             }
             Some(TrailCursorOverlayTarget::Code) => {
-                if let Some((rect, shape)) =
-                    self.context_manager.current().code.as_ref().and_then(|code| {
+                if let Some((rect, shape)) = self
+                    .context_manager
+                    .current()
+                    .code
+                    .as_ref()
+                    .and_then(|code| {
                         code.cursor_rect.map(|rect| (rect, code.cursor_shape()))
                     })
                 {

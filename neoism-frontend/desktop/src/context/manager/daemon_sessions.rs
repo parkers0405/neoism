@@ -744,5 +744,4 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             neoism_extensions: None,
         })
     }
-
 }

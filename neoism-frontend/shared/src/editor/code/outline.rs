@@ -106,10 +106,11 @@ fn symbol_for_node(node: tree_sitter::Node, source: &str) -> Option<OutlineSymbo
         // rust / go / python / lua / js / bash / c / c++ share most of
         // these kinds (`function_definition` covers python, bash, and
         // C/C++ functions alike).
-        "function_item" | "function_declaration" | "function_definition"
-        | "local_function_declaration_statement" | "generator_function_declaration" => {
-            Function
-        }
+        "function_item"
+        | "function_declaration"
+        | "function_definition"
+        | "local_function_declaration_statement"
+        | "generator_function_declaration" => Function,
         "method_definition" | "method_declaration" => Method,
         "struct_item" | "type_declaration" | "struct_specifier" => Struct,
         "enum_item" | "enum_declaration" => Enum,
@@ -147,7 +148,11 @@ fn symbol_for_node(node: tree_sitter::Node, source: &str) -> Option<OutlineSymbo
                 .find(|child| child.kind() == "type_spec");
             spec.and_then(|spec| spec.child_by_field_name("name"))
         })?;
-    let name = name_node.utf8_text(source.as_bytes()).ok()?.trim().to_string();
+    let name = name_node
+        .utf8_text(source.as_bytes())
+        .ok()?
+        .trim()
+        .to_string();
     if name.is_empty() {
         return None;
     }
@@ -198,8 +203,7 @@ mod tests {
 
     #[test]
     fn cpp_trail_walks_class_method() {
-        let source =
-            "class Repo {\n    void fetch() {\n        int x = 1;\n    }\n};\n";
+        let source = "class Repo {\n    void fetch() {\n        int x = 1;\n    }\n};\n";
         let byte = source.find("int x").unwrap();
         let trail = symbol_trail(source, Lang::Cpp, byte);
         let names: Vec<&str> = trail.iter().map(|s| s.name.as_str()).collect();

@@ -540,13 +540,13 @@ impl NeoismAgentPane {
         let live_start = self
             .timeline_live_trace_start
             .unwrap_or(self.messages.len());
-        let lookup =
-            |needle: &str| self.messages.iter().position(|message| message.id == needle);
+        let lookup = |needle: &str| {
+            self.messages
+                .iter()
+                .position(|message| message.id == needle)
+        };
         lookup(id)
-            .or_else(|| {
-                id.split_once("..")
-                    .and_then(|(first, _)| lookup(first))
-            })
+            .or_else(|| id.split_once("..").and_then(|(first, _)| lookup(first)))
             .is_some_and(|index| index < live_start)
     }
 

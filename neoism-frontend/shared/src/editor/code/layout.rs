@@ -112,11 +112,7 @@ pub fn wrap_rows(line: &str, cols: usize, tab: usize) -> usize {
 /// Start byte + start display column of every wrap segment of `line`,
 /// in one pass. Always at least one entry `(0, 0)`; the entry count
 /// equals [`wrap_rows`].
-pub fn wrap_segment_starts(
-    line: &str,
-    cols: usize,
-    tab: usize,
-) -> Vec<(usize, usize)> {
+pub fn wrap_segment_starts(line: &str, cols: usize, tab: usize) -> Vec<(usize, usize)> {
     let mut starts = vec![(0usize, 0usize)];
     if cols == 0 {
         return starts;

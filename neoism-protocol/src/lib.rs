@@ -29,8 +29,7 @@ pub use cursor::{
 };
 pub use diagnostics::{
     DiagnosticItem as LspDiagnosticItem, DiagnosticRelatedInformation,
-    DiagnosticsClientMessage,
-    DiagnosticsServerMessage, LspState, RouteId,
+    DiagnosticsClientMessage, DiagnosticsServerMessage, LspState, RouteId,
 };
 pub use workspace::{
     ClipboardPayload, EditorSurfaceSummary, HostSummary, PaneFocusDir, PaneLayoutOp,

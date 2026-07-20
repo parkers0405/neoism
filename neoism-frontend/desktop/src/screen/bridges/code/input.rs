@@ -1,5 +1,5 @@
-use super::*;
 use super::lsp::CodeKeyEdit;
+use super::*;
 use neoism_backend::clipboard::{Clipboard, ClipboardType};
 use neoism_ui::editor::code::{CodeInputMode, CodeMode, CodeMotion};
 use neoism_ui::editor::markdown::vim::{VimAction, VimKeyFeed, VimStage};
@@ -73,24 +73,21 @@ impl Screen<'_> {
                     return;
                 }
                 Key::Character("a") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         code.buffer.select_all();
                     }
                     self.mark_dirty();
                     return;
                 }
                 Key::Character("c") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         let (payload, _linewise) = code.buffer.copy_payload();
                         clipboard.set(ClipboardType::Clipboard, payload);
                     }
                     return;
                 }
                 Key::Character("x") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         let (payload, _linewise) = code.buffer.cut_payload();
                         clipboard.set(ClipboardType::Clipboard, payload);
                     }
@@ -101,8 +98,7 @@ impl Screen<'_> {
                 }
                 Key::Character("v") => {
                     let content = clipboard.get(ClipboardType::Clipboard);
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         code.buffer.insert_text(&content);
                     }
                     self.dismiss_code_lsp_popups();
@@ -112,8 +108,7 @@ impl Screen<'_> {
                 }
                 // Shift yields an uppercase logical key (Ctrl+Shift+Z).
                 Key::Character("z") | Key::Character("Z") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         if shift {
                             code.buffer.redo();
                         } else {
@@ -126,8 +121,7 @@ impl Screen<'_> {
                     return;
                 }
                 Key::Character("y") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         code.buffer.redo();
                     }
                     self.dismiss_code_lsp_popups();
@@ -239,13 +233,21 @@ impl Screen<'_> {
                 CodeKeyEdit::Other
             }
             Key::Named(NamedKey::PageUp) => {
-                code.buffer
-                    .apply_motion(CodeMotion::PageUp { rows: viewport_rows }, shift);
+                code.buffer.apply_motion(
+                    CodeMotion::PageUp {
+                        rows: viewport_rows,
+                    },
+                    shift,
+                );
                 CodeKeyEdit::Other
             }
             Key::Named(NamedKey::PageDown) => {
-                code.buffer
-                    .apply_motion(CodeMotion::PageDown { rows: viewport_rows }, shift);
+                code.buffer.apply_motion(
+                    CodeMotion::PageDown {
+                        rows: viewport_rows,
+                    },
+                    shift,
+                );
                 CodeKeyEdit::Other
             }
             Key::Named(NamedKey::Space) if plain => {
@@ -431,8 +433,7 @@ impl Screen<'_> {
                 // Ctrl+C: copy the visual selection (or current line in
                 // Normal) to the clipboard, then drop back to Normal.
                 Key::Character("c") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         let (payload, _linewise) = code.buffer.copy_payload();
                         clipboard.set(ClipboardType::Clipboard, payload);
                         code.buffer.mode = CodeMode::Normal;
@@ -442,8 +443,7 @@ impl Screen<'_> {
                     self.mark_dirty();
                 }
                 Key::Character("r") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         code.buffer.redo();
                     }
                     self.sync_active_code_modified();
@@ -465,8 +465,7 @@ impl Screen<'_> {
                         .as_ref()
                         .map(|code| (code.geometry.viewport_rows() / 2).max(1))
                         .unwrap_or(1);
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         let extend = code.buffer.mode == CodeMode::Visual;
                         code.half_page_scroll(down, extend);
                         if code.buffer.mode == CodeMode::Normal {
@@ -511,11 +510,10 @@ impl Screen<'_> {
                 }
                 return self.code_vim_char('j', clipboard);
             }
-            Key::Named(NamedKey::Backspace) => {
-                return self.code_vim_char('h', clipboard)
-            }
+            Key::Named(NamedKey::Backspace) => return self.code_vim_char('h', clipboard),
             Key::Named(NamedKey::PageUp) | Key::Named(NamedKey::PageDown) => {
-                let down = matches!(key.logical_key.as_ref(), Key::Named(NamedKey::PageDown));
+                let down =
+                    matches!(key.logical_key.as_ref(), Key::Named(NamedKey::PageDown));
                 let rows = self
                     .context_manager
                     .current()
@@ -670,13 +668,10 @@ impl Screen<'_> {
             VimKeyFeed::Unhandled => return,
             VimKeyFeed::Action(action) => {
                 // Only hit the OS clipboard when the action can paste.
-                let paste = matches!(
-                    action,
-                    VimAction::Paste { .. } | VimAction::Repeat { .. }
-                )
-                .then(|| clipboard.get(ClipboardType::Clipboard));
-                let Some(code) = self.context_manager.current_mut().code.as_mut()
-                else {
+                let paste =
+                    matches!(action, VimAction::Paste { .. } | VimAction::Repeat { .. })
+                        .then(|| clipboard.get(ClipboardType::Clipboard));
+                let Some(code) = self.context_manager.current_mut().code.as_mut() else {
                     return;
                 };
                 let applied = code.buffer.apply_vim_action(&action, paste.as_deref());
@@ -784,8 +779,7 @@ impl Screen<'_> {
         };
         // Scrollbar first refusal: thumb press starts a 1:1 drag,
         // track press jumps a viewport toward the click (house style).
-        if let (Some(track), Some(thumb)) = (code.scrollbar_track, code.scrollbar_thumb)
-        {
+        if let (Some(track), Some(thumb)) = (code.scrollbar_track, code.scrollbar_thumb) {
             let in_track = x >= track[0] - 4.0
                 && x <= track[0] + track[2] + 4.0
                 && y >= track[1]

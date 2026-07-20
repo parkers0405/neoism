@@ -48,7 +48,9 @@ impl Screen<'_> {
         // geometry. Clearing here also prevents a diagnostic removed by an
         // edit from leaving a stale hover/click target behind.
         let no_inline_identities: [neoism_ui::panels::inline_diagnostics::InlineDiagnosticIdentity; 0] = [];
-        self.renderer.inline_diagnostics.begin_frame(&no_inline_identities);
+        self.renderer
+            .inline_diagnostics
+            .begin_frame(&no_inline_identities);
         for (route_id, grid) in self.grids.iter_mut() {
             let Some(p) = ctx.panels.iter().find(|p| p.route_id == *route_id) else {
                 continue;
@@ -493,7 +495,10 @@ impl Screen<'_> {
                 cell_size: [p.cell_w, p.cell_h],
                 // GPU grid size includes the hidden edge slots for
                 // editor/terminal fractional scroll.
-                grid_size: [p.cols, p.rows + TERMINAL_BUFFER_ABOVE + TERMINAL_BUFFER_BELOW],
+                grid_size: [
+                    p.cols,
+                    p.rows + TERMINAL_BUFFER_ABOVE + TERMINAL_BUFFER_BELOW,
+                ],
                 cursor_pos,
                 _pad_cursor: [0; 2],
                 min_contrast: 0.0,
@@ -520,11 +525,7 @@ impl Screen<'_> {
             let theme = self.renderer.theme;
             for p in &ctx.panels {
                 if !neoism_ui::render_policy::pane_overlay_is_paintable(
-                    false,
-                    p.cols,
-                    p.rows,
-                    p.cell_w,
-                    p.cell_h,
+                    false, p.cols, p.rows, p.cell_w, p.cell_h,
                 ) {
                     continue;
                 }

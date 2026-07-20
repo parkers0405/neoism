@@ -198,12 +198,10 @@ fn adapter_tab_roles(adapter_id: &str) -> AdapterTabRoles {
             linter: false,
         },
         // Lint-first ids, recognised for workspace-configured adapters.
-        "eslint" | "ruff" | "oxlint" | "ts_standard" | "standardjs" => {
-            AdapterTabRoles {
-                formatter: false,
-                linter: true,
-            }
-        }
+        "eslint" | "ruff" | "oxlint" | "ts_standard" | "standardjs" => AdapterTabRoles {
+            formatter: false,
+            linter: true,
+        },
         // biome is a formatter+linter combo.
         "biome" => AdapterTabRoles {
             formatter: true,
@@ -462,8 +460,7 @@ fn catalog_manifests_for_engine_adapters() -> Vec<ExtensionManifest> {
     let mut manifests = Vec::new();
     for adapter in neoism_agent_server::language_server::language_server_adapters() {
         for package in &adapter.catalog_packages {
-            let Some(pkg) = registry.iter().find(|p| p.name == package.package_id)
-            else {
+            let Some(pkg) = registry.iter().find(|p| p.name == package.package_id) else {
                 continue;
             };
             let Ok(manifest) = neoism_extensions::package_to_manifest(pkg) else {

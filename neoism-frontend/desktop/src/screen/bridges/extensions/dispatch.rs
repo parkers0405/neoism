@@ -236,8 +236,7 @@ impl Screen<'_> {
     /// install would provide. `server` may be an engine adapter id
     /// (e.g. `rust`, `typescript`) or already a catalog package id.
     fn catalog_candidates_for_server(server: &str) -> Vec<String> {
-        let adapters =
-            neoism_agent_server::language_server::language_server_adapters();
+        let adapters = neoism_agent_server::language_server::language_server_adapters();
         let mut candidates: Vec<String> = adapters
             .iter()
             .find(|adapter| adapter.id == server)
@@ -440,5 +439,4 @@ impl Screen<'_> {
             .notifications
             .push(format!("Uninstalled {}", label), NotificationLevel::Info);
     }
-
 }

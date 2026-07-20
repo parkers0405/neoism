@@ -129,8 +129,8 @@ pub fn styled_runs_with_syntax(
             .find(|(s, e, _)| *s <= start && end <= *e)
             .map(|(_, _, token)| *token)
             .unwrap_or(SynTok::Plain);
-        let selected = selection
-            .is_some_and(|(s, e)| s <= start && end <= e.min(line.len()));
+        let selected =
+            selection.is_some_and(|(s, e)| s <= start && end <= e.min(line.len()));
         let severity = diagnostics
             .iter()
             .filter(|diag| diag.start <= start && end <= diag.end.min(line.len()))

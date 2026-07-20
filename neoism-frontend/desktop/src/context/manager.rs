@@ -366,7 +366,6 @@ impl ContextManagerDaemonLink {
             );
         }
     }
-
 }
 
 #[derive(Clone, Default)]

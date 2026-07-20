@@ -3,9 +3,7 @@ use crate::daemon_client::{
     DaemonClient, DaemonClientOptions, DaemonEndpoint, ReconnectBackoff,
 };
 use crate::event::VoidListener;
-use neoism_protocol::workspace::{
-    PaneFocusDir, PaneLayoutOp, PaneLayoutSnapshotNode,
-};
+use neoism_protocol::workspace::{PaneFocusDir, PaneLayoutOp, PaneLayoutSnapshotNode};
 use std::time::Duration;
 
 fn attach_unconnected_daemon(

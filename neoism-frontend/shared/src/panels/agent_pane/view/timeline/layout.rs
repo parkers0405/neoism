@@ -1071,9 +1071,7 @@ pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
             | AgentTimelineMessageKind::Tool
             | AgentTimelineMessageKind::Subtask
             | AgentTimelineMessageKind::Compaction => index >= live_start,
-            AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => {
-                true
-            }
+            AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => true,
         })
         .collect()
 }

@@ -56,8 +56,7 @@ impl Screen<'_> {
         if self.context_manager.current().code.is_some() {
             match MarkdownExCommandPlan::classify(&head) {
                 MarkdownExCommandPlan::JumpToLastLine => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         let last = code.buffer.line_count().saturating_sub(1);
                         code.buffer.set_cursor_position(last, 0, false);
                         code.buffer.follow_cursor = true;
@@ -66,8 +65,7 @@ impl Screen<'_> {
                     return true;
                 }
                 MarkdownExCommandPlan::JumpToLine(line) => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         let line = line
                             .saturating_sub(1)
                             .min(code.buffer.line_count().saturating_sub(1));

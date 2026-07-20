@@ -439,9 +439,7 @@ fn workspace_edit_file_edits(
     }
     if let Some(doc_changes) = edit.get("documentChanges").and_then(|c| c.as_array()) {
         for change in doc_changes {
-            let Some(uri) = change
-                .pointer("/textDocument/uri")
-                .and_then(|u| u.as_str())
+            let Some(uri) = change.pointer("/textDocument/uri").and_then(|u| u.as_str())
             else {
                 // CreateFile/RenameFile/DeleteFile — unsupported here.
                 continue;
@@ -495,7 +493,8 @@ fn apply_edits_on_disk(
         let head = lines[sl][..sc].to_string();
         let tail = lines[el][ec..].to_string();
         let replacement = format!("{head}{}{tail}", edit.text.replace('\r', ""));
-        let new_lines: Vec<String> = replacement.split('\n').map(str::to_string).collect();
+        let new_lines: Vec<String> =
+            replacement.split('\n').map(str::to_string).collect();
         lines.splice(sl..=el, new_lines);
     }
     let newline = if crlf { "\r\n" } else { "\n" };
@@ -689,10 +688,7 @@ fn completion_prefix(line: &str, anchor: usize, cursor: usize) -> Option<String>
         return None;
     }
     let slice = line.get(anchor..cursor)?;
-    slice
-        .chars()
-        .all(is_ident_char)
-        .then(|| slice.to_string())
+    slice.chars().all(is_ident_char).then(|| slice.to_string())
 }
 
 /// Strip LSP snippet placeholders (`$0`, `$1`, `${2:default}`) from an
@@ -1440,9 +1436,14 @@ impl Screen<'_> {
         // Pointer-idle hover: request once the pointer has rested long
         // enough on one cell (armed by `note_code_mouse_hover`).
         const MOUSE_HOVER_DELAY_SECS: f32 = 0.4;
-        let matured = self.renderer.code_lsp.mouse_hover.as_ref().is_some_and(|c| {
-            !c.requested && c.since.elapsed().as_secs_f32() >= MOUSE_HOVER_DELAY_SECS
-        });
+        let matured = self
+            .renderer
+            .code_lsp
+            .mouse_hover
+            .as_ref()
+            .is_some_and(|c| {
+                !c.requested && c.since.elapsed().as_secs_f32() >= MOUSE_HOVER_DELAY_SECS
+            });
         if matured {
             let (line, col) = {
                 let cand = self.renderer.code_lsp.mouse_hover.as_mut().unwrap();
@@ -1456,9 +1457,9 @@ impl Screen<'_> {
                 .as_ref()
                 .and_then(|code| code.diagnostics.get(&line))
                 .is_some_and(|spans| {
-                    spans.iter().any(|d| {
-                        col >= d.start && col < d.end && !d.message.is_empty()
-                    })
+                    spans
+                        .iter()
+                        .any(|d| col >= d.start && col < d.end && !d.message.is_empty())
                 });
             if over_diagnostic {
                 // The diagnostic is what the pointer is asking about —
@@ -1753,9 +1754,13 @@ impl Screen<'_> {
             }
             let canonical = canonical_key(&path);
             let is_current =
-                self.context_manager.current().code.as_ref().is_some_and(|code| {
-                    code.path == path || canonical_key(&code.path) == canonical
-                });
+                self.context_manager
+                    .current()
+                    .code
+                    .as_ref()
+                    .is_some_and(|code| {
+                        code.path == path || canonical_key(&code.path) == canonical
+                    });
             if is_current {
                 if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                     code.buffer.apply_text_edits(&parsed);
@@ -1777,8 +1782,7 @@ impl Screen<'_> {
                 open_pane = Some(canonical.clone());
             }
             if let Some(pane_path) = open_pane {
-                if let Some(pane) =
-                    self.context_manager.code_pane_mut_by_path(&pane_path)
+                if let Some(pane) = self.context_manager.code_pane_mut_by_path(&pane_path)
                 {
                     pane.buffer.apply_text_edits(&parsed);
                     let dirty = pane.is_dirty();
@@ -1816,9 +1820,7 @@ impl Screen<'_> {
         let (line, col) = location
             .range
             .as_ref()
-            .map(|range| {
-                (range.start.line as usize, range.start.character as usize)
-            })
+            .map(|range| (range.start.line as usize, range.start.character as usize))
             .unwrap_or((0, 0));
         self.open_code_location(target, line, col);
     }
@@ -1885,14 +1887,14 @@ impl Screen<'_> {
     /// card pinned to the span start. Non-consuming — the click also
     /// moved the cursor as usual.
     pub(crate) fn show_code_diagnostic_card_at(&mut self, line: usize, col: usize) {
-        let Some((path, spans)) = self.context_manager.current().code.as_ref().map(
-            |code| {
+        let Some((path, spans)) =
+            self.context_manager.current().code.as_ref().map(|code| {
                 (
                     code.path.clone(),
                     code.diagnostics.get(&line).cloned().unwrap_or_default(),
                 )
-            },
-        ) else {
+            })
+        else {
             return;
         };
         let mut hits: Vec<&CodeLineDiagnostic> = spans
@@ -2269,9 +2271,7 @@ impl Screen<'_> {
         };
         let seq = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
         if lsp_log() {
-            eprintln!(
-                "neoism::lsp code definition request: seq={seq} at {line}:{col}"
-            );
+            eprintln!("neoism::lsp code definition request: seq={seq} at {line}:{col}");
         }
         self.renderer.code_lsp.definition_seq = Some(seq);
         let _ = shared.jobs.send(CodeLspJob::Definition {
@@ -2593,9 +2593,7 @@ impl Screen<'_> {
                 return false;
             }
             let cursor_col = code.buffer.cursor_col;
-            let start = edit_start
-                .unwrap_or(session.anchor_col)
-                .min(cursor_col);
+            let start = edit_start.unwrap_or(session.anchor_col).min(cursor_col);
             let start = if code
                 .buffer
                 .lines
@@ -2732,5 +2730,4 @@ impl Screen<'_> {
             }
         }
     }
-
 }

@@ -40,9 +40,7 @@ use tokio::net::UnixListener;
 use tokio::sync::Notify;
 use tower_service::Service;
 
-use neoism_workspace_daemon::{
-    auth, handshake, server, workspace::WorkspaceManager,
-};
+use neoism_workspace_daemon::{auth, handshake, server, workspace::WorkspaceManager};
 
 const EMBEDDED_DAEMON_TOKEN_ENV: &str = "NEOISM_DAEMON_TOKEN";
 const EMBEDDED_DAEMON_SOCKET_ENV: &str = "NEOISM_DAEMON_SOCKET";

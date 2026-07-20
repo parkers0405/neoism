@@ -640,7 +640,8 @@ fn transcript_refresh_keeps_live_trace_anchored_to_its_turn() {
 
     // A newer prompt arriving must NOT move the boundary forward: the
     // anchored turn's trace stays visible for the rest of the visit.
-    pane.messages.push(NeoismAgentMessage::user("newer").with_id("newer"));
+    pane.messages
+        .push(NeoismAgentMessage::user("newer").with_id("newer"));
     pane.messages
         .push(NeoismAgentMessage::assistant("newer answer").with_id("newer-answer"));
     pane.rebase_current_turn_trace();

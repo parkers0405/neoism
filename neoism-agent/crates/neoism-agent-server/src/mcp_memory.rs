@@ -245,8 +245,7 @@ async fn sync_memory_embeddings(
     }
     let now = crate::now_millis() as i64;
     for chunk in stale.chunks(EMBED_BATCH) {
-        let inputs: Vec<String> =
-            chunk.iter().map(|(_, _, text)| text.clone()).collect();
+        let inputs: Vec<String> = chunk.iter().map(|(_, _, text)| text.clone()).collect();
         let vectors = client.embed(&inputs).await?;
         for ((path, hash, _), vector) in chunk.iter().zip(vectors) {
             if vector.is_empty() {

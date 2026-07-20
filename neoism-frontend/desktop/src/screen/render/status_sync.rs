@@ -262,19 +262,18 @@ impl Screen<'_> {
             // Ruler pill: cursor line / total lines. Code and markdown
             // panes read the shared pane's cursor directly. Terminals
             // get no pill — a shell has no line position.
-            let cursor_lines = if let Some(code) =
-                self.context_manager.current().code.as_ref()
-            {
-                let total = code.buffer.line_count();
-                (total > 0).then(|| ((code.buffer.cursor_line + 1).min(total), total))
-            } else if let Some(markdown) =
-                self.context_manager.current().markdown.as_ref()
-            {
-                let total = markdown.lines.len();
-                (total > 0).then(|| ((markdown.cursor_line + 1).min(total), total))
-            } else {
-                None
-            };
+            let cursor_lines =
+                if let Some(code) = self.context_manager.current().code.as_ref() {
+                    let total = code.buffer.line_count();
+                    (total > 0).then(|| ((code.buffer.cursor_line + 1).min(total), total))
+                } else if let Some(markdown) =
+                    self.context_manager.current().markdown.as_ref()
+                {
+                    let total = markdown.lines.len();
+                    (total > 0).then(|| ((markdown.cursor_line + 1).min(total), total))
+                } else {
+                    None
+                };
             let workspace = cursor_lines.map(|(cur, total)| format!("WS {cur}/{total}"));
             let git_changes = active_path
                 .as_deref()
@@ -427,8 +426,7 @@ impl Screen<'_> {
                         .set_from_path(&p, active_cwd.as_deref());
                     // Code panes append the tree-sitter symbol trail
                     // (`mod net › impl Client › fn connect`).
-                    match current.code.as_ref().filter(|c| !c.symbol_trail.is_empty())
-                    {
+                    match current.code.as_ref().filter(|c| !c.symbol_trail.is_empty()) {
                         Some(code) => {
                             let symbol = code
                                 .symbol_trail

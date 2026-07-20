@@ -40,8 +40,10 @@ impl CodeBuffer {
             CodeMotion::Left => {
                 self.clear_vertical_goal();
                 if self.cursor_col > 0 {
-                    self.cursor_col =
-                        prev_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
+                    self.cursor_col = prev_char_boundary(
+                        &self.lines[self.cursor_line],
+                        self.cursor_col,
+                    );
                 } else if self.cursor_line > 0 {
                     self.cursor_line -= 1;
                     self.cursor_col = self.lines[self.cursor_line].len();
@@ -284,8 +286,7 @@ impl CodeBuffer {
             let undo_line = self.cursor_line;
             self.save_local_undo(undo_line, undo_line + 1);
             let next = next_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
-            self.lines[self.cursor_line]
-                .replace_range(self.cursor_col..next, "");
+            self.lines[self.cursor_line].replace_range(self.cursor_col..next, "");
             self.mark_edited();
             self.commit_local_undo(undo_line, undo_line + 1);
         } else if self.cursor_line + 1 < self.lines.len() {

@@ -253,42 +253,41 @@ impl Finder {
         let search_mode_label = self.search_mode_label();
         // BufferLines swaps the search-mode badge for a live match
         // count (with the uncapped total when rows were truncated).
-        let badge_text = if matches!(self.mode, FinderMode::BufferLines)
-            && !self.query.is_empty()
-        {
-            let shown = self.results.len();
-            if self.buffer_match_total > shown {
-                format!("[{}/{} matches]", shown, self.buffer_match_total)
-            } else if self.buffer_match_total == 1 {
-                "[1 match]".to_string()
+        let badge_text =
+            if matches!(self.mode, FinderMode::BufferLines) && !self.query.is_empty() {
+                let shown = self.results.len();
+                if self.buffer_match_total > shown {
+                    format!("[{}/{} matches]", shown, self.buffer_match_total)
+                } else if self.buffer_match_total == 1 {
+                    "[1 match]".to_string()
+                } else {
+                    format!("[{} matches]", self.buffer_match_total)
+                }
+            } else if matches!(self.mode, FinderMode::References) {
+                // Reference count badge; `shown/total` while filtering.
+                let shown = self.results.len();
+                let total = self.reference_rows.len();
+                if shown < total {
+                    format!("[{shown}/{total} refs]")
+                } else if total == 1 {
+                    "[1 ref]".to_string()
+                } else {
+                    format!("[{total} refs]")
+                }
+            } else if matches!(self.mode, FinderMode::Symbols) {
+                // Symbol count badge; `shown/total` while filtering.
+                let shown = self.results.len();
+                let total = self.symbol_rows.len();
+                if shown < total {
+                    format!("[{shown}/{total} syms]")
+                } else if total == 1 {
+                    "[1 sym]".to_string()
+                } else {
+                    format!("[{total} syms]")
+                }
             } else {
-                format!("[{} matches]", self.buffer_match_total)
-            }
-        } else if matches!(self.mode, FinderMode::References) {
-            // Reference count badge; `shown/total` while filtering.
-            let shown = self.results.len();
-            let total = self.reference_rows.len();
-            if shown < total {
-                format!("[{shown}/{total} refs]")
-            } else if total == 1 {
-                "[1 ref]".to_string()
-            } else {
-                format!("[{total} refs]")
-            }
-        } else if matches!(self.mode, FinderMode::Symbols) {
-            // Symbol count badge; `shown/total` while filtering.
-            let shown = self.results.len();
-            let total = self.symbol_rows.len();
-            if shown < total {
-                format!("[{shown}/{total} syms]")
-            } else if total == 1 {
-                "[1 sym]".to_string()
-            } else {
-                format!("[{total} syms]")
-            }
-        } else {
-            format!("[{}]", search_mode_label)
-        };
+                format!("[{}]", search_mode_label)
+            };
         let badge_font = (input_font * 0.92).max(1.0);
         let badge_opts = DrawOpts {
             font_size: badge_font,
@@ -639,15 +638,14 @@ impl Finder {
                     let cursor_x = icon_x + icon_w + icon_gap;
                     let text_w = (available_w - icon_w - icon_gap).max(0.0);
                     let line_text = format!("  {}", s.line);
-                    let line_w = sugarloaf
-                        .overlay_text_mut()
-                        .measure(&line_text, &line_opts);
+                    let line_w =
+                        sugarloaf.overlay_text_mut().measure(&line_text, &line_opts);
                     let name_budget = (text_w - line_w).max(0.0);
                     let name =
                         truncate_to_fit(&s.name, name_budget, sugarloaf, &name_opts);
-                    let name_w = sugarloaf.overlay_text_mut().draw(
-                        cursor_x, baseline, &name, &name_opts,
-                    );
+                    let name_w = sugarloaf
+                        .overlay_text_mut()
+                        .draw(cursor_x, baseline, &name, &name_opts);
                     sugarloaf.overlay_text_mut().draw(
                         cursor_x + name_w,
                         baseline,
@@ -1002,7 +1000,10 @@ fn parent_path(path: &str) -> &str {
 fn symbol_kind_visual(kind: &str, theme: &IdeTheme) -> (&'static str, [u8; 4]) {
     let glyph = crate::panels::completion_menu::kind_icon(kind);
     let glyph = if glyph.is_empty() { "\u{f121}" } else { glyph };
-    (glyph, crate::panels::completion_menu::kind_color(kind, theme))
+    (
+        glyph,
+        crate::panels::completion_menu::kind_color(kind, theme),
+    )
 }
 
 /// Squeeze a long path to a `…/last_two_segments` form so it fits the

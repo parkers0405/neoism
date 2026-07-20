@@ -23,8 +23,8 @@ pub mod highlight;
 pub mod history;
 pub mod input;
 pub mod layout;
-pub mod render;
 pub mod outline;
+pub mod render;
 #[cfg(test)]
 mod tests;
 pub mod types;

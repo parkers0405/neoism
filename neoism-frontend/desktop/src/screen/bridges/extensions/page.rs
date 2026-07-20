@@ -217,13 +217,15 @@ impl Screen<'_> {
         let mut entries: Vec<ExtensionEntry> = manifests
             .into_iter()
             .map(|m| {
-                let installed_version =
-                    installed.get(&m.id).map(|e| e.version.clone());
+                let installed_version = installed.get(&m.id).map(|e| e.version.clone());
                 extension_manifest_to_entry(m, installed_version)
             })
             .collect();
         let workspace_root = self.active_pane_workspace_root();
-        entries.extend(language_server_entries(workspace_root.as_deref(), &installed));
+        entries.extend(language_server_entries(
+            workspace_root.as_deref(),
+            &installed,
+        ));
         entries.extend(built_in_syntax_entries());
         entries
     }

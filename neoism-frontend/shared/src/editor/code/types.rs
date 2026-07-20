@@ -49,8 +49,12 @@ pub enum CodeMotion {
     DocStart,
     DocEnd,
     /// Page motions move by the host-reported viewport rows.
-    PageUp { rows: usize },
-    PageDown { rows: usize },
+    PageUp {
+        rows: usize,
+    },
+    PageDown {
+        rows: usize,
+    },
 }
 
 /// Detected indentation style of the loaded file, used by Tab and the
@@ -224,14 +228,16 @@ impl CodePaneGeometry {
             ((mx - self.text_x + self.scroll_x) / self.cell_w.max(1.0)).max(0.0) as usize;
         let cols = self.wrap.cols();
         if cols == 0 {
-            return (line_ix, byte_for_display_col(line, cells, TAB_DISPLAY_WIDTH));
+            return (
+                line_ix,
+                byte_for_display_col(line, cells, TAB_DISPLAY_WIDTH),
+            );
         }
         let starts = wrap_segment_starts(line, cols, TAB_DISPLAY_WIDTH);
         let seg = seg.min(starts.len().saturating_sub(1));
         let (seg_start, base_col) = starts[seg];
         let seg_end = starts.get(seg + 1).map(|s| s.0).unwrap_or(line.len());
-        let mut byte =
-            byte_for_display_col(line, base_col + cells, TAB_DISPLAY_WIDTH);
+        let mut byte = byte_for_display_col(line, base_col + cells, TAB_DISPLAY_WIDTH);
         if byte >= seg_end && seg_end < line.len() {
             // Clicked into the slack right of a wrapped row: stay on it.
             byte = super::buffer::floor_char_boundary(line, seg_end - 1);
@@ -274,8 +280,7 @@ impl CodePane {
         let vrow = self.wrap_index.first_row_of_line(line) + seg;
         let goal = match self.visual_goal {
             Some((gline, gcol, goal))
-                if gline == self.buffer.cursor_line
-                    && gcol == self.buffer.cursor_col =>
+                if gline == self.buffer.cursor_line && gcol == self.buffer.cursor_col =>
             {
                 goal
             }
@@ -316,8 +321,7 @@ impl CodePane {
     /// raw accumulator AND visual position move together so the spring
     /// has nothing to chase (1:1 hand tracking).
     pub fn set_scroll_progress(&mut self, progress: f32) {
-        let max_scroll =
-            (self.content_height - self.scroll_viewport_height).max(0.0);
+        let max_scroll = (self.content_height - self.scroll_viewport_height).max(0.0);
         let target = (progress.clamp(0.0, 1.0) * max_scroll).clamp(0.0, max_scroll);
         self.target_scroll_y = target;
         self.target_scroll_raw = target;
@@ -344,8 +348,7 @@ impl CodePane {
         );
         let goal = match self.visual_goal {
             Some((gline, gcol, goal))
-                if gline == self.buffer.cursor_line
-                    && gcol == self.buffer.cursor_col =>
+                if gline == self.buffer.cursor_line && gcol == self.buffer.cursor_col =>
             {
                 goal
             }
@@ -387,8 +390,7 @@ impl CodePane {
         let total = self.wrap_index.total_rows(line_count) as i64;
         let max_top = (total - rows_fit).max(0);
         let current_top = (self.target_scroll_y / row_h).round() as i64;
-        let new_top =
-            (current_top + if down { half } else { -half }).clamp(0, max_top);
+        let new_top = (current_top + if down { half } else { -half }).clamp(0, max_top);
         let cursor_vrow = {
             use super::layout::{wrap_visual_position, TAB_DISPLAY_WIDTH};
             let line = self.buffer.cursor_line.min(line_count.saturating_sub(1));
@@ -405,8 +407,7 @@ impl CodePane {
             (new_top + center).clamp(0, (total - 1).max(0))
         } else {
             // View clamped at a buffer edge → cursor keeps traveling.
-            (cursor_vrow + if down { half } else { -half })
-                .clamp(0, (total - 1).max(0))
+            (cursor_vrow + if down { half } else { -half }).clamp(0, (total - 1).max(0))
         };
         if std::env::var_os("NEOISM_SCROLL_LOG").is_some() {
             eprintln!(
@@ -517,7 +518,8 @@ pub struct CodePane {
     /// LSP pipeline (`EditorServerMessage::Diagnostics`). Ranges are
     /// byte columns; positions can go stale between publishes — the
     /// painter clamps, anchoring lands with the LSP wiring pass.
-    pub diagnostics: std::collections::HashMap<usize, Vec<super::feed::CodeLineDiagnostic>>,
+    pub diagnostics:
+        std::collections::HashMap<usize, Vec<super::feed::CodeLineDiagnostic>>,
     /// Buffer revision last shipped to the LSP engine (host bookkeeping
     /// for the didChange sync loop). `None` = never synced (didOpen).
     pub lsp_synced_revision: Option<u64>,
@@ -665,8 +667,7 @@ impl CodePane {
         if row_h > 1.0 && (self.target_scroll_y - prev_target).abs() > f32::EPSILON {
             use super::buffer::{byte_for_char_col, char_col};
             let visible = (self.scroll_viewport_height / row_h).floor().max(1.0);
-            let center_vrow = ((self.target_scroll_y / row_h)
-                + (visible - 1.0) * 0.5)
+            let center_vrow = ((self.target_scroll_y / row_h) + (visible - 1.0) * 0.5)
                 .round()
                 .max(0.0) as usize;
             let (line, _) = self

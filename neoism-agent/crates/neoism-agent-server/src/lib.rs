@@ -31,6 +31,7 @@ mod global_routes;
 mod goal_routes;
 mod instruction;
 mod interaction;
+pub mod language_server;
 mod lsp;
 mod lsp_routes;
 mod managed_lsp_path;
@@ -62,7 +63,6 @@ mod provider_transform;
 mod pty;
 mod pty_routes;
 mod route_query;
-pub mod language_server;
 /// Compatibility export for older callers. New code should use
 /// [`language_server`].
 pub mod rust_lsp {

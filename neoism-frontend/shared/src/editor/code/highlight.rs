@@ -37,8 +37,7 @@ impl CodeHighlightCache {
         self.lines.clear();
         self.unavailable = true;
 
-        let total_bytes: usize =
-            buffer.lines.iter().map(|line| line.len() + 1).sum();
+        let total_bytes: usize = buffer.lines.iter().map(|line| line.len() + 1).sum();
         if total_bytes > WHOLE_BUFFER_HIGHLIGHT_MAX_BYTES {
             return;
         }

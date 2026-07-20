@@ -111,9 +111,7 @@ impl Screen<'_> {
                         }
                     }
                     let content = clipboard.get(ClipboardType::Clipboard);
-                    if let Some(code) =
-                        self.context_manager.current_mut().code.as_mut()
-                    {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         code.buffer.insert_text(&content);
                         self.sync_active_code_modified();
                         self.mark_dirty();

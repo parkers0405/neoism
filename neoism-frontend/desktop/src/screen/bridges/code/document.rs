@@ -38,11 +38,10 @@ impl Screen<'_> {
         }
         let rich_text_id = next_rich_text_id();
         let _ = self.sugarloaf.text(Some(rich_text_id));
-        if !self.context_manager.add_stacked_code(
-            path,
-            rich_text_id,
-            &mut self.sugarloaf,
-        ) {
+        if !self
+            .context_manager
+            .add_stacked_code(path, rich_text_id, &mut self.sugarloaf)
+        {
             self.file_tree_notify(
                 "Could not open code pane",
                 neoism_ui::panels::notifications::NotificationLevel::Error,
@@ -65,16 +64,16 @@ impl Screen<'_> {
     }
 
     pub(crate) fn finish_code_save(&mut self) -> bool {
-        let Some((path, result)) = self
-            .context_manager
-            .current_mut()
-            .code
-            .as_mut()
-            .map(|code| {
-                let path = code.path.clone();
-                let result = code.save().map_err(|err| err.to_string());
-                (path, result)
-            })
+        let Some((path, result)) =
+            self.context_manager
+                .current_mut()
+                .code
+                .as_mut()
+                .map(|code| {
+                    let path = code.path.clone();
+                    let result = code.save().map_err(|err| err.to_string());
+                    (path, result)
+                })
         else {
             return false;
         };

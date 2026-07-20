@@ -467,7 +467,6 @@ impl Screen<'_> {
     }
 }
 
-
 fn collect_leaves(snapshot: &PaneLayoutSnapshot) -> Vec<ScreenPaneLeaf> {
     let mut leaves = Vec::new();
     collect_node_leaves(&snapshot.root, &mut leaves);

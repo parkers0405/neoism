@@ -430,7 +430,8 @@ impl Screen<'_> {
             return;
         };
         if query.is_empty() {
-            code.buffer.set_cursor_position(origin_line, origin_col, false);
+            code.buffer
+                .set_cursor_position(origin_line, origin_col, false);
             code.buffer.follow_cursor = true;
             code.search_highlight = None;
             self.mark_dirty();
@@ -454,7 +455,8 @@ impl Screen<'_> {
         };
         if let Some(found) = vim_search_forward(&code.buffer.lines, start, &query, false)
         {
-            code.buffer.set_cursor_position(found.line, found.col, false);
+            code.buffer
+                .set_cursor_position(found.line, found.col, false);
             code.buffer.follow_cursor = true;
         }
         self.mark_dirty();
@@ -628,7 +630,8 @@ impl Screen<'_> {
             return;
         };
         let line_ix = (line as usize).saturating_sub(1);
-        code.buffer.set_cursor_position(line_ix, col as usize, false);
+        code.buffer
+            .set_cursor_position(line_ix, col as usize, false);
         code.buffer.follow_cursor = true;
         self.mark_dirty();
     }
@@ -648,7 +651,8 @@ impl Screen<'_> {
             Some((line, col)) => {
                 code.search_origin = None;
                 let line_ix = (line as usize).saturating_sub(1);
-                code.buffer.set_cursor_position(line_ix, col as usize, false);
+                code.buffer
+                    .set_cursor_position(line_ix, col as usize, false);
                 code.buffer.follow_cursor = true;
             }
             None => {

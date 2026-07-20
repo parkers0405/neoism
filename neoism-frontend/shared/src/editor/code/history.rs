@@ -86,7 +86,11 @@ impl CodeBuffer {
                 let Some(after) = after.clone() else {
                     return false;
                 };
-                self.restore_history_line_snapshot(after, before.start, before.lines.len());
+                self.restore_history_line_snapshot(
+                    after,
+                    before.start,
+                    before.lines.len(),
+                );
             }
         }
         self.undo_stack.push(entry);

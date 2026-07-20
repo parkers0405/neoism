@@ -541,7 +541,11 @@ where
     // themes but is invisible on a light one, so fall back to the (dark)
     // foreground there. Static accents are routed through `readable_accent` so
     // a dark-tuned accent stays legible as the card title on light themes.
-    let live_base = if theme.is_dark() { theme.white } else { theme.fg };
+    let live_base = if theme.is_dark() {
+        theme.white
+    } else {
+        theme.fg
+    };
     let accent_u8 = if live_task {
         theme.u8_alpha(live_base, live_task_alpha)
     } else {

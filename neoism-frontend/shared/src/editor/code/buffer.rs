@@ -63,7 +63,9 @@ fn char_class(c: char) -> u8 {
 
 /// Start of the next word after `col`, or None past the last word.
 pub(super) fn word_right_boundary(line: &str, col: usize) -> Option<usize> {
-    let mut chars = line[floor_char_boundary(line, col)..].char_indices().peekable();
+    let mut chars = line[floor_char_boundary(line, col)..]
+        .char_indices()
+        .peekable();
     let base = floor_char_boundary(line, col);
     let (_, first) = chars.next()?;
     let start_class = char_class(first);
@@ -117,10 +119,7 @@ pub(super) fn detect_indent(lines: &[String]) -> CodeIndent {
         }
     }
     for width in [2usize, 4, 8] {
-        if space_runs
-            .iter()
-            .any(|run| *run == width)
-        {
+        if space_runs.iter().any(|run| *run == width) {
             return CodeIndent {
                 use_tabs: false,
                 width,
@@ -175,10 +174,8 @@ impl CodeBuffer {
             &self.lines[sl],
             edit.start_col.min(self.lines[sl].len()),
         );
-        let ec = floor_char_boundary(
-            &self.lines[el],
-            edit.end_col.min(self.lines[el].len()),
-        );
+        let ec =
+            floor_char_boundary(&self.lines[el], edit.end_col.min(self.lines[el].len()));
         let head = self.lines[sl][..sc].to_string();
         let tail = self.lines[el][ec..].to_string();
         let replacement = format!("{head}{}{tail}", edit.text.replace('\r', ""));
@@ -197,8 +194,7 @@ impl CodeBuffer {
         };
         let cleaned = text.replace('\r', "");
         let trailing_newline = cleaned.ends_with('\n');
-        let mut lines: Vec<String> =
-            cleaned.split('\n').map(str::to_string).collect();
+        let mut lines: Vec<String> = cleaned.split('\n').map(str::to_string).collect();
         if trailing_newline {
             lines.pop();
         }

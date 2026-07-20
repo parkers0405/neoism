@@ -263,7 +263,7 @@ mod tests {
             "src/main.rs",
             "apps/frontend/pages/index.tsx",
             "README.md",
-            "dist.rs",            // file named like an ignored dir, not inside one
+            "dist.rs", // file named like an ignored dir, not inside one
             "my-node_modules.md", // segment must match exactly
             "notes/build-log.md",
         ] {

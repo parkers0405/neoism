@@ -122,7 +122,9 @@ impl CodeBuffer {
             VimAction::VisualTextObject { kind, around } => {
                 self.vim_visual_text_object(*kind, *around)
             }
-            VimAction::Search { reverse, count } => self.vim_search_next(*reverse, *count),
+            VimAction::Search { reverse, count } => {
+                self.vim_search_next(*reverse, *count)
+            }
             VimAction::SearchWord { forward, count } => {
                 self.vim_search_word(*forward, *count)
             }
@@ -328,8 +330,7 @@ impl CodeBuffer {
             }
             VimMotion::Find { kind, target } => {
                 let col = vim_find_col(line, pos.col, kind, target, count, false)?;
-                let inclusive =
-                    matches!(kind, VimFindKind::To | VimFindKind::Till);
+                let inclusive = matches!(kind, VimFindKind::To | VimFindKind::Till);
                 (
                     CodePosition {
                         line: pos.line,
@@ -346,8 +347,7 @@ impl CodeBuffer {
                 let (kind, target) = self.vim.last_find?;
                 let kind = if reverse { reverse_find(kind) } else { kind };
                 let col = vim_find_col(line, pos.col, kind, target, count, true)?;
-                let inclusive =
-                    matches!(kind, VimFindKind::To | VimFindKind::Till);
+                let inclusive = matches!(kind, VimFindKind::To | VimFindKind::Till);
                 (
                     CodePosition {
                         line: pos.line,
@@ -382,20 +382,14 @@ impl CodeBuffer {
                 for _ in 0..count {
                     cur = vim_paragraph_forward(lines, cur);
                 }
-                (
-                    CodePosition { line: cur, col: 0 },
-                    MotionKind::Exclusive,
-                )
+                (CodePosition { line: cur, col: 0 }, MotionKind::Exclusive)
             }
             VimMotion::ParagraphBack => {
                 let mut cur = pos.line;
                 for _ in 0..count {
                     cur = vim_paragraph_back(lines, cur);
                 }
-                (
-                    CodePosition { line: cur, col: 0 },
-                    MotionKind::Exclusive,
-                )
+                (CodePosition { line: cur, col: 0 }, MotionKind::Exclusive)
             }
             VimMotion::MatchPair => {
                 // Returns (bracket under/after cursor, its match); the
@@ -422,21 +416,14 @@ impl CodeBuffer {
         match op {
             VimOperator::Yank => {
                 let (text, linewise) = self.vim_range_text(&range);
-                let register = if linewise {
-                    format!("{text}\n")
-                } else {
-                    text
-                };
+                let register = if linewise { format!("{text}\n") } else { text };
                 // TextYankPost-style flash over the yanked rows.
                 let flash_rows = match &range {
                     VimOpRange::Lines { first, last } => (*first, *last),
                     VimOpRange::Chars { start, end } => (start.line, end.line),
                 };
-                self.yank_flash = Some((
-                    flash_rows.0,
-                    flash_rows.1,
-                    web_time::Instant::now(),
-                ));
+                self.yank_flash =
+                    Some((flash_rows.0, flash_rows.1, web_time::Instant::now()));
                 // Yank ends Visual mode with the cursor at the start of
                 // what was yanked (vim semantics) — without this the
                 // selection lingers and the yank looks like a no-op.
@@ -461,11 +448,7 @@ impl CodeBuffer {
             }
             VimOperator::Delete | VimOperator::Change => {
                 let (text, linewise) = self.vim_range_text(&range);
-                let register = if linewise {
-                    format!("{text}\n")
-                } else {
-                    text
-                };
+                let register = if linewise { format!("{text}\n") } else { text };
                 self.break_undo_group();
                 self.save_undo();
                 let change = matches!(op, VimOperator::Change);
@@ -552,9 +535,7 @@ impl CodeBuffer {
                     })
                 }
             }
-            VimTarget::Object { kind, around } => {
-                self.vim_object_range(kind, around)
-            }
+            VimTarget::Object { kind, around } => self.vim_object_range(kind, around),
             VimTarget::Motion(motion) => {
                 // `cw` acts like `ce` (vim's most-loved special case).
                 let motion = if matches!(op, VimOperator::Change) {
@@ -582,8 +563,7 @@ impl CodeBuffer {
                             (cursor, dest)
                         };
                         if kind == MotionKind::Inclusive {
-                            let line =
-                                &self.lines[end.line.min(self.lines.len() - 1)];
+                            let line = &self.lines[end.line.min(self.lines.len() - 1)];
                             if end.col < line.len() {
                                 end.col = next_char_boundary(line, end.col);
                             }
@@ -605,16 +585,10 @@ impl CodeBuffer {
         }
     }
 
-    fn vim_object_range(
-        &self,
-        kind: VimTextObject,
-        around: bool,
-    ) -> Option<VimOpRange> {
+    fn vim_object_range(&self, kind: VimTextObject, around: bool) -> Option<VimOpRange> {
         let pos = md(self.cursor());
         match kind {
-            VimTextObject::Word { big } => {
-                vim_word_object(&self.lines, pos, big, around)
-            }
+            VimTextObject::Word { big } => vim_word_object(&self.lines, pos, big, around),
             VimTextObject::Quote(quote) => {
                 vim_quote_object(&self.lines, pos, quote, around)
             }
@@ -752,8 +726,7 @@ impl CodeBuffer {
                 .chars()
                 .map(toggle_char_case)
                 .collect();
-            self.lines[self.cursor_line]
-                .replace_range(self.cursor_col..end, &toggled);
+            self.lines[self.cursor_line].replace_range(self.cursor_col..end, &toggled);
             self.cursor_col = self.cursor_col + toggled.len();
         }
         self.mark_edited();
@@ -805,8 +778,7 @@ impl CodeBuffer {
         self.save_undo();
         if text.ends_with('\n') {
             // Linewise paste: whole lines below (p) or above (P).
-            let mut lines: Vec<String> =
-                text.split('\n').map(str::to_string).collect();
+            let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
             lines.pop();
             if lines.is_empty() {
                 return VimApplied::noop();
@@ -911,11 +883,9 @@ impl CodeBuffer {
     // --- visual-mode edits ---
 
     fn vim_visual_toggle_case(&mut self) -> VimApplied {
-        let Some(range) = self.vim_target_range(
-            VimOperator::Change,
-            VimTarget::Selection,
-            1,
-        ) else {
+        let Some(range) =
+            self.vim_target_range(VimOperator::Change, VimTarget::Selection, 1)
+        else {
             return VimApplied::noop();
         };
         self.break_undo_group();
@@ -931,11 +901,9 @@ impl CodeBuffer {
     }
 
     fn vim_visual_replace(&mut self, ch: char) -> VimApplied {
-        let Some(range) = self.vim_target_range(
-            VimOperator::Change,
-            VimTarget::Selection,
-            1,
-        ) else {
+        let Some(range) =
+            self.vim_target_range(VimOperator::Change, VimTarget::Selection, 1)
+        else {
             return VimApplied::noop();
         };
         self.break_undo_group();
@@ -954,11 +922,7 @@ impl CodeBuffer {
 
     /// Rewrite every char span covered by `range` through `map`,
     /// preserving line structure.
-    fn vim_map_range_chars(
-        &mut self,
-        range: &VimOpRange,
-        map: impl Fn(&str) -> String,
-    ) {
+    fn vim_map_range_chars(&mut self, range: &VimOpRange, map: impl Fn(&str) -> String) {
         match range {
             VimOpRange::Chars { start, end } => {
                 let last = self.lines.len() - 1;

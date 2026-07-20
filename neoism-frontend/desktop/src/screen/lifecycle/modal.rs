@@ -103,11 +103,18 @@ impl Screen<'_> {
                 // nvim removed; native editor equivalent TBD.
                 self.renderer.modal.close();
             }
-            ModalAction::RunEditorCommandWithInput { command: _, value: _ } => {
+            ModalAction::RunEditorCommandWithInput {
+                command: _,
+                value: _,
+            } => {
                 // nvim removed; native editor equivalent TBD.
                 self.renderer.modal.close();
             }
-            ModalAction::OpenLspLocation { uri, line, character } => {
+            ModalAction::OpenLspLocation {
+                uri,
+                line,
+                character,
+            } => {
                 // Jump-to-line/column comes back with the native editor's
                 // LSP integration; for now just open the file.
                 let _ = (line, character);
@@ -467,5 +474,4 @@ impl Screen<'_> {
 
         self.mark_dirty();
     }
-
 }

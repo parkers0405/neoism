@@ -389,38 +389,85 @@ impl Lang {
                 "return", "then", "true", "until", "while",
             ],
             Lang::C => &[
-                "auto", "break", "case", "char", "const", "continue", "default",
-                "do", "double", "else", "enum", "extern", "float", "for", "goto",
-                "if", "inline", "int", "long", "register", "restrict", "return",
-                "short", "signed", "sizeof", "static", "struct", "switch",
-                "typedef", "union", "unsigned", "void", "volatile", "while",
-                "NULL", "true", "false",
+                "auto", "break", "case", "char", "const", "continue", "default", "do",
+                "double", "else", "enum", "extern", "float", "for", "goto", "if",
+                "inline", "int", "long", "register", "restrict", "return", "short",
+                "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+                "unsigned", "void", "volatile", "while", "NULL", "true", "false",
             ],
             Lang::Cpp => &[
-                "auto", "bool", "break", "case", "catch", "char", "class",
-                "const", "constexpr", "continue", "default", "delete", "do",
-                "double", "else", "enum", "explicit", "extern", "false", "float",
-                "for", "friend", "goto", "if", "inline", "int", "long",
-                "mutable", "namespace", "new", "noexcept", "nullptr", "operator",
-                "override", "private", "protected", "public", "return", "short",
-                "signed", "sizeof", "static", "struct", "switch", "template",
-                "this", "throw", "true", "try", "typedef", "typename", "union",
-                "unsigned", "using", "virtual", "void", "volatile", "while",
+                "auto",
+                "bool",
+                "break",
+                "case",
+                "catch",
+                "char",
+                "class",
+                "const",
+                "constexpr",
+                "continue",
+                "default",
+                "delete",
+                "do",
+                "double",
+                "else",
+                "enum",
+                "explicit",
+                "extern",
+                "false",
+                "float",
+                "for",
+                "friend",
+                "goto",
+                "if",
+                "inline",
+                "int",
+                "long",
+                "mutable",
+                "namespace",
+                "new",
+                "noexcept",
+                "nullptr",
+                "operator",
+                "override",
+                "private",
+                "protected",
+                "public",
+                "return",
+                "short",
+                "signed",
+                "sizeof",
+                "static",
+                "struct",
+                "switch",
+                "template",
+                "this",
+                "throw",
+                "true",
+                "try",
+                "typedef",
+                "typename",
+                "union",
+                "unsigned",
+                "using",
+                "virtual",
+                "void",
+                "volatile",
+                "while",
             ],
             Lang::Bash => &[
-                "if", "then", "elif", "else", "fi", "for", "while", "until",
-                "do", "done", "case", "esac", "in", "function", "select",
-                "time", "return", "break", "continue", "local", "export",
-                "readonly", "declare", "unset", "shift", "exit", "trap",
-                "source", "alias", "eval", "exec",
+                "if", "then", "elif", "else", "fi", "for", "while", "until", "do",
+                "done", "case", "esac", "in", "function", "select", "time", "return",
+                "break", "continue", "local", "export", "readonly", "declare", "unset",
+                "shift", "exit", "trap", "source", "alias", "eval", "exec",
             ],
             Lang::Make => &[
-                "ifeq", "ifneq", "ifdef", "ifndef", "else", "endif", "include",
-                "define", "endef", "export", "unexport", "override",
+                "ifeq", "ifneq", "ifdef", "ifndef", "else", "endif", "include", "define",
+                "endef", "export", "unexport", "override",
             ],
             Lang::Nix => &[
-                "let", "in", "if", "then", "else", "with", "inherit", "rec",
-                "assert", "or", "true", "false", "null",
+                "let", "in", "if", "then", "else", "with", "inherit", "rec", "assert",
+                "or", "true", "false", "null",
             ],
             Lang::Yaml => &["true", "false", "null", "yes", "no"],
             Lang::Css
@@ -456,16 +503,16 @@ impl Lang {
             | Lang::Go
             | Lang::C
             | Lang::Cpp => Some("//"),
-            Lang::Python | Lang::Toml | Lang::Bash | Lang::Nix | Lang::Yaml
-            | Lang::Make => {
-                Some("#")
-            }
+            Lang::Python
+            | Lang::Toml
+            | Lang::Bash
+            | Lang::Nix
+            | Lang::Yaml
+            | Lang::Make => Some("#"),
             Lang::Lua => Some("--"),
             // CSS/HTML only have block comments, which the per-line
             // fallback can't carry across lines anyway.
-            Lang::Css | Lang::Html | Lang::Json | Lang::Markdown | Lang::Other => {
-                None
-            }
+            Lang::Css | Lang::Html | Lang::Json | Lang::Markdown | Lang::Other => None,
         }
     }
 }
@@ -1042,7 +1089,11 @@ mod tests {
             .find(|(_, s, e)| *s <= name_pos && name_pos < *e)
             .map(|(k, _, _)| *k);
         eprintln!("nix tokens: {toks:?}");
-        assert_eq!(hit, Some(SynTok::Function), "attr key should color as property");
+        assert_eq!(
+            hit,
+            Some(SynTok::Function),
+            "attr key should color as property"
+        );
     }
 
     #[test]

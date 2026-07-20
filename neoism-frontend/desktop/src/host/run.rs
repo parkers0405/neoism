@@ -1138,8 +1138,8 @@ impl Renderer {
                 neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
             ) as f32;
             let anchor_x = geometry.text_x + word_col * geometry.cell_w;
-            let anchor_y = geometry.rect[1] + session.line as f32 * geometry.row_h
-                - code.scroll_y;
+            let anchor_y =
+                geometry.rect[1] + session.line as f32 * geometry.row_h - code.scroll_y;
             let pane_bottom = geometry.rect[1] + geometry.rect[3];
             let lines_below =
                 (((pane_bottom - anchor_y) / geometry.row_h).floor()).max(1.0) as u32;
@@ -1177,8 +1177,8 @@ impl Renderer {
                 neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
             ) as f32;
             let anchor_x = geometry.text_x + col_cells * geometry.cell_w;
-            let anchor_y = geometry.rect[1] + session.line as f32 * geometry.row_h
-                - code.scroll_y;
+            let anchor_y =
+                geometry.rect[1] + session.line as f32 * geometry.row_h - code.scroll_y;
             let pane_bottom = geometry.rect[1] + geometry.rect[3];
             let lines_below =
                 (((pane_bottom - anchor_y) / geometry.row_h).floor()).max(1.0) as u32;
@@ -1194,11 +1194,11 @@ impl Renderer {
                 },
             ))
         });
-        let (completion_popup, completion_anchor) =
-            match code_actions.or(code_completion) {
-                Some((popup, anchor)) => (Some(popup), anchor),
-                None => (None, completion_anchor),
-            };
+        let (completion_popup, completion_anchor) = match code_actions.or(code_completion)
+        {
+            Some((popup, anchor)) => (Some(popup), anchor),
+            None => (None, completion_anchor),
+        };
         // Log ONLY when a popup is actually built — this runs every frame, so
         // logging the `present=false` case floods 60/s and buries the rest of
         // the completion chain. eprintln, NOT tracing::info (desktop subscriber
@@ -1261,9 +1261,7 @@ impl Renderer {
             // hovered cell (dismissed by pointer-cell change instead —
             // requiring cursor equality made them never render).
             let cursor = code.buffer.cursor();
-            if !card.from_mouse
-                && (cursor.line != card.line || cursor.col != card.col)
-            {
+            if !card.from_mouse && (cursor.line != card.line || cursor.col != card.col) {
                 return None;
             }
             let geometry = &code.geometry;
@@ -1282,8 +1280,7 @@ impl Renderer {
             );
             let vrow = geometry.wrap.first_row_of_line(card.line) + seg;
             Some((
-                geometry.text_x + local_col as f32 * geometry.cell_w
-                    - geometry.scroll_x,
+                geometry.text_x + local_col as f32 * geometry.cell_w - geometry.scroll_x,
                 geometry.rect[1] + vrow as f32 * geometry.row_h - code.scroll_y,
                 geometry.row_h,
                 &card.lines,

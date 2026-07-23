@@ -859,6 +859,15 @@ impl Screen<'_> {
             PaletteAction::GoToSymbol => {
                 self.open_finder_symbols();
             }
+            PaletteAction::ToggleWordWrap => {
+                let _ = self.toggle_code_word_wrap();
+            }
+            PaletteAction::ReplaceInFile => {
+                self.open_finder_buffer_replace();
+            }
+            PaletteAction::ProjectProblems => {
+                self.open_project_problems();
+            }
             PaletteAction::ToggleViMode => {
                 // Code pane: flip between standard and vim input.
                 // Terminal pane: the classic scrollback vi mode.

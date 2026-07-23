@@ -51,13 +51,20 @@ impl Screen<'_> {
 
     pub(crate) fn save_current_code(&mut self) -> bool {
         self.renderer.code_lsp.dismiss_popups();
-        // Format-on-save (config `[neoism] format-on-save`, default on):
-        // formatter runs on the worker; the pump applies the edits and
-        // calls `finish_code_save`. No LSP target → save directly.
+        // Format-on-save runs FIRST on every path (config `[neoism]
+        // format-on-save`, default on): the worker formats, the pump
+        // applies the edits and finishes the save — through the daemon
+        // when the pane is doc-bound, locally otherwise.
         if self.renderer.code_format_on_save
             && self.context_manager.current().code.is_some()
             && self.queue_code_format_then_save()
         {
+            return true;
+        }
+        // Doc-bound panes save through the daemon (single writer; the
+        // converged CRDT doc hits disk and every peer gets `Saved`).
+        if self.save_current_code_via_daemon() {
+            self.mark_dirty();
             return true;
         }
         self.finish_code_save()

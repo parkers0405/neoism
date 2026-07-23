@@ -518,12 +518,17 @@ pub struct NeoismAgentPane {
     fx_started: Option<(neoism_ui::panels::agent_pane::view::fx::AgentFxKind, f32)>,
     fx_pending_prompt: Option<String>,
     cursor_byte: usize,
-    /// Byte spans of the input's soft-wrapped visual rows, registered
-    /// by the renderer each frame (same wrap the caret is placed
-    /// with). Up/Down movement walks these; `input_wrap_len` guards
-    /// against a frame of staleness after the text changes.
-    input_wrap_ranges: Vec<(usize, usize)>,
+    /// Soft-wrapped visual rows of the input (byte spans + per-boundary
+    /// x offsets), registered by the renderer each frame — the same
+    /// wrap the caret is placed with. Up/Down movement walks these;
+    /// `input_wrap_len` guards against a frame of staleness after the
+    /// text changes.
+    input_wrap_rows: Vec<neoism_ui::panels::agent_pane::input_controller::InputWrapRow>,
     input_wrap_len: usize,
+    /// Sticky caret x carried between consecutive Up/Down presses so a
+    /// run of vertical moves keeps aiming at the column it started in.
+    /// Cleared by edits and horizontal moves.
+    input_goal_x: Option<f32>,
     input_attachments: Vec<NeoismAgentInputAttachment>,
     ui_events: Vec<NeoismAgentUiEvent>,
     pending_user_prompts: Vec<String>,
@@ -741,8 +746,9 @@ impl Default for NeoismAgentPane {
             fx_started: None,
             fx_pending_prompt: None,
             cursor_byte: 0,
-            input_wrap_ranges: Vec::new(),
+            input_wrap_rows: Vec::new(),
             input_wrap_len: 0,
+            input_goal_x: None,
             input_attachments: Vec::new(),
             ui_events: Vec::new(),
             pending_user_prompts: Vec::new(),

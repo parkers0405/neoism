@@ -57,7 +57,7 @@ impl MarkdownCrdtState {
     }
 }
 
-fn generate_client_id() -> u64 {
+pub(crate) fn generate_client_id() -> u64 {
     // Mask into Yjs's safe-integer client-id space; retry the (absurdly
     // unlikely) zero so 0 can act as the snapshot-origin sentinel.
     loop {

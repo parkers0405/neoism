@@ -441,6 +441,17 @@ impl Application<'_> {
                     return;
                 }
 
+                // Spring-loaded file-tree drop: commit the move onto the
+                // hovered folder, or fall back to a click (open/toggle)
+                // when the press never crossed the drag threshold.
+                if button == MouseButton::Left
+                    && route.window.screen.handle_file_tree_drag_release()
+                {
+                    route.window.set_cursor(CursorIcon::Default);
+                    route.request_redraw();
+                    return;
+                }
+
                 // Stop selection auto-scroll on button release.
                 if let MouseButton::Left | MouseButton::Right = button {
                     let scroll_timer_id = route.window.screen.ctx().current_route();
@@ -744,6 +755,16 @@ impl Application<'_> {
                 route.request_redraw();
             }
             route.window.set_cursor(CursorIcon::Default);
+            return;
+        }
+
+        // Spring-loaded file-tree drag: a row dragged onto a folder.
+        // Grips the cursor while live and springs dwelt-on folders open.
+        if route.window.screen.handle_file_tree_drag_move() {
+            if route.window.screen.renderer.file_tree.is_file_dragging() {
+                route.window.set_cursor(CursorIcon::Grabbing);
+            }
+            route.request_redraw();
             return;
         }
 

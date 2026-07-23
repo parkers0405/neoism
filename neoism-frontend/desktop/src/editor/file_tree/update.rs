@@ -66,6 +66,13 @@ impl FileTree {
         self.with_ctx(|inner, ctx| inner.toggle_dir_at(index, ctx))
     }
 
+    /// Open (list + expand) the folder at `path`, threading the correct
+    /// files service. Used by the spring-loaded drag to open a folder the
+    /// cursor dwells on. No-op / `false` when the path isn't a closed dir.
+    pub fn open_dir(&mut self, path: &Path) -> bool {
+        self.with_ctx(|inner, ctx| inner.open_dir(path, ctx))
+    }
+
     pub fn reveal_directory(&mut self, path: &Path) -> Option<usize> {
         self.with_ctx(|inner, ctx| inner.reveal_directory(path, ctx))
     }

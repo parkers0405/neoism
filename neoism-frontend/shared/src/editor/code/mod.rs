@@ -19,20 +19,24 @@
 
 pub mod buffer;
 pub mod feed;
+pub mod doc_sync;
+pub mod gitdiff;
 pub mod highlight;
 pub mod history;
 pub mod input;
 pub mod layout;
 pub mod outline;
+pub mod multicursor;
 pub mod render;
+pub mod substitute;
 #[cfg(test)]
 mod tests;
 pub mod types;
 pub mod vim;
 
 pub use feed::{
-    styled_runs_for_line, styled_runs_with_syntax, CodeDiagnosticSeverity,
-    CodeLineDiagnostic, CodeStyledRun,
+    styled_runs_for_line, styled_runs_with_syntax, CodeDiagAnchor,
+    CodeDiagnosticSeverity, CodeLineDiagnostic, CodeStyledRun,
 };
 pub use highlight::CodeHighlightCache;
 pub use types::*;

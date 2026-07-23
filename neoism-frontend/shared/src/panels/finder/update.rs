@@ -119,6 +119,25 @@ impl Finder {
         self.start_open_pop();
     }
 
+    /// Open the finder in BufferReplace mode (search & replace over
+    /// the active code pane): same snapshot + fresh-state reset as
+    /// `open_buffer_lines`; the query is `pattern/replacement`.
+    pub fn open_buffer_replace(&mut self, lines: Vec<String>) {
+        self.enabled = true;
+        self.mode = FinderMode::BufferReplace;
+        self.buffer_lines = lines;
+        self.buffer_match_total = 0;
+        self.query.clear();
+        self.results.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.reset_motion();
+        self.query_dirty_at = Some(Instant::now());
+        self.last_executed_query.clear();
+        self.caret_blink_start = Instant::now();
+        self.start_open_pop();
+    }
+
     /// Open the finder in References mode over pre-computed LSP hits
     /// (`gr` on the code pane). Rows carry cwd-relative paths so
     /// Enter/preview reuse the grep open path; typing fuzzy-filters
@@ -336,9 +355,10 @@ impl Finder {
                 self.grep_search_mode = self.grep_search_mode.next();
             }
             // Single search mode — nothing to cycle.
-            FinderMode::BufferLines | FinderMode::References | FinderMode::Symbols => {
-                return
-            }
+            FinderMode::BufferLines
+            | FinderMode::BufferReplace
+            | FinderMode::References
+            | FinderMode::Symbols => return,
         }
         self.results.clear();
         self.selected_index = 0;

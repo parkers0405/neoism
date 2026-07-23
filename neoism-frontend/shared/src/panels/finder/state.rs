@@ -203,6 +203,8 @@ impl Finder {
             // In-memory substring scan — cheap enough to run every
             // keystroke, and the pane live-jump should never lag rows.
             FinderMode::BufferLines => 0,
+            // Same in-memory scan on the pattern part of the query.
+            FinderMode::BufferReplace => 0,
             // In-memory fuzzy filter over pre-computed rows.
             FinderMode::References => 0,
             // Same — pre-computed symbol rows, filtered in-memory.
@@ -254,6 +256,7 @@ impl Finder {
             FinderMode::Files | FinderMode::GitChanges => self.file_search_mode.label(),
             FinderMode::Grep => self.grep_search_mode.label(),
             FinderMode::BufferLines => "buffer",
+            FinderMode::BufferReplace => "replace",
             FinderMode::References => "refs",
             FinderMode::Symbols => "symbols",
         }
@@ -273,6 +276,8 @@ impl Finder {
             },
             // Raw, case-sensitive substring — spaces are significant.
             FinderMode::BufferLines => self.query.clone(),
+            // Raw `pattern/replacement` — split happens at use sites.
+            FinderMode::BufferReplace => self.query.clone(),
             // Fuzzy over `path:line text` — raw query.
             FinderMode::References => self.query.clone(),
             // Fuzzy over symbol names — raw query.

@@ -226,6 +226,24 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Code,
     },
     Command {
+        title: "Toggle Word Wrap",
+        shortcut: "",
+        action: PaletteAction::ToggleWordWrap,
+        service: CommandService::Code,
+    },
+    Command {
+        title: "Replace in File",
+        shortcut: "",
+        action: PaletteAction::ReplaceInFile,
+        service: CommandService::Code,
+    },
+    Command {
+        title: "Project Problems",
+        shortcut: "",
+        action: PaletteAction::ProjectProblems,
+        service: CommandService::Code,
+    },
+    Command {
         title: "Toggle Fullscreen",
         shortcut: "",
         action: PaletteAction::ToggleFullscreen,

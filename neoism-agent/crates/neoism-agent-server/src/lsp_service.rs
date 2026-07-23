@@ -16,7 +16,8 @@ use super::{
     lsp_client::{InitializeResult, LspClient},
     lsp_parse::{
         parse_call_hierarchy_calls, parse_call_hierarchy_items, parse_completion,
-        parse_diagnostics, parse_document_symbols, parse_hover, parse_locations,
+        parse_diagnostics, parse_document_highlights, parse_document_symbols,
+        parse_hover, parse_inlay_hints, parse_locations, parse_signature_help,
         parse_workspace_symbols,
     },
     lsp_scan::server_root_for_file,
@@ -314,6 +315,97 @@ impl LspService {
             Ok(parse_hover(root, file, &language, result)
                 .into_iter()
                 .collect())
+        })
+    }
+
+    pub(super) fn signature_help(
+        &self,
+        root: &Path,
+        file: &Path,
+        line: u32,
+        character: u32,
+        spec: &LanguageAdapter,
+    ) -> anyhow::Result<Vec<super::LspSignatureHelp>> {
+        let language = spec
+            .logical_language_for_path(file)
+            .unwrap_or(&spec.id)
+            .to_string();
+        self.with_file_client(root, file, spec, |client| {
+            if !client.initialized.signature_help_provider {
+                return Ok(Vec::new());
+            }
+            client.ensure_open(file, None)?;
+            let result = client.client.request(
+                "textDocument/signatureHelp",
+                text_document_position_params(file, line, character),
+                DOCUMENT_TIMEOUT,
+            )?;
+            Ok(parse_signature_help(root, file, &language, result)
+                .into_iter()
+                .collect())
+        })
+    }
+
+    pub(super) fn inlay_hints(
+        &self,
+        root: &Path,
+        file: &Path,
+        start_line: u32,
+        end_line: u32,
+        spec: &LanguageAdapter,
+    ) -> anyhow::Result<Vec<super::LspInlayHint>> {
+        let language = spec
+            .logical_language_for_path(file)
+            .unwrap_or(&spec.id)
+            .to_string();
+        self.with_file_client(root, file, spec, |client| {
+            if !client.initialized.inlay_hint_provider {
+                return Ok(Vec::new());
+            }
+            client.ensure_open(file, None)?;
+            // The inclusive zero-based line range widens to the start of the
+            // following line so hints anywhere on `end_line` are included.
+            let result = client.client.request(
+                "textDocument/inlayHint",
+                json!({
+                    "textDocument": { "uri": path_to_file_uri(file) },
+                    "range": {
+                        "start": { "line": start_line, "character": 0 },
+                        "end": {
+                            "line": end_line.saturating_add(1),
+                            "character": 0
+                        }
+                    }
+                }),
+                DOCUMENT_TIMEOUT,
+            )?;
+            Ok(parse_inlay_hints(root, file, &language, result))
+        })
+    }
+
+    pub(super) fn document_highlights(
+        &self,
+        root: &Path,
+        file: &Path,
+        line: u32,
+        character: u32,
+        spec: &LanguageAdapter,
+    ) -> anyhow::Result<Vec<super::LspDocumentHighlight>> {
+        let language = spec
+            .logical_language_for_path(file)
+            .unwrap_or(&spec.id)
+            .to_string();
+        self.with_file_client(root, file, spec, |client| {
+            if !client.initialized.document_highlight_provider {
+                return Ok(Vec::new());
+            }
+            client.ensure_open(file, None)?;
+            let result = client.client.request(
+                "textDocument/documentHighlight",
+                text_document_position_params(file, line, character),
+                DOCUMENT_TIMEOUT,
+            )?;
+            Ok(parse_document_highlights(root, file, &language, result))
         })
     }
 

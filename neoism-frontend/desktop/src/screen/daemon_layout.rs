@@ -153,6 +153,7 @@ impl Screen<'_> {
         self.context_manager.detach_daemon_client();
         self.daemon_pane_layout = ScreenPaneLayoutCache::default();
         self.markdown_crdt = crate::screen::markdown_crdt::MarkdownCrdtState::default();
+        self.code_crdt = crate::screen::code_crdt::CodeCrdtState::default();
         self.remote_presence = neoism_ui::editor::crdt::RemotePresenceStore::new();
         self.presence_publisher = None;
         self.pending_peer_workspace_join = None;

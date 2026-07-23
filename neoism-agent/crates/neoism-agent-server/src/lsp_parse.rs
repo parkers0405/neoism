@@ -5,8 +5,9 @@ use serde_json::{json, Value};
 use super::lsp_uri::file_uri_to_path;
 use super::{
     LspCallHierarchyCall, LspCallHierarchyItem, LspCompletionItem, LspDiagnostic,
-    LspDocumentSymbol, LspHover, LspLocation, LspPosition, LspRange, WorkspaceSymbol,
-    MAX_COMPLETIONS, MAX_SYMBOLS,
+    LspDocumentHighlight, LspDocumentSymbol, LspHover, LspInlayHint, LspLocation,
+    LspParameterInfo, LspPosition, LspRange, LspSignatureHelp, LspSignatureInfo,
+    WorkspaceSymbol, MAX_COMPLETIONS, MAX_SYMBOLS,
 };
 
 const MAX_HOVER_CONTENT_CHARS: usize = 8_192;
@@ -120,6 +121,204 @@ fn hover_contents_to_string(value: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+pub(crate) fn parse_signature_help(
+    root: &Path,
+    file: &Path,
+    language: &str,
+    result: Value,
+) -> Option<LspSignatureHelp> {
+    if result.is_null() {
+        return None;
+    }
+    let signatures = result
+        .get("signatures")?
+        .as_array()?
+        .iter()
+        .filter_map(parse_signature_info)
+        .collect::<Vec<_>>();
+    if signatures.is_empty() {
+        return None;
+    }
+
+    Some(LspSignatureHelp {
+        path: relative_path(root, file),
+        signatures,
+        active_signature: optional_u32(result.get("activeSignature")),
+        active_parameter: optional_u32(result.get("activeParameter")),
+        language: Some(language.to_string()),
+    })
+}
+
+fn parse_signature_info(item: &Value) -> Option<LspSignatureInfo> {
+    let label = item.get("label")?.as_str()?.to_string();
+    let parameters = item
+        .get("parameters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|parameter| {
+            Some(LspParameterInfo {
+                label: parameter_label_text(&label, parameter.get("label")?)?,
+                documentation: parameter
+                    .get("documentation")
+                    .and_then(hover_contents_to_string)
+                    .filter(|doc| !doc.trim().is_empty()),
+            })
+        })
+        .collect();
+
+    Some(LspSignatureInfo {
+        documentation: item
+            .get("documentation")
+            .and_then(hover_contents_to_string)
+            .filter(|doc| !doc.trim().is_empty()),
+        parameters,
+        active_parameter: optional_u32(item.get("activeParameter")),
+        label,
+    })
+}
+
+/// A ParameterInformation label is either the literal substring or a
+/// `[start, end)` pair of UTF-16 code-unit offsets into the signature label.
+/// Both forms normalize to the substring; offsets that split a surrogate pair
+/// or overrun the label are rejected.
+fn parameter_label_text(signature_label: &str, label: &Value) -> Option<String> {
+    match label {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(offsets) => {
+            let start = offsets.first()?.as_u64()?;
+            let end = offsets.get(1)?.as_u64()?;
+            if end < start {
+                return None;
+            }
+            let start = utf16_offset_to_byte(signature_label, start)?;
+            let end = utf16_offset_to_byte(signature_label, end)?;
+            signature_label.get(start..end).map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+fn utf16_offset_to_byte(label: &str, offset: u64) -> Option<usize> {
+    let mut utf16 = 0u64;
+    for (byte_index, ch) in label.char_indices() {
+        match utf16.cmp(&offset) {
+            std::cmp::Ordering::Equal => return Some(byte_index),
+            std::cmp::Ordering::Greater => return None,
+            std::cmp::Ordering::Less => utf16 += ch.len_utf16() as u64,
+        }
+    }
+    (utf16 == offset).then_some(label.len())
+}
+
+fn optional_u32(value: Option<&Value>) -> Option<u32> {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+pub(crate) fn parse_inlay_hints(
+    root: &Path,
+    file: &Path,
+    language: &str,
+    result: Value,
+) -> Vec<LspInlayHint> {
+    let Value::Array(items) = result else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter_map(|item| parse_inlay_hint(root, file, language, &item))
+        // A viewport of hints can legitimately exceed the symbol cap; bound by
+        // the larger completion budget instead.
+        .take(MAX_COMPLETIONS)
+        .collect()
+}
+
+fn parse_inlay_hint(
+    root: &Path,
+    file: &Path,
+    language: &str,
+    item: &Value,
+) -> Option<LspInlayHint> {
+    let position = parse_lsp_position(item.get("position")?)?;
+    let label = inlay_hint_label_text(item.get("label")?)?;
+
+    Some(LspInlayHint {
+        path: relative_path(root, file),
+        line: position.line,
+        character: position.character,
+        label,
+        kind: match item.get("kind").and_then(Value::as_u64) {
+            Some(1) => Some("type".to_string()),
+            Some(2) => Some("parameter".to_string()),
+            _ => None,
+        },
+        padding_left: item
+            .get("paddingLeft")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        padding_right: item
+            .get("paddingRight")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        language: Some(language.to_string()),
+    })
+}
+
+/// An InlayHint label is either one string or a list of InlayHintLabelPart
+/// objects; the parts concatenate into the displayed text.
+fn inlay_hint_label_text(label: &Value) -> Option<String> {
+    match label {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| part.get("value").and_then(Value::as_str))
+                .collect::<String>();
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_document_highlights(
+    root: &Path,
+    file: &Path,
+    language: &str,
+    result: Value,
+) -> Vec<LspDocumentHighlight> {
+    let Value::Array(items) = result else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter_map(|item| parse_document_highlight(root, file, language, &item))
+        .take(MAX_SYMBOLS)
+        .collect()
+}
+
+fn parse_document_highlight(
+    root: &Path,
+    file: &Path,
+    language: &str,
+    item: &Value,
+) -> Option<LspDocumentHighlight> {
+    let range = item.get("range").and_then(parse_lsp_range)?;
+
+    Some(LspDocumentHighlight {
+        path: relative_path(root, file),
+        range: Some(range),
+        kind: match item.get("kind").and_then(Value::as_u64) {
+            Some(1) => Some("text".to_string()),
+            Some(2) => Some("read".to_string()),
+            Some(3) => Some("write".to_string()),
+            _ => None,
+        },
+        language: Some(language.to_string()),
+    })
 }
 
 pub(crate) fn parse_locations(
@@ -664,5 +863,28 @@ fn symbol_kind_name(kind: u64) -> &'static str {
         25 => "operator",
         26 => "type_parameter",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod signature_label_tests {
+    use super::*;
+
+    #[test]
+    fn parameter_labels_normalize_strings_and_utf16_offsets() {
+        let signature = "fn greet(name: &str, wave: 😀) -> ()";
+        assert_eq!(
+            parameter_label_text(signature, &json!("name: &str")).as_deref(),
+            Some("name: &str")
+        );
+        // "wave: 😀" spans UTF-16 units 21..29 (the emoji is a surrogate pair).
+        assert_eq!(
+            parameter_label_text(signature, &json!([21, 29])).as_deref(),
+            Some("wave: 😀")
+        );
+        // Mid-surrogate and reversed offsets are rejected, not mis-sliced.
+        assert_eq!(parameter_label_text(signature, &json!([21, 28])), None);
+        assert_eq!(parameter_label_text(signature, &json!([9, 3])), None);
+        assert_eq!(parameter_label_text(signature, &json!([0, 999])), None);
     }
 }

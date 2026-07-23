@@ -538,7 +538,19 @@ impl WorkspaceManager {
         let title = resolved
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());
-        self.create_host_workspace(machine_host_id(), None, title, Some(resolved))
+        let workspace =
+            self.create_host_workspace(machine_host_id(), None, title, Some(resolved));
+        // `--workspace` EXISTS to serve this dir to other machines, so the
+        // workspace is broadcast the moment the daemon binds. Declaring it
+        // Shared is what lights the network badge on the owner's workspace
+        // tab (`workspace_icon_kind_for_index` reads `visibility`) — without
+        // it a hosted workspace is indistinguishable from a private local
+        // one, and nothing else in the host path ever flips the bit.
+        self.set_host_workspace_visibility(
+            &workspace.id,
+            neoism_protocol::workspace::WorkspaceVisibility::Shared,
+        )
+        .unwrap_or(workspace)
     }
 
     pub(crate) fn switch_host_workspace(

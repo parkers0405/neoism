@@ -422,6 +422,55 @@ pub struct LspCallHierarchyCall {
     pub language: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LspSignatureHelp {
+    pub path: String,
+    pub signatures: Vec<LspSignatureInfo>,
+    pub active_signature: Option<u32>,
+    pub active_parameter: Option<u32>,
+    pub language: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct LspSignatureInfo {
+    pub label: String,
+    pub documentation: Option<String>,
+    /// Parameter labels are always normalized to the labelled substring of
+    /// `label`, even when the server sent `[start, end]` UTF-16 offsets.
+    pub parameters: Vec<LspParameterInfo>,
+    pub active_parameter: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct LspParameterInfo {
+    pub label: String,
+    pub documentation: Option<String>,
+}
+
+/// One inlay hint anchored at a one-based (line, UTF-8 byte column) position —
+/// the same display convention every [`LspRange`] in this module uses.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LspInlayHint {
+    pub path: String,
+    pub line: u32,
+    pub character: u32,
+    pub label: String,
+    /// "type" | "parameter" when the server classified the hint.
+    pub kind: Option<String>,
+    pub padding_left: bool,
+    pub padding_right: bool,
+    pub language: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LspDocumentHighlight {
+    pub path: String,
+    pub range: Option<LspRange>,
+    /// "text" | "read" | "write" when the server classified the occurrence.
+    pub kind: Option<String>,
+    pub language: Option<String>,
+}
+
 pub fn status(directory: impl AsRef<Path>) -> Vec<LspStatus> {
     let root = normalized_root(directory.as_ref());
     let adapters = adapters_for_root(&root);
@@ -816,6 +865,130 @@ pub fn hover(
                     command = ?spec.command(),
                     %error,
                     "hover query failed"
+                );
+            }
+        }
+    }
+
+    results
+}
+
+/// Signature help at an exact editor position. `line` is zero-based and
+/// `character` is a zero-based UTF-8 byte column; the client converts it to
+/// the server's negotiated wire encoding exactly once.
+pub fn signature_help(
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    line: u32,
+    character: u32,
+) -> Vec<LspSignatureHelp> {
+    let root = normalized_root(directory.as_ref());
+    let file = normalized_file(&root, file.as_ref());
+    let mut results = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for spec in file_query_specs(&root, &file, LspOperation::SignatureHelp) {
+        match lsp_service::service().signature_help(&root, &file, line, character, &spec)
+        {
+            Ok(found) => {
+                for help in found {
+                    let key = (help.path.clone(), help.signatures.clone());
+                    if seen.insert(key) {
+                        results.push(help);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    language = spec.id,
+                    command = ?spec.command(),
+                    %error,
+                    "signature help query failed"
+                );
+            }
+        }
+    }
+
+    results
+}
+
+/// Inlay hints for the inclusive zero-based line range `start_line..=end_line`.
+/// Returned hint positions are one-based (line, UTF-8 byte column), matching
+/// every other position this module emits.
+pub fn inlay_hints(
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    start_line: u32,
+    end_line: u32,
+) -> Vec<LspInlayHint> {
+    let root = normalized_root(directory.as_ref());
+    let file = normalized_file(&root, file.as_ref());
+    let mut results = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for spec in file_query_specs(&root, &file, LspOperation::InlayHints) {
+        match lsp_service::service().inlay_hints(&root, &file, start_line, end_line, &spec)
+        {
+            Ok(found) => {
+                for hint in found {
+                    let key = (hint.line, hint.character, hint.label.clone());
+                    if seen.insert(key) {
+                        results.push(hint);
+                    }
+                    // A viewport of hints can legitimately exceed the symbol
+                    // cap; bound by the larger completion budget instead.
+                    if results.len() >= MAX_COMPLETIONS {
+                        return results;
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    language = spec.id,
+                    command = ?spec.command(),
+                    error = %error,
+                    "inlay hint query failed"
+                );
+            }
+        }
+    }
+
+    results
+}
+
+/// Occurrences of the symbol under an exact zero-based line and zero-based
+/// UTF-8 byte column, scoped to `file`.
+pub fn document_highlights(
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    line: u32,
+    character: u32,
+) -> Vec<LspDocumentHighlight> {
+    let root = normalized_root(directory.as_ref());
+    let file = normalized_file(&root, file.as_ref());
+    let mut results = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for spec in file_query_specs(&root, &file, LspOperation::DocumentHighlight) {
+        match lsp_service::service().document_highlights(&root, &file, line, character, &spec)
+        {
+            Ok(found) => {
+                for highlight in found {
+                    let key = (highlight.range.clone(), highlight.kind.clone());
+                    if seen.insert(key) {
+                        results.push(highlight);
+                    }
+                    if results.len() >= MAX_SYMBOLS {
+                        return results;
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    language = spec.id,
+                    command = ?spec.command(),
+                    error = %error,
+                    "document highlight query failed"
                 );
             }
         }

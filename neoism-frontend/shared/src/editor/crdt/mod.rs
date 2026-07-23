@@ -56,7 +56,8 @@ mod presence;
 mod remote_presence;
 
 pub use buffer::{
-    CrdtTextBuffer, CrdtTextBufferError, CrdtTextEdit, CrdtTextOffset, CrdtTextUpdate,
+    CrdtStickyAnchor, CrdtTextBuffer, CrdtTextBufferError, CrdtTextEdit, CrdtTextOffset,
+    CrdtTextUpdate,
 };
 pub use presence::{
     resolve_presence_display_name, stable_presence_color, PeerCursor, PeerPresence,

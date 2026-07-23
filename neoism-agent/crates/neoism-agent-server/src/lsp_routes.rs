@@ -21,6 +21,14 @@ pub(crate) struct LspDocumentQuery {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub(crate) struct LspLineRangeQuery {
+    pub directory: Option<String>,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct LspTouchRequest {
     pub directory: Option<String>,
     pub file: String,
@@ -41,6 +49,45 @@ pub(crate) async fn lsp_hover(
 ) -> Json<Vec<lsp::LspHover>> {
     let directory = resolve_directory(query.directory, &headers);
     Json(lsp::hover(
+        directory,
+        query.file,
+        query.line,
+        query.character,
+    ))
+}
+
+pub(crate) async fn lsp_signature_help(
+    Query(query): Query<LspPositionQuery>,
+    headers: HeaderMap,
+) -> Json<Vec<lsp::LspSignatureHelp>> {
+    let directory = resolve_directory(query.directory, &headers);
+    Json(lsp::signature_help(
+        directory,
+        query.file,
+        query.line,
+        query.character,
+    ))
+}
+
+pub(crate) async fn lsp_inlay_hints(
+    Query(query): Query<LspLineRangeQuery>,
+    headers: HeaderMap,
+) -> Json<Vec<lsp::LspInlayHint>> {
+    let directory = resolve_directory(query.directory, &headers);
+    Json(lsp::inlay_hints(
+        directory,
+        query.file,
+        query.start_line,
+        query.end_line,
+    ))
+}
+
+pub(crate) async fn lsp_document_highlights(
+    Query(query): Query<LspPositionQuery>,
+    headers: HeaderMap,
+) -> Json<Vec<lsp::LspDocumentHighlight>> {
+    let directory = resolve_directory(query.directory, &headers);
+    Json(lsp::document_highlights(
         directory,
         query.file,
         query.line,

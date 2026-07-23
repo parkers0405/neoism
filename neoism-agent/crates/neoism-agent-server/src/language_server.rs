@@ -3,9 +3,10 @@ use std::path::Path;
 pub use crate::lsp::{
     language_server_adapters, language_server_adapters_for, DiagnosticsEvent,
     LspAdapterMetadata, LspAdapterOrigin, LspAdapterTransport, LspCatalogPackageMetadata,
-    LspCommandSource, LspCompletionItem, LspDiagnostic, LspDocumentSymbol, LspHover,
-    LspLanguageRouteMetadata, LspLocation, LspPosition, LspRange, LspServerState,
-    LspStatus, WorkspaceSymbol,
+    LspCommandSource, LspCompletionItem, LspDiagnostic, LspDocumentHighlight,
+    LspDocumentSymbol, LspHover, LspInlayHint, LspLanguageRouteMetadata, LspLocation,
+    LspParameterInfo, LspPosition, LspRange, LspServerState, LspSignatureHelp,
+    LspSignatureInfo, LspStatus, WorkspaceSymbol,
 };
 
 /// Subscribe to real-time `publishDiagnostics` pushes (event-driven — the
@@ -107,6 +108,40 @@ pub fn hover(
     character: u32,
 ) -> Vec<LspHover> {
     crate::lsp::hover(directory, file, line, character)
+}
+
+/// Signature help at the cursor. `line`/`character` follow the same
+/// convention as [`hover`]: zero-based line, zero-based UTF-8 byte column.
+pub fn signature_help(
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    line: u32,
+    character: u32,
+) -> Vec<LspSignatureHelp> {
+    crate::lsp::signature_help(directory, file, line, character)
+}
+
+/// Inlay hints for the inclusive zero-based line range
+/// `start_line..=end_line`. Returned hint positions are one-based
+/// (line, UTF-8 byte column), like every [`LspRange`] this module emits.
+pub fn inlay_hints(
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    start_line: u32,
+    end_line: u32,
+) -> Vec<LspInlayHint> {
+    crate::lsp::inlay_hints(directory, file, start_line, end_line)
+}
+
+/// Occurrences of the symbol under the cursor within `file`, with
+/// read/write/text classification when the server provides one.
+pub fn document_highlight(
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    line: u32,
+    character: u32,
+) -> Vec<LspDocumentHighlight> {
+    crate::lsp::document_highlights(directory, file, line, character)
 }
 
 /// Completion items at the cursor from the file's language server. `text` is

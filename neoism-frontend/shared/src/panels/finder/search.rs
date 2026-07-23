@@ -73,6 +73,12 @@ impl Finder {
                     self.refresh_buffer_results();
                 }
             }
+            FinderMode::BufferReplace => {
+                if search_key != self.last_executed_query {
+                    self.last_executed_query = search_key;
+                    self.refresh_buffer_replace_results();
+                }
+            }
             FinderMode::References => {
                 if search_key != self.last_executed_query {
                     self.last_executed_query = search_key;
@@ -161,6 +167,38 @@ impl Finder {
         let mut rows: Vec<(i32, Result_)> = Vec::new();
         for (ix, line) in self.buffer_lines.iter().enumerate() {
             if !line.contains(q) {
+                continue;
+            }
+            total += 1;
+            if rows.len() < super::state::BUFFER_MAX_RESULTS {
+                rows.push((
+                    0,
+                    Result_::Buffer(super::types::BufferLineResult {
+                        line: (ix + 1) as u32,
+                        text: line.trim().to_string(),
+                    }),
+                ));
+            }
+        }
+        self.buffer_match_total = total;
+        self.results = rows;
+    }
+
+    /// BufferReplace mode: rows list lines containing the PATTERN part
+    /// of the `pattern/replacement` query (same `:s` escaping — the
+    /// splitter lives in `editor::code::substitute`).
+    pub(super) fn refresh_buffer_replace_results(&mut self) {
+        let (pattern, _) =
+            crate::editor::code::substitute::split_replace_query(&self.query);
+        if pattern.is_empty() {
+            self.results.clear();
+            self.buffer_match_total = 0;
+            return;
+        }
+        let mut total = 0usize;
+        let mut rows: Vec<(i32, Result_)> = Vec::new();
+        for (ix, line) in self.buffer_lines.iter().enumerate() {
+            if !line.contains(pattern.as_str()) {
                 continue;
             }
             total += 1;

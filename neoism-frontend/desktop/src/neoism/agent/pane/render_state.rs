@@ -285,6 +285,7 @@ impl NeoismAgentPane {
             self.history_index,
             self.history_draft.clone(),
         )
+        .with_goal_x(self.input_goal_x)
     }
 
     pub(crate) fn apply_input_buffer(&mut self, buffer: AgentInputBuffer) {
@@ -293,6 +294,7 @@ impl NeoismAgentPane {
         self.sent_history = buffer.sent_history;
         self.history_index = buffer.history_index;
         self.history_draft = buffer.history_draft;
+        self.input_goal_x = buffer.goal_x;
     }
 
     pub fn set_cursor_rect(&mut self, rect: Option<[f32; 4]>) {
@@ -384,17 +386,22 @@ impl NeoismAgentPane {
         self.fx_requested.is_some() || self.fx_started.is_some()
     }
 
-    pub fn set_input_wrap_ranges(&mut self, ranges: Vec<(usize, usize)>) {
+    pub fn set_input_wrap_rows(
+        &mut self,
+        rows: Vec<neoism_ui::panels::agent_pane::input_controller::InputWrapRow>,
+    ) {
         self.input_wrap_len = self.input.len();
-        self.input_wrap_ranges = ranges;
+        self.input_wrap_rows = rows;
     }
 
-    /// Wrap ranges registered by the renderer, but only if they still
+    /// Wrap rows registered by the renderer, but only if they still
     /// describe the current input (a keystroke can land between edit
     /// and redraw).
-    pub(crate) fn current_input_wrap_ranges(&self) -> Option<&[(usize, usize)]> {
-        (!self.input_wrap_ranges.is_empty() && self.input_wrap_len == self.input.len())
-            .then_some(self.input_wrap_ranges.as_slice())
+    pub(crate) fn current_input_wrap_rows(
+        &self,
+    ) -> Option<&[neoism_ui::panels::agent_pane::input_controller::InputWrapRow]> {
+        (!self.input_wrap_rows.is_empty() && self.input_wrap_len == self.input.len())
+            .then_some(self.input_wrap_rows.as_slice())
     }
 
     pub fn clear_tool_hit_rects(&mut self) {

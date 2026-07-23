@@ -24,9 +24,10 @@ use crate::interaction::{
     permission_list, permission_reply, question_list, question_reject, question_reply,
 };
 use crate::lsp_routes::{
-    lsp_code_actions, lsp_definition, lsp_diagnostics, lsp_document_symbols,
-    lsp_formatting, lsp_hover, lsp_implementation, lsp_incoming_calls,
-    lsp_outgoing_calls, lsp_prepare_call_hierarchy, lsp_references, lsp_shutdown,
+    lsp_code_actions, lsp_definition, lsp_diagnostics, lsp_document_highlights,
+    lsp_document_symbols, lsp_formatting, lsp_hover, lsp_implementation,
+    lsp_incoming_calls, lsp_inlay_hints, lsp_outgoing_calls,
+    lsp_prepare_call_hierarchy, lsp_references, lsp_shutdown, lsp_signature_help,
     lsp_status, lsp_touch,
 };
 use crate::mcp_routes::{
@@ -103,6 +104,9 @@ pub fn app(state: AppState) -> Router {
         .route("/plugin", get(plugin_status))
         .route("/lsp", get(lsp_status))
         .route("/lsp/hover", get(lsp_hover))
+        .route("/lsp/signature-help", get(lsp_signature_help))
+        .route("/lsp/inlay-hints", get(lsp_inlay_hints))
+        .route("/lsp/document-highlights", get(lsp_document_highlights))
         .route("/lsp/definition", get(lsp_definition))
         .route("/lsp/references", get(lsp_references))
         .route("/lsp/implementation", get(lsp_implementation))

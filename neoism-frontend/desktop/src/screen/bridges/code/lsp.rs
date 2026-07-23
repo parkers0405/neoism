@@ -1911,8 +1911,16 @@ impl Screen<'_> {
                             continue;
                         };
                         let severity = map_severity(&diag.severity);
-                        let start_line = range.start.line as usize;
-                        let end_line = (range.end.line as usize).max(start_line);
+                        // LSP positions arrive 1-based here (the agent-server
+                        // parser adds +1 in `parse_lsp_position`); the buffer
+                        // is 0-based. Drop the +1 exactly like the occurrence
+                        // and goto paths do — forgetting it is what drew every
+                        // diagnostic one line low and one column right.
+                        let start_line = (range.start.line as usize).saturating_sub(1);
+                        let end_line =
+                            (range.end.line as usize).saturating_sub(1).max(start_line);
+                        let start_char = (range.start.character as usize).saturating_sub(1);
+                        let end_char = (range.end.character as usize).saturating_sub(1);
                         // Pin the published range into the CRDT doc
                         // while the pane is bound: the squiggle then
                         // tracks edits char-precisely until the next
@@ -1922,12 +1930,12 @@ impl Screen<'_> {
                             if let (Some(start), Some(end)) = (
                                 binding.sticky_anchor_at_utf16(
                                     start_line,
-                                    range.start.character as usize,
+                                    start_char,
                                     true,
                                 ),
                                 binding.sticky_anchor_at_utf16(
                                     end_line,
-                                    range.end.character as usize,
+                                    end_char,
                                     false,
                                 ),
                             ) {
@@ -1944,12 +1952,12 @@ impl Screen<'_> {
                                 break;
                             };
                             let mut from = if line_ix == start_line {
-                                byte_for_utf16_col(line, range.start.character as usize)
+                                byte_for_utf16_col(line, start_char)
                             } else {
                                 0
                             };
                             let mut to = if line_ix == end_line {
-                                byte_for_utf16_col(line, range.end.character as usize)
+                                byte_for_utf16_col(line, end_char)
                             } else {
                                 line.len()
                             };

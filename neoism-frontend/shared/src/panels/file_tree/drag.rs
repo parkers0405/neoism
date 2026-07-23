@@ -192,27 +192,64 @@ impl FileTree {
         hovered_row: Option<usize>,
         source_path: &Path,
     ) -> Option<(PathBuf, bool)> {
-        let entry = self.entries.get(hovered_row?)?;
-        if entry.is_virtual() {
+        // A real directory row under the cursor is the explicit target:
+        // resolve it fully, INCLUDING its no-op/illegal cases, so a drop
+        // aimed at a folder is never silently rerouted to the root.
+        if let Some(entry) = hovered_row.and_then(|row| self.entries.get(row)) {
+            if !entry.is_virtual() {
+                if let NodeKind::Dir { open } = entry.kind {
+                    let dir = normalize_path(entry.path.as_ref()?);
+                    if dir.as_path() == source_path {
+                        return None;
+                    }
+                    // Inside the dragged folder's own subtree.
+                    if dir.starts_with(source_path) {
+                        return None;
+                    }
+                    // Already living directly in this folder — a no-op.
+                    if source_path.parent() == Some(dir.as_path()) {
+                        return None;
+                    }
+                    return Some((dir, !open));
+                }
+            }
+            // A file row or the virtual workspace-root header falls through
+            // to a root drop below.
+        }
+        // Empty tree space, a top-level file, or the workspace header all
+        // resolve to "move into the workspace root". The root owns no row
+        // of its own, so without this there was no way to target it.
+        self.root_drop_target(source_path)
+    }
+
+    /// The workspace root as a drop target, or `None` when there is no
+    /// root, the source already lives directly at root (a no-op move), or
+    /// the source is the root / an ancestor of it. The root is always open
+    /// — its children ARE the top-level rows — so it never spring-opens.
+    fn root_drop_target(&self, source_path: &Path) -> Option<(PathBuf, bool)> {
+        let root = normalize_path(self.root.as_ref()?);
+        if root.as_path() == source_path || root.starts_with(source_path) {
             return None;
         }
-        let open = match entry.kind {
-            NodeKind::Dir { open } => open,
-            NodeKind::File => return None,
+        if source_path.parent() == Some(root.as_path()) {
+            return None;
+        }
+        Some((root, false))
+    }
+
+    /// True while a live drag's current drop target is the workspace root.
+    /// The root owns no row, so the renderer paints a whole-panel outline
+    /// as its "release here" affordance instead of a per-row band.
+    pub(super) fn is_root_drop_target(&self) -> bool {
+        let Some(drag) = self.file_drag.as_ref().filter(|drag| drag.live) else {
+            return false;
         };
-        let dir = normalize_path(entry.path.as_ref()?);
-        if dir.as_path() == source_path {
-            return None;
+        match (drag.hovered_dir.as_deref(), self.root.as_deref()) {
+            (Some(hovered), Some(root)) => {
+                normalize_path(hovered) == normalize_path(root)
+            }
+            _ => false,
         }
-        // Inside the dragged folder's own subtree.
-        if dir.starts_with(source_path) {
-            return None;
-        }
-        // Already living directly in this folder — moving there is a no-op.
-        if source_path.parent() == Some(dir.as_path()) {
-            return None;
-        }
-        Some((dir, !open))
     }
 
     /// Index of the row being dragged, resolved from its path so it
@@ -337,10 +374,79 @@ mod tests {
     }
 
     #[test]
-    fn releasing_over_empty_space_cancels() {
+    fn releasing_over_empty_space_without_a_root_cancels() {
+        // `FileTree::empty()` has no root, so there is nowhere for an
+        // empty-space drop to land.
         let mut tree = sample();
         tree.begin_file_drag(1, 100.0, 100.0);
         tree.update_file_drag(100.0, 130.0, None);
         assert!(matches!(tree.end_file_drag(), FileDropOutcome::Cancel));
+    }
+
+    /// `sample()` plus a workspace root at `/w`, so root-drop targets resolve.
+    fn sample_rooted() -> FileTree {
+        let mut tree = sample();
+        tree.root = Some(PathBuf::from("/w"));
+        tree
+    }
+
+    #[test]
+    fn dropping_into_empty_space_moves_to_root() {
+        let mut tree = sample_rooted();
+        tree.begin_file_drag(1, 100.0, 100.0); // /w/src/a.rs
+        tree.update_file_drag(100.0, 400.0, None); // released in empty space
+        match tree.end_file_drag() {
+            FileDropOutcome::Move { source, dest_dir } => {
+                assert_eq!(source, PathBuf::from("/w/src/a.rs"));
+                assert_eq!(dest_dir, PathBuf::from("/w"));
+            }
+            _ => panic!("expected a move to root"),
+        }
+    }
+
+    #[test]
+    fn dropping_onto_the_workspace_header_moves_to_root() {
+        let mut tree = FileTree::empty();
+        tree.root = Some(PathBuf::from("/w"));
+        tree.set_entries(vec![
+            entry(
+                "Neoism",
+                NodeKind::Dir { open: true },
+                "/w",
+                0,
+                Some(VirtualEntryKind::NeoismWorkspace),
+            ),
+            entry("src", NodeKind::Dir { open: true }, "/w/src", 1, None),
+            entry("a.rs", NodeKind::File, "/w/src/a.rs", 2, None),
+        ]);
+        tree.begin_file_drag(2, 100.0, 100.0); // /w/src/a.rs
+        tree.update_file_drag(100.0, 130.0, Some(0)); // over the virtual header
+        match tree.end_file_drag() {
+            FileDropOutcome::Move { source, dest_dir } => {
+                assert_eq!(source, PathBuf::from("/w/src/a.rs"));
+                assert_eq!(dest_dir, PathBuf::from("/w"));
+            }
+            _ => panic!("expected a move to root via the workspace header"),
+        }
+    }
+
+    #[test]
+    fn top_level_item_dropped_at_root_is_a_noop() {
+        // `docs` (index 2) already lives directly at root.
+        let mut tree = sample_rooted();
+        tree.begin_file_drag(2, 100.0, 100.0);
+        tree.update_file_drag(100.0, 400.0, None); // empty space => root
+        assert!(matches!(tree.end_file_drag(), FileDropOutcome::Cancel));
+    }
+
+    #[test]
+    fn is_root_drop_target_flags_only_the_root_wash() {
+        let mut tree = sample_rooted();
+        tree.begin_file_drag(1, 100.0, 100.0); // /w/src/a.rs
+        tree.update_file_drag(100.0, 400.0, None); // empty space => root
+        assert!(tree.is_root_drop_target());
+        // Over a real folder the flag is off — the per-row band handles it.
+        tree.update_file_drag(100.0, 130.0, Some(2)); // over /w/docs
+        assert!(!tree.is_root_drop_target());
     }
 }

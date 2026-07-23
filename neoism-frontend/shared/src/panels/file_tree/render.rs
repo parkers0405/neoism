@@ -621,6 +621,23 @@ impl FileTree {
                 );
             }
         }
+        // Whole-panel "drop into root" affordance: the workspace root owns
+        // no row, so when the drag targets it we wash the entire tree in a
+        // faint accent tint (rows still show through) instead of a per-row
+        // band. Drawn above the rows, below the cursor ghost.
+        if self.is_root_drop_target() {
+            sugarloaf.quad(
+                None,
+                content_x,
+                content_y,
+                content_w,
+                content_h,
+                theme.f32_alpha(theme.accent, 0.14),
+                [content_radius; 4],
+                DEPTH,
+                ORDER + 5,
+            );
+        }
         // Paint the lifted row above the list (its rect was already cut
         // out of the row text above). A soft shadow + faintly raised sheet
         // reads as the real row peeled up off the list — no synthetic

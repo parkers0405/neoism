@@ -237,6 +237,7 @@ impl Finder {
         let mode_glyph = match self.mode {
             FinderMode::Files => "› ",
             FinderMode::Grep | FinderMode::BufferLines => "/ ",
+            FinderMode::BufferReplace => "s/ ",
             FinderMode::GitChanges => "git ",
             FinderMode::References => "ref ",
             FinderMode::Symbols => "@ ",
@@ -246,6 +247,7 @@ impl Finder {
             FinderMode::Grep => "Grep across project...",
             FinderMode::GitChanges => "Filter git changes...",
             FinderMode::BufferLines => "Search in buffer...",
+            FinderMode::BufferReplace => "Replace: pattern/replacement...",
             FinderMode::References => "Filter references...",
             FinderMode::Symbols => "Go to symbol...",
         };
@@ -253,8 +255,11 @@ impl Finder {
         let search_mode_label = self.search_mode_label();
         // BufferLines swaps the search-mode badge for a live match
         // count (with the uncapped total when rows were truncated).
-        let badge_text =
-            if matches!(self.mode, FinderMode::BufferLines) && !self.query.is_empty() {
+        let badge_text = if matches!(
+            self.mode,
+            FinderMode::BufferLines | FinderMode::BufferReplace
+        ) && !self.query.is_empty()
+        {
                 let shown = self.results.len();
                 if self.buffer_match_total > shown {
                     format!("[{}/{} matches]", shown, self.buffer_match_total)
@@ -739,6 +744,9 @@ impl Finder {
                     FinderMode::Grep => "Start typing to grep…",
                     FinderMode::GitChanges => "No git changes",
                     FinderMode::BufferLines => "Start typing to search buffer…",
+                    FinderMode::BufferReplace => {
+                        "Type pattern/replacement — Enter replaces all"
+                    }
                     FinderMode::References => "No references",
                     // Rows exist (guard above) but the empty query
                     // filtered none — unreachable; keep exhaustive.

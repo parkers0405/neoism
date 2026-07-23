@@ -19,6 +19,9 @@ use std::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
+use tree_sitter::StreamingIterator as _;
+
+#[cfg(not(target_arch = "wasm32"))]
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -938,19 +941,223 @@ fn tree_sitter_config(lang: ParserLang) -> Option<HighlightConfiguration> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// Outer `None` = not built yet; inner `None` = construction failed
+    /// once, don't retry per keystroke.
+    static MAKE_INJECTION: RefCell<Option<Option<MakeInjection>>> = RefCell::new(None);
+}
+
+/// Parsers + query for bash-over-make recipe injection, built once per
+/// thread (parser construction and query compilation are not free).
+#[cfg(not(target_arch = "wasm32"))]
+struct MakeInjection {
+    make_parser: tree_sitter::Parser,
+    bash_parser: tree_sitter::Parser,
+    bash_query: tree_sitter::Query,
+    /// `SynTok` per bash query capture index.
+    capture_kinds: Vec<SynTok>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MakeInjection {
+    fn new() -> Option<Self> {
+        let mut make_parser = tree_sitter::Parser::new();
+        make_parser
+            .set_language(&tree_sitter_make::LANGUAGE.into())
+            .ok()?;
+        let bash_language: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
+        let mut bash_parser = tree_sitter::Parser::new();
+        bash_parser.set_language(&bash_language).ok()?;
+        let bash_query =
+            tree_sitter::Query::new(&bash_language, tree_sitter_bash::HIGHLIGHT_QUERY)
+                .ok()?;
+        let capture_kinds = bash_query
+            .capture_names()
+            .iter()
+            .map(|name| tree_sitter_capture_kind(name, Lang::Bash))
+            .collect();
+        Some(Self {
+            make_parser,
+            bash_parser,
+            bash_query,
+            capture_kinds,
+        })
+    }
+
+    /// Parse `source` with the make grammar, hand every `shell_text`
+    /// region (the command text of a `recipe_line`, minus the leading
+    /// tab) to the bash parser via `set_included_ranges`, and return
+    /// the regions plus bash highlight spans in whole-source byte
+    /// offsets. `None` on any failure — the caller keeps make-only
+    /// spans.
+    fn overlay(
+        &mut self,
+        source: &str,
+    ) -> Option<(Vec<tree_sitter::Range>, Vec<(SynTok, usize, usize)>)> {
+        let make_tree = self.make_parser.parse(source, None)?;
+        let mut regions: Vec<tree_sitter::Range> = Vec::new();
+        collect_shell_text_ranges(make_tree.root_node(), &mut regions);
+        if regions.is_empty() {
+            return None;
+        }
+        // Pre-order traversal of non-nesting leaves: already ascending
+        // and disjoint, as `set_included_ranges` requires. Ranges carry
+        // the tree's own row/column points, so they are exact.
+        self.bash_parser.set_included_ranges(&regions).ok()?;
+        let parsed = self.bash_parser.parse(source, None);
+        // Always restore whole-document mode for the next caller.
+        let _ = self.bash_parser.set_included_ranges(&[]);
+        let bash_tree = parsed?;
+
+        let mut spans: Vec<(SynTok, usize, usize)> = Vec::new();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut captures =
+            cursor.captures(&self.bash_query, bash_tree.root_node(), source.as_bytes());
+        while let Some((matched, capture_ix)) = captures.next() {
+            let capture = &matched.captures[*capture_ix];
+            let kind = self
+                .capture_kinds
+                .get(capture.index as usize)
+                .copied()
+                .unwrap_or(SynTok::Plain);
+            // Skipping Plain keeps broad captures (`@embedded` on a
+            // whole `$(...)`) from erasing the inner ones.
+            if kind == SynTok::Plain {
+                continue;
+            }
+            overlay_span(
+                &mut spans,
+                kind,
+                capture.node.start_byte(),
+                capture.node.end_byte(),
+            );
+        }
+        Some((regions, spans))
+    }
+}
+
+/// Depth-first collection of `shell_text` node ranges (tree-sitter-make
+/// wraps recipe command text — including any nested make expansions —
+/// in `recipe` > `recipe_line` > `shell_text`).
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_shell_text_ranges(node: tree_sitter::Node, out: &mut Vec<tree_sitter::Range>) {
+    if node.kind() == "shell_text" {
+        out.push(node.range());
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_shell_text_ranges(child, out);
+    }
+}
+
+/// Paint `kind` over `spans`, clipping whatever is already there —
+/// captures arrive in document order with enclosing nodes first, so
+/// later (inner, more specific) captures win, mirroring how the
+/// highlight-event stream resolves nesting.
+#[cfg(not(target_arch = "wasm32"))]
+fn overlay_span(
+    spans: &mut Vec<(SynTok, usize, usize)>,
+    kind: SynTok,
+    start: usize,
+    end: usize,
+) {
+    if start >= end {
+        return;
+    }
+    let mut ix = 0;
+    while ix < spans.len() {
+        let (old_kind, old_start, old_end) = spans[ix];
+        if old_end <= start || end <= old_start {
+            ix += 1;
+            continue;
+        }
+        spans.remove(ix);
+        if old_start < start {
+            spans.insert(ix, (old_kind, old_start, start));
+            ix += 1;
+        }
+        if end < old_end {
+            spans.insert(ix, (old_kind, end, old_end));
+            ix += 1;
+        }
+    }
+    spans.push((kind, start, end));
+}
+
+/// Splice bash recipe spans into the make spans: make spans are clipped
+/// out of every `shell_text` region (bash wins there — including make's
+/// own fallback runs), bash spans drop in, and the result is re-sorted
+/// so downstream per-line splitting sees ordered spans.
+#[cfg(not(target_arch = "wasm32"))]
+fn merge_injected_spans(
+    make_spans: Vec<(SynTok, usize, usize)>,
+    regions: &[tree_sitter::Range],
+    bash_spans: Vec<(SynTok, usize, usize)>,
+) -> Vec<(SynTok, usize, usize)> {
+    let mut merged: Vec<(SynTok, usize, usize)> =
+        Vec::with_capacity(make_spans.len() + bash_spans.len());
+    for (kind, start, end) in make_spans {
+        let mut cursor = start;
+        for region in regions {
+            if region.end_byte <= cursor {
+                continue;
+            }
+            if region.start_byte >= end {
+                break;
+            }
+            if cursor < region.start_byte {
+                merged.push((kind, cursor, region.start_byte.min(end)));
+            }
+            cursor = cursor.max(region.end_byte);
+            if cursor >= end {
+                break;
+            }
+        }
+        if cursor < end {
+            merged.push((kind, cursor, end));
+        }
+    }
+    merged.extend(bash_spans);
+    merged.sort_unstable_by_key(|(_, start, end)| (*start, *end));
+    merged
+}
+
+/// Bash injection for Makefile recipe lines, resilient by construction:
+/// any failure (parser missing, bad ranges, no recipes) yields `None`
+/// and the make-only spans stand.
+#[cfg(not(target_arch = "wasm32"))]
+fn make_recipe_bash_overlay(
+    source: &str,
+) -> Option<(Vec<tree_sitter::Range>, Vec<(SynTok, usize, usize)>)> {
+    MAKE_INJECTION.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let injection = cell.get_or_insert_with(MakeInjection::new).as_mut()?;
+        injection.overlay(source)
+    })
+}
+
 /// Whole-source tree-sitter highlight: global byte spans over the full
 /// text, correct across multi-line constructs (block comments, raw
 /// strings, triple-quoted strings) that the per-line path mis-colors.
+/// Makefiles additionally get bash injection over recipe lines.
 /// Returns None when no parser exists for `lang` (caller falls back to
 /// the per-line highlighter).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn highlight_source(source: &str, lang: Lang) -> Option<Vec<(SynTok, usize, usize)>> {
     let parser_lang = ParserLang::from_lang(lang)?;
-    TREE_SITTER_CACHE.with(|cache| {
+    let spans = TREE_SITTER_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let config = cache.config(parser_lang)?;
         tree_sitter_highlight_ranges(source, lang, config)
-    })
+    })?;
+    if lang == Lang::Make {
+        if let Some((regions, bash_spans)) = make_recipe_bash_overlay(source) {
+            return Some(merge_injected_spans(spans, &regions, bash_spans));
+        }
+    }
+    Some(spans)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1074,11 +1281,7 @@ mod tests {
         assert!(has_token(&spans, SynTok::Punct, "("));
     }
 
-    /// `tree_sitter_config` returns `None` (silent scanner fallback) when a
-    /// grammar's highlight query fails to load — so every compiled-in parser
-    /// must prove its config constructs, or a bad query ships invisibly.
     #[cfg(not(target_arch = "wasm32"))]
-    #[test]
     #[test]
     fn nix_attr_keys_color_as_property() {
         let src = "{\n  name = \"x\";\n  services.foo.enable = true;\n}\n";
@@ -1121,6 +1324,46 @@ mod tests {
         }
     }
 
+    /// Recipe lines in a Makefile are shell: the make parse finds the
+    /// `shell_text` regions and the bash grammar highlights them via
+    /// `set_included_ranges`, so `echo`/`ls` read as commands instead
+    /// of plain make text.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn make_recipe_lines_highlight_as_bash() {
+        let src = "all: build\n\techo $(FOO) && ls -la\n";
+        let toks = highlight_source(src, Lang::Make).unwrap_or_default();
+        eprintln!("make tokens: {toks:?}");
+        let kind_at = |pos: usize| {
+            toks.iter()
+                .find(|(_, s, e)| *s <= pos && pos < *e)
+                .map(|(k, _, _)| *k)
+        };
+        let echo = src.find("echo").unwrap();
+        let ls = src.find("ls -la").unwrap();
+        let flag = src.find("-la").unwrap();
+        assert_eq!(
+            kind_at(echo),
+            Some(SynTok::Function),
+            "echo should color as a bash command"
+        );
+        assert_eq!(
+            kind_at(ls),
+            Some(SynTok::Function),
+            "ls should color as a bash command"
+        );
+        assert_eq!(
+            kind_at(flag),
+            Some(SynTok::Type),
+            "-la should color as a bash flag"
+        );
+    }
+
+    /// `tree_sitter_config` returns `None` (silent scanner fallback) when a
+    /// grammar's highlight query fails to load — so every compiled-in parser
+    /// must prove its config constructs, or a bad query ships invisibly.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn every_compiled_parser_config_constructs() {
         for lang in [
             ParserLang::Rust,
@@ -1134,6 +1377,7 @@ mod tests {
             ParserLang::Toml,
             ParserLang::Json,
             ParserLang::Nix,
+            ParserLang::Make,
             ParserLang::Bash,
             ParserLang::C,
             ParserLang::Cpp,

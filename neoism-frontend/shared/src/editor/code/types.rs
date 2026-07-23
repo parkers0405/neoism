@@ -182,6 +182,21 @@ pub struct CodeBuffer {
     /// (never a monotonic flag), matching the markdown pane and nvim's
     /// `modified` semantics.
     pub(super) saved_baseline: Vec<String>,
+    /// Additional multi-cursor carets (`gb`/Ctrl+D occurrences,
+    /// Ctrl+Alt+Up/Down stacks). Text entry applies at every caret;
+    /// Esc collapses back to the primary. See `multicursor.rs`.
+    pub extra_carets: Vec<CodeExtraCaret>,
+}
+
+/// One additional multi-cursor caret. `anchor` holds its selection
+/// start when the caret was created from a word occurrence — the next
+/// typed char replaces that selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeExtraCaret {
+    pub line: usize,
+    /// Byte column (char-boundary), like the primary cursor.
+    pub col: usize,
+    pub anchor: Option<CodePosition>,
 }
 
 /// Per-frame pane geometry, stored by the painter and read by the host
@@ -520,11 +535,26 @@ pub struct CodePane {
     /// painter clamps, anchoring lands with the LSP wiring pass.
     pub diagnostics:
         std::collections::HashMap<usize, Vec<super::feed::CodeLineDiagnostic>>,
+    /// Diagnostics pinned into the CRDT doc with sticky anchors (only
+    /// while the pane is doc-bound). The host rebuilds `diagnostics`
+    /// from these on every buffer revision — char-precise tracking
+    /// through local and remote edits, superseding the line-shift
+    /// heuristic between server publishes.
+    pub diag_anchors: Vec<super::feed::CodeDiagAnchor>,
     /// Buffer revision last shipped to the LSP engine (host bookkeeping
     /// for the didChange sync loop). `None` = never synced (didOpen).
     pub lsp_synced_revision: Option<u64>,
     /// Diagnostics-store version last folded into `diagnostics`.
     pub lsp_diag_version: u64,
+    /// Occurrences of the symbol under the caret (LSP
+    /// documentHighlight), 0-based line → byte spans. Fed by the host
+    /// on caret idle; painted as quiet bands under the text.
+    pub occurrence_spans: std::collections::HashMap<usize, Vec<(usize, usize)>>,
+    /// Per-file diagnostics PUBLISH sequence last folded into
+    /// `diag_anchors` — the sticky-anchor path only refolds from the
+    /// raw store (and re-pins anchors) when the server actually
+    /// published for THIS file.
+    pub lsp_diag_publish_seq: u64,
     /// Symbol containers around the cursor, outermost first — the
     /// breadcrumb trail. Refreshed by the painter when the cursor
     /// line or buffer revision moves.
@@ -540,13 +570,25 @@ pub struct CodePane {
     /// Space-leader chord armed (vim Normal mode): the next key picks
     /// the leader action (`<Space>x` closes the buffer).
     pub leader_pending: bool,
+    /// Git gutter marks (added/modified lines + deleted-above rows),
+    /// recomputed by the host against the HEAD baseline when the
+    /// buffer revision moves. Painted next to the line numbers.
+    pub git_marks: super::gitdiff::CodeGitMarks,
     /// Cursor position when `/` opened in-buffer search — Esc restores
     /// it (nvim incsearch semantics); Enter keeps the match position.
     pub search_origin: Option<(usize, usize)>,
+    /// The active in-buffer search runs backward (`?` instead of `/`):
+    /// incsearch scans up from the origin and Enter commits `n`/`N`
+    /// reversed, exactly nvim's `?` semantics.
+    pub search_backward: bool,
     /// hlsearch: every occurrence of this pattern gets a highlight band
     /// in the painter. Set by `/` search (live + on commit); cleared by
     /// Esc in Normal mode (`:noh` convention).
     pub search_highlight: Option<String>,
+    /// Remote collaborators' carets on this file, refreshed by the host
+    /// each frame from the presence store (same shape as the markdown
+    /// pane's — the presence plane is buffer-id generic).
+    pub remote_cursors: Vec<crate::editor::markdown::MarkdownRemoteCursor>,
 }
 
 impl CodePane {
@@ -587,14 +629,20 @@ impl CodePane {
             mouse_selecting: false,
             highlight: super::highlight::CodeHighlightCache::default(),
             diagnostics: std::collections::HashMap::new(),
+            diag_anchors: Vec::new(),
             lsp_synced_revision: None,
+            lsp_diag_publish_seq: 0,
+            occurrence_spans: std::collections::HashMap::new(),
             lsp_diag_version: 0,
             symbol_trail: Vec::new(),
             symbol_trail_key: None,
             symbol_trail_pending: None,
             caret_drawn_by_host: false,
             leader_pending: false,
+            git_marks: super::gitdiff::CodeGitMarks::default(),
+            remote_cursors: Vec::new(),
             search_origin: None,
+            search_backward: false,
             search_highlight: None,
         }
     }

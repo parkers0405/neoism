@@ -161,6 +161,9 @@ impl CodeBuffer {
         if self.lines.is_empty() {
             self.lines.push(String::new());
         }
+        // Multi-cursor carets don't transform through bulk edits —
+        // collapse rather than desync.
+        self.extra_carets.clear();
         self.clamp_cursor();
         self.mark_edited();
         self.commit_undo();
@@ -224,6 +227,7 @@ impl CodeBuffer {
             insert_burst: None,
             doc_history_bound: false,
             pending_doc_history: Vec::new(),
+            extra_carets: Vec::new(),
         }
     }
 

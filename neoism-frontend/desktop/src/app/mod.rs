@@ -750,13 +750,16 @@ impl Application<'_> {
             let (markdown_crdt_messages, markdown_pane_changed) =
                 route.window.screen.drain_markdown_crdt_messages();
             outbound_crdt.extend(markdown_crdt_messages);
+            let (code_crdt_messages, code_pane_changed) =
+                route.window.screen.drain_code_crdt_messages();
+            outbound_crdt.extend(code_crdt_messages);
             let (markdown_disk_messages, markdown_disk_changed) =
                 route.window.screen.reload_open_markdown_files_from_disk();
             outbound_crdt.extend(markdown_disk_messages);
             (
                 outbound,
                 outbound_crdt,
-                markdown_pane_changed || markdown_disk_changed,
+                markdown_pane_changed || code_pane_changed || markdown_disk_changed,
             )
         };
         if redraw {
@@ -782,9 +785,10 @@ impl Application<'_> {
         if let Some(route) = self.router.routes.get_mut(&window_id) {
             let markdown_changed =
                 route.window.screen.apply_markdown_crdt_message(&message);
+            let code_changed = route.window.screen.apply_code_crdt_message(&message);
             let presence_changed =
                 route.window.screen.apply_presence_crdt_message(&message);
-            if markdown_changed || presence_changed {
+            if markdown_changed || code_changed || presence_changed {
                 route.request_redraw();
             }
         }

@@ -130,6 +130,27 @@ enum CodeLspJob {
         file: PathBuf,
         seq: u64,
     },
+    /// Signature help at the caret (auto-triggered by `(`/`,`,
+    /// retriggered per keystroke while the session is live). The
+    /// result rides the HOVER mailbox as one synthetic hover, so the
+    /// card surface, dismissal and rendering are shared.
+    SignatureHelp {
+        root: PathBuf,
+        file: PathBuf,
+        line: u32,
+        character: u32,
+        seq: u64,
+    },
+    /// Occurrences of the symbol under the caret
+    /// (textDocument/documentHighlight), requested on caret idle; the
+    /// painter bands them like a quiet hlsearch.
+    DocumentHighlight {
+        root: PathBuf,
+        file: PathBuf,
+        line: u32,
+        character: u32,
+        seq: u64,
+    },
 }
 
 struct CodeLspShared {
@@ -149,6 +170,18 @@ type DiagStore = Mutex<HashMap<PathBuf, HashMap<String, Vec<engine::LspDiagnosti
 
 fn diag_store() -> &'static DiagStore {
     static STORE: OnceLock<DiagStore> = OnceLock::new();
+    STORE.get_or_init(Default::default)
+}
+
+/// Per-file publish sequence: bumped ONLY when a server actually
+/// publishes diagnostics for that file. Unlike the global
+/// `DIAG_VERSION` (which also moves on heuristic re-anchors and other
+/// files' publishes), this lets the sticky-anchor path refold from the
+/// raw store exactly when fresh positions exist — a version bump from
+/// anywhere else must never overwrite anchor-precise spans with stale
+/// store positions.
+fn diag_publish_seq() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    static STORE: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
     STORE.get_or_init(Default::default)
 }
 
@@ -180,6 +213,9 @@ struct CodeLspResults {
     rename: Option<(u64, Vec<serde_json::Value>)>,
     /// `(seq, flattened symbol rows)` for the finder Symbols mode.
     document_symbols: Option<(u64, Vec<neoism_ui::panels::finder::SymbolRow>)>,
+    /// `(seq, file, zero-based (line, byte start, byte end) spans)` of
+    /// the symbol under the caret (documentHighlight).
+    occurrences: Option<(u64, PathBuf, Vec<(usize, usize, usize)>)>,
 }
 
 fn results_store() -> &'static Mutex<CodeLspResults> {
@@ -505,6 +541,238 @@ fn apply_edits_on_disk(
     std::fs::write(path, out)
 }
 
+/// Git gutter baseline: the file's HEAD content as lines. `None` value
+/// = fetched and absent (untracked / not a repo); missing key = not
+/// fetched yet. Filled by a spawned `git show` thread; the UI thread
+/// only reads.
+type GitBaselineStore =
+    Mutex<HashMap<PathBuf, Option<std::sync::Arc<Vec<String>>>>>;
+
+fn git_baseline_store() -> &'static GitBaselineStore {
+    static STORE: OnceLock<GitBaselineStore> = OnceLock::new();
+    STORE.get_or_init(Default::default)
+}
+
+fn git_baseline_inflight() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static STORE: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
+        OnceLock::new();
+    STORE.get_or_init(Default::default)
+}
+
+/// Baseline for `file`, spawning a one-shot `git show HEAD:./name`
+/// fetch when it hasn't been loaded yet (the wake repaints once it
+/// lands). Returns `None` until the fetch resolves or when the file
+/// has no baseline.
+fn git_baseline(
+    file: &Path,
+    proxy: &EventProxy,
+    window_id: WindowId,
+) -> Option<std::sync::Arc<Vec<String>>> {
+    let key = canonical_key(file);
+    {
+        let store = match git_baseline_store().lock() {
+            Ok(store) => store,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(entry) = store.get(&key) {
+            return entry.clone();
+        }
+    }
+    {
+        let mut inflight = match git_baseline_inflight().lock() {
+            Ok(inflight) => inflight,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !inflight.insert(key.clone()) {
+            return None;
+        }
+    }
+    let fetch_file = key.clone();
+    let proxy = proxy.clone();
+    let _ = std::thread::Builder::new()
+        .name("code-git-baseline".into())
+        .spawn(move || {
+            let baseline = fetch_file.parent().and_then(|dir| {
+                let name = fetch_file.file_name()?;
+                let output = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .arg("show")
+                    .arg(format!("HEAD:./{}", name.to_string_lossy()))
+                    .output()
+                    .ok()?;
+                if !output.status.success() {
+                    return None;
+                }
+                let text =
+                    String::from_utf8_lossy(&output.stdout).replace('\r', "");
+                let mut lines: Vec<String> =
+                    text.split('\n').map(str::to_string).collect();
+                if text.ends_with('\n') {
+                    lines.pop();
+                }
+                Some(std::sync::Arc::new(lines))
+            });
+            {
+                let mut store = match git_baseline_store().lock() {
+                    Ok(store) => store,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                store.insert(fetch_file.clone(), baseline);
+            }
+            {
+                let mut inflight = match git_baseline_inflight().lock() {
+                    Ok(inflight) => inflight,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                inflight.remove(&fetch_file);
+            }
+            proxy.send_event(RioEventType::Rio(RioEvent::Render), window_id);
+        });
+    None
+}
+
+/// Anchor-lite for diagnostics (Zed keeps real anchors; we shift the
+/// stored ranges by the line-span delta of each edit): compare the
+/// buffer against its previous snapshot, and when lines were inserted
+/// or removed, move every stored diagnostic that sits BELOW the edited
+/// span. Squiggles then track edits instead of drifting until the
+/// server's next publish (which replaces the set wholesale).
+fn reanchor_diagnostics(file: &Path, current: &[String]) {
+    static PREV: OnceLock<Mutex<HashMap<PathBuf, Vec<String>>>> = OnceLock::new();
+    let key = canonical_key(file);
+    let prev = {
+        let mut map = match PREV.get_or_init(Default::default).lock() {
+            Ok(map) => map,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        map.insert(key.clone(), current.to_vec())
+    };
+    let Some(prev) = prev else {
+        return;
+    };
+    if prev.len() == current.len() {
+        // Same line count: per-line edits don't move ranges.
+        return;
+    }
+    let mut prefix = 0usize;
+    let max_prefix = prev.len().min(current.len());
+    while prefix < max_prefix && prev[prefix] == current[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0usize;
+    let max_suffix = max_prefix - prefix;
+    while suffix < max_suffix
+        && prev[prev.len() - 1 - suffix] == current[current.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let old_len = prev.len() - prefix - suffix;
+    let new_len = current.len() - prefix - suffix;
+    let delta = new_len as i64 - old_len as i64;
+    if delta == 0 {
+        return;
+    }
+    // First OLD line index at/after which ranges must shift.
+    let boundary = (prefix + old_len) as i64;
+    let shift = |line: &mut u32| {
+        let shifted = (*line as i64 + delta).max(0);
+        *line = shifted as u32;
+    };
+    let mut store = match diag_store().lock() {
+        Ok(store) => store,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(by_server) = store.get_mut(&key) else {
+        return;
+    };
+    let mut moved = false;
+    for diags in by_server.values_mut() {
+        for diag in diags.iter_mut() {
+            let Some(range) = diag.range.as_mut() else {
+                continue;
+            };
+            if (range.start.line as i64) >= boundary {
+                shift(&mut range.start.line);
+                shift(&mut range.end.line);
+                moved = true;
+            } else if (range.end.line as i64) >= boundary {
+                shift(&mut range.end.line);
+                moved = true;
+            }
+        }
+    }
+    drop(store);
+    if moved {
+        DIAG_VERSION.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Rebuild the pane's per-line diagnostic spans by resolving its
+/// sticky anchors against the live CRDT doc — the Zed-grade path for
+/// doc-bound panes. Local AND remote edits move the anchors with the
+/// text they were pinned to (char-precise), where the line-shift
+/// heuristic above only tracks whole-line insertions/deletions. The
+/// per-line splitting/clamping mirrors the raw-store fold exactly so
+/// the squiggle geometry is identical at publish time.
+fn fold_anchored_diagnostics(
+    code: &neoism_ui::editor::code::CodePane,
+    binding: &neoism_ui::editor::code::doc_sync::CodeDocBinding,
+) -> HashMap<usize, Vec<CodeLineDiagnostic>> {
+    let mut per_line: HashMap<usize, Vec<CodeLineDiagnostic>> = HashMap::new();
+    for anchor in &code.diag_anchors {
+        let Some(start) = binding.resolve_sticky_anchor(&anchor.start) else {
+            continue;
+        };
+        let Some(end) = binding.resolve_sticky_anchor(&anchor.end) else {
+            continue;
+        };
+        // A delete spanning the range can leave the endpoints reversed;
+        // normalize rather than dropping the diagnostic.
+        let ((start_line, start_col), (end_line, end_col)) =
+            if end < start { (end, start) } else { (start, end) };
+        for line_ix in start_line..=end_line {
+            let Some(line) = code.buffer.lines.get(line_ix) else {
+                break;
+            };
+            let mut from = if line_ix == start_line {
+                start_col.min(line.len())
+            } else {
+                0
+            };
+            let mut to = if line_ix == end_line {
+                end_col.min(line.len())
+            } else {
+                line.len()
+            };
+            // Zero-width / end-of-line ranges still get a visible
+            // one-cell underline (same policy as the store fold).
+            if to <= from {
+                if from >= line.len() && !line.is_empty() {
+                    from = line.len() - 1;
+                }
+                to = (from + 1).min(line.len());
+            }
+            if from < to {
+                per_line
+                    .entry(line_ix)
+                    .or_default()
+                    .push(CodeLineDiagnostic {
+                        start: from,
+                        end: to,
+                        severity: anchor.severity,
+                        message: if line_ix == start_line {
+                            anchor.message.clone()
+                        } else {
+                            String::new()
+                        },
+                    });
+            }
+        }
+    }
+    per_line
+}
+
 fn map_severity(severity: &str) -> CodeDiagnosticSeverity {
     match severity.to_ascii_lowercase().as_str() {
         "error" => CodeDiagnosticSeverity::Error,
@@ -538,6 +806,22 @@ pub struct CodeLspUiState {
     pub pending_rename: Option<PendingCodeRename>,
     /// Pointer-idle hover tracking (mouse LSP info).
     pub mouse_hover: Option<CodeMouseHover>,
+    /// Live signature-help session: seq of the current card. Typing
+    /// retriggers at the new caret; `)`/motions/Esc end it.
+    pub signature_seq: Option<u64>,
+    /// Caret-idle probe for documentHighlight (symbol occurrences).
+    pub occurrence_probe: Option<CodeOccurrenceProbe>,
+}
+
+/// Caret-idle occurrence probe: armed when the caret comes to rest at
+/// a new position, requested once it has been still for a beat.
+pub struct CodeOccurrenceProbe {
+    pub line: usize,
+    pub col: usize,
+    pub revision: u64,
+    pub since: std::time::Instant,
+    pub requested: bool,
+    pub seq: u64,
 }
 
 impl CodeLspUiState {
@@ -694,12 +978,16 @@ fn completion_prefix(line: &str, anchor: usize, cursor: usize) -> Option<String>
 /// Strip LSP snippet placeholders (`$0`, `$1`, `${2:default}`) from an
 /// `insertTextFormat == 2` completion, keeping placeholder defaults.
 /// v1 has no tab-stop editing — the caret lands after the insertion.
-fn strip_snippet_placeholders(text: &str) -> String {
+/// Like `strip_snippet_placeholders`, but also reports the FIRST
+/// tabstop's `(byte offset, default-text len)` in the stripped output —
+/// accept lands the caret there with the placeholder selected, so
+/// typing replaces it (snippets v1: no Tab-chain yet).
+fn snippet_with_first_stop(text: &str) -> (String, Option<(usize, usize)>) {
     let mut out = String::with_capacity(text.len());
+    let mut first_stop: Option<(usize, usize)> = None;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\\' {
-            // Snippet escapes: `\$`, `\}`, `\\` produce the literal.
             if let Some(&next) = chars.peek() {
                 if next == '$' || next == '}' || next == '\\' {
                     out.push(next);
@@ -717,8 +1005,7 @@ fn strip_snippet_placeholders(text: &str) -> String {
         match chars.peek() {
             Some('{') => {
                 chars.next();
-                // `${N}` or `${N:default}` (no nesting; LSP snippets in
-                // practice keep defaults flat).
+                let start = out.len();
                 let mut saw_colon = false;
                 for inner in chars.by_ref() {
                     if inner == '}' {
@@ -730,16 +1017,30 @@ fn strip_snippet_placeholders(text: &str) -> String {
                         saw_colon = true;
                     }
                 }
+                if first_stop.is_none() {
+                    first_stop = Some((start, out.len() - start));
+                }
             }
             Some(d) if d.is_ascii_digit() => {
                 while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
                     chars.next();
                 }
+                if first_stop.is_none() {
+                    first_stop = Some((out.len(), 0));
+                }
             }
             _ => out.push('$'),
         }
     }
-    out
+    (out, first_stop)
+}
+
+/// Flat placeholder strip (`${N:default}` → `default`, `$N` → ``);
+/// superseded by `snippet_with_first_stop` on the accept path but kept
+/// for callers that only need the text.
+#[allow(dead_code)]
+fn strip_snippet_placeholders(text: &str) -> String {
+    snippet_with_first_stop(text).0
 }
 
 fn build_completion_popup(session: &CodeCompletionSession) -> PopupMenu {
@@ -840,6 +1141,8 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                     let mut newest_references: Option<usize> = None;
                     let mut newest_rename: Option<usize> = None;
                     let mut newest_symbols: Option<usize> = None;
+                    let mut newest_signature: Option<usize> = None;
+                    let mut newest_occurrences: Option<usize> = None;
                     for (ix, job) in batch.iter().enumerate() {
                         match job {
                             CodeLspJob::Sync { file, .. } => {
@@ -861,6 +1164,12 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                             CodeLspJob::Rename { .. } => newest_rename = Some(ix),
                             CodeLspJob::DocumentSymbols { .. } => {
                                 newest_symbols = Some(ix)
+                            }
+                            CodeLspJob::SignatureHelp { .. } => {
+                                newest_signature = Some(ix)
+                            }
+                            CodeLspJob::DocumentHighlight { .. } => {
+                                newest_occurrences = Some(ix)
                             }
                             _ => {}
                         }
@@ -962,6 +1271,131 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     Err(poisoned) => poisoned.into_inner(),
                                 };
                                 results.hover = Some((*seq, file.clone(), hovers));
+                                woke = true;
+                            }
+                            CodeLspJob::SignatureHelp {
+                                root,
+                                file,
+                                line,
+                                character,
+                                seq,
+                            } => {
+                                if newest_signature != Some(ix) {
+                                    continue;
+                                }
+                                let helps = engine::signature_help(
+                                    root, file, *line, *character,
+                                );
+                                // One synthetic hover carrying the active
+                                // signature + parameter — rides the hover
+                                // mailbox so the card surface is shared.
+                                let hovers: Vec<engine::LspHover> = helps
+                                    .into_iter()
+                                    .next()
+                                    .and_then(|help| {
+                                        let count = help.signatures.len();
+                                        let active = (help
+                                            .active_signature
+                                            .unwrap_or(0)
+                                            as usize)
+                                            .min(count.checked_sub(1)?);
+                                        let sig = &help.signatures[active];
+                                        let mut contents = sig.label.clone();
+                                        let param_ix = sig
+                                            .active_parameter
+                                            .or(help.active_parameter)
+                                            .unwrap_or(0)
+                                            as usize;
+                                        if let Some(param) =
+                                            sig.parameters.get(param_ix)
+                                        {
+                                            contents.push_str("\n▸ ");
+                                            contents.push_str(&param.label);
+                                            if let Some(doc) = param
+                                                .documentation
+                                                .as_deref()
+                                                .and_then(|doc| doc.lines().next())
+                                            {
+                                                contents.push_str(" — ");
+                                                contents.push_str(doc);
+                                            }
+                                        }
+                                        if let Some(doc) = sig
+                                            .documentation
+                                            .as_deref()
+                                            .and_then(|doc| doc.lines().next())
+                                        {
+                                            contents.push('\n');
+                                            contents.push_str(doc);
+                                        }
+                                        Some(engine::LspHover {
+                                            path: String::new(),
+                                            contents,
+                                            kind: Some("plaintext".to_string()),
+                                            range: None,
+                                            language: None,
+                                        })
+                                    })
+                                    .into_iter()
+                                    .collect();
+                                if lsp_log() {
+                                    eprintln!(
+                                        "neoism::lsp signature result: seq={seq} present={} at {line}:{character}",
+                                        !hovers.is_empty()
+                                    );
+                                }
+                                let mut results = match results_store().lock() {
+                                    Ok(results) => results,
+                                    Err(poisoned) => poisoned.into_inner(),
+                                };
+                                results.hover = Some((*seq, file.clone(), hovers));
+                                woke = true;
+                            }
+                            CodeLspJob::DocumentHighlight {
+                                root,
+                                file,
+                                line,
+                                character,
+                                seq,
+                            } => {
+                                if newest_occurrences != Some(ix) {
+                                    continue;
+                                }
+                                let highlights = engine::document_highlight(
+                                    root, file, *line, *character,
+                                );
+                                // Engine query outputs are ONE-based
+                                // (line + byte col); convert to the
+                                // pane's zero-based space and keep only
+                                // single-line spans.
+                                let mut spans: Vec<(usize, usize, usize)> =
+                                    highlights
+                                        .into_iter()
+                                        .filter_map(|highlight| {
+                                            let range = highlight.range?;
+                                            if range.start.line != range.end.line {
+                                                return None;
+                                            }
+                                            let line0 = (range.start.line
+                                                as usize)
+                                                .checked_sub(1)?;
+                                            let start = (range.start.character
+                                                as usize)
+                                                .saturating_sub(1);
+                                            let end = (range.end.character
+                                                as usize)
+                                                .saturating_sub(1);
+                                            (end > start)
+                                                .then_some((line0, start, end))
+                                        })
+                                        .collect();
+                                spans.sort_unstable();
+                                let mut results = match results_store().lock() {
+                                    Ok(results) => results,
+                                    Err(poisoned) => poisoned.into_inner(),
+                                };
+                                results.occurrences =
+                                    Some((*seq, file.clone(), spans));
                                 woke = true;
                             }
                             CodeLspJob::Definition {
@@ -1295,9 +1729,16 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                     Err(poisoned) => poisoned.into_inner(),
                                 };
                                 store
-                                    .entry(file)
+                                    .entry(file.clone())
                                     .or_default()
                                     .insert(event.server_id.clone(), event.diagnostics);
+                            }
+                            {
+                                let mut seq = match diag_publish_seq().lock() {
+                                    Ok(seq) => seq,
+                                    Err(poisoned) => poisoned.into_inner(),
+                                };
+                                *seq.entry(file).or_insert(0) += 1;
                             }
                             DIAG_VERSION.fetch_add(1, Ordering::SeqCst);
                             proxy.send_event(
@@ -1344,6 +1785,7 @@ impl Screen<'_> {
             return;
         }
         let proxy = self.context_manager.event_proxy_clone();
+        let git_proxy = self.context_manager.event_proxy_clone();
         let window_id = self.context_manager.window_id();
         let shared = ensure_workers(proxy, window_id);
         let global_version = DIAG_VERSION.load(Ordering::SeqCst);
@@ -1355,18 +1797,98 @@ impl Screen<'_> {
         let Some(root) = root.or_else(|| file.parent().map(Path::to_path_buf)) else {
             return;
         };
+        // The pane's live CRDT binding (None → not doc-bound; the
+        // line-shift heuristic serves those panes instead). Disjoint
+        // field of `self` from the `code` borrow above.
+        let diag_binding = self
+            .code_crdt
+            .binding_for(&crate::screen::markdown_crdt::buffer_id_for_markdown_path(
+                &file,
+            ))
+            .filter(|binding| binding.is_seeded());
 
         if code.lsp_synced_revision != Some(code.buffer.revision) {
             code.lsp_synced_revision = Some(code.buffer.revision);
             let _ = shared.jobs.send(CodeLspJob::Sync {
-                root,
+                root: root.clone(),
                 file: file.clone(),
                 text: code.buffer.text(),
             });
         }
 
-        if code.lsp_diag_version != global_version {
+        // Per-revision pass: git gutter marks + diagnostic anchor-lite.
+        // Gated by its own key so it also runs on the FIRST frame of a
+        // freshly opened pane (revision 0).
+        {
+            static GIT_PASS_REV: OnceLock<Mutex<HashMap<PathBuf, u64>>> =
+                OnceLock::new();
+            let revision = code.buffer.revision;
+            let needs_pass = {
+                let mut map = match GIT_PASS_REV.get_or_init(Default::default).lock()
+                {
+                    Ok(map) => map,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                map.insert(file.clone(), revision) != Some(revision)
+            };
+            // 512KB gate matches the highlight/outline cutoffs.
+            let small_enough = code
+                .buffer
+                .lines
+                .iter()
+                .map(|line| line.len() + 1)
+                .sum::<usize>()
+                <= 512 * 1024;
+            if needs_pass && small_enough {
+                // The heuristic keeps the RAW store's line numbers
+                // roughly right (status counts, problems popup and
+                // diagnostic cards read it) — the publish gate below
+                // stops its version bump from ever overwriting the
+                // anchored fold.
+                reanchor_diagnostics(&file, &code.buffer.lines);
+                if let Some(binding) = diag_binding {
+                    // Doc-bound: char-precise squiggles by re-resolving
+                    // sticky anchors against the live CRDT doc.
+                    let folded = fold_anchored_diagnostics(code, binding);
+                    code.diagnostics = folded;
+                }
+                match git_baseline(&file, &git_proxy, window_id) {
+                    Some(baseline) => {
+                        code.git_marks = neoism_ui::editor::code::gitdiff::compute_git_marks(
+                            &baseline,
+                            &code.buffer.lines,
+                        );
+                    }
+                    None => {
+                        if !code.git_marks.is_empty() {
+                            code.git_marks = Default::default();
+                        }
+                    }
+                }
+            }
+        }
+
+        let fold_from_store = code.lsp_diag_version != global_version && {
             code.lsp_diag_version = global_version;
+            // Publish gate for the sticky-anchor path: the global
+            // version also moves on other files' publishes and on the
+            // line-shift heuristic; refolding from the store then
+            // would overwrite anchor-precise spans with stale
+            // positions. A doc-bound pane refolds (and re-pins its
+            // anchors) only when a server actually published for THIS
+            // file.
+            let publish_seq = {
+                let seq = match diag_publish_seq().lock() {
+                    Ok(seq) => seq,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                seq.get(&canonical_key(&file)).copied().unwrap_or(0)
+            };
+            let fresh_publish = publish_seq != code.lsp_diag_publish_seq;
+            code.lsp_diag_publish_seq = publish_seq;
+            diag_binding.is_none() || fresh_publish
+        };
+        if fold_from_store {
             let store = match diag_store().lock() {
                 Ok(store) => store,
                 Err(poisoned) => poisoned.into_inner(),
@@ -1381,6 +1903,7 @@ impl Screen<'_> {
                 );
             }
             let mut per_line: HashMap<usize, Vec<CodeLineDiagnostic>> = HashMap::new();
+            let mut anchors: Vec<neoism_ui::editor::code::CodeDiagAnchor> = Vec::new();
             if let Some(by_server) = store.get(&canonical) {
                 for diags in by_server.values() {
                     for diag in diags {
@@ -1390,6 +1913,32 @@ impl Screen<'_> {
                         let severity = map_severity(&diag.severity);
                         let start_line = range.start.line as usize;
                         let end_line = (range.end.line as usize).max(start_line);
+                        // Pin the published range into the CRDT doc
+                        // while the pane is bound: the squiggle then
+                        // tracks edits char-precisely until the next
+                        // publish (start follows its character, end
+                        // stays put on inserts at the range edge).
+                        if let Some(binding) = diag_binding {
+                            if let (Some(start), Some(end)) = (
+                                binding.sticky_anchor_at_utf16(
+                                    start_line,
+                                    range.start.character as usize,
+                                    true,
+                                ),
+                                binding.sticky_anchor_at_utf16(
+                                    end_line,
+                                    range.end.character as usize,
+                                    false,
+                                ),
+                            ) {
+                                anchors.push(neoism_ui::editor::code::CodeDiagAnchor {
+                                    start,
+                                    end,
+                                    severity,
+                                    message: diag.message.clone(),
+                                });
+                            }
+                        }
                         for line_ix in start_line..=end_line {
                             let Some(line) = code.buffer.lines.get(line_ix) else {
                                 break;
@@ -1430,7 +1979,70 @@ impl Screen<'_> {
                     }
                 }
             }
+            code.diag_anchors = anchors;
             code.diagnostics = per_line;
+        }
+
+        // Caret-idle occurrence probe (documentHighlight): once the
+        // caret rests at a new position for a beat, ask for the
+        // symbol's occurrences; any motion or edit re-arms the probe
+        // and drops the previous bands.
+        const OCCURRENCE_IDLE_SECS: f32 = 0.35;
+        {
+            let snapshot = self.context_manager.current().code.as_ref().map(|code| {
+                (
+                    code.buffer.cursor_line,
+                    code.buffer.cursor_col,
+                    code.buffer.revision,
+                    code.occurrence_spans.is_empty(),
+                )
+            });
+            if let Some((line, col, revision, spans_empty)) = snapshot {
+                let ui = &mut self.renderer.code_lsp;
+                let moved = ui.occurrence_probe.as_ref().map_or(true, |probe| {
+                    probe.line != line
+                        || probe.col != col
+                        || probe.revision != revision
+                });
+                if moved {
+                    ui.occurrence_probe = Some(CodeOccurrenceProbe {
+                        line,
+                        col,
+                        revision,
+                        since: std::time::Instant::now(),
+                        requested: false,
+                        seq: 0,
+                    });
+                    if !spans_empty {
+                        if let Some(code) =
+                            self.context_manager.current_mut().code.as_mut()
+                        {
+                            code.occurrence_spans.clear();
+                        }
+                        self.mark_dirty();
+                    }
+                } else {
+                    let due = ui.occurrence_probe.as_ref().is_some_and(|probe| {
+                        !probe.requested
+                            && probe.since.elapsed().as_secs_f32()
+                                >= OCCURRENCE_IDLE_SECS
+                    });
+                    if due {
+                        let seq = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
+                        if let Some(probe) = ui.occurrence_probe.as_mut() {
+                            probe.requested = true;
+                            probe.seq = seq;
+                        }
+                        let _ = shared.jobs.send(CodeLspJob::DocumentHighlight {
+                            root: root.clone(),
+                            file: file.clone(),
+                            line: line as u32,
+                            character: col as u32,
+                            seq,
+                        });
+                    }
+                }
+            }
         }
 
         // Pointer-idle hover: request once the pointer has rested long
@@ -1502,6 +2114,10 @@ impl Screen<'_> {
                 || (!card.from_mouse
                     && (card.line != cursor.line || card.col != cursor.col))
             {
+                // A dismissed signature card ends its session too.
+                if ui.signature_seq == Some(card.seq) {
+                    ui.signature_seq = None;
+                }
                 ui.hover = None;
             }
         }
@@ -1533,6 +2149,7 @@ impl Screen<'_> {
             references,
             rename,
             document_symbols,
+            occurrences,
         ) = {
             let mut results = match results_store().lock() {
                 Ok(results) => results,
@@ -1548,8 +2165,31 @@ impl Screen<'_> {
                 results.references.take(),
                 results.rename.take(),
                 results.document_symbols.take(),
+                results.occurrences.take(),
             )
         };
+
+        // Symbol occurrences: install into the pane when the probe that
+        // requested them is still current (stale seqs just drop).
+        if let Some((seq, file, spans)) = occurrences {
+            let probe_current = self
+                .renderer
+                .code_lsp
+                .occurrence_probe
+                .as_ref()
+                .is_some_and(|probe| probe.seq == seq);
+            if probe_current && file == path {
+                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    let mut per_line: HashMap<usize, Vec<(usize, usize)>> =
+                        HashMap::new();
+                    for (line, start, end) in spans {
+                        per_line.entry(line).or_default().push((start, end));
+                    }
+                    code.occurrence_spans = per_line;
+                }
+                self.mark_dirty();
+            }
+        }
 
         // Symbols-mode rows: install while the finder is showing them
         // (stale seqs and closed finders just drop the result).
@@ -1573,7 +2213,15 @@ impl Screen<'_> {
                         code.buffer.apply_text_edits(&parsed);
                     }
                 }
-                self.finish_code_save();
+                // Doc-bound panes finish through the daemon: the save
+                // flushes the just-applied format edits into the CRDT
+                // (peers converge on the formatted text) and the daemon
+                // writes the doc. Unbound panes write locally as before.
+                if self.save_current_code_via_daemon() {
+                    self.mark_dirty();
+                } else {
+                    self.finish_code_save();
+                }
             }
         }
 
@@ -2202,6 +2850,121 @@ impl Screen<'_> {
         });
     }
 
+    /// Signature help at the caret: install/refresh the card (the
+    /// result rides the hover mailbox as a synthetic hover). Carries
+    /// the previous card's lines while retriggering so the popup never
+    /// flickers empty between keystrokes.
+    pub(crate) fn request_code_signature_help(&mut self) {
+        let shared = self.code_lsp_shared();
+        let Some((root, file)) = self.code_lsp_target() else {
+            return;
+        };
+        let Some((line, col)) = self
+            .context_manager
+            .current()
+            .code
+            .as_ref()
+            .map(|code| (code.buffer.cursor_line, code.buffer.cursor_col))
+        else {
+            return;
+        };
+        let seq = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
+        let ui = &mut self.renderer.code_lsp;
+        let carried_lines = match (ui.signature_seq, ui.hover.take()) {
+            (Some(previous), Some(card)) if card.seq == previous => card.lines,
+            (_, other) => {
+                ui.hover = other;
+                Vec::new()
+            }
+        };
+        ui.signature_seq = Some(seq);
+        ui.hover = Some(CodeHoverCard {
+            path: file.clone(),
+            line,
+            col,
+            seq,
+            lines: carried_lines,
+            from_mouse: false,
+        });
+        let _ = shared.jobs.send(CodeLspJob::SignatureHelp {
+            root,
+            file,
+            line: line as u32,
+            character: col as u32,
+            seq,
+        });
+    }
+
+    /// End the signature-help session (typed `)`, committed the line,
+    /// or moved away), dismissing its card if still up.
+    fn end_code_signature_help(&mut self) {
+        let ui = &mut self.renderer.code_lsp;
+        if let Some(seq) = ui.signature_seq.take() {
+            if ui.hover.as_ref().is_some_and(|card| card.seq == seq) {
+                ui.hover = None;
+            }
+        }
+    }
+
+    /// Palette "Project Problems": every diagnostic in the store, all
+    /// files, as finder References rows (path:line + severity-tagged
+    /// message) — Enter/preview jump straight to the problem.
+    pub(crate) fn open_project_problems(&mut self) {
+        let Some(cwd) = self
+            .active_pane_workspace_root()
+            .or_else(|| self.active_workspace_root.clone())
+        else {
+            return;
+        };
+        let mut rows: Vec<neoism_ui::panels::finder::ReferenceRow> = Vec::new();
+        {
+            let store = match diag_store().lock() {
+                Ok(store) => store,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            for (path, by_server) in store.iter() {
+                let display = path
+                    .strip_prefix(&cwd)
+                    .unwrap_or(path.as_path())
+                    .to_string_lossy()
+                    .into_owned();
+                for diags in by_server.values() {
+                    for diag in diags {
+                        let Some(range) = diag.range.as_ref() else {
+                            continue;
+                        };
+                        let mut message =
+                            diag.message.lines().next().unwrap_or("").to_string();
+                        if message.chars().count() > 160 {
+                            message = message.chars().take(160).collect();
+                        }
+                        rows.push(neoism_ui::panels::finder::ReferenceRow {
+                            path: display.clone(),
+                            // Store ranges are raw wire (zero-based);
+                            // rows are 1-based like references.
+                            line: range.start.line + 1,
+                            column: range.start.character,
+                            text: format!("{}: {}", diag.severity, message),
+                        });
+                    }
+                }
+            }
+        }
+        if rows.is_empty() {
+            self.renderer.notifications.push(
+                "No problems reported",
+                neoism_ui::panels::notifications::NotificationLevel::Info,
+            );
+            self.mark_dirty();
+            return;
+        }
+        rows.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
+        self.finder_target_route = None;
+        self.renderer.file_tree.set_focused(false);
+        self.renderer.finder.open_references(cwd, rows);
+        self.mark_dirty();
+    }
+
     /// Pointer moved: arm/refresh the mouse-idle hover candidate (the
     /// pump requests once the pointer rests ~400ms on one cell).
     pub(crate) fn note_code_mouse_hover(&mut self) {
@@ -2575,15 +3338,24 @@ impl Screen<'_> {
             .get("insertTextFormat")
             .and_then(|format| format.as_u64())
             == Some(2);
-        let insert = if is_snippet {
-            strip_snippet_placeholders(&item.insert_text)
+        let (insert, first_stop) = if is_snippet {
+            snippet_with_first_stop(&item.insert_text)
         } else {
-            item.insert_text.clone()
+            (item.insert_text.clone(), None)
         };
         let follow_up = item
             .server_id
             .clone()
             .zip(item.payload.get("command").cloned());
+        // Auto-imports and friends: extra edits the server wants applied
+        // alongside the accepted item (positions already at the engine's
+        // byte-coordinate boundary, same contract as format-on-save).
+        let additional_edits = item
+            .payload
+            .get("additionalTextEdits")
+            .and_then(|edits| edits.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         {
             let Some(code) = self.context_manager.current_mut().code.as_mut() else {
@@ -2611,6 +3383,57 @@ impl Screen<'_> {
             }
             code.buffer.insert_text(&insert);
             code.buffer.follow_cursor = true;
+
+            // Apply the additional edits AFTER the completion text:
+            // auto-import inserts live above the caret and are
+            // unaffected by the at-cursor insert; `apply_text_edits`
+            // runs bottom-up so multiple edits stay position-stable.
+            let mut import_line_shift: i64 = 0;
+            if !additional_edits.is_empty() {
+                let parsed = parse_lsp_text_edits(&additional_edits);
+                if !parsed.is_empty() {
+                    let cursor_line = code.buffer.cursor_line;
+                    let cursor_col = code.buffer.cursor_col;
+                    // Net line delta of edits strictly above the caret
+                    // — an inserted `use` line must not leave the caret
+                    // one line off.
+                    let line_shift: i64 = parsed
+                        .iter()
+                        .filter(|edit| edit.end_line < cursor_line)
+                        .map(|edit| {
+                            edit.text.matches('\n').count() as i64
+                                - (edit.end_line - edit.start_line) as i64
+                        })
+                        .sum();
+                    code.buffer.apply_text_edits(&parsed);
+                    let target = (cursor_line as i64 + line_shift).max(0) as usize;
+                    code.buffer.set_cursor_position(target, cursor_col, false);
+                    code.buffer.follow_cursor = true;
+                    import_line_shift = line_shift;
+                }
+            }
+
+            // Snippet: land the caret on the FIRST tabstop with its
+            // placeholder selected, so typing replaces it. Runs after
+            // the import edits (which may have shifted lines above).
+            if let Some((offset, len)) = first_stop {
+                let before = &insert[..offset.min(insert.len())];
+                let line_delta = before.matches('\n').count();
+                let stop_line = (session.line as i64
+                    + line_delta as i64
+                    + import_line_shift)
+                    .max(0) as usize;
+                let stop_col = if line_delta == 0 {
+                    start + before.len()
+                } else {
+                    before.rsplit('\n').next().map(str::len).unwrap_or(0)
+                };
+                code.buffer.set_cursor_position(stop_line, stop_col, false);
+                if len > 0 {
+                    code.buffer.set_cursor_position(stop_line, stop_col + len, true);
+                }
+                code.buffer.follow_cursor = true;
+            }
         }
 
         if let Some((server_id, command)) = follow_up {
@@ -2700,12 +3523,27 @@ impl Screen<'_> {
     /// insert sites funnel here): drives completion open/refilter/
     /// dismiss and clears the hover card on any edit.
     pub(crate) fn code_lsp_after_key(&mut self, edit: CodeKeyEdit) {
-        if self.renderer.code_lsp.hover.is_some() {
+        // A live signature session survives keystrokes (retriggered at
+        // the new caret below); ordinary hover cards dismiss on typing.
+        let signature_active = self.renderer.code_lsp.signature_seq.is_some();
+        if self.renderer.code_lsp.hover.is_some() && !signature_active {
             self.renderer.code_lsp.hover = None;
         }
         let session_open = self.renderer.code_lsp.completion.is_some();
         match edit {
             CodeKeyEdit::Char(c) => {
+                // Signature help: `(`/`,` opens or refreshes; `)` ends
+                // the session; anything else retriggers at the caret
+                // while a session is live (the card follows the args).
+                if c == '(' || c == ',' {
+                    self.request_code_signature_help();
+                } else if signature_active {
+                    if c == ')' {
+                        self.end_code_signature_help();
+                    } else {
+                        self.request_code_signature_help();
+                    }
+                }
                 if let Some(trigger) = self.code_completion_trigger(c) {
                     self.request_code_completion(Some(trigger));
                 } else if is_ident_char(c) {
@@ -2719,11 +3557,17 @@ impl Screen<'_> {
                 }
             }
             CodeKeyEdit::Backspace => {
+                if signature_active {
+                    self.request_code_signature_help();
+                }
                 if session_open {
                     self.refilter_code_completion();
                 }
             }
             CodeKeyEdit::Other => {
+                if signature_active {
+                    self.end_code_signature_help();
+                }
                 if session_open {
                     self.renderer.code_lsp.completion = None;
                 }

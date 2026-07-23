@@ -37,11 +37,14 @@ pub(crate) struct InitializeResult {
     pub(crate) completion_provider: bool,
     pub(crate) completion_resolve_provider: bool,
     pub(crate) completion_trigger_characters: Vec<String>,
+    pub(crate) signature_help_provider: bool,
     pub(crate) hover_provider: bool,
     pub(crate) definition_provider: bool,
     pub(crate) references_provider: bool,
     pub(crate) implementation_provider: bool,
     pub(crate) call_hierarchy_provider: bool,
+    pub(crate) document_highlight_provider: bool,
+    pub(crate) inlay_hint_provider: bool,
     pub(crate) document_symbol_provider: bool,
     pub(crate) formatting_provider: bool,
     pub(crate) code_action_provider: bool,
@@ -621,6 +624,19 @@ impl LspClient {
                         "dynamicRegistration": false,
                         "contentFormat": ["markdown", "plaintext"]
                     },
+                    "signatureHelp": {
+                        "dynamicRegistration": false,
+                        "signatureInformation": {
+                            "documentationFormat": ["markdown", "plaintext"],
+                            // Offset labels are normalized back to substrings
+                            // at the parse boundary.
+                            "parameterInformation": {
+                                "labelOffsetSupport": true
+                            },
+                            "activeParameterSupport": true
+                        },
+                        "contextSupport": false
+                    },
                     // Push diagnostics are a client capability, independent
                     // of the 3.17 pull-diagnostic request capability below.
                     // Servers such as typescript-language-server deliberately
@@ -640,11 +656,17 @@ impl LspClient {
                     "references": {
                         "dynamicRegistration": false
                     },
+                    "documentHighlight": {
+                        "dynamicRegistration": false
+                    },
                     "implementation": {
                         "dynamicRegistration": false,
                         "linkSupport": true
                     },
                     "callHierarchy": {
+                        "dynamicRegistration": false
+                    },
+                    "inlayHint": {
                         "dynamicRegistration": false
                     },
                     "documentSymbol": {
@@ -763,6 +785,12 @@ impl LspClient {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // signatureHelpProvider is an object (or absent), like
+        // completionProvider; a non-null value means the server supports it.
+        let signature_help_provider = result
+            .pointer("/capabilities/signatureHelpProvider")
+            .map(capability_enabled)
+            .unwrap_or(false);
         let hover_provider = result
             .pointer("/capabilities/hoverProvider")
             .map(capability_enabled)
@@ -781,6 +809,14 @@ impl LspClient {
             .unwrap_or(false);
         let call_hierarchy_provider = result
             .pointer("/capabilities/callHierarchyProvider")
+            .map(capability_enabled)
+            .unwrap_or(false);
+        let document_highlight_provider = result
+            .pointer("/capabilities/documentHighlightProvider")
+            .map(capability_enabled)
+            .unwrap_or(false);
+        let inlay_hint_provider = result
+            .pointer("/capabilities/inlayHintProvider")
             .map(capability_enabled)
             .unwrap_or(false);
         let document_symbol_provider = result
@@ -816,10 +852,13 @@ impl LspClient {
             lsp = %self.label,
             initialize_ms = crate::perf::elapsed_ms(initialized_started),
             workspace_symbol_provider,
+            signature_help_provider,
             hover_provider,
             definition_provider,
             references_provider,
             implementation_provider,
+            document_highlight_provider,
+            inlay_hint_provider,
             document_symbol_provider,
             formatting_provider,
             code_action_provider,
@@ -836,11 +875,14 @@ impl LspClient {
             completion_provider,
             completion_resolve_provider,
             completion_trigger_characters,
+            signature_help_provider,
             hover_provider,
             definition_provider,
             references_provider,
             implementation_provider,
             call_hierarchy_provider,
+            document_highlight_provider,
+            inlay_hint_provider,
             document_symbol_provider,
             formatting_provider,
             code_action_provider,

@@ -1069,7 +1069,10 @@ impl FileTree {
                 || self.cursor_spring.position != 0.0
                 || reveal_animating
                 || self.root_transition_started.is_some()
-                || self.is_loading())
+                || self.is_loading()
+                // A live drag paints a cursor-following ghost and a
+                // wiggling drop target every frame — keep them flowing.
+                || self.is_file_dragging())
     }
 
     /// Number of rows that fit in `panel_height` logical pixels.

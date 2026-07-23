@@ -54,6 +54,15 @@ impl Screen<'_> {
         // Code panes reuse the ex line-jump/save heads (`:42`, `:$`,
         // `:w`, `:wq`); the notebook-only plans stay markdown-gated.
         if self.context_manager.current().code.is_some() {
+            // `:s` substitute family FIRST, parsed from the full line —
+            // the pattern may contain spaces, so the head/tail split
+            // below does not apply (`:%s/foo bar/baz/g`).
+            if let Some(spec) =
+                neoism_ui::editor::code::substitute::parse_substitute_command(trimmed)
+            {
+                self.run_code_substitute(&spec);
+                return true;
+            }
             match MarkdownExCommandPlan::classify(&head) {
                 MarkdownExCommandPlan::JumpToLastLine => {
                     if let Some(code) = self.context_manager.current_mut().code.as_mut() {
@@ -363,6 +372,53 @@ impl Screen<'_> {
 
     /// Drain every file-tab in the workspace, one at a time, falling
     /// back to the next file tab if the close lands the focus on a
+    /// Apply a parsed `:s` substitute to the focused code pane, arm
+    /// hlsearch/`n` with the pattern (vim keeps it as the last
+    /// search), and toast the result.
+    pub(crate) fn run_code_substitute(
+        &mut self,
+        spec: &neoism_ui::editor::code::substitute::SubstituteSpec,
+    ) {
+        let outcome = {
+            let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+                return;
+            };
+            let outcome = neoism_ui::editor::code::substitute::apply_substitute(
+                &mut code.buffer,
+                spec,
+            );
+            if outcome.substitutions > 0 {
+                code.search_highlight = Some(spec.pattern.clone());
+                code.buffer.vim.search =
+                    Some(neoism_ui::editor::markdown::vim::VimSearch {
+                        pattern: spec.pattern.clone(),
+                        forward: true,
+                        whole_word: false,
+                    });
+            }
+            outcome
+        };
+        if outcome.substitutions == 0 {
+            self.renderer.notifications.push(
+                format!("Pattern not found: {}", spec.pattern),
+                neoism_ui::panels::notifications::NotificationLevel::Info,
+            );
+        } else {
+            self.sync_active_code_modified();
+            self.renderer.notifications.push(
+                format!(
+                    "{} substitution{} on {} line{}",
+                    outcome.substitutions,
+                    if outcome.substitutions == 1 { "" } else { "s" },
+                    outcome.lines_changed,
+                    if outcome.lines_changed == 1 { "" } else { "s" },
+                ),
+                neoism_ui::panels::notifications::NotificationLevel::Info,
+            );
+        }
+        self.mark_dirty();
+    }
+
     /// terminal tab. Extracted so `:qa` and `:wqa` share the same
     /// loop after the plan dispatch above.
     fn close_all_workspace_file_tabs(&mut self) {

@@ -282,8 +282,8 @@ impl NeoismAgentPane {
             return;
         }
         let mut buffer = self.input_buffer();
-        match self.current_input_wrap_ranges() {
-            Some(ranges) => buffer.move_up_with_history_visual(ranges),
+        match self.current_input_wrap_rows() {
+            Some(rows) => buffer.move_up_with_history_visual(rows),
             None => buffer.move_up_with_history(),
         }
         self.apply_input_buffer(buffer);
@@ -299,8 +299,8 @@ impl NeoismAgentPane {
             return;
         }
         let mut buffer = self.input_buffer();
-        match self.current_input_wrap_ranges() {
-            Some(ranges) => buffer.move_down_with_history_visual(ranges),
+        match self.current_input_wrap_rows() {
+            Some(rows) => buffer.move_down_with_history_visual(rows),
             None => buffer.move_down_with_history(),
         }
         self.apply_input_buffer(buffer);

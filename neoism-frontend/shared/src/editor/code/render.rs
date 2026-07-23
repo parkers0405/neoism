@@ -402,6 +402,39 @@ pub fn render(
         }
     }
 
+    // Symbol occurrences (LSP documentHighlight): quiet bands under
+    // every visible instance of the symbol the caret rests on.
+    if !pane.occurrence_spans.is_empty() {
+        let occ_color = theme.f32_alpha(theme.blue, 0.16);
+        for rv in &visible {
+            let Some(spans) = pane.occurrence_spans.get(&rv.line) else {
+                continue;
+            };
+            let ry = row_screen_y(rv.vrow);
+            if ry + row_h <= grid_y || ry >= grid_y + h_content {
+                continue;
+            }
+            let line = &pane.buffer.lines[rv.line];
+            for &(start, end) in spans {
+                let s = start.min(line.len()).max(rv.seg_start);
+                let e = end.min(line.len()).min(rv.seg_end);
+                if s >= e {
+                    continue;
+                }
+                let start_col = display_col_for_byte(line, s, TAB_DISPLAY_WIDTH)
+                    .saturating_sub(rv.base_col);
+                let end_col = display_col_for_byte(line, e, TAB_DISPLAY_WIDTH)
+                    .saturating_sub(rv.base_col);
+                if let Some((bx, bw)) = clamp_band(
+                    text_x + start_col as f32 * cell_w - scroll_x,
+                    (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w,
+                ) {
+                    sugarloaf.rect(None, bx, ry, bw, row_h, occ_color, DEPTH, ORDER_BG);
+                }
+            }
+        }
+    }
+
     // Yank flash: quick fading band over the yanked rows.
     const YANK_FLASH_SECS: f32 = 0.28;
     let mut flash_animating = false;
@@ -499,6 +532,41 @@ pub fn render(
         let ry = row_screen_y(rv.vrow);
         let ty = ry + text_pad_y;
         if rv.seg == 0 {
+            // Git gutter: a slim bar left of the number (green added,
+            // yellow modified), and a red tick at the top edge when
+            // baseline lines were deleted above this one.
+            if let Some(mark) = pane.git_marks.lines.get(&rv.line) {
+                let color = match mark {
+                    super::gitdiff::CodeGitMark::Added => {
+                        theme.f32_alpha(theme.green, 0.9)
+                    }
+                    super::gitdiff::CodeGitMark::Modified => {
+                        theme.f32_alpha(theme.yellow, 0.9)
+                    }
+                };
+                sugarloaf.rect(
+                    None,
+                    x + 2.0,
+                    ry + 1.0,
+                    3.0,
+                    row_h - 2.0,
+                    color,
+                    DEPTH,
+                    ORDER_TEXT,
+                );
+            }
+            if pane.git_marks.deleted_above.binary_search(&rv.line).is_ok() {
+                sugarloaf.rect(
+                    None,
+                    x + 2.0,
+                    ry,
+                    GUTTER_PAD_X + 4.0,
+                    2.0,
+                    theme.f32_alpha(theme.red, 0.9),
+                    DEPTH,
+                    ORDER_TEXT,
+                );
+            }
             let number = format!("{:>width$}", rv.line + 1, width = digits);
             let num_opts = DrawOpts {
                 color: if rv.line == pane.buffer.cursor_line {
@@ -698,6 +766,155 @@ pub fn render(
         caret_h,
     ]);
 
+    // Remote collaborators' carets (colored bar + name flag), mapped
+    // through the SAME wrap math as the local caret so a peer's cursor
+    // lands exactly on the glyph it covers in MY view. Off-screen peers
+    // simply don't draw this frame.
+    for cursor in &pane.remote_cursors {
+        let Some(line_text) = pane.buffer.lines.get(cursor.line) else {
+            continue;
+        };
+        let byte_col = byte_col_for_utf16_col(line_text, cursor.col_utf16);
+        let (seg, local_col) =
+            wrap_visual_position(line_text, byte_col, cols, TAB_DISPLAY_WIDTH);
+        let vrow = wrap.first_row_of_line(cursor.line) + seg;
+        let ry = row_screen_y(vrow);
+        if ry + row_h <= grid_y || ry >= grid_y + h_content {
+            continue;
+        }
+        let px = (text_x + local_col as f32 * cell_w - scroll_x)
+            .clamp(text_x, (x + w - 2.0).max(text_x));
+        // Rainbow peers animate locally on the shared clock; everyone
+        // else paints in the color they broadcast.
+        let color = if cursor.rainbow {
+            let c = crate::cursor_style::rainbow_color_f32(
+                crate::cursor_style::rainbow_now_seconds(),
+            );
+            [c[0], c[1], c[2], 0.9]
+        } else {
+            [
+                cursor.color[0] as f32 / 255.0,
+                cursor.color[1] as f32 / 255.0,
+                cursor.color[2] as f32 / 255.0,
+                0.9,
+            ]
+        };
+        let peer_caret_y = ry + ((row_h - caret_h) * 0.5).max(0.0).round();
+        sugarloaf.rect(None, px, peer_caret_y, 2.0, caret_h, color, DEPTH, ORDER_TEXT);
+        // Name flag riding the caret top, like every co-editing UI.
+        if cursor.name.is_empty() {
+            continue;
+        }
+        let name_opts = DrawOpts {
+            font_size: (font_size * 0.58).max(8.0),
+            color: theme.u8(theme.bg),
+            clip_rect: Some(clip),
+            ..DrawOpts::default()
+        };
+        let name_w = sugarloaf.text_mut().measure(&cursor.name, &name_opts);
+        let tag_h = name_opts.font_size + 4.0;
+        let tag_y = (peer_caret_y - tag_h).max(grid_y);
+        {
+            use crate::editor::markdown::render::draw::draw_rounded_rect_clipped;
+            draw_rounded_rect_clipped(
+                sugarloaf,
+                clip,
+                px,
+                tag_y,
+                name_w + 8.0,
+                tag_h,
+                3.0,
+                color,
+                DEPTH,
+                ORDER_TEXT,
+            );
+        }
+        sugarloaf
+            .text_mut()
+            .draw(px + 4.0, tag_y + 2.0, &cursor.name, &name_opts);
+    }
+
+    // Multi-cursor extra carets (+ their pending gb selections). The
+    // host trail cursor owns only the PRIMARY caret — extras always
+    // paint here, mapped through the same wrap math.
+    if !pane.buffer.extra_carets.is_empty() {
+        let bar_color = theme.f32_alpha(theme.accent, 0.85);
+        let block_color = theme.f32_alpha(theme.accent, 0.55);
+        let sel_color = theme.f32_alpha(theme.accent, 0.28);
+        for extra in &pane.buffer.extra_carets {
+            let Some(line_text) = pane.buffer.lines.get(extra.line) else {
+                continue;
+            };
+            // Selection band (single-line by construction; drawn per
+            // wrap segment like the primary selection).
+            if let Some(anchor) = extra.anchor.filter(|a| a.line == extra.line) {
+                let (s, e) = if anchor.col <= extra.col {
+                    (anchor.col, extra.col)
+                } else {
+                    (extra.col, anchor.col)
+                };
+                for rv in &visible {
+                    if rv.line != extra.line {
+                        continue;
+                    }
+                    let band_y = row_screen_y(rv.vrow);
+                    if band_y + row_h <= grid_y || band_y >= grid_y + h_content {
+                        continue;
+                    }
+                    let ss = s.max(rv.seg_start);
+                    let ee = e.min(rv.seg_end);
+                    if ss >= ee {
+                        continue;
+                    }
+                    let start_col = display_col_for_byte(line_text, ss, TAB_DISPLAY_WIDTH)
+                        .saturating_sub(rv.base_col);
+                    let end_col = display_col_for_byte(line_text, ee, TAB_DISPLAY_WIDTH)
+                        .saturating_sub(rv.base_col);
+                    if let Some((bx, bw)) = clamp_band(
+                        text_x + start_col as f32 * cell_w - scroll_x,
+                        (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w,
+                    ) {
+                        sugarloaf.rect(
+                            None, bx, band_y, bw, row_h, sel_color, DEPTH, ORDER_BG,
+                        );
+                    }
+                }
+            }
+            let (seg, local_col) = wrap_visual_position(
+                line_text,
+                extra.col.min(line_text.len()),
+                cols,
+                TAB_DISPLAY_WIDTH,
+            );
+            let vrow = wrap.first_row_of_line(extra.line) + seg;
+            let ry = row_screen_y(vrow);
+            if ry + row_h <= grid_y || ry >= grid_y + h_content {
+                continue;
+            }
+            let px = (text_x + local_col as f32 * cell_w - scroll_x)
+                .clamp(text_x, (x + w - 2.0).max(text_x));
+            let ecaret_y = ry + ((row_h - caret_h) * 0.5).max(0.0).round();
+            match pane.buffer.mode {
+                CodeMode::Insert => {
+                    sugarloaf
+                        .rect(None, px, ecaret_y, 2.0, caret_h, bar_color, DEPTH, ORDER_TEXT);
+                }
+                CodeMode::Normal | CodeMode::Visual => {
+                    sugarloaf.rect(
+                        None,
+                        px,
+                        ecaret_y,
+                        cell_w,
+                        caret_h,
+                        block_color,
+                        DEPTH,
+                        ORDER_TEXT,
+                    );
+                }
+            }
+        }
+    }
+
     // Read-only scrollbar thumb (drag interaction comes with the host
     // wiring pass).
     // Themed scrollbar (shared `ScrollbarStyle` — Mash Up Pack slot),
@@ -778,6 +995,20 @@ pub fn render(
 
 fn rects_intersect(a: [f32; 4], b: [f32; 4]) -> bool {
     a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+/// Byte column in `line` for a UTF-16 column (the presence wire
+/// format). Clamps to the line end; lands on a char boundary by
+/// construction.
+fn byte_col_for_utf16_col(line: &str, col_utf16: usize) -> usize {
+    let mut utf16 = 0usize;
+    for (byte, ch) in line.char_indices() {
+        if utf16 >= col_utf16 {
+            return byte;
+        }
+        utf16 += ch.len_utf16();
+    }
+    line.len()
 }
 
 /// Clip-aware, occlusion-aware single-line text draw (the code pane's

@@ -405,20 +405,27 @@ impl Island {
             let title = contexts.title(tab_index);
             let (default_icon_glyph, icon_color) =
                 crate::panels::file_tree::icons::workspace_tab_icon();
-            let icon_glyph = title
+            // Network states get their own color as well as their own
+            // glyph: a workspace that is live on the network has to read
+            // as such at a glance, which the shared folder-blue does not.
+            const BROADCAST_COLOR: [u8; 4] = [0x5D, 0xD3, 0x8D, 0xFF];
+            const JOINED_COLOR: [u8; 4] = [0x6F, 0xB4, 0xF0, 0xFF];
+            let (icon_glyph, icon_color) = title
                 .as_ref()
                 .and_then(|title| title.icon_kind.as_deref())
                 .map(|kind| match kind {
-                    "cloud_sandbox" => "☁",
-                    "docker_sandbox" => "⬢",
-                    "tailscale" => "◌",
-                    "shared" => "󰒗",
+                    "cloud_sandbox" => ("☁", JOINED_COLOR),
+                    "docker_sandbox" => ("⬢", JOINED_COLOR),
+                    "tailscale" => ("◌", BROADCAST_COLOR),
+                    // This machine is HOSTING it: the workspace is being
+                    // broadcast right now.
+                    "shared" => ("󰒗", BROADCAST_COLOR),
                     // Guest side of sharing: a workspace JOINED from
                     // another host wears a link, not the share mark.
-                    "joined" => "󰌷",
-                    _ => default_icon_glyph,
+                    "joined" => ("󰌷", JOINED_COLOR),
+                    _ => (default_icon_glyph, icon_color),
                 })
-                .unwrap_or(default_icon_glyph);
+                .unwrap_or((default_icon_glyph, icon_color));
             // Font size scales with the chrome zoom `s` (NOT the device
             // scale — sugarloaf applies that on top), exactly like the
             // buffer-tab strip, so the label matches their size and zooms

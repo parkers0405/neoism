@@ -304,11 +304,17 @@ pub(super) fn operation_supported(
     match operation {
         LspOperation::WorkspaceSymbols => adapter.workspace_symbols,
         LspOperation::Completion => adapter.completion,
+        // Signature help, document highlight, and inlay hints have no
+        // dedicated spec flag; gate on the nearest feature family here and let
+        // the server-advertised initialize capability make the final call.
+        LspOperation::SignatureHelp => adapter.completion,
         LspOperation::Hover => adapter.hover,
         LspOperation::Definition => adapter.definition,
         LspOperation::References => adapter.references,
         LspOperation::Implementation => adapter.implementation,
         LspOperation::CallHierarchy => adapter.call_hierarchy,
+        LspOperation::DocumentHighlight => adapter.references,
+        LspOperation::InlayHints => adapter.hover,
         LspOperation::Diagnostics => adapter.diagnostics,
         LspOperation::DocumentSymbols => adapter.document_symbols,
         LspOperation::Formatting => adapter.formatting,

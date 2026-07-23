@@ -32,6 +32,9 @@ pub enum PaletteAction {
     DecreaseFontSize,
     ResetFontSize,
     ToggleViMode,
+    ToggleWordWrap,
+    ReplaceInFile,
+    ProjectProblems,
     ToggleFullscreen,
     ToggleAppearanceTheme,
     OpenThemePicker,
@@ -526,6 +529,11 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::LspWorkspaceSymbols
         | PaletteAction::ToggleInlayHints
         | PaletteAction::ToggleMinimap => surface == PaletteSurface::Editor,
+        // Word-wrap toggle and in-buffer replace act on the focused code
+        // buffer, so they only surface when a code pane owns focus.
+        PaletteAction::ToggleWordWrap | PaletteAction::ReplaceInFile => {
+            surface == PaletteSurface::Editor
+        }
         PaletteAction::TabCreate
         | PaletteAction::TabClose
         | PaletteAction::TabCloseUnfocused
@@ -551,6 +559,9 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::SearchWords
         | PaletteAction::SearchGitChanges
         | PaletteAction::ToggleGitDiffPanel
+        // Project-wide diagnostics panel — openable from anywhere, like
+        // the Git diff panel above it.
+        | PaletteAction::ProjectProblems
         | PaletteAction::CreateNeoismNote
         | PaletteAction::DrawOnNote
         | PaletteAction::OpenNeoismNotes

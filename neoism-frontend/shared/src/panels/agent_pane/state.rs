@@ -30,7 +30,7 @@ use sugarloaf::{
 };
 use web_time::Instant;
 
-use crate::panels::agent_pane::input_controller::{self, AgentInputBuffer};
+use crate::panels::agent_pane::input_controller::{self, AgentInputBuffer, InputWrapRow};
 use crate::panels::agent_pane::interaction_policy;
 use crate::panels::agent_pane::outbound::OutboundAgentCommand;
 use crate::panels::agent_pane::permission_policy::{self, PermissionReplyStart};
@@ -508,12 +508,18 @@ pub struct NeoismAgentPane {
     background_rx: (),
     cursor_rect: Option<[f32; 4]>,
     cursor_byte: usize,
-    /// Byte spans of the input's soft-wrapped visual rows, registered
-    /// by the renderer each frame (same wrap the caret is placed
-    /// with). Up/Down movement walks these; `input_wrap_len` guards
-    /// against a frame of staleness after the text changes.
-    input_wrap_ranges: Vec<(usize, usize)>,
+    /// Soft-wrapped visual rows of the input (byte spans + per-boundary
+    /// x offsets), registered by the renderer each frame — the same
+    /// wrap the caret is placed with. Up/Down movement walks these;
+    /// `input_wrap_len` guards against a frame of staleness after the
+    /// text changes.
+    input_wrap_rows: Vec<InputWrapRow>,
     input_wrap_len: usize,
+    /// Sticky caret x carried between consecutive Up/Down presses so a
+    /// run of vertical moves keeps aiming at the column it started in
+    /// (see [`AgentInputBuffer::goal_x`]). Cleared by edits and
+    /// horizontal moves.
+    input_goal_x: Option<f32>,
     input_attachments: Vec<NeoismAgentInputAttachment>,
     ui_events: Vec<NeoismAgentUiEvent>,
     pending_user_prompts: Vec<String>,
@@ -837,8 +843,9 @@ impl Default for NeoismAgentPane {
             background_rx,
             cursor_rect: None,
             cursor_byte: 0,
-            input_wrap_ranges: Vec::new(),
+            input_wrap_rows: Vec::new(),
             input_wrap_len: 0,
+            input_goal_x: None,
             input_attachments: Vec::new(),
             ui_events: Vec::new(),
             pending_user_prompts: Vec::new(),

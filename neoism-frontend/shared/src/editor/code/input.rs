@@ -164,12 +164,85 @@ impl CodeBuffer {
             self.delete_selection();
         }
         self.clamp_cursor();
+        // Close-skip: typing a closer that is already at the cursor
+        // walks over it instead of doubling it (its pair was
+        // auto-inserted a moment ago).
+        if matches!(c, ')' | ']' | '}' | '"' | '\'' | '`')
+            && self.lines[self.cursor_line][self.cursor_col..].starts_with(c)
+        {
+            self.break_undo_group();
+            self.cursor_col += c.len_utf8();
+            return;
+        }
         if !self.continues_insert_burst(self.cursor_line) {
             self.save_local_undo(self.cursor_line, self.cursor_line + 1);
             self.begin_insert_burst(self.cursor_line);
         }
+        // Electric dedent: a closer typed on pure-indent whitespace
+        // pulls the line back one indent level first (smartindent —
+        // `}` on the auto-indented body line lands under its opener).
+        if matches!(c, '}' | ')' | ']') && self.cursor_col > 0 {
+            let all_ws = self.lines[self.cursor_line][..self.cursor_col]
+                .chars()
+                .all(|ch| ch == ' ' || ch == '\t');
+            if all_ws {
+                let line = &self.lines[self.cursor_line];
+                let take = if line[..self.cursor_col].ends_with('\t') {
+                    1
+                } else {
+                    let width = self.indent.width.max(1);
+                    ((self.cursor_col - 1) % width) + 1
+                };
+                let new_col = self.cursor_col.saturating_sub(take);
+                self.lines[self.cursor_line].replace_range(new_col..self.cursor_col, "");
+                self.cursor_col = new_col;
+            }
+        }
         let mut buf = [0u8; 4];
         self.insert_str_at_cursor(c.encode_utf8(&mut buf));
+        // Auto-close: an opener typed before nothing/whitespace/a
+        // closer gets its mate inserted BEHIND the caret. Quotes stay
+        // single inside words and lifetimes (`don't`, `&'a`).
+        let close = match c {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            '{' => Some('}'),
+            '"' | '\'' | '`' => Some(c),
+            _ => None,
+        };
+        if let Some(close) = close {
+            let should_pair = {
+                let line = &self.lines[self.cursor_line];
+                let next_ok = line[self.cursor_col..]
+                    .chars()
+                    .next()
+                    .map(|next| {
+                        next.is_whitespace()
+                            || matches!(next, ')' | ']' | '}' | ',' | ';')
+                    })
+                    .unwrap_or(true);
+                let prev_ok = if matches!(c, '"' | '\'' | '`') {
+                    let typed_start = self.cursor_col - c.len_utf8();
+                    !matches!(
+                        line[..typed_start].chars().next_back(),
+                        Some(prev) if prev.is_alphanumeric()
+                            || prev == '_'
+                            || prev == '&'
+                            || prev == '<'
+                            || prev == c
+                    )
+                } else {
+                    true
+                };
+                next_ok && prev_ok
+            };
+            if should_pair {
+                let mut buf = [0u8; 4];
+                let col = self.cursor_col;
+                self.lines[self.cursor_line]
+                    .insert_str(col, close.encode_utf8(&mut buf));
+            }
+        }
         self.mark_edited();
         self.commit_local_undo_overwrite(self.cursor_line, self.cursor_line + 1);
     }
@@ -218,9 +291,56 @@ impl CodeBuffer {
         }
         self.break_undo_group();
         self.clamp_cursor();
+        // Auto-pair block expand: Enter with the caret between a brace
+        // pair opens an indented body line and drops the closer onto
+        // its own line below (every modern editor's `{|}` behavior).
+        let expand_pair = {
+            let line = &self.lines[self.cursor_line];
+            let before = line[..self.cursor_col].chars().next_back();
+            let after = line[self.cursor_col..].chars().next();
+            matches!(
+                (before, after),
+                (Some('{'), Some('}'))
+                    | (Some('('), Some(')'))
+                    | (Some('['), Some(']'))
+            )
+        };
+        if expand_pair {
+            self.save_undo();
+            // Split twice: the closer lands two lines down with the
+            // source line's indent; the middle line gets one extra
+            // indent level and the caret.
+            self.split_line_at_cursor(true);
+            self.split_line_at_cursor(true);
+            self.cursor_line -= 1;
+            self.cursor_col = self.lines[self.cursor_line].len();
+            let unit = if self.indent.use_tabs {
+                "\t".to_string()
+            } else {
+                " ".repeat(self.indent.width.max(1))
+            };
+            self.insert_str_at_cursor(&unit);
+            self.mark_edited();
+            self.commit_undo();
+            return;
+        }
         let source_line = self.cursor_line;
         self.save_local_undo(source_line, source_line + 1);
+        // Auto-indent step-in: Enter after a dangling opener (`{`, an
+        // open paren/bracket, or a `:` block head) indents the new
+        // line one level past the copied leading whitespace.
+        let indent_more = self.lines[self.cursor_line][..self.cursor_col]
+            .trim_end()
+            .ends_with(['{', '(', '[', ':']);
         self.split_line_at_cursor(true);
+        if indent_more {
+            let unit = if self.indent.use_tabs {
+                "\t".to_string()
+            } else {
+                " ".repeat(self.indent.width.max(1))
+            };
+            self.insert_str_at_cursor(&unit);
+        }
         self.mark_edited();
         self.commit_local_undo(source_line, self.cursor_line + 1);
     }
@@ -242,7 +362,29 @@ impl CodeBuffer {
             let undo_line = self.cursor_line;
             self.save_local_undo(undo_line, undo_line + 1);
             let prev = self.backspace_target_col();
-            self.lines[self.cursor_line].replace_range(prev..self.cursor_col, "");
+            // Auto-pair delete: backspace between an empty pair `(|)`
+            // removes both sides in one stroke.
+            let end = {
+                let line = &self.lines[self.cursor_line];
+                let paired = matches!(
+                    (
+                        line[prev..].chars().next(),
+                        line[self.cursor_col..].chars().next(),
+                    ),
+                    (Some('('), Some(')'))
+                        | (Some('['), Some(']'))
+                        | (Some('{'), Some('}'))
+                        | (Some('"'), Some('"'))
+                        | (Some('\''), Some('\''))
+                        | (Some('`'), Some('`'))
+                );
+                if paired {
+                    next_char_boundary(line, self.cursor_col)
+                } else {
+                    self.cursor_col
+                }
+            };
+            self.lines[self.cursor_line].replace_range(prev..end, "");
             self.cursor_col = prev;
             self.mark_edited();
             self.commit_local_undo(undo_line, undo_line + 1);

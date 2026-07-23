@@ -287,6 +287,103 @@ impl FileTree {
                 self.root_transition_started = None;
             }
         }
+        // The dragged row is LIFTED out of the list: its real icon +
+        // label (the actual entry, not a synthetic chip) follow the
+        // cursor on a softly raised sheet, while its slot in the list
+        // dims to a placeholder. Laid out here (up front) so the sheet's
+        // rect can join the text-occlusion set — row labels paint in a
+        // layer above plain quads and would otherwise bleed through it.
+        // The sheet is painted after the rows below.
+        let drag_source_index = self.drag_source_index();
+        struct LiftedRow {
+            rect: [f32; 4],
+            chevron: Option<&'static str>,
+            icon_glyph: &'static str,
+            icon_color: [u8; 4],
+            label: String,
+            label_color: [u8; 4],
+            radius: f32,
+        }
+        let lifted = if let Some(drag) = self.file_drag.as_ref().filter(|drag| drag.live) {
+            // Pull the real source entry so the lifted row is a faithful
+            // copy of the one in the list (same glyph, same folder blue).
+            let entry = drag_source_index.and_then(|ix| self.entries.get(ix));
+            let (icon_glyph, file_icon_color) = entry
+                .map(icon_for)
+                .unwrap_or_else(|| super::icons::icon_for_file(&drag.source_label));
+            let is_dir = entry.is_some_and(|e| matches!(e.kind, NodeKind::Dir { .. }));
+            let is_open = entry.is_some_and(|e| matches!(e.kind, NodeKind::Dir { open: true }));
+            let chevron = is_dir.then(|| if is_open { "\u{f078}" } else { "\u{f054}" });
+            let icon_color = if is_dir {
+                theme.u8(theme.folder)
+            } else {
+                file_icon_color
+            };
+            let pad = 10.0 * self.scale;
+            let text_opts = DrawOpts {
+                font_size,
+                ..DrawOpts::default()
+            };
+            let glyph_opts = DrawOpts {
+                font_size: icon_size,
+                ..DrawOpts::default()
+            };
+            let label =
+                truncate_label(&drag.source_label, 240.0 * self.scale, sugarloaf, &text_opts);
+            let label_w = sugarloaf.text_mut().measure(&label, &text_opts);
+            let icon_w = sugarloaf.text_mut().measure(icon_glyph, &glyph_opts);
+            let chevron_w = chevron
+                .map(|chev| sugarloaf.text_mut().measure(chev, &glyph_opts) + icon_gap)
+                .unwrap_or(0.0);
+            let sheet_w = pad + chevron_w + icon_w + icon_gap + label_w + pad;
+            let sheet_h = row_h;
+            // Sit the row just off the cursor's lower-right, like Finder.
+            let sheet_x = drag.current_x + 12.0 * self.scale;
+            let sheet_y = drag.current_y - sheet_h * 0.5;
+            Some(LiftedRow {
+                rect: [sheet_x, sheet_y, sheet_w, sheet_h],
+                chevron,
+                icon_glyph,
+                icon_color,
+                label,
+                label_color: theme.u8(theme.fg),
+                radius: 6.0 * self.scale,
+            })
+        } else {
+            None
+        };
+        // Fold the lifted sheet rect into the occlusion set the row text
+        // honors, so the rows underneath don't bleed through it.
+        let mut occlusion_owned: Vec<[f32; 4]>;
+        let text_occlusion_rects: &[[f32; 4]] = match lifted.as_ref() {
+            Some(l) => {
+                occlusion_owned = text_occlusion_rects.to_vec();
+                occlusion_owned.push(l.rect);
+                &occlusion_owned
+            }
+            None => text_occlusion_rects,
+        };
+
+        // Spring-loaded drag: the folder under the cursor is the drop
+        // target — it gets a highlight band and a gentle horizontal
+        // wiggle. Resolve it by PATH (via `drag_hovered_index`) so a
+        // spring-open re-indexing the rows mid-drag doesn't lose it.
+        let drag_hover_index = self.drag_hovered_index();
+        let drag_wiggle_dx = self
+            .file_drag
+            .as_ref()
+            .filter(|drag| drag.live)
+            .map(|drag| {
+                let t = drag
+                    .hovered_since
+                    .map(|since| since.elapsed().as_secs_f32())
+                    .unwrap_or(0.0);
+                // Amplitude ramps in over ~120ms so the folder shivers to
+                // life instead of snapping; ~4Hz feels alive, not jittery.
+                let ramp = (t / 0.12).clamp(0.0, 1.0);
+                (t * 26.0).sin() * 2.4 * self.scale * ramp
+            })
+            .unwrap_or(0.0);
         let mut rendered_rows = 0usize;
         for absolute_ix in start..end {
             let entry = &self.entries[absolute_ix];
@@ -314,6 +411,10 @@ impl FileTree {
                 .as_deref()
                 .and_then(|p| entry.path.as_deref().map(|q| p == q))
                 .unwrap_or(false);
+            // The row being dragged is lifted out — leave a dimmed
+            // placeholder where it sat so the list doesn't collapse.
+            let is_drag_source = drag_source_index == Some(absolute_ix);
+            let row_reveal = if is_drag_source { reveal * 0.32 } else { reveal };
             // Active buffer (the file nvim is currently showing) gets
             // a thin white accent stripe on the left edge — visible
             // even when the user's keyboard selection is on a
@@ -360,6 +461,29 @@ impl FileTree {
                 }
             }
 
+            // Spring-loaded drop target: accent-tinted band + a bright
+            // outline so it reads as "release here".
+            let is_drop_target = drag_hover_index == Some(absolute_ix);
+            if is_drop_target {
+                sugarloaf.quad(
+                    None,
+                    content_x,
+                    visible_row_y,
+                    content_w,
+                    visible_row_h,
+                    theme.f32_alpha(theme.accent, 0.22),
+                    edge_row_radii(
+                        visible_row_y,
+                        visible_row_h,
+                        content_y,
+                        panel_bottom,
+                        content_radius,
+                    ),
+                    DEPTH,
+                    ORDER + 4,
+                );
+            }
+
             // Chevron is its own glyph in dim grey so the label color
             // can stay folder-white / file-grey without being polluted.
             let chevron = match entry.kind {
@@ -393,35 +517,37 @@ impl FileTree {
 
             let label_opts = DrawOpts {
                 font_size,
-                color: fade_u8(label_color, reveal),
+                color: fade_u8(label_color, row_reveal),
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()
             };
             let git_opts = DrawOpts {
                 font_size: font_size * 0.9,
-                color: fade_u8(entry.git_status.color(theme), reveal),
+                color: fade_u8(entry.git_status.color(theme), row_reveal),
                 bold: true,
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()
             };
             let chevron_opts = DrawOpts {
                 font_size,
-                color: fade_u8(theme.u8(theme.muted), reveal),
+                color: fade_u8(theme.u8(theme.muted), row_reveal),
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()
             };
             let icon_opts = DrawOpts {
                 font_size: icon_size,
-                color: fade_u8(icon_color, reveal),
+                color: fade_u8(icon_color, row_reveal),
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()
             };
 
-            // Mid-sweep rows slide in from the left as they fade.
+            // Mid-sweep rows slide in from the left as they fade; the
+            // drop-target folder additionally wiggles under the drag.
             let base_x = content_x
                 + row_pad_x
                 + entry.depth as f32 * indent_px
-                + (1.0 - reveal) * 12.0 * self.scale;
+                + (1.0 - reveal) * 12.0 * self.scale
+                + if is_drop_target { drag_wiggle_dx } else { 0.0 };
             let text_y = row_y + (row_h - font_size) / 2.0;
             let icon_y = row_y + (row_h - icon_size) / 2.0;
 
@@ -495,6 +621,63 @@ impl FileTree {
                 );
             }
         }
+        // Paint the lifted row above the list (its rect was already cut
+        // out of the row text above). A soft shadow + faintly raised sheet
+        // reads as the real row peeled up off the list — no synthetic
+        // chrome. No clip: it follows the cursor past the panel edge.
+        if let Some(l) = lifted {
+            let s = self.scale;
+            let [lx, ly, lw, lh] = l.rect;
+            let pad = 10.0 * s;
+            sugarloaf.quad(
+                None,
+                lx + 1.5 * s,
+                ly + 3.0 * s,
+                lw,
+                lh,
+                theme.f32_alpha(theme.bg, 0.40),
+                [l.radius; 4],
+                DEPTH,
+                ORDER + 6,
+            );
+            sugarloaf.quad(
+                None,
+                lx,
+                ly,
+                lw,
+                lh,
+                theme.f32_alpha(theme.surface, 0.94),
+                [l.radius; 4],
+                DEPTH,
+                ORDER + 7,
+            );
+            let chevron_opts = DrawOpts {
+                font_size: icon_size,
+                color: theme.u8(theme.muted),
+                ..DrawOpts::default()
+            };
+            let icon_opts = DrawOpts {
+                font_size: icon_size,
+                color: l.icon_color,
+                ..DrawOpts::default()
+            };
+            let label_opts = DrawOpts {
+                font_size,
+                color: l.label_color,
+                ..DrawOpts::default()
+            };
+            let mut cx = lx + pad;
+            let icon_y = ly + (lh - icon_size) / 2.0;
+            let text_y = ly + (lh - font_size) / 2.0;
+            if let Some(chev) = l.chevron {
+                sugarloaf.text_mut().draw(cx, icon_y, chev, &chevron_opts);
+                cx += sugarloaf.text_mut().measure(chev, &chevron_opts) + icon_gap;
+            }
+            sugarloaf.text_mut().draw(cx, icon_y, l.icon_glyph, &icon_opts);
+            cx += sugarloaf.text_mut().measure(l.icon_glyph, &icon_opts) + icon_gap;
+            sugarloaf.text_mut().draw(cx, text_y, &l.label, &label_opts);
+        }
+
         if let Some(started) = perf_started {
             tracing::info!(
                 target: "neoism::file_tree_perf",

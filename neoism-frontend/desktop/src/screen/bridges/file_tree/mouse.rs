@@ -102,12 +102,61 @@ impl Screen<'_> {
             return false;
         };
 
-        // Click always promotes to focused — the user wants their next
+        // Press always promotes to focused — the user wants their next
         // j/k/Enter to go to the tree, even if the previous click had
-        // landed in the editor pane.
+        // landed in the editor pane. Select the row now, but ARM a
+        // potential Finder-style drag and DEFER activation (open file /
+        // toggle folder) to release: a plain click opens, a press+drag
+        // moves. Virtual/path-less rows aren't draggable, so they
+        // activate immediately as before.
         self.renderer.file_tree.set_focused(true);
         self.renderer.file_tree.set_selected(row);
-        self.activate_file_tree_selection();
+        let (mx, my) = self.mouse_logical_for_hit_test();
+        if !self.renderer.file_tree.begin_file_drag(row, mx, my) {
+            self.activate_file_tree_selection();
+        }
+        self.mark_dirty();
+        true
+    }
+
+    /// Drive a live/armed file-tree drag from a pointer move. Returns
+    /// true while a drag is armed or live (so the host skips normal hover
+    /// and keeps gripping). Springs a dwelt-on folder open. `false` when
+    /// nothing is being dragged.
+    pub fn handle_file_tree_drag_move(&mut self) -> bool {
+        if self.renderer.file_tree.file_drag().is_none() {
+            return false;
+        }
+        let (mx, my) = self.mouse_logical_for_hit_test();
+        let (tree_top, tree_bottom) = self.side_panel_band();
+        let tree_height = (tree_bottom - tree_top).max(0.0);
+        let hovered = self
+            .renderer
+            .file_tree
+            .hit_test(mx, my, tree_top, tree_height);
+        if let Some(dir) = self.renderer.file_tree.update_file_drag(mx, my, hovered) {
+            // Dwell elapsed over a closed folder — spring it open.
+            self.renderer.file_tree.open_dir(&dir);
+        }
+        self.mark_dirty();
+        true
+    }
+
+    /// Finish a file-tree drag on release: commit a move onto the hovered
+    /// folder, or fall back to a click (open/toggle) when the press never
+    /// became a drag. Returns true iff a drag was in progress.
+    pub fn handle_file_tree_drag_release(&mut self) -> bool {
+        use neoism_ui::panels::file_tree::FileDropOutcome;
+        if self.renderer.file_tree.file_drag().is_none() {
+            return false;
+        }
+        match self.renderer.file_tree.end_file_drag() {
+            FileDropOutcome::Click => self.activate_file_tree_selection(),
+            FileDropOutcome::Move { source, dest_dir } => {
+                self.move_file_tree_path(source, dest_dir);
+            }
+            FileDropOutcome::Cancel => {}
+        }
         self.mark_dirty();
         true
     }

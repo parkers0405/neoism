@@ -8,13 +8,72 @@
 pub const LARGE_PASTE_CHARS: usize = 8000;
 pub const LARGE_PASTE_BREAKS: usize = 120;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One soft-wrapped visual row of the composer, exactly as the renderer
+/// laid it out: the byte span it covers, plus the x offset of every
+/// character boundary inside it. `offsets[i]` is the caret x — relative
+/// to the row's left edge — for the i-th boundary, so `offsets[0]` is
+/// always `0.0` and `offsets.len()` is the row's char count plus one.
+///
+/// Movement needs the offsets, not just the span. The composer renders
+/// in a PROPORTIONAL font, so the n-th character of one row and the
+/// n-th of the next sit at different x positions; walking rows by
+/// character index (which is what this used to do) slides the caret
+/// sideways on every Up/Down.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InputWrapRow {
+    pub start: usize,
+    pub end: usize,
+    pub offsets: Vec<f32>,
+}
+
+impl InputWrapRow {
+    /// Caret x for `cursor`, a byte inside this row.
+    fn x_for_byte(&self, value: &str, cursor: usize) -> f32 {
+        let cursor = cursor.clamp(self.start, self.end);
+        let col = value[self.start..cursor].chars().count();
+        self.offsets
+            .get(col)
+            .or_else(|| self.offsets.last())
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Byte of the boundary in this row whose caret x is closest to `x`
+    /// — the same "snap to the nearest gap" a mouse click performs.
+    fn byte_for_x(&self, value: &str, x: f32) -> usize {
+        let slice = &value[self.start..self.end];
+        let mut best = 0usize;
+        let mut best_delta = f32::INFINITY;
+        for (col, offset) in self.offsets.iter().enumerate() {
+            let delta = (offset - x).abs();
+            if delta < best_delta {
+                best_delta = delta;
+                best = col;
+            }
+        }
+        self.start
+            + slice
+                .char_indices()
+                .nth(best)
+                .map(|(index, _)| index)
+                .unwrap_or(slice.len())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentInputBuffer {
     pub input: String,
     pub cursor_byte: usize,
     pub sent_history: Vec<String>,
     pub history_index: Option<usize>,
     pub history_draft: String,
+    /// Sticky x the caret aims for while walking rows with Up/Down. It
+    /// is set by the first vertical move and preserved across the rest,
+    /// so crossing a SHORT row doesn't permanently pull the caret left
+    /// — without it every Up through a short row clamps the column and
+    /// the caret drifts to the start of the line. Edits and horizontal
+    /// moves clear it.
+    pub goal_x: Option<f32>,
 }
 
 impl AgentInputBuffer {
@@ -31,7 +90,16 @@ impl AgentInputBuffer {
             sent_history,
             history_index,
             history_draft,
+            goal_x: None,
         }
+    }
+
+    /// Restore the goal column the pane carried over from the previous
+    /// keystroke (the buffer is rebuilt from pane state on every key, so
+    /// without this the goal could never survive a second Up).
+    pub fn with_goal_x(mut self, goal_x: Option<f32>) -> Self {
+        self.goal_x = goal_x;
+        self
     }
 
     pub fn insert_text(&mut self, text: &str) {
@@ -39,6 +107,7 @@ impl AgentInputBuffer {
         self.input.insert_str(cursor, text);
         self.cursor_byte = cursor.saturating_add(text.len());
         self.history_index = None;
+        self.goal_x = None;
     }
 
     pub fn insert_token(&mut self, token: &str) {
@@ -70,6 +139,7 @@ impl AgentInputBuffer {
         let prev = previous_char_boundary(&self.input, self.cursor_byte());
         self.input.replace_range(prev..self.cursor_byte(), "");
         self.cursor_byte = prev;
+        self.goal_x = None;
         true
     }
 
@@ -98,6 +168,7 @@ impl AgentInputBuffer {
             self.input.replace_range(start..cursor, "");
             self.cursor_byte = start;
             self.history_index = None;
+            self.goal_x = None;
             return Some(deleted);
         }
         // `@mention` words delete as a unit too — but only words that
@@ -116,6 +187,7 @@ impl AgentInputBuffer {
             self.input.replace_range(word_start..cursor, "");
             self.cursor_byte = word_start;
             self.history_index = None;
+            self.goal_x = None;
             return Some(deleted);
         }
         None
@@ -123,10 +195,12 @@ impl AgentInputBuffer {
 
     pub fn move_left(&mut self) {
         self.cursor_byte = previous_char_boundary(&self.input, self.cursor_byte());
+        self.goal_x = None;
     }
 
     pub fn move_right(&mut self) {
         self.cursor_byte = next_char_boundary(&self.input, self.cursor_byte());
+        self.goal_x = None;
     }
 
     pub fn move_home(&mut self) {
@@ -135,6 +209,7 @@ impl AgentInputBuffer {
             .rfind('\n')
             .map(|index| index + 1)
             .unwrap_or(0);
+        self.goal_x = None;
     }
 
     pub fn move_end(&mut self) {
@@ -143,6 +218,7 @@ impl AgentInputBuffer {
             .find('\n')
             .map(|relative| cursor + relative)
             .unwrap_or(self.input.len());
+        self.goal_x = None;
     }
 
     pub fn move_up_with_history(&mut self) {
@@ -164,50 +240,57 @@ impl AgentInputBuffer {
         }
     }
 
-    /// Move the cursor one VISUAL line up. `ranges` are the byte spans
-    /// of the soft-wrapped rows the renderer laid out last frame (same
-    /// wrap the caret is drawn with), so Up walks wrapped rows exactly
-    /// as they appear on screen; history recall only fires when the
-    /// cursor is already on the first visual row. Falls back to
-    /// hard-newline movement when the ranges don't match the buffer
-    /// (stale frame, never rendered).
-    pub fn move_up_with_history_visual(&mut self, ranges: &[(usize, usize)]) {
-        if !self.visual_ranges_valid(ranges) {
+    /// Move the cursor one VISUAL line up. `rows` are the soft-wrapped
+    /// rows the renderer laid out last frame — the same wrap the caret
+    /// is drawn with — so Up walks rows exactly as they appear on
+    /// screen and keeps the caret under the x it started from. History
+    /// recall only fires when the cursor is already on the first visual
+    /// row. Falls back to hard-newline movement when the rows don't
+    /// match the buffer (stale frame, never rendered).
+    pub fn move_up_with_history_visual(&mut self, rows: &[InputWrapRow]) {
+        if !self.visual_rows_valid(rows) {
             return self.move_up_with_history();
         }
-        match visual_range_index(ranges, self.cursor_byte()) {
+        match visual_row_index(rows, self.cursor_byte()) {
             Some(0) => self.history_previous(),
-            Some(ix) => {
-                let col = visual_col(&self.input, ranges[ix], self.cursor_byte());
-                self.cursor_byte = byte_for_visual_col(&self.input, ranges[ix - 1], col);
-            }
+            Some(ix) => self.step_visual_row(rows, ix, ix - 1),
             None => self.move_up_with_history(),
         }
     }
 
     /// Mirror of [`Self::move_up_with_history_visual`]: Down walks the
     /// soft-wrapped rows and only advances history from the last one.
-    pub fn move_down_with_history_visual(&mut self, ranges: &[(usize, usize)]) {
-        if !self.visual_ranges_valid(ranges) {
+    pub fn move_down_with_history_visual(&mut self, rows: &[InputWrapRow]) {
+        if !self.visual_rows_valid(rows) {
             return self.move_down_with_history();
         }
-        match visual_range_index(ranges, self.cursor_byte()) {
-            Some(ix) if ix + 1 < ranges.len() => {
-                let col = visual_col(&self.input, ranges[ix], self.cursor_byte());
-                self.cursor_byte = byte_for_visual_col(&self.input, ranges[ix + 1], col);
-            }
+        match visual_row_index(rows, self.cursor_byte()) {
+            Some(ix) if ix + 1 < rows.len() => self.step_visual_row(rows, ix, ix + 1),
             Some(_) => self.history_next(),
             None => self.move_down_with_history(),
         }
     }
 
-    fn visual_ranges_valid(&self, ranges: &[(usize, usize)]) -> bool {
-        !ranges.is_empty()
-            && ranges.iter().all(|&(start, end)| {
-                start <= end
-                    && end <= self.input.len()
-                    && self.input.is_char_boundary(start)
-                    && self.input.is_char_boundary(end)
+    /// Carry the caret from row `from` to row `to` at the same x. The x
+    /// is remembered in `goal_x`, so a run of Up/Down keeps aiming at
+    /// the column the run STARTED in even when it crosses rows too
+    /// short to reach it.
+    fn step_visual_row(&mut self, rows: &[InputWrapRow], from: usize, to: usize) {
+        let x = self
+            .goal_x
+            .unwrap_or_else(|| rows[from].x_for_byte(&self.input, self.cursor_byte()));
+        self.cursor_byte = rows[to].byte_for_x(&self.input, x);
+        self.goal_x = Some(x);
+    }
+
+    fn visual_rows_valid(&self, rows: &[InputWrapRow]) -> bool {
+        !rows.is_empty()
+            && rows.iter().all(|row| {
+                row.start <= row.end
+                    && row.end <= self.input.len()
+                    && self.input.is_char_boundary(row.start)
+                    && self.input.is_char_boundary(row.end)
+                    && !row.offsets.is_empty()
             })
     }
 
@@ -225,6 +308,7 @@ impl AgentInputBuffer {
         self.history_index = Some(next);
         self.input = self.sent_history[next].clone();
         self.cursor_byte = self.input.len();
+        self.goal_x = None;
     }
 
     pub fn history_next(&mut self) {
@@ -240,6 +324,7 @@ impl AgentInputBuffer {
             self.input = std::mem::take(&mut self.history_draft);
         }
         self.cursor_byte = self.input.len();
+        self.goal_x = None;
     }
 
     pub fn cursor_byte(&self) -> usize {
@@ -413,27 +498,10 @@ pub fn cursor_line_col(value: &str, byte: usize) -> (usize, usize) {
 
 /// Index of the visual row containing `cursor`. A cursor sitting on a
 /// soft-wrap boundary (== end of row N == start of row N+1) belongs to
-/// row N — the same resolution the renderer uses when it wraps the
-/// prefix to place the caret.
-fn visual_range_index(ranges: &[(usize, usize)], cursor: usize) -> Option<usize> {
-    ranges
-        .iter()
-        .position(|&(start, end)| cursor >= start && cursor <= end)
-}
-
-fn visual_col(value: &str, range: (usize, usize), cursor: usize) -> usize {
-    let cursor = cursor.clamp(range.0, range.1);
-    value[range.0..cursor].chars().count()
-}
-
-fn byte_for_visual_col(value: &str, range: (usize, usize), col: usize) -> usize {
-    let slice = &value[range.0..range.1];
-    range.0
-        + slice
-            .char_indices()
-            .nth(col)
-            .map(|(index, _)| index)
-            .unwrap_or(slice.len())
+/// row N, which is also the row the renderer paints its caret on.
+pub fn visual_row_index(rows: &[InputWrapRow], cursor: usize) -> Option<usize> {
+    rows.iter()
+        .position(|row| cursor >= row.start && cursor <= row.end)
 }
 
 pub fn byte_for_line_col(value: &str, target_line: usize, target_col: usize) -> usize {
@@ -526,10 +594,19 @@ mod tests {
         assert_eq!(input.cursor_byte, "αβγ\nab\nxy".len());
     }
 
+    /// A row of `chars` glyphs each `advance` wide, covering `start..end`.
+    fn row(start: usize, end: usize, chars: usize, advance: f32) -> InputWrapRow {
+        InputWrapRow {
+            start,
+            end,
+            offsets: (0..=chars).map(|col| col as f32 * advance).collect(),
+        }
+    }
+
     #[test]
     fn visual_motion_walks_soft_wrapped_rows_before_history() {
         // "abcdef" soft-wrapped as ["abc", "def"] — no '\n' anywhere.
-        let ranges = [(0, 3), (3, 6)];
+        let rows = [row(0, 3, 3, 10.0), row(3, 6, 3, 10.0)];
         let mut input = AgentInputBuffer::new(
             "abcdef".to_string(),
             4,
@@ -538,15 +615,15 @@ mod tests {
             String::new(),
         );
 
-        input.move_up_with_history_visual(&ranges);
+        input.move_up_with_history_visual(&rows);
         assert_eq!(input.cursor_byte, 1, "row 1 col 1 -> row 0 col 1");
         assert_eq!(input.input, "abcdef", "no history recall mid-draft");
 
-        input.move_down_with_history_visual(&ranges);
+        input.move_down_with_history_visual(&rows);
         assert_eq!(input.cursor_byte, 4, "row 0 col 1 -> row 1 col 1");
 
-        input.move_up_with_history_visual(&ranges);
-        input.move_up_with_history_visual(&ranges);
+        input.move_up_with_history_visual(&rows);
+        input.move_up_with_history_visual(&rows);
         assert_eq!(
             input.input, "old",
             "Up on the first visual row recalls history"
@@ -558,7 +635,7 @@ mod tests {
         // Cursor at byte 3 == end of row 0 == start of row 1: the
         // renderer paints the caret at the end of row 0, so Down must
         // move into row 1 (not fall through to history).
-        let ranges = [(0, 3), (3, 6)];
+        let rows = [row(0, 3, 3, 10.0), row(3, 6, 3, 10.0)];
         let mut input = AgentInputBuffer::new(
             "abcdef".to_string(),
             3,
@@ -567,16 +644,81 @@ mod tests {
             String::new(),
         );
 
-        input.move_down_with_history_visual(&ranges);
+        input.move_down_with_history_visual(&rows);
         assert_eq!(input.input, "abcdef");
         assert_eq!(input.cursor_byte, 6, "row 0 end -> row 1 col 3 (clamped)");
     }
 
     #[test]
-    fn visual_motion_falls_back_on_stale_ranges() {
-        // Ranges that don't match the buffer (stale frame) must not
-        // panic or misplace the cursor — hard-newline fallback runs.
-        let ranges = [(0, 50)];
+    fn visual_motion_tracks_x_not_char_index_in_a_proportional_font() {
+        // Row 0 is three WIDE glyphs (30px each), row 1 six narrow ones
+        // (5px each). The caret sits at x=15 on row 1 (col 3). Walking
+        // by character index would land on col 3 of row 0 — x=90, way
+        // off the right. Matching x lands on col 0 (x=0), the nearest
+        // boundary, which is what the eye expects.
+        let rows = [row(0, 3, 3, 30.0), row(3, 9, 6, 5.0)];
+        let mut input = AgentInputBuffer::new(
+            "abcdefghi".to_string(),
+            6,
+            Vec::new(),
+            None,
+            String::new(),
+        );
+
+        input.move_up_with_history_visual(&rows);
+
+        assert_eq!(input.cursor_byte, 0, "x=15 snaps to row 0's nearest gap");
+    }
+
+    #[test]
+    fn visual_motion_goal_column_survives_a_short_row() {
+        // Rows: long, SHORT, long. Starting at col 6 of the bottom row,
+        // two Ups must return to col 6 — the short middle row clamps the
+        // caret to col 1 on the way through, and without a sticky goal
+        // that clamp would stick.
+        let rows = [row(0, 8, 8, 10.0), row(8, 9, 1, 10.0), row(9, 17, 8, 10.0)];
+        let mut input = AgentInputBuffer::new(
+            "aaaaaaaabccccccccc".to_string(),
+            15,
+            Vec::new(),
+            None,
+            String::new(),
+        );
+
+        input.move_up_with_history_visual(&rows);
+        assert_eq!(input.cursor_byte, 9, "clamped to the short row's end");
+
+        input.move_up_with_history_visual(&rows);
+        assert_eq!(input.cursor_byte, 6, "goal column restored on the long row");
+    }
+
+    #[test]
+    fn visual_motion_goal_column_resets_on_edits_and_horizontal_moves() {
+        let rows = [row(0, 4, 4, 10.0), row(4, 8, 4, 10.0)];
+        let mut input = AgentInputBuffer::new(
+            "abcdefgh".to_string(),
+            7,
+            Vec::new(),
+            None,
+            String::new(),
+        );
+
+        input.move_up_with_history_visual(&rows);
+        assert_eq!(input.goal_x, Some(30.0));
+        input.move_left();
+        assert_eq!(input.goal_x, None, "horizontal move drops the goal");
+
+        input.move_down_with_history_visual(&rows);
+        assert_eq!(input.goal_x, Some(20.0), "goal re-seeds from the new x");
+        input.insert_text("z");
+        assert_eq!(input.goal_x, None, "editing drops the goal");
+    }
+
+    #[test]
+    fn visual_motion_falls_back_on_stale_rows() {
+        // Rows that don't match the buffer (stale frame) must not panic
+        // or misplace the cursor — hard-newline fallback runs.
+        let rows = [row(0, 50, 50, 10.0)];
         let mut input = AgentInputBuffer::new(
             "ab\ncd".to_string(),
             4,
@@ -585,7 +727,7 @@ mod tests {
             String::new(),
         );
 
-        input.move_up_with_history_visual(&ranges);
+        input.move_up_with_history_visual(&rows);
         assert_eq!(input.cursor_byte, 1, "hard-newline movement used instead");
     }
 

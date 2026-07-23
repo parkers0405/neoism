@@ -35,6 +35,20 @@ pub struct CodeLineDiagnostic {
     pub message: String,
 }
 
+/// A diagnostic pinned into the CRDT document with sticky anchors
+/// (Zed-Anchor semantics): the range endpoints survive local AND
+/// remote edits by anchoring to CRDT block identity instead of
+/// line/col numbers. Built by the host at diagnostics-publish time
+/// when the pane is doc-bound; re-resolved into per-line spans on
+/// every buffer revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeDiagAnchor {
+    pub start: crate::editor::crdt::CrdtStickyAnchor,
+    pub end: crate::editor::crdt::CrdtStickyAnchor,
+    pub severity: CodeDiagnosticSeverity,
+    pub message: String,
+}
+
 /// One styled run: `line[start..end]` drawn with `token` color,
 /// optionally selected and/or underlined by the strongest overlapping
 /// diagnostic.

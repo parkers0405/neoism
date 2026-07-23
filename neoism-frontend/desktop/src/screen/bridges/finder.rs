@@ -141,7 +141,9 @@ impl Screen<'_> {
             return;
         }
         match self.renderer.finder.mode() {
-            FinderMode::BufferLines => self.cancel_finder_buffer_search(),
+            FinderMode::BufferLines | FinderMode::BufferReplace => {
+                self.cancel_finder_buffer_search()
+            }
             FinderMode::Symbols => self.cancel_finder_symbols(),
             _ => self.renderer.finder.close(),
         }
@@ -278,6 +280,12 @@ impl Screen<'_> {
             self.confirm_finder_buffer_search();
             return;
         }
+        // BufferReplace rows have no path either — Enter runs the
+        // whole-file substitute.
+        if self.renderer.finder.mode() == FinderMode::BufferReplace {
+            self.confirm_finder_buffer_replace();
+            return;
+        }
         // Symbols rows have no path either — Enter jumps the active
         // code pane to the selected symbol.
         if self.renderer.finder.mode() == FinderMode::Symbols {
@@ -395,21 +403,67 @@ impl Screen<'_> {
         self.renderer.buffer_tabs.open_path(path.to_path_buf());
     }
 
-    /// `/` on the code pane: open the finder in BufferLines mode over
-    /// a snapshot of the buffer (the same centered floating bar as
-    /// Ctrl+P). Typing live-jumps from the origin (incsearch) and
-    /// lists matching lines; Enter commits and arms `n`/`N`; Esc
-    /// restores the origin. No-op when no code pane is active.
-    pub(crate) fn open_finder_buffer_search(&mut self) {
+    /// `/` (or `?` with `backward`) on the code pane: open the finder
+    /// in BufferLines mode over a snapshot of the buffer (the same
+    /// centered floating bar as Ctrl+P). Typing live-jumps from the
+    /// origin (incsearch) and lists matching lines; Enter commits and
+    /// arms `n`/`N` (reversed for `?`); Esc restores the origin. No-op
+    /// when no code pane is active.
+    pub(crate) fn open_finder_buffer_search(&mut self, backward: bool) {
         let Some(code) = self.context_manager.current_mut().code.as_mut() else {
             return;
         };
         code.search_origin = Some((code.buffer.cursor_line, code.buffer.cursor_col));
+        code.search_backward = backward;
         let lines = code.buffer.lines.clone();
         self.finder_target_route = None;
         self.renderer.file_tree.set_focused(false);
         self.renderer.finder.open_buffer_lines(lines);
         self.mark_dirty();
+    }
+
+    /// Palette "Replace in File": open the finder in BufferReplace
+    /// mode over the active code pane — the same centered bar, query
+    /// typed as `pattern/replacement` (`:s` escaping), Enter replaces
+    /// every occurrence in the file. No-op without a code pane.
+    pub(crate) fn open_finder_buffer_replace(&mut self) {
+        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            return;
+        };
+        code.search_origin = Some((code.buffer.cursor_line, code.buffer.cursor_col));
+        code.search_backward = false;
+        let lines = code.buffer.lines.clone();
+        self.finder_target_route = None;
+        self.renderer.file_tree.set_focused(false);
+        self.renderer.finder.open_buffer_replace(lines);
+        self.mark_dirty();
+    }
+
+    /// Enter in BufferReplace mode: parse `pattern/replacement`, run a
+    /// whole-file global substitute through the `:s` engine (one undo
+    /// step, count toast, hlsearch + `n` armed), close the finder.
+    /// An empty pattern behaves like Esc.
+    fn confirm_finder_buffer_replace(&mut self) {
+        let query = self.renderer.finder.query.clone();
+        let (pattern, replacement) =
+            neoism_ui::editor::code::substitute::split_replace_query(&query);
+        if pattern.is_empty() {
+            self.cancel_finder_buffer_search();
+            return;
+        }
+        self.renderer.finder.close();
+        self.renderer.file_tree.set_focused(false);
+        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            code.search_origin = None;
+        }
+        let spec = neoism_ui::editor::code::substitute::SubstituteSpec {
+            range: neoism_ui::editor::code::substitute::SubstituteRange::WholeFile,
+            pattern,
+            replacement: replacement.unwrap_or_default(),
+            global: true,
+            case_insensitive: false,
+        };
+        self.run_code_substitute(&spec);
     }
 
     /// BufferLines query changed: live-drive the pane — hlsearch bands
@@ -419,10 +473,17 @@ impl Screen<'_> {
     pub(crate) fn finder_buffer_query_changed(&mut self) {
         use neoism_ui::editor::markdown::vim::vim_search_forward;
         use neoism_ui::editor::markdown::MarkdownPosition;
-        if self.renderer.finder.mode() != FinderMode::BufferLines {
+        let mode = self.renderer.finder.mode();
+        if !matches!(mode, FinderMode::BufferLines | FinderMode::BufferReplace) {
             return;
         }
         let query = self.renderer.finder.query.clone();
+        // Replace mode live-drives on the PATTERN half of the query.
+        let query = if mode == FinderMode::BufferReplace {
+            neoism_ui::editor::code::substitute::split_replace_query(&query).0
+        } else {
+            query
+        };
         let Some(code) = self.context_manager.current_mut().code.as_mut() else {
             return;
         };
@@ -438,23 +499,37 @@ impl Screen<'_> {
             return;
         }
         code.search_highlight = Some(query.clone());
-        // Search from just before the origin so a match AT the origin
-        // is found (vim_search_forward starts strictly after `pos`).
-        let start = if origin_col > 0 {
-            MarkdownPosition {
+        // Both helpers exclude the exact start position, so nudge the
+        // origin one step the other way — a match AT the origin is
+        // found either direction.
+        let found = if code.search_backward {
+            let start = MarkdownPosition {
                 line: origin_line,
-                col: origin_col - 1,
-            }
-        } else if origin_line > 0 {
-            MarkdownPosition {
-                line: origin_line - 1,
-                col: usize::MAX,
-            }
+                col: origin_col + 1,
+            };
+            neoism_ui::editor::markdown::vim::vim_search_backward(
+                &code.buffer.lines,
+                start,
+                &query,
+                false,
+            )
         } else {
-            MarkdownPosition { line: 0, col: 0 }
+            let start = if origin_col > 0 {
+                MarkdownPosition {
+                    line: origin_line,
+                    col: origin_col - 1,
+                }
+            } else if origin_line > 0 {
+                MarkdownPosition {
+                    line: origin_line - 1,
+                    col: usize::MAX,
+                }
+            } else {
+                MarkdownPosition { line: 0, col: 0 }
+            };
+            vim_search_forward(&code.buffer.lines, start, &query, false)
         };
-        if let Some(found) = vim_search_forward(&code.buffer.lines, start, &query, false)
-        {
+        if let Some(found) = found {
             code.buffer
                 .set_cursor_position(found.line, found.col, false);
             code.buffer.follow_cursor = true;
@@ -466,10 +541,16 @@ impl Screen<'_> {
     /// jumping the pane to the selected row's match. No-op in other
     /// finder modes.
     pub(crate) fn finder_buffer_preview_selected(&mut self) {
-        if self.renderer.finder.mode() != FinderMode::BufferLines {
+        let mode = self.renderer.finder.mode();
+        if !matches!(mode, FinderMode::BufferLines | FinderMode::BufferReplace) {
             return;
         }
         let query = self.renderer.finder.query.clone();
+        let query = if mode == FinderMode::BufferReplace {
+            neoism_ui::editor::code::substitute::split_replace_query(&query).0
+        } else {
+            query
+        };
         let Some(row_line) = self.renderer.finder.selected_line() else {
             return;
         };
@@ -526,7 +607,9 @@ impl Screen<'_> {
         code.search_highlight = Some(query.clone());
         code.buffer.vim.search = Some(neoism_ui::editor::markdown::vim::VimSearch {
             pattern: query,
-            forward: true,
+            // `?` commits with the direction reversed: `n` continues
+            // up, `N` back down (nvim semantics).
+            forward: !code.search_backward,
             whole_word: false,
         });
         code.search_origin = None;

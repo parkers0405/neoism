@@ -330,4 +330,65 @@ impl Screen<'_> {
             ),
         }
     }
+
+    /// Move `source` (file or folder) into `dest_dir` — the commit half
+    /// of a spring-loaded drag-and-drop. A move is a rename into a new
+    /// parent: on a JOINED workspace it goes to the host as
+    /// `FilesClientMessage::Rename`, otherwise it's a local `fs::rename`.
+    pub(crate) fn move_file_tree_path(&mut self, source: PathBuf, dest_dir: PathBuf) {
+        use neoism_ui::panels::notifications::NotificationLevel;
+
+        let Some(file_name) = source.file_name() else {
+            return;
+        };
+        let target = dest_dir.join(file_name);
+        if target == source {
+            return;
+        }
+
+        // JOINED workspace: the move happens on the HOST; path math is
+        // pure here and the existence checks belong to the daemon there.
+        if self.renderer.file_tree.is_remote() {
+            if let (Some(from), Some(to)) =
+                (self.remote_tree_rel(&source), self.remote_tree_rel(&target))
+            {
+                self.send_remote_files_op(
+                    neoism_protocol::files::FilesClientMessage::Rename { from, to },
+                );
+                // Open the destination so the moved item is in view when
+                // the host's relist lands.
+                self.renderer.file_tree.reveal_directory(&dest_dir);
+            }
+            return;
+        }
+
+        if !source.exists() {
+            self.file_tree_notify("Path no longer exists.", NotificationLevel::Warn);
+            return;
+        }
+        if target.exists() {
+            self.file_tree_notify(
+                "A file or folder with that name already exists there.",
+                NotificationLevel::Warn,
+            );
+            return;
+        }
+        match fs::rename(&source, &target) {
+            Ok(()) => {
+                let label = self.file_tree_display_path(&target);
+                self.refresh_note_graph_after_rename(&source, &target);
+                self.refresh_file_tree_entries();
+                // Reveal the destination folder so the moved item shows.
+                self.renderer.file_tree.reveal_directory(&dest_dir);
+                self.file_tree_notify(
+                    format!("Moved to `{label}`"),
+                    NotificationLevel::Info,
+                );
+            }
+            Err(err) => self.file_tree_notify(
+                format!("Move failed: {err}"),
+                NotificationLevel::Error,
+            ),
+        }
+    }
 }

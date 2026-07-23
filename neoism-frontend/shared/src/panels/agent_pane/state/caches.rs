@@ -267,6 +267,7 @@ impl NeoismAgentPane {
             self.history_index,
             self.history_draft.clone(),
         )
+        .with_goal_x(self.input_goal_x)
     }
 
     pub(in crate::panels::agent_pane::state) fn apply_input_buffer(
@@ -278,24 +279,25 @@ impl NeoismAgentPane {
         self.sent_history = buffer.sent_history;
         self.history_index = buffer.history_index;
         self.history_draft = buffer.history_draft;
+        self.input_goal_x = buffer.goal_x;
     }
 
     pub fn set_cursor_rect(&mut self, rect: Option<[f32; 4]>) {
         self.cursor_rect = rect;
     }
 
-    pub fn set_input_wrap_ranges(&mut self, ranges: Vec<(usize, usize)>) {
+    pub fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>) {
         self.input_wrap_len = self.input.len();
-        self.input_wrap_ranges = ranges;
+        self.input_wrap_rows = rows;
     }
 
-    /// Wrap ranges registered by the renderer, but only if they still
+    /// Wrap rows registered by the renderer, but only if they still
     /// describe the current input (a keystroke can land between edit
     /// and redraw).
-    pub(in crate::panels::agent_pane::state) fn current_input_wrap_ranges(
+    pub(in crate::panels::agent_pane::state) fn current_input_wrap_rows(
         &self,
-    ) -> Option<&[(usize, usize)]> {
-        (!self.input_wrap_ranges.is_empty() && self.input_wrap_len == self.input.len())
-            .then_some(self.input_wrap_ranges.as_slice())
+    ) -> Option<&[InputWrapRow]> {
+        (!self.input_wrap_rows.is_empty() && self.input_wrap_len == self.input.len())
+            .then_some(self.input_wrap_rows.as_slice())
     }
 }

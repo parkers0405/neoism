@@ -1,6 +1,7 @@
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
+use crate::panels::agent_pane::input_controller::{visual_row_index, InputWrapRow};
 use crate::panels::agent_pane::state::{
     NeoismAgentPane, NeoismAgentPendingPermission, NeoismAgentPermissionChoice,
     NeoismAgentStreamingState,
@@ -64,7 +65,7 @@ pub trait AgentUserInputPane {
     fn input(&self) -> &str;
     fn cursor_byte(&self) -> usize;
     fn set_cursor_rect(&mut self, rect: Option<[f32; 4]>);
-    fn set_input_wrap_ranges(&mut self, ranges: Vec<(usize, usize)>);
+    fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>);
     fn clear_usage_chip_rect(&mut self);
     fn register_usage_chip_rect(&mut self, rect: [f32; 4]);
     fn clear_status_chip_rects(&mut self);
@@ -155,8 +156,13 @@ macro_rules! neoism_ui_impl_agent_user_input {
                 <$pane>::set_cursor_rect(self, rect);
             }
 
-            fn set_input_wrap_ranges(&mut self, ranges: Vec<(usize, usize)>) {
-                <$pane>::set_input_wrap_ranges(self, ranges);
+            fn set_input_wrap_rows(
+                &mut self,
+                rows: Vec<
+                    $crate::panels::agent_pane::input_controller::InputWrapRow,
+                >,
+            ) {
+                <$pane>::set_input_wrap_rows(self, rows);
             }
 
             fn clear_usage_chip_rect(&mut self) {
@@ -358,8 +364,8 @@ impl AgentUserInputPane for NeoismAgentPane {
         NeoismAgentPane::set_cursor_rect(self, rect);
     }
 
-    fn set_input_wrap_ranges(&mut self, ranges: Vec<(usize, usize)>) {
-        NeoismAgentPane::set_input_wrap_ranges(self, ranges);
+    fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>) {
+        NeoismAgentPane::set_input_wrap_rows(self, rows);
     }
 
     fn clear_usage_chip_rect(&mut self) {
@@ -685,28 +691,41 @@ pub fn render_input(
         clip_rect: Some([text_x, box_y + 6.0 * s, text_w, box_h - bottom_reserved]),
         ..DrawOpts::default()
     };
-    let wrapped_ranges = wrap_agent_prompt_ranges(sugarloaf, text, text_w, &opts);
-    // Register the visual-row byte spans back on the pane so Up/Down
-    // arrow movement walks the exact rows drawn below (see
-    // `AgentInputBuffer::move_up_with_history_visual`). The placeholder
-    // isn't the draft, so an empty input registers no rows.
-    pane.set_input_wrap_ranges(if input_text.is_empty() {
+    let wrapped_rows = wrap_agent_prompt_rows(sugarloaf, text, text_w, &opts);
+    // Register the visual rows (byte spans + per-boundary x offsets)
+    // back on the pane so Up/Down arrow movement walks the exact rows
+    // drawn below AND matches their proportional-font caret positions
+    // (see `AgentInputBuffer::move_up_with_history_visual`). The
+    // placeholder isn't the draft, so an empty input registers no rows.
+    pane.set_input_wrap_rows(if input_text.is_empty() {
         Vec::new()
     } else {
-        wrapped_ranges.clone()
+        wrapped_rows.clone()
     });
-    let wrapped_lines: Vec<String> = wrapped_ranges
-        .iter()
-        .map(|&(start, end)| text[start..end].to_string())
-        .collect();
-    let visible_line_offset = wrapped_lines.len().saturating_sub(max_visible_lines);
-    let visible_lines = &wrapped_lines[visible_line_offset..];
-    for (ix, line) in visible_lines.iter().enumerate() {
+
+    // The box only shows `max_visible_lines` rows at once. Scroll so the
+    // caret's row is always one of them — otherwise pressing Up into a
+    // row above the window moves the (invisible) cursor while the text
+    // stays put, which is exactly the "cursor going up is screwed up"
+    // report. The window is anchored on the caret, not pinned to the
+    // bottom, so it follows the cursor in both directions.
+    let caret_row = if input_text.is_empty() {
+        0
+    } else {
+        visual_row_index(&wrapped_rows, pane.cursor_byte())
+            .unwrap_or(wrapped_rows.len().saturating_sub(1))
+    };
+    let max_offset = wrapped_rows.len().saturating_sub(max_visible_lines);
+    let visible_line_offset = caret_row
+        .saturating_sub(max_visible_lines.saturating_sub(1))
+        .min(max_offset);
+    let visible_rows = &wrapped_rows[visible_line_offset..];
+    for (ix, wrapped) in visible_rows.iter().take(max_visible_lines).enumerate() {
         draw_agent_prompt_text(
             sugarloaf,
             text_x,
             text_y + ix as f32 * line_h,
-            line,
+            &text[wrapped.start..wrapped.end],
             &opts,
             theme,
             occlusion_rects,
@@ -714,21 +733,26 @@ pub fn render_input(
     }
 
     if active {
-        let prefix = if pane.input().is_empty() {
-            ""
-        } else {
-            &pane.input()[..pane.cursor_byte()]
-        };
-        let mut prefix_lines = wrap_agent_prompt_lines(sugarloaf, prefix, text_w, &opts);
-        if prefix_lines.len() > max_visible_lines {
-            prefix_lines =
-                prefix_lines[prefix_lines.len() - max_visible_lines..].to_vec();
-        }
-        let last_line = prefix_lines.last().map(String::as_str).unwrap_or("");
-        let last_w = sugarloaf.text_mut().measure(last_line, &opts);
-        let caret_line = prefix_lines.len().saturating_sub(1);
-        let caret_y = text_y + caret_line as f32 * line_h;
-        let caret_x = (text_x + last_w).min(box_x + box_w - 28.0 * s).max(text_x);
+        // Place the caret from the SAME rows the movement logic walks,
+        // so the painted caret and the logical cursor never disagree.
+        let caret_x_in_row = wrapped_rows
+            .get(caret_row)
+            .map(|row| {
+                let col = pane.input()[row.start..pane.cursor_byte().clamp(row.start, row.end)]
+                    .chars()
+                    .count();
+                row.offsets
+                    .get(col)
+                    .or_else(|| row.offsets.last())
+                    .copied()
+                    .unwrap_or(0.0)
+            })
+            .unwrap_or(0.0);
+        let caret_visible_row = caret_row.saturating_sub(visible_line_offset);
+        let caret_y = text_y + caret_visible_row as f32 * line_h;
+        let caret_x = (text_x + caret_x_in_row)
+            .min(box_x + box_w - 28.0 * s)
+            .max(text_x);
         let cursor_w = (16.0 * s * 0.6).max(2.0);
         let cursor_h = 20.0 * s;
         let caret_rect = [caret_x, caret_y, cursor_w, cursor_h];
@@ -1277,49 +1301,57 @@ fn draw_agent_prompt_text(
     }
 }
 
-fn wrap_agent_prompt_lines(
-    sugarloaf: &mut Sugarloaf,
-    text: &str,
-    max_w: f32,
-    opts: &DrawOpts,
-) -> Vec<String> {
-    wrap_agent_prompt_ranges(sugarloaf, text, max_w, opts)
-        .into_iter()
-        .map(|(start, end)| text[start..end].to_string())
-        .collect()
-}
-
-/// Running wrap state for [`wrap_agent_prompt_ranges`]: the visual row
-/// being built covers `text[start..end]` at accumulated width `width`.
+/// Running wrap state for [`wrap_agent_prompt_rows`]: the visual row
+/// being built covers `text[start..end]` at accumulated width `width`,
+/// with `offsets` holding the x of every character boundary already
+/// placed on it.
 #[derive(Default)]
 struct PromptWrapRanges {
-    lines: Vec<(usize, usize)>,
+    lines: Vec<InputWrapRow>,
     start: usize,
     end: usize,
     width: f32,
+    offsets: Vec<f32>,
 }
 
 impl PromptWrapRanges {
-    fn break_soft(&mut self) {
-        self.lines.push((self.start, self.end));
-        self.start = self.end;
+    /// Close the row under construction and start a fresh one at
+    /// `start`. Every row begins with a boundary at x=0.
+    fn push_row(&mut self, start: usize) {
+        self.lines.push(InputWrapRow {
+            start: self.start,
+            end: self.end,
+            offsets: std::mem::replace(&mut self.offsets, vec![0.0]),
+        });
+        self.start = start;
+        self.end = start;
         self.width = 0.0;
+    }
+
+    fn break_soft(&mut self) {
+        let resume = self.end;
+        self.push_row(resume);
     }
 }
 
-/// Byte spans of each visual row the prompt wraps into. This is the
-/// wrap CORE — `wrap_agent_prompt_lines` (drawing) slices these same
-/// spans, and the pane registers them for Up/Down cursor movement, so
-/// layout and navigation can never disagree about row boundaries.
-/// Rows exclude their terminating `\n`.
-fn wrap_agent_prompt_ranges(
+/// Byte spans of each visual row the prompt wraps into, each carrying
+/// the x offset of every character boundary on it. This is the wrap
+/// CORE — the drawing loop slices these same spans, the caret is placed
+/// from these same offsets, and the pane registers them for Up/Down
+/// movement, so layout and navigation can never disagree about either
+/// row boundaries or column positions. Rows exclude their terminating
+/// `\n`.
+fn wrap_agent_prompt_rows(
     sugarloaf: &mut Sugarloaf,
     text: &str,
     max_w: f32,
     opts: &DrawOpts,
-) -> Vec<(usize, usize)> {
+) -> Vec<InputWrapRow> {
     let token_spans = agent_attachment_token_spans(text);
-    let mut wrap = PromptWrapRanges::default();
+    let mut wrap = PromptWrapRanges {
+        offsets: vec![0.0],
+        ..PromptWrapRanges::default()
+    };
     let mut cursor = 0;
 
     for (start, end) in token_spans {
@@ -1332,6 +1364,14 @@ fn wrap_agent_prompt_ranges(
             wrap.break_soft();
         }
         wrap.end = end;
+        // A token is measured whole (it draws as one pill), so spread
+        // its width evenly over its characters — the caret can still sit
+        // inside one, and an even split keeps those positions monotonic.
+        let token_chars = token.chars().count().max(1);
+        for step in 1..=token_chars {
+            let fraction = step as f32 / token_chars as f32;
+            wrap.offsets.push(wrap.width + token_w * fraction);
+        }
         wrap.width += token_w;
         cursor = end;
     }
@@ -1346,7 +1386,8 @@ fn wrap_agent_prompt_ranges(
         &mut wrap,
     );
     if wrap.end > wrap.start || wrap.lines.is_empty() {
-        wrap.lines.push((wrap.start, wrap.end));
+        let end = wrap.end;
+        wrap.push_row(end);
     }
     wrap.lines
 }
@@ -1364,10 +1405,7 @@ fn push_wrapped_prompt_segment(
     for ch in text[seg_start..seg_end].chars() {
         let ch_len = ch.len_utf8();
         if ch == '\n' {
-            wrap.lines.push((wrap.start, wrap.end));
-            wrap.start = ix + ch_len;
-            wrap.end = wrap.start;
-            wrap.width = 0.0;
+            wrap.push_row(ix + ch_len);
             ix += ch_len;
             continue;
         }
@@ -1375,12 +1413,11 @@ fn push_wrapped_prompt_segment(
         let s = ch.encode_utf8(&mut buf);
         let ch_w = sugarloaf.text_mut().measure(s, opts);
         if wrap.end > wrap.start && wrap.width + ch_w > max_w {
-            wrap.lines.push((wrap.start, wrap.end));
-            wrap.start = ix;
-            wrap.width = 0.0;
+            wrap.push_row(ix);
         }
         wrap.end = ix + ch_len;
         wrap.width += ch_w;
+        wrap.offsets.push(wrap.width);
         ix += ch_len;
     }
 }

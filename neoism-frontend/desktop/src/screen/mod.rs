@@ -607,6 +607,7 @@ pub struct Screen<'screen> {
     /// panes (local edits → minimal ops, remote ops → incremental
     /// splices with caret transform). See `screen/markdown_crdt.rs`.
     pub markdown_crdt: markdown_crdt::MarkdownCrdtState,
+    pub code_crdt: code_crdt::CodeCrdtState,
     last_ime_cursor_pos: Option<(f32, f32)>,
     last_editor_trail_cursor_cell: Option<(usize, usize, usize)>,
     hints_config: Vec<std::rc::Rc<neoism_backend::config::hints::Hint>>,
@@ -1189,6 +1190,7 @@ pub mod daemon_layout;
 pub mod editor_scroll;
 pub mod lifecycle;
 pub mod markdown_crdt;
+pub mod code_crdt;
 pub mod panes;
 pub mod presence;
 pub mod render;
@@ -1554,6 +1556,7 @@ impl Screen<'_> {
             presence_publisher: None,
             presence_display_name_override: config.neoism.display_name.clone(),
             markdown_crdt: markdown_crdt::MarkdownCrdtState::default(),
+            code_crdt: code_crdt::CodeCrdtState::default(),
             sugarloaf,
             mouse: Mouse::new(config.scroll.multiplier, config.scroll.divider),
             touchpurpose: TouchPurpose::default(),

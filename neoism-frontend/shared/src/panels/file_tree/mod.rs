@@ -29,6 +29,7 @@
 //! bare "Geist Mono" does not. Per-row colors come from `IdeTheme`
 //! so the theme picker repaints the tree live.
 
+mod drag;
 mod git;
 pub mod icons;
 mod policy;
@@ -93,6 +94,7 @@ pub use scan::{
     apply_git_statuses, entries_from_dir_listing, normalize_path, same_entry_layout,
     scan_dir, scan_dir_result, scan_dir_with_open,
 };
+pub use drag::{FileDragState, FileDropOutcome};
 pub use state::FileTree;
 pub use types::{
     FileTreeGitRefreshRequest, FileTreeGitRefreshResult, GitStatus, GitWatchPaths,

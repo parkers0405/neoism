@@ -309,9 +309,10 @@ impl ChromeBridge {
             FinderMode::Grep => "grep",
             FinderMode::GitChanges => "git_changes",
             // Web has no native code pane yet; the desktop owns these.
-            FinderMode::BufferLines | FinderMode::References | FinderMode::Symbols => {
-                return false
-            }
+            FinderMode::BufferLines
+            | FinderMode::BufferReplace
+            | FinderMode::References
+            | FinderMode::Symbols => return false,
         };
         let query = self.chrome.finder.query.clone();
         self.pending_finder_open_intents.push(FinderOpenIntent {

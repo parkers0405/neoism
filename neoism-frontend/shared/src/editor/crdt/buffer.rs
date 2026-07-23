@@ -6,8 +6,8 @@ use thiserror::Error;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    ClientID, Doc, GetString, OffsetKind, Options, Origin, ReadTxn, StateVector, Text,
-    TextRef, Transact, UndoManager, Update,
+    Assoc, ClientID, Doc, GetString, IndexedSequence, OffsetKind, Options, Origin,
+    ReadTxn, StateVector, StickyIndex, Text, TextRef, Transact, UndoManager, Update,
 };
 
 pub type CrdtTextOffset = u32;
@@ -51,6 +51,14 @@ pub struct CrdtTextUpdate {
     pub update_v1: Vec<u8>,
     pub state_vector_v1: Vec<u8>,
 }
+
+/// A permanent position in the document (Yrs `StickyIndex` — the
+/// Zed-`Anchor` equivalent): survives concurrent edits by anchoring to
+/// the CRDT block identity instead of a numeric offset. Opaque so the
+/// rest of the editor never touches Yrs types; resolve back to a live
+/// UTF-16 offset with [`CrdtTextBuffer::resolve_sticky_anchor`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrdtStickyAnchor(StickyIndex);
 
 /// Minimal Yrs-backed text CRDT wrapper for editor-buffer experiments.
 ///
@@ -211,6 +219,51 @@ impl CrdtTextBuffer {
         let mut txn = self.doc.transact_mut_with(LOCAL_EDIT_ORIGIN);
         self.text.remove_range(&mut txn, index, len);
         Ok(())
+    }
+
+    /// Pin a UTF-16 offset as a permanent position (Zed-Anchor
+    /// semantics). `stick_to_next = true` associates with the character
+    /// AT the offset (an insert exactly here pushes the anchor right —
+    /// range starts); `false` associates with the character BEFORE it
+    /// (an insert here leaves the anchor put — range ends). Falls back
+    /// to the opposite association at the document edges rather than
+    /// failing. `None` only when the offset is out of bounds.
+    pub fn sticky_anchor(
+        &self,
+        index: CrdtTextOffset,
+        stick_to_next: bool,
+    ) -> Option<CrdtStickyAnchor> {
+        let txn = self.doc.transact();
+        let assoc = if stick_to_next {
+            Assoc::After
+        } else {
+            Assoc::Before
+        };
+        self.text
+            .sticky_index(&txn, index, assoc)
+            .or_else(|| {
+                // `Assoc::After` at the very end of the document has no
+                // next block to attach to — stick left instead.
+                let fallback = if stick_to_next {
+                    Assoc::Before
+                } else {
+                    Assoc::After
+                };
+                self.text.sticky_index(&txn, index, fallback)
+            })
+            .map(CrdtStickyAnchor)
+    }
+
+    /// Current UTF-16 offset of a pinned position, after any number of
+    /// local/remote edits since it was created. `None` when the anchored
+    /// block is unknown to this replica (e.g. an anchor from a state the
+    /// replica never saw).
+    pub fn resolve_sticky_anchor(
+        &self,
+        anchor: &CrdtStickyAnchor,
+    ) -> Option<CrdtTextOffset> {
+        let txn = self.doc.transact();
+        anchor.0.get_offset(&txn).map(|offset| offset.index)
     }
 
     pub fn state_vector_v1(&self) -> Vec<u8> {
@@ -512,6 +565,37 @@ mod tests {
 
         assert_eq!(a.text(), b.text());
         assert_eq!(b.text(), c.text());
+    }
+
+    #[test]
+    fn sticky_anchors_track_positions_through_edits() {
+        let buffer = CrdtTextBuffer::with_text(1, "hello world");
+        // Range over "world": start sticks to its first char, end sticks
+        // to the char before the range end (diagnostic-range policy).
+        let start = buffer.sticky_anchor(6, true).unwrap();
+        let end = buffer.sticky_anchor(11, false).unwrap();
+
+        // An edit BEFORE the range shifts both endpoints.
+        buffer.insert(0, ">> ").unwrap(); // ">> hello world"
+        assert_eq!(buffer.resolve_sticky_anchor(&start), Some(9));
+        assert_eq!(buffer.resolve_sticky_anchor(&end), Some(14));
+
+        // Typing exactly AT the range start pushes the range right
+        // (the anchor follows its character, not the numeric offset).
+        buffer.insert(9, "big ").unwrap(); // ">> hello big world"
+        assert_eq!(buffer.resolve_sticky_anchor(&start), Some(13));
+        assert_eq!(buffer.resolve_sticky_anchor(&end), Some(18));
+
+        // A REMOTE edit shifts anchors identically — the whole point.
+        let remote = CrdtTextBuffer::new(2);
+        remote
+            .apply_update_v1(&buffer.encode_full_update_v1())
+            .unwrap();
+        remote.insert(0, "x").unwrap();
+        let diff = remote.encode_diff_v1(&buffer.state_vector_v1()).unwrap();
+        buffer.apply_update_v1(&diff).unwrap();
+        assert_eq!(buffer.resolve_sticky_anchor(&start), Some(14));
+        assert_eq!(buffer.resolve_sticky_anchor(&end), Some(19));
     }
 
     #[test]

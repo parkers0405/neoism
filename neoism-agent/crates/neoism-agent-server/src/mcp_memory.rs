@@ -8,8 +8,12 @@ pub(crate) const MEMORY_MCP_ID: &str = "neoism-memory";
 
 const INDEX_FILE: &str = "MEMORY.md";
 const PROJECT_MEMORY_DIR: &str = "Memory";
-const USER_MEMORY_DIR: &str = "Personal/Memory";
-const SCOPE_DESCRIPTION: &str = "Scope: auto searches project and user memory; project uses the linked project vault; user uses Default/Personal/Memory; all is the same as auto.";
+const USER_MEMORY_DIR: &str = "Memory/Personal";
+/// Pre-flip user memory location (`Personal/Memory` inside the Default
+/// vault). Reads fall back here while the new `Memory/Personal` folder is
+/// missing; write paths migrate its files forward on first touch.
+const LEGACY_USER_MEMORY_DIR: &str = "Personal/Memory";
+const SCOPE_DESCRIPTION: &str = "Scope: auto searches project and user memory; project uses the linked project vault; user uses Default/Memory/Personal; all is the same as auto.";
 
 pub(crate) fn tools() -> Vec<McpToolInfo> {
     vec![
@@ -451,6 +455,17 @@ fn roots_for_scope(
         other => anyhow::bail!("unknown memory scope {other}"),
     };
     if !include_missing {
+        for root in &mut roots {
+            // Read-side fallback: user memory that has not been migrated
+            // yet still lives at the legacy `Personal/Memory` location.
+            if !root.path.is_dir() {
+                if let Some(legacy) = legacy_user_memory_path(root) {
+                    if legacy.is_dir() {
+                        root.path = legacy;
+                    }
+                }
+            }
+        }
         roots.retain(|root| root.path.is_dir());
     }
     Ok(roots)
@@ -503,13 +518,66 @@ fn user_root(cwd: &Path) -> anyhow::Result<MemoryRoot> {
     let path = workspace.notes_workspace_dir().join(USER_MEMORY_DIR);
     Ok(MemoryRoot {
         scope: "user",
-        label: "Default/Personal".to_string(),
+        label: "Default/Memory/Personal".to_string(),
         path,
         workspace,
     })
 }
 
+/// The legacy pre-flip location (`Personal/Memory`) of the user memory
+/// folder in the same Default vault as `root`. None for non-user roots.
+fn legacy_user_memory_path(root: &MemoryRoot) -> Option<PathBuf> {
+    if root.scope != "user" {
+        return None;
+    }
+    Some(
+        root.workspace
+            .notes_workspace_dir()
+            .join(LEGACY_USER_MEMORY_DIR),
+    )
+}
+
+/// One-way migration from the legacy `Personal/Memory` layout: move every
+/// entry the legacy folder still holds into the new `Memory/Personal`
+/// folder. Moves only — nothing is ever deleted, and entries that already
+/// exist at the destination stay behind at the legacy location. Runs from
+/// the write path (memory.init / memory.write) so the flip happens on the
+/// first touch that mutates memory.
+fn migrate_legacy_user_memory(root: &MemoryRoot) -> anyhow::Result<()> {
+    let Some(legacy) = legacy_user_memory_path(root) else {
+        return Ok(());
+    };
+    if legacy == root.path || !legacy.is_dir() {
+        return Ok(());
+    }
+    let Ok(entries) = std::fs::read_dir(&legacy) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&root.path)
+        .with_context(|| format!("failed to create {}", root.path.display()))?;
+    for entry in entries.filter_map(Result::ok) {
+        let source = entry.path();
+        let Some(name) = source.file_name() else {
+            continue;
+        };
+        let target = root.path.join(name);
+        if target.exists() {
+            continue;
+        }
+        if let Err(error) = std::fs::rename(&source, &target) {
+            tracing::warn!(
+                %error,
+                source = %source.display(),
+                target = %target.display(),
+                "failed to migrate legacy user memory entry"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn ensure_memory_root(root: &MemoryRoot) -> anyhow::Result<()> {
+    migrate_legacy_user_memory(root)?;
     std::fs::create_dir_all(&root.path)
         .with_context(|| format!("failed to create {}", root.path.display()))?;
     let index = root.path.join(INDEX_FILE);
@@ -1014,7 +1082,7 @@ mod tests {
         assert_eq!(init["operation"], "init");
         assert!(notes_home.join("Default/Memory/MEMORY.md").is_file());
         assert!(notes_home
-            .join("Default/Personal/Memory/MEMORY.md")
+            .join("Default/Memory/Personal/MEMORY.md")
             .is_file());
 
         let project = result_json(
@@ -1043,7 +1111,7 @@ mod tests {
                 "memory.write",
                 json!({
                     "name": "Parker prefers notes memory",
-                    "description": "Store personal memory in Default/Personal/Memory",
+                    "description": "Store personal memory in Default/Memory/Personal",
                     "type": "personal",
                     "body": "Personal durable facts should stay in the Default vault.",
                     "created": "2026-06-30",
@@ -1054,7 +1122,7 @@ mod tests {
         );
         assert_eq!(user["scope"], "user");
         assert!(notes_home
-            .join("Default/Personal/Memory/personal_parker_prefers_notes_memory.md")
+            .join("Default/Memory/Personal/personal_parker_prefers_notes_memory.md")
             .is_file());
 
         let index =
@@ -1091,6 +1159,71 @@ mod tests {
         let text = read["text"].as_str().unwrap();
         assert!(text.contains("type: \"feedback\""));
         assert!(text.contains("origin: \"neoism-agent\""));
+
+        let _ = std::fs::remove_dir_all(cwd);
+        let _ = std::fs::remove_dir_all(notes_home);
+    }
+
+    #[test]
+    fn legacy_user_memory_reads_fall_back_and_writes_migrate() {
+        let _lock = env_lock().lock().unwrap();
+        let cwd = tempdir("cwd-legacy");
+        let notes_home = tempdir("notes-legacy");
+        let _env = EnvGuard::set("NEOISM_NOTES_HOME", &notes_home);
+        let directory = cwd.to_str().unwrap();
+
+        let legacy = notes_home.join("Default/Personal/Memory");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join("personal_legacy_fact.md"),
+            "---\nname: \"Legacy fact\"\ndescription: \"Recorded before the layout flip\"\ntype: \"personal\"\n---\n\nLegacy body.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            legacy.join("MEMORY.md"),
+            "# Memory\n\n- [Legacy fact](personal_legacy_fact.md) - Recorded before the layout flip\n",
+        )
+        .unwrap();
+
+        // Read paths fall back to the legacy folder while Memory/Personal
+        // does not exist yet — and reading migrates nothing.
+        let recall = result_json(
+            call_tool(
+                directory,
+                "memory.recall",
+                json!({ "query": "legacy", "scope": "user" }),
+            )
+            .unwrap(),
+        );
+        let hits = recall["hits"][0]["result"].as_array().unwrap();
+        assert_eq!(hits[0]["path"], "personal_legacy_fact.md");
+        assert!(!notes_home.join("Default/Memory/Personal").exists());
+
+        // First write touch moves the legacy files into Memory/Personal.
+        let user = result_json(
+            call_tool(
+                directory,
+                "memory.write",
+                json!({
+                    "name": "Fresh user note",
+                    "description": "Written after the new hierarchy shipped",
+                    "type": "personal",
+                    "body": "New body."
+                }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(user["scope"], "user");
+        let migrated = notes_home.join("Default/Memory/Personal");
+        assert!(migrated.join("personal_legacy_fact.md").is_file());
+        assert!(migrated.join("MEMORY.md").is_file());
+        assert!(migrated.join("personal_fresh_user_note.md").is_file());
+        assert!(!legacy.join("personal_legacy_fact.md").exists());
+        assert!(!legacy.join("MEMORY.md").exists());
+
+        let index = std::fs::read_to_string(migrated.join("MEMORY.md")).unwrap();
+        assert!(index.contains("[Legacy fact](personal_legacy_fact.md)"));
+        assert!(index.contains("[Fresh user note](personal_fresh_user_note.md)"));
 
         let _ = std::fs::remove_dir_all(cwd);
         let _ = std::fs::remove_dir_all(notes_home);

@@ -36,6 +36,24 @@ impl Screen<'_> {
             return;
         }
 
+        // Multi-cursor: Ctrl+Alt+Up/Down stacks a caret above/below the
+        // current extreme — intercepted BEFORE the vim layer so it
+        // works in every input mode.
+        if mods.control_key() && mods.alt_key() {
+            let vertical = match key.logical_key.as_ref() {
+                Key::Named(NamedKey::ArrowUp) => Some(false),
+                Key::Named(NamedKey::ArrowDown) => Some(true),
+                _ => None,
+            };
+            if let Some(down) = vertical {
+                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    code.buffer.add_caret_vertical(down);
+                }
+                self.mark_dirty();
+                return;
+            }
+        }
+
         // Vim layer: modal interception when the pane's input mode is
         // Vim. Insert mode falls through to the standard path (typing
         // is typing) except Esc, which returns to Normal.
@@ -56,6 +74,7 @@ impl Screen<'_> {
                 if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                     code.buffer.mode = CodeMode::Normal;
                     code.buffer.clear_selection();
+                    code.buffer.clear_extra_carets();
                     code.buffer.break_undo_group();
                     code.buffer.snap_normal_cursor();
                 }
@@ -135,6 +154,16 @@ impl Screen<'_> {
                     self.mark_dirty();
                     return;
                 }
+                // Ctrl/Cmd+D: select next occurrence (multi-cursor) —
+                // standard mode + vim Insert only; vim Normal keeps
+                // Ctrl+D as half-page scroll (routed above).
+                Key::Character("d") => {
+                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                        code.buffer.add_caret_next_occurrence();
+                    }
+                    self.mark_dirty();
+                    return;
+                }
                 // Ctrl+.: LSP code actions / quick-fix at the cursor
                 // (standard mode + vim Insert, which falls through
                 // here; vim Normal uses `<Space>a`).
@@ -183,17 +212,27 @@ impl Screen<'_> {
         let Some(code) = self.context_manager.current_mut().code.as_mut() else {
             return;
         };
+        let multi = code.buffer.has_extra_carets();
         let lsp_edit = match key.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => {
                 code.buffer.clear_selection();
+                code.buffer.clear_extra_carets();
                 CodeKeyEdit::Other
             }
             Key::Named(NamedKey::Enter) => {
-                code.buffer.insert_newline();
+                if multi {
+                    code.buffer.multi_insert_newline();
+                } else {
+                    code.buffer.insert_newline();
+                }
                 CodeKeyEdit::Other
             }
             Key::Named(NamedKey::Backspace) => {
-                code.buffer.backspace();
+                if multi {
+                    code.buffer.multi_backspace();
+                } else {
+                    code.buffer.backspace();
+                }
                 CodeKeyEdit::Backspace
             }
             Key::Named(NamedKey::Delete) => {
@@ -251,7 +290,11 @@ impl Screen<'_> {
                 CodeKeyEdit::Other
             }
             Key::Named(NamedKey::Space) if plain => {
-                code.buffer.insert_char(' ');
+                if multi {
+                    code.buffer.multi_insert_char(' ');
+                } else {
+                    code.buffer.insert_char(' ');
+                }
                 CodeKeyEdit::Char(' ')
             }
             _ if plain && !text.is_empty() => {
@@ -260,11 +303,19 @@ impl Screen<'_> {
                     // Single typed char goes through `insert_char` so
                     // consecutive keystrokes coalesce into one undo.
                     (Some(c), None) => {
-                        code.buffer.insert_char(c);
+                        if multi {
+                            code.buffer.multi_insert_char(c);
+                        } else {
+                            code.buffer.insert_char(c);
+                        }
                         CodeKeyEdit::Char(c)
                     }
                     _ => {
-                        code.buffer.insert_text(text);
+                        if multi {
+                            code.buffer.multi_insert_text(text);
+                        } else {
+                            code.buffer.insert_text(text);
+                        }
                         CodeKeyEdit::Other
                     }
                 }
@@ -486,6 +537,7 @@ impl Screen<'_> {
                     code.leader_pending = false;
                     code.buffer.mode = CodeMode::Normal;
                     code.buffer.clear_selection();
+                    code.buffer.clear_extra_carets();
                     code.buffer.snap_normal_cursor();
                     // `:noh` convention — Esc drops the hlsearch bands.
                     code.search_highlight = None;
@@ -586,15 +638,16 @@ impl Screen<'_> {
             return;
         }
 
-        // `/` opens in-buffer incremental search (nvim incsearch).
+        // `/` opens in-buffer incremental search (nvim incsearch);
+        // `?` is the same surface scanning backward.
         let pending_empty_for_search = self
             .context_manager
             .current()
             .code
             .as_ref()
             .is_some_and(|code| code.buffer.vim.pending.is_empty());
-        if ch == '/' && pending_empty_for_search {
-            self.open_finder_buffer_search();
+        if (ch == '/' || ch == '?') && pending_empty_for_search {
+            self.open_finder_buffer_search(ch == '?');
             return;
         }
 
@@ -647,6 +700,48 @@ impl Screen<'_> {
                 self.mark_dirty();
                 return;
             }
+            // gb: multi-cursor "select next occurrence" (VSCodeVim
+            // binding) — first press selects the word and enters
+            // Visual; further presses add carets on later occurrences.
+            if ch == 'b'
+                && pending.operator.is_none()
+                && pending.stage == VimStage::Gee
+                && matches!(code.buffer.mode, CodeMode::Normal | CodeMode::Visual)
+            {
+                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    code.buffer.vim.clear_pending();
+                    if code.buffer.add_caret_next_occurrence() {
+                        code.buffer.mode = CodeMode::Visual;
+                        code.buffer.follow_cursor = true;
+                    }
+                }
+                self.mark_dirty();
+                return;
+            }
+            // Explicit gj/gk: visual-row motion regardless of count
+            // state (bare j/k already do this when wrap is on).
+            if (ch == 'j' || ch == 'k')
+                && pending.operator.is_none()
+                && pending.stage == VimStage::Gee
+                && matches!(code.buffer.mode, CodeMode::Normal | CodeMode::Visual)
+            {
+                let down = ch == 'j';
+                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    code.buffer.vim.clear_pending();
+                    let extend = code.buffer.mode == CodeMode::Visual;
+                    if !code.move_cursor_vertical_visual(down, extend) {
+                        code.buffer.apply_motion(
+                            if down { CodeMotion::Down } else { CodeMotion::Up },
+                            extend,
+                        );
+                    }
+                    if code.buffer.mode == CodeMode::Normal {
+                        code.buffer.snap_normal_cursor();
+                    }
+                }
+                self.mark_dirty();
+                return;
+            }
         }
 
         if (ch == 'j' || ch == 'k') && self.code_vim_vertical(ch == 'j') {
@@ -656,6 +751,27 @@ impl Screen<'_> {
     }
 
     fn code_vim_char(&mut self, ch: char, clipboard: &mut Clipboard) {
+        // Multi-cursor Visual `c`/`d` (the gb flow): delete EVERY
+        // caret's selection in one undo step; `c` drops into Insert so
+        // the follow-up typing lands at every caret.
+        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            if code.buffer.has_extra_carets()
+                && code.buffer.mode == CodeMode::Visual
+                && matches!(ch, 'c' | 'd')
+            {
+                code.buffer.multi_change_selections();
+                if ch == 'c' {
+                    code.buffer.mode = CodeMode::Insert;
+                } else {
+                    code.buffer.mode = CodeMode::Normal;
+                    code.buffer.clear_extra_carets();
+                    code.buffer.snap_normal_cursor();
+                }
+                self.sync_active_code_modified();
+                self.mark_dirty();
+                return;
+            }
+        }
         // Normal/Visual keys always settle the LSP popups (cursor is
         // about to move or the buffer to change).
         self.renderer.code_lsp.dismiss_popups();
@@ -764,6 +880,28 @@ impl Screen<'_> {
         true
     }
 
+    /// Palette `ToggleWordWrap`: flip the pane between soft wrap (the
+    /// default) and NoWrap + horizontal caret-follow. No-op without a
+    /// code pane.
+    pub(crate) fn toggle_code_word_wrap(&mut self) -> bool {
+        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            return false;
+        };
+        code.wrap = !code.wrap;
+        if code.wrap {
+            code.scroll_x = 0.0;
+        }
+        // Re-reveal: the cursor's visual row changes with the layout.
+        code.buffer.follow_cursor = true;
+        let wrap = code.wrap;
+        self.renderer.notifications.push(
+            if wrap { "Word wrap on" } else { "Word wrap off" },
+            neoism_ui::panels::notifications::NotificationLevel::Info,
+        );
+        self.mark_dirty();
+        true
+    }
+
     pub(crate) fn handle_code_mouse_press(&mut self, button: MouseButton) -> bool {
         if self.context_manager.current().code.is_none() {
             return false;
@@ -797,6 +935,62 @@ impl Screen<'_> {
             }
         }
         let (line, col) = code.geometry.hit_position(&code.buffer.lines, x, y);
+        // Multi-click selection (chrome standard): double-click selects
+        // the word under the pointer, triple-click the whole line. Uses
+        // the same ClickState the terminal press pipeline maintains.
+        /// Byte range of the "word" at `col`: an identifier run when
+        /// the char is word-class, else the single char clicked.
+        fn word_range_at(line: &str, col: usize) -> (usize, usize) {
+            let is_word = |c: char| c.is_alphanumeric() || c == '_';
+            if line.is_empty() {
+                return (0, 0);
+            }
+            let mut start = col.min(line.len().saturating_sub(1));
+            while start > 0 && !line.is_char_boundary(start) {
+                start -= 1;
+            }
+            let ch = line[start..].chars().next().unwrap_or(' ');
+            if !is_word(ch) {
+                return (start, start + ch.len_utf8());
+            }
+            let mut begin = start;
+            while begin > 0 {
+                let prev = line[..begin].chars().next_back().unwrap_or(' ');
+                if !is_word(prev) {
+                    break;
+                }
+                begin -= prev.len_utf8();
+            }
+            let mut end = start;
+            for c in line[start..].chars() {
+                if !is_word(c) {
+                    break;
+                }
+                end += c.len_utf8();
+            }
+            (begin, end)
+        }
+        match self.mouse.click_state {
+            crate::event::ClickState::DoubleClick if !ctrl => {
+                let (start, end) = word_range_at(&code.buffer.lines[line], col);
+                code.buffer.set_cursor_position(line, start, false);
+                code.buffer.set_cursor_position(line, end, true);
+                code.mouse_selecting = true;
+                self.dismiss_code_lsp_popups();
+                self.mark_dirty();
+                return true;
+            }
+            crate::event::ClickState::TripleClick if !ctrl => {
+                let line_len = code.buffer.lines[line].len();
+                code.buffer.set_cursor_position(line, 0, false);
+                code.buffer.set_cursor_position(line, line_len, true);
+                code.mouse_selecting = true;
+                self.dismiss_code_lsp_popups();
+                self.mark_dirty();
+                return true;
+            }
+            _ => {}
+        }
         // Ctrl+Click: go to definition of the clicked identifier.
         if ctrl && !shift {
             code.buffer.set_cursor_position(line, col, false);

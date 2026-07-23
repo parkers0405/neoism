@@ -69,6 +69,9 @@ pub struct FileTree {
     pub(super) pending_count: Option<usize>,
     /// True after a lone `g`, so the next `g` completes `gg` (go-to-top).
     pub(super) pending_g: bool,
+    /// In-flight Finder-style drag of a row onto a folder (spring-loaded
+    /// move). `None` when nothing is being dragged. See [`super::drag`].
+    pub(super) file_drag: Option<super::drag::FileDragState>,
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +126,7 @@ impl FileTree {
             pending_opens: Vec::new(),
             pending_count: None,
             pending_g: false,
+            file_drag: None,
         }
     }
 
@@ -157,6 +161,7 @@ impl FileTree {
             pending_opens: Vec::new(),
             pending_count: None,
             pending_g: false,
+            file_drag: None,
         }
     }
 

@@ -116,6 +116,32 @@ impl Screen<'_> {
                             == neoism_ui::editor::markdown::MarkdownMode::Insert,
                     )
                 })
+            })
+            .or_else(|| {
+                current.code.as_ref().map(|code| {
+                    // The wire column is UTF-16 (CRDT offset policy);
+                    // the code buffer's cursor_col is a byte column —
+                    // convert against the live line text.
+                    let col_utf16 = code
+                        .buffer
+                        .lines
+                        .get(code.buffer.cursor_line)
+                        .map(|line| {
+                            let col = code.buffer.cursor_col.min(line.len());
+                            line.get(..col)
+                                .map(|prefix| prefix.encode_utf16().count())
+                                .unwrap_or(col)
+                        })
+                        .unwrap_or(0);
+                    (
+                        presence_buffer_id_for_path(&code.path),
+                        PeerCursor::new(
+                            code.buffer.cursor_line as u32,
+                            col_utf16 as u32,
+                        ),
+                        code.buffer.mode == neoism_ui::editor::code::CodeMode::Insert,
+                    )
+                })
             });
 
         if self.presence_publisher.is_none() {

@@ -723,7 +723,7 @@ pub fn vim_search_forward(
     None
 }
 
-pub(crate) fn vim_search_backward(
+pub fn vim_search_backward(
     lines: &[String],
     from: MarkdownPosition,
     pattern: &str,

@@ -16,6 +16,11 @@ pub enum FinderMode {
     /// (nvim `/`). Plain case-sensitive substring, fully in-memory —
     /// no ripgrep, no services.
     BufferLines,
+    /// In-buffer search & replace over the active code pane (the
+    /// Ctrl+P-style replace surface): the query is typed as
+    /// `pattern/replacement` (`:s` escaping); rows list lines matching
+    /// the PATTERN part; Enter replaces every occurrence in the file.
+    BufferReplace,
     /// LSP find-references results (`gr` on the code pane). Rows are
     /// pre-computed `path:line  text` hits installed by the host;
     /// typing fuzzy-filters them in-memory — no services.

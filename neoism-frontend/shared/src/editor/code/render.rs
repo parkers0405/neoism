@@ -238,9 +238,24 @@ pub fn render(
     if scroll_animating {
         // ω of the critically-damped spring; higher = snappier.
         const OMEGA: f32 = 16.0;
-        let accel = OMEGA * OMEGA * delta - 2.0 * OMEGA * pane.scroll_velocity_px_s;
-        pane.scroll_velocity_px_s += accel * dt;
-        pane.scroll_y += pane.scroll_velocity_px_s * dt;
+        // Explicit Euler is only stable for small dt. When the frame rate
+        // drops — e.g. heavy per-keystroke diagnostic work while typing —
+        // `dt` climbs to its 0.05 clamp and a single big step makes this
+        // spring OVERSHOOT and ring frame-to-frame: the visible up/down
+        // bounce. Integrate in fixed sub-steps so the spring behaves the
+        // same at 20fps as at 144fps and never overshoots, recomputing
+        // `delta` each sub-step so it tracks a moving target cleanly.
+        const MAX_SUBSTEP: f32 = 1.0 / 240.0;
+        let mut remaining = dt;
+        while remaining > 0.0 {
+            let step = remaining.min(MAX_SUBSTEP);
+            let delta = pane.target_scroll_y - pane.scroll_y;
+            let accel =
+                OMEGA * OMEGA * delta - 2.0 * OMEGA * pane.scroll_velocity_px_s;
+            pane.scroll_velocity_px_s += accel * step;
+            pane.scroll_y += pane.scroll_velocity_px_s * step;
+            remaining -= step;
+        }
         if (pane.target_scroll_y - pane.scroll_y).abs() < 0.5
             && pane.scroll_velocity_px_s.abs() < 30.0
         {

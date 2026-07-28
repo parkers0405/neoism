@@ -16,6 +16,34 @@ fn command_payload_sends_plain_command_without_control_prefix() {
 }
 
 #[test]
+fn command_payload_uses_carriage_return_for_windows_shells() {
+    assert_eq!(
+        TerminalShellKind::PowerShell.command_payload("cd ..", false),
+        b"cd ..\r"
+    );
+    assert_eq!(
+        TerminalShellKind::Cmd.command_payload("cd ..", false),
+        b"cd ..\r"
+    );
+}
+
+#[test]
+fn detects_native_windows_shell_names() {
+    assert_eq!(
+        TerminalShellKind::detect(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+        TerminalShellKind::PowerShell
+    );
+    assert_eq!(
+        TerminalShellKind::detect(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.EXE"),
+        TerminalShellKind::PowerShell
+    );
+    assert_eq!(
+        TerminalShellKind::detect(r"C:\Windows\System32\cmd.exe"),
+        TerminalShellKind::Cmd
+    );
+}
+
+#[test]
 fn command_payload_strips_c0_controls_except_newline_and_tab() {
     let payload =
         TerminalShellKind::Bash.command_payload("echo\x04 ok\tthere\nnext", true);

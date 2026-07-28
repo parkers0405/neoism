@@ -35,7 +35,7 @@ mod git;
 mod icons;
 mod render;
 mod scan;
-mod state;
+pub(crate) mod state;
 mod types;
 mod update;
 mod virtuals;

@@ -113,6 +113,20 @@ impl RemoteFiles {
     }
 }
 
+impl crate::editor::file_tree::state::RemoteFileSource for RemoteFiles {
+    fn root(&self) -> &Path {
+        RemoteFiles::root(self)
+    }
+
+    fn request_read_file(&self, path: &Path) -> u64 {
+        RemoteFiles::request_read_file(self, path)
+    }
+
+    fn as_files_service(&self) -> &dyn neoism_ui::services::FilesService {
+        self
+    }
+}
+
 impl neoism_ui::services::FilesService for RemoteFiles {
     fn list_dir(
         &self,

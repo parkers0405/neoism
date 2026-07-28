@@ -20,9 +20,7 @@ impl FileTree {
         let remote = self.remote.clone();
         let inner = &mut self.inner;
         with_panel_context_files(
-            remote
-                .as_deref()
-                .map(|r| r as &dyn neoism_ui::services::FilesService),
+            remote.as_deref().map(|r| r.as_files_service()),
             |ctx| f(inner, ctx),
         )
     }

@@ -19,6 +19,8 @@ pub(super) fn shell_badge_label(kind: TerminalShellKind) -> &'static str {
         TerminalShellKind::Bash => "Bash",
         TerminalShellKind::Zsh => "Zsh",
         TerminalShellKind::Fish => "Fish",
+        TerminalShellKind::PowerShell => "PowerShell",
+        TerminalShellKind::Cmd => "Cmd",
         TerminalShellKind::Unknown => "Shell",
     }
 }
@@ -28,6 +30,8 @@ pub(super) fn shell_badge_accent(kind: TerminalShellKind, theme: &IdeTheme) -> [
         TerminalShellKind::Bash => theme.u8(theme.green),
         TerminalShellKind::Zsh => theme.u8(theme.cyan),
         TerminalShellKind::Fish => theme.u8(theme.yellow),
+        TerminalShellKind::PowerShell => theme.u8(theme.blue),
+        TerminalShellKind::Cmd => theme.u8(theme.green),
         TerminalShellKind::Unknown => theme.u8(theme.magenta),
     }
 }

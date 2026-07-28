@@ -94,6 +94,48 @@ fn passthrough_shell_detection_handles_raw_remote_sessions() {
 }
 
 #[test]
+fn parse_ssh_target_extracts_host_and_passthrough_opts() {
+    // Bare login: target, no opts.
+    assert_eq!(
+        parse_ssh_target("ssh devbox"),
+        Some(("devbox".to_string(), Vec::new()))
+    );
+    // Value flag is carried onto the browsing connection.
+    assert_eq!(
+        parse_ssh_target("ssh -p 2222 user@box"),
+        Some((
+            "user@box".to_string(),
+            vec!["-p".to_string(), "2222".to_string()]
+        ))
+    );
+    assert_eq!(
+        parse_ssh_target("ssh -i ~/.ssh/id_ed25519 devbox"),
+        Some((
+            "devbox".to_string(),
+            vec!["-i".to_string(), "~/.ssh/id_ed25519".to_string()]
+        ))
+    );
+    // Bare toggle (`-t`) is dropped.
+    assert_eq!(
+        parse_ssh_target("ssh -t devbox"),
+        Some(("devbox".to_string(), Vec::new()))
+    );
+    // Program basename is what matters.
+    assert_eq!(
+        parse_ssh_target("/usr/bin/ssh devbox"),
+        Some(("devbox".to_string(), Vec::new()))
+    );
+    // A one-shot remote command is NOT a session to follow.
+    assert_eq!(parse_ssh_target("ssh devbox ls"), None);
+    // No target.
+    assert_eq!(parse_ssh_target("ssh"), None);
+    // Not ssh.
+    assert_eq!(parse_ssh_target("mosh devbox"), None);
+    assert_eq!(parse_ssh_target("bash"), None);
+}
+
+
+#[test]
 fn git_state_event_filter_ignores_lock_churn() {
     let event =
         notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))

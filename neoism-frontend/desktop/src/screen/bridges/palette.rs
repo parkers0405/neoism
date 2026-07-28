@@ -164,6 +164,33 @@ impl Screen<'_> {
             return;
         }
 
+        // Sharing the folder you're ALREADY in? Don't spawn a second
+        // standalone daemon that re-declares the dir as a fresh workspace
+        // (which then opens a duplicate tab). The embedded daemon already
+        // hosts this workspace on loopback + tailnet — just flip it Shared,
+        // exactly like the "Share current workspace" command. Compare
+        // canonicalized roots so `~/x`, `./x`, and trailing slashes match.
+        let same_as_current = self
+            .active_workspace_root
+            .as_ref()
+            .map(|root| paths_equivalent(root, &dir))
+            .unwrap_or(false);
+        if same_as_current {
+            if let Some(workspace_id) = self.current_workspace_id() {
+                self.context_manager.send_workspace_request(
+                    neoism_protocol::workspace::WorkspaceClientMessage::ShareWorkspace {
+                        workspace_id,
+                    },
+                );
+                self.renderer.notifications.push(
+                    "Sharing your current workspace — others can join it now.",
+                    NotificationLevel::Info,
+                );
+                self.mark_dirty();
+                return;
+            }
+        }
+
         // First port that binds; dropped immediately so the daemon can
         // take it (the tiny race is fine — a failed spawn surfaces in
         // the join error).
@@ -1401,5 +1428,17 @@ impl Screen<'_> {
         ));
 
         (entries, peer_hosts)
+    }
+}
+
+/// Two filesystem paths point at the same directory. Canonicalizes both
+/// (resolving `.`, `..`, symlinks, trailing slashes) so the create-server
+/// dir the user typed matches the current workspace root even when one is
+/// `~/x` and the other `/home/me/x/`. Falls back to a lexical compare when
+/// a path can't be canonicalized (e.g. it doesn't exist yet).
+fn paths_equivalent(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }

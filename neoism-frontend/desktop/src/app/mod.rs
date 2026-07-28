@@ -1772,6 +1772,12 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     route.request_redraw();
                 }
             }
+            RioEventType::Rio(RioEvent::SshFilesReady) => {
+                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    route.window.screen.drain_ssh_files_replies();
+                    route.request_redraw();
+                }
+            }
             RioEventType::Rio(RioEvent::ApplyFileTreeGitStatus) => {
                 for route in self.router.routes.values_mut() {
                     if matches!(

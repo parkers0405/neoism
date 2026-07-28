@@ -70,7 +70,7 @@ pub fn git_changes_snapshot(repo: &Path) -> (u64, u64) {
     // changes via `git diff HEAD --numstat`, plus every untracked
     // file's line count folded into `added`, so the pill agrees with
     // the side diff panel's `+N -M` header.
-    let numstat = std::process::Command::new("git")
+    let numstat = crate::process::background_command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(repo)
@@ -98,7 +98,7 @@ pub fn git_changes_snapshot(repo: &Path) -> (u64, u64) {
 
     // Untracked files don't show up in `diff HEAD`; count their lines
     // as additions.
-    if let Ok(output) = std::process::Command::new("git")
+    if let Ok(output) = crate::process::background_command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(repo)

@@ -19,6 +19,7 @@ pub mod language_server;
 pub mod pairing;
 pub mod permissions;
 pub mod persistence;
+mod process;
 pub mod search;
 pub mod server;
 pub mod sessions;

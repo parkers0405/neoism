@@ -69,12 +69,11 @@ pub fn parse_numstat(bytes: &[u8]) -> HashMap<String, (u32, u32)> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_diff(repo_root: &std::path::Path, file: &FileChange) -> Vec<DiffLine> {
     use super::types::FileStatus;
-    use std::process::Command;
 
     let mut lines = Vec::new();
     if matches!(file.status, FileStatus::Untracked) {
         let abs = repo_root.join(&file.path);
-        if let Ok(output) = Command::new("git")
+        if let Ok(output) = crate::utils::background_command("git")
             .env("GIT_OPTIONAL_LOCKS", "0")
             .arg("-C")
             .arg(repo_root)
@@ -86,7 +85,7 @@ pub fn load_diff(repo_root: &std::path::Path, file: &FileChange) -> Vec<DiffLine
         }
         return lines;
     }
-    if let Ok(output) = Command::new("git")
+    if let Ok(output) = crate::utils::background_command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(repo_root)

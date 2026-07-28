@@ -478,6 +478,20 @@ pub struct NeoismAgentSidePanel {
     /// reach. Clamped against `content_scroll_max` each frame.
     content_scroll_px: f32,
     content_scroll_max: f32,
+    /// When a live conversation is open, the "← Back" affordance flips the
+    /// panel to the home/recent-sessions view *without* ending the chat.
+    /// The renderer shows the sessions list whenever this is set (or there
+    /// is no conversation at all); activating a session clears it.
+    show_home_override: bool,
+    /// True when the selection cursor sits on the "← Back" affordance at the
+    /// top of the panel (reached by arrow-up past the first row / search).
+    /// Mirrors `search_focused`: while set, no row is highlighted and the
+    /// trail cursor parks on the Back button.
+    back_focused: bool,
+    /// Screen rect of the "← Back" button, cached each frame it is drawn so
+    /// the click handler can hit-test it and the focus model knows it is
+    /// present. `None` when no Back button was drawn (genuine home view).
+    back_button_rect: Option<[f32; 4]>,
 }
 
 impl Default for NeoismAgentSidePanel {
@@ -525,6 +539,9 @@ impl Default for NeoismAgentSidePanel {
             goal_version: 0,
             content_scroll_px: 0.0,
             content_scroll_max: 0.0,
+            show_home_override: false,
+            back_focused: false,
+            back_button_rect: None,
         }
     }
 }
@@ -542,7 +559,74 @@ impl NeoismAgentSidePanel {
         self.focused = focused;
         if !focused {
             self.search_focused = false;
+            self.back_focused = false;
         }
+    }
+
+    pub fn show_home_override(&self) -> bool {
+        self.show_home_override
+    }
+
+    pub fn set_show_home_override(&mut self, value: bool) {
+        self.show_home_override = value;
+    }
+
+    /// Flip the home-while-chatting view on/off. Non-destructive — the live
+    /// conversation stays open underneath; only which list the panel shows
+    /// changes.
+    pub fn toggle_home_override(&mut self) {
+        self.show_home_override = !self.show_home_override;
+    }
+
+    pub fn back_button_rect(&self) -> Option<[f32; 4]> {
+        self.back_button_rect
+    }
+
+    pub fn set_back_button_rect(&mut self, rect: [f32; 4]) {
+        self.back_button_rect = Some(rect);
+    }
+
+    /// Called when the panel renders a view that carries no Back button
+    /// (the genuine no-conversation home). Drops the cached rect and any
+    /// focus that was on it so the focus model doesn't strand the cursor.
+    pub fn clear_back_button_rect(&mut self) {
+        self.back_button_rect = None;
+        self.back_focused = false;
+    }
+
+    pub fn back_button_contains(&self, x: f32, y: f32) -> bool {
+        let Some([bx, by, bw, bh]) = self.back_button_rect else {
+            return false;
+        };
+        x >= bx && x <= bx + bw && y >= by && y <= by + bh
+    }
+
+    /// Whether the selection cursor is on the "← Back" affordance. Only
+    /// meaningful while a Back button is actually being drawn.
+    pub fn back_focused(&self) -> bool {
+        self.back_focused && self.back_button_rect.is_some()
+    }
+
+    /// Move the selection cursor onto the "← Back" affordance.
+    pub fn focus_back(&mut self) {
+        self.back_focused = true;
+        self.search_focused = false;
+        self.cursor_spring.reset();
+    }
+
+    fn clear_back_focus(&mut self) {
+        self.back_focused = false;
+    }
+
+    /// True when the Back affordance is the *only* thing worth landing a
+    /// cursor on (chat with no branch rows, or an empty session list). The
+    /// focus-entry drops the cursor straight onto Back in that case.
+    pub fn only_back_focusable(&self) -> bool {
+        self.back_button_rect.is_some()
+            && match self.mode {
+                SidePanelMode::Sessions => self.sessions.is_empty(),
+                SidePanelMode::Subagents => self.subagents.len() <= 1,
+            }
     }
 
     pub fn user_hidden(&self) -> bool {
@@ -842,6 +926,16 @@ impl NeoismAgentSidePanel {
     /// i.e. there's at least one real child below the implicit "main
     /// session" entry the picker prepends.
     pub fn focusable(&self) -> bool {
+        // A hidden panel is never focusable, whatever rows it last held.
+        if self.user_hidden {
+            return false;
+        }
+        // The "← Back" affordance (drawn whenever a live conversation is
+        // open) is always reachable, so the panel is focusable even in a
+        // chat with no sub-agent branches to land a row cursor on.
+        if self.back_button_rect.is_some() {
+            return true;
+        }
         match self.mode {
             SidePanelMode::Sessions => !self.sessions.is_empty(),
             SidePanelMode::Subagents => self.subagents.len() > 1,
@@ -907,6 +1001,8 @@ impl NeoismAgentSidePanel {
     pub fn clear_last_panel_rect(&mut self) {
         self.last_panel_rect = None;
         self.last_row_hit_rect = None;
+        self.back_button_rect = None;
+        self.back_focused = false;
         self.focused = false;
         self.selected_cursor_rect = None;
     }
@@ -1525,6 +1621,7 @@ impl NeoismAgentSidePanel {
     /// Move the selection cursor onto the search row.
     pub fn focus_search(&mut self) {
         self.search_focused = true;
+        self.back_focused = false;
         self.cursor_spring.reset();
     }
 
@@ -1533,6 +1630,21 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_next(&mut self) {
+        // Leaving the Back affordance drops onto the element directly below
+        // it: the search row in home mode, the first branch in chat mode.
+        if self.back_focused() {
+            self.clear_back_focus();
+            if matches!(self.mode, SidePanelMode::Sessions) {
+                self.focus_search();
+            } else if let Some(first) = self.nearest_selectable(0) {
+                self.selected = first;
+                self.scroll_top = 0;
+                self.scroll_px = 0.0;
+                self.scroll.set_target(0.0);
+                self.cursor_spring.reset();
+            }
+            return;
+        }
         let len = self.active_len();
         if len == 0 {
             return;
@@ -1554,19 +1666,36 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_prev(&mut self) {
-        if self.active_len() == 0 {
-            return;
+        if self.back_focused() {
+            return; // already at the top of the panel
         }
+        // Arrow-up from the search row lands on the Back affordance above it.
         if self.search_focused() {
+            if self.back_button_rect.is_some() {
+                self.focus_back();
+            }
             return;
         }
-        // Arrow-up past the first session lands on the search row.
+        if self.active_len() == 0 {
+            // No selectable rows, but a Back affordance may still be reachable
+            // (e.g. a chat with no sub-agent branches).
+            if self.back_button_rect.is_some() {
+                self.focus_back();
+            }
+            return;
+        }
+        // Arrow-up past the first row lands on the search row (home mode) or
+        // the Back affordance (chat mode).
         match self.step_selectable(self.selected, false) {
             Some(prev) => self.move_selection_to(prev),
             None if matches!(self.mode, SidePanelMode::Sessions) => {
                 self.focus_search();
             }
-            None => {}
+            None => {
+                if self.back_button_rect.is_some() {
+                    self.focus_back();
+                }
+            }
         }
     }
 
@@ -1575,8 +1704,10 @@ impl NeoismAgentSidePanel {
         if len == 0 {
             return;
         }
-        // A click selects a real row, so it also leaves the search field.
+        // A click selects a real row, so it also leaves the search field and
+        // the Back affordance.
         self.search_focused = false;
+        self.back_focused = false;
         // A click may land on a header row; snap to the nearest session.
         let row = self.nearest_selectable(row.min(len - 1)).unwrap_or(0);
         self.move_selection_to(row);

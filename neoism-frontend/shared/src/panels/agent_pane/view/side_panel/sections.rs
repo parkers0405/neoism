@@ -1,6 +1,6 @@
 use super::draw::{
     draw_status_dot_text, draw_subagent_spinner, intersect_rect,
-    push_provider_icon_clipped,
+    push_provider_icon_clipped, render_back_button, set_back_cursor_if_focused,
 };
 use super::*;
 
@@ -226,10 +226,29 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     // disappears on the right timer even if the server is quiet.
     pane.side_panel_mut().prune_expired_completed_subagents();
 
-    let [cx, cy, cw, ch] = content_rect;
+    let [cx, cy_full, cw, ch_full] = content_rect;
     let pad_x = ROW_PADDING_X * s;
     let text_x = cx + pad_x;
     let text_w = (cw - pad_x * 2.0).max(0.0);
+    let full_clip = [cx, cy_full, cw, ch_full];
+
+    // Sticky "← Back" affordance at the very top — reveals the recent
+    // sessions list without ending this chat. Drawn against the full
+    // content rect so it never scrolls; the session body below is carved
+    // out under it and clips there.
+    let back_bottom = render_back_button(
+        sugarloaf,
+        pane,
+        content_rect,
+        theme,
+        s,
+        full_clip,
+        occlusion_rects,
+        inner_radius,
+        false,
+    );
+    let cy = back_bottom;
+    let ch = (ch_full - (back_bottom - cy_full)).max(0.0);
     let clip = [cx, cy, cw, ch];
 
     // The whole chat-mode content column scrolls as one viewport so
@@ -408,6 +427,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
         y = list_top + list_h;
     } else {
         pane.side_panel_mut().clear_row_hit_rect();
+        pane.side_panel_mut().clear_selected_cursor_rect();
     }
 
     // --- Tasks ---
@@ -439,6 +459,10 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     let content_height = (y + scroll) - content_top + 14.0 * s;
     let overflow = (content_height - ch).max(0.0);
     pane.side_panel_mut().set_content_scroll_max(overflow);
+
+    // Park the trail cursor on the Back affordance last, so it wins over
+    // the branch-row cursor the section above may have set.
+    set_back_cursor_if_focused(pane, s);
 }
 
 /// Render the Goal section: a "GOAL" header, a status badge
@@ -727,7 +751,8 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
     // how file_tree keeps its cursor visible. The branch row's offset
     // from the content top is fixed; we only need the scroll to land it
     // between the viewport edges.
-    if focused && selected < rows_len {
+    let back_focused = pane.side_panel().back_focused();
+    if focused && !back_focused && selected < rows_len {
         let row_offset_in_list = selected as f32 * row_h;
         // Row top/bottom in *unscrolled* content space, relative to the
         // list's scrolled origin: convert back to absolute by adding the
@@ -747,7 +772,7 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
         }
     }
 
-    if selected < rows_len {
+    if selected < rows_len && !back_focused {
         let row_ix = selected as isize;
         let row_y = list_rect[1] + row_ix as f32 * row_h + cursor_offset;
         let row_bottom = row_y + row_h;

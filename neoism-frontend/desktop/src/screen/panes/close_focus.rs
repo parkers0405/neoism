@@ -726,6 +726,12 @@ impl Screen<'_> {
                 && !self.renderer.notes_sidebar.is_focused()
             {
                 agent.side_panel_mut().set_focused(true);
+                // With no list rows worth a cursor (a chat with no branch
+                // rows), land straight on the "← Back" affordance so the
+                // caret has somewhere to sit.
+                if agent.side_panel().only_back_focusable() {
+                    agent.side_panel_mut().focus_back();
+                }
                 self.renderer.file_tree.set_focused(false);
                 self.mark_dirty();
                 return true;

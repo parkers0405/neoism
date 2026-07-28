@@ -610,6 +610,26 @@ fn measure_markdown_inline_width(
         .sum()
 }
 
+/// The visible text the renderer actually paints for an inline line: the
+/// style markers (`**`, `~~`, `` ` ``, `[]()`) are dropped, link labels and
+/// inline-code content are kept without their delimiters. Selection + copy
+/// run against this rather than the raw Markdown source, so the clipboard
+/// gets `bold` not `**bold**` and the highlight reserves no phantom width for
+/// markers that are never drawn.
+fn rendered_inline_text(line: &str) -> String {
+    parsed_markdown_inline_line(line)
+        .iter()
+        .map(|segment| match segment {
+            MarkdownInlineSegment::Text(text) => text.as_str(),
+            MarkdownInlineSegment::Bold(text) => text.as_str(),
+            MarkdownInlineSegment::Strike(text) => text.as_str(),
+            MarkdownInlineSegment::Code { text, .. } => text.as_str(),
+            MarkdownInlineSegment::MarkdownLink { label, .. } => label.as_str(),
+            MarkdownInlineSegment::PlainToken { text, .. } => text.as_str(),
+        })
+        .collect()
+}
+
 pub fn layout_assistant_markdown_cached<P: AgentMarkdownPane>(
     sugarloaf: &mut Sugarloaf,
     pane: &P,
@@ -1919,9 +1939,15 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
     occlusion_rects: &[[f32; 4]],
 ) {
     if !suppress_interactions {
-        let line_w = measure_text_cached(sugarloaf, line, opts).max(12.0);
+        // Register the RENDERED text and its drawn width — not the raw
+        // Markdown `line` — so the selection geometry matches the glyphs we
+        // actually paint (per-segment advances below) and the copied string
+        // carries no `**`/`` ` ``/`[]()` markers. `measure_markdown_inline_width`
+        // sums the same per-segment widths the draw loop advances `x` by.
+        let rendered = rendered_inline_text(line);
+        let line_w = measure_markdown_inline_width(sugarloaf, line, opts).max(12.0);
         let line_index = pane
-            .register_selectable_line(line, [x, y - 3.0, line_w, opts.font_size + 8.0]);
+            .register_selectable_line(&rendered, [x, y - 3.0, line_w, opts.font_size + 8.0]);
         if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(line_index) {
             // Sub-line highlight follows the drag end-points so the user can
             // grab a single word instead of being forced into a full row.

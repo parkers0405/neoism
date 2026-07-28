@@ -53,6 +53,7 @@
 
 mod buffer;
 mod presence;
+mod presence_avatar;
 mod remote_presence;
 
 pub use buffer::{
@@ -65,8 +66,9 @@ pub use presence::{
     PresenceGridPoint, PresenceGridSize, PresenceOffset, PresencePeerId,
     PresenceRenderPeer, PresenceRenderSelection, PresenceUpdate,
 };
+pub use presence_avatar::{avatar_cells, AvatarCell, AvatarProfile};
 pub use remote_presence::{
     peer_presence_from_wire, peer_presence_to_wire, presence_buffer_id_for_path,
-    PresencePublisher, RemotePresenceStore, PRESENCE_HEARTBEAT_INTERVAL_MS,
-    PRESENCE_PUBLISH_MIN_INTERVAL_MS,
+    PresenceAvatarPeer, PresencePublisher, RemotePresenceStore,
+    PRESENCE_HEARTBEAT_INTERVAL_MS, PRESENCE_PUBLISH_MIN_INTERVAL_MS,
 };

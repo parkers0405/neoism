@@ -254,6 +254,16 @@ impl NeoismAgentPane {
         true
     }
 
+    /// Whether the side-panel's selected home-mode session is the one
+    /// already open. Used so that picking the current (green-dotted)
+    /// session from the "← Back" recent list returns to the live chat.
+    pub fn selected_side_panel_session_is_current(&self) -> bool {
+        self.side_panel
+            .selected_session()
+            .map(|entry| Some(entry.id.as_str()) == self.session_id.as_deref())
+            .unwrap_or(false)
+    }
+
     /// Background refresh of the sub-agent / sibling-session list for
     /// the active session. Mirrors `maybe_refresh_side_panel_sessions`.
     pub fn maybe_refresh_side_panel_subagents(&mut self) {

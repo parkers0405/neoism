@@ -64,6 +64,40 @@ pub(crate) fn draw_rounded_rect_clipped(
     );
 }
 
+/// Draw a peer's deterministic pixel-plasma presence orb (the Rust port
+/// of Synapse's member orb) as a grid of solid quads clipped to `clip`.
+/// `seed` is the peer's stable display name, so the same host always
+/// wears the same round orb on every device. Cells outside the unit
+/// circle are dropped by the generator, so the round silhouette comes
+/// for free — no mask. Pass `t = 0.6` for a still, still-unique frame;
+/// surfaces already repainting continuously for presence can pass a live
+/// clock to animate the plasma.
+pub(crate) fn draw_presence_orb_clipped(
+    sugarloaf: &mut Sugarloaf,
+    clip: [f32; 4],
+    seed: &str,
+    ox: f32,
+    oy: f32,
+    size: f32,
+    t: f32,
+    depth: f32,
+    order: u8,
+) {
+    crate::editor::crdt::avatar_cells(seed, ox, oy, size, t, |cell| {
+        draw_rect_clipped(
+            sugarloaf,
+            clip,
+            cell.rect[0],
+            cell.rect[1],
+            cell.rect[2],
+            cell.rect[3],
+            cell.color,
+            depth,
+            order,
+        );
+    });
+}
+
 pub(super) fn draw_if_visible(
     sugarloaf: &mut Sugarloaf,
     x: f32,

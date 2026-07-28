@@ -226,6 +226,122 @@ fn draw_session_loading_skeleton(
     }
 }
 
+/// Draw the "← Back" affordance at the top of the panel. Present only when
+/// a live conversation is open — from chat mode it reveals the recent list
+/// ("Back"); from the recent list it returns to the live chat ("Back to
+/// chat"). Caches its screen rect for hit-testing and returns the `y` below
+/// the divider. Drawn in the app UI font (the "←" is a glyph in that font),
+/// matching the panel's row chrome.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_back_button(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut impl AgentSidePanelPane,
+    content_rect: [f32; 4],
+    theme: &IdeTheme,
+    s: f32,
+    clip: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+    inner_radius: f32,
+    to_chat: bool,
+) -> f32 {
+    let [cx, cy, cw, _ch] = content_rect;
+    let pad_x = ROW_PADDING_X * s;
+    let text_x = cx + pad_x;
+    let row_h = (FONT_SIZE + 12.0) * s;
+    let row_top = cy + 6.0 * s;
+    let row_rect = [cx, row_top, cw, row_h];
+    pane.side_panel_mut().set_back_button_rect(row_rect);
+
+    let focused =
+        pane.side_panel().is_focused() && pane.side_panel().back_focused();
+    if focused {
+        sugarloaf.quad(
+            None,
+            cx,
+            row_top,
+            cw,
+            row_h,
+            theme.f32_alpha(theme.surface, 0.55),
+            [inner_radius, inner_radius, inner_radius, inner_radius],
+            DEPTH,
+            ORDER_PANEL + 1,
+        );
+    }
+
+    // Arrow glyph in the accent as a subtle affordance cue, label in fg —
+    // both in the default UI face like the panel's other row text.
+    let text_y = row_top + (row_h - FONT_SIZE * s) / 2.0;
+    let arrow_opts = DrawOpts {
+        font_size: FONT_SIZE * s,
+        color: theme.u8(theme.accent),
+        bold: true,
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    let label_opts = DrawOpts {
+        font_size: FONT_SIZE * s,
+        color: theme.u8(theme.fg),
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    let arrow = "\u{2190}"; // ←
+    draw_text_with_occlusion(
+        sugarloaf,
+        text_x,
+        text_y,
+        arrow,
+        &arrow_opts,
+        occlusion_rects,
+    );
+    let arrow_w = sugarloaf.text_mut().measure(arrow, &arrow_opts);
+    let label = if to_chat { "Back to chat" } else { "Back" };
+    draw_text_with_occlusion(
+        sugarloaf,
+        text_x + arrow_w + 8.0 * s,
+        text_y,
+        label,
+        &label_opts,
+        occlusion_rects,
+    );
+
+    // Divider under the affordance, mirroring the home search-row rule.
+    sugarloaf.rect(
+        None,
+        text_x,
+        row_top + row_h,
+        (cw - pad_x * 2.0).max(0.0),
+        (1.0 * s).max(1.0),
+        theme.f32_alpha(theme.border, 0.6),
+        DEPTH,
+        ORDER_PANEL,
+    );
+
+    row_top + row_h + 8.0 * s
+}
+
+/// Park the trail cursor on the Back affordance when it owns focus. Called
+/// once per frame *after* the row/branch cursor logic so it wins cleanly
+/// (the two states are mutually exclusive, but the row code runs a
+/// `clear_selected_cursor_rect` we must land after).
+pub(crate) fn set_back_cursor_if_focused(
+    pane: &mut impl AgentSidePanelPane,
+    s: f32,
+) {
+    if !(pane.side_panel().is_focused() && pane.side_panel().back_focused()) {
+        return;
+    }
+    let Some([bx, by, _bw, bh]) = pane.side_panel().back_button_rect() else {
+        return;
+    };
+    let font_size = FONT_SIZE * s;
+    let cursor_w = (font_size * 0.6).max(2.0);
+    let cursor_x = bx + (ROW_PADDING_X * s - cursor_w).max(0.0);
+    let cursor_h = (bh - 6.0 * s).max(font_size).min(bh);
+    let cursor_y = by + (bh - cursor_h) / 2.0;
+    pane.side_panel_mut()
+        .set_selected_cursor_rect([cursor_x, cursor_y, cursor_w, cursor_h]);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_sessions_list(
     sugarloaf: &mut Sugarloaf,
@@ -246,7 +362,29 @@ pub(crate) fn render_sessions_list(
     let text_w = (cw - pad_x * 2.0).max(0.0);
     let clip = [cx, cy, cw, ch];
 
+    // "← Back to chat" affordance — drawn only while a live conversation is
+    // open (the home-override peek). A genuine no-conversation home has no
+    // chat to return to, so no button is drawn and the cached rect is
+    // cleared so the focus model doesn't strand a cursor on it.
     let mut y = cy + 14.0 * s;
+    if pane.has_conversation() {
+        y = render_back_button(
+            sugarloaf,
+            pane,
+            content_rect,
+            theme,
+            s,
+            clip,
+            occlusion_rects,
+            inner_radius,
+            true,
+        ) + 4.0 * s;
+    } else {
+        pane.side_panel_mut().clear_back_button_rect();
+    }
+    // Park the trail cursor on the Back affordance now (before any early
+    // return below), so it survives paths that skip the row-cursor block.
+    set_back_cursor_if_focused(pane, s);
     y = render_directory_section(
         sugarloaf,
         pane,
@@ -451,13 +589,18 @@ pub(crate) fn render_sessions_list(
     let list_bottom = list_rect[1] + list_rect[3];
 
     // Selected-row background (the trail cursor handles the focus
-    // signal — same model as file_tree, see screen/render).
-    pane.side_panel_mut().clear_selected_cursor_rect();
+    // signal — same model as file_tree, see screen/render). Skip the
+    // clear when the Back affordance owns the cursor so the rect set right
+    // after the button was drawn survives.
+    let back_focused = pane.side_panel().back_focused();
+    if !back_focused {
+        pane.side_panel_mut().clear_selected_cursor_rect();
+    }
     let sessions_len = pane.side_panel().sessions().len();
-    if search_focused {
-        // Cursor is on the search row — the moving text caret drawn in the
-        // search block above is the cursor, so skip the session-row
-        // highlight + left-gutter block cursor entirely.
+    if search_focused || back_focused {
+        // Cursor is on the search row or the Back affordance — the caret /
+        // back cursor is drawn elsewhere, so skip the session-row highlight
+        // + left-gutter block cursor entirely.
     } else if selected < sessions_len {
         let row_ix = selected as isize - render_top as isize;
         let row_y = list_rect[1] + row_ix as f32 * row_h - frac + cursor_offset;
@@ -564,17 +707,22 @@ pub(crate) fn render_sessions_list(
         }
 
         let is_current = current_id.as_deref() == Some(entry.id.as_str());
+        let running = session_entry_is_running(entry);
 
-        // Colored dot for the active session — a clear live-status signal.
-        if is_current {
+        // Green status dot in the left gutter: an actively-running session
+        // (green + a brighter halo to read as "live") or the session
+        // currently open (green, softer halo). Both are clear live-status
+        // signals; running takes the stronger halo.
+        if running || is_current {
             let dot_y = row_y + (row_h - dot_diameter) / 2.0;
+            let halo_alpha = if running { 0.5 } else { 0.35 };
             draw_status_dot_text(
                 sugarloaf,
                 text_x,
                 dot_y,
                 dot_diameter,
                 theme.u8(theme.green),
-                Some((theme.u8(theme.green), 0.35)),
+                Some((theme.u8(theme.green), halo_alpha)),
                 list_rect,
                 occlusion_rects,
                 s,

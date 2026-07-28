@@ -837,12 +837,23 @@ pub fn render(
         let name_w = sugarloaf.text_mut().measure(&cursor.name, &name_opts);
         let tag_h = name_opts.font_size + 4.0;
         let tag_y = (peer_caret_y - tag_h).max(grid_y);
+        // Notion-style presence chip: the peer's pixel-plasma orb, then
+        // their name flag. Orb seed is the display name, so the same host
+        // always wears the same orb. Still frame (t = 0.6).
+        let orb_size = tag_h;
+        let orb_gap = 2.0;
+        let flag_x = px + orb_size + orb_gap;
         {
-            use crate::editor::markdown::render::draw::draw_rounded_rect_clipped;
+            use crate::editor::markdown::render::draw::{
+                draw_presence_orb_clipped, draw_rounded_rect_clipped,
+            };
+            draw_presence_orb_clipped(
+                sugarloaf, clip, &cursor.name, px, tag_y, orb_size, 0.6, DEPTH, ORDER_TEXT,
+            );
             draw_rounded_rect_clipped(
                 sugarloaf,
                 clip,
-                px,
+                flag_x,
                 tag_y,
                 name_w + 8.0,
                 tag_h,
@@ -854,7 +865,7 @@ pub fn render(
         }
         sugarloaf
             .text_mut()
-            .draw(px + 4.0, tag_y + 2.0, &cursor.name, &name_opts);
+            .draw(flag_x + 4.0, tag_y + 2.0, &cursor.name, &name_opts);
     }
 
     // Multi-cursor extra carets (+ their pending gb selections). The

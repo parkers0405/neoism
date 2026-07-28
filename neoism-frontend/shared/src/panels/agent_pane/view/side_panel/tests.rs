@@ -1,4 +1,5 @@
 use super::*;
+use crate::panels::agent_pane::state::side_panel::SidePanelMode;
 
 struct TestPane {
     side_panel: NeoismAgentSidePanel,
@@ -320,6 +321,94 @@ fn unversioned_poll_none_never_clears_a_live_goal() {
     // A versioned clear (newer) does clear it.
     panel.set_session_goal(None, 6);
     assert!(panel.session_goal().is_none());
+}
+
+#[test]
+fn home_override_toggles_without_ending_chat() {
+    // The "← Back" affordance flips the sessions view on/off; it never
+    // touches the conversation, so this is pure view-state.
+    let mut panel = NeoismAgentSidePanel::default();
+    assert!(!panel.show_home_override());
+    panel.toggle_home_override();
+    assert!(panel.show_home_override());
+    panel.toggle_home_override();
+    assert!(!panel.show_home_override());
+    panel.set_show_home_override(true);
+    assert!(panel.show_home_override());
+}
+
+#[test]
+fn running_dot_predicate_only_lights_active_sessions() {
+    let running = NeoismAgentSessionEntry::new("a", "a", "")
+        .with_runtime_status(Some("running".to_string()));
+    assert!(session_entry_is_running(&running));
+
+    let busy = NeoismAgentSessionEntry::new("b", "b", "")
+        .with_runtime_status(Some("busy".to_string()));
+    assert!(session_entry_is_running(&busy));
+
+    let done = NeoismAgentSessionEntry::new("c", "c", "")
+        .with_runtime_status(Some("completed".to_string()));
+    assert!(!session_entry_is_running(&done));
+
+    let blocked = NeoismAgentSessionEntry::new("d", "d", "")
+        .with_runtime_status(Some("blocked".to_string()));
+    assert!(!session_entry_is_running(&blocked));
+
+    let idle = NeoismAgentSessionEntry::new("e", "e", "");
+    assert!(!session_entry_is_running(&idle));
+}
+
+#[test]
+fn back_affordance_joins_the_focus_chain() {
+    // Arrow-up walks to the "← Back" affordance at the top of the panel,
+    // and arrow-down walks back off it — mirroring the search-row hop.
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_mode(SidePanelMode::Subagents);
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("main", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "child", "explore")
+            .with_runtime_status(Some("running".to_string())),
+    ]);
+    // Not focusable / not back-reachable until the button is actually drawn.
+    assert!(!panel.back_focused());
+    panel.set_back_button_rect([0.0, 0.0, 100.0, 20.0]);
+    assert!(panel.focusable());
+
+    // Cursor starts on the main row; arrow-up reaches Back.
+    panel.select_prev();
+    assert!(panel.back_focused());
+
+    // Arrow-down drops back onto the first branch row.
+    panel.select_next();
+    assert!(!panel.back_focused());
+    assert_eq!(panel.selected_index(), 0);
+
+    // Dropping focus clears the Back cursor, and clearing the button rect
+    // makes it un-reachable again.
+    panel.focus_back();
+    assert!(panel.back_focused());
+    panel.set_focused(false);
+    assert!(!panel.back_focused());
+    panel.clear_back_button_rect();
+    panel.focus_back();
+    assert!(!panel.back_focused());
+}
+
+#[test]
+fn only_back_focusable_when_no_list_rows() {
+    // A chat with no real branches (just the main session) is focusable
+    // solely via the Back affordance.
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_mode(SidePanelMode::Subagents);
+    panel.set_subagents(vec![NeoismAgentSessionEntry::new(
+        "main",
+        "main session",
+        "return",
+    )]);
+    panel.set_back_button_rect([0.0, 0.0, 100.0, 20.0]);
+    assert!(panel.only_back_focusable());
+    assert!(panel.focusable());
 }
 
 #[test]

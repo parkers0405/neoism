@@ -72,6 +72,36 @@ impl Screen<'_> {
         changed
     }
 
+    /// Rebuild the file tree's `path -> peers` presence index from the
+    /// current presence store. EVENT-DRIVEN: called only when presence
+    /// actually changes (from `apply_daemon_crdt_message`) or when the
+    /// store is reset on a server switch — never per frame or on a timer.
+    /// The per-row avatar draw then reads the cached index with a plain
+    /// map lookup, so it costs nothing when nothing changes.
+    pub(crate) fn rebuild_file_tree_presence_index(&mut self) {
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+        let by_buffer = self.remote_presence.avatar_peers_by_buffer();
+        // Fast path: nobody is sharing and the tree already has no index
+        // — skip the allocation churn entirely.
+        if by_buffer.is_empty() && !self.renderer.file_tree.has_presence() {
+            return;
+        }
+        let mut index: HashMap<
+            PathBuf,
+            Vec<neoism_ui::editor::crdt::PresenceAvatarPeer>,
+        > = HashMap::new();
+        for (buffer_id, peers) in by_buffer {
+            // Presence buffer ids are `file://<abs path>`; map back to the
+            // path a tree row carries. Virtual buffers (notebook render
+            // surfaces, etc.) own no row and are skipped.
+            if let Some(path) = buffer_id.strip_prefix("file://") {
+                index.insert(PathBuf::from(path), peers);
+            }
+        }
+        self.renderer.file_tree.set_presence_index(index);
+    }
+
     /// THE renderer accessor: remote peer cursors for the file at
     /// `path`, already excluding the local peer. For notebook panes, use
     /// `buffer_id_for_notebook_render_path` and query the store directly.

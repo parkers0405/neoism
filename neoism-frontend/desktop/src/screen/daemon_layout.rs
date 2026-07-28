@@ -161,6 +161,9 @@ impl Screen<'_> {
         self.pending_remote_file_ops.clear();
         self.pending_remote_git_status.clear();
         self.renderer.file_tree.set_entries(Vec::new());
+        // Presence was just reset — drop any stale path->peers index so
+        // the tree doesn't paint ghost avatars for the old server.
+        self.rebuild_file_tree_presence_index();
         self.renderer.git_diff_panel.reset_for_server_switch();
         // Tab strips and the per-workspace caches are server-owned: every
         // WorkspaceKey in them names a workspace on the daemon being left,

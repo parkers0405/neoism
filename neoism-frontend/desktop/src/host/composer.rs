@@ -462,12 +462,16 @@ impl Renderer {
             self.path_executables = Some(build_path_executables());
         }
         let path_cache = self.path_executables.as_ref().expect("just populated");
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             let current = context_manager.current_mut();
-            if let Some(shell_kind) =
-                crate::terminal::blocks::detect_foreground_shell(*current.main_fd)
-            {
+            #[cfg(target_os = "linux")]
+            let detected =
+                crate::terminal::blocks::detect_foreground_shell(*current.main_fd);
+            #[cfg(target_os = "windows")]
+            let detected =
+                crate::terminal::blocks::detect_foreground_shell(current.shell_pid);
+            if let Some(shell_kind) = detected {
                 if current.terminal_shell_kind != shell_kind {
                     current
                         .terminal_input

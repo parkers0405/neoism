@@ -384,6 +384,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn build_http_post_frames_headers_body_and_token() {
         std::env::set_var("NEOISM_DAEMON_TOKEN", "tok123");

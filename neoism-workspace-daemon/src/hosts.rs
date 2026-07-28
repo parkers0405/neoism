@@ -228,6 +228,18 @@ fn persist(inner: &StoreInner) -> std::io::Result<()> {
     }
     {
         let mut f: File = opts.open(&tmp)?;
+        // Windows counterpart of the 0o600 open mode: owner+SYSTEM-only DACL
+        // before the raw bearer tokens land in the file; the rename carries
+        // it to the final path. Warn-and-go — ACL-less filesystems must not
+        // fail the write.
+        #[cfg(windows)]
+        if let Err(error) = crate::windows_acl::harden_owner_only(&tmp) {
+            tracing::warn!(
+                error = %error,
+                path = %tmp.display(),
+                "could not tighten paired-hosts file ACL; continuing",
+            );
+        }
         f.write_all(&body)?;
         f.flush()?;
     }

@@ -250,8 +250,7 @@ pub fn render(
         while remaining > 0.0 {
             let step = remaining.min(MAX_SUBSTEP);
             let delta = pane.target_scroll_y - pane.scroll_y;
-            let accel =
-                OMEGA * OMEGA * delta - 2.0 * OMEGA * pane.scroll_velocity_px_s;
+            let accel = OMEGA * OMEGA * delta - 2.0 * OMEGA * pane.scroll_velocity_px_s;
             pane.scroll_velocity_px_s += accel * step;
             pane.scroll_y += pane.scroll_velocity_px_s * step;
             remaining -= step;
@@ -815,7 +814,16 @@ pub fn render(
             ]
         };
         let peer_caret_y = ry + ((row_h - caret_h) * 0.5).max(0.0).round();
-        sugarloaf.rect(None, px, peer_caret_y, 2.0, caret_h, color, DEPTH, ORDER_TEXT);
+        sugarloaf.rect(
+            None,
+            px,
+            peer_caret_y,
+            2.0,
+            caret_h,
+            color,
+            DEPTH,
+            ORDER_TEXT,
+        );
         // Name flag riding the caret top, like every co-editing UI.
         if cursor.name.is_empty() {
             continue;
@@ -881,8 +889,9 @@ pub fn render(
                     if ss >= ee {
                         continue;
                     }
-                    let start_col = display_col_for_byte(line_text, ss, TAB_DISPLAY_WIDTH)
-                        .saturating_sub(rv.base_col);
+                    let start_col =
+                        display_col_for_byte(line_text, ss, TAB_DISPLAY_WIDTH)
+                            .saturating_sub(rv.base_col);
                     let end_col = display_col_for_byte(line_text, ee, TAB_DISPLAY_WIDTH)
                         .saturating_sub(rv.base_col);
                     if let Some((bx, bw)) = clamp_band(
@@ -911,8 +920,9 @@ pub fn render(
             let ecaret_y = ry + ((row_h - caret_h) * 0.5).max(0.0).round();
             match pane.buffer.mode {
                 CodeMode::Insert => {
-                    sugarloaf
-                        .rect(None, px, ecaret_y, 2.0, caret_h, bar_color, DEPTH, ORDER_TEXT);
+                    sugarloaf.rect(
+                        None, px, ecaret_y, 2.0, caret_h, bar_color, DEPTH, ORDER_TEXT,
+                    );
                 }
                 CodeMode::Normal | CodeMode::Visual => {
                     sugarloaf.rect(

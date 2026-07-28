@@ -66,14 +66,8 @@ impl<'a> neoism_ui::session_layout::ContextGridLike for ContextGridDescriptorAda
             .and_then(|node| self.0.contexts().get(&node))
             .map(|item| {
                 let context = item.context();
-                // Windows contexts have no shell_pid field; 0 is the same
-                // "no process to signal" sentinel editor panes use.
-                #[cfg(not(target_os = "windows"))]
-                let shell_pid = context.shell_pid;
-                #[cfg(target_os = "windows")]
-                let shell_pid = 0u32;
                 (
-                    shell_pid,
+                    context.shell_pid,
                     context.code.is_none()
                         && context.markdown.is_none()
                         && context.neoism_agent.is_none()

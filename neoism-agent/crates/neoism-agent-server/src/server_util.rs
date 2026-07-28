@@ -33,17 +33,49 @@ pub(crate) fn now_millis() -> u64 {
 }
 
 pub(crate) fn default_state_dir() -> String {
-    std::env::var("XDG_STATE_HOME")
-        .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.local/state")))
-        .map(|base| format!("{base}/neoism"))
-        .unwrap_or_else(|_| ".neoism/state".to_string())
+    #[cfg(windows)]
+    {
+        return windows_neoism_dir("state", ".neoism/state");
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("XDG_STATE_HOME")
+            .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.local/state")))
+            .map(|base| format!("{base}/neoism"))
+            .unwrap_or_else(|_| ".neoism/state".to_string())
+    }
 }
 
 pub(crate) fn default_cache_dir() -> String {
-    std::env::var("XDG_CACHE_HOME")
-        .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.cache")))
-        .map(|base| format!("{base}/neoism"))
-        .unwrap_or_else(|_| ".neoism/cache".to_string())
+    #[cfg(windows)]
+    {
+        return windows_neoism_dir("cache", ".neoism/cache");
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("XDG_CACHE_HOME")
+            .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.cache")))
+            .map(|base| format!("{base}/neoism"))
+            .unwrap_or_else(|_| ".neoism/cache".to_string())
+    }
+}
+
+/// Windows has no XDG split: everything nests under the same
+/// `%USERPROFILE%\AppData\Local\neoism` root the terminal resolves via
+/// `config_dir_path()` (neoism-backend/src/config/mod.rs — identical
+/// construction, so terminal and agent share one config.json), with the
+/// state/cache trees as subdirectories standing in for the separate XDG
+/// roots used on unix.
+#[cfg(windows)]
+fn windows_neoism_dir(subdir: &str, fallback: &str) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return fallback.to_string();
+    };
+    let mut dir = home.join("AppData").join("Local").join("neoism");
+    if !subdir.is_empty() {
+        dir = dir.join(subdir);
+    }
+    dir.display().to_string()
 }
 
 pub(crate) fn default_config_dir() -> String {
@@ -60,10 +92,17 @@ pub(crate) fn default_config_dir() -> String {
             return dir;
         }
     }
-    std::env::var("XDG_CONFIG_HOME")
-        .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.config")))
-        .map(|base| format!("{base}/neoism"))
-        .unwrap_or_else(|_| ".neoism/config".to_string())
+    #[cfg(windows)]
+    {
+        return windows_neoism_dir("", ".neoism/config");
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("XDG_CONFIG_HOME")
+            .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.config")))
+            .map(|base| format!("{base}/neoism"))
+            .unwrap_or_else(|_| ".neoism/config".to_string())
+    }
 }
 
 pub(crate) fn slug() -> String {

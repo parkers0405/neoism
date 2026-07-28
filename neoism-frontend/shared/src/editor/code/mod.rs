@@ -18,15 +18,15 @@
 //!   terminal cells. The feed lands with the syntax layer.
 
 pub mod buffer;
-pub mod feed;
 pub mod doc_sync;
+pub mod feed;
 pub mod gitdiff;
 pub mod highlight;
 pub mod history;
 pub mod input;
 pub mod layout;
-pub mod outline;
 pub mod multicursor;
+pub mod outline;
 pub mod render;
 pub mod substitute;
 #[cfg(test)]

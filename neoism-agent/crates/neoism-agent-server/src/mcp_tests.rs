@@ -85,10 +85,9 @@ async fn auth_start_builds_authorization_url_and_persists_transient_fields() {
     )
     .unwrap();
     let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    let directory = root.to_str().unwrap();
 
-    let response = auth_start(root.to_str().unwrap(), "remote", &store)
-        .await
-        .unwrap();
+    let response = auth_start(directory, "remote", &store).await.unwrap();
 
     assert!(response
         .authorization_url
@@ -104,6 +103,7 @@ async fn auth_start_builds_authorization_url_and_persists_transient_fields() {
         Some(response.oauth_state.as_str())
     );
     assert_eq!(entry.server_url.as_deref(), Some("https://example.com/mcp"));
+    assert_eq!(entry.oauth_directory.as_deref(), Some(directory));
     assert!(entry.code_verifier.is_some());
     let _ = fs::remove_dir_all(root);
 }

@@ -36,13 +36,26 @@ pub fn create_window_builder(
     #[allow(unused_variables)] tab_id: Option<&str>,
     #[allow(unused_variables)] app_id: Option<&str>,
 ) -> WindowAttributes {
-    let image_icon = image_rs::load_from_memory(LOGO_ICON).unwrap();
-    let icon = Icon::from_rgba(
-        image_icon.to_rgba8().into_raw(),
-        image_icon.width(),
-        image_icon.height(),
-    )
-    .unwrap();
+    // On Windows, prefer the multi-size icon resource winres embeds in
+    // the exe (ordinal 1): Windows then picks the hand-tuned 16/24/32px
+    // frames for the title bar and taskbar instead of downscaling the
+    // 512px PNG. Dev/cross builds without the resource fall back to it.
+    #[cfg(windows)]
+    let resource_icon = {
+        use neoism_window::platform::windows::IconExtWindows;
+        Icon::from_resource(1, None).ok()
+    };
+    #[cfg(not(windows))]
+    let resource_icon: Option<Icon> = None;
+    let icon = resource_icon.unwrap_or_else(|| {
+        let image_icon = image_rs::load_from_memory(LOGO_ICON).unwrap();
+        Icon::from_rgba(
+            image_icon.to_rgba8().into_raw(),
+            image_icon.width(),
+            image_icon.height(),
+        )
+        .unwrap()
+    });
 
     let mut window_builder = WindowAttributes::default()
         .with_title(title)

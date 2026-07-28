@@ -185,9 +185,8 @@ impl PtySession {
         }
     }
 
-    /// PID of the child shell (Unix only). Remote sessions report `0`
-    /// (the process lives in the daemon, possibly on another machine).
-    #[cfg(unix)]
+    /// PID of the child shell. Remote sessions report `0` (the process
+    /// lives in the daemon, possibly on another machine).
     pub fn shell_pid(&self) -> u32 {
         match &self.inner {
             PtyInner::Local(pty) => pty.shell_pid(),

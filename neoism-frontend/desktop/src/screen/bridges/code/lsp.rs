@@ -545,8 +545,7 @@ fn apply_edits_on_disk(
 /// = fetched and absent (untracked / not a repo); missing key = not
 /// fetched yet. Filled by a spawned `git show` thread; the UI thread
 /// only reads.
-type GitBaselineStore =
-    Mutex<HashMap<PathBuf, Option<std::sync::Arc<Vec<String>>>>>;
+type GitBaselineStore = Mutex<HashMap<PathBuf, Option<std::sync::Arc<Vec<String>>>>>;
 
 fn git_baseline_store() -> &'static GitBaselineStore {
     static STORE: OnceLock<GitBaselineStore> = OnceLock::new();
@@ -554,8 +553,7 @@ fn git_baseline_store() -> &'static GitBaselineStore {
 }
 
 fn git_baseline_inflight() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
-    static STORE: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
-        OnceLock::new();
+    static STORE: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
     STORE.get_or_init(Default::default)
 }
 
@@ -604,8 +602,7 @@ fn git_baseline(
                 if !output.status.success() {
                     return None;
                 }
-                let text =
-                    String::from_utf8_lossy(&output.stdout).replace('\r', "");
+                let text = String::from_utf8_lossy(&output.stdout).replace('\r', "");
                 let mut lines: Vec<String> =
                     text.split('\n').map(str::to_string).collect();
                 if text.ends_with('\n') {
@@ -729,8 +726,11 @@ fn fold_anchored_diagnostics(
         };
         // A delete spanning the range can leave the endpoints reversed;
         // normalize rather than dropping the diagnostic.
-        let ((start_line, start_col), (end_line, end_col)) =
-            if end < start { (end, start) } else { (start, end) };
+        let ((start_line, start_col), (end_line, end_col)) = if end < start {
+            (end, start)
+        } else {
+            (start, end)
+        };
         for line_ix in start_line..=end_line {
             let Some(line) = code.buffer.lines.get(line_ix) else {
                 break;
@@ -1820,12 +1820,10 @@ impl Screen<'_> {
         // Gated by its own key so it also runs on the FIRST frame of a
         // freshly opened pane (revision 0).
         {
-            static GIT_PASS_REV: OnceLock<Mutex<HashMap<PathBuf, u64>>> =
-                OnceLock::new();
+            static GIT_PASS_REV: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
             let revision = code.buffer.revision;
             let needs_pass = {
-                let mut map = match GIT_PASS_REV.get_or_init(Default::default).lock()
-                {
+                let mut map = match GIT_PASS_REV.get_or_init(Default::default).lock() {
                     Ok(map) => map,
                     Err(poisoned) => poisoned.into_inner(),
                 };
@@ -1854,10 +1852,11 @@ impl Screen<'_> {
                 }
                 match git_baseline(&file, &git_proxy, window_id) {
                     Some(baseline) => {
-                        code.git_marks = neoism_ui::editor::code::gitdiff::compute_git_marks(
-                            &baseline,
-                            &code.buffer.lines,
-                        );
+                        code.git_marks =
+                            neoism_ui::editor::code::gitdiff::compute_git_marks(
+                                &baseline,
+                                &code.buffer.lines,
+                            );
                     }
                     None => {
                         if !code.git_marks.is_empty() {
@@ -1919,7 +1918,8 @@ impl Screen<'_> {
                         let start_line = (range.start.line as usize).saturating_sub(1);
                         let end_line =
                             (range.end.line as usize).saturating_sub(1).max(start_line);
-                        let start_char = (range.start.character as usize).saturating_sub(1);
+                        let start_char =
+                            (range.start.character as usize).saturating_sub(1);
                         let end_char = (range.end.character as usize).saturating_sub(1);
                         // Pin the published range into the CRDT doc
                         // while the pane is bound: the squiggle then
@@ -1928,16 +1928,9 @@ impl Screen<'_> {
                         // stays put on inserts at the range edge).
                         if let Some(binding) = diag_binding {
                             if let (Some(start), Some(end)) = (
-                                binding.sticky_anchor_at_utf16(
-                                    start_line,
-                                    start_char,
-                                    true,
-                                ),
-                                binding.sticky_anchor_at_utf16(
-                                    end_line,
-                                    end_char,
-                                    false,
-                                ),
+                                binding
+                                    .sticky_anchor_at_utf16(start_line, start_char, true),
+                                binding.sticky_anchor_at_utf16(end_line, end_char, false),
                             ) {
                                 anchors.push(neoism_ui::editor::code::CodeDiagAnchor {
                                     start,
@@ -2008,9 +2001,7 @@ impl Screen<'_> {
             if let Some((line, col, revision, spans_empty)) = snapshot {
                 let ui = &mut self.renderer.code_lsp;
                 let moved = ui.occurrence_probe.as_ref().map_or(true, |probe| {
-                    probe.line != line
-                        || probe.col != col
-                        || probe.revision != revision
+                    probe.line != line || probe.col != col || probe.revision != revision
                 });
                 if moved {
                     ui.occurrence_probe = Some(CodeOccurrenceProbe {
@@ -2032,8 +2023,7 @@ impl Screen<'_> {
                 } else {
                     let due = ui.occurrence_probe.as_ref().is_some_and(|probe| {
                         !probe.requested
-                            && probe.since.elapsed().as_secs_f32()
-                                >= OCCURRENCE_IDLE_SECS
+                            && probe.since.elapsed().as_secs_f32() >= OCCURRENCE_IDLE_SECS
                     });
                     if due {
                         let seq = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
@@ -3427,10 +3417,9 @@ impl Screen<'_> {
             if let Some((offset, len)) = first_stop {
                 let before = &insert[..offset.min(insert.len())];
                 let line_delta = before.matches('\n').count();
-                let stop_line = (session.line as i64
-                    + line_delta as i64
-                    + import_line_shift)
-                    .max(0) as usize;
+                let stop_line =
+                    (session.line as i64 + line_delta as i64 + import_line_shift).max(0)
+                        as usize;
                 let stop_col = if line_delta == 0 {
                     start + before.len()
                 } else {
@@ -3438,7 +3427,8 @@ impl Screen<'_> {
                 };
                 code.buffer.set_cursor_position(stop_line, stop_col, false);
                 if len > 0 {
-                    code.buffer.set_cursor_position(stop_line, stop_col + len, true);
+                    code.buffer
+                        .set_cursor_position(stop_line, stop_col + len, true);
                 }
                 code.buffer.follow_cursor = true;
             }

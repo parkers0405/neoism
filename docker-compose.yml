@@ -131,13 +131,8 @@ services:
         # and must keep its host ownership.
         mkdir -p "$$home/state" "$$home/config" "$$home/data" "$$home/workspaces"
         chown "$$uid:$$gid" "$$home" "$$home/state" "$$home/config" "$$home/data" "$$home/workspaces"
-        # Co-hosted agent (background, same dropped identity, config +
-        # auth under the state volume's HOME). The daemon stays the
-        # container's foreground lifeline; if the agent dies, joined
-        # agent panes error until the container restarts.
         setpriv --reuid "$$uid" --regid "$$gid" --clear-groups \
-          env HOME="$$home" \
-          neoism-agent serve --port 4096 --hostname 0.0.0.0 &
+          env HOME="$$home" neoism-agent serve --hostname 0.0.0.0 --port 4096 &
         exec setpriv --reuid "$$uid" --regid "$$gid" --clear-groups \
           env HOME="$$home" \
               NEOISM_DAEMON_DATA_DIR="$$home/data" \

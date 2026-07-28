@@ -617,6 +617,17 @@ fn persist_tokens(path: &Path, tokens: &[PairingTokenEntry]) -> std::io::Result<
     }
     {
         let mut f = opts.open(&tmp)?;
+        // Windows counterpart of the 0o600 open mode: owner+SYSTEM-only DACL
+        // before any token lands in the file; the rename carries it to the
+        // final path. Warn-and-go — ACL-less filesystems must not fail this.
+        #[cfg(windows)]
+        if let Err(error) = crate::windows_acl::harden_owner_only(&tmp) {
+            tracing::warn!(
+                error = %error,
+                path = %tmp.display(),
+                "could not tighten pairing-token file ACL; continuing",
+            );
+        }
         writeln!(
             f,
             "# neoism pairing tokens — one JSON object per line. Treat as a secret."
@@ -643,6 +654,14 @@ fn ensure_config_dir(dir: &Path) -> std::io::Result<()> {
             perms.set_mode(0o700);
             let _ = fs::set_permissions(dir, perms);
         }
+    }
+    #[cfg(windows)]
+    if let Err(error) = crate::windows_acl::harden_owner_only(dir) {
+        tracing::warn!(
+            error = %error,
+            path = %dir.display(),
+            "could not tighten config dir ACL; continuing",
+        );
     }
     Ok(())
 }

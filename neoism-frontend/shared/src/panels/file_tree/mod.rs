@@ -78,6 +78,7 @@ pub(crate) const ROOT_TRANSITION_STAGGER_MS: f32 = 12.0;
 pub(crate) const SCROLL_OFF_ROWS: usize = 4;
 pub(crate) const LABEL_TRUNCATION_CACHE_MAX: usize = 2048;
 
+pub use drag::{FileDragState, FileDropOutcome};
 pub use git::{git_statuses_for, git_watch_paths_for, parse_git_status};
 pub use icons::{icon_for_file, workspace_root_icon};
 pub use policy::{
@@ -94,7 +95,6 @@ pub use scan::{
     apply_git_statuses, entries_from_dir_listing, normalize_path, same_entry_layout,
     scan_dir, scan_dir_result, scan_dir_with_open,
 };
-pub use drag::{FileDragState, FileDropOutcome};
 pub use state::FileTree;
 pub use types::{
     FileTreeGitRefreshRequest, FileTreeGitRefreshResult, GitStatus, GitWatchPaths,

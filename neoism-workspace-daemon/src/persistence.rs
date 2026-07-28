@@ -114,7 +114,9 @@ impl Snapshot {
 /// 2. `$NEOISM_STATE_DIR` (test override).
 /// 3. `$XDG_STATE_HOME/neoism/` if `XDG_STATE_HOME` is set.
 /// 4. `~/.local/state/neoism/` as the spec'd default fallback.
-/// 5. `./.neoism-state/` if we have neither `$HOME` nor XDG.
+/// 5. On Windows (no `$HOME`): `dirs::state_dir()` then
+///    `dirs::data_local_dir()` (`%LOCALAPPDATA%\neoism\`).
+/// 6. `./.neoism-state/` if all of the above fail.
 pub fn resolve_state_dir(explicit: Option<&Path>) -> PathBuf {
     if let Some(p) = explicit {
         return p.to_path_buf();
@@ -136,6 +138,12 @@ pub fn resolve_state_dir(explicit: Option<&Path>) -> PathBuf {
                 .join("state")
                 .join(STATE_SUBDIR);
         }
+    }
+    // Windows-only so a unix host without $HOME keeps the historical
+    // `./.neoism-state` behavior.
+    #[cfg(windows)]
+    if let Some(dir) = dirs::state_dir().or_else(dirs::data_local_dir) {
+        return dir.join(STATE_SUBDIR);
     }
     PathBuf::from(".neoism-state")
 }

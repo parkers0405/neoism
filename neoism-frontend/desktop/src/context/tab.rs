@@ -28,7 +28,6 @@ pub struct Context<T: EventListener> {
     pub messenger: Messenger,
     #[cfg(not(target_os = "windows"))]
     pub main_fd: Arc<i32>,
-    #[cfg(not(target_os = "windows"))]
     pub shell_pid: u32,
     pub rich_text_id: usize,
     pub dimension: ContextDimension,
@@ -105,9 +104,10 @@ impl<T: neoism_backend::event::EventListener> Drop for Context<T> {
         // Daemon-backed panes (8A) report `shell_pid == 0` — `kill(0,
         // SIGHUP)` would HUP our OWN process group; their shell is owned
         // by the daemon and torn down via the `ClosePty` the machine's
-        // shutdown emits.
-        #[cfg(not(target_os = "windows"))]
-        if self.remote_pty.is_none()
+        // shutdown emits. (On Windows a 0/sentinel pid just fails the
+        // OpenProcess inside `kill_pid`, but the same skip applies.)
+        if self.shell_pid != 0
+            && self.remote_pty.is_none()
             && self.markdown.is_none()
             && self.code.is_none()
             && self.draw.is_none()

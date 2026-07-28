@@ -4823,6 +4823,7 @@ dependencies = [
  "rapidhash",
  "raw-window-handle",
  "regex",
+ "reqwest",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
@@ -4865,6 +4866,7 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "winres",
 ]
 
 [[package]]
@@ -4885,6 +4887,8 @@ dependencies = [
  "async-stream",
  "axum",
  "base64",
+ "clap",
+ "dirs 6.0.0",
  "fff-search",
  "futures",
  "futures-core",
@@ -4906,6 +4910,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "turso",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5242,6 +5247,8 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
+ "windows-sys 0.60.2",
+ "winres",
 ]
 
 [[package]]

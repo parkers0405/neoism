@@ -56,11 +56,7 @@ impl Screen<'_> {
                     .map(
                         |presence| neoism_ui::editor::markdown::MarkdownRemoteCursor {
                             name: presence.display_name.clone(),
-                            color: [
-                                presence.color.r,
-                                presence.color.g,
-                                presence.color.b,
-                            ],
+                            color: [presence.color.r, presence.color.g, presence.color.b],
                             rainbow: presence.rainbow,
                             line: presence.cursor.line as usize,
                             col_utf16: presence.cursor.column as usize,
@@ -88,8 +84,7 @@ impl Screen<'_> {
             // between panels and into the buffer); the pane only
             // publishes `cursor_rect`.
             code.caret_drawn_by_host = true;
-            code.remote_cursors =
-                remote_by_path.remove(&code.path).unwrap_or_default();
+            code.remote_cursors = remote_by_path.remove(&code.path).unwrap_or_default();
             let animating = neoism_ui::editor::code::render::render(
                 &mut self.sugarloaf,
                 code,

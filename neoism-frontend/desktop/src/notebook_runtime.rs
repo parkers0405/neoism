@@ -404,9 +404,12 @@ impl RuntimeWorker {
             .spawn()
             .map_err(|err| err.to_string())?;
         let pid = child.id();
+        // Local processes get their own process group (setpgid on unix,
+        // CREATE_NEW_PROCESS_GROUP on windows), so both advertise the
+        // group-interrupt capability.
         if let Err(err) = self
             .active_processes
-            .register_pid(&job.path, pid, cfg!(unix))
+            .register_pid(&job.path, pid, cfg!(any(unix, windows)))
         {
             let _ = child.kill();
             let _ = child.wait();
@@ -503,7 +506,31 @@ fn signal_notebook_interrupt(process: ActiveNotebookProcess) -> Result<(), Strin
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn signal_notebook_interrupt(process: ActiveNotebookProcess) -> Result<(), String> {
+    use windows_sys::Win32::System::Console::{
+        GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT,
+    };
+
+    // Best effort: CTRL_BREAK reaches the child's whole process group (local
+    // processes spawn with CREATE_NEW_PROCESS_GROUP, so their pid names the
+    // group), but only when the child shares a console with us. Piped kernels
+    // without a console make the call fail; keep the polite explanation so
+    // the UI still tells the user what happened.
+    let ok = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, process.pid) };
+    if ok != 0 {
+        Ok(())
+    } else {
+        let err = std::io::Error::last_os_error();
+        Err(format!(
+            "Notebook kernel interrupt is not supported for this kernel on Windows yet \
+             (GenerateConsoleCtrlEvent for process {} failed: {err})",
+            process.pid
+        ))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn signal_notebook_interrupt(_process: ActiveNotebookProcess) -> Result<(), String> {
     Err("Notebook kernel interrupt is not supported on this platform yet".to_string())
 }
@@ -566,7 +593,20 @@ fn configure_local_process_interrupt(command: &mut StdCommand) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn configure_local_process_interrupt(command: &mut StdCommand) {
+    use std::os::windows::process::CommandExt;
+
+    // A fresh process group lets `signal_notebook_interrupt` CTRL_BREAK the
+    // child without tearing down our own group. `creation_flags` REPLACES any
+    // previously-set flags (Command exposes no getter), so this must stay the
+    // only flag-setting site for local notebook commands.
+    command.creation_flags(
+        windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+    );
+}
+
+#[cfg(not(any(unix, windows)))]
 fn configure_local_process_interrupt(_command: &mut StdCommand) {}
 
 fn run_spawned_local_process(

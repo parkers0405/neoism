@@ -1170,8 +1170,28 @@ fn shell_pid_is_alive(shell_pid: u32) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn shell_pid_is_alive(_shell_pid: u32) -> bool {
-    false
+fn shell_pid_is_alive(shell_pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if shell_pid == 0 {
+        return false;
+    }
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, shell_pid);
+        if handle.is_null() {
+            // Access denied still proves existence (the unix EPERM case),
+            // but ConPTY shells are our own children, so treat any open
+            // failure as "gone".
+            return false;
+        }
+        let mut code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        ok != 0 && code == STILL_ACTIVE as u32
+    }
 }
 
 pub struct ScreenWindowProperties {
@@ -1186,11 +1206,11 @@ pub struct ScreenWindowProperties {
 // Each declares its own `impl Screen<'_>` block.
 pub mod bridges;
 pub mod chrome_geom;
+pub mod code_crdt;
 pub mod daemon_layout;
 pub mod editor_scroll;
 pub mod lifecycle;
 pub mod markdown_crdt;
-pub mod code_crdt;
 pub mod panes;
 pub mod presence;
 pub mod render;

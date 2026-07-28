@@ -44,11 +44,7 @@ RUN useradd --system --create-home --home-dir /var/lib/neoism --shell /usr/sbin/
     && chown -R neoism:neoism /var/lib/neoism
 
 COPY --from=builder /src/target/release/neoism-workspace-daemon /usr/local/bin/neoism-workspace-daemon
-# The AI agent runs NEXT TO the daemon: joined clients' agent panes
-# talk to it directly (daemon port + 1 by convention), so tools
-# (read/edit/bash/git) execute on the machine that owns the files.
 COPY --from=builder /src/target/release/neoism-agent /usr/local/bin/neoism-agent
-
 USER neoism
 ENV NEOISM_DAEMON_ADDR=0.0.0.0:9876 \
     NEOISM_DAEMON_DATA_DIR=/var/lib/neoism/data \

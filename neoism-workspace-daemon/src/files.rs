@@ -108,15 +108,28 @@ pub async fn handle_with_root(
 /// Read the daemon user's shell history for the web composer's
 /// ArrowUp recall — desktop parity, where the composer loads
 /// `~/.zsh_history` directly. Zsh extended-format lines
-/// (`: <ts>:<dur>;cmd`) are stripped to the bare command.
+/// (`: <ts>:<dur>;cmd`) are stripped to the bare command. On Windows
+/// the PowerShell PSReadLine history (plain lines) is read instead.
 async fn read_shell_history(max_entries: usize) -> Vec<FilesServerMessage> {
     let result = tokio::task::spawn_blocking(move || {
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
-        let candidates = [
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(dirs::home_dir)?;
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut candidates = vec![
             std::env::var_os("HISTFILE").map(std::path::PathBuf::from),
             Some(home.join(".zsh_history")),
             Some(home.join(".bash_history")),
         ];
+        #[cfg(windows)]
+        candidates.push(dirs::data_dir().map(|appdata| {
+            appdata
+                .join("Microsoft")
+                .join("Windows")
+                .join("PowerShell")
+                .join("PSReadLine")
+                .join("ConsoleHost_history.txt")
+        }));
         for path in candidates.into_iter().flatten() {
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
@@ -133,7 +146,12 @@ async fn read_shell_history(max_entries: usize) -> Vec<FilesServerMessage> {
                 } else {
                     line
                 };
-                let command = command.trim_end_matches('\\').trim();
+                // Bash stores continuations with a trailing `\`; on Windows
+                // a trailing backslash is a real path char (PSReadLine
+                // continues with a backtick), so don't strip it there.
+                #[cfg(not(windows))]
+                let command = command.trim_end_matches('\\');
+                let command = command.trim();
                 if command.is_empty() {
                     continue;
                 }

@@ -26,14 +26,13 @@ use crate::interaction::{
 use crate::lsp_routes::{
     lsp_code_actions, lsp_definition, lsp_diagnostics, lsp_document_highlights,
     lsp_document_symbols, lsp_formatting, lsp_hover, lsp_implementation,
-    lsp_incoming_calls, lsp_inlay_hints, lsp_outgoing_calls,
-    lsp_prepare_call_hierarchy, lsp_references, lsp_shutdown, lsp_signature_help,
-    lsp_status, lsp_touch,
+    lsp_incoming_calls, lsp_inlay_hints, lsp_outgoing_calls, lsp_prepare_call_hierarchy,
+    lsp_references, lsp_shutdown, lsp_signature_help, lsp_status, lsp_touch,
 };
 use crate::mcp_routes::{
-    mcp_add, mcp_auth_authenticate, mcp_auth_callback, mcp_auth_remove, mcp_auth_start,
-    mcp_connect, mcp_disconnect, mcp_prompts, mcp_resources, mcp_status, mcp_tool_call,
-    mcp_tools,
+    mcp_add, mcp_auth_authenticate, mcp_auth_callback, mcp_auth_callback_get,
+    mcp_auth_remove, mcp_auth_start, mcp_connect, mcp_disconnect, mcp_prompts,
+    mcp_resources, mcp_status, mcp_tool_call, mcp_tools,
 };
 use crate::openapi::openapi_doc;
 use crate::permission_runtime::session_permission_respond;
@@ -322,7 +321,10 @@ pub fn app(state: AppState) -> Router {
             "/mcp/:name/auth",
             post(mcp_auth_start).delete(mcp_auth_remove),
         )
-        .route("/mcp/:name/auth/callback", post(mcp_auth_callback))
+        .route(
+            "/mcp/:name/auth/callback",
+            get(mcp_auth_callback_get).post(mcp_auth_callback),
+        )
         .route("/mcp/:name/auth/authenticate", post(mcp_auth_authenticate))
         .route("/mcp/:name/connect", post(mcp_connect))
         .route("/mcp/:name/disconnect", post(mcp_disconnect))

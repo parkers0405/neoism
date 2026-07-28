@@ -84,6 +84,16 @@ fn load_or_create_daemon_token(path: &PathBuf) -> io::Result<String> {
         // itself is the real gate at 0o600.
         #[cfg(unix)]
         let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+        // Same tightening on Windows: owner+SYSTEM-only DACL. Warn-and-go on
+        // failure — ACL-less filesystems must not block token bootstrap.
+        #[cfg(windows)]
+        if let Err(error) = crate::windows_acl::harden_owner_only(parent) {
+            tracing::warn!(
+                error = %error,
+                path = %parent.display(),
+                "could not tighten daemon token dir ACL; continuing",
+            );
+        }
     }
 
     match fs::read_to_string(path) {
@@ -103,6 +113,14 @@ fn load_or_create_daemon_token(path: &PathBuf) -> io::Result<String> {
         Ok(mut file) => {
             #[cfg(unix)]
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            #[cfg(windows)]
+            if let Err(error) = crate::windows_acl::harden_owner_only(path) {
+                tracing::warn!(
+                    error = %error,
+                    path = %path.display(),
+                    "could not tighten daemon token file ACL; continuing",
+                );
+            }
             file.write_all(token.as_bytes())?;
             file.write_all(b"\n")?;
             Ok(token)

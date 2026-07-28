@@ -260,6 +260,18 @@ fn persist(path: &Path, records: &[DeviceRecord]) -> Result<(), RegistryError> {
     }
     {
         let mut f: File = opts.open(&tmp)?;
+        // Windows counterpart of the 0o600 open mode: owner+SYSTEM-only DACL
+        // on the tmp file before the secrets land in it; the rename below
+        // carries the descriptor to the final path. Warn-and-go on failure —
+        // ACL-less filesystems must not fail the write.
+        #[cfg(windows)]
+        if let Err(error) = crate::windows_acl::harden_owner_only(&tmp) {
+            tracing::warn!(
+                error = %error,
+                path = %tmp.display(),
+                "could not tighten device registry ACL; continuing",
+            );
+        }
         f.write_all(&body)?;
         f.flush()?;
     }
@@ -280,6 +292,14 @@ fn ensure_data_dir(dir: &Path) -> Result<(), RegistryError> {
             let _ = fs::set_permissions(dir, p);
         }
     }
+    #[cfg(windows)]
+    if let Err(error) = crate::windows_acl::harden_owner_only(dir) {
+        tracing::warn!(
+            error = %error,
+            path = %dir.display(),
+            "could not tighten daemon data dir ACL; continuing",
+        );
+    }
     Ok(())
 }
 
@@ -296,7 +316,26 @@ fn check_file_permissions(path: &Path) -> Result<(), RegistryError> {
 }
 
 #[cfg(not(unix))]
-fn check_file_permissions(_path: &Path) -> Result<(), RegistryError> {
+fn check_file_permissions(path: &Path) -> Result<(), RegistryError> {
+    // Mirror the unix semantics on Windows: a DACL that lets anyone beyond
+    // the owner, SYSTEM, or Administrators read the file is rejected exactly
+    // like group/other mode bits above. A failure to *read* the ACL only
+    // warns — FAT32/ExFAT cannot express one, and erroring there would brick
+    // startup on such filesystems.
+    #[cfg(windows)]
+    match crate::windows_acl::check_owner_only(path) {
+        Ok(true) => {}
+        Ok(false) => return Err(RegistryError::PermissionsTooOpen(path.to_path_buf())),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                path = %path.display(),
+                "could not read device registry ACL; skipping permission check",
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = path;
     Ok(())
 }
 

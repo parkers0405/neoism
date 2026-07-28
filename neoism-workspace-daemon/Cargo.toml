@@ -47,7 +47,20 @@ clap = { workspace = true }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "service"] }
 
+# Owner+SYSTEM-only DACLs on secret files — the Windows counterpart of the
+# unix 0o600/0o700 tightening (see src/windows_acl.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-tungstenite = "0.24"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1.12"

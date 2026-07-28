@@ -105,10 +105,13 @@ impl CodeBuffer {
         for step in 0..=line_count {
             let line_ix = (from_line + step) % line_count;
             let line = &self.lines[line_ix];
-            let start_at = if step == 0 { search_col.min(line.len()) } else { 0 };
+            let start_at = if step == 0 {
+                search_col.min(line.len())
+            } else {
+                0
+            };
             let mut at = start_at;
-            while let Some(found) = line.get(at..).and_then(|tail| tail.find(&pattern))
-            {
+            while let Some(found) = line.get(at..).and_then(|tail| tail.find(&pattern)) {
                 let start = at + found;
                 if !claimed.contains(&(line_ix, start)) {
                     self.extra_carets.push(CodeExtraCaret {
@@ -522,10 +525,7 @@ mod tests {
             vec!["one".to_string(), " two".to_string(), String::new()]
         );
         assert_eq!((b.cursor_line, b.cursor_col), (1, 0));
-        assert_eq!(
-            (b.extra_carets[0].line, b.extra_carets[0].col),
-            (2, 0)
-        );
+        assert_eq!((b.extra_carets[0].line, b.extra_carets[0].col), (2, 0));
     }
 
     #[test]

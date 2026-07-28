@@ -1,7 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
    <Package
       Name="Neoism"
-      UpgradeCode="87c21c74-dbd5-4584-89d5-46d9cd0c40a8"
+      UpgradeCode="d0a67e9a-ead8-458d-81af-2211ff538d0c"
       Language="1033"
       Codepage="1252"
       Version="{{ .Version }}"
@@ -10,49 +10,49 @@
 
       <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
       <WixVariable Id="WixUILicenseRtf" Value=".\misc\windows\License.rtf" />
-      <Icon Id="RioIcon" SourceFile=".\misc\windows\rio.ico" />
-      <Property Id="APPRODUCTICON" Value="RioIcon" />
+      <Icon Id="NeoismIcon" SourceFile=".\misc\windows\neoism.ico" />
+      <Property Id="APPRODUCTICON" Value="NeoismIcon" />
       <MediaTemplate EmbedCab="yes" />
       <ui:WixUI Id="WixUI_Minimal" />
       <Feature Id="ProductFeature" Title="ConsoleApp" Level="1">
-         <ComponentRef Id="RioExe" />
-         <ComponentRef Id="RioShortcut" />
+         <ComponentRef Id="NeoismExe" />
+         <ComponentRef Id="NeoismShortcut" />
          <ComponentRef Id="ModifyPathEnv" />
          <ComponentRef Id="ContextMenu" />
       </Feature>
       <!-- Application binaries -->
-      <DirectoryRef Id="RioProgramFiles">
-         <Component Id="RioExe">
-             <File Id="RioExeFile" Source="{{ .Binary }}.exe" Name="neoism.exe" KeyPath="yes" />
+      <DirectoryRef Id="NeoismProgramFiles">
+         <Component Id="NeoismExe">
+             <File Id="NeoismExeFile" Source="{{ .Binary }}.exe" Name="neoism.exe" KeyPath="yes" />
          </Component>
       </DirectoryRef>
-      <DirectoryRef Id="RioProgramMenu">
+      <DirectoryRef Id="NeoismProgramMenu">
          <!-- Application shortcut -->
-         <Component Id="RioShortcut" Guid="aa36e61a-23cd-4383-b744-2f78e912f0dc">
-             <Shortcut Id="RioShortcutFile" Name="Neoism" Description="A hardware-accelerated terminal-first editor workspace" Target="[RioProgramFiles]neoism.exe" Icon="RioIcon" />
-             <RemoveFolder Id="RioProgramMenu" On="uninstall" />
+         <Component Id="NeoismShortcut" Guid="ce3f92be-0586-40b9-a6c8-ba3a3d589611">
+             <Shortcut Id="NeoismShortcutFile" Name="Neoism" Description="A hardware-accelerated terminal-first editor workspace" Target="[NeoismProgramFiles]neoism.exe" Icon="NeoismIcon" />
+             <RemoveFolder Id="NeoismProgramMenu" On="uninstall" />
              <RegistryValue Root="HKCU" Key="Software\Microsoft\Neoism" Name="installed" Type="integer" Value="1" KeyPath="yes" />
          </Component>
       </DirectoryRef>
-      <DirectoryRef Id="RioProgramFiles">
+      <DirectoryRef Id="NeoismProgramFiles">
          <!-- Add to PATH -->
-         <Component Id="ModifyPathEnv" Guid="edf0b679-9eb6-46f7-a5d1-5160f30acb34" KeyPath="yes">
-            <Environment Id="PathEnv" Value="[RioProgramFiles]" Name="PATH" Permanent="no" Part="first" Action="set" System="yes" />
+         <Component Id="ModifyPathEnv" Guid="38015f32-365c-42ca-b4b9-dd1ef19b421d" KeyPath="yes">
+            <Environment Id="PathEnv" Value="[NeoismProgramFiles]" Name="PATH" Permanent="no" Part="first" Action="set" System="yes" />
          </Component>
       </DirectoryRef>
       <StandardDirectory Id="ProgramFiles64Folder">
-          <Directory Id="RioProgramFiles" Name="Neoism" />
+          <Directory Id="NeoismProgramFiles" Name="Neoism" />
       </StandardDirectory>
       <StandardDirectory Id="ProgramMenuFolder">
-          <Directory Id="RioProgramMenu" Name="Neoism" />
+          <Directory Id="NeoismProgramMenu" Name="Neoism" />
       </StandardDirectory>
       <!-- Add context menu -->
-      <Component Id="ContextMenu" Guid="449f9121-f7b9-41fe-82da-52349ea8ff91" Directory="TARGETDIR">
+      <Component Id="ContextMenu" Guid="cb9dfbaf-7569-4d1c-8275-f2bff7126bdd" Directory="TARGETDIR">
           <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\Open Neoism here\command">
-             <RegistryValue Type="string" Value='[RioProgramFiles]neoism.exe --working-dir "%v"' KeyPath="yes" />
+             <RegistryValue Type="string" Value='[NeoismProgramFiles]neoism.exe --working-dir "%v"' KeyPath="yes" />
           </RegistryKey>
           <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\Open Neoism here">
-             <RegistryValue Type="string" Name="Icon" Value="[RioProgramFiles]neoism.exe" />
+             <RegistryValue Type="string" Name="Icon" Value="[NeoismProgramFiles]neoism.exe" />
           </RegistryKey>
       </Component>
    </Package>

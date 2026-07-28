@@ -226,29 +226,6 @@ impl Screen<'_> {
         // Co-hosted agent on port + 1 (the convention joined clients
         // derive). Missing binary just means no remote agent — the
         // server itself is unaffected.
-        let agent_bin = sibling("neoism-agent");
-        if agent_bin.is_file() || agent_bin.components().count() == 1 {
-            let _ = std::process::Command::new(&agent_bin)
-                .arg("serve")
-                .arg("--port")
-                .arg((port + 1).to_string())
-                .arg("--hostname")
-                .arg("0.0.0.0")
-                // Pin Turso so the served agent opens the SAME
-                // `agent.turso.db` as this machine's local agent (both
-                // resolve `~/.local/state/neoism` from the shared HOME).
-                // Without this it rides the default, and a stray
-                // `NEOISM_AGENT_DB_BACKEND=sqlite` in the environment
-                // would silently split the store into a separate empty
-                // `agent.sqlite3` — the guest would then see none of the
-                // host's directory-scoped conversation history.
-                .env("NEOISM_AGENT_DB_BACKEND", "turso")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-        }
-
         // Hand off to the normal add+join path (it dials with retry, so
         // the daemon's startup wins the race).
         let address = format!("ws://127.0.0.1:{port}/session");

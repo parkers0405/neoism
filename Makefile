@@ -9,7 +9,11 @@ TARGET_DIR_OSX = $(TARGET_DIR)/osx
 RELEASE_DIR = release
 
 APP_NAME = Neoism.app
-APP_TEMPLATE = $(BUILD_MISC_DIR)/osx/neo-rio.app
+# Assembled from parts (plist with a {{VERSION}} placeholder + icns),
+# same as the CI darwin packaging step — no pre-baked .app template.
+APP_PLIST = $(BUILD_MISC_DIR)/macos/Info.plist
+APP_ICNS = $(BUILD_MISC_DIR)/macos/neoism.icns
+APP_VERSION = $(shell cargo pkgid -p neoism 2>/dev/null | sed 's/.*[@\#]//')
 APP_BINARY = $(TARGET_DIR)/$(TARGET)
 APP_BINARY_DIR = $(TARGET_DIR_OSX)/$(APP_NAME)/Contents/MacOS
 APP_EXTRAS_DIR = $(TARGET_DIR_OSX)/$(APP_NAME)/Contents/Resources
@@ -79,7 +83,9 @@ $(APP_NAME)-%: $(TARGET)-%
 	@mkdir -p $(APP_BINARY_DIR)
 	@mkdir -p $(APP_EXTRAS_DIR)
 	@rm -rf "$(TARGET_DIR_OSX)/$(APP_NAME)"
-	@cp -fRp $(APP_TEMPLATE) "$(TARGET_DIR_OSX)/$(APP_NAME)"
+	@mkdir -p $(APP_BINARY_DIR) $(APP_EXTRAS_DIR)
+	@sed 's/{{VERSION}}/$(APP_VERSION)/g' $(APP_PLIST) > "$(TARGET_DIR_OSX)/$(APP_NAME)/Contents/Info.plist"
+	@cp -fp $(APP_ICNS) $(APP_EXTRAS_DIR)/
 	@cp -fp $(APP_BINARY) $(APP_BINARY_DIR)
 	@touch -r "$(APP_BINARY)" "$(TARGET_DIR_OSX)/$(APP_NAME)"
 
@@ -123,8 +129,7 @@ update-version:
 	@echo "Switching from $(old-version) to $(new-version)"
 	find Cargo.toml -type f -exec sed -i '' 's/$(old-version)/$(new-version)/g' {} \;
 	find CHANGELOG.md -type f -exec sed -i '' 's/Unreleased/Unreleased\n\n- TBD\n\n## $(new-version)/g' {} \;
-	find $(BUILD_MISC_DIR)/windows/rio.wxs -type f -exec sed -i '' 's/$(old-version)/$(new-version)/g' {} \;
-	find $(APP_TEMPLATE)/Contents/Info.plist -type f -exec sed -i '' 's/$(old-version)/$(new-version)/g' {} \;
+	find $(BUILD_MISC_DIR)/windows/neoism.wxs -type f -exec sed -i '' 's/$(old-version)/$(new-version)/g' {} \;
 
 release-macos-dmg:
 # 	Using https://www.npmjs.com/package/create-dmg

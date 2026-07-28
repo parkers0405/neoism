@@ -731,7 +731,11 @@ impl Screen<'_> {
                     let extend = code.buffer.mode == CodeMode::Visual;
                     if !code.move_cursor_vertical_visual(down, extend) {
                         code.buffer.apply_motion(
-                            if down { CodeMotion::Down } else { CodeMotion::Up },
+                            if down {
+                                CodeMotion::Down
+                            } else {
+                                CodeMotion::Up
+                            },
                             extend,
                         );
                     }
@@ -895,7 +899,11 @@ impl Screen<'_> {
         code.buffer.follow_cursor = true;
         let wrap = code.wrap;
         self.renderer.notifications.push(
-            if wrap { "Word wrap on" } else { "Word wrap off" },
+            if wrap {
+                "Word wrap on"
+            } else {
+                "Word wrap off"
+            },
             neoism_ui::panels::notifications::NotificationLevel::Info,
         );
         self.mark_dirty();

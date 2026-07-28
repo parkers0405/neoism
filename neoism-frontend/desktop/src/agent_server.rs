@@ -260,6 +260,15 @@ fn is_provider_credential_key(key: &str) -> bool {
 /// parsed `KEY=VALUE` pairs, or an empty vec if the shell can't be resolved in
 /// time. Bounded by a short timeout so a slow or misbehaving rc file can't stall
 /// startup, and stdin is detached so an interactive shell can't block on a tty.
+// Windows GUI processes already inherit the user's registry environment
+// (where installers and `setx` put API keys), so there is no login-shell
+// divergence to repair — and no `/bin/sh` to run.
+#[cfg(windows)]
+fn resolve_login_shell_env() -> Vec<(String, String)> {
+    Vec::new()
+}
+
+#[cfg(not(windows))]
 fn resolve_login_shell_env() -> Vec<(String, String)> {
     if let Some(home) = std::env::var_os("HOME") {
         let session_vars = std::path::PathBuf::from(home)
@@ -307,6 +316,7 @@ fn resolve_login_shell_env() -> Vec<(String, String)> {
     Vec::new()
 }
 
+#[cfg(not(windows))]
 fn run_env_capture(shell: &str, args: &[&str], timeout: Duration) -> Option<String> {
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
@@ -332,6 +342,7 @@ fn run_env_capture(shell: &str, args: &[&str], timeout: Duration) -> Option<Stri
     result
 }
 
+#[cfg_attr(windows, allow(dead_code))] // test-only there
 fn parse_env_dump(dump: &str) -> Vec<(String, String)> {
     dump.lines()
         .filter_map(|line| {

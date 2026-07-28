@@ -164,6 +164,69 @@ pub(crate) fn intersect_rect(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn draw_session_loading_skeleton(
+    sugarloaf: &mut Sugarloaf,
+    list_rect: [f32; 4],
+    text_x: f32,
+    row_h: f32,
+    elapsed: f32,
+    theme: &IdeTheme,
+    s: f32,
+) {
+    // Match the file-tree loader: a short fade-in, square icon stubs,
+    // varied rounded text bars, and a sine wave travelling down the rows.
+    let fade_in = (elapsed / 0.18).min(1.0);
+    const SKELETON_WIDTHS: [f32; 12] = [
+        0.58, 0.72, 0.46, 0.64, 0.38, 0.55, 0.68, 0.44, 0.52, 0.36, 0.62, 0.48,
+    ];
+    let [_, list_top, list_w, list_h] = list_rect;
+    let list_bottom = list_top + list_h;
+    let rows_visible = (list_h / row_h).ceil().max(0.0) as usize;
+    let stub_size = (10.0 * s).min(row_h).max(4.0);
+    let bar_h = (FONT_SIZE * 0.72 * s).max(4.0);
+    let gap = 7.0 * s;
+
+    for (i, width) in SKELETON_WIDTHS.iter().enumerate().take(rows_visible) {
+        let row_y = list_top + i as f32 * row_h;
+        if row_y + row_h > list_bottom + 0.5 {
+            break;
+        }
+        let wave = (elapsed / 1.3 * std::f32::consts::TAU - i as f32 * 0.55).sin();
+        let alpha = (0.16 + 0.08 * wave).max(0.04) * fade_in;
+        let stub_y = row_y + (row_h - stub_size) / 2.0;
+        sugarloaf.quad(
+            None,
+            text_x,
+            stub_y,
+            stub_size,
+            stub_size,
+            theme.f32_alpha(theme.muted, alpha),
+            [3.0 * s; 4],
+            DEPTH,
+            ORDER_PANEL + 2,
+        );
+
+        let bar_x = text_x + stub_size + gap;
+        let bar_y = row_y + (row_h - bar_h) / 2.0;
+        let bar_budget = (list_rect[0] + list_w - ROW_PADDING_X * s - bar_x).max(0.0);
+        let bar_w = bar_budget * width;
+        if bar_w > 1.0 {
+            sugarloaf.quad(
+                None,
+                bar_x,
+                bar_y,
+                bar_w,
+                bar_h,
+                theme.f32_alpha(theme.muted, alpha),
+                [bar_h / 2.0; 4],
+                DEPTH,
+                ORDER_PANEL + 2,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_sessions_list(
     sugarloaf: &mut Sugarloaf,
     pane: &mut impl AgentSidePanelPane,
@@ -306,19 +369,14 @@ pub(crate) fn render_sessions_list(
         .clamp_scroll_bounds(rows_visible.max(1));
 
     if !pane.side_panel().sessions_loaded() {
-        let opts = DrawOpts {
-            font_size: FONT_SIZE * s,
-            color: theme.u8(theme.dim),
-            clip_rect: Some(clip),
-            ..DrawOpts::default()
-        };
-        draw_text_with_occlusion(
+        draw_session_loading_skeleton(
             sugarloaf,
+            list_rect,
             text_x,
-            list_top + 12.0 * s,
-            "loading…",
-            &opts,
-            occlusion_rects,
+            row_h,
+            pane.side_panel().sessions_loading_elapsed(),
+            theme,
+            s,
         );
         return;
     }

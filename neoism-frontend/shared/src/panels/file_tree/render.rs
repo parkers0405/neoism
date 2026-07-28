@@ -304,7 +304,8 @@ impl FileTree {
             label_color: [u8; 4],
             radius: f32,
         }
-        let lifted = if let Some(drag) = self.file_drag.as_ref().filter(|drag| drag.live) {
+        let lifted = if let Some(drag) = self.file_drag.as_ref().filter(|drag| drag.live)
+        {
             // Pull the real source entry so the lifted row is a faithful
             // copy of the one in the list (same glyph, same folder blue).
             let entry = drag_source_index.and_then(|ix| self.entries.get(ix));
@@ -312,7 +313,8 @@ impl FileTree {
                 .map(icon_for)
                 .unwrap_or_else(|| super::icons::icon_for_file(&drag.source_label));
             let is_dir = entry.is_some_and(|e| matches!(e.kind, NodeKind::Dir { .. }));
-            let is_open = entry.is_some_and(|e| matches!(e.kind, NodeKind::Dir { open: true }));
+            let is_open =
+                entry.is_some_and(|e| matches!(e.kind, NodeKind::Dir { open: true }));
             let chevron = is_dir.then(|| if is_open { "\u{f078}" } else { "\u{f054}" });
             let icon_color = if is_dir {
                 theme.u8(theme.folder)
@@ -328,8 +330,12 @@ impl FileTree {
                 font_size: icon_size,
                 ..DrawOpts::default()
             };
-            let label =
-                truncate_label(&drag.source_label, 240.0 * self.scale, sugarloaf, &text_opts);
+            let label = truncate_label(
+                &drag.source_label,
+                240.0 * self.scale,
+                sugarloaf,
+                &text_opts,
+            );
             let label_w = sugarloaf.text_mut().measure(&label, &text_opts);
             let icon_w = sugarloaf.text_mut().measure(icon_glyph, &glyph_opts);
             let chevron_w = chevron
@@ -414,7 +420,11 @@ impl FileTree {
             // The row being dragged is lifted out — leave a dimmed
             // placeholder where it sat so the list doesn't collapse.
             let is_drag_source = drag_source_index == Some(absolute_ix);
-            let row_reveal = if is_drag_source { reveal * 0.32 } else { reveal };
+            let row_reveal = if is_drag_source {
+                reveal * 0.32
+            } else {
+                reveal
+            };
             // Active buffer (the file nvim is currently showing) gets
             // a thin white accent stripe on the left edge — visible
             // even when the user's keyboard selection is on a
@@ -690,7 +700,9 @@ impl FileTree {
                 sugarloaf.text_mut().draw(cx, icon_y, chev, &chevron_opts);
                 cx += sugarloaf.text_mut().measure(chev, &chevron_opts) + icon_gap;
             }
-            sugarloaf.text_mut().draw(cx, icon_y, l.icon_glyph, &icon_opts);
+            sugarloaf
+                .text_mut()
+                .draw(cx, icon_y, l.icon_glyph, &icon_opts);
             cx += sugarloaf.text_mut().measure(l.icon_glyph, &icon_opts) + icon_gap;
             sugarloaf.text_mut().draw(cx, text_y, &l.label, &label_opts);
         }

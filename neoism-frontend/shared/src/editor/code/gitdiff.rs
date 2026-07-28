@@ -153,9 +153,7 @@ fn myers_line_ops(old: &[String], new: &[String]) -> Option<Vec<LineOp>> {
             let mut k = -d_i;
             while k <= d_i {
                 let ki = (k + offset as isize) as usize;
-                let mut x = if k == -d_i
-                    || (k != d_i && v[ki - 1] < v[ki + 1])
-                {
+                let mut x = if k == -d_i || (k != d_i && v[ki - 1] < v[ki + 1]) {
                     v[ki + 1]
                 } else {
                     v[ki - 1] + 1

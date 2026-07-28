@@ -176,8 +176,7 @@ impl Screen<'_> {
         let Some(binding) = state.bindings.get_mut(buffer_id) else {
             return false;
         };
-        let Some(code) = find_code_pane_mut(&mut self.context_manager, buffer_id)
-        else {
+        let Some(code) = find_code_pane_mut(&mut self.context_manager, buffer_id) else {
             return false;
         };
         if binding.is_seeded() {
@@ -218,8 +217,7 @@ impl Screen<'_> {
         let Some(binding) = state.bindings.get_mut(buffer_id) else {
             return false;
         };
-        let Some(code) = find_code_pane_mut(&mut self.context_manager, buffer_id)
-        else {
+        let Some(code) = find_code_pane_mut(&mut self.context_manager, buffer_id) else {
             return false;
         };
         match binding.apply_remote(origin_client_id, update_v1, &mut code.buffer) {

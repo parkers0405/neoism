@@ -28,8 +28,7 @@ pub use teletypewriter::WinsizeBuilder;
 
 /// Re-export of `teletypewriter::kill_pid` so callers don't need to
 /// keep a direct dependency on the teletypewriter crate just to HUP
-/// a shell on tab close.
-#[cfg(unix)]
+/// a shell on tab close. (Windows: `TerminateProcess`.)
 pub fn kill_pid(pid: i32) {
     teletypewriter::kill_pid(pid);
 }
@@ -40,6 +39,14 @@ pub fn foreground_process_name(main_fd: i32, shell_pid: u32) -> String {
     teletypewriter::foreground_process_name(main_fd, shell_pid)
 }
 
+/// Re-export of `teletypewriter::foreground_process_name`. ConPTY has
+/// no PTY fd / process group, so only the shell PID is taken; the
+/// foreground process is inferred from the process tree.
+#[cfg(windows)]
+pub fn foreground_process_name(shell_pid: u32) -> String {
+    teletypewriter::foreground_process_name(shell_pid)
+}
+
 /// Re-export of `teletypewriter::foreground_process_path`.
 #[cfg(unix)]
 pub fn foreground_process_path(
@@ -47,4 +54,15 @@ pub fn foreground_process_path(
     shell_pid: u32,
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     teletypewriter::foreground_process_path(main_fd, shell_pid)
+}
+
+/// Re-export of `teletypewriter::foreground_process_path`. Windows
+/// reports the foreground process **image path** (not its cwd like the
+/// Unix version) and takes only the shell PID — see the teletypewriter
+/// doc comment.
+#[cfg(windows)]
+pub fn foreground_process_path(
+    shell_pid: u32,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    teletypewriter::foreground_process_path(shell_pid)
 }

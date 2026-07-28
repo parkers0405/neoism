@@ -10,6 +10,21 @@ pub(crate) fn managed_lsp_path_entries() -> Vec<PathBuf> {
         entries.push(PathBuf::from("/opt/homebrew/bin"));
         entries.push(PathBuf::from("/usr/local/bin"));
     }
+    #[cfg(windows)]
+    {
+        // Same story on Windows: GUI processes see a minimal PATH, and the
+        // usual language-server homes are global npm shims, scoop shims,
+        // and per-user program installs.
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            entries.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            entries.push(PathBuf::from(profile).join("scoop").join("shims"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            entries.push(PathBuf::from(local).join("Programs"));
+        }
+    }
     if let Some(home) = home_dir() {
         entries.push(
             home.join(".local")
@@ -28,7 +43,19 @@ pub(crate) fn managed_lsp_path_entries() -> Vec<PathBuf> {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    // HOME first so unix (and explicit overrides) keep working; Windows
+    // normally leaves it unset, so fall back to the platform lookup there.
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(PathBuf::from(home));
+    }
+    #[cfg(windows)]
+    {
+        dirs::home_dir()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 pub(crate) fn managed_lsp_path() -> Option<std::ffi::OsString> {

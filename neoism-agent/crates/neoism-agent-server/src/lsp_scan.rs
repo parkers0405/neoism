@@ -623,9 +623,18 @@ fn is_ignored_dir_name(name: &OsStr) -> bool {
 }
 
 pub(super) fn command_available(command: &str) -> bool {
+    resolve_command(command).is_some()
+}
+
+/// Resolve a configured command to the concrete on-disk executable a spawn
+/// must use. On Windows the file usually carries a `PATHEXT` extension
+/// (`.exe`, npm's `.cmd` shims, ...) that the configured name omits — and
+/// `CreateProcess` will not infer `.cmd`/`.bat` — so the spawn site needs
+/// the fully resolved path back, not the bare name.
+pub(super) fn resolve_command(command: &str) -> Option<PathBuf> {
     let path = Path::new(command);
     if path.components().count() > 1 {
-        return executable_exists(path.to_path_buf());
+        return resolve_executable(path.to_path_buf());
     }
     let managed = managed_lsp_path_entries();
     let env_paths = env::var_os("PATH")
@@ -634,22 +643,45 @@ pub(super) fn command_available(command: &str) -> bool {
     managed
         .into_iter()
         .chain(env_paths)
-        .any(|directory| executable_exists(directory.join(command)))
+        .find_map(|directory| resolve_executable(directory.join(command)))
 }
 
-fn executable_exists(path: PathBuf) -> bool {
+fn resolve_executable(path: PathBuf) -> Option<PathBuf> {
     if is_executable_file(&path) {
-        return true;
+        return Some(path);
     }
     #[cfg(windows)]
     {
-        for extension in ["exe", "cmd", "bat"] {
-            if is_executable_file(&path.with_extension(extension)) {
-                return true;
+        // PATHEXT is appended, never substituted: `foo.v2` probes
+        // `foo.v2.exe`, matching cmd.exe's search rules.
+        for extension in windows_pathext() {
+            let mut candidate = path.clone().into_os_string();
+            candidate.push(".");
+            candidate.push(&extension);
+            let candidate = PathBuf::from(candidate);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
             }
         }
     }
-    false
+    None
+}
+
+#[cfg(windows)]
+fn windows_pathext() -> Vec<String> {
+    let configured = env::var("PATHEXT").ok().map(|value| {
+        value
+            .split(';')
+            .filter_map(|ext| {
+                let ext = ext.trim().trim_start_matches('.');
+                (!ext.is_empty()).then(|| ext.to_ascii_lowercase())
+            })
+            .collect::<Vec<_>>()
+    });
+    match configured {
+        Some(extensions) if !extensions.is_empty() => extensions,
+        _ => ["com", "exe", "bat", "cmd"].map(String::from).to_vec(),
+    }
 }
 
 fn is_executable_file(path: &Path) -> bool {

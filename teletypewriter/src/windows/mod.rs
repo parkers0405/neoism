@@ -3,17 +3,29 @@ mod conpty;
 mod pipes;
 mod spsc;
 
-use std::ffi::OsStr;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::{OsStr, OsString};
 use std::io::{self};
 use std::iter::once;
-use std::os::windows::ffi::OsStrExt;
+use std::mem;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::TryRecvError;
 
 use crate::windows::child::ChildExitWatcher;
 use crate::{ChildEvent, EventedPty, ProcessReadWrite, Winsize, WinsizeBuilder};
-use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+    TH32CS_SNAPPROCESS,
+};
+use windows_sys::Win32::System::Threading::{
+    GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+};
 
 use conpty::Conpty as Backend;
 use pipes::{EventedAnonRead as ReadPipe, EventedAnonWrite as WritePipe};
@@ -39,13 +51,45 @@ pub fn create_pty(
     columns: u16,
     rows: u16,
 ) -> Result<Pty, std::io::Error> {
-    let exec = if !args.is_empty() {
-        let args = args.join(" ");
-        &format!("{shell} {args}")
-    } else {
-        shell
-    };
-    conpty::new(exec, working_directory, columns, rows)
+    // The shell is passed through verbatim (it may already be a full
+    // command line from user config); each argument is quoted per the
+    // CommandLineToArgvW rules so paths with spaces survive.
+    let mut exec = shell.to_string();
+    for arg in &args {
+        exec.push(' ');
+        exec.push_str(&quote_cmdline_arg(arg));
+    }
+    conpty::new(&exec, working_directory, columns, rows)
+}
+
+/// Quote a single command-line argument per the MSVCRT/CommandLineToArgvW
+/// rules: wrap in double quotes when it contains whitespace, quotes, or is
+/// empty; backslash runs are doubled before a quote (2n+1 before a literal
+/// quote, 2n before the closing quote) and left alone everywhere else.
+fn quote_cmdline_arg(arg: &str) -> String {
+    if !arg.is_empty() && !arg.chars().any(|c| matches!(c, ' ' | '\t' | '"')) {
+        return arg.to_string();
+    }
+
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            if c == '"' {
+                // 2n+1 backslashes total before a literal quote.
+                quoted.extend(std::iter::repeat('\\').take(backslashes + 1));
+            }
+            backslashes = 0;
+        }
+        quoted.push(c);
+    }
+    // 2n backslashes total before the closing quote.
+    quoted.extend(std::iter::repeat('\\').take(backslashes));
+    quoted.push('"');
+    quoted
 }
 
 /// Name-parity alias with the Unix API so cross-platform callers can spawn
@@ -279,4 +323,215 @@ where
         .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         .spawn()
         .map(|_| ())
+}
+
+/// Terminate the process with the given PID. Failures are ignored, the
+/// same as the Unix `kill(pid, SIGHUP)` counterpart.
+pub fn kill_pid(pid: i32) {
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid as u32);
+        if !handle.is_null() {
+            TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+}
+
+/// ConPTY has no terminfo database, so entries never exist on Windows.
+pub fn terminfo_exists(_terminfo: &str) -> bool {
+    false
+}
+
+/// Full image path of the process with the given PID, or an empty string
+/// if the process is gone or cannot be queried. (The Unix counterpart
+/// shells out to `ps -o comm=`; the image path is the closest Windows
+/// equivalent.)
+pub fn command_per_pid(pid: i32) -> String {
+    process_image_path(pid as u32)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// One row of a Toolhelp process snapshot.
+#[derive(Clone)]
+struct ProcessEntry {
+    pid: u32,
+    parent_pid: u32,
+    exe: String,
+}
+
+fn snapshot_processes() -> io::Result<Vec<ProcessEntry>> {
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut entries = Vec::new();
+        let mut entry: PROCESSENTRY32W = mem::zeroed();
+        entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                entries.push(ProcessEntry {
+                    pid: entry.th32ProcessID,
+                    parent_pid: entry.th32ParentProcessID,
+                    exe: String::from_utf16_lossy(&entry.szExeFile[..len]),
+                });
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+
+        CloseHandle(snapshot);
+        Ok(entries)
+    }
+}
+
+/// Creation time as a raw FILETIME tick count, for ordering only.
+fn process_creation_time(pid: u32) -> Option<u64> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut creation: FILETIME = mem::zeroed();
+        let mut exit: FILETIME = mem::zeroed();
+        let mut kernel: FILETIME = mem::zeroed();
+        let mut user: FILETIME = mem::zeroed();
+        let ok =
+            GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+    }
+}
+
+fn process_image_path(pid: u32) -> Option<PathBuf> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            buf.as_mut_ptr(),
+            &mut len,
+        );
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        Some(PathBuf::from(OsString::from_wide(&buf[..len as usize])))
+    }
+}
+
+/// Best guess at the "foreground" process of a ConPTY session: the most
+/// recently created leaf in the process tree rooted at the shell. There
+/// is no tcgetpgrp equivalent for ConPTY, so this walks a Toolhelp
+/// snapshot instead.
+fn foreground_process(shell_pid: u32) -> Option<ProcessEntry> {
+    if shell_pid == 0 {
+        return None;
+    }
+    let entries = snapshot_processes().ok()?;
+
+    let mut by_pid: HashMap<u32, usize> = HashMap::new();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (idx, entry) in entries.iter().enumerate() {
+        by_pid.insert(entry.pid, idx);
+        if entry.parent_pid != entry.pid {
+            children.entry(entry.parent_pid).or_default().push(entry.pid);
+        }
+    }
+
+    // Restrict the walk to descendants of the shell. The visited set
+    // guards against parent-pid cycles introduced by PID reuse.
+    let mut visited: HashSet<u32> = HashSet::new();
+    let mut queue: VecDeque<u32> = VecDeque::from([shell_pid]);
+    let mut leaves: Vec<u32> = Vec::new();
+    while let Some(pid) = queue.pop_front() {
+        if !visited.insert(pid) || !by_pid.contains_key(&pid) {
+            continue;
+        }
+        match children.get(&pid) {
+            Some(kids) => queue.extend(kids),
+            None => leaves.push(pid),
+        }
+    }
+
+    // Most recently created leaf wins; processes we cannot query
+    // (e.g. elevated children) rank lowest.
+    let best = leaves
+        .into_iter()
+        .max_by_key(|pid| process_creation_time(*pid).unwrap_or(0))?;
+    by_pid.get(&best).map(|&idx| entries[idx].clone())
+}
+
+/// Executable name (without the `.exe` suffix) of the foreground process
+/// of the ConPTY session rooted at `shell_pid`, or an empty string if it
+/// cannot be determined.
+///
+/// Unlike the Unix version there is no PTY fd / process group, so only
+/// the shell PID is taken and the foreground process is inferred from
+/// the process tree (see [`foreground_process`]).
+pub fn foreground_process_name(shell_pid: u32) -> String {
+    let Some(entry) = foreground_process(shell_pid) else {
+        return String::new();
+    };
+    let mut name = entry.exe;
+    if name.to_ascii_lowercase().ends_with(".exe") {
+        name.truncate(name.len() - 4);
+    }
+    name
+}
+
+/// Full image path of the foreground process of the ConPTY session
+/// rooted at `shell_pid`.
+///
+/// Unlike the Unix version (which reports the process **cwd** via
+/// `/proc/<pid>/cwd` — unreadable for another process on Windows without
+/// undocumented PEB spelunking), this reports the executable path from
+/// `QueryFullProcessImageNameW`. Signature also differs: no PTY fd, see
+/// [`foreground_process_name`].
+pub fn foreground_process_path(
+    shell_pid: u32,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let entry = foreground_process(shell_pid)
+        .ok_or("no live process found for the ConPTY session")?;
+    process_image_path(entry.pid)
+        .ok_or_else(|| "could not query the foreground process image path".into())
+}
+
+#[cfg(test)]
+mod cmdline_tests {
+    use super::quote_cmdline_arg;
+
+    #[test]
+    fn plain_args_are_untouched() {
+        assert_eq!(quote_cmdline_arg("-NoLogo"), "-NoLogo");
+        assert_eq!(quote_cmdline_arg("C:\\Windows\\notepad.exe"), "C:\\Windows\\notepad.exe");
+    }
+
+    #[test]
+    fn spaces_and_quotes_are_escaped() {
+        assert_eq!(quote_cmdline_arg(""), "\"\"");
+        assert_eq!(quote_cmdline_arg("C:\\Program Files\\x"), "\"C:\\Program Files\\x\"");
+        // Trailing backslash run is doubled before the closing quote.
+        assert_eq!(quote_cmdline_arg("C:\\a b\\"), "\"C:\\a b\\\\\"");
+        // Literal quote gets 2n+1 backslashes.
+        assert_eq!(quote_cmdline_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(quote_cmdline_arg("tail\\\""), "\"tail\\\\\\\"\"");
+    }
 }

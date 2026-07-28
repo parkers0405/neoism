@@ -266,8 +266,8 @@ impl LocalPty {
         self.main_fd.clone()
     }
 
-    /// Child PID (Unix only).
-    #[cfg(unix)]
+    /// Child PID. On Windows this is the ConPTY child process id (0 if
+    /// it could not be captured at spawn time).
     pub fn shell_pid(&self) -> u32 {
         self.shell_pid
     }

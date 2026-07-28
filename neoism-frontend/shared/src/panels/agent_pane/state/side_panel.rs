@@ -436,6 +436,10 @@ pub struct NeoismAgentSidePanel {
     search_focused: bool,
     sessions: Vec<NeoismAgentSessionEntry>,
     sessions_loaded: bool,
+    /// Phase origin for the first-load session skeleton. The panel starts
+    /// unloaded, so this clock can begin with the panel state and stops
+    /// participating in redraws as soon as `set_sessions` lands.
+    sessions_loading_started: Instant,
     /// Last time we kicked off a refresh of the sessions list.
     /// Used to debounce refreshes when the home view re-renders every
     /// frame.
@@ -509,6 +513,7 @@ impl Default for NeoismAgentSidePanel {
             search_focused: false,
             sessions: Vec::new(),
             sessions_loaded: false,
+            sessions_loading_started: Instant::now(),
             last_sessions_refresh: None,
             subagents: Vec::new(),
             subagents_loaded: false,
@@ -716,6 +721,13 @@ impl NeoismAgentSidePanel {
 
     pub fn sessions_loaded(&self) -> bool {
         self.sessions_loaded
+    }
+
+    /// Seconds since the initial session-list skeleton began.
+    pub fn sessions_loading_elapsed(&self) -> f32 {
+        Instant::now()
+            .saturating_duration_since(self.sessions_loading_started)
+            .as_secs_f32()
     }
 
     pub fn subagents(&self) -> &[NeoismAgentSessionEntry] {
@@ -1741,6 +1753,8 @@ impl NeoismAgentSidePanel {
     pub fn is_animating(&self) -> bool {
         self.scroll.is_animating()
                 || self.cursor_spring.position != 0.0
+                // The initial sessions skeleton uses the file-tree shimmer.
+                || (!self.sessions_loaded && !self.user_hidden)
                 // The semantic-search skeleton shimmers in the empty state.
                 || self.semantic_searching
                 // A running sub-agent paints the rainbow loader spinner (and

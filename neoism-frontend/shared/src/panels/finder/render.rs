@@ -260,39 +260,39 @@ impl Finder {
             FinderMode::BufferLines | FinderMode::BufferReplace
         ) && !self.query.is_empty()
         {
-                let shown = self.results.len();
-                if self.buffer_match_total > shown {
-                    format!("[{}/{} matches]", shown, self.buffer_match_total)
-                } else if self.buffer_match_total == 1 {
-                    "[1 match]".to_string()
-                } else {
-                    format!("[{} matches]", self.buffer_match_total)
-                }
-            } else if matches!(self.mode, FinderMode::References) {
-                // Reference count badge; `shown/total` while filtering.
-                let shown = self.results.len();
-                let total = self.reference_rows.len();
-                if shown < total {
-                    format!("[{shown}/{total} refs]")
-                } else if total == 1 {
-                    "[1 ref]".to_string()
-                } else {
-                    format!("[{total} refs]")
-                }
-            } else if matches!(self.mode, FinderMode::Symbols) {
-                // Symbol count badge; `shown/total` while filtering.
-                let shown = self.results.len();
-                let total = self.symbol_rows.len();
-                if shown < total {
-                    format!("[{shown}/{total} syms]")
-                } else if total == 1 {
-                    "[1 sym]".to_string()
-                } else {
-                    format!("[{total} syms]")
-                }
+            let shown = self.results.len();
+            if self.buffer_match_total > shown {
+                format!("[{}/{} matches]", shown, self.buffer_match_total)
+            } else if self.buffer_match_total == 1 {
+                "[1 match]".to_string()
             } else {
-                format!("[{}]", search_mode_label)
-            };
+                format!("[{} matches]", self.buffer_match_total)
+            }
+        } else if matches!(self.mode, FinderMode::References) {
+            // Reference count badge; `shown/total` while filtering.
+            let shown = self.results.len();
+            let total = self.reference_rows.len();
+            if shown < total {
+                format!("[{shown}/{total} refs]")
+            } else if total == 1 {
+                "[1 ref]".to_string()
+            } else {
+                format!("[{total} refs]")
+            }
+        } else if matches!(self.mode, FinderMode::Symbols) {
+            // Symbol count badge; `shown/total` while filtering.
+            let shown = self.results.len();
+            let total = self.symbol_rows.len();
+            if shown < total {
+                format!("[{shown}/{total} syms]")
+            } else if total == 1 {
+                "[1 sym]".to_string()
+            } else {
+                format!("[{total} syms]")
+            }
+        } else {
+            format!("[{}]", search_mode_label)
+        };
         let badge_font = (input_font * 0.92).max(1.0);
         let badge_opts = DrawOpts {
             font_size: badge_font,

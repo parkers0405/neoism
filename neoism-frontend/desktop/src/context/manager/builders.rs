@@ -53,11 +53,15 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
 
             #[cfg(target_os = "windows")]
             {
-                // if let Ok(path) = neoism_terminal_pty::foreground_process_path() {
-                //     working_dir =
-                //         Some(path.to_string_lossy().to_string());
-                // }
-                working_dir = None;
+                // No /proc cwd read on Windows; the OSC 7-reported
+                // directory (when the shell emits it) is the best
+                // available signal.
+                let current_context = self.current();
+                if let Some(terminal) = current_context.terminal.try_lock_unfair() {
+                    if let Some(dir) = terminal.current_directory.as_ref() {
+                        working_dir = Some(dir.to_string_lossy().to_string());
+                    }
+                }
             }
         }
 
@@ -282,11 +286,15 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
 
             #[cfg(target_os = "windows")]
             {
-                // if let Ok(path) = neoism_terminal_pty::foreground_process_path() {
-                //     working_dir =
-                //         Some(path.to_string_lossy().to_string());
-                // }
-                working_dir = None;
+                // No /proc cwd read on Windows; the OSC 7-reported
+                // directory (when the shell emits it) is the best
+                // available signal.
+                let current_context = self.current();
+                if let Some(terminal) = current_context.terminal.try_lock_unfair() {
+                    if let Some(dir) = terminal.current_directory.as_ref() {
+                        working_dir = Some(dir.to_string_lossy().to_string());
+                    }
+                }
             }
         }
 

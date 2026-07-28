@@ -660,6 +660,24 @@ impl CodePane {
         }
     }
 
+    /// Local read failed because the file lives on a joined server or an
+    /// ssh host — clear the raw os error and show an empty buffer while
+    /// the remote fetch is in flight (mirrors the markdown pane).
+    pub fn mark_remote_loading(&mut self) {
+        self.error = None;
+        self.remote_content_pending = true;
+        self.buffer.reset_from_text("");
+    }
+
+    /// Seed the pane with bytes fetched from the host/ssh remote, exactly
+    /// like a successful local load would. Language/highlighting were
+    /// already resolved from the path at construction.
+    pub fn apply_remote_source(&mut self, text: &str) {
+        self.buffer.reset_from_text(text);
+        self.remote_content_pending = false;
+        self.error = None;
+    }
+
     /// Local host-side save: writes the buffer with its original line
     /// ending / trailing newline restored, then resets the dirty
     /// baseline. (Daemon/CRDT-owned saves come with the LSP wiring.)

@@ -339,7 +339,12 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .iter()
             .find(|workspace| workspace.id == workspace_id)
             .map(|workspace| workspace.host_id == local)
-            .unwrap_or(true)
+            // Unknown workspace (not yet in the tree cache): on a PEER
+            // link we are a guest, so a not-yet-cached id is the host's,
+            // NOT ours — defaulting to "owned" here made a guest join
+            // restore the owner's tabs and publish into the host tree.
+            // On a home link an unknown id is genuinely local.
+            .unwrap_or(!self.daemon.link_is_peer)
     }
 
     /// True when this window's daemon link points at ANOTHER

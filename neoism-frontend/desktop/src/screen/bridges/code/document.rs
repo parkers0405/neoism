@@ -21,10 +21,48 @@ impl Screen<'_> {
                 path.clone(),
             ),
         );
-        self.activate_code_path(path);
+        self.activate_code_path(path.clone());
+        // Remote tree (joined workspace OR ssh-followed): the CodePane's
+        // local read just failed with os error 2 because the file lives
+        // on the host. Fetch it over the same files plane the tree uses
+        // and seed the pane when the reply lands.
+        self.request_remote_code_content(&path);
         self.reapply_chrome_layout();
         self.renderer.trail_cursor.reset();
         self.mark_dirty();
+    }
+
+    /// Kick a remote `ReadFile` for a code pane whose local load failed
+    /// because the bytes live on the host/ssh remote. Mirrors
+    /// `request_remote_markdown_content`; the reply is applied in
+    /// `apply_daemon_files_message`'s `FileContent` arm.
+    fn request_remote_code_content(&mut self, path: &Path) {
+        let Some(remote) = self.renderer.file_tree.remote_files() else {
+            return;
+        };
+        if !path.starts_with(remote.root()) {
+            return;
+        }
+        let needs_fetch = self
+            .context_manager
+            .code_pane_mut_by_path(path)
+            .map(|pane| {
+                if pane.remote_content_pending {
+                    return false;
+                }
+                let missing = pane.error.is_some();
+                if missing {
+                    pane.mark_remote_loading();
+                }
+                missing
+            })
+            .unwrap_or(false);
+        if !needs_fetch {
+            return;
+        }
+        let request_id = remote.request_read_file(path);
+        self.pending_remote_code_opens
+            .insert(request_id, path.to_path_buf());
     }
 
     pub(crate) fn activate_code_path(&mut self, path: std::path::PathBuf) {

@@ -10,15 +10,6 @@ name: Build Stack (Linux)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "**/*.rs"
-      - "**/Cargo.toml"
-      - "Cargo.lock"
-      - "neoism-frontend/web/**"
-      - "install.sh"
-      - ".github/workflows/build-stack.yml"
 
 concurrency:
   group: build-stack-${{ github.ref }}

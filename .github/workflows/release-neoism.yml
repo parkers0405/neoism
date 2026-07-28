@@ -158,6 +158,23 @@ jobs:
           if command -v sha256sum >/dev/null; then sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256";
           else shasum -a 256 "$OUT.tar.gz" > "$OUT.tar.gz.sha256"; fi
 
+      # Drag-to-install DMG: the same Neoism.app plus an /Applications
+      # symlink, compressed with hdiutil (no third-party tooling). Until an
+      # Apple Developer ID signs + notarizes the app, Gatekeeper makes users
+      # right-click → Open on first launch; wire notarytool here once the
+      # DEVELOPER_ID_* secrets exist.
+      - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.dmg
+        if: matrix.goos == 'darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="neoism-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p stage/dmg
+          cp -R "stage/$OUT/Neoism.app" stage/dmg/
+          ln -s /Applications stage/dmg/Applications
+          hdiutil create -volname "Neoism" -srcfolder stage/dmg -ov -format UDZO "$OUT.dmg"
+          shasum -a 256 "$OUT.dmg" > "$OUT.dmg.sha256"
+
       - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip
         if: matrix.goos == 'windows'
         shell: pwsh
@@ -194,6 +211,20 @@ jobs:
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
           fail_on_unmatched_files: true
 
+      - name: Publish macOS DMG to public dist repo
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'darwin'
+        with:
+          repository: parkers0405/neoism
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: true
+          files: |
+            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.dmg
+            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.dmg.sha256
+          fail_on_unmatched_files: true
+
       - name: Publish Windows artifacts to public dist repo
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') && matrix.goos == 'windows'
@@ -216,6 +247,7 @@ jobs:
           path: |
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
+            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.dmg*
 
       - name: Upload Windows build artifact (dry runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.goos == 'windows' }}

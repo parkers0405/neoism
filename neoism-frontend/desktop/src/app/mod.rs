@@ -2021,6 +2021,54 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
 
     #[cfg(target_os = "macos")]
     fn open_urls(&mut self, active_event_loop: &ActiveEventLoop, urls: Vec<String>) {
+        // Finder "Open With" / double-click / drag-onto-Dock deliver files
+        // here as file:// URLs (`application:openURLs:` in the app delegate).
+        // Route regular files into the same editor path used for CLI-passed
+        // paths and drag-and-drop; everything else (directories, custom
+        // schemes) keeps the legacy open-a-new-surface behavior below.
+        let mut editor_paths: Vec<PathBuf> = Vec::new();
+        let mut other_urls: Vec<String> = Vec::new();
+        for raw in urls {
+            let file_path = url::Url::parse(&raw)
+                .ok()
+                .filter(|u| u.scheme() == "file")
+                .and_then(|u| u.to_file_path().ok())
+                .filter(|p| p.is_file());
+            match file_path {
+                Some(path) => editor_paths.push(path),
+                None => other_urls.push(raw),
+            }
+        }
+
+        if !editor_paths.is_empty() {
+            // Prefer the focused window, else any live window. On a cold
+            // start from a Finder double-click the URLs can arrive before
+            // the first window exists — queue them on initial_open_paths,
+            // which drains when the first window is created.
+            let target = self
+                .router
+                .get_focused_route()
+                .filter(|id| self.router.routes.contains_key(id))
+                .or_else(|| self.router.routes.keys().next().copied());
+            match target {
+                Some(window_id) => {
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        for path in editor_paths {
+                            route.window.screen.open_path_in_editor(path);
+                        }
+                        route.request_redraw();
+                        route.window.winit_window.focus_window();
+                    }
+                }
+                None => self.initial_open_paths.extend(editor_paths),
+            }
+        }
+
+        if other_urls.is_empty() {
+            return;
+        }
+        let urls = other_urls;
+
         if !self.config.navigation.is_native() {
             for url in urls {
                 let window_id = self.router.create_window(

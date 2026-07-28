@@ -47,6 +47,8 @@ pub(crate) struct McpAuthEntry {
     pub(crate) code_verifier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) oauth_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) oauth_directory: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) server_url: Option<String>,
 }
@@ -230,6 +232,16 @@ impl McpAuthStore {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
         }
+        // Windows counterpart of the 0o600 above: owner+SYSTEM-only DACL.
+        // Warn-and-go — ACL-less filesystems must not fail token writes.
+        #[cfg(windows)]
+        if let Err(error) = crate::windows_acl::harden_owner_only(&self.path) {
+            tracing::warn!(
+                error = %error,
+                path = %self.path.display(),
+                "could not tighten MCP auth store ACL; continuing",
+            );
+        }
         Ok(())
     }
 }
@@ -278,6 +290,7 @@ mod tests {
                     }),
                     code_verifier: Some("verifier".to_string()),
                     oauth_state: Some("state".to_string()),
+                    oauth_directory: Some("/tmp/project".to_string()),
                     server_url: Some("https://example.com/mcp".to_string()),
                 },
             )
@@ -407,6 +420,7 @@ mod tests {
                     }),
                     code_verifier: None,
                     oauth_state: None,
+                    oauth_directory: None,
                     server_url: Some("https://example.com/mcp".to_string()),
                 },
             )

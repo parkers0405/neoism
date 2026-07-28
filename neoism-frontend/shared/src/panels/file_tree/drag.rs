@@ -257,7 +257,12 @@ impl FileTree {
     /// renderer dims this row in place (it's been lifted out) and paints
     /// the real row content following the cursor.
     pub(super) fn drag_source_index(&self) -> Option<usize> {
-        let source = self.file_drag.as_ref().filter(|drag| drag.live)?.source_path.as_path();
+        let source = self
+            .file_drag
+            .as_ref()
+            .filter(|drag| drag.live)?
+            .source_path
+            .as_path();
         self.entries.iter().position(|entry| {
             entry.path.as_deref().map(normalize_path).as_deref() == Some(source)
         })
@@ -304,7 +309,13 @@ mod tests {
             entry("a.rs", NodeKind::File, "/w/src/a.rs", 1, None),
             entry("docs", NodeKind::Dir { open: false }, "/w/docs", 0, None),
             entry("assets", NodeKind::Dir { open: true }, "/w/assets", 0, None),
-            entry("img", NodeKind::Dir { open: false }, "/w/assets/img", 1, None),
+            entry(
+                "img",
+                NodeKind::Dir { open: false },
+                "/w/assets/img",
+                1,
+                None,
+            ),
         ]);
         tree
     }
@@ -324,7 +335,10 @@ mod tests {
             0,
             Some(VirtualEntryKind::NeoismWorkspace),
         )]);
-        assert!(!tree.begin_file_drag(0, 0.0, 0.0), "virtual row is not draggable");
+        assert!(
+            !tree.begin_file_drag(0, 0.0, 0.0),
+            "virtual row is not draggable"
+        );
         assert!(tree.file_drag().is_none());
     }
 

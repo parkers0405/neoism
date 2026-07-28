@@ -1,7 +1,6 @@
 use librashader_presets::{ParsePresetError, ShaderFeatures, ShaderPreset};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
 
 macro_rules! resource {
     ($resource:literal) => {
@@ -54,9 +53,9 @@ const NEWPIXIECRT_NEWPIXIECRT: &[u8] = resource!("./newpixiecrt/newpixie-crt.sla
 const NEWPIXIECRT_NEWPIXIECRTP: &[u8] = resource!("./newpixiecrt/newpixie-crt.slangp");
 
 pub fn newpixiecrt() -> Result<ShaderPreset, LoadError> {
-    let dir_path = Path::new("/tmp/newpixiecrt");
+    let dir_path = std::env::temp_dir().join("newpixiecrt");
     if !dir_path.exists() {
-        fs::create_dir_all(dir_path)?;
+        fs::create_dir_all(&dir_path)?;
     }
 
     let files = vec![
@@ -88,9 +87,9 @@ const CRT_CURVE: &[u8] = resource!("./crt_curve.slang");
 const CRT_CURVE_PRESET: &[u8] = resource!("./crt_curve.slangp");
 
 pub fn crt_curve() -> Result<ShaderPreset, LoadError> {
-    let dir_path = Path::new("/tmp/crt_curve");
+    let dir_path = std::env::temp_dir().join("crt_curve");
     if !dir_path.exists() {
-        fs::create_dir_all(dir_path)?;
+        fs::create_dir_all(&dir_path)?;
     }
 
     let files = vec![

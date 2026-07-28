@@ -60,9 +60,13 @@ pub fn default_shell() -> crate::config::Shell {
 
     #[cfg(target_os = "windows")]
     {
+        // Prefer PowerShell 7 (pwsh) when it is on PATH; classic
+        // Windows PowerShell ships with the OS and is the safety net.
+        let program = find_shell_in_path("pwsh.exe")
+            .unwrap_or_else(|| String::from("powershell.exe"));
         crate::config::Shell {
-            program: String::from("powershell"),
-            args: vec![],
+            program,
+            args: vec![String::from("-NoLogo")],
         }
     }
 }
@@ -76,6 +80,18 @@ fn find_shell_in_path(name: &str) -> Option<String> {
             return Some(candidate.to_string_lossy().into_owned());
         }
     }
+    let path_env = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_env) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn find_shell_in_path(name: &str) -> Option<String> {
     let path_env = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_env) {
         let candidate = dir.join(name);

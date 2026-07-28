@@ -316,7 +316,37 @@ async fn shutdown_signal(writer: persistence::SnapshotWriter) {
         }
     }
 
-    #[cfg(not(unix))]
+    // Windows has no SIGTERM: console close and system shutdown arrive as
+    // console control events instead, and missing them would skip the
+    // snapshot flush below exactly when it matters most.
+    #[cfg(windows)]
+    {
+        match (
+            tokio::signal::windows::ctrl_close(),
+            tokio::signal::windows::ctrl_shutdown(),
+        ) {
+            (Ok(mut ctrl_close), Ok(mut ctrl_shutdown)) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        tracing::info!("received Ctrl-C; shutting down");
+                    }
+                    _ = ctrl_close.recv() => {
+                        tracing::info!("console closing; shutting down");
+                    }
+                    _ = ctrl_shutdown.recv() => {
+                        tracing::info!("system shutdown; shutting down");
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!("failed to install console control handlers");
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("received Ctrl-C; shutting down");
+            }
+        }
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!("received Ctrl-C; shutting down");
@@ -338,11 +368,36 @@ fn daemonize_background() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// Windows stand-in for the double-fork: re-spawn ourselves detached
+/// (minus `--background`, so the child doesn't recurse) and exit the
+/// parent. The child re-parses the remaining args, so pidfile/state
+/// flags behave as on unix.
+#[cfg(windows)]
+fn daemonize_background() -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+    let exe = std::env::current_exe()?;
+    let args: Vec<std::ffi::OsString> = std::env::args_os()
+        .skip(1)
+        .filter(|arg| arg != "--background")
+        .collect();
+    std::process::Command::new(exe)
+        .args(args)
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    std::process::exit(0);
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn daemonize_background() -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "--background is only supported on Unix",
+        "--background is only supported on Unix and Windows",
     ))
 }
 

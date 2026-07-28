@@ -20,6 +20,19 @@ pub(super) fn host_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ]);
+    #[cfg(windows)]
+    {
+        // %APPDATA%\npm (npm global bins), scoop shims, %LOCALAPPDATA%\Programs.
+        if let Some(appdata) = dirs::data_dir() {
+            paths.push(appdata.join("npm"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join("scoop").join("shims"));
+        }
+        if let Some(local) = dirs::data_local_dir() {
+            paths.push(local.join("Programs"));
+        }
+    }
     if let Some(existing) = std::env::var_os("PATH") {
         paths.extend(std::env::split_paths(&existing));
     }

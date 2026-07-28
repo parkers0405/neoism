@@ -144,24 +144,23 @@ notarize:
         profile_name: "{{ .Env.MACOS_NOTARY_KEYCHAIN_PROFILE }}"
 
 app_bundles:
-  - icon: ./misc/osx/Rio.app/Contents/Resources/icon.icns
-    bundle: com.neoism.neoism # TODO: confirm your macOS bundle identifier
+  - icon: ./misc/macos/neoism.icns
+    bundle: dev.neoism.Neoism
     extra_files:
-      - src: ./misc/72/rio
-        dst: Contents/Resources/72/rio
-      # releases made before goreleaser integration included the classic icon
-      - src: ./misc/osx/Rio.app/Contents/Resources/icon-classic.icns
-        dst: Contents/Resources/icon-classic.icns
-    templated_extra_files:
-      - src: ./misc/osx/Rio.app/Contents/Info.plist
+      # Not templated: the plist carries a literal {{VERSION}} placeholder
+      # (the CI darwin packaging step seds it); goreleaser's Go templating
+      # would choke on that syntax.
+      - src: ./misc/macos/Info.plist
         dst: Contents/Info.plist
+      - src: ./misc/macos/neoism.icns
+        dst: Contents/Resources/neoism.icns
 
 nfpms:
   - formats: [deb, rpm]
     id: deb-arm64-wayland
     ids: [linux-arm64-wayland]
     file_name_template: "{{- trimsuffix .ConventionalFileName .ConventionalExtension -}}_wayland"
-    package_name: rioterm
+    package_name: neoism
     dependencies: [libc6 (>= 2.35), libstdc++6 (>= 11)]
     overrides:
       rpm:
@@ -184,7 +183,7 @@ nfpms:
     id: deb-arm64-x11
     ids: [linux-arm64-x11]
     file_name_template: "{{- trimsuffix .ConventionalFileName .ConventionalExtension -}}_x11"
-    package_name: rioterm
+    package_name: neoism
     dependencies: [libc6 (>= 2.35), libstdc++6 (>= 11)]
     overrides:
       rpm:
@@ -207,7 +206,7 @@ nfpms:
     id: deb-x64-wayland
     ids: [linux-x64-wayland]
     file_name_template: "{{- trimsuffix .ConventionalFileName .ConventionalExtension -}}_wayland"
-    package_name: rioterm
+    package_name: neoism
     dependencies: [libc6 (>= 2.35), libstdc++6 (>= 11)]
     overrides:
       rpm:
@@ -230,7 +229,7 @@ nfpms:
     id: deb-x64-x11
     ids: [linux-x64-x11]
     file_name_template: "{{- trimsuffix .ConventionalFileName .ConventionalExtension -}}_x11"
-    package_name: rioterm
+    package_name: neoism
     dependencies: [libc6 (>= 2.35), libstdc++6 (>= 11)]
     overrides:
       rpm:
@@ -253,16 +252,16 @@ nfpms:
 msi:
   - id: win-x64
     name: "{{ .ProjectName }}-installer-x86_64"
-    wxs: ./misc/windows/rio.wxs
+    wxs: ./misc/windows/neoism.wxs
     ids: [windows-x86_64]
     extensions: [WixToolset.UI.wixext, WixToolset.Util.wixext]
-    extra_files: [./misc/windows/rio.ico, ./misc/windows/License.rtf]
+    extra_files: [./misc/windows/neoism.ico, ./misc/windows/License.rtf]
   - id: win-arm64
     name: "{{ .ProjectName }}-installer-aarch64"
-    wxs: ./misc/windows/rio.wxs
+    wxs: ./misc/windows/neoism.wxs
     ids: [windows-arm64]
     extensions: [WixToolset.UI.wixext, WixToolset.Util.wixext]
-    extra_files: [./misc/windows/rio.ico, ./misc/windows/License.rtf]
+    extra_files: [./misc/windows/neoism.ico, ./misc/windows/License.rtf]
 
 winget:
   - use: msi

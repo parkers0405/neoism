@@ -44,10 +44,11 @@ jobs:
           # (aarch64 mac runner + x86_64-apple-darwin target) if Intel macs
           # ever matter.
           # - { runner: macos-13,      goos: darwin, goarch: x86_64,  target: x86_64-apple-darwin }
-          # windows compiles (see build-mac-win.yml, the compile guard) but
-          # has never been RUN on a real Windows machine — don't publish
-          # artifacts until someone validates it at runtime, then re-add.
-          # - { runner: windows-latest, goos: windows, goarch: x86_64,  target: x86_64-pc-windows-msvc }
+          # Windows: full parity wave 2026-07-27 (embedded daemon over
+          # loopback TCP, ConPTY end-to-end, LSP spawn, bootstrap +
+          # associations); runtime-smoked under Wine/Proton (daemon boot,
+          # ConPTY round-trips, GUI renders on real GPUs).
+          - { runner: windows-latest, goos: windows, goarch: x86_64,  target: x86_64-pc-windows-msvc }
           # linux-aarch64 dropped for now: `ubuntu-24.04-arm` isn't free on a
           # private repo. Re-add via cross-compile or a paid/public runner.
     steps:
@@ -107,6 +108,23 @@ jobs:
           BIN="target/${{ matrix.target }}/release"
           cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "stage/$OUT/"
           cp misc/rio.terminfo "stage/$OUT/" 2>/dev/null || true
+          if [[ "${{ matrix.goos }}" == "darwin" ]]; then
+            # Neoism.app: double-clickable + Finder "Open With" candidate for
+            # code/markdown/json (CFBundleDocumentTypes in misc/macos/Info.plist).
+            # Ships INSIDE the tarball alongside the raw binaries above — CLI
+            # installs keep using those, the .app is dragged to /Applications.
+            APP="stage/$OUT/Neoism.app"
+            mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+            cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "$APP/Contents/MacOS/"
+            cp misc/macos/neoism.icns "$APP/Contents/Resources/neoism.icns"
+            VERSION="${GITHUB_REF_NAME#v}"
+            case "$VERSION" in
+              [0-9]*.[0-9]*) ;; # tag push: vX.Y.Z
+              *) VERSION="$(cargo pkgid -p neoism | sed 's/.*[@#]//')" ;; # dispatch/dry run
+            esac
+            sed "s/{{VERSION}}/$VERSION/g" misc/macos/Info.plist > "$APP/Contents/Info.plist"
+            codesign --force --deep -s - "$APP" # ad-hoc; real signing needs an Apple Dev account
+          fi
           tar -C stage -czf "$OUT.tar.gz" "$OUT"
           if command -v sha256sum >/dev/null; then sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256";
           else shasum -a 256 "$OUT.tar.gz" > "$OUT.tar.gz.sha256"; fi

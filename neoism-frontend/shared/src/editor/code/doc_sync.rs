@@ -240,9 +240,10 @@ impl CodeDocBinding {
         for (ix, text) in self.shadow.iter().enumerate() {
             let units = text.encode_utf16().count();
             if ix == line {
-                return self
-                    .replica
-                    .sticky_anchor((offset + utf16_col.min(units)) as u32, stick_to_next);
+                return self.replica.sticky_anchor(
+                    (offset + utf16_col.min(units)) as u32,
+                    stick_to_next,
+                );
             }
             offset += units + 1;
         }
@@ -265,7 +266,11 @@ impl CodeDocBinding {
         Some(position_for_utf16_offset(&self.shadow, offset))
     }
 
-    fn apply_history(&mut self, buffer: &mut CodeBuffer, redo: bool) -> CodeDocHistoryApply {
+    fn apply_history(
+        &mut self,
+        buffer: &mut CodeBuffer,
+        redo: bool,
+    ) -> CodeDocHistoryApply {
         if !self.seeded {
             return CodeDocHistoryApply::default();
         }

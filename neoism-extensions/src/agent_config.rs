@@ -6,14 +6,36 @@ use crate::install_runner::InstallError;
 use crate::installed::write_atomic;
 use crate::manifest::ExtensionManifest;
 
-/// `$XDG_CONFIG_HOME/neoism/config.json`, fallback `$HOME/.config/...` —
+/// `$XDG_CONFIG_HOME/neoism/config.json` (fallback `$HOME/.config/...`)
+/// on unix, `%USERPROFILE%\AppData\Local\neoism\config.json` on Windows —
 /// the unified config the terminal AND the agent server both read.
-/// Mirrors `neoism-agent-server::server_util::default_config_dir`.
+/// Mirrors `neoism-agent-server::server_util::default_config_dir`,
+/// including its `NEOISM_AGENT_CONFIG_DIR` override, so MCP installs
+/// always land in the config.json the agent server actually loads.
 pub fn agent_config_path() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.config")))
-        .unwrap_or_else(|_| ".neoism/config".to_string());
-    PathBuf::from(base).join("neoism/config.json")
+    if let Ok(dir) = std::env::var("NEOISM_AGENT_CONFIG_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir).join("config.json");
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Identical construction to the terminal's `config_dir_path()`
+        // (neoism-backend/src/config/mod.rs) and the agent server's
+        // Windows config root.
+        let base = dirs::home_dir()
+            .map(|home| home.join("AppData").join("Local").join("neoism"))
+            .unwrap_or_else(|| PathBuf::from(".neoism/config"));
+        base.join("config.json")
+    }
+    #[cfg(not(windows))]
+    {
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.config")))
+            .map(|base| format!("{base}/neoism"))
+            .unwrap_or_else(|_| ".neoism/config".to_string());
+        PathBuf::from(base).join("config.json")
+    }
 }
 
 /// Merge an MCP entry into the user's agent config under `mcp.<id>`.

@@ -91,6 +91,7 @@ pub(crate) async fn auth_start(
     entry.client_info = client.client_info;
     entry.code_verifier = Some(code_verifier);
     entry.oauth_state = Some(state.clone());
+    entry.oauth_directory = Some(directory.to_string());
     entry.server_url = Some(url.clone());
     auth_store.set(name, entry)?;
 
@@ -174,6 +175,7 @@ pub(crate) async fn auth_callback(
     });
     entry.code_verifier = None;
     entry.oauth_state = None;
+    entry.oauth_directory = None;
     entry.server_url = Some(url.clone());
     auth_store.set(name, entry)?;
 

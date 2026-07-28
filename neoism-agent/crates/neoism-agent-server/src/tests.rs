@@ -1257,6 +1257,8 @@ async fn neoism_headless_routes_are_registered() {
         (Method::GET, "/question"),
         (Method::GET, "/pty/shells"),
         (Method::GET, "/mcp"),
+        (Method::GET, "/mcp/test/auth/callback?code=test"),
+        (Method::POST, "/mcp/test/auth/callback"),
         (Method::GET, "/experimental/tool/ids"),
         (Method::POST, "/experimental/tool/read/execute"),
         (Method::GET, "/experimental/resource"),

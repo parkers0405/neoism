@@ -93,10 +93,7 @@ pub fn parse_substitute_command(input: &str) -> Option<SubstituteSpec> {
 /// Replace UI treats that as search-only preview).
 pub fn split_replace_query(input: &str) -> (String, Option<String>) {
     let (pattern, rest) = split_at_separator(input, '/');
-    (
-        pattern,
-        rest.map(|rest| split_at_separator(rest, '/').0),
-    )
+    (pattern, rest.map(|rest| split_at_separator(rest, '/').0))
 }
 
 /// Split `input` at the first unescaped `sep`, unescaping `\sep` (and
@@ -196,7 +193,10 @@ fn find_ci(haystack: &str, needle: &str, from: usize, ci: bool) -> Option<usize>
 /// Run the substitution on the buffer: one undo step, cursor parked on
 /// the last substitution, selection cleared. Returns what happened so
 /// the host can toast it.
-pub fn apply_substitute(buffer: &mut CodeBuffer, spec: &SubstituteSpec) -> SubstituteOutcome {
+pub fn apply_substitute(
+    buffer: &mut CodeBuffer,
+    spec: &SubstituteSpec,
+) -> SubstituteOutcome {
     let last_line = buffer.line_count().saturating_sub(1);
     let resolve = |marker: SubstituteLine| -> usize {
         match marker {
@@ -235,8 +235,13 @@ pub fn apply_substitute(buffer: &mut CodeBuffer, spec: &SubstituteSpec) -> Subst
     // Scan first: no match in range → no undo entry, no edit, clean
     // "Pattern not found" report.
     let any_match = (start..=end).any(|line_ix| {
-        find_ci(&buffer.lines[line_ix], &spec.pattern, 0, spec.case_insensitive)
-            .is_some()
+        find_ci(
+            &buffer.lines[line_ix],
+            &spec.pattern,
+            0,
+            spec.case_insensitive,
+        )
+        .is_some()
     });
     if !any_match {
         return outcome;
@@ -248,9 +253,12 @@ pub fn apply_substitute(buffer: &mut CodeBuffer, spec: &SubstituteSpec) -> Subst
         let mut from = 0usize;
         let mut replaced_here = false;
         loop {
-            let Some(found) =
-                find_ci(&buffer.lines[line_ix], &spec.pattern, from, spec.case_insensitive)
-            else {
+            let Some(found) = find_ci(
+                &buffer.lines[line_ix],
+                &spec.pattern,
+                from,
+                spec.case_insensitive,
+            ) else {
                 break;
             };
             let match_len = spec.pattern.len();

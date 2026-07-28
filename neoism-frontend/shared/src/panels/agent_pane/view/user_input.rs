@@ -738,7 +738,8 @@ pub fn render_input(
         let caret_x_in_row = wrapped_rows
             .get(caret_row)
             .map(|row| {
-                let col = pane.input()[row.start..pane.cursor_byte().clamp(row.start, row.end)]
+                let col = pane.input()
+                    [row.start..pane.cursor_byte().clamp(row.start, row.end)]
                     .chars()
                     .count();
                 row.offsets

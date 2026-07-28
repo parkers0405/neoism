@@ -18,7 +18,7 @@ mod daemon_client;
 #[cfg(not(target_arch = "wasm32"))]
 mod discord_presence;
 mod editor;
-#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 mod embedded_daemon;
 mod host;
 mod input;
@@ -34,7 +34,7 @@ mod router;
 mod screen;
 #[cfg(not(target_arch = "wasm32"))]
 mod server_registry;
-#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 mod ssh_hosts;
 #[cfg(not(target_arch = "wasm32"))]
 mod tailscale;
@@ -689,7 +689,17 @@ fn probe_daemon_socket(path: &std::path::Path) -> bool {
     UnixStream::connect_addr(&addr).is_ok()
 }
 
-#[cfg(all(unix, not(target_arch = "wasm32")))]
+/// Quick connect-only probe of an existing daemon's loopback TCP port —
+/// the non-unix analogue of `probe_daemon_socket`. A short timeout keeps
+/// a firewalled/blackholed port from stalling launch.
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
+fn probe_daemon_tcp(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).is_ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonMode {
     Explicit,
@@ -697,7 +707,7 @@ enum DaemonMode {
     EmbeddedLocal,
 }
 
-#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 impl DaemonMode {
     fn as_str(self) -> &'static str {
         match self {
@@ -708,14 +718,14 @@ impl DaemonMode {
     }
 }
 
-#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 struct ResolvedDaemon {
     url: String,
     mode: DaemonMode,
     _embedded: Option<embedded_daemon::EmbeddedDaemonHandle>,
 }
 
-#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 impl ResolvedDaemon {
     fn external(url: String, mode: DaemonMode) -> Self {
         Self {
@@ -726,7 +736,7 @@ impl ResolvedDaemon {
     }
 
     fn embedded(handle: embedded_daemon::EmbeddedDaemonHandle) -> Self {
-        let url = unix_socket_url(handle.socket_path());
+        let url = handle.client_url();
         Self {
             url,
             mode: DaemonMode::EmbeddedLocal,
@@ -746,7 +756,7 @@ fn unix_socket_url(path: &std::path::Path) -> String {
 /// embedded handle (if any) so the caller keeps it alive for the
 /// duration of the process. Drop shuts the daemon down and unlinks
 /// the socket.
-#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_daemon(daemon_url: Option<&str>) -> Option<ResolvedDaemon> {
     if let Some(url) = daemon_url {
         tracing::info!(daemon = url, "Attached to external daemon at {url}");
@@ -754,17 +764,35 @@ fn resolve_daemon(daemon_url: Option<&str>) -> Option<ResolvedDaemon> {
         return Some(resolved);
     }
 
-    let default_socket = embedded_daemon::default_socket_path();
     embedded_daemon::ensure_embedded_daemon_token();
-    if probe_daemon_socket(&default_socket) {
-        let url = unix_socket_url(&default_socket);
-        tracing::info!(
-            socket = %default_socket.display(),
-            "Attached to external daemon at {}",
-            default_socket.display(),
-        );
-        let resolved = ResolvedDaemon::external(url, DaemonMode::ExternalDefaultSocket);
-        return Some(resolved);
+    #[cfg(unix)]
+    {
+        let default_socket = embedded_daemon::default_socket_path();
+        if probe_daemon_socket(&default_socket) {
+            let url = unix_socket_url(&default_socket);
+            tracing::info!(
+                socket = %default_socket.display(),
+                "Attached to external daemon at {}",
+                default_socket.display(),
+            );
+            let resolved =
+                ResolvedDaemon::external(url, DaemonMode::ExternalDefaultSocket);
+            return Some(resolved);
+        }
+    }
+    // No socket file to probe off-unix: a live listener on the default
+    // loopback port (embedded desktop or standalone daemon) is the
+    // "already running" signal instead.
+    #[cfg(not(unix))]
+    {
+        let port = embedded_daemon::default_tcp_port();
+        if probe_daemon_tcp(port) {
+            let url = format!("ws://127.0.0.1:{port}/session");
+            tracing::info!(daemon = url, "Attached to external daemon at {url}");
+            let resolved =
+                ResolvedDaemon::external(url, DaemonMode::ExternalDefaultSocket);
+            return Some(resolved);
+        }
     }
 
     match embedded_daemon::EmbeddedDaemonHandle::spawn() {
@@ -933,6 +961,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if run_workspace_notes_command()? {
         return Ok(());
+    }
+
+    let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if let Some(result) = neoism_agent_server::auth_cli::maybe_run(&raw_args, || {
+        agent_server::ensure_started_for_request();
+    }) {
+        return result.map_err(Into::into);
     }
 
     if run_neoism_terminal_command()? {
@@ -1106,11 +1141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // daemon plumbing below. The `_ssh_attach` guard must outlive
     // `application.run(...)` so the tunnel stays open; dropping it kills
     // the ssh child. On any failure we degrade to the local path.
-    #[cfg(all(unix, not(target_arch = "wasm32")))]
     let mut explicit_daemon_url = args.daemon_url.clone();
-    #[cfg(all(windows, not(target_arch = "wasm32")))]
-    let explicit_daemon_url = args.daemon_url.clone();
-    #[cfg(all(unix, not(target_arch = "wasm32")))]
     let _ssh_attach = match args.ssh_host.as_deref() {
         Some(alias) => match ssh_hosts::attach_over_ssh(alias) {
             Ok(attach) => {
@@ -1138,24 +1169,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // explicit endpoint. Fresh windows always use this retained local
     // descriptor, even when the first window was launched with --daemon-url
     // or --ssh-host.
-    #[cfg(all(unix, not(target_arch = "wasm32")))]
     let local_daemon = resolve_daemon(None);
-    #[cfg(all(unix, not(target_arch = "wasm32")))]
     let home_daemon_endpoint = local_daemon.as_ref().map(|daemon| daemon.url.clone());
-    #[cfg(all(unix, not(target_arch = "wasm32")))]
     let daemon_url = explicit_daemon_url
         .clone()
         .or_else(|| home_daemon_endpoint.clone());
-    #[cfg(all(windows, not(target_arch = "wasm32")))]
-    let home_daemon_endpoint = Some("ws://127.0.0.1:7878/session".to_string());
-    #[cfg(all(windows, not(target_arch = "wasm32")))]
-    let daemon_url = explicit_daemon_url
-        .clone()
-        .or_else(|| home_daemon_endpoint.clone());
-    #[cfg(all(not(unix), not(windows), not(target_arch = "wasm32")))]
-    let home_daemon_endpoint = None;
-    #[cfg(all(not(unix), not(windows), not(target_arch = "wasm32")))]
-    let daemon_url = explicit_daemon_url.clone();
 
     let daemon_token = None;
     let initial_server_id = explicit_daemon_url

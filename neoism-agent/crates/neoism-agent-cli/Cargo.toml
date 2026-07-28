@@ -25,3 +25,6 @@ tracing-subscriber.workspace = true
 [[bin]]
 name = "neoism-agent"
 path = "src/main.rs"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1.12"

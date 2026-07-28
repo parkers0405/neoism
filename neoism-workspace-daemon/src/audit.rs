@@ -70,6 +70,16 @@ impl AuditLog {
             opts.mode(0o600);
         }
         let file = opts.open(&path)?;
+        // Windows counterpart of the 0o600 open mode above. Warn-and-go —
+        // an ACL-less filesystem must not disable auditing entirely.
+        #[cfg(windows)]
+        if let Err(error) = crate::windows_acl::harden_owner_only(&path) {
+            tracing::warn!(
+                error = %error,
+                path = %path.display(),
+                "could not tighten audit log ACL; continuing",
+            );
+        }
         Ok(Self {
             inner: Arc::new(AuditLogInner {
                 path,

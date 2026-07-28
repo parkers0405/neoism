@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
+use axum::response::Html;
 use axum::Json;
 use neoism_agent_core::{
     McpAuthRemoveResponse, McpAuthStartResponse, McpConfig, McpPromptInfo, McpResource,
@@ -23,6 +24,13 @@ pub(crate) struct McpAddRequest {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct CodeRequest {
     pub code: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct OAuthCallbackQuery {
+    pub code: String,
+    pub state: Option<String>,
+    pub directory: Option<String>,
 }
 
 pub(crate) async fn mcp_status(
@@ -79,6 +87,36 @@ pub(crate) async fn mcp_auth_callback(
         )
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?,
+    ))
+}
+
+pub(crate) async fn mcp_auth_callback_get(
+    Path(name): Path<String>,
+    Query(query): Query<OAuthCallbackQuery>,
+    headers: HeaderMap,
+) -> Result<Html<String>, ApiError> {
+    let auth_store = mcp_auth::McpAuthStore::from_env();
+    let directory = query
+        .directory
+        .or_else(|| {
+            auth_store
+                .get(&name)
+                .ok()
+                .flatten()
+                .and_then(|entry| entry.oauth_directory)
+        })
+        .unwrap_or_else(|| resolve_directory(None, &headers));
+    mcp::auth_callback(
+        &directory,
+        &name,
+        &query.code,
+        query.state.as_deref(),
+        &auth_store,
+    )
+    .await
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(Html(
+        "<!doctype html><meta charset=\"utf-8\"><title>Neoism MCP authenticated</title><body style=\"font:16px system-ui;background:#111;color:#eee;padding:3rem\"><h1>MCP server connected</h1><p>Authentication completed. You can close this tab and return to Neoism.</p></body>".to_string(),
     ))
 }
 

@@ -135,10 +135,7 @@ impl Screen<'_> {
                         .unwrap_or(0);
                     (
                         presence_buffer_id_for_path(&code.path),
-                        PeerCursor::new(
-                            code.buffer.cursor_line as u32,
-                            col_utf16 as u32,
-                        ),
+                        PeerCursor::new(code.buffer.cursor_line as u32, col_utf16 as u32),
                         code.buffer.mode == neoism_ui::editor::code::CodeMode::Insert,
                     )
                 })

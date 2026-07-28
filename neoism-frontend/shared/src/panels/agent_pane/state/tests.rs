@@ -577,6 +577,15 @@ fn subagent_rehydrate_does_not_complete_task_without_explicit_status() {
 }
 
 #[test]
+fn initial_session_skeleton_animates_until_sessions_load() {
+    let mut pane = NeoismAgentPane::default();
+
+    assert!(pane.side_panel.is_animating());
+    pane.side_panel.set_sessions(Vec::new());
+    assert!(!pane.side_panel.is_animating());
+}
+
+#[test]
 fn subagent_rehydrate_completes_task_from_explicit_child_status() {
     let mut pane = NeoismAgentPane::default();
     pane.messages = vec![task_tool_message("child-1", "running")];

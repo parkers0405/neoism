@@ -65,9 +65,42 @@ jobs:
           env -u CI cargo build --release --locked --target ${{ matrix.target }} \
             -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
 
-      # Package + upload the same tarball release-neoism.yml ships so a
-      # dispatch run yields a downloadable production artifact, not just a
-      # compile check. Windows stays build-only until validated at runtime.
+      # Runtime validation on the real OS: PTY-layer unit + ConPTY spawn
+      # smoke tests, then boot the daemon and require its loopback
+      # listener to come up. This is the gate Windows must pass before
+      # the release matrix row gets re-enabled.
+      - name: PTY smoke tests (real ConPTY)
+        if: matrix.goos == 'windows'
+        shell: bash
+        run: |
+          env -u CI cargo test --release --locked --target ${{ matrix.target }} \
+            -p teletypewriter -p neoism-terminal-pty -- --include-ignored
+
+      - name: Daemon boot smoke (loopback listener + token)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $daemon = Start-Process -PassThru -NoNewWindow `
+            -FilePath "target/${{ matrix.target }}/release/neoism-workspace-daemon.exe" `
+            -ArgumentList "--ephemeral"
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep -Seconds 1
+            if ($daemon.HasExited) { throw "daemon exited early with code $($daemon.ExitCode)" }
+            $probe = New-Object Net.Sockets.TcpClient
+            try {
+              $probe.Connect("127.0.0.1", 7878)
+              if ($probe.Connected) { $ok = $true; $probe.Close(); break }
+            } catch {} finally { $probe.Dispose() }
+          }
+          Stop-Process -Id $daemon.Id -Force
+          if (-not $ok) { throw "daemon never opened 127.0.0.1:7878" }
+          Write-Host "daemon loopback listener OK"
+
+      # Package + upload what release-neoism.yml would ship so a dispatch
+      # run yields a downloadable production artifact, not just a compile
+      # check: tar.gz on mac (same as releases), zip on Windows.
       - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
         if: matrix.goos != 'windows'
         shell: bash
@@ -78,15 +111,46 @@ jobs:
           BIN="target/${{ matrix.target }}/release"
           cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "stage/$OUT/"
           cp misc/rio.terminfo "stage/$OUT/" 2>/dev/null || true
+          if [[ "${{ matrix.goos }}" == "darwin" ]]; then
+            # Neoism.app: double-clickable + Finder "Open With" candidate for
+            # code/markdown/json (CFBundleDocumentTypes in misc/macos/Info.plist).
+            # Ships INSIDE the tarball alongside the raw binaries above — CLI
+            # installs keep using those, the .app is dragged to /Applications.
+            APP="stage/$OUT/Neoism.app"
+            mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+            cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "$APP/Contents/MacOS/"
+            cp misc/macos/neoism.icns "$APP/Contents/Resources/neoism.icns"
+            VERSION="${GITHUB_REF_NAME#v}"
+            case "$VERSION" in
+              [0-9]*.[0-9]*) ;; # tag push: vX.Y.Z
+              *) VERSION="$(cargo pkgid -p neoism | sed 's/.*[@#]//')" ;; # dispatch/dry run
+            esac
+            sed "s/{{VERSION}}/$VERSION/g" misc/macos/Info.plist > "$APP/Contents/Info.plist"
+            codesign --force --deep -s - "$APP" # ad-hoc; real signing needs an Apple Dev account
+          fi
           tar -C stage -czf "$OUT.tar.gz" "$OUT"
           if command -v sha256sum >/dev/null; then sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256";
           else shasum -a 256 "$OUT.tar.gz" > "$OUT.tar.gz.sha256"; fi
 
+      - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "neoism-${{ matrix.goos }}-${{ matrix.goarch }}"
+          New-Item -ItemType Directory -Path "stage/$out" -Force | Out-Null
+          $bin = "target/${{ matrix.target }}/release"
+          Copy-Item "$bin/neoism.exe", "$bin/neoism-workspace-daemon.exe", "$bin/neoism-agent.exe" "stage/$out/"
+          Compress-Archive -Path "stage/$out" -DestinationPath "$out.zip"
+          (Get-FileHash "$out.zip" -Algorithm SHA256).Hash.ToLower() + "  $out.zip" `
+            | Out-File -FilePath "$out.zip.sha256" -Encoding ascii
+
       - name: Upload build artifact
-        if: matrix.goos != 'windows'
         uses: actions/upload-artifact@v4
         with:
           name: neoism-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
+            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip
+            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip.sha256

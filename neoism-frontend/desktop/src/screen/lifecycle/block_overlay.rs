@@ -914,12 +914,18 @@ impl Screen<'_> {
                     .clear_block_cursor(rich_text_id);
                 self.renderer.terminal_scroll.reset_wheel(rich_text_id);
                 let bracketed = self.get_mode().contains(Mode::BRACKETED_PASTE);
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
                     let current = self.context_manager.current_mut();
-                    if let Some(shell_kind) =
-                        crate::terminal::blocks::detect_foreground_shell(*current.main_fd)
-                    {
+                    #[cfg(target_os = "linux")]
+                    let detected = crate::terminal::blocks::detect_foreground_shell(
+                        *current.main_fd,
+                    );
+                    #[cfg(target_os = "windows")]
+                    let detected = crate::terminal::blocks::detect_foreground_shell(
+                        current.shell_pid,
+                    );
+                    if let Some(shell_kind) = detected {
                         if current.terminal_shell_kind != shell_kind {
                             current
                                 .terminal_input

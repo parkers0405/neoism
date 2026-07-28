@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::io;
 use std::process::Stdio;
+#[cfg(unix)]
+use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-#[cfg(unix)]
-use std::{io, ptr};
 
 use axum::extract::ws::{Message, WebSocket};
 use neoism_agent_core::PtyInfo;
@@ -147,7 +148,7 @@ pub(crate) async fn serve_websocket(
 
 struct PtyProcess {
     stdin: Arc<Mutex<PtyInput>>,
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<PtyChild>>,
     #[cfg(unix)]
     pgid: Option<libc::pid_t>,
     output: broadcast::Sender<PtyOutputEvent>,
@@ -155,10 +156,54 @@ struct PtyProcess {
     exited: AtomicBool,
 }
 
+/// The spawned process behind a PTY: a tokio child for the unix-PTY and
+/// pipe paths, raw Win32 handles for the ConPTY path (tokio's `Command`
+/// cannot carry the pseudoconsole proc-thread attribute).
+enum PtyChild {
+    Spawned(Child),
+    #[cfg(windows)]
+    Conpty(conpty::ConptyChild),
+}
+
+impl PtyChild {
+    /// `Ok(Some(code))` once the process has exited (`code` is `None`
+    /// when the platform reports no exit code, e.g. signal death).
+    fn try_wait(&mut self) -> io::Result<Option<Option<i32>>> {
+        match self {
+            PtyChild::Spawned(child) => {
+                Ok(child.try_wait()?.map(|status| status.code()))
+            }
+            #[cfg(windows)]
+            PtyChild::Conpty(child) => child.try_wait(),
+        }
+    }
+
+    fn start_kill(&mut self) {
+        match self {
+            PtyChild::Spawned(child) => {
+                let _ = child.start_kill();
+            }
+            #[cfg(windows)]
+            PtyChild::Conpty(child) => child.kill(),
+        }
+    }
+
+    /// Called once the monitor observed the exit. The ConPTY host keeps
+    /// the output pipe's write end open until the pseudoconsole is
+    /// closed, so without this the reader task never sees EOF.
+    fn on_reaped(&mut self) {
+        match self {
+            PtyChild::Spawned(_) => {}
+            #[cfg(windows)]
+            PtyChild::Conpty(child) => child.close_console(),
+        }
+    }
+}
+
 enum PtyInput {
     #[cfg(not(unix))]
     Pipe(ChildStdin),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Pty(tokio::fs::File),
 }
 
@@ -229,7 +274,7 @@ async fn stop_process(process: Arc<PtyProcess>) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let mut child = process.child.lock().await;
-    let _ = child.start_kill();
+    child.start_kill();
     let _ = process.output.send(PtyOutputEvent::Exited);
 }
 
@@ -259,6 +304,16 @@ fn spawn_process(
     info: PtyInfo,
     on_exit: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
 ) -> Result<Arc<PtyProcess>, PtyError> {
+    // Prefer a real pseudoconsole; the pipe fallback (no TTY, no
+    // resize, no ANSI) only remains for pre-1809 conhosts where
+    // `CreatePseudoConsole` is unavailable.
+    #[cfg(windows)]
+    match spawn_conpty_process(info.clone(), on_exit.clone()) {
+        Ok(process) => return Ok(process),
+        Err(error) => {
+            warn!(pty_id = %info.id, ?error, "ConPTY spawn failed; falling back to pipe process");
+        }
+    }
     spawn_pipe_process(info, on_exit)
 }
 
@@ -301,7 +356,7 @@ fn spawn_pipe_process(
 
     let (output, _) = broadcast::channel(1024);
     let buffer = Arc::new(Mutex::new(PtyOutputBuffer::default()));
-    let child = Arc::new(Mutex::new(child));
+    let child = Arc::new(Mutex::new(PtyChild::Spawned(child)));
     let pty_id = info.id.clone();
     let process = Arc::new(PtyProcess {
         stdin: Arc::new(Mutex::new(PtyInput::Pipe(stdin))),
@@ -326,44 +381,51 @@ fn spawn_pipe_process(
         "stderr",
     ));
 
-    let monitor_ref = process.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            let status = {
-                let mut child = child.lock().await;
-                child.try_wait()
-            };
-            match status {
-                Ok(Some(status)) => {
-                    let code = status.code();
-                    let already_exited = monitor_ref.exited.swap(true, Ordering::SeqCst);
-                    let _ = output.send(PtyOutputEvent::Exited);
-                    process_registry()
-                        .remove_if_same(&pty_id, &monitor_ref)
-                        .await;
-                    if !already_exited {
-                        on_exit(pty_id, code);
-                    }
-                    return;
-                }
-                Ok(None) => continue,
-                Err(error) => {
-                    warn!(pty_id = %pty_id, error = %error, "failed to poll PTY process");
-                    break;
-                }
-            }
-        }
-        let already_exited = monitor_ref.exited.swap(true, Ordering::SeqCst);
-        let _ = output.send(PtyOutputEvent::Exited);
-        process_registry()
-            .remove_if_same(&pty_id, &monitor_ref)
-            .await;
-        if !already_exited {
-            on_exit(pty_id, None);
-        }
+    monitor_process(child, process.clone(), output, pty_id, on_exit);
+    Ok(process)
+}
+
+/// ConPTY-backed process: full TTY semantics (isatty, ANSI, resize) via
+/// `CreatePseudoConsole`, with the conin/conout pipe ends wrapped in
+/// `tokio::fs::File` exactly like the unix PTY master.
+#[cfg(windows)]
+fn spawn_conpty_process(
+    info: PtyInfo,
+    on_exit: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
+) -> Result<Arc<PtyProcess>, PtyError> {
+    if info.command.is_empty() {
+        return Err(PtyError::SpawnFailed(
+            "PTY command must contain at least one argument".to_string(),
+        ));
+    }
+    let (conpty_child, reader, writer) = conpty::spawn(
+        &info.command,
+        &info.cwd,
+        &[("TERM", "xterm-256color"), ("NEOISM_TERMINAL", "1")],
+        PtySize { cols: 80, rows: 24 },
+    )?;
+
+    let (output, _) = broadcast::channel(1024);
+    let buffer = Arc::new(Mutex::new(PtyOutputBuffer::default()));
+    let child = Arc::new(Mutex::new(PtyChild::Conpty(conpty_child)));
+    let pty_id = info.id.clone();
+    let process = Arc::new(PtyProcess {
+        stdin: Arc::new(Mutex::new(PtyInput::Pty(tokio::fs::File::from_std(writer)))),
+        child: child.clone(),
+        output: output.clone(),
+        buffer: buffer.clone(),
+        exited: AtomicBool::new(false),
     });
 
+    tokio::spawn(read_process_output(
+        tokio::fs::File::from_std(reader),
+        output.clone(),
+        buffer,
+        pty_id.clone(),
+        "conpty",
+    ));
+
+    monitor_process(child, process.clone(), output, pty_id, on_exit);
     Ok(process)
 }
 
@@ -449,7 +511,7 @@ fn spawn_pty_process(
     let (output, _) = broadcast::channel(1024);
     let buffer = Arc::new(Mutex::new(PtyOutputBuffer::default()));
     let pgid = child.id().map(|pid| pid as libc::pid_t);
-    let child = Arc::new(Mutex::new(child));
+    let child = Arc::new(Mutex::new(PtyChild::Spawned(child)));
     let pty_id = info.id.clone();
     let process = Arc::new(PtyProcess {
         stdin: Arc::new(Mutex::new(PtyInput::Pty(tokio::fs::File::from_std(writer)))),
@@ -511,7 +573,7 @@ fn set_cloexec(fd: libc::c_int) -> Result<(), PtyError> {
 }
 
 fn monitor_process(
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<PtyChild>>,
     process: Arc<PtyProcess>,
     output: broadcast::Sender<PtyOutputEvent>,
     pty_id: String,
@@ -526,8 +588,8 @@ fn monitor_process(
                 child.try_wait()
             };
             match status {
-                Ok(Some(status)) => {
-                    code = status.code();
+                Ok(Some(exit_code)) => {
+                    code = exit_code;
                     break;
                 }
                 Ok(None) => continue,
@@ -537,6 +599,7 @@ fn monitor_process(
                 }
             }
         }
+        child.lock().await.on_reaped();
         let already_exited = process.exited.swap(true, Ordering::SeqCst);
         let _ = output.send(PtyOutputEvent::Exited);
         process_registry().remove_if_same(&pty_id, &process).await;
@@ -564,6 +627,9 @@ async fn read_process_output<R>(
                 let chunk = buffer.lock().await.push(data);
                 let _ = output.send(PtyOutputEvent::Data(chunk));
             }
+            // ConPTY teardown surfaces as ERROR_BROKEN_PIPE rather than
+            // a clean zero-read; that's an EOF, not a failure.
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
             Err(error) => {
                 warn!(pty_id = %pty_id, stream, error = %error, "failed to read PTY process output");
                 break;
@@ -595,11 +661,419 @@ async fn resize_process(process: Arc<PtyProcess>, size: PtySize) -> Result<(), P
         }
         signal_process_group(&process, libc::SIGWINCH);
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let child = process.child.lock().await;
+        if let PtyChild::Conpty(conpty) = &*child {
+            conpty.resize(size)?;
+        }
+        // Pipe-fallback processes have no console to resize.
+    }
+    #[cfg(all(not(unix), not(windows)))]
     {
         let _ = (process, size);
     }
     Ok(())
+}
+
+/// Raw ConPTY plumbing: `CreatePseudoConsole` + `CreateProcessW` with the
+/// pseudoconsole proc-thread attribute, synchronous anonymous pipes for
+/// conin/conout. Kept self-contained so the rest of the module only deals
+/// in `std::fs::File` + `ConptyChild`.
+#[cfg(windows)]
+mod conpty {
+    use std::io;
+    use std::iter::once;
+    use std::mem::{size_of, zeroed};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use std::ptr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, HANDLE, S_OK, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Console::{
+        ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
+    };
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+        InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
+        CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+        PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    };
+
+    use super::{PtyError, PtySize};
+
+    pub(super) struct ConptyChild {
+        hpc: HPCON,
+        process: HANDLE,
+        pid: u32,
+        console_closed: AtomicBool,
+    }
+
+    // Raw handles are plain kernel object references; every operation we
+    // perform on them is documented thread-safe.
+    unsafe impl Send for ConptyChild {}
+    unsafe impl Sync for ConptyChild {}
+
+    impl ConptyChild {
+        pub(super) fn try_wait(&mut self) -> io::Result<Option<Option<i32>>> {
+            let mut code: u32 = 0;
+            let ok = unsafe { GetExitCodeProcess(self.process, &mut code) };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if code == STILL_ACTIVE as u32 {
+                Ok(None)
+            } else {
+                Ok(Some(Some(code as i32)))
+            }
+        }
+
+        pub(super) fn kill(&mut self) {
+            // Children first (the shell's own children don't die with
+            // it on Windows), then the root, then the console host.
+            crate::tool::process::kill_process_group(Some(self.pid));
+            unsafe {
+                let _ = TerminateProcess(self.process, 1);
+            }
+            self.close_console();
+        }
+
+        pub(super) fn close_console(&mut self) {
+            if !self.console_closed.swap(true, Ordering::SeqCst) {
+                unsafe { ClosePseudoConsole(self.hpc) };
+            }
+        }
+
+        pub(super) fn resize(&self, size: PtySize) -> Result<(), PtyError> {
+            let coord = COORD {
+                X: size.cols.max(1) as i16,
+                Y: size.rows.max(1) as i16,
+            };
+            let hr = unsafe { ResizePseudoConsole(self.hpc, coord) };
+            if hr != S_OK {
+                return Err(PtyError::Io(format!(
+                    "ResizePseudoConsole failed: HRESULT {hr:#x}"
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for ConptyChild {
+        fn drop(&mut self) {
+            self.close_console();
+            unsafe {
+                let _ = CloseHandle(self.process);
+            }
+        }
+    }
+
+    /// Close-on-drop guard for handles on the error paths.
+    struct Handle(HANDLE);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    let _ = CloseHandle(self.0);
+                }
+            }
+        }
+    }
+    impl Handle {
+        fn take(mut self) -> HANDLE {
+            std::mem::replace(&mut self.0, ptr::null_mut())
+        }
+    }
+
+    fn last_error(what: &str) -> PtyError {
+        PtyError::SpawnFailed(format!("{what}: {}", io::Error::last_os_error()))
+    }
+
+    fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
+        value.encode_wide().chain(once(0)).collect()
+    }
+
+    /// Quote one argument per the MSVCRT/CommandLineToArgvW rules.
+    fn quote_arg(arg: &str) -> String {
+        if !arg.is_empty()
+            && !arg.contains([' ', '\t', '\n', '\x0b', '"'])
+        {
+            return arg.to_string();
+        }
+        let mut quoted = String::with_capacity(arg.len() + 2);
+        quoted.push('"');
+        let mut backslashes = 0usize;
+        for ch in arg.chars() {
+            match ch {
+                '\\' => backslashes += 1,
+                '"' => {
+                    quoted.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                    backslashes = 0;
+                    quoted.push('"');
+                    continue;
+                }
+                _ => {
+                    quoted.extend(std::iter::repeat('\\').take(backslashes));
+                    backslashes = 0;
+                }
+            }
+            if ch != '"' {
+                if ch == '\\' {
+                    continue;
+                }
+                quoted.push(ch);
+            }
+        }
+        quoted.extend(std::iter::repeat('\\').take(backslashes * 2));
+        quoted.push('"');
+        quoted
+    }
+
+    /// Inherited environment plus overrides, as a sorted UTF-16
+    /// double-NUL-terminated block (`CREATE_UNICODE_ENVIRONMENT`).
+    fn environment_block(extra: &[(&str, &str)]) -> Vec<u16> {
+        let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+            std::env::vars_os()
+                .filter(|(key, _)| {
+                    !extra.iter().any(|(extra_key, _)| {
+                        key.to_string_lossy().eq_ignore_ascii_case(extra_key)
+                    })
+                })
+                .collect();
+        for (key, value) in extra {
+            vars.push((key.into(), value.into()));
+        }
+        vars.sort_by(|(a, _), (b, _)| {
+            a.to_string_lossy()
+                .to_uppercase()
+                .cmp(&b.to_string_lossy().to_uppercase())
+        });
+
+        let mut block = Vec::new();
+        for (key, value) in vars {
+            block.extend(key.encode_wide());
+            block.push('=' as u16);
+            block.extend(value.encode_wide());
+            block.push(0);
+        }
+        block.push(0);
+        block
+    }
+
+    pub(super) fn spawn(
+        command: &[String],
+        cwd: &str,
+        extra_env: &[(&str, &str)],
+        size: PtySize,
+    ) -> Result<(ConptyChild, std::fs::File, std::fs::File), PtyError> {
+        unsafe {
+            // conin: we write, the console reads. conout: the console
+            // writes, we read. Plain synchronous pipes — tokio::fs::File
+            // reads them on the blocking pool.
+            let (mut conin_read, mut conin_write): (HANDLE, HANDLE) =
+                (ptr::null_mut(), ptr::null_mut());
+            if CreatePipe(&mut conin_read, &mut conin_write, ptr::null(), 0) == 0 {
+                return Err(last_error("CreatePipe (conin)"));
+            }
+            let conin_read = Handle(conin_read);
+            let conin_write = Handle(conin_write);
+            let (mut conout_read, mut conout_write): (HANDLE, HANDLE) =
+                (ptr::null_mut(), ptr::null_mut());
+            if CreatePipe(&mut conout_read, &mut conout_write, ptr::null(), 0) == 0 {
+                return Err(last_error("CreatePipe (conout)"));
+            }
+            let conout_read = Handle(conout_read);
+            let conout_write = Handle(conout_write);
+
+            let coord = COORD {
+                X: size.cols.max(1) as i16,
+                Y: size.rows.max(1) as i16,
+            };
+            let mut hpc: HPCON = zeroed();
+            let hr = CreatePseudoConsole(
+                coord,
+                conin_read.0,
+                conout_write.0,
+                0,
+                &mut hpc,
+            );
+            if hr != S_OK {
+                return Err(PtyError::SpawnFailed(format!(
+                    "CreatePseudoConsole failed: HRESULT {hr:#x}"
+                )));
+            }
+            // NOTE: the console-side pipe ends (conin_read/conout_write)
+            // must stay open until AFTER CreateProcessW — the EchoCon
+            // sample's ordering. Real Windows tolerates closing them
+            // right here (the console host duplicates them), but Wine's
+            // ConPTY does not, and closing early kills the console
+            // before the child attaches.
+
+            let close_hpc = |hpc: HPCON| ClosePseudoConsole(hpc);
+
+            let mut attr_size: usize = 0;
+            // First call intentionally fails, reporting the needed size.
+            let _ = InitializeProcThreadAttributeList(
+                ptr::null_mut(),
+                1,
+                0,
+                &mut attr_size,
+            );
+            let mut attr_buf = vec![0u8; attr_size];
+            let attr_list = attr_buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
+            if InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size) == 0
+            {
+                let error = last_error("InitializeProcThreadAttributeList");
+                close_hpc(hpc);
+                return Err(error);
+            }
+            if UpdateProcThreadAttribute(
+                attr_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+                hpc as *mut core::ffi::c_void,
+                size_of::<HPCON>(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ) == 0
+            {
+                let error = last_error("UpdateProcThreadAttribute");
+                DeleteProcThreadAttributeList(attr_list);
+                close_hpc(hpc);
+                return Err(error);
+            }
+
+            let mut startup: STARTUPINFOEXW = zeroed();
+            startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+            // USESTDHANDLES with null handles: stops the child from
+            // binding the PARENT's console for stdio instead of the
+            // pseudoconsole (same trick as teletypewriter's spawn).
+            startup.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+            startup.lpAttributeList = attr_list;
+
+            let cmdline = command
+                .iter()
+                .map(|arg| quote_arg(arg))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut cmdline_wide = wide(std::ffi::OsStr::new(&cmdline));
+            let cwd_wide = if cwd.is_empty() {
+                None
+            } else {
+                Some(wide(std::ffi::OsStr::new(cwd)))
+            };
+            let mut env_block = environment_block(extra_env);
+
+            let mut process_info: PROCESS_INFORMATION = zeroed();
+            let created = CreateProcessW(
+                ptr::null(),
+                cmdline_wide.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                env_block.as_mut_ptr() as *mut core::ffi::c_void,
+                cwd_wide
+                    .as_ref()
+                    .map(|wide| wide.as_ptr())
+                    .unwrap_or(ptr::null()),
+                &startup.StartupInfo,
+                &mut process_info,
+            );
+            DeleteProcThreadAttributeList(attr_list);
+            if created == 0 {
+                let error = last_error("CreateProcessW");
+                close_hpc(hpc);
+                return Err(error);
+            }
+            let _ = CloseHandle(process_info.hThread);
+            drop(conin_read);
+            drop(conout_write);
+
+            let child = ConptyChild {
+                hpc,
+                process: process_info.hProcess,
+                pid: process_info.dwProcessId,
+                console_closed: AtomicBool::new(false),
+            };
+            let reader = std::fs::File::from_raw_handle(conout_read.take() as _);
+            let writer = std::fs::File::from_raw_handle(conin_write.take() as _);
+            Ok((child, reader, writer))
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod conpty_tests {
+    use super::*;
+    use std::io::Read;
+
+    /// Round-trips a real pseudoconsole: spawn `cmd /C echo` and read
+    /// the marker back off the conout pipe. The pipes are synchronous,
+    /// so — exactly like the production monitor task — a SEPARATE
+    /// thread must close the pseudoconsole once the child exits, or a
+    /// blocked `read` would never see EOF (the ConPTY host holds the
+    /// write end open until `ClosePseudoConsole`).
+    #[test]
+    fn conpty_spawn_echo_roundtrip() {
+        let (child, mut reader, _writer) = conpty::spawn(
+            &[
+                "cmd.exe".to_string(),
+                "/C".to_string(),
+                "echo hello-conpty".to_string(),
+            ],
+            "C:\\",
+            &[("NEOISM_TERMINAL", "1")],
+            PtySize { cols: 80, rows: 24 },
+        )
+        .expect("conpty spawn");
+        let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+
+        let watchdog = std::sync::Arc::clone(&child);
+        let watchdog_handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                {
+                    let mut child = watchdog.lock().unwrap();
+                    let exited = matches!(child.try_wait(), Ok(Some(_)));
+                    if exited || std::time::Instant::now() >= deadline {
+                        child.close_console();
+                        return;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+
+        let marker = b"hello-conpty";
+        let mut got = Vec::new();
+        let mut buf = [0u8; 512];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    got.extend_from_slice(&buf[..n]);
+                    if got.windows(marker.len()).any(|w| w == marker) {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
+                Err(error) => panic!("conout read failed: {error}"),
+            }
+        }
+        let _ = watchdog_handle.join();
+        child.lock().unwrap().kill();
+        assert!(
+            got.windows(marker.len()).any(|w| w == marker),
+            "marker missing from ConPTY output: {:?}",
+            String::from_utf8_lossy(&got)
+        );
+    }
 }
 
 async fn write_stdin(stdin: &Arc<Mutex<PtyInput>>, data: &[u8]) -> Result<(), PtyError> {
@@ -616,7 +1090,7 @@ async fn write_stdin(stdin: &Arc<Mutex<PtyInput>>, data: &[u8]) -> Result<(), Pt
                 .await
                 .map_err(|error| PtyError::Io(error.to_string()))
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         PtyInput::Pty(file) => {
             file.write_all(data)
                 .await

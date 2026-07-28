@@ -82,6 +82,16 @@ impl AuthStore {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
         }
+        // Windows counterpart of the 0o600 above: owner+SYSTEM-only DACL.
+        // Warn-and-go — ACL-less filesystems must not fail credential writes.
+        #[cfg(windows)]
+        if let Err(error) = crate::windows_acl::harden_owner_only(&self.path) {
+            tracing::warn!(
+                error = %error,
+                path = %self.path.display(),
+                "could not tighten auth store ACL; continuing",
+            );
+        }
         Ok(())
     }
 }

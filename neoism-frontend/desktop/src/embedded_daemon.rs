@@ -15,6 +15,13 @@
 //! so the daemon has no network listener at all in local mode and the
 //! file's owner/permissions act as the authz gate.
 //!
+//! On Windows there is no unix socket: the loopback TCP listener (port
+//! `NEOISM_DAEMON_TCP_PORT`, default 7878 — the same port the web client
+//! and standalone daemon already use) is the PRIMARY listener instead of
+//! a best-effort extra, and readiness gates on that bind. Winning the
+//! port bind is also the single-instance race guard, standing in for the
+//! unix path's stale-socket probe.
+//!
 //! Lifecycle:
 //! * `EmbeddedDaemonHandle::spawn()` creates the socket, builds the
 //!   axum router, spawns a single-thread tokio runtime on a worker
@@ -23,19 +30,20 @@
 //! * Drop aborts the accept-loop task (via `CancellationToken`-style
 //!   `Notify`) and unlinks the socket file.
 
-#![cfg(unix)]
-
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::net::IpAddr;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use futures::StreamExt;
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HyperServerBuilder;
+#[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::sync::Notify;
 use tower_service::Service;
@@ -49,7 +57,14 @@ const EMBEDDED_DAEMON_SOCKET_ENV: &str = "NEOISM_DAEMON_SOCKET";
 /// dropped (or the process exits). Dropping unlinks the socket and
 /// signals the accept loop to stop.
 pub struct EmbeddedDaemonHandle {
+    #[cfg(unix)]
     socket_path: PathBuf,
+    /// Loopback TCP port that got bound, when the loopback bind succeeded.
+    /// On Windows this is the primary (and only guaranteed) listener, so
+    /// it is always `Some` for a live handle there. On unix the client
+    /// dials the socket instead, so the field is never read.
+    #[cfg_attr(unix, allow(dead_code))]
+    local_tcp_port: Option<u16>,
     shutdown: Arc<Notify>,
     // We keep the runtime alive on a dedicated worker thread; dropping
     // the JoinHandle here is fine. When the shutdown notify fires the
@@ -64,14 +79,29 @@ impl EmbeddedDaemonHandle {
     /// default path (or returns an error if the bind fails; caller
     /// should fall back to a different socket path or report the
     /// failure clearly).
+    #[cfg(unix)]
     pub fn spawn() -> io::Result<Self> {
         let socket_path = default_socket_path();
         Self::spawn_at(socket_path)
     }
 
+    /// Spawn the embedded daemon. The loopback TCP listener is the
+    /// primary endpoint here; an `AddrInUse` failure means another
+    /// daemon (or embedded desktop) already owns the port and the
+    /// caller should attach to it instead.
+    #[cfg(not(unix))]
+    pub fn spawn() -> io::Result<Self> {
+        Self::spawn_inner(None)
+    }
+
     /// Spawn the embedded daemon bound to a specific socket path. This
     /// is mostly useful for tests; production code uses `spawn()`.
+    #[cfg(unix)]
     pub fn spawn_at(socket_path: PathBuf) -> io::Result<Self> {
+        Self::spawn_inner(Some(socket_path))
+    }
+
+    fn spawn_inner(socket_path: Option<PathBuf>) -> io::Result<Self> {
         ensure_embedded_daemon_token();
         // The embedded daemon runs IN-PROCESS and is only reachable over this
         // trusted per-user unix socket; its sole client is this desktop, which
@@ -86,6 +116,11 @@ impl EmbeddedDaemonHandle {
         // their own auth in their own process, so clearing it here for the
         // desktop process is safe.
         std::env::remove_var("NEOISM_REQUIRE_AUTH");
+        #[cfg(unix)]
+        let socket_path = socket_path.expect("unix spawn always supplies a socket path");
+        #[cfg(not(unix))]
+        let _ = socket_path;
+        #[cfg(unix)]
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -93,6 +128,7 @@ impl EmbeddedDaemonHandle {
         // `bind()` fail with `EADDRINUSE` even though nobody's
         // listening. Probe it first; if the connect fails the path is
         // dead and safe to remove.
+        #[cfg(unix)]
         if socket_path.exists() {
             let metadata = std::fs::symlink_metadata(&socket_path)?;
             if !metadata.file_type().is_socket() {
@@ -137,8 +173,13 @@ impl EmbeddedDaemonHandle {
 
         let shutdown = Arc::new(Notify::new());
         let shutdown_for_task = Arc::clone(&shutdown);
+        #[cfg(unix)]
         let socket_path_for_task = socket_path.clone();
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<io::Result<()>>(1);
+        // Readiness carries the loopback TCP port when the PRIMARY
+        // listener is TCP (Windows); on unix the primary is the socket
+        // and the loopback bind happens later, off the readiness gate.
+        let (ready_tx, ready_rx) =
+            std::sync::mpsc::sync_channel::<io::Result<Option<u16>>>(1);
 
         let runtime_thread = std::thread::Builder::new()
             .name("neoism-embedded-daemon".to_string())
@@ -162,6 +203,7 @@ impl EmbeddedDaemonHandle {
                 };
 
                 runtime.block_on(async move {
+                    #[cfg(unix)]
                     let listener = match UnixListener::bind(&socket_path_for_task) {
                         Ok(listener) => listener,
                         Err(error) => {
@@ -170,19 +212,44 @@ impl EmbeddedDaemonHandle {
                         }
                     };
 
-                    // COLD-START GATE ends HERE. The moment the unix socket
-                    // is bound, signal readiness so the desktop's main
-                    // thread unblocks (`resolve_daemon` in main.rs) and goes
-                    // straight on to create + paint its window. Everything
-                    // below — auth/workspace bootstrap, router build, the
-                    // `tailscale ip -4` subprocess, and the TCP 7878 binds —
-                    // now runs concurrently on THIS daemon thread instead of
-                    // on the launch critical path. A bound socket is all the
-                    // caller needs to avoid racing a second embedded daemon
-                    // (the sole reason this readiness handshake exists);
-                    // connections opened before the serve loop spins up just
-                    // queue in the listener backlog (sub-millisecond).
-                    let _ = ready_tx.send(Ok(()));
+                    // Windows primary listener: loopback TCP. Bound BEFORE
+                    // the app-state bootstrap for the same cold-start reason
+                    // as the unix socket, and its AddrInUse doubles as the
+                    // single-instance guard (no socket file to probe).
+                    #[cfg(not(unix))]
+                    let (primary_tcp, primary_port) = {
+                        let port = default_tcp_port();
+                        match tokio::net::TcpListener::bind((
+                            IpAddr::from([127, 0, 0, 1]),
+                            port,
+                        ))
+                        .await
+                        {
+                            Ok(listener) => (listener, port),
+                            Err(error) => {
+                                let _ = ready_tx.send(Err(error));
+                                return;
+                            }
+                        }
+                    };
+
+                    // COLD-START GATE ends HERE. The moment the primary
+                    // listener is bound, signal readiness so the desktop's
+                    // main thread unblocks (`resolve_daemon` in main.rs) and
+                    // goes straight on to create + paint its window.
+                    // Everything below — auth/workspace bootstrap, router
+                    // build, the `tailscale ip -4` subprocess, and the extra
+                    // TCP binds — now runs concurrently on THIS daemon
+                    // thread instead of on the launch critical path. A bound
+                    // listener is all the caller needs to avoid racing a
+                    // second embedded daemon (the sole reason this readiness
+                    // handshake exists); connections opened before the serve
+                    // loop spins up just queue in the listener backlog
+                    // (sub-millisecond).
+                    #[cfg(unix)]
+                    let _ = ready_tx.send(Ok(None));
+                    #[cfg(not(unix))]
+                    let _ = ready_tx.send(Ok(Some(primary_port)));
 
                     // Build the same AppState the binary's main()
                     // constructs. Auth + pairing degrade to in-memory
@@ -230,6 +297,7 @@ impl EmbeddedDaemonHandle {
                         paired_hosts,
                     });
 
+                    #[cfg(unix)]
                     tracing::info!(
                         socket = %socket_path_for_task.display(),
                         "embedded daemon listening on unix socket",
@@ -246,15 +314,29 @@ impl EmbeddedDaemonHandle {
                     // reachable from the tailnet. Bind the machine's Tailscale
                     // IPv4 when present instead of requiring the user to stop
                     // desktop and launch the standalone daemon manually.
+                    let tcp_port = default_tcp_port();
                     let mut tcp_listeners = Vec::new();
                     let mut bound_addrs = Vec::new();
+                    #[cfg(not(unix))]
+                    {
+                        tracing::info!(
+                            port = primary_port,
+                            "embedded daemon listening on loopback TCP"
+                        );
+                        tcp_listeners.push(primary_tcp);
+                        bound_addrs.push(IpAddr::from([127, 0, 0, 1]));
+                    }
                     for (label, addr) in embedded_tcp_bind_addrs() {
-                        match tokio::net::TcpListener::bind((addr, 7878)).await {
+                        if bound_addrs.contains(&addr) {
+                            continue;
+                        }
+                        match tokio::net::TcpListener::bind((addr, tcp_port)).await {
                             Ok(listener) => {
                                 tracing::info!(
                                     bind = %addr,
+                                    port = tcp_port,
                                     kind = label,
-                                    "embedded daemon also listening on TCP 7878"
+                                    "embedded daemon also listening on TCP"
                                 );
                                 tcp_listeners.push(listener);
                                 bound_addrs.push(addr);
@@ -263,28 +345,12 @@ impl EmbeddedDaemonHandle {
                                 tracing::info!(
                                     %error,
                                     bind = %addr,
+                                    port = tcp_port,
                                     kind = label,
-                                    "embedded daemon: TCP 7878 bind unavailable"
+                                    "embedded daemon: TCP bind unavailable"
                                 );
                             }
                         }
-                    }
-
-                    async fn accept_tcp(
-                        listeners: &[tokio::net::TcpListener],
-                    ) -> io::Result<tokio::net::TcpStream> {
-                        if listeners.is_empty() {
-                            return std::future::pending().await;
-                        }
-                        let mut accepts = listeners
-                            .iter()
-                            .map(|listener| listener.accept())
-                            .collect::<futures::stream::FuturesUnordered<_>>();
-                        accepts
-                            .next()
-                            .await
-                            .expect("tcp accept future set is non-empty")
-                            .map(|(stream, _)| stream)
                     }
 
                     // Serve one accepted stream (unix or TCP — both are
@@ -343,13 +409,14 @@ impl EmbeddedDaemonHandle {
                                 if bound.contains(&ip) {
                                     continue;
                                 }
-                                match tokio::net::TcpListener::bind((ip, 7878)).await
+                                match tokio::net::TcpListener::bind((ip, tcp_port)).await
                                 {
                                     Ok(listener) => {
                                         tracing::info!(
                                             bind = %ip,
+                                            port = tcp_port,
                                             kind = "tailscale",
-                                            "embedded daemon: late tailnet bind on TCP 7878"
+                                            "embedded daemon: late tailnet bind on TCP"
                                         );
                                         bound.push(ip);
                                         let app = app.clone();
@@ -385,31 +452,43 @@ impl EmbeddedDaemonHandle {
                         });
                     }
 
-                    let shutdown = shutdown_for_task;
-                    loop {
-                        tokio::select! {
-                            _ = shutdown.notified() => {
-                                tracing::debug!("embedded daemon: shutdown signal received");
-                                break;
-                            }
-                            accept = listener.accept() => {
-                                match accept {
-                                    Ok((stream, _addr)) => spawn_connection(app.clone(), stream),
+                    // One accept task per listener, all feeding the shared
+                    // router. They die with this runtime when the shutdown
+                    // notify below returns and `block_on` unwinds.
+                    #[cfg(unix)]
+                    {
+                        let app = app.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                match listener.accept().await {
+                                    Ok((stream, _addr)) => {
+                                        spawn_connection(app.clone(), stream)
+                                    }
                                     Err(error) => {
                                         tracing::warn!(%error, "embedded daemon accept failed");
                                     }
                                 }
                             }
-                            accept = accept_tcp(&tcp_listeners) => {
-                                match accept {
-                                    Ok(stream) => spawn_connection(app.clone(), stream),
+                        });
+                    }
+                    for tcp_listener in tcp_listeners {
+                        let app = app.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                match tcp_listener.accept().await {
+                                    Ok((stream, _addr)) => {
+                                        spawn_connection(app.clone(), stream)
+                                    }
                                     Err(error) => {
                                         tracing::warn!(%error, "embedded daemon tcp accept failed");
                                     }
                                 }
                             }
-                        }
+                        });
                     }
+
+                    shutdown_for_task.notified().await;
+                    tracing::debug!("embedded daemon: shutdown signal received");
                 });
             })
             .map_err(|error| {
@@ -424,8 +503,10 @@ impl EmbeddedDaemonHandle {
         // caller could probe before the socket exists and decide to
         // spawn a *second* embedded daemon, racing into EADDRINUSE.
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
+            Ok(Ok(local_tcp_port)) => Ok(Self {
+                #[cfg(unix)]
                 socket_path,
+                local_tcp_port,
                 shutdown,
                 runtime_thread: Some(runtime_thread),
             }),
@@ -439,9 +520,35 @@ impl EmbeddedDaemonHandle {
 
     /// Path to the unix socket the embedded daemon is listening on.
     /// The (future) `DaemonClient` connects here.
+    #[cfg(unix)]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
+
+    /// Endpoint URL the local `DaemonClient` should dial: the unix
+    /// socket where one exists, the loopback TCP websocket otherwise.
+    pub fn client_url(&self) -> String {
+        #[cfg(unix)]
+        {
+            format!("unix://{}", self.socket_path.display())
+        }
+        #[cfg(not(unix))]
+        {
+            let port = self.local_tcp_port.unwrap_or_else(default_tcp_port);
+            format!("ws://127.0.0.1:{port}/session")
+        }
+    }
+}
+
+/// Loopback TCP port shared by the embedded daemon, the web client, and
+/// the standalone daemon's default `--addr`. `NEOISM_DAEMON_TCP_PORT`
+/// overrides it for isolated local dev instances (the TCP analogue of
+/// `NEOISM_DAEMON_SOCKET`).
+pub fn default_tcp_port() -> u16 {
+    std::env::var("NEOISM_DAEMON_TCP_PORT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .unwrap_or(7878)
 }
 
 fn embedded_tcp_bind_addrs() -> Vec<(&'static str, IpAddr)> {
@@ -480,6 +587,7 @@ impl Drop for EmbeddedDaemonHandle {
             });
             let _ = done_rx.recv_timeout(std::time::Duration::from_millis(150));
         }
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&self.socket_path);
     }
 }
@@ -506,6 +614,9 @@ fn load_or_create_embedded_daemon_token() -> io::Result<String> {
     let path = embedded_daemon_token_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        // On Windows the token lives under the per-user %TEMP%, whose
+        // default DACL is already owner-only; there is no mode to set.
+        #[cfg(unix)]
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     }
 
@@ -523,6 +634,7 @@ fn load_or_create_embedded_daemon_token() -> io::Result<String> {
     let token = generate_embedded_daemon_token();
     match OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(mut file) => {
+            #[cfg(unix)]
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
             file.write_all(token.as_bytes())?;
             file.write_all(b"\n")?;
@@ -560,16 +672,38 @@ fn embedded_daemon_token_path() -> PathBuf {
         }
     }
 
-    let uid = unsafe { libc::geteuid() };
     std::env::temp_dir()
-        .join(format!("neoism-{uid}"))
+        .join(format!("neoism-{}", per_user_suffix()))
         .join("daemon-token")
+}
+
+/// Per-user disambiguator for shared temp locations: the euid on unix,
+/// the login name on Windows (where %TEMP% is per-user anyway and this
+/// only guards against exotic shared-TEMP setups).
+fn per_user_suffix() -> String {
+    #[cfg(unix)]
+    {
+        unsafe { libc::geteuid() }.to_string()
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::var("USERNAME")
+            .ok()
+            .filter(|name| !name.is_empty())
+            .map(|name| {
+                name.chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                    .collect()
+            })
+            .unwrap_or_else(|| "user".to_string())
+    }
 }
 
 /// Default per-user unix socket path. Allows `$NEOISM_DAEMON_SOCKET` for
 /// isolated local dev instances without overriding `$XDG_RUNTIME_DIR` (Wayland
 /// needs the real compositor runtime dir), then prefers `$XDG_RUNTIME_DIR` and
 /// falls back to `/tmp/neoism-$UID.sock` otherwise.
+#[cfg(unix)]
 pub fn default_socket_path() -> PathBuf {
     if let Some(socket) = std::env::var_os(EMBEDDED_DAEMON_SOCKET_ENV) {
         let path = PathBuf::from(socket);
@@ -587,7 +721,7 @@ pub fn default_socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/neoism-{uid}.sock"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixStream as StdUnixStream;

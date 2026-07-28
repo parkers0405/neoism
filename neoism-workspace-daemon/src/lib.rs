@@ -23,6 +23,9 @@ pub mod search;
 pub mod server;
 pub mod sessions;
 pub mod tailnet;
+/// Windows-only ACL hardening for secret files (unix uses mode bits).
+#[cfg(windows)]
+pub mod windows_acl;
 pub mod workspace;
 pub mod workspace_promote;
 pub mod workspace_provision;

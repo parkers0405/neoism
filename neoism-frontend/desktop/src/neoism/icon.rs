@@ -9,7 +9,7 @@
 // upload, and native foreground-process detection — none of which the
 // web build needs or could compile.
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use neoism_backend::event::{EventProxy, RioEvent, RioEventType, WindowId};
 use neoism_backend::sugarloaf::{
     ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay, Sugarloaf,
@@ -135,6 +135,16 @@ pub fn foreground_process_group(main_fd: std::os::unix::io::RawFd) -> Option<u32
     Some(pgid as u32)
 }
 
+/// Windows counterpart: a ConPTY has no foreground process group (no
+/// `tcgetpgrp`), so the render-thread step is just handing over the
+/// pane's shell PID. The Toolhelp descendant walk that resolves the
+/// actual foreground process happens later on [`AgentDetectionWorker`],
+/// never while painting a frame.
+#[cfg(target_os = "windows")]
+pub fn foreground_process_group(shell_pid: u32) -> Option<u32> {
+    (shell_pid != 0).then_some(shell_pid)
+}
+
 /// Inspect a Linux foreground process group from the background detection
 /// worker. With wrapper chains (npx → node → native binary), the process-group
 /// leader's command line still carries the identifying package/binary name.
@@ -169,15 +179,36 @@ fn detect_agent_for_process_group(pgid: u32) -> Option<AgentKind> {
     detect_agent_from_process_identity("", &identity)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Windows: the probe carries the pane's shell PID (there is no ConPTY
+/// process group) and `teletypewriter` walks the descendant tree
+/// (Toolhelp snapshot) for the most recently created leaf. Its name
+/// stands in for the Linux `comm`; the full exe image path stands in
+/// for the command line, so a natively installed
+/// `...\AppData\...\claude.exe` still identifies (`process_name_is`
+/// splits on `\` and trims `.exe`).
+#[cfg(target_os = "windows")]
+fn detect_agent_for_process_group(shell_pid: u32) -> Option<AgentKind> {
+    let comm = teletypewriter::foreground_process_name(shell_pid);
+    if comm.is_empty() {
+        return None;
+    }
+    let command = teletypewriter::foreground_process_path(shell_pid)
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    detect_agent_from_process_identity(&comm, &command)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug)]
 pub struct AgentProbe {
     pub route_id: usize,
     pub is_root: bool,
+    /// Foreground process group on unix; the pane's shell PID on
+    /// Windows (see the per-platform `foreground_process_group`).
     pub process_group: u32,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 struct AgentDetectionRequest {
     workspace_token: usize,
     probes: Vec<AgentProbe>,
@@ -185,22 +216,23 @@ struct AgentDetectionRequest {
     window_id: WindowId,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub struct AgentDetectionResult {
     pub workspace_token: usize,
     pub detected: Vec<(usize, bool, AgentKind)>,
 }
 
 /// One long-lived native process-inspection lane. Requests are bounded and
-/// latest-wins at the caller, so a slow `ps` cannot accumulate work or block
-/// rendering. The worker explicitly wakes winit after publishing a result.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// latest-wins at the caller, so a slow `ps` (or Toolhelp snapshot on
+/// Windows) cannot accumulate work or block rendering. The worker
+/// explicitly wakes winit after publishing a result.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub struct AgentDetectionWorker {
     request_tx: std::sync::mpsc::SyncSender<AgentDetectionRequest>,
     result_rx: std::sync::mpsc::Receiver<AgentDetectionResult>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl AgentDetectionWorker {
     pub fn spawn() -> Option<Self> {
         let (request_tx, request_rx) =

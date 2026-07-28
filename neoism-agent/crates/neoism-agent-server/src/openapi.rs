@@ -65,7 +65,7 @@ pub(crate) async fn openapi_doc() -> Json<Value> {
             "/sync/history": { "post": { "operationId": "sync.history.list" } },
             "/mcp": { "get": { "operationId": "mcp.status" }, "post": { "operationId": "mcp.add" } },
             "/mcp/{name}/auth": { "post": { "operationId": "mcp.auth.start" }, "delete": { "operationId": "mcp.auth.remove" } },
-            "/mcp/{name}/auth/callback": { "post": { "operationId": "mcp.auth.callback" } },
+            "/mcp/{name}/auth/callback": { "get": { "operationId": "mcp.auth.callback.browser" }, "post": { "operationId": "mcp.auth.callback" } },
             "/mcp/{name}/auth/authenticate": { "post": { "operationId": "mcp.auth.authenticate" } },
             "/mcp/{name}/connect": { "post": { "operationId": "mcp.connect" } },
             "/mcp/{name}/disconnect": { "post": { "operationId": "mcp.disconnect" } },

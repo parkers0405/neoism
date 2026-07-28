@@ -19,7 +19,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-#[cfg(not(target_os = "windows"))]
 use std::fs;
 
 // Global atomic counter for generating unique route IDs
@@ -54,8 +53,8 @@ pub fn create_dead_context<T: neoism_backend::event::EventListener>(
         route_id,
         #[cfg(not(target_os = "windows"))]
         main_fd: Arc::new(-1),
-        #[cfg(not(target_os = "windows"))]
-        shell_pid: 1,
+        // 0 = "no shell": Drop's kill guard skips it on every platform.
+        shell_pid: 0,
         messenger: Messenger::new(sender),
         renderable_content: RenderableContent::new(Cursor::default()),
         terminal,
@@ -390,6 +389,101 @@ bind \cp 'commandline ""'
         }),
         _ => None,
     }
+}
+
+/// Windows twin of the unix rc wrappers above: a `neoism_profile.ps1`
+/// dot-sourced into PowerShell so every prompt is framed with the same
+/// OSC 133 marks (`D;<exit>` closing the previous command, `A` before
+/// the prompt text, `B` after it) plus an OSC 7 `file:///C:/...` cwd
+/// report the desktop's Windows tab-cwd/workspace re-rooting reads.
+/// cmd (and anything else that isn't PowerShell) has no prompt hooks
+/// worth shimming and spawns as configured (`None`).
+#[cfg(target_os = "windows")]
+pub(super) fn neoism_block_shell_for_spawn(
+    shell: &Shell,
+    route_id: usize,
+) -> Option<Shell> {
+    let name = std::path::Path::new(&shell.program)
+        .file_name()
+        .and_then(|name| name.to_str())?
+        .to_ascii_lowercase();
+    if !matches!(
+        name.as_str(),
+        "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe"
+    ) {
+        return None;
+    }
+    let dir = std::env::temp_dir()
+        .join(format!("neoism-shell-{}-{route_id}", std::process::id()));
+    fs::create_dir_all(&dir).ok()?;
+    let profile = dir.join("neoism_profile.ps1");
+    let profile_script = r##"# Neoism block-shell integration for PowerShell. Dot-sourced via
+# `-NoExit -Command` AFTER the user's own $PROFILE ran, mirroring the
+# unix zsh/bash/fish rc wrappers: every prompt is framed with OSC 133
+# marks so the block UI can segment command output, and OSC 7 reports
+# the cwd for tab-cwd / workspace re-rooting.
+$Global:__NeoismOriginalPrompt = $function:prompt
+
+function Global:prompt {
+    # $? / $LASTEXITCODE describe the command that just finished; read
+    # them before anything in this function can clobber them.
+    $__neoism_exit = if ($Global:?) {
+        0
+    } elseif (($null -ne $Global:LASTEXITCODE) -and ($Global:LASTEXITCODE -ne 0)) {
+        $Global:LASTEXITCODE
+    } else {
+        1
+    }
+    # OSC 7 cwd: file:///C:/... with forward slashes and
+    # percent-encoded spaces. Skipped on non-filesystem providers
+    # (a registry drive has no cwd a terminal could re-root to).
+    $__neoism_out = ''
+    $__neoism_loc = $ExecutionContext.SessionState.Path.CurrentLocation
+    if ($__neoism_loc.Provider.Name -eq 'FileSystem') {
+        $__neoism_cwd = $__neoism_loc.ProviderPath.Replace('\', '/').Replace(' ', '%20')
+        $__neoism_out += "$([char]27)]7;file:///$__neoism_cwd$([char]7)"
+    }
+    # D;<exit> closes the PREVIOUS command's block, then A <prompt
+    # text> B frame this prompt (B doubles as command start).
+    $__neoism_out += "$([char]27)]133;D;$__neoism_exit$([char]7)"
+    $__neoism_out += "$([char]27)]133;A$([char]7)"
+    $__neoism_out += if ($null -ne $Global:__NeoismOriginalPrompt) {
+        $Global:__NeoismOriginalPrompt.Invoke()
+    } else {
+        "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
+    }
+    $__neoism_out += "$([char]27)]133;B$([char]7)"
+    $__neoism_out
+}
+
+# C (command pre-exec) needs a command-accepted hook, which only
+# PSReadLine's PSConsoleHostReadLine provides. Wrap it when present;
+# without PSReadLine the C mark is skipped and D/A/B still frame the
+# blocks.
+if ($null -ne (Get-Command PSConsoleHostReadLine -ErrorAction Ignore)) {
+    $Global:__NeoismOriginalReadLine = $function:PSConsoleHostReadLine
+    function Global:PSConsoleHostReadLine {
+        $__neoism_line = & $Global:__NeoismOriginalReadLine
+        [Console]::Write("$([char]27)]133;C$([char]7)")
+        $__neoism_line
+    }
+}
+"##;
+    fs::write(&profile, profile_script).ok()?;
+
+    // Dot-source through `-Command` (no -NoProfile) so the user's own
+    // $PROFILE still runs first; appended AFTER the configured args so
+    // `-NoLogo` and friends survive. Doubling embedded quotes is the
+    // escape for a single-quoted PowerShell string literal.
+    let quoted_profile = profile.display().to_string().replace('\'', "''");
+    let mut args = shell.args.clone();
+    args.push("-NoExit".to_string());
+    args.push("-Command".to_string());
+    args.push(format!(". '{quoted_profile}'"));
+    Some(Shell {
+        program: shell.program.clone(),
+        args,
+    })
 }
 
 #[cfg(test)]

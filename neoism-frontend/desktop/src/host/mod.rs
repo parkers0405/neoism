@@ -252,7 +252,7 @@ pub struct Renderer {
     /// Native process metadata inspection stays off the render thread. The
     /// worker is created lazily on the first visible terminal-tab probe and
     /// reused for the lifetime of this renderer.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub(super) agent_detection_worker: Option<agent_icon::AgentDetectionWorker>,
     /// In-flight extension install jobs keyed by manifest id. Lives on
     /// the renderer so the per-frame pump in
@@ -439,7 +439,7 @@ impl Renderer {
             agent_icons_registered: false,
             last_agent: None,
             last_agent_check: None,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             agent_detection_worker: None,
             install_tracker: crate::screen::bridges::extensions::InstallTracker::default(
             ),

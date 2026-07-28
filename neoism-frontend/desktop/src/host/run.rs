@@ -852,7 +852,7 @@ impl Renderer {
             // Apply native-process results only to the workspace they were
             // captured from. The worker wakes winit when a result lands, so
             // an idle terminal does not need a polling render loop.
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             if let Some(result) = self
                 .agent_detection_worker
                 .as_ref()
@@ -884,7 +884,11 @@ impl Renderer {
                     .map(|t| t.elapsed() >= AGENT_DETECT_INTERVAL)
                     .unwrap_or(true);
                 if due {
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    #[cfg(any(
+                        target_os = "linux",
+                        target_os = "macos",
+                        target_os = "windows"
+                    ))]
                     {
                         let current_route = context_manager.current().route_id;
                         let grid = context_manager.current_grid();
@@ -903,9 +907,16 @@ impl Renderer {
                             {
                                 continue;
                             }
-                            if let Some(process_group) =
-                                agent_icon::foreground_process_group(*ctx.main_fd)
-                            {
+                            // tcgetpgrp on the PTY fd (unix); on Windows the
+                            // probe just carries the shell PID — the ConPTY
+                            // descendant walk happens on the worker.
+                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            let foreground =
+                                agent_icon::foreground_process_group(*ctx.main_fd);
+                            #[cfg(target_os = "windows")]
+                            let foreground =
+                                agent_icon::foreground_process_group(ctx.shell_pid);
+                            if let Some(process_group) = foreground {
                                 probes.push(agent_icon::AgentProbe {
                                     route_id: ctx.route_id,
                                     is_root: Some(ctx.route_id) == root_route,

@@ -239,8 +239,7 @@ impl CodeBuffer {
             if should_pair {
                 let mut buf = [0u8; 4];
                 let col = self.cursor_col;
-                self.lines[self.cursor_line]
-                    .insert_str(col, close.encode_utf8(&mut buf));
+                self.lines[self.cursor_line].insert_str(col, close.encode_utf8(&mut buf));
             }
         }
         self.mark_edited();
@@ -300,9 +299,7 @@ impl CodeBuffer {
             let after = line[self.cursor_col..].chars().next();
             matches!(
                 (before, after),
-                (Some('{'), Some('}'))
-                    | (Some('('), Some(')'))
-                    | (Some('['), Some(']'))
+                (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']'))
             )
         };
         if expand_pair {

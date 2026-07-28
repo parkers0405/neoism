@@ -171,6 +171,39 @@ pub(crate) struct LspClient {
 #[cfg(test)]
 pub(crate) type StdioLspClient = LspClient;
 
+/// On unix the program goes straight to exec (the command's PATH already
+/// carries the managed entries).
+#[cfg(not(windows))]
+fn build_lsp_command(program: &str, args: &[String]) -> Command {
+    let mut command = Command::new(program);
+    command.args(args);
+    command
+}
+
+/// Windows `CreateProcess` cannot exec `.cmd`/`.bat` npm shims directly, so
+/// resolve the concrete PATHEXT target first and route batch shims through
+/// `cmd /C`.
+#[cfg(windows)]
+fn build_lsp_command(program: &str, args: &[String]) -> Command {
+    let resolved = super::lsp_scan::resolve_command(program)
+        .unwrap_or_else(|| PathBuf::from(program));
+    let is_batch = resolved
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        });
+    let mut command = if is_batch {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(&resolved);
+        command
+    } else {
+        Command::new(&resolved)
+    };
+    command.args(args);
+    command
+}
+
 impl LspClient {
     #[cfg(test)]
     pub(crate) fn spawn(root: &Path, command: &[String]) -> Result<Self> {
@@ -189,13 +222,17 @@ impl LspClient {
         let (program, args) = command
             .split_first()
             .ok_or_else(|| anyhow!("LSP command is empty"))?;
-        let mut command_proc = Command::new(program);
-        command_proc.args(args).current_dir(project_root).envs(env);
+        let mut command_proc = build_lsp_command(program, args);
+        command_proc.current_dir(project_root).envs(env);
         if !env.contains_key("PATH") {
             if let Some(path) = managed_lsp_path() {
                 command_proc.env("PATH", path);
             }
         }
+        // Own process group/tree so helpers the server forks (rust-analyzer
+        // proc-macro servers, npm shim children) can be reaped with it on
+        // drop instead of orphaning.
+        crate::tool::process::set_new_process_group_std(&mut command_proc);
         let label = command.join(" ");
         let spawn_started = crate::perf::now();
         tracing::info!(
@@ -1282,6 +1319,9 @@ impl Drop for LspClient {
                         pid = child.id(),
                         "lsp process still running on drop; killing"
                     );
+                    // The child got its own process group/tree at spawn;
+                    // take the helper processes down with it.
+                    crate::tool::process::kill_process_group(Some(child.id()));
                     let _ = child.kill();
                     let _ = child.wait();
                 }

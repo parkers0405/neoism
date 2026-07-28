@@ -1,6 +1,6 @@
 use crate::context::Context;
 use rustc_hash::FxHashMap;
-use std::path::Path;
+use std::path::{Path, MAIN_SEPARATOR, MAIN_SEPARATOR_STR};
 use std::time::Instant;
 
 pub struct ContextTitleExtra {
@@ -57,7 +57,12 @@ pub fn create_title_extra_from_context<T: neoism_backend::event::EventListener>(
     let program =
         teletypewriter::foreground_process_name(*context.main_fd, context.shell_pid);
 
-    #[cfg(not(unix))]
+    // Windows has no controlling-tty fd; the ConPTY backend resolves the
+    // foreground process by walking the shell pid's descendants.
+    #[cfg(windows)]
+    let program = teletypewriter::foreground_process_name(context.shell_pid);
+
+    #[cfg(all(not(unix), not(windows)))]
     let program = String::default();
 
     Some(ContextTitleExtra { program })
@@ -78,8 +83,7 @@ pub fn create_title_extra_from_context<T: neoism_backend::event::EventListener>(
 fn shorten_path(absolute: &str) -> String {
     let path = Path::new(absolute);
 
-    // Replace home prefix with ~
-    #[cfg(unix)]
+    // Replace home prefix with ~ (`/home/name` and `C:\Users\name` alike)
     let display_path = {
         if let Some(home) = dirs::home_dir() {
             if let Ok(stripped) = path.strip_prefix(&home) {
@@ -87,7 +91,7 @@ fn shorten_path(absolute: &str) -> String {
                 if s.is_empty() {
                     "~".to_string()
                 } else {
-                    format!("~/{s}")
+                    format!("~{MAIN_SEPARATOR}{s}")
                 }
             } else {
                 absolute.to_string()
@@ -97,14 +101,17 @@ fn shorten_path(absolute: &str) -> String {
         }
     };
 
-    #[cfg(not(unix))]
-    let display_path = absolute.to_string();
-
-    // If 4+ components, show …/last3
-    let components: Vec<&str> =
-        display_path.split('/').filter(|s| !s.is_empty()).collect();
+    // If 4+ components, show …/last3; split on both separators so
+    // Windows paths shorten too
+    let components: Vec<&str> = display_path
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .collect();
     if components.len() >= 4 {
-        format!("…/{}", components[components.len() - 3..].join("/"))
+        format!(
+            "…{MAIN_SEPARATOR}{}",
+            components[components.len() - 3..].join(MAIN_SEPARATOR_STR)
+        )
     } else {
         display_path
     }
@@ -192,15 +199,18 @@ pub fn update_title<T: neoism_backend::event::EventListener>(
                 }
                 "program" => {
                     #[cfg(unix)]
-                    {
-                        let program = teletypewriter::foreground_process_name(
-                            *context.main_fd,
-                            context.shell_pid,
-                        );
+                    let program = teletypewriter::foreground_process_name(
+                        *context.main_fd,
+                        context.shell_pid,
+                    );
+                    #[cfg(windows)]
+                    let program =
+                        teletypewriter::foreground_process_name(context.shell_pid);
+                    #[cfg(all(not(unix), not(windows)))]
+                    let program = String::new();
 
-                        new_template = new_template.replace(to_replace_str, &program);
-                        matched = true;
-                    }
+                    new_template = new_template.replace(to_replace_str, &program);
+                    matched = true;
                 }
                 "absolute_path" => {
                     if let Some(dir_str) = try_terminal_current_directory(context) {
@@ -233,6 +243,18 @@ pub fn update_title<T: neoism_backend::event::EventListener>(
                             matched = true;
                         }
                     }
+
+                    // No /proc-style cwd read off-unix: OSC 7 above is the
+                    // only source. Erase the placeholder so the raw
+                    // template never shows in the title.
+                    #[cfg(not(unix))]
+                    {
+                        let is_only_one = variables.len() == 1;
+                        let is_last = i == variables.len() - 1;
+                        if is_only_one || is_last {
+                            new_template = new_template.replace(to_replace_str, "");
+                        }
+                    }
                 }
                 "relative_path" => {
                     if let Some(dir_str) = try_terminal_current_directory(context) {
@@ -261,6 +283,15 @@ pub fn update_title<T: neoism_backend::event::EventListener>(
                         if !path.is_empty() {
                             new_template = new_template.replace(to_replace_str, &path);
                             matched = true;
+                        }
+                    }
+
+                    #[cfg(not(unix))]
+                    {
+                        let is_only_one = variables.len() == 1;
+                        let is_last = i == variables.len() - 1;
+                        if is_only_one || is_last {
+                            new_template = new_template.replace(to_replace_str, "");
                         }
                     }
                 }

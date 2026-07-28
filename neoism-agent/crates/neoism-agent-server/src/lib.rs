@@ -11,6 +11,7 @@ use std::sync::Arc;
 mod agent;
 mod agent_tool_registry;
 mod app_router;
+pub mod auth_cli;
 mod app_routes;
 mod auth_store;
 mod background_job;
@@ -97,6 +98,8 @@ mod tool_selection;
 mod v2_routes;
 mod vcs;
 mod vcs_routes;
+#[cfg(windows)]
+mod windows_acl;
 mod worktree;
 mod worktree_routes;
 

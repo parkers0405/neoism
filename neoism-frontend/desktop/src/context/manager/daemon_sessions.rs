@@ -2,7 +2,6 @@ use super::*;
 use crate::ansi::CursorShape;
 use crate::app::ime::Ime;
 use crate::app::messenger::Messenger;
-#[cfg(not(target_os = "windows"))]
 use crate::context::factories::neoism_block_shell_for_spawn;
 use crate::context::factories::ROUTE_ID_COUNTER;
 use crate::context::renderable::{Cursor, RenderableContent};
@@ -625,58 +624,32 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
 
         let pty;
         let mut remote_binding = None;
-        #[cfg(not(target_os = "windows"))]
-        {
-            if let Some(prepared) = remote_pty {
-                // 8A: daemon-hosted shell. Same Machine/Messenger
-                // machinery; bytes are bridged by the context manager
-                // (daemon `PtyOutput` → feed, `Msg::Input`/`Resize` →
-                // sink → daemon link).
-                tracing::info!(
-                    route_id,
-                    "rio -> neoism_terminal_pty: PtySession::remote (daemon-hosted shell)"
-                );
-                let (session, feed) = PtySession::remote(prepared.sink);
-                remote_binding = Some(crate::context::remote_pty::RemotePtyBinding {
-                    feed,
-                    shared: prepared.shared,
-                });
-                pty = session;
-            } else {
-                let spawn_shell = neoism_block_shell_for_spawn(&config.shell, route_id)
-                    .unwrap_or_else(|| config.shell.clone());
-                tracing::info!("rio -> neoism_terminal_pty: PtySession::spawn");
-                let session_config = PtySessionConfig {
-                    shell: Some(spawn_shell.program.clone()),
-                    args: spawn_shell.args.clone(),
-                    cwd: config.working_dir.as_ref().map(PathBuf::from),
-                    env: Vec::new(),
-                    cols,
-                    rows,
-                };
-                pty = match PtySession::spawn(session_config) {
-                    Ok(session) => session,
-                    Err(err) => {
-                        tracing::error!("{err:?}");
-                        return Err(Box::new(err));
-                    }
-                };
-            }
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        let main_fd = pty.main_fd();
-        #[cfg(not(target_os = "windows"))]
-        let shell_pid = pty.shell_pid();
-
-        #[cfg(target_os = "windows")]
-        {
-            // Remote (daemon-hosted) panes are unix-only for now.
-            let _ = remote_pty;
-            tracing::info!("rio -> neoism_terminal_pty: PtySession::spawn (windows)");
+        if let Some(prepared) = remote_pty {
+            // 8A: daemon-hosted shell. Same Machine/Messenger
+            // machinery; bytes are bridged by the context manager
+            // (daemon `PtyOutput` → feed, `Msg::Input`/`Resize` →
+            // sink → daemon link).
+            tracing::info!(
+                route_id,
+                "rio -> neoism_terminal_pty: PtySession::remote (daemon-hosted shell)"
+            );
+            let (session, feed) = PtySession::remote(prepared.sink);
+            remote_binding = Some(crate::context::remote_pty::RemotePtyBinding {
+                feed,
+                shared: prepared.shared,
+            });
+            pty = session;
+        } else {
+            // The block-shell wrapper injects rc shims that emit the
+            // OSC 133 prompt marks — zsh/bash/fish on unix, a
+            // PowerShell profile on Windows; shells without a shim
+            // (e.g. cmd) spawn as configured.
+            let spawn_shell = neoism_block_shell_for_spawn(&config.shell, route_id)
+                .unwrap_or_else(|| config.shell.clone());
+            tracing::info!("rio -> neoism_terminal_pty: PtySession::spawn");
             let session_config = PtySessionConfig {
-                shell: Some(config.shell.program.clone()),
-                args: config.shell.args.clone(),
+                shell: Some(spawn_shell.program.clone()),
+                args: spawn_shell.args.clone(),
                 cwd: config.working_dir.as_ref().map(PathBuf::from),
                 env: Vec::new(),
                 cols,
@@ -690,6 +663,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 }
             };
         }
+
+        #[cfg(not(target_os = "windows"))]
+        let main_fd = pty.main_fd();
+        let shell_pid = pty.shell_pid();
 
         let machine = Machine::new(
             Arc::clone(&terminal),
@@ -717,7 +694,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             route_id,
             #[cfg(not(target_os = "windows"))]
             main_fd,
-            #[cfg(not(target_os = "windows"))]
             shell_pid,
             messenger,
             terminal,

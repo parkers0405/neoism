@@ -70,6 +70,19 @@ impl Screen<'_> {
                 }
             }
         }
+        // Windows local panes: no /proc cwd; the OSC 7-reported directory
+        // (when the shell emits it) stands in before the daemon fallback.
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(dir) = current
+                .terminal
+                .try_lock_unfair()
+                .and_then(|terminal| terminal.current_directory.clone())
+                .and_then(Self::normalize_workspace_dir)
+            {
+                return Some(dir);
+            }
+        }
         // Daemon-backed (remote) terminal pane: there's no local PTY fd to
         // read `/proc` from, so the shell's cwd arrives via the daemon's
         // `SessionCwd` push (cached per session). Resolve this pane's route

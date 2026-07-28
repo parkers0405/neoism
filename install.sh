@@ -4,7 +4,7 @@
 #   ./install.sh                # release build into ~/.local/bin
 #
 # This script only builds and places files:
-#   - neoism, neoism-workspace-daemon, neoism-agent  -> BIN_DIR
+#   - neoism, neoism-workspace-daemon, neoism-agent -> BIN_DIR
 #   - wasm bundle + Vite web build (optional)        -> neoism-frontend/web/dist
 #
 # Everything user-facing (terminfo entry, desktop launcher + icons, default

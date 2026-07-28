@@ -184,7 +184,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path "stage/$out" | Out-Null
           $bin = "target/${{ matrix.target }}/release"
           Copy-Item "$bin/neoism.exe", "$bin/neoism-workspace-daemon.exe", "$bin/neoism-agent.exe" "stage/$out/"
-          if (Test-Path "misc/rio.terminfo") { Copy-Item "misc/rio.terminfo" "stage/$out/" }
           Compress-Archive -Path "stage/$out" -DestinationPath "$out.zip" -Force
           $hash = Get-FileHash "$out.zip" -Algorithm SHA256
           "$($hash.Hash.ToLower())  $out.zip" | Set-Content -NoNewline "$out.zip.sha256"

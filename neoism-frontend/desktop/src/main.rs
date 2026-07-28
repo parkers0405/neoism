@@ -7,6 +7,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod agent_server;
 mod app;
+mod background_process;
 mod bindings;
 mod bootstrap;
 mod bridges;

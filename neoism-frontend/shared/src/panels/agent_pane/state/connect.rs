@@ -347,9 +347,10 @@ impl NeoismAgentPane {
         }
         if url.starts_with("http://") || url.starts_with("https://") {
             if !message.is_empty() {
-                message.push('\n');
+                message.push_str("\n\n");
             }
-            message.push_str(&url);
+            message.push_str("Authorization URL (click to open; drag to copy):\n");
+            message.push_str(&format!("[{url}]({url})"));
         }
         if !message.trim().is_empty() {
             self.system_message(provider.name.as_str(), message);

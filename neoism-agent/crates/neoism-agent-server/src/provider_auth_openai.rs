@@ -49,8 +49,23 @@ pub(super) async fn authorize_openai_browser(
         .unwrap_or_else(|_| {
             format!("http://localhost:{OPENAI_BROWSER_OAUTH_PORT}/auth/callback")
         });
+    let mut pending = pending.write().await;
+    if let Some(ProviderOAuthPending::OpenAiBrowser {
+        issuer,
+        redirect_uri,
+        code_verifier,
+        state,
+        ..
+    }) = pending.get(provider_id)
+    {
+        return Ok(openai_browser_authorization(
+            issuer,
+            redirect_uri,
+            code_verifier,
+            state,
+        ));
+    }
     let code_verifier = random_oauth_string(64);
-    let code_challenge = pkce_challenge(&code_verifier);
     let state = random_oauth_string(43);
     let (sender, receiver) = oneshot::channel();
     start_openai_browser_callback_listener(
@@ -60,7 +75,7 @@ pub(super) async fn authorize_openai_browser(
         sender,
     )
     .await?;
-    pending.write().await.insert(
+    pending.insert(
         provider_id.to_string(),
         ProviderOAuthPending::OpenAiBrowser {
             issuer: issuer.clone(),
@@ -71,19 +86,34 @@ pub(super) async fn authorize_openai_browser(
         },
     );
 
+    Ok(openai_browser_authorization(
+        &issuer,
+        &redirect_uri,
+        &code_verifier,
+        &state,
+    ))
+}
+
+fn openai_browser_authorization(
+    issuer: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+    state: &str,
+) -> ProviderAuthAuthorization {
+    let code_challenge = pkce_challenge(code_verifier);
     let params = [
         ("response_type", "code".to_string()),
         ("client_id", OPENAI_CLIENT_ID.to_string()),
-        ("redirect_uri", redirect_uri),
+        ("redirect_uri", redirect_uri.to_string()),
         ("scope", "openid profile email offline_access".to_string()),
         ("code_challenge", code_challenge),
         ("code_challenge_method", "S256".to_string()),
         ("id_token_add_organizations", "true".to_string()),
         ("codex_cli_simplified_flow", "true".to_string()),
-        ("state", state),
+        ("state", state.to_string()),
         ("originator", "neoism".to_string()),
     ];
-    Ok(ProviderAuthAuthorization {
+    ProviderAuthAuthorization {
         url: format!(
             "{issuer}/oauth/authorize?{}",
             params
@@ -96,31 +126,48 @@ pub(super) async fn authorize_openai_browser(
         instructions:
             "Complete authorization in your browser. This window will close automatically."
                 .to_string(),
-    })
+    }
 }
 
 pub(super) async fn exchange_openai_browser(
     provider_id: &str,
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
 ) -> anyhow::Result<AuthInfo> {
-    let Some(ProviderOAuthPending::OpenAiBrowser {
-        issuer,
-        redirect_uri,
-        code_verifier,
-        state: _state,
-        receiver,
-    }) = pending.write().await.remove(provider_id)
-    else {
-        anyhow::bail!("no pending OpenAI OAuth browser flow for provider {provider_id}")
+    let (issuer, redirect_uri, code_verifier, receiver) = {
+        let pending = pending.read().await;
+        let Some(ProviderOAuthPending::OpenAiBrowser {
+            issuer,
+            redirect_uri,
+            code_verifier,
+            receiver,
+            ..
+        }) = pending.get(provider_id)
+        else {
+            anyhow::bail!(
+                "no pending OpenAI OAuth browser flow for provider {provider_id}"
+            )
+        };
+        (
+            issuer.clone(),
+            redirect_uri.clone(),
+            code_verifier.clone(),
+            receiver.clone(),
+        )
     };
     let receiver = receiver.lock().await.take().ok_or_else(|| {
         anyhow::anyhow!("OpenAI OAuth browser callback was already consumed")
     })?;
-    let code = tokio::time::timeout(std::time::Duration::from_secs(300), receiver)
-        .await
-        .map_err(|_| anyhow::anyhow!("OpenAI OAuth browser callback timed out"))?
-        .map_err(|_| anyhow::anyhow!("OpenAI OAuth browser callback listener stopped"))?
-        .map_err(|error| anyhow::anyhow!(error))?;
+    let code =
+        match tokio::time::timeout(std::time::Duration::from_secs(300), receiver).await {
+            Ok(Ok(Ok(code))) => Ok(code),
+            Ok(Ok(Err(error))) => Err(anyhow::anyhow!(error)),
+            Ok(Err(_)) => Err(anyhow::anyhow!(
+                "OpenAI OAuth browser callback listener stopped"
+            )),
+            Err(_) => Err(anyhow::anyhow!("OpenAI OAuth browser callback timed out")),
+        };
+    pending.write().await.remove(provider_id);
+    let code = code?;
     let token_response = reqwest::Client::new()
         .post(format!("{issuer}/oauth/token"))
         .header("content-type", "application/x-www-form-urlencoded")

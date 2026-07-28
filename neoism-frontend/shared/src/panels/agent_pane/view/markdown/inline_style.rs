@@ -45,8 +45,10 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
             }
         }
         if let Some(link) = md::parse_markdown_link(rest) {
-            let target =
-                md::looks_like_file_ref(link.target).then(|| link.target.to_string());
+            let target = (md::looks_like_file_ref(link.target)
+                || link.target.starts_with("http://")
+                || link.target.starts_with("https://"))
+            .then(|| link.target.to_string());
             out.push(MarkdownInlineSegment::MarkdownLink {
                 label: link.label.to_string(),
                 source_target: link.target.to_string(),

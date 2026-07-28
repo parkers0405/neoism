@@ -284,33 +284,52 @@ impl NeoismAgentPane {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        if url.starts_with("http://") || url.starts_with("https://") {
-            open_url(&url);
-        }
+        let authorization_link = (url.starts_with("http://")
+            || url.starts_with("https://"))
+        .then(|| format!("[{url}]({url})"));
+        let browser_error = authorization_link
+            .is_some()
+            .then(|| crate::background_process::open_url(&url).err())
+            .flatten();
         if auto {
-            let mut message = format!(
-                "Opened your browser to sign in to {}. Finish there — neoism connects automatically, and you can close the tab when it's done.",
-                provider.name
-            );
+            let mut message = match browser_error {
+                Some(error) => format!(
+                    "Could not open your browser ({error}). Use the authorization URL below to sign in to {}.",
+                    provider.name
+                ),
+                None => format!(
+                    "Opened your browser to sign in to {}. Finish there — neoism connects automatically, and you can close the tab when it's done.",
+                    provider.name
+                ),
+            };
             if !instructions.trim().is_empty() {
                 message.push('\n');
                 message.push_str(instructions.trim());
+            }
+            if let Some(link) = &authorization_link {
+                message
+                    .push_str("\n\nAuthorization URL (click to open; drag to copy):\n");
+                message.push_str(link);
             }
             self.system_message(&provider.name, message);
             self.spawn_connect_oauth_wait(provider, method.index);
             // Return to the composer; the outcome arrives as a background update.
             self.close_connect();
         } else {
-            if !instructions.trim().is_empty() {
-                self.system_message(&provider.name, instructions);
-            } else if !url.is_empty() {
-                self.system_message(
-                    &provider.name,
-                    format!(
-                        "Authorize in your browser, then paste the token below.\n{url}"
-                    ),
-                );
+            let mut message = if instructions.trim().is_empty() {
+                "Authorize in your browser, then paste the token below.".to_string()
+            } else {
+                instructions
+            };
+            if let Some(error) = browser_error {
+                message.push_str(&format!("\nCould not open your browser: {error}"));
             }
+            if let Some(link) = authorization_link {
+                message
+                    .push_str("\n\nAuthorization URL (click to open; drag to copy):\n");
+                message.push_str(&link);
+            }
+            self.system_message(&provider.name, message);
             self.open_connect_secret_entry(method);
         }
     }
@@ -552,13 +571,4 @@ fn connect_provider_row(provider: &ConnectProvider) -> NeoismAgentPickerOption {
         if provider.connected { "connected" } else { "" },
         &provider.id,
     )
-}
-
-/// Open a URL in the user's default browser (best-effort, non-blocking).
-fn open_url(url: &str) {
-    #[cfg(target_os = "macos")]
-    let program = "open";
-    #[cfg(not(target_os = "macos"))]
-    let program = "xdg-open";
-    let _ = std::process::Command::new(program).arg(url).spawn();
 }

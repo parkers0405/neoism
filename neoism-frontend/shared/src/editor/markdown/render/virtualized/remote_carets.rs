@@ -104,12 +104,21 @@ fn draw_remote_markdown_carets(
         let tag_y = (caret_y - tag_h).max(clip_top);
         // Notion-style presence chip: the peer's pixel-plasma orb, then
         // their name flag. The orb is seeded by the display name, so the
-        // same host always wears the same orb. Still frame (t = 0.6) —
-        // the markdown pane doesn't repaint just for presence.
+        // same host always wears the same orb, animated on the shared
+        // process clock (the presence-orb redraw owner keeps frames
+        // coming while a peer is present).
         let orb_size = tag_h;
         let orb_gap = 2.0;
         draw_presence_orb_clipped(
-            sugarloaf, clip, &cursor.name, x, tag_y, orb_size, 0.6, DEPTH, ORDER_TEXT,
+            sugarloaf,
+            clip,
+            &cursor.name,
+            x,
+            tag_y,
+            orb_size,
+            crate::editor::crdt::presence_orb_now_seconds(),
+            DEPTH,
+            ORDER_TEXT,
         );
         let flag_x = x + orb_size + orb_gap;
         draw_rounded_rect_clipped(

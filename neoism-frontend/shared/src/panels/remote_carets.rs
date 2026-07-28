@@ -15,8 +15,7 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::roster::{
-    markdown_roster_initial, ROSTER_DOT_DIAMETER, ROSTER_DOT_GAP, ROSTER_MARGIN_RIGHT,
-    ROSTER_MARGIN_TOP,
+    ROSTER_DOT_DIAMETER, ROSTER_DOT_GAP, ROSTER_MARGIN_RIGHT, ROSTER_MARGIN_TOP,
 };
 
 /// One remote peer's caret on an editor grid.
@@ -93,9 +92,9 @@ pub fn render_editor_remote_carets(
     }
     let clip = [pane_x, pane_y, pane_w, pane_h];
 
-    // Roster: markdown's initial-dots, pinned to the pane's top-right
-    // (NOT scroll-offset — it's chrome, like md's). The right anchor
-    // is md's exact math: first dot's RIGHT edge sits at
+    // Roster: markdown's presence-orb pile, pinned to the pane's
+    // top-right (NOT scroll-offset — it's chrome, like md's). The right
+    // anchor is md's exact math: first dot's RIGHT edge sits at
     // `pane right - ROSTER_MARGIN_RIGHT`.
     let mut dot_x = pane_x + pane_w - ROSTER_MARGIN_RIGHT - ROSTER_DOT_DIAMETER;
     let dot_y = pane_y + ROSTER_MARGIN_TOP;
@@ -103,36 +102,21 @@ pub fn render_editor_remote_carets(
         if dot_x < pane_x {
             break;
         }
-        // Each peer renders in the color THEY broadcast — their own
-        // theme's cursor color (their caret looks to you the way their
-        // cursor looks to them). Rainbow peers animate locally on the
-        // shared clock instead.
-        let peer_rgb = remote_peer_rgb(peer);
-        let color = [peer_rgb[0], peer_rgb[1], peer_rgb[2], 0.95];
-        sugarloaf.rounded_rect(
-            None,
+        // The peer's deterministic pixel-plasma orb replaces the old
+        // colored-circle-with-initial badge — one presence identity the
+        // caret flags and chrome cluster all share (seed = display name),
+        // animated on the shared process clock (dots are gap-spaced, so
+        // no face-pile ring is needed here).
+        crate::editor::markdown::render::draw::draw_presence_orb_clipped(
+            sugarloaf,
+            clip,
+            &peer.name,
             dot_x,
             dot_y,
             ROSTER_DOT_DIAMETER,
-            ROSTER_DOT_DIAMETER,
-            color,
+            crate::editor::crdt::presence_orb_now_seconds(),
             DEPTH,
-            ROSTER_DOT_DIAMETER * 0.5,
             ORDER,
-        );
-        let initial = markdown_roster_initial(&peer.name);
-        let initial_opts = DrawOpts {
-            font_size: 9.6,
-            color: [13, 15, 18, 255],
-            clip_rect: Some(clip),
-            ..DrawOpts::default()
-        };
-        let initial_w = sugarloaf.text_mut().measure(&initial, &initial_opts);
-        sugarloaf.text_mut().draw(
-            dot_x + (ROSTER_DOT_DIAMETER - initial_w) * 0.5,
-            dot_y + (ROSTER_DOT_DIAMETER - initial_opts.font_size) * 0.5 - 1.0,
-            &initial,
-            &initial_opts,
         );
         dot_x -= ROSTER_DOT_DIAMETER + ROSTER_DOT_GAP;
     }

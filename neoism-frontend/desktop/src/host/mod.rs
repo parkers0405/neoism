@@ -109,6 +109,12 @@ pub struct Renderer {
     /// at paint time so `needs_redraw` keeps frames coming for their
     /// animation too.
     pub remote_rainbow_active: bool,
+    /// True while any remote peer is present, so their pixel-plasma
+    /// presence orbs (top-chrome cluster, tree rows, caret flags) are on
+    /// screen. Set at paint time so `redraw_reason` keeps frames coming
+    /// to animate the plasma — and stops for zero cost the instant the
+    /// last peer leaves (a solo session never spins the loop for this).
+    pub presence_orbs_active: bool,
     pub(crate) ignore_selection_fg_color: bool,
     pub search: search::SearchOverlay,
     pub assistant: assistant::AssistantOverlay,
@@ -360,6 +366,7 @@ impl Renderer {
                 config.neoism.cursor_style.as_deref().unwrap_or_default(),
             ),
             remote_rainbow_active: false,
+            presence_orbs_active: false,
             ignore_selection_fg_color: config.ignore_selection_fg_color,
             colors,
             navigation: config.navigation.clone(),

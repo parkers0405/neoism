@@ -66,7 +66,9 @@ pub use presence::{
     PresenceGridPoint, PresenceGridSize, PresenceOffset, PresencePeerId,
     PresenceRenderPeer, PresenceRenderSelection, PresenceUpdate,
 };
-pub use presence_avatar::{avatar_cells, AvatarCell, AvatarProfile};
+pub use presence_avatar::{
+    avatar_cells, presence_orb_now_seconds, AvatarCell, AvatarProfile,
+};
 pub use remote_presence::{
     peer_presence_from_wire, peer_presence_to_wire, presence_buffer_id_for_path,
     PresenceAvatarPeer, PresencePublisher, RemotePresenceStore,

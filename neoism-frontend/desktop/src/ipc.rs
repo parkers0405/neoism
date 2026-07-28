@@ -191,9 +191,7 @@ pub fn listen_for_external_commands(
     let thread_pipe = pipe.clone();
     let spawn_result = std::thread::Builder::new()
         .name("neoism-ipc".to_string())
-        .spawn(move || {
-            runtime.block_on(listen_loop(pipe, first_instance, event_proxy))
-        });
+        .spawn(move || runtime.block_on(listen_loop(pipe, first_instance, event_proxy)));
 
     if let Err(err) = spawn_result {
         tracing::warn!(
@@ -258,9 +256,7 @@ fn request_command(command: ExternalCommand) -> io::Result<bool> {
         let mut client = loop {
             match ClientOptions::new().open(&pipe) {
                 Ok(client) => break client,
-                Err(err)
-                    if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) =>
-                {
+                Err(err) if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
                     return Ok(false);
                 }
                 Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {

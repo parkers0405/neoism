@@ -187,12 +187,14 @@ fn build_lsp_command(program: &str, args: &[String]) -> Command {
 fn build_lsp_command(program: &str, args: &[String]) -> Command {
     let resolved = super::lsp_scan::resolve_command(program)
         .unwrap_or_else(|| PathBuf::from(program));
-    let is_batch = resolved
-        .extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-        });
+    let is_batch =
+        resolved
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("cmd")
+                    || extension.eq_ignore_ascii_case("bat")
+            });
     let mut command = if is_batch {
         let mut command = Command::new("cmd");
         command.arg("/C").arg(&resolved);

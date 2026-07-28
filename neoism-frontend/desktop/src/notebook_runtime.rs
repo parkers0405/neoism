@@ -407,9 +407,9 @@ impl RuntimeWorker {
         // Local processes get their own process group (setpgid on unix,
         // CREATE_NEW_PROCESS_GROUP on windows), so both advertise the
         // group-interrupt capability.
-        if let Err(err) = self
-            .active_processes
-            .register_pid(&job.path, pid, cfg!(any(unix, windows)))
+        if let Err(err) =
+            self.active_processes
+                .register_pid(&job.path, pid, cfg!(any(unix, windows)))
         {
             let _ = child.kill();
             let _ = child.wait();
@@ -601,9 +601,8 @@ fn configure_local_process_interrupt(command: &mut StdCommand) {
     // child without tearing down our own group. `creation_flags` REPLACES any
     // previously-set flags (Command exposes no getter), so this must stay the
     // only flag-setting site for local notebook commands.
-    command.creation_flags(
-        windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
-    );
+    command
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
 }
 
 #[cfg(not(any(unix, windows)))]

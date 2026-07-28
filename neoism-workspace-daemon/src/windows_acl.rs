@@ -14,16 +14,19 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::null_mut;
 
-use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ, LocalFree};
+use windows_sys::Win32::Foundation::{
+    LocalFree, ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ,
+};
 use windows_sys::Win32::Security::Authorization::{
     GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
-    NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SET_ACCESS, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
+    TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, EqualSid, GetAce, WinBuiltinAdministratorsSid, WinLocalSystemSid,
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE,
-    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SECURITY_MAX_SID_SIZE, WELL_KNOWN_SID_TYPE,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_MAX_SID_SIZE, WELL_KNOWN_SID_TYPE,
 };
 use windows_sys::Win32::Storage::FileSystem::{FILE_ALL_ACCESS, FILE_READ_DATA};
 
@@ -51,10 +54,14 @@ fn win32_err(code: u32) -> io::Error {
     io::Error::from_raw_os_error(code as i32)
 }
 
-fn well_known_sid(kind: WELL_KNOWN_SID_TYPE) -> io::Result<[u8; SECURITY_MAX_SID_SIZE as usize]> {
+fn well_known_sid(
+    kind: WELL_KNOWN_SID_TYPE,
+) -> io::Result<[u8; SECURITY_MAX_SID_SIZE as usize]> {
     let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
     let mut len = sid.len() as u32;
-    let ok = unsafe { CreateWellKnownSid(kind, null_mut(), sid.as_mut_ptr() as PSID, &mut len) };
+    let ok = unsafe {
+        CreateWellKnownSid(kind, null_mut(), sid.as_mut_ptr() as PSID, &mut len)
+    };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -115,8 +122,12 @@ pub fn harden_owner_only(path: &Path) -> io::Result<()> {
             },
         ];
         let mut dacl: *mut ACL = null_mut();
-        let status =
-            SetEntriesInAclW(entries.len() as u32, entries.as_ptr(), null_mut(), &mut dacl);
+        let status = SetEntriesInAclW(
+            entries.len() as u32,
+            entries.as_ptr(),
+            null_mut(),
+            &mut dacl,
+        );
         if status != ERROR_SUCCESS {
             return Err(win32_err(status));
         }

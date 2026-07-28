@@ -452,7 +452,10 @@ fn foreground_process(shell_pid: u32) -> Option<ProcessEntry> {
     for (idx, entry) in entries.iter().enumerate() {
         by_pid.insert(entry.pid, idx);
         if entry.parent_pid != entry.pid {
-            children.entry(entry.parent_pid).or_default().push(entry.pid);
+            children
+                .entry(entry.parent_pid)
+                .or_default()
+                .push(entry.pid);
         }
     }
 
@@ -521,13 +524,19 @@ mod cmdline_tests {
     #[test]
     fn plain_args_are_untouched() {
         assert_eq!(quote_cmdline_arg("-NoLogo"), "-NoLogo");
-        assert_eq!(quote_cmdline_arg("C:\\Windows\\notepad.exe"), "C:\\Windows\\notepad.exe");
+        assert_eq!(
+            quote_cmdline_arg("C:\\Windows\\notepad.exe"),
+            "C:\\Windows\\notepad.exe"
+        );
     }
 
     #[test]
     fn spaces_and_quotes_are_escaped() {
         assert_eq!(quote_cmdline_arg(""), "\"\"");
-        assert_eq!(quote_cmdline_arg("C:\\Program Files\\x"), "\"C:\\Program Files\\x\"");
+        assert_eq!(
+            quote_cmdline_arg("C:\\Program Files\\x"),
+            "\"C:\\Program Files\\x\""
+        );
         // Trailing backslash run is doubled before the closing quote.
         assert_eq!(quote_cmdline_arg("C:\\a b\\"), "\"C:\\a b\\\\\"");
         // Literal quote gets 2n+1 backslashes.

@@ -7,7 +7,6 @@ fn main() {
         res.set_icon("../misc/windows/neoism.ico");
         res.set("ProductName", "Neoism");
         res.set("FileDescription", "Neoism workspace daemon");
-        res.compile()
-            .expect("Failed to compile Windows resources");
+        res.compile().expect("Failed to compile Windows resources");
     }
 }

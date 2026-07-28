@@ -457,6 +457,22 @@ impl Screen<'_> {
                 applied
             }
             FilesServerMessage::FileContent { bytes, .. } => {
+                // Code panes and markdown panes share the same async
+                // ReadFile round-trip; the pending map the request id
+                // lands in tells them apart.
+                if let Some(pane_path) =
+                    self.pending_remote_code_opens.remove(&request_id)
+                {
+                    let source = String::from_utf8_lossy(bytes).into_owned();
+                    let Some(pane) =
+                        self.context_manager.code_pane_mut_by_path(&pane_path)
+                    else {
+                        return false;
+                    };
+                    pane.apply_remote_source(&source);
+                    self.mark_dirty();
+                    return true;
+                }
                 let Some(pane_path) =
                     self.pending_remote_markdown_opens.remove(&request_id)
                 else {

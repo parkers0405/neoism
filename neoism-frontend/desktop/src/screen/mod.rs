@@ -733,6 +733,11 @@ pub struct Screen<'screen> {
     /// a joined workspace (the bytes only exist on the host), by request
     /// id → pane path. The correlated `FileContent` reply fills the pane.
     pending_remote_markdown_opens: HashMap<u64, PathBuf>,
+    /// Same as `pending_remote_markdown_opens` but for code-editor panes
+    /// (joined workspace OR ssh-followed tree): the correlated
+    /// `FileContent` reply seeds the `CodePane` instead of showing the
+    /// raw "No such file (os error 2)" from the failed local read.
+    pending_remote_code_opens: HashMap<u64, PathBuf>,
     /// Decoded `cover:` banner images by resolved file path. `None`
     /// records a failed decode so a broken cover doesn't re-decode every
     /// frame. Entries re-load lazily if sugarloaf drops the texture.
@@ -1694,6 +1699,7 @@ impl Screen<'_> {
             pending_workspace_subscription: None,
             pending_remote_file_ops: std::collections::HashSet::new(),
             pending_remote_markdown_opens: HashMap::new(),
+            pending_remote_code_opens: HashMap::new(),
             markdown_cover_cache: HashMap::new(),
             markdown_image_overlay_ids: std::collections::HashSet::new(),
             pending_remote_git_status: HashMap::new(),

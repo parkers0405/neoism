@@ -327,16 +327,49 @@ impl Screen<'_> {
     /// Ctrl+Shift+W, but attached to the existing shells — instead of
     /// only flipping the daemon's active-workspace pointer.
     pub(crate) fn open_or_adopt_daemon_workspace(&mut self, workspace_id: String) {
-        if let Some(index) = self
+        let matched_index = self
             .context_manager
-            .grid_index_for_workspace_id(&workspace_id)
-        {
-            if index != self.context_manager.current_index() {
+            .grid_index_for_workspace_id(&workspace_id);
+        let current_index = self.context_manager.current_index();
+        let owned = self.context_manager.workspace_owned_locally(&workspace_id);
+        let is_peer = self.context_manager.daemon_link_is_peer();
+        tracing::info!(
+            target: "neoism::workspaces",
+            workspace_id = %workspace_id,
+            ?matched_index,
+            current_index,
+            owned,
+            is_peer,
+            "open_or_adopt_daemon_workspace",
+        );
+        if let Some(index) = matched_index {
+            // A match on the CURRENT grid while that grid isn't actually
+            // this daemon workspace is a FALSE positive (a guest sitting
+            // on a local grid whose synthetic id collided): treat it as
+            // "not open yet" and fall through to a real adopt so the join
+            // lands in a NEW workspace tab instead of no-op'ing on the
+            // current one.
+            let current_is_really_this = self
+                .context_manager
+                .current_adopted_workspace_id()
+                .as_deref()
+                == Some(workspace_id.as_str());
+            if index != current_index {
                 self.select_top_level_workspace_at(index);
+                self.context_manager
+                    .switch_daemon_host_workspace(workspace_id);
+                return;
+            } else if current_is_really_this {
+                self.context_manager
+                    .switch_daemon_host_workspace(workspace_id);
+                return;
             }
-            self.context_manager
-                .switch_daemon_host_workspace(workspace_id);
-            return;
+            // else: false-positive current-grid match — fall through to adopt.
+            tracing::info!(
+                target: "neoism::workspaces",
+                workspace_id = %workspace_id,
+                "current-grid match was a false positive; adopting a new workspace",
+            );
         }
 
         // The workspace lives on a tailnet PEER's daemon (it came from

@@ -15,6 +15,24 @@ pub struct SavedServer {
     pub id: String,
     pub name: String,
     pub endpoint: String,
+    /// Present only for servers this machine hosts (Create & join). Records
+    /// everything needed to relaunch the daemon if it died with a previous
+    /// app session. Optional + `serde(default)` so pre-existing servers.json
+    /// files (which never had this field) still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted: Option<HostedServerSpec>,
+}
+
+/// Relaunch recipe for a locally-hosted daemon: the exact `--state-dir`,
+/// `--workspace`, port, and auth mode `create_and_join_local_server` spawned it
+/// with, so a later dial that finds the daemon dead can rehost it identically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedServerSpec {
+    pub state_dir: PathBuf,
+    pub workspace_dir: PathBuf,
+    pub port: u16,
+    #[serde(default)]
+    pub require_auth: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -110,6 +128,28 @@ impl ServerRegistry {
         name: Option<&str>,
         token: Option<&str>,
     ) -> Result<SavedServer, String> {
+        self.add_inner(address, name, token, None)
+    }
+
+    /// Like [`add`], but records the relaunch spec for a server this machine
+    /// hosts so a future dial can rehost the daemon if it died.
+    pub fn add_hosted(
+        &mut self,
+        address: &str,
+        name: Option<&str>,
+        token: Option<&str>,
+        spec: HostedServerSpec,
+    ) -> Result<SavedServer, String> {
+        self.add_inner(address, name, token, Some(spec))
+    }
+
+    fn add_inner(
+        &mut self,
+        address: &str,
+        name: Option<&str>,
+        token: Option<&str>,
+        hosted: Option<HostedServerSpec>,
+    ) -> Result<SavedServer, String> {
         let (address, inline_name) = match address.split_once('|') {
             Some((address, name)) => (address.trim(), non_empty(Some(name))),
             None => (address, None),
@@ -129,6 +169,7 @@ impl ServerRegistry {
             id: Uuid::new_v4().to_string(),
             name: normalized_name(name, &endpoint),
             endpoint,
+            hosted,
         };
         self.data.servers.push(server.clone());
         if let Some(token) = non_empty(token) {
@@ -138,6 +179,11 @@ impl ServerRegistry {
         }
         self.persist().map_err(|error| error.to_string())?;
         Ok(server)
+    }
+
+    /// The relaunch recipe for a hosted server, if `id` is one we host.
+    pub fn hosted_spec(&self, id: &str) -> Option<HostedServerSpec> {
+        self.server(id).and_then(|server| server.hosted.clone())
     }
 
     pub fn remove(&mut self, id: &str) -> io::Result<bool> {
@@ -333,6 +379,42 @@ mod tests {
         let loaded = ServerRegistry::load(directory.clone()).unwrap();
         assert_eq!(loaded.server(&server.id).unwrap().name, "Home");
         assert_eq!(loaded.token(&server.id), Some("secret-token"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_servers_json_without_hosted_field_still_loads() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        // A servers.json written before the `hosted` field existed.
+        fs::write(
+            directory.join(REGISTRY_FILE),
+            r#"{"servers":[{"id":"abc","name":"Home","endpoint":"ws://127.0.0.1:7878/session"}]}"#,
+        )
+        .unwrap();
+        let registry = ServerRegistry::load(directory.clone()).unwrap();
+        let server = registry.server("abc").unwrap();
+        assert_eq!(server.name, "Home");
+        assert!(server.hosted.is_none());
+        assert!(registry.hosted_spec("abc").is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn add_hosted_persists_and_exposes_the_relaunch_spec() {
+        let directory = test_dir();
+        let mut registry = ServerRegistry::load(directory.clone()).unwrap();
+        let spec = HostedServerSpec {
+            state_dir: PathBuf::from("/state/9877"),
+            workspace_dir: PathBuf::from("/work/repo"),
+            port: 9877,
+            require_auth: true,
+        };
+        let server = registry
+            .add_hosted("ws://127.0.0.1:9877/session", Some("Repo"), None, spec.clone())
+            .unwrap();
+        let loaded = ServerRegistry::load(directory.clone()).unwrap();
+        assert_eq!(loaded.hosted_spec(&server.id), Some(spec));
         fs::remove_dir_all(directory).unwrap();
     }
 

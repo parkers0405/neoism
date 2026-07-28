@@ -468,10 +468,25 @@ impl Application<'_> {
         }
 
         if let Some((address, name, token)) = add_request {
-            match self
-                .server_registry
-                .add(&address, name.as_deref(), token.as_deref())
-            {
+            // A locally-hosted server (Create & join) leaves a relaunch-spec
+            // sidecar in its state dir; fold it onto the SavedServer so a later
+            // dial that finds the daemon dead can rehost it. Non-hosted /
+            // remote addresses read back None and take the plain add path.
+            let added = match crate::screen::bridges::palette::read_hosted_sidecar(
+                &address,
+            ) {
+                Some(spec) => self.server_registry.add_hosted(
+                    &address,
+                    name.as_deref(),
+                    token.as_deref(),
+                    spec,
+                ),
+                None => {
+                    self.server_registry
+                        .add(&address, name.as_deref(), token.as_deref())
+                }
+            };
+            match added {
                 Ok(server) => {
                     let token =
                         self.server_registry.token(&server.id).map(str::to_string);
@@ -561,6 +576,35 @@ impl Application<'_> {
                 if let Some(session) = self.window_sessions.get_mut(&window_id) {
                     session.pending_peer_adopt = None;
                 }
+                self.switch_window_server(window_id, &home, None, None);
+                self.send_window_message(
+                    window_id,
+                    WorkspaceClientMessage::RequestHostWorkspaceTree,
+                );
+            }
+        }
+
+        // Host ended the session (daemon shutdown / stop-sharing): the
+        // ingest layer already detached this window's adopted grids
+        // (without killing the host's shells). Surface the reason, mark
+        // the session offline so it stops showing "Reconnecting", and
+        // re-dial home — which replaces the guest connection and drops
+        // its reconnect loop.
+        let host_ended_reason = self.router.routes.get_mut(&window_id).and_then(|route| {
+            route.window.screen.context_manager.take_host_ended_reason()
+        });
+        if let Some(reason) = host_ended_reason {
+            if let Some(session) = self.window_sessions.get_mut(&window_id) {
+                session.mark_host_ended();
+            }
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route.window.screen.renderer.notifications.push(
+                    reason,
+                    neoism_ui::panels::notifications::NotificationLevel::Warn,
+                );
+                route.request_redraw();
+            }
+            if let Some(home) = self.home_daemon_endpoint.clone() {
                 self.switch_window_server(window_id, &home, None, None);
                 self.send_window_message(
                     window_id,
@@ -1060,6 +1104,14 @@ impl Application<'_> {
     }
 
     fn drain_server_switch_results(&mut self) {
+        // Rehosting a dead daemon re-dials, which loops back through here.
+        // Remember which hosted servers we've already relaunched this session
+        // so a daemon that refuses to come up can't spin an infinite relaunch
+        // loop — we relaunch each hosted server at most once per session.
+        thread_local! {
+            static RELAUNCHED: std::cell::RefCell<std::collections::HashSet<String>> =
+                std::cell::RefCell::new(std::collections::HashSet::new());
+        }
         while let Ok(pending) = self.server_switch_rx.try_recv() {
             let PendingServerSwitch {
                 window_id,
@@ -1071,6 +1123,50 @@ impl Application<'_> {
             let connection = match result {
                 Ok(connection) => connection,
                 Err(error) => {
+                    // A server we host may just have died with a previous app
+                    // session. Relaunch its daemon ONCE (per session) and
+                    // re-dial before giving up — the dial retries with backoff,
+                    // so the freshly spawned daemon wins the startup race.
+                    if let Some(server_id) = server_id.clone() {
+                        if let Some(spec) = self.server_registry.hosted_spec(&server_id) {
+                            let first_attempt = RELAUNCHED
+                                .with(|set| set.borrow_mut().insert(server_id.clone()));
+                            if first_attempt {
+                                let token = self
+                                    .server_registry
+                                    .token(&server_id)
+                                    .map(str::to_string);
+                                match crate::screen::bridges::palette::spawn_hosted_daemon(
+                                    &spec,
+                                    token.as_deref(),
+                                ) {
+                                    Ok(()) => {
+                                        tracing::info!(
+                                            target: "neoism::desktop_daemon",
+                                            window = ?window_id,
+                                            daemon = %daemon_url,
+                                            server = %server_id,
+                                            "hosted daemon was down; relaunched it and re-dialing"
+                                        );
+                                        self.switch_window_server(
+                                            window_id,
+                                            &daemon_url,
+                                            token,
+                                            Some(server_id),
+                                        );
+                                        continue;
+                                    }
+                                    Err(error) => tracing::warn!(
+                                        target: "neoism::desktop_daemon",
+                                        window = ?window_id,
+                                        server = %server_id,
+                                        %error,
+                                        "failed to relaunch hosted daemon"
+                                    ),
+                                }
+                            }
+                        }
+                    }
                     tracing::warn!(
                         target: "neoism::desktop_daemon",
                         window = ?window_id,

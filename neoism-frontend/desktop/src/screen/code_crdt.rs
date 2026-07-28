@@ -265,7 +265,18 @@ fn drain_code_pane_crdt(
     buffer_id: String,
     open_buffer_ids: &mut HashSet<String>,
 ) -> bool {
-    // A pane that failed to load has no authoritative text to seed.
+    // The pane's real bytes are still in flight from the host daemon (a
+    // joined workspace's local read failed, so `request_remote_code_content`
+    // cleared the error and marked it loading). Binding now would seed the
+    // CRDT doc with the empty placeholder, whose snapshot then CLOBBERS the
+    // fetched content the moment it paints — the "code shows nothing, then
+    // flickers" bug. Bind on the next drain after `apply_remote_source`
+    // lands. (Mirror of `drain_markdown_pane_crdt`.)
+    if code.remote_content_pending {
+        return false;
+    }
+    // A pane that genuinely failed to load locally (not a pending remote
+    // fetch) has no authoritative text to seed.
     if code.error.is_some() {
         return false;
     }

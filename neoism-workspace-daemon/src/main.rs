@@ -186,8 +186,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         result = serve => { result?; }
         _ = shutdown_signal(shutdown_writer) => {
+            // Farewell frame FIRST: tell every connected guest the host
+            // is ending the session so they detach their adopted
+            // workspace and re-dial home instead of reconnecting forever
+            // against a daemon that is about to vanish. The per-socket
+            // pumps live on this same runtime, so give them a brief
+            // window to flush the frame before we fall through and the
+            // runtime drop aborts their tasks.
+            workspaces.broadcast_host_ended("The host ended the session");
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             tracing::info!(
-                "shutdown: snapshot persisted; aborting open connections and exiting"
+                "shutdown: HostEnded broadcast; snapshot persisted; aborting open connections and exiting"
             );
         }
     }

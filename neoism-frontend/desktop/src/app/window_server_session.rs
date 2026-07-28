@@ -30,6 +30,13 @@ pub struct WindowServerSession {
     /// reuses this connection (same namespace, nvims intact) instead of
     /// dialling a fresh one.
     pub parked_home: Option<DesktopDaemonConnection>,
+    /// Set when the host ended the shared session (its daemon shut down
+    /// or it stopped sharing). Forces the status pill to `Offline`
+    /// instead of the perpetual `Reconnecting` the still-backing-off
+    /// guest link would otherwise show, for the brief window between the
+    /// `HostEnded` push and the re-dial-home switch completing (that
+    /// switch replaces this session outright, clearing the flag).
+    host_ended: bool,
     host_daemon_urls: HashMap<String, String>,
     workspace_homes: HashMap<String, String>,
 }
@@ -48,12 +55,25 @@ impl WindowServerSession {
             pending_peer_adopt: None,
             needs_initial_workspace_adopt: false,
             parked_home: None,
+            host_ended: false,
             host_daemon_urls: HashMap::new(),
             workspace_homes: HashMap::new(),
         }
     }
 
+    /// Mark that the host ended this shared session. From now until the
+    /// window finishes re-dialling home the status pill reads `Offline`
+    /// rather than `Reconnecting`, so a guest sees a settled "session
+    /// over" state instead of an endless retry against a dead host.
+    pub fn mark_host_ended(&mut self) {
+        self.host_ended = true;
+    }
+
     pub fn refresh_status(&mut self) {
+        if self.host_ended {
+            self.status = ServerConnectionStatus::Offline;
+            return;
+        }
         self.status = match self.connection.status() {
             DaemonClientStatus::Connecting => ServerConnectionStatus::Connecting,
             DaemonClientStatus::Open => ServerConnectionStatus::Online,

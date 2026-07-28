@@ -205,6 +205,12 @@ fn handle_inner(
             ) {
             Some(workspace) => {
                 manager.broadcast_tree_changed(Some(conn.client_id));
+                // Un-sharing must also KICK any guest who already
+                // adopted this workspace: the visibility flip alone only
+                // hides it from future joins. Broadcasting the farewell
+                // to every client is simplest — a client with nothing
+                // adopted no-ops on receipt.
+                manager.broadcast_host_ended("Host stopped sharing this workspace");
                 DispatchOutcome::just(vec![WorkspaceServerMessage::HostWorkspaceUpserted {
                     workspace,
                 }])

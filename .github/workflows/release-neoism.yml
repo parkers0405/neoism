@@ -30,8 +30,37 @@ env:
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
 jobs:
+  # Never rebuild what's already green: if THIS exact commit already has a
+  # successful run of this workflow (a dispatch validation run), a tag push
+  # reuses its artifacts instead of rebuilding all three legs. Same commit
+  # ⇒ same baked-in version string, so the binaries are byte-honest.
+  # Release flow that exploits this: bump version → push → (optional)
+  # dispatch validation → tag the SAME commit → instant publish.
+  precheck:
+    name: find reusable build
+    runs-on: ubuntu-latest
+    outputs:
+      reuse_run: ${{ steps.find.outputs.run_id }}
+    steps:
+      - name: Find a successful same-commit run with artifacts
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id=""
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            for id in $(gh api "repos/${{ github.repository }}/actions/workflows/release-neoism.yml/runs?head_sha=${{ github.sha }}&status=success&per_page=10" --jq '.workflow_runs[].id'); do
+              count=$(gh api "repos/${{ github.repository }}/actions/runs/$id/artifacts" --jq '.artifacts | length')
+              if [[ "$count" -ge 3 ]]; then run_id="$id"; break; fi
+            done
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "reusable run: ${run_id:-none — building from scratch}"
+
   build:
     name: ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: precheck
+    if: needs.precheck.outputs.reuse_run == ''
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -204,10 +233,25 @@ jobs:
   # the previous release.
   publish:
     name: publish dist release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [precheck, build]
+    if: >-
+      always() && startsWith(github.ref, 'refs/tags/') &&
+      (needs.build.result == 'success' ||
+       (needs.build.result == 'skipped' && needs.precheck.outputs.reuse_run != ''))
     runs-on: ubuntu-latest
     steps:
+      # Reuse path: the build matrix never ran, so attach the validated
+      # same-commit run's artifacts to a fresh draft ourselves.
+      - name: Attach reused artifacts to the draft release
+        if: needs.build.result == 'skipped'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ needs.precheck.outputs.reuse_run }}" -R "${{ github.repository }}" -D artifacts
+          gh release create "${{ github.ref_name }}" -R parkers0405/neoism \
+            --draft --title "${{ github.ref_name }}" || true
+          gh release upload "${{ github.ref_name }}" -R parkers0405/neoism --clobber artifacts/*/*
       - name: Undraft the dist release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

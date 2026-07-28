@@ -927,7 +927,8 @@ pub fn inlay_hints(
     let mut seen = BTreeSet::new();
 
     for spec in file_query_specs(&root, &file, LspOperation::InlayHints) {
-        match lsp_service::service().inlay_hints(&root, &file, start_line, end_line, &spec)
+        match lsp_service::service()
+            .inlay_hints(&root, &file, start_line, end_line, &spec)
         {
             Ok(found) => {
                 for hint in found {
@@ -970,7 +971,8 @@ pub fn document_highlights(
     let mut seen = BTreeSet::new();
 
     for spec in file_query_specs(&root, &file, LspOperation::DocumentHighlight) {
-        match lsp_service::service().document_highlights(&root, &file, line, character, &spec)
+        match lsp_service::service()
+            .document_highlights(&root, &file, line, character, &spec)
         {
             Ok(found) => {
                 for highlight in found {

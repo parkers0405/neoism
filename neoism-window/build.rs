@@ -83,7 +83,10 @@ fn load_app_icon() {
     // Version metadata shows in Explorer's Properties → Details and the
     // task manager; without it the exe reads as anonymous shovelware.
     res.set("ProductName", "Neoism");
-    res.set("FileDescription", "Neoism — terminal-first editor workspace");
+    res.set(
+        "FileDescription",
+        "Neoism — terminal-first editor workspace",
+    );
     res.compile()
         .expect("Failed to compile Window icon resource");
 }

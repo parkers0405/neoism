@@ -230,20 +230,26 @@ async fn auth_login(mut args: AuthLoginArgs) -> Result<(), String> {
 
     match method.kind {
         AuthKind::Api => {
-            let key = match args.key {
-                Some(key) => key,
-                None if io::stdin().is_terminal() => prompt_secret("API key: ")?,
-                None => return Err("an API key is required; pass --key when stdin is not a terminal".into()),
-            };
+            let key =
+                match args.key {
+                    Some(key) => key,
+                    None if io::stdin().is_terminal() => prompt_secret("API key: ")?,
+                    None => return Err(
+                        "an API key is required; pass --key when stdin is not a terminal"
+                            .into(),
+                    ),
+                };
             let saved: bool = put_json(
                 &args.output.server,
                 &format!("/auth/{provider}"),
                 &json!({ "type": "api", "key": key }),
             )
             .await?;
-            print_result(&args.output, json!({ "provider": provider, "saved": saved }), || {
-                format!("Connected {provider} with {}.", method.label)
-            })
+            print_result(
+                &args.output,
+                json!({ "provider": provider, "saved": saved }),
+                || format!("Connected {provider} with {}.", method.label),
+            )
         }
         AuthKind::OAuth => {
             let authorization: Authorization = post_json(
@@ -268,18 +274,22 @@ async fn auth_login(mut args: AuthLoginArgs) -> Result<(), String> {
                 &json!({ "method": index, "code": args.code }),
             )
             .await?;
-            print_result(&args.output, json!({ "provider": provider, "saved": saved }), || {
-                format!("Connected {provider} with {}.", method.label)
-            })
+            print_result(
+                &args.output,
+                json!({ "provider": provider, "saved": saved }),
+                || format!("Connected {provider} with {}.", method.label),
+            )
         }
     }
 }
 
 async fn auth_list(output: OutputArgs) -> Result<(), String> {
-    let methods: BTreeMap<String, Vec<AuthMethod>> = get_json(&output.server, "/provider/auth").await?;
+    let methods: BTreeMap<String, Vec<AuthMethod>> =
+        get_json(&output.server, "/provider/auth").await?;
     let mut statuses = BTreeMap::new();
     for provider in methods.keys() {
-        let auth: Option<Value> = get_json(&output.server, &format!("/auth/{provider}")).await?;
+        let auth: Option<Value> =
+            get_json(&output.server, &format!("/auth/{provider}")).await?;
         statuses.insert(provider.clone(), auth_kind(auth.as_ref()));
     }
     if output.json {
@@ -294,7 +304,8 @@ async fn auth_list(output: OutputArgs) -> Result<(), String> {
 
 async fn auth_status(args: AuthProviderArgs) -> Result<(), String> {
     let provider = provider_id(&args.provider);
-    let auth: Option<Value> = get_json(&args.output.server, &format!("/auth/{provider}")).await?;
+    let auth: Option<Value> =
+        get_json(&args.output.server, &format!("/auth/{provider}")).await?;
     if args.output.json {
         return print_json(&json!({ "provider": provider, "auth": auth }));
     }
@@ -304,10 +315,13 @@ async fn auth_status(args: AuthProviderArgs) -> Result<(), String> {
 
 async fn auth_logout(args: AuthProviderArgs) -> Result<(), String> {
     let provider = provider_id(&args.provider);
-    let removed: bool = delete_json(&args.output.server, &format!("/auth/{provider}")).await?;
-    print_result(&args.output, json!({ "provider": provider, "removed": removed }), || {
-        format!("Removed credentials for {provider}.")
-    })
+    let removed: bool =
+        delete_json(&args.output.server, &format!("/auth/{provider}")).await?;
+    print_result(
+        &args.output,
+        json!({ "provider": provider, "removed": removed }),
+        || format!("Removed credentials for {provider}."),
+    )
 }
 
 async fn run_mcp(command: McpCommand) -> Result<(), String> {
@@ -328,7 +342,8 @@ async fn run_mcp(command: McpCommand) -> Result<(), String> {
 }
 
 async fn mcp_list(output: OutputArgs, auth_only: bool) -> Result<(), String> {
-    let status: BTreeMap<String, McpStatus> = get_json(&output.server, "/mcp/status").await?;
+    let status: BTreeMap<String, McpStatus> =
+        get_json(&output.server, "/mcp/status").await?;
     if output.json {
         return print_json(&status);
     }
@@ -342,17 +357,22 @@ async fn mcp_list(output: OutputArgs, auth_only: bool) -> Result<(), String> {
     Ok(())
 }
 
-async fn mcp_authenticate(name: String, no_open: bool, output: OutputArgs) -> Result<(), String> {
-    let started: McpAuthStart = post_json(
-        &output.server,
-        "/mcp/auth",
-        &json!({ "name": name }),
-    )
-    .await?;
-    println!("Authorize {name} in your browser:\n\n{}", started.authorization_url);
+async fn mcp_authenticate(
+    name: String,
+    no_open: bool,
+    output: OutputArgs,
+) -> Result<(), String> {
+    let started: McpAuthStart =
+        post_json(&output.server, "/mcp/auth", &json!({ "name": name })).await?;
+    println!(
+        "Authorize {name} in your browser:\n\n{}",
+        started.authorization_url
+    );
     if !no_open {
         if let Err(error) = open_browser(&started.authorization_url) {
-            eprintln!("Could not open a browser ({error}). Open the URL above to continue.");
+            eprintln!(
+                "Could not open a browser ({error}). Open the URL above to continue."
+            );
         }
     }
     eprintln!("\nWaiting for authorization...");
@@ -366,11 +386,15 @@ async fn mcp_authenticate(name: String, no_open: bool, output: OutputArgs) -> Re
         .await?;
         match status.get(&name) {
             Some(McpStatus::Connected) => {
-                return print_result(&output, json!({ "name": name, "status": "connected" }), || {
-                    format!("Connected {name}.")
-                })
+                return print_result(
+                    &output,
+                    json!({ "name": name, "status": "connected" }),
+                    || format!("Connected {name}."),
+                )
             }
-            Some(McpStatus::Failed { error }) => return Err(format!("{name} failed: {error}")),
+            Some(McpStatus::Failed { error }) => {
+                return Err(format!("{name} failed: {error}"))
+            }
             _ if Instant::now() >= deadline => {
                 return Err(format!("timed out waiting for {name} authorization"))
             }
@@ -392,7 +416,10 @@ async fn mcp_logout(args: McpServerArgs) -> Result<(), String> {
     )
 }
 
-fn select_method<'a>(methods: &'a [AuthMethod], selector: Option<&str>) -> Result<(usize, &'a AuthMethod), String> {
+fn select_method<'a>(
+    methods: &'a [AuthMethod],
+    selector: Option<&str>,
+) -> Result<(usize, &'a AuthMethod), String> {
     if methods.is_empty() {
         return Err("provider does not expose an authentication method".into());
     }
@@ -408,7 +435,10 @@ fn select_method<'a>(methods: &'a [AuthMethod], selector: Option<&str>) -> Resul
             .iter()
             .enumerate()
             .find(|(_, method)| {
-                let kind = match method.kind { AuthKind::Api => "api", AuthKind::OAuth => "oauth" };
+                let kind = match method.kind {
+                    AuthKind::Api => "api",
+                    AuthKind::OAuth => "oauth",
+                };
                 kind == needle || method.label.to_ascii_lowercase().contains(&needle)
             })
             .ok_or_else(|| format!("authentication method {selector} does not exist"));
@@ -422,7 +452,9 @@ fn select_method<'a>(methods: &'a [AuthMethod], selector: Option<&str>) -> Resul
         .map(|(index, method)| format!("  {index}: {}", method.label))
         .collect::<Vec<_>>()
         .join("\n");
-    Err(format!("choose an authentication method with --method:\n{choices}"))
+    Err(format!(
+        "choose an authentication method with --method:\n{choices}"
+    ))
 }
 
 fn provider_id(provider: &str) -> &str {
@@ -434,7 +466,10 @@ fn provider_id(provider: &str) -> &str {
 }
 
 fn auth_kind(auth: Option<&Value>) -> &'static str {
-    match auth.and_then(|value| value.get("type")).and_then(Value::as_str) {
+    match auth
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str)
+    {
         Some("api") => "API key",
         Some("oauth") => "OAuth",
         Some("wellknown") => "environment",
@@ -456,7 +491,9 @@ fn prompt_secret(prompt: &str) -> Result<String, String> {
     eprint!("{prompt}");
     io::stderr().flush().map_err(|error| error.to_string())?;
     let mut value = String::new();
-    io::stdin().read_line(&mut value).map_err(|error| error.to_string())?;
+    io::stdin()
+        .read_line(&mut value)
+        .map_err(|error| error.to_string())?;
     let value = value.trim().to_string();
     if value.is_empty() {
         Err("API key cannot be empty".into())
@@ -527,31 +564,67 @@ fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
 }
 
 async fn get_json<T: DeserializeOwned>(server: &str, path: &str) -> Result<T, String> {
-    response_json(reqwest::Client::new().get(format!("{}{path}", normalize_server(server))).send().await).await
+    response_json(
+        reqwest::Client::new()
+            .get(format!("{}{path}", normalize_server(server)))
+            .send()
+            .await,
+    )
+    .await
 }
 
-async fn post_json<T: DeserializeOwned>(server: &str, path: &str, body: &Value) -> Result<T, String> {
-    response_json(reqwest::Client::new().post(format!("{}{path}", normalize_server(server))).json(body).send().await).await
+async fn post_json<T: DeserializeOwned>(
+    server: &str,
+    path: &str,
+    body: &Value,
+) -> Result<T, String> {
+    response_json(
+        reqwest::Client::new()
+            .post(format!("{}{path}", normalize_server(server)))
+            .json(body)
+            .send()
+            .await,
+    )
+    .await
 }
 
-async fn put_json<T: DeserializeOwned>(server: &str, path: &str, body: &Value) -> Result<T, String> {
-    response_json(reqwest::Client::new().put(format!("{}{path}", normalize_server(server))).json(body).send().await).await
+async fn put_json<T: DeserializeOwned>(
+    server: &str,
+    path: &str,
+    body: &Value,
+) -> Result<T, String> {
+    response_json(
+        reqwest::Client::new()
+            .put(format!("{}{path}", normalize_server(server)))
+            .json(body)
+            .send()
+            .await,
+    )
+    .await
 }
 
 async fn delete_json<T: DeserializeOwned>(server: &str, path: &str) -> Result<T, String> {
-    response_json(reqwest::Client::new().delete(format!("{}{path}", normalize_server(server))).send().await).await
+    response_json(
+        reqwest::Client::new()
+            .delete(format!("{}{path}", normalize_server(server)))
+            .send()
+            .await,
+    )
+    .await
 }
 
 async fn response_json<T: DeserializeOwned>(
     response: Result<reqwest::Response, reqwest::Error>,
 ) -> Result<T, String> {
-    let response = response.map_err(|error| format!("could not reach Neoism Agent: {error}"))?;
+    let response =
+        response.map_err(|error| format!("could not reach Neoism Agent: {error}"))?;
     let status = response.status();
     let body = response.text().await.map_err(|error| error.to_string())?;
     if !status.is_success() {
         return Err(format_http_error(status, &body));
     }
-    serde_json::from_str(&body).map_err(|error| format!("invalid Agent response: {error}"))
+    serde_json::from_str(&body)
+        .map_err(|error| format!("invalid Agent response: {error}"))
 }
 
 fn normalize_server(server: &str) -> String {
@@ -561,7 +634,12 @@ fn normalize_server(server: &str) -> String {
 fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
     let message = serde_json::from_str::<Value>(body)
         .ok()
-        .and_then(|value| value.pointer("/data/message").and_then(Value::as_str).map(str::to_string))
+        .and_then(|value| {
+            value
+                .pointer("/data/message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| body.trim().to_string());
     format!("Neoism Agent returned {status}: {message}")
 }

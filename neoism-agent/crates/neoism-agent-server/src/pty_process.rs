@@ -1,9 +1,9 @@
 use std::collections::HashMap;
+use std::io;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::io;
 use std::process::Stdio;
 #[cfg(unix)]
 use std::ptr;
@@ -170,9 +170,7 @@ impl PtyChild {
     /// when the platform reports no exit code, e.g. signal death).
     fn try_wait(&mut self) -> io::Result<Option<Option<i32>>> {
         match self {
-            PtyChild::Spawned(child) => {
-                Ok(child.try_wait()?.map(|status| status.code()))
-            }
+            PtyChild::Spawned(child) => Ok(child.try_wait()?.map(|status| status.code())),
             #[cfg(windows)]
             PtyChild::Conpty(child) => child.try_wait(),
         }
@@ -690,9 +688,7 @@ mod conpty {
     use std::ptr;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, HANDLE, S_OK, STILL_ACTIVE,
-    };
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE, S_OK};
     use windows_sys::Win32::System::Console::{
         ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
     };
@@ -800,9 +796,7 @@ mod conpty {
 
     /// Quote one argument per the MSVCRT/CommandLineToArgvW rules.
     fn quote_arg(arg: &str) -> String {
-        if !arg.is_empty()
-            && !arg.contains([' ', '\t', '\n', '\x0b', '"'])
-        {
+        if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\x0b', '"']) {
             return arg.to_string();
         }
         let mut quoted = String::with_capacity(arg.len() + 2);
@@ -837,14 +831,13 @@ mod conpty {
     /// Inherited environment plus overrides, as a sorted UTF-16
     /// double-NUL-terminated block (`CREATE_UNICODE_ENVIRONMENT`).
     fn environment_block(extra: &[(&str, &str)]) -> Vec<u16> {
-        let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> =
-            std::env::vars_os()
-                .filter(|(key, _)| {
-                    !extra.iter().any(|(extra_key, _)| {
-                        key.to_string_lossy().eq_ignore_ascii_case(extra_key)
-                    })
+        let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+            .filter(|(key, _)| {
+                !extra.iter().any(|(extra_key, _)| {
+                    key.to_string_lossy().eq_ignore_ascii_case(extra_key)
                 })
-                .collect();
+            })
+            .collect();
         for (key, value) in extra {
             vars.push((key.into(), value.into()));
         }
@@ -895,13 +888,8 @@ mod conpty {
                 Y: size.rows.max(1) as i16,
             };
             let mut hpc: HPCON = zeroed();
-            let hr = CreatePseudoConsole(
-                coord,
-                conin_read.0,
-                conout_write.0,
-                0,
-                &mut hpc,
-            );
+            let hr =
+                CreatePseudoConsole(coord, conin_read.0, conout_write.0, 0, &mut hpc);
             if hr != S_OK {
                 return Err(PtyError::SpawnFailed(format!(
                     "CreatePseudoConsole failed: HRESULT {hr:#x}"
@@ -918,16 +906,11 @@ mod conpty {
 
             let mut attr_size: usize = 0;
             // First call intentionally fails, reporting the needed size.
-            let _ = InitializeProcThreadAttributeList(
-                ptr::null_mut(),
-                1,
-                0,
-                &mut attr_size,
-            );
+            let _ =
+                InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut attr_size);
             let mut attr_buf = vec![0u8; attr_size];
             let attr_list = attr_buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
-            if InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size) == 0
-            {
+            if InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size) == 0 {
                 let error = last_error("InitializeProcThreadAttributeList");
                 close_hpc(hpc);
                 return Err(error);

@@ -19,6 +19,10 @@ impl Screen<'_> {
         // refresh the flag every frame so `needs_redraw` keeps frames
         // coming while one is on screen (and stops when it leaves).
         self.renderer.remote_rainbow_active = self.remote_presence.any_rainbow();
+        // Presence orbs animate the same way: while any peer is present
+        // their orbs are on screen, so keep repainting to flow the plasma
+        // (cleared to zero cost the instant the last peer disconnects).
+        self.renderer.presence_orbs_active = self.remote_presence.has_any_peers();
 
         let initial_redraw_reason = self.renderer.redraw_reason();
         let mut has_animation = initial_redraw_reason.is_some();

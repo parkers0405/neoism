@@ -49,21 +49,23 @@ impl Renderer {
         // Git panel always pushes the content band's right edge in.
         let mut right =
             logical_width - self.git_diff_panel.effective_width(logical_width);
-        // Agent side panel pushes it too (the width subtraction matches
-        // the old `right_chrome_edge` behaviour, incl. with splits).
+        // Agent side panel pushes it too — but only reserve the width it
+        // ACTUALLY drew last frame (`last_panel_rect`). When the panel is
+        // redacted for a narrow window (`carve_panel_rect` → None), its
+        // last rect is None and it draws nothing, so reserving its nominal
+        // `width()` (as the old `!user_hidden()` check did) shoved the tab
+        // strip with phantom padding behind an invisible panel.
         if let Some(agent) = context_manager.current().neoism_agent.as_ref() {
-            let panel = agent.side_panel();
-            if !panel.user_hidden() {
-                right -= panel.width();
-            }
-        }
-        if self.pane_tabs.is_empty() {
-            if let Some(agent) = context_manager.current().neoism_agent.as_ref() {
-                if let Some([panel_x, _, panel_w, panel_h]) =
-                    agent.side_panel().last_panel_rect()
-                {
-                    if panel_w > 0.0 && panel_h > 0.0 {
+            if let Some([panel_x, _, panel_w, panel_h]) =
+                agent.side_panel().last_panel_rect()
+            {
+                if panel_w > 0.0 && panel_h > 0.0 {
+                    // Empty-tab-strip layout clamps to the panel's left
+                    // edge; otherwise just subtract its drawn width.
+                    if self.pane_tabs.is_empty() {
                         right = right.min(panel_x);
+                    } else {
+                        right -= panel_w;
                     }
                 }
             }

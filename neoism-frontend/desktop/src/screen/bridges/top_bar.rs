@@ -26,12 +26,20 @@ impl Screen<'_> {
                 true
             }
             Some(TopBarAction::ToggleRightPanel) => {
-                if let Some(agent) =
-                    self.context_manager.current_mut().neoism_agent.as_mut()
-                {
-                    agent.side_panel_mut().toggle_visibility();
-                    self.mark_dirty();
+                if self.context_manager.current().neoism_agent.is_some() {
+                    // On an agent tab: toggle its recent-chats side rail.
+                    if let Some(agent) =
+                        self.context_manager.current_mut().neoism_agent.as_mut()
+                    {
+                        agent.side_panel_mut().toggle_visibility();
+                    }
+                } else {
+                    // Elsewhere: open (or focus an existing) agent tab —
+                    // the always-present icon's primary job, mirroring how
+                    // the tree toggle opens the tree from anywhere.
+                    self.open_neoism_agent_tab();
                 }
+                self.mark_dirty();
                 true
             }
             Some(TopBarAction::OpenServers) => {

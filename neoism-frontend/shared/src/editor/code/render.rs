@@ -839,7 +839,8 @@ pub fn render(
         let tag_y = (peer_caret_y - tag_h).max(grid_y);
         // Notion-style presence chip: the peer's pixel-plasma orb, then
         // their name flag. Orb seed is the display name, so the same host
-        // always wears the same orb. Still frame (t = 0.6).
+        // always wears the same orb, animated on the shared process clock
+        // (the presence-orb redraw owner keeps frames coming).
         let orb_size = tag_h;
         let orb_gap = 2.0;
         let flag_x = px + orb_size + orb_gap;
@@ -848,7 +849,15 @@ pub fn render(
                 draw_presence_orb_clipped, draw_rounded_rect_clipped,
             };
             draw_presence_orb_clipped(
-                sugarloaf, clip, &cursor.name, px, tag_y, orb_size, 0.6, DEPTH, ORDER_TEXT,
+                sugarloaf,
+                clip,
+                &cursor.name,
+                px,
+                tag_y,
+                orb_size,
+                crate::editor::crdt::presence_orb_now_seconds(),
+                DEPTH,
+                ORDER_TEXT,
             );
             draw_rounded_rect_clipped(
                 sugarloaf,

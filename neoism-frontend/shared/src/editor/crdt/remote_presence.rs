@@ -179,6 +179,18 @@ impl RemotePresenceStore {
         })
     }
 
+    /// True when ANY remote peer (any buffer) is present — the presence
+    /// orbs are on screen, so the render loop must keep repainting to
+    /// animate their plasma. Cheap: a handful of peers at most, and the
+    /// store is empty on a solo session so this stays `false` (no
+    /// continuous redraw, no power cost).
+    pub fn has_any_peers(&self) -> bool {
+        let local_peer_id = self.local_peer_id.as_deref();
+        self.channels
+            .values()
+            .any(|channel| channel.snapshot_iter_except(local_peer_id).next().is_some())
+    }
+
     /// Fold one daemon push into the store. Returns `true` when remote
     /// presence changed (i.e. a redraw of the affected pane is due).
     /// Non-presence CRDT traffic returns `false` untouched.

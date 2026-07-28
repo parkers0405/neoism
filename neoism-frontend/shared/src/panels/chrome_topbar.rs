@@ -348,7 +348,7 @@ impl ChromeTopBar {
         // edge; the cluster grows leftward into the empty bar region.
         self.peer_rects.clear();
         if !self.peers.is_empty() {
-            let av = (btn * 0.74).clamp(14.0, 20.0);
+            let av = (btn * 0.74).clamp(16.0, 22.0);
             let step = av * 0.64;
             let anchor_x = if self.right_button_visible {
                 self.right_btn_rect.x
@@ -551,8 +551,9 @@ impl ChromeTopBar {
     /// deterministic pixel-plasma avatar (seed = display name) over a bg
     /// ring so overlapping orbs stay legible; the overflow beyond
     /// `CHROME_PEER_CAP` collapses into a "+N" count to the cluster's
-    /// left. Still frame (`t = 0.6`) — the bar doesn't repaint just for
-    /// presence.
+    /// left. The plasma animates on the shared process clock — while any
+    /// peer is present the render loop keeps repainting (the presence-orb
+    /// redraw owner), and stops for zero cost once the room empties.
     fn draw_peer_cluster(&self, sugarloaf: &mut Sugarloaf, strip: Rect, theme: &IdeTheme) {
         if self.peer_rects.is_empty() {
             return;
@@ -581,7 +582,7 @@ impl ChromeTopBar {
                 r.x,
                 r.y,
                 r.w,
-                0.6,
+                crate::editor::crdt::presence_orb_now_seconds(),
                 DEPTH,
                 ORDER_ICON + 1,
             );

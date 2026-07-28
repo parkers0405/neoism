@@ -14,8 +14,8 @@ fn draw_markdown_roster(
     font_scale: f32,
 ) {
     use crate::editor::markdown::roster::{
-        markdown_roster_dot_rects, markdown_roster_entries, markdown_roster_initial,
-        ROSTER_DOT_DIAMETER, ROSTER_DOT_GAP, ROSTER_MARGIN_RIGHT, ROSTER_MARGIN_TOP,
+        markdown_roster_dot_rects, markdown_roster_entries, ROSTER_DOT_DIAMETER,
+        ROSTER_DOT_GAP, ROSTER_MARGIN_RIGHT, ROSTER_MARGIN_TOP,
     };
 
     let entries = markdown_roster_entries(&pane.remote_cursors);
@@ -34,32 +34,34 @@ fn draw_markdown_roster(
     let mut hovered: Option<usize> = None;
     for (ix, (entry, dot)) in entries.iter().zip(dots.iter()).enumerate() {
         let [dot_x, dot_y, dot_w, dot_h] = *dot;
-        let color = roster_entry_color(entry);
+        // The peer's deterministic pixel-plasma orb replaces the old
+        // colored-circle-with-initial badge — one presence identity
+        // everywhere (seed = display name), over a face-pile ring so the
+        // pile stays legible, animated on the shared process clock.
+        let ring = theme.f32(theme.bg);
+        let ring_pad = 1.0;
         draw_rounded_rect_clipped(
             sugarloaf,
             clip,
-            dot_x,
-            dot_y,
-            dot_w,
-            dot_h,
-            dot_w * 0.5,
-            color,
+            dot_x - ring_pad,
+            dot_y - ring_pad,
+            dot_w + 2.0 * ring_pad,
+            dot_h + 2.0 * ring_pad,
+            (dot_w + 2.0 * ring_pad) * 0.5,
+            ring,
             DEPTH,
             ORDER_TEXT + 3,
         );
-        let initial = markdown_roster_initial(&entry.name);
-        let initial_opts = DrawOpts {
-            font_size: (markdown_font(16.0, font_scale) * 0.6).max(8.0),
-            color: theme.u8(theme.bg),
-            clip_rect: Some(clip),
-            ..DrawOpts::default()
-        };
-        let initial_w = sugarloaf.text_mut().measure(&initial, &initial_opts);
-        sugarloaf.text_mut().draw(
-            dot_x + (dot_w - initial_w) * 0.5,
-            dot_y + (dot_h - initial_opts.font_size) * 0.5 - 1.0,
-            &initial,
-            &initial_opts,
+        draw_presence_orb_clipped(
+            sugarloaf,
+            clip,
+            &entry.name,
+            dot_x,
+            dot_y,
+            dot_w,
+            crate::editor::crdt::presence_orb_now_seconds(),
+            DEPTH,
+            ORDER_TEXT + 4,
         );
         pane.register_roster_rect(*dot, entry.line);
         if mouse.is_some_and(|[mx, my]| {

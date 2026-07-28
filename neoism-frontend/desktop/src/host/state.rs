@@ -177,6 +177,13 @@ impl Renderer {
         if self.cursor_style.is_animated() || self.remote_rainbow_active {
             return Some("rainbow_cursor");
         }
+        // Presence orbs sample the wall clock per frame to animate their
+        // pixel plasma — keep frames coming while any peer's orb is on
+        // screen (top-chrome cluster, tree rows, caret flags), and stop
+        // the moment the last peer leaves so an empty room costs nothing.
+        if self.presence_orbs_active {
+            return Some("presence_orbs");
+        }
         if self.trail_cursor_enabled && self.trail_cursor.is_animating() {
             return Some("trail_cursor");
         }

@@ -565,13 +565,13 @@ impl Screen<'_> {
         {
             let scale = self.sugarloaf.scale_factor();
             let logical_width = self.sugarloaf.window_size().width as f32 / scale;
-            // Surface the right-edge agent-panel toggle only when
-            // the active tab actually has an agent side panel to
-            // toggle. Otherwise the button has nothing to do.
-            let agent_present = self.context_manager.current().neoism_agent.is_some();
-            self.renderer
-                .top_bar
-                .set_right_button_visible(agent_present);
+            // Agent toggle is ALWAYS present, mirroring the left tree
+            // toggle: on an agent tab it toggles the recent-chats rail; on
+            // any other tab a click opens/focuses the agent tab (handled in
+            // `TopBarAction::ToggleRightPanel`). Gating it on the active tab
+            // being an agent made it vanish exactly when you'd click it to
+            // open the agent.
+            self.renderer.top_bar.set_right_button_visible(true);
             // Reflect which panels are open so the toggle buttons
             // paint in their active accent style.
             let tree_open = self.renderer.file_tree.is_visible();

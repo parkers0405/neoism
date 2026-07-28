@@ -57,15 +57,6 @@ pub fn markdown_roster_entries(
     entries
 }
 
-/// The single uppercased character shown inside a roster dot.
-pub fn markdown_roster_initial(name: &str) -> String {
-    name.trim()
-        .chars()
-        .next()
-        .map(|ch| ch.to_uppercase().to_string())
-        .unwrap_or_else(|| "?".to_string())
-}
-
 /// Dot rects for `count` entries, right-aligned so the LAST entry's
 /// right edge sits at `right` and earlier entries extend leftwards.
 /// Returned in entry order, one `[x, y, w, h]` per entry.
@@ -127,15 +118,6 @@ mod tests {
         ]);
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, ["amy", "mel", "zoe"]);
-    }
-
-    #[test]
-    fn markdown_roster_initial_uppercases_first_char() {
-        assert_eq!(markdown_roster_initial("fern"), "F");
-        assert_eq!(markdown_roster_initial("  ada  "), "A");
-        assert_eq!(markdown_roster_initial("ß-host"), "SS"); // uppercase may expand
-        assert_eq!(markdown_roster_initial(""), "?");
-        assert_eq!(markdown_roster_initial("   "), "?");
     }
 
     #[test]

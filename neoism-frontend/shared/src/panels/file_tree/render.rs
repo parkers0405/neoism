@@ -110,7 +110,7 @@ fn draw_row_presence_cluster(
             ox,
             oy,
             av,
-            0.6,
+            crate::editor::crdt::presence_orb_now_seconds(),
             DEPTH,
             ORDER + 6,
         );
@@ -704,7 +704,7 @@ impl FileTree {
                 .and_then(|p| self.presence_index.get(p))
                 .cloned()
                 .unwrap_or_default();
-            let presence_av = (font_size + 2.0).clamp(12.0, 18.0);
+            let presence_av = (font_size + 2.0).clamp(14.0, 18.0);
             let presence_opts = DrawOpts {
                 font_size: font_size * 0.82,
                 color: fade_u8(theme.u8(theme.dim), row_reveal),

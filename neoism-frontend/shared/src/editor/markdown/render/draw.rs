@@ -69,9 +69,18 @@ pub(crate) fn draw_rounded_rect_clipped(
 /// `seed` is the peer's stable display name, so the same host always
 /// wears the same round orb on every device. Cells outside the unit
 /// circle are dropped by the generator, so the round silhouette comes
-/// for free — no mask. Pass `t = 0.6` for a still, still-unique frame;
-/// surfaces already repainting continuously for presence can pass a live
-/// clock to animate the plasma.
+/// for free — no mask.
+///
+/// The box is snapped to whole DEVICE pixels and the grid is generated
+/// in device space, so every cell edge lands on a real pixel — crisp,
+/// with no fractional-pixel blend. The box is also floored to at least
+/// the grid resolution so no cell collapses below one pixel at small
+/// sizes.
+///
+/// Pass `t = 0.6` for a still, still-unique frame, or
+/// `presence_orb_now_seconds()` to animate — the render loop keeps
+/// repainting while any peer is present (see the presence-orb redraw
+/// owner), so the plasma flows.
 pub(crate) fn draw_presence_orb_clipped(
     sugarloaf: &mut Sugarloaf,
     clip: [f32; 4],
@@ -83,14 +92,26 @@ pub(crate) fn draw_presence_orb_clipped(
     depth: f32,
     order: u8,
 ) {
-    crate::editor::crdt::avatar_cells(seed, ox, oy, size, t, |cell| {
+    use crate::editor::crdt::AvatarProfile;
+    let scale = sugarloaf.scale_factor().max(1.0);
+    let profile = AvatarProfile::from_seed(seed);
+    let grid = profile.grid() as f32;
+    // Work in device pixels: snap the box origin, and floor the box to
+    // at least one device pixel per cell so nothing collapses at small
+    // logical sizes.
+    let dox = (ox * scale).round();
+    let doy = (oy * scale).round();
+    let dsize = (size * scale).round().max(grid);
+    profile.cells(dox, doy, dsize, t, |cell| {
+        // Cells are in device space; hand sugarloaf the logical rect it
+        // will scale back up to those exact whole device pixels.
         draw_rect_clipped(
             sugarloaf,
             clip,
-            cell.rect[0],
-            cell.rect[1],
-            cell.rect[2],
-            cell.rect[3],
+            cell.rect[0] / scale,
+            cell.rect[1] / scale,
+            cell.rect[2] / scale,
+            cell.rect[3] / scale,
             cell.color,
             depth,
             order,

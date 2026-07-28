@@ -61,6 +61,3 @@ windows-sys = { version = "0.60", features = [
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-tungstenite = "0.24"
-
-[target.'cfg(windows)'.build-dependencies]
-winres = "0.1.12"

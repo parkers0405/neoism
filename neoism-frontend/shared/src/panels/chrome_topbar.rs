@@ -28,12 +28,17 @@
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
+use crate::editor::crdt::PresenceAvatarPeer;
 use crate::event::{PointerButton, UiEvent};
 use crate::layout::{PanelLayout, Rect};
 use crate::panels::{Panel, PanelContext};
 use crate::primitives::IdeTheme;
 
 pub const CHROME_TOPBAR_HEIGHT: f32 = 30.0;
+
+/// Max connected-peer orbs shown in the top-bar cluster before the rest
+/// collapse into a "+N" count.
+const CHROME_PEER_CAP: usize = 4;
 
 const PANEL_BTN_GLYPH: &str = "\u{eb56}"; // codicon split-horizontal — same as status-line split pill
 const HAMBURGER_GLYPH: &str = "\u{f0c9}"; // FA bars
@@ -161,6 +166,15 @@ pub struct ChromeTopBar {
     hover_right_btn: bool,
     hover_menu_item: Option<usize>,
     server_status: ServerIndicatorStatus,
+    /// Connected remote peers, pushed by the host each frame (cheap: a
+    /// handful at most). Rendered as a stacked orb cluster beside the
+    /// server selector; empty when nobody else is connected.
+    peers: Vec<PresenceAvatarPeer>,
+    /// Per-orb hit rects for the shown avatars, refreshed every paint so
+    /// hover hit-testing can't misfire on stale geometry. Parallel to the
+    /// first `min(peers.len(), CHROME_PEER_CAP)` entries of `peers`.
+    peer_rects: Vec<Rect>,
+    hover_peer: Option<usize>,
     pending_action: Option<TopBarAction>,
 }
 
@@ -185,6 +199,9 @@ impl ChromeTopBar {
             hover_right_btn: false,
             hover_menu_item: None,
             server_status: ServerIndicatorStatus::Unknown,
+            peers: Vec::new(),
+            peer_rects: Vec::new(),
+            hover_peer: None,
             pending_action: None,
         }
     }
@@ -216,6 +233,19 @@ impl ChromeTopBar {
 
     pub fn set_server_status(&mut self, status: ServerIndicatorStatus) {
         self.server_status = status;
+    }
+
+    /// Push the currently connected remote peers so the top bar can draw
+    /// their presence orbs. Hosts source these from the per-window
+    /// presence store; pass an empty vec when nobody else is connected.
+    pub fn set_peers(&mut self, peers: Vec<PresenceAvatarPeer>) {
+        if peers.len() != self.peers.len() {
+            // Peer count shifted — any lingering hover index is now
+            // ambiguous; clear it so a tooltip never points at the wrong
+            // peer until the next pointer move refreshes it.
+            self.hover_peer = None;
+        }
+        self.peers = peers;
     }
 
     pub fn set_left_safe_inset(&mut self, inset: f32) {
@@ -312,6 +342,29 @@ impl ChromeTopBar {
         } else {
             Rect::new(0.0, 0.0, 0.0, 0.0)
         };
+        // Connected-peer orb cluster, right-aligned just left of the
+        // left-most existing button (the agent toggle if present, else
+        // the server selector). The server selector stays pinned to the
+        // edge; the cluster grows leftward into the empty bar region.
+        self.peer_rects.clear();
+        if !self.peers.is_empty() {
+            let av = (btn * 0.74).clamp(14.0, 20.0);
+            let step = av * 0.64;
+            let anchor_x = if self.right_button_visible {
+                self.right_btn_rect.x
+            } else {
+                self.server_btn_rect.x
+            };
+            let cluster_right = anchor_x - gap;
+            let shown = self.peers.len().min(CHROME_PEER_CAP);
+            let group_w = av + (shown as f32 - 1.0) * step;
+            let group_left = cluster_right - group_w;
+            let ay = strip.y + (strip.h - av) * 0.5;
+            for i in 0..shown {
+                self.peer_rects
+                    .push(Rect::new(group_left + i as f32 * step, ay, av, av));
+            }
+        }
         self.menu_rect = self.menu_overlay_rect_for(self.menu_btn_rect, strip);
     }
 
@@ -363,6 +416,9 @@ impl ChromeTopBar {
         } else {
             None
         };
+        // First match is the left-most orb, which is drawn on top of its
+        // overlapping neighbour — so the topmost orb wins the hover.
+        self.hover_peer = self.peer_rects.iter().position(|r| r.contains(x, y));
     }
 
     fn handle_pointer_down(&mut self, x: f32, y: f32) -> bool {
@@ -481,9 +537,116 @@ impl ChromeTopBar {
             );
         }
 
+        // Connected-peer orbs beside the server selector, then the
+        // hover tooltip on top of everything.
+        self.draw_peer_cluster(sugarloaf, strip, theme);
+        self.draw_peer_tooltip(sugarloaf, strip, theme);
+
         if self.menu_open {
             self.draw_menu(sugarloaf, theme);
         }
+    }
+
+    /// Draw the stacked connected-peer orbs. Each orb is the peer's
+    /// deterministic pixel-plasma avatar (seed = display name) over a bg
+    /// ring so overlapping orbs stay legible; the overflow beyond
+    /// `CHROME_PEER_CAP` collapses into a "+N" count to the cluster's
+    /// left. Still frame (`t = 0.6`) — the bar doesn't repaint just for
+    /// presence.
+    fn draw_peer_cluster(&self, sugarloaf: &mut Sugarloaf, strip: Rect, theme: &IdeTheme) {
+        if self.peer_rects.is_empty() {
+            return;
+        }
+        let clip = [strip.x, strip.y, strip.w, strip.h];
+        let ring = theme.f32(theme.bg);
+        let ring_pad = self.scale.max(1.0);
+        // Right-most first so the left-most orb lands on top (face-pile).
+        for i in (0..self.peer_rects.len()).rev() {
+            let r = self.peer_rects[i];
+            sugarloaf.rounded_rect(
+                None,
+                r.x - ring_pad,
+                r.y - ring_pad,
+                r.w + 2.0 * ring_pad,
+                r.h + 2.0 * ring_pad,
+                ring,
+                DEPTH,
+                (r.w + 2.0 * ring_pad) * 0.5,
+                ORDER_ICON,
+            );
+            crate::editor::markdown::render::draw::draw_presence_orb_clipped(
+                sugarloaf,
+                clip,
+                &self.peers[i].display_name,
+                r.x,
+                r.y,
+                r.w,
+                0.6,
+                DEPTH,
+                ORDER_ICON + 1,
+            );
+        }
+        let overflow = self.peers.len().saturating_sub(self.peer_rects.len());
+        if overflow > 0 {
+            if let Some(first) = self.peer_rects.first() {
+                let opts = DrawOpts {
+                    font_size: ICON_FONT_SIZE * self.scale * 0.82,
+                    color: theme.u8(theme.dim),
+                    ..DrawOpts::default()
+                };
+                let label = format!("+{overflow}");
+                let w = sugarloaf.text_mut().measure(&label, &opts);
+                let tx = first.x - 4.0 * self.scale - w;
+                let ty = strip.y + (strip.h - opts.font_size) * 0.5;
+                sugarloaf.text_mut().draw(tx, ty, &label, &opts);
+            }
+        }
+    }
+
+    /// Tooltip under the hovered orb showing that peer's display name.
+    /// Mirrors the breadcrumbs action-tooltip: a surface pill + label,
+    /// clamped inside the strip's horizontal bounds, painted above the
+    /// dropdown order so it never hides behind other chrome.
+    fn draw_peer_tooltip(&self, sugarloaf: &mut Sugarloaf, strip: Rect, theme: &IdeTheme) {
+        let Some(idx) = self.hover_peer else {
+            return;
+        };
+        let (Some(anchor), Some(peer)) = (self.peer_rects.get(idx), self.peers.get(idx))
+        else {
+            return;
+        };
+        let scale = self.scale;
+        let font_size = 11.0 * scale;
+        let opts = DrawOpts {
+            font_size,
+            color: theme.u8(theme.fg),
+            ..DrawOpts::default()
+        };
+        let pad_x = 7.0 * scale;
+        let tip_h = 20.0 * scale;
+        let tip_w = sugarloaf.text_mut().measure(&peer.display_name, &opts) + pad_x * 2.0;
+        let margin = 4.0 * scale;
+        let min_x = strip.x + margin;
+        let max_x = (strip.x + strip.w - tip_w - margin).max(min_x);
+        let tip_x = (anchor.x + anchor.w * 0.5 - tip_w * 0.5).clamp(min_x, max_x);
+        let tip_y = strip.y + strip.h + margin;
+        sugarloaf.rounded_rect(
+            None,
+            tip_x,
+            tip_y,
+            tip_w,
+            tip_h,
+            theme.f32(theme.surface),
+            DEPTH,
+            5.0 * scale,
+            ORDER_MENU_BORDER + 1,
+        );
+        sugarloaf.text_mut().draw(
+            tip_x + pad_x,
+            tip_y + (tip_h - font_size) * 0.5,
+            &peer.display_name,
+            &opts,
+        );
     }
 
     fn draw_icon_button(

@@ -371,14 +371,30 @@ pub fn render_side_panel_with_icons<P, I>(
     let content_w = (pw - frame_stroke * 2.0).max(0.0);
     let content_h = (frame_h - frame_stroke).max(0.0);
 
-    let mode = if pane.has_conversation() {
-        crate::panels::agent_pane::state::side_panel::SidePanelMode::Subagents
-    } else {
+    // The home/recent-sessions view shows whenever there's no conversation
+    // yet OR the user tapped "← Back" to peek at recent chats while keeping
+    // the live one open (`show_home_override`). Chat mode (session info) is
+    // shown otherwise.
+    let show_home =
+        !pane.has_conversation() || pane.side_panel().show_home_override();
+    let mode = if show_home {
         crate::panels::agent_pane::state::side_panel::SidePanelMode::Sessions
+    } else {
+        crate::panels::agent_pane::state::side_panel::SidePanelMode::Subagents
     };
     pane.side_panel_mut().set_mode(mode);
 
-    if pane.has_conversation() {
+    if show_home {
+        render_sessions_list(
+            sugarloaf,
+            pane,
+            [content_x, content_y, content_w, content_h],
+            theme,
+            s,
+            occlusion_rects,
+            frame_radius - frame_stroke,
+        );
+    } else {
         render_session_info::<I>(
             sugarloaf,
             pane,
@@ -386,16 +402,6 @@ pub fn render_side_panel_with_icons<P, I>(
             theme,
             s,
             now_seconds,
-            occlusion_rects,
-            frame_radius - frame_stroke,
-        );
-    } else {
-        render_sessions_list(
-            sugarloaf,
-            pane,
-            [content_x, content_y, content_w, content_h],
-            theme,
-            s,
             occlusion_rects,
             frame_radius - frame_stroke,
         );
@@ -407,6 +413,17 @@ pub(crate) mod sections;
 
 use self::draw::render_sessions_list;
 use self::sections::render_session_info;
+
+/// Whether a home-mode session row should wear the green "running" dot —
+/// its runtime status maps to an actively-working branch state (busy /
+/// running / created). Idle, blocked, and finished sessions return false.
+pub(crate) fn session_entry_is_running(entry: &NeoismAgentSessionEntry) -> bool {
+    entry
+        .runtime_status
+        .as_deref()
+        .and_then(BranchStatus::from_runtime_status)
+        .is_some_and(|status| matches!(status, BranchStatus::Active))
+}
 
 fn subagent_row_activity(
     pane: &impl AgentSidePanelPane,

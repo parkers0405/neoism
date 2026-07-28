@@ -112,8 +112,27 @@ impl Screen<'_> {
         self.renderer.file_tree.set_focused(true);
         self.renderer.file_tree.set_selected(row);
         let (mx, my) = self.mouse_logical_for_hit_test();
+        self.file_tree_opened_on_press = false;
         if !self.renderer.file_tree.begin_file_drag(row, mx, my) {
+            // Virtual / path-less row (not draggable): activates as before.
             self.activate_file_tree_selection();
+        } else {
+            // Real row: open a FILE on press so it feels as instant as
+            // pressing Enter (the old defer-to-release cost a perceptible
+            // click→release lag). Folders keep toggling on release, so a
+            // folder drag doesn't flip it open/closed mid-grab.
+            let action = neoism_ui::panels::file_tree::activation_for_selection(
+                self.renderer.file_tree.selected(),
+                self.renderer.file_tree.selected_index(),
+            );
+            if matches!(
+                action,
+                neoism_ui::panels::file_tree::SelectionActivation::OpenPath(_)
+                    | neoism_ui::panels::file_tree::SelectionActivation::OpenVirtual(_)
+            ) {
+                self.activate_file_tree_selection();
+                self.file_tree_opened_on_press = true;
+            }
         }
         self.mark_dirty();
         true
@@ -150,7 +169,11 @@ impl Screen<'_> {
         if self.renderer.file_tree.file_drag().is_none() {
             return false;
         }
+        let opened_on_press = std::mem::take(&mut self.file_tree_opened_on_press);
         match self.renderer.file_tree.end_file_drag() {
+            // A file already opened on press; only a folder (deferred)
+            // still needs its toggle here.
+            FileDropOutcome::Click if opened_on_press => {}
             FileDropOutcome::Click => self.activate_file_tree_selection(),
             FileDropOutcome::Move { source, dest_dir } => {
                 self.move_file_tree_path(source, dest_dir);

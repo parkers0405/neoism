@@ -102,10 +102,20 @@ fn draw_remote_markdown_carets(
         let name_w = sugarloaf.text_mut().measure(&cursor.name, &name_opts);
         let tag_h = name_opts.font_size + 4.0;
         let tag_y = (caret_y - tag_h).max(clip_top);
+        // Notion-style presence chip: the peer's pixel-plasma orb, then
+        // their name flag. The orb is seeded by the display name, so the
+        // same host always wears the same orb. Still frame (t = 0.6) —
+        // the markdown pane doesn't repaint just for presence.
+        let orb_size = tag_h;
+        let orb_gap = 2.0;
+        draw_presence_orb_clipped(
+            sugarloaf, clip, &cursor.name, x, tag_y, orb_size, 0.6, DEPTH, ORDER_TEXT,
+        );
+        let flag_x = x + orb_size + orb_gap;
         draw_rounded_rect_clipped(
             sugarloaf,
             clip,
-            x,
+            flag_x,
             tag_y,
             name_w + 8.0,
             tag_h,
@@ -115,7 +125,7 @@ fn draw_remote_markdown_carets(
             ORDER_TEXT,
         );
         sugarloaf.text_mut().draw(
-            x + 4.0,
+            flag_x + 4.0,
             tag_y + 2.0,
             &cursor.name,
             &name_opts,

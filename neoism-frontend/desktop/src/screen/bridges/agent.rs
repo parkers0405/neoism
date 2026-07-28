@@ -184,13 +184,34 @@ impl Screen<'_> {
                     return true;
                 }
                 Key::Named(NamedKey::Enter) => {
-                    let activated = if agent.has_conversation() {
-                        agent.activate_side_panel_subagent()
+                    if agent.side_panel().back_focused() {
+                        // Enter on "← Back" flips the home-override view
+                        // without touching the live conversation; keep the
+                        // cursor on the affordance so it's reversible.
+                        agent.side_panel_mut().toggle_home_override();
+                        agent.side_panel_mut().focus_back();
                     } else {
-                        agent.activate_side_panel_selection()
-                    };
-                    if activated {
-                        agent.side_panel_mut().set_focused(false);
+                        // The sessions list shows when there's no
+                        // conversation OR the Back override is active.
+                        let showing_sessions = !agent.has_conversation()
+                            || agent.side_panel().show_home_override();
+                        let mut activated = if showing_sessions {
+                            agent.activate_side_panel_selection()
+                        } else {
+                            agent.activate_side_panel_subagent()
+                        };
+                        // Choosing the already-open session from the recent
+                        // list just returns to its live conversation.
+                        if !activated
+                            && agent.side_panel().show_home_override()
+                            && agent.selected_side_panel_session_is_current()
+                        {
+                            activated = true;
+                        }
+                        if activated {
+                            agent.side_panel_mut().set_show_home_override(false);
+                            agent.side_panel_mut().set_focused(false);
+                        }
                     }
                     self.mark_dirty();
                     return true;
@@ -1036,19 +1057,36 @@ impl Screen<'_> {
         {
             if agent.side_panel().contains_point(mx, my) {
                 agent.side_panel_mut().set_focused(true);
-                let panel_rect = agent.side_panel().last_panel_rect();
-                if let Some(rect) = panel_rect {
+                if agent.side_panel().back_button_contains(mx, my) {
+                    // "← Back" flips the home-override view; the live
+                    // conversation stays open underneath.
+                    agent.side_panel_mut().toggle_home_override();
+                    agent.side_panel_mut().focus_back();
+                } else if let Some(rect) = agent.side_panel().last_panel_rect() {
                     if let Some(row) = agent.side_panel().hit_test_row(mx, my, rect) {
                         agent.side_panel_mut().set_selected(row);
-                        let activated = if agent.has_conversation() {
-                            agent.activate_side_panel_subagent()
-                        } else {
+                        // The sessions list shows when there's no
+                        // conversation OR the Back override is active.
+                        let showing_sessions = !agent.has_conversation()
+                            || agent.side_panel().show_home_override();
+                        let mut activated = if showing_sessions {
                             agent.activate_side_panel_selection()
+                        } else {
+                            agent.activate_side_panel_subagent()
                         };
+                        // Clicking the already-open session from the recent
+                        // list just returns to its live conversation.
+                        if !activated
+                            && agent.side_panel().show_home_override()
+                            && agent.selected_side_panel_session_is_current()
+                        {
+                            activated = true;
+                        }
                         if activated {
                             // Hand keyboard focus back to the input bar
                             // — the user just picked a session, they
                             // want to type, not keep navigating rows.
+                            agent.side_panel_mut().set_show_home_override(false);
                             agent.side_panel_mut().set_focused(false);
                         }
                     }

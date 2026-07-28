@@ -409,6 +409,9 @@ impl NeoismAgentPane {
         }
         self.session_id = Some(trimmed.clone());
         self.messages.clear();
+        // Any session switch returns the panel to chat view — the "← Back"
+        // home-override peek shouldn't linger onto the newly opened session.
+        self.side_panel.set_show_home_override(false);
         self.reset_session_runtime_ui();
         self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
         self.push_outbound(OutboundAgentCommand::SwitchSession {

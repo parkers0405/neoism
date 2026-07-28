@@ -280,6 +280,68 @@ impl RemotePresenceStore {
         self.channels.clear();
         had_peers
     }
+
+    /// Every distinct remote peer present on ANY buffer, reduced to just
+    /// what a presence avatar needs and deduped by `peer_id` (a peer
+    /// viewing several files still yields one avatar). Sorted by
+    /// `peer_id` so a rendered cluster keeps a stable order across
+    /// frames. Excludes the local peer. Cheap: a handful of peers at
+    /// most — safe to call whenever presence CHANGES (not per frame).
+    pub fn avatar_peers(&self) -> Vec<PresenceAvatarPeer> {
+        let local = self.local_peer_id.as_deref();
+        let mut seen: HashMap<&str, PresenceAvatarPeer> = HashMap::new();
+        for channel in self.channels.values() {
+            for presence in channel.snapshot_iter_except(local) {
+                seen.entry(presence.peer_id.as_str())
+                    .or_insert_with(|| avatar_peer_from(presence));
+            }
+        }
+        let mut peers: Vec<PresenceAvatarPeer> = seen.into_values().collect();
+        peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        peers
+    }
+
+    /// Per-buffer avatar peers — `(buffer_id, peers)` for every buffer
+    /// holding at least one remote peer. Hosts fold this into a
+    /// `path -> peers` index ONCE per presence change (never per frame)
+    /// so a file-tree row can show who is on that file. Excludes the
+    /// local peer; peers within a buffer are sorted by `peer_id`.
+    pub fn avatar_peers_by_buffer(&self) -> Vec<(String, Vec<PresenceAvatarPeer>)> {
+        let local = self.local_peer_id.as_deref();
+        let mut out = Vec::new();
+        for (buffer_id, channel) in &self.channels {
+            let mut peers: Vec<PresenceAvatarPeer> = channel
+                .snapshot_iter_except(local)
+                .map(avatar_peer_from)
+                .collect();
+            if peers.is_empty() {
+                continue;
+            }
+            peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+            out.push((buffer_id.clone(), peers));
+        }
+        out
+    }
+}
+
+/// A distinct connected peer reduced to just what a presence avatar
+/// needs: the seed (the peer's stable `display_name`) plus the fallback
+/// caret color and the rainbow flag. Deduped by `peer_id` upstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceAvatarPeer {
+    pub peer_id: String,
+    pub display_name: String,
+    pub color: [u8; 3],
+    pub rainbow: bool,
+}
+
+fn avatar_peer_from(presence: &PeerPresence) -> PresenceAvatarPeer {
+    PresenceAvatarPeer {
+        peer_id: presence.peer_id.clone(),
+        display_name: presence.display_name.clone(),
+        color: [presence.color.r, presence.color.g, presence.color.b],
+        rainbow: presence.rainbow,
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -496,6 +558,40 @@ mod tests {
         assert_eq!(in_a[0].cursor.line, 3);
         assert!(store.has_remote_cursors("buf-b"));
         assert!(!store.has_remote_cursors("buf-missing"));
+    }
+
+    #[test]
+    fn avatar_peers_dedupe_across_buffers_and_index_by_buffer() {
+        let mut store = RemotePresenceStore::new();
+        store.set_local_peer_id("me@host");
+        // alice on two files, bob on one, plus the local peer (filtered).
+        store.apply_server_message(&upsert(wire_presence("file://a.rs", "alice", 1, 10)));
+        store.apply_server_message(&upsert(wire_presence("file://b.rs", "alice", 2, 11)));
+        store.apply_server_message(&upsert(wire_presence("file://a.rs", "bob", 3, 12)));
+        store.apply_server_message(&upsert(wire_presence("file://a.rs", "me@host", 4, 13)));
+
+        // Distinct-peer cluster: alice + bob once each, local excluded,
+        // stable order by peer_id.
+        let distinct = store.avatar_peers();
+        let ids: Vec<_> = distinct.iter().map(|p| p.peer_id.as_str()).collect();
+        assert_eq!(ids, ["alice", "bob"]);
+        assert_eq!(distinct[0].display_name, "ALICE");
+
+        // Per-buffer index: a.rs has alice+bob, b.rs has alice; local peer
+        // never appears.
+        let by_buffer = store.avatar_peers_by_buffer();
+        let a = by_buffer
+            .iter()
+            .find(|(id, _)| id == "file://a.rs")
+            .map(|(_, peers)| peers.iter().map(|p| p.peer_id.as_str()).collect::<Vec<_>>())
+            .unwrap();
+        assert_eq!(a, ["alice", "bob"]);
+        let b = by_buffer
+            .iter()
+            .find(|(id, _)| id == "file://b.rs")
+            .map(|(_, peers)| peers.len())
+            .unwrap();
+        assert_eq!(b, 1);
     }
 
     #[test]

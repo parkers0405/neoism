@@ -7,6 +7,7 @@ use crate::services::RequestId;
 
 use super::types::{GitStatus, PendingDirRequest, TreeEntry};
 use super::FILE_TREE_WIDTH;
+use crate::editor::crdt::PresenceAvatarPeer;
 
 pub struct FileTree {
     pub(super) visible: bool,
@@ -28,6 +29,12 @@ pub struct FileTree {
     pub(super) active_path: Option<PathBuf>,
     pub(super) root: Option<PathBuf>,
     pub(super) git_statuses: HashMap<PathBuf, GitStatus>,
+    /// Multiplayer presence: which remote peers are currently on each
+    /// file, so a row can show their avatars (Notion-style "who's here").
+    /// Keyed by absolute file path. Rebuilt out-of-band by the host ONLY
+    /// when presence changes (never per frame) via [`set_presence_index`]
+    /// and read per-row in `render`; empty when nobody else is connected.
+    pub(super) presence_index: HashMap<PathBuf, Vec<PresenceAvatarPeer>>,
     pub(super) pending_dir_requests: HashMap<RequestId, PendingDirRequest>,
     // TODO(wave6-cutover): swap to the lifted `Scroll` widget once
     // `chrome/widgets/scroll.rs` lands in neoism-ui. The pair of
@@ -109,6 +116,7 @@ impl FileTree {
             active_path: None,
             root: Some(root),
             git_statuses: HashMap::new(),
+            presence_index: HashMap::new(),
             pending_dir_requests: HashMap::new(),
             scroll: CriticallyDampedSpring::new(),
             cursor_spring: CriticallyDampedSpring::new(),
@@ -144,6 +152,7 @@ impl FileTree {
             active_path: None,
             root: None,
             git_statuses: HashMap::new(),
+            presence_index: HashMap::new(),
             pending_dir_requests: HashMap::new(),
             scroll: CriticallyDampedSpring::new(),
             cursor_spring: CriticallyDampedSpring::new(),
@@ -169,6 +178,22 @@ impl FileTree {
     /// call. The host turns each one into an "open file" intent.
     pub fn drain_open_paths(&mut self) -> Vec<PathBuf> {
         std::mem::take(&mut self.pending_opens)
+    }
+
+    /// Replace the presence index (path -> remote peers on that file).
+    /// The host calls this ONLY when presence changes, so the per-row
+    /// draw is a cheap map lookup with zero polling.
+    pub fn set_presence_index(
+        &mut self,
+        index: HashMap<PathBuf, Vec<PresenceAvatarPeer>>,
+    ) {
+        self.presence_index = index;
+    }
+
+    /// True while at least one file has remote presence — lets the host
+    /// skip pushing an empty index when nothing is shared.
+    pub fn has_presence(&self) -> bool {
+        !self.presence_index.is_empty()
     }
 
     pub(super) fn clear_label_truncation_cache(&mut self) {

@@ -832,6 +832,15 @@ impl Application<'_> {
             let code_changed = route.window.screen.apply_code_crdt_message(&message);
             let presence_changed =
                 route.window.screen.apply_presence_crdt_message(&message);
+            if presence_changed {
+                // Event-driven: fold the new presence into the file
+                // tree's path->peers index exactly once per change, so
+                // the per-row avatar draw never polls the store.
+                route
+                    .window
+                    .screen
+                    .rebuild_file_tree_presence_index();
+            }
             if markdown_changed || code_changed || presence_changed {
                 route.request_redraw();
             }

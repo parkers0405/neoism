@@ -381,8 +381,30 @@ impl ChromeBridge {
                     pane.scroll_timeline_half_page(true);
                 }
                 AgentKeyIntent::SidePanelActivateSelection => {
-                    let _ = pane.activate_side_panel_selection()
-                        || pane.activate_side_panel_subagent();
+                    if pane.side_panel().back_focused() {
+                        // Enter on "← Back" flips the home-override view
+                        // without touching the live conversation.
+                        pane.side_panel_mut().toggle_home_override();
+                        pane.side_panel_mut().focus_back();
+                    } else {
+                        let showing_sessions = !pane.has_conversation()
+                            || pane.side_panel().show_home_override();
+                        let mut activated = if showing_sessions {
+                            pane.activate_side_panel_selection()
+                        } else {
+                            pane.activate_side_panel_subagent()
+                        };
+                        if !activated
+                            && pane.side_panel().show_home_override()
+                            && pane.selected_side_panel_session_is_current()
+                        {
+                            activated = true;
+                        }
+                        if activated {
+                            pane.side_panel_mut().set_show_home_override(false);
+                            pane.side_panel_mut().set_focused(false);
+                        }
+                    }
                 }
                 AgentKeyIntent::SidePanelBlur => {
                     pane.side_panel_mut().set_focused(false);
@@ -954,15 +976,31 @@ impl ChromeBridge {
             }
             if pane.side_panel().contains_point(x, y) {
                 pane.side_panel_mut().set_focused(true);
-                if let Some(rect) = pane.side_panel().last_panel_rect() {
+                if pane.side_panel().back_button_contains(x, y) {
+                    // "← Back" flips the home-override view; the live
+                    // conversation stays open underneath.
+                    pane.side_panel_mut().toggle_home_override();
+                    pane.side_panel_mut().focus_back();
+                } else if let Some(rect) = pane.side_panel().last_panel_rect() {
                     if let Some(row) = pane.side_panel().hit_test_row(x, y, rect) {
                         pane.side_panel_mut().set_selected(row);
-                        let activated = if pane.has_conversation() {
-                            pane.activate_side_panel_subagent()
-                        } else {
+                        // The sessions list shows when there's no
+                        // conversation OR the Back override is active.
+                        let showing_sessions = !pane.has_conversation()
+                            || pane.side_panel().show_home_override();
+                        let mut activated = if showing_sessions {
                             pane.activate_side_panel_selection()
+                        } else {
+                            pane.activate_side_panel_subagent()
                         };
+                        if !activated
+                            && pane.side_panel().show_home_override()
+                            && pane.selected_side_panel_session_is_current()
+                        {
+                            activated = true;
+                        }
                         if activated {
+                            pane.side_panel_mut().set_show_home_override(false);
                             pane.side_panel_mut().set_focused(false);
                         }
                     }

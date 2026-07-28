@@ -18,6 +18,11 @@ use super::{
     ROOT_TRANSITION_STAGGER_MS, ROW_PADDING_X,
 };
 use crate::animation::ease_out_cubic;
+use crate::editor::crdt::PresenceAvatarPeer;
+
+/// Max presence orbs shown on a single file-tree row before collapsing
+/// the remainder into a "+N" count.
+const PRESENCE_ROW_CAP: usize = 3;
 
 fn fade_u8(mut color: [u8; 4], alpha: f32) -> [u8; 4] {
     color[3] = (color[3] as f32 * alpha) as u8;
@@ -27,6 +32,96 @@ fn fade_u8(mut color: [u8; 4], alpha: f32) -> [u8; 4] {
 fn fade_f32(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
     color[3] *= alpha;
     color
+}
+
+/// Horizontal space the presence-orb cluster for `peers` will occupy, so
+/// the label budget can reserve it before truncating. Mirrors the layout
+/// in [`draw_row_presence_cluster`]: up to `PRESENCE_ROW_CAP` orbs at 62%
+/// overlap, plus a "+N" tail when there are more. `0.0` for no peers.
+fn presence_cluster_width(
+    sugarloaf: &mut Sugarloaf,
+    peers: &[PresenceAvatarPeer],
+    av: f32,
+    plus_opts: &DrawOpts,
+) -> f32 {
+    if peers.is_empty() {
+        return 0.0;
+    }
+    let shown = peers.len().min(PRESENCE_ROW_CAP);
+    let step = av * 0.62;
+    let mut width = av + (shown as f32 - 1.0) * step;
+    if peers.len() > shown {
+        let extra = format!("+{}", peers.len() - shown);
+        width += 4.0 + sugarloaf.text_mut().measure(&extra, plus_opts);
+    }
+    width
+}
+
+/// Draw the stacked presence-avatar cluster for a file-tree row, right
+/// aligned to end at `right_edge` (just left of the git marker). Up to
+/// `PRESENCE_ROW_CAP` orbs overlap face-pile style; any overflow shows a
+/// "+N" count to the group's left. Each orb is the peer's deterministic
+/// pixel-plasma orb (seed = display name) drawn over a bg ring so
+/// overlapping orbs stay legible. Still frame (`t = 0.6`) — the tree
+/// doesn't repaint just for presence.
+#[allow(clippy::too_many_arguments)]
+fn draw_row_presence_cluster(
+    sugarloaf: &mut Sugarloaf,
+    peers: &[PresenceAvatarPeer],
+    right_edge: f32,
+    row_y: f32,
+    row_h: f32,
+    av: f32,
+    scale: f32,
+    plus_opts: &DrawOpts,
+    panel_clip: [f32; 4],
+    theme: &IdeTheme,
+    reveal: f32,
+    text_occlusion_rects: &[[f32; 4]],
+) {
+    if peers.is_empty() {
+        return;
+    }
+    let shown = peers.len().min(PRESENCE_ROW_CAP);
+    let step = av * 0.62;
+    let group_w = av + (shown as f32 - 1.0) * step;
+    let group_left = right_edge - group_w;
+    let oy = row_y + (row_h - av) / 2.0;
+    let ring = fade_f32(theme.f32(theme.bg), reveal);
+    let ring_pad = scale.max(1.0);
+    // Rightmost first so the leftmost orb lands on top (face-pile read).
+    for i in (0..shown).rev() {
+        let ox = group_left + i as f32 * step;
+        sugarloaf.quad(
+            None,
+            ox - ring_pad,
+            oy - ring_pad,
+            av + 2.0 * ring_pad,
+            av + 2.0 * ring_pad,
+            ring,
+            [(av + 2.0 * ring_pad) / 2.0; 4],
+            DEPTH,
+            ORDER + 5,
+        );
+        crate::editor::markdown::render::draw::draw_presence_orb_clipped(
+            sugarloaf,
+            panel_clip,
+            &peers[i].display_name,
+            ox,
+            oy,
+            av,
+            0.6,
+            DEPTH,
+            ORDER + 6,
+        );
+    }
+    if peers.len() > shown {
+        let extra = format!("+{}", peers.len() - shown);
+        let extra_w = sugarloaf.text_mut().measure(&extra, plus_opts);
+        let tx = group_left - 4.0 - extra_w;
+        let ty = row_y + (row_h - plus_opts.font_size) / 2.0;
+        draw_text_with_occlusion(sugarloaf, tx, ty, &extra, plus_opts, text_occlusion_rects);
+    }
 }
 
 // TODO(wave6-cutover): the native build draws the panel chassis via
@@ -599,9 +694,34 @@ impl FileTree {
                     )
                 })
                 .unwrap_or((0.0, 0.0));
-            let label_budget_px =
-                (content_x + content_w - cursor_x - row_pad_x - git_width - git_gap)
-                    .max(0.0);
+            // Multiplayer presence: peers currently on this file. Cloned
+            // (only for the rare row that has any) so the immutable index
+            // borrow doesn't collide with the mutable truncation-cache
+            // borrow below.
+            let peers_here: Vec<PresenceAvatarPeer> = entry
+                .path
+                .as_deref()
+                .and_then(|p| self.presence_index.get(p))
+                .cloned()
+                .unwrap_or_default();
+            let presence_av = (font_size + 2.0).clamp(12.0, 18.0);
+            let presence_opts = DrawOpts {
+                font_size: font_size * 0.82,
+                color: fade_u8(theme.u8(theme.dim), row_reveal),
+                clip_rect: Some(panel_clip),
+                ..DrawOpts::default()
+            };
+            let presence_w =
+                presence_cluster_width(sugarloaf, &peers_here, presence_av, &presence_opts);
+            let presence_gap = if presence_w > 0.0 { 8.0 * self.scale } else { 0.0 };
+            let label_budget_px = (content_x + content_w
+                - cursor_x
+                - row_pad_x
+                - git_width
+                - git_gap
+                - presence_w
+                - presence_gap)
+                .max(0.0);
             let label = truncate_label_cached(
                 &mut self.label_truncation_cache,
                 &mut self.label_truncation_cache_items,
@@ -627,6 +747,26 @@ impl FileTree {
                     text_y,
                     marker,
                     &git_opts,
+                    text_occlusion_rects,
+                );
+            }
+
+            // Presence orbs, right-aligned just left of the git marker.
+            if !peers_here.is_empty() {
+                let cluster_right =
+                    content_x + content_w - row_pad_x - git_width - git_gap;
+                draw_row_presence_cluster(
+                    sugarloaf,
+                    &peers_here,
+                    cluster_right,
+                    row_y,
+                    row_h,
+                    presence_av,
+                    self.scale,
+                    &presence_opts,
+                    panel_clip,
+                    theme,
+                    row_reveal,
                     text_occlusion_rects,
                 );
             }

@@ -422,6 +422,10 @@ impl NeoismAgentPane {
                 // older" entirely or fed the server a foreign message id,
                 // which resolves to the newest page and dedupes to nothing.
                 self.timeline_history = Default::default();
+                // Any session switch returns the panel to chat view — the
+                // "← Back" home-override peek shouldn't linger onto the
+                // newly opened session.
+                self.side_panel.set_show_home_override(false);
                 self.side_panel.invalidate_subagent_refresh();
                 // Reset the previous session's goal AND its version, then
                 // force a refetch so the Goal section reflects the session we

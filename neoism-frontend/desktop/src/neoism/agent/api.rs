@@ -206,8 +206,14 @@ pub(super) fn fetch_session_entries(
     directory: Option<&str>,
 ) -> Result<Vec<NeoismAgentSessionEntry>, String> {
     let sessions = fetch_sessions_sorted(server, directory)?;
+    // Runs map so the home list can green-dot actively-running sessions.
+    // Best-effort: a failed status fetch just means no dots this refresh.
+    let statuses = fetch_session_statuses(server).unwrap_or_default();
     let _ = current_id;
-    Ok(sessions.iter().filter_map(session_entry).collect())
+    Ok(sessions
+        .iter()
+        .filter_map(|session| session_entry(session, &statuses))
+        .collect())
 }
 
 pub(super) fn fetch_subagent_options(
@@ -1276,7 +1282,10 @@ fn session_option_input(
 }
 
 /// Flat side-panel entry for one session.
-fn session_entry(session: &Value) -> Option<NeoismAgentSessionEntry> {
+fn session_entry(
+    session: &Value,
+    statuses: &HashMap<String, SessionStatusSnapshot>,
+) -> Option<NeoismAgentSessionEntry> {
     let id = session.get("id").and_then(Value::as_str)?.to_string();
     let title = session
         .get("title")
@@ -1287,8 +1296,33 @@ fn session_entry(session: &Value) -> Option<NeoismAgentSessionEntry> {
     Some(
         NeoismAgentSessionEntry::new(id, title, "")
             .with_updated_ms(session_updated_at(session))
-            .with_pinned(session_pinned(session)),
+            .with_pinned(session_pinned(session))
+            .with_runtime_status(session_running_status(session, statuses)),
     )
+}
+
+/// Surface a home-mode session's runtime status *only* when it is actively
+/// running, so the side panel paints the green "running" dot. Idle,
+/// blocked, and finished sessions return `None` (no dot). Unlike the
+/// sub-agent path this never terminalizes — a plain finished session isn't
+/// a branch that needs a status dot.
+fn session_running_status(
+    session: &Value,
+    statuses: &HashMap<String, SessionStatusSnapshot>,
+) -> Option<String> {
+    let id = session.get("id").and_then(Value::as_str)?;
+    let kind = statuses
+        .get(id)
+        .map(|status| status.kind.clone())
+        .or_else(|| {
+            session
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })?;
+    normalize_explicit_runtime_status(&kind)
+        .filter(|status| *status == "running")
+        .map(str::to_string)
 }
 
 /// Whether a session JSON carries the flattened `pinned` flag.

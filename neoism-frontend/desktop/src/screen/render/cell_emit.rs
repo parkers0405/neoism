@@ -583,6 +583,11 @@ impl Screen<'_> {
                 .is_some_and(|agent| !agent.side_panel().user_hidden());
             self.renderer.top_bar.set_panel_open(tree_open);
             self.renderer.top_bar.set_right_panel_open(agent_panel_open);
+            // Connected-peer presence orbs beside the server selector.
+            // Cheap: a handful of peers deduped from the presence store.
+            self.renderer
+                .top_bar
+                .set_peers(self.remote_presence.avatar_peers());
             #[cfg(target_os = "macos")]
             self.renderer.top_bar.set_left_safe_inset(if is_fullscreen {
                 0.0

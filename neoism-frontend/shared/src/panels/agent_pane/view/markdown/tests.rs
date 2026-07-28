@@ -229,6 +229,37 @@ fn adjacent_inline_styles_do_not_invent_whitespace() {
     );
 }
 
+/// Drag-selecting assistant Markdown must copy the RENDERED text, never the
+/// raw source: `**bold**` copies as `bold`, `` `code` `` as `code`, and a
+/// `[label](url)` link as its visible `label`. The selectable line is
+/// registered with exactly this string (see `draw_markdown_inline_line`), so
+/// the clipboard is marker-free and `slice_line_by_x` divides the drawn width
+/// over the rendered characters — no phantom space is reserved for the `**`,
+/// `` ` ``, `~~`, or `[]()` markers that are measured-but-never-painted.
+#[test]
+fn selectable_line_text_is_rendered_not_raw_markdown() {
+    let rendered = rendered_inline_text("**bold** and `code`");
+    assert_eq!(rendered, "bold and code");
+    // No leftover Markdown markers can survive into the clipboard / hit model.
+    assert!(!rendered.contains('*'));
+    assert!(!rendered.contains('`'));
+
+    assert_eq!(
+        rendered_inline_text("see [the docs](file.rs) now"),
+        "see the docs now"
+    );
+    assert_eq!(rendered_inline_text("~~gone~~ kept"), "gone kept");
+
+    // The width the selectable rect uses now derives from the rendered
+    // segments (marker-free), so its character count matches the copied text
+    // — the two must stay in lock-step for `slice_line_by_x` to map an x
+    // range back to the right substring.
+    assert_eq!(
+        rendered.chars().count(),
+        "bold and code".chars().count()
+    );
+}
+
 #[test]
 fn outer_blank_blocks_never_inflate_a_message_card() {
     let mut blocks = vec![

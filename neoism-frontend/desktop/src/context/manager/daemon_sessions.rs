@@ -454,12 +454,30 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             };
         tabs.sort_by_key(|tab| std::cmp::Reverse(tab.active));
         if self.prepared_remote_pty_for_adopt().is_none() {
+            tracing::warn!(
+                target: "neoism::workspaces",
+                workspace_id,
+                link = self.daemon.link.is_some(),
+                "workspace not adopted: no daemon link/runtime for remote pty",
+            );
             return false;
         }
         if self.contexts.len() >= self.capacity {
-            tracing::warn!("workspace not adopted: capacity reached");
+            tracing::warn!(
+                target: "neoism::workspaces",
+                workspace_id,
+                len = self.contexts.len(),
+                capacity = self.capacity,
+                "workspace not adopted: capacity reached",
+            );
             return false;
         }
+        tracing::info!(
+            target: "neoism::workspaces",
+            workspace_id,
+            tab_count = tabs.len(),
+            "adopting daemon workspace as a new tab",
+        );
 
         let root_dir = self
             .daemon

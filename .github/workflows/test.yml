@@ -1,16 +1,10 @@
 name: Test
 
-# Per-push CI is Linux-only: Windows minutes bill 2x and macOS 10x on the
-# private repo, and running them on every push drained the Actions quota
-# (which blocked a release build entirely). Run the full cross-platform
+# On-demand CI only (no per-push runs — they burned Actions quota): Windows
+# minutes bill 2x and macOS 10x on the private repo
+# Run the full cross-platform
 # matrix on demand via workflow_dispatch.
 on:
-  push:
-    paths:
-      - '**/*.rs'
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - '.github/workflows/test.yml'
   pull_request:
     paths:
       - '**/*.rs'

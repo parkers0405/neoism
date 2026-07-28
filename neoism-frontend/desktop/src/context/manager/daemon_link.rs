@@ -177,13 +177,25 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     /// True when the CURRENT grid is a workspace JOINED from another
-    /// host (adopted, and the daemon tree says its owner is not this
-    /// machine). Drives the guest icon, the remote file tree, and the
-    /// leave flow.
+    /// host (adopted over a peer link). Drives the guest icon, the
+    /// remote file tree, and the leave flow.
+    ///
+    /// Keyed on CONNECTION-TYPE (`link_is_peer`), not host-IDENTITY:
+    /// the older `workspace.host_id != local_host_id()` check silently
+    /// read local disk whenever those ids collided or the joined tree's
+    /// host_id hadn't landed in cache yet — the "join a hosted machine,
+    /// get an empty tree" bug. A peer link with an adopted workspace is
+    /// ALWAYS remote (a guest never mirrors its own workspaces into a
+    /// joined daemon — see `attach_daemon_client_with_runtime`), so the
+    /// connection type is the authoritative signal. Host-identity stays
+    /// as a fallback for the (rare) non-peer adopt paths.
     pub fn current_workspace_is_remote_joined(&self) -> bool {
         let Some(workspace_id) = self.current_adopted_workspace_id() else {
             return false;
         };
+        if self.daemon.link_is_peer {
+            return true;
+        }
         let local = self.local_host_id();
         self.daemon
             .cache

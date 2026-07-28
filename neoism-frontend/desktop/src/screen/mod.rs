@@ -360,6 +360,64 @@ fn ends_passthrough_session(command: &str) -> bool {
     matches!(command.trim(), "exit" | "logout")
 }
 
+/// Parse the `[user@]host` target — plus any connection flags worth
+/// carrying onto the browsing connection — out of an `ssh` command
+/// line, for the follow-the-terminal file tree.
+///
+/// Returns `None` when the command is NOT an interactive `ssh` login we
+/// can follow: a non-`ssh` program (including `mosh` — its file ops need
+/// a separate story), no target at all, or a one-shot
+/// `ssh host <remote command>` (the shell never lands on the remote, so
+/// flipping the tree would be wrong).
+///
+/// Value-taking flags (`-p 2222`, `-i key`, `-o Opt=…`, …) are kept as
+/// pass-through opts so the multiplexed browsing connection matches the
+/// interactive one; bare toggles (`-t`, `-v`, …) are dropped — they're
+/// irrelevant to (or actively fight) the file-op connection.
+fn parse_ssh_target(command: &str) -> Option<(String, Vec<String>)> {
+    // Flags that consume the following token as their value.
+    const VALUE_FLAGS: &[&str] = &[
+        "-p", "-i", "-o", "-l", "-F", "-J", "-b", "-c", "-D", "-E", "-e", "-I",
+        "-L", "-m", "-Q", "-R", "-S", "-W", "-w",
+    ];
+
+    let mut tokens = command.split_whitespace();
+    let program = tokens.next()?;
+    let program = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    if program != "ssh" {
+        return None;
+    }
+
+    let mut opts: Vec<String> = Vec::new();
+    let mut target: Option<String> = None;
+    while let Some(token) = tokens.next() {
+        if token.starts_with('-') {
+            if VALUE_FLAGS.contains(&token) {
+                opts.push(token.to_string());
+                if let Some(value) = tokens.next() {
+                    opts.push(value.to_string());
+                }
+            }
+            // Bare toggles are dropped.
+            continue;
+        }
+        // First non-flag token is the target.
+        target = Some(token.to_string());
+        break;
+    }
+
+    let target = target?;
+    // Anything left after the target is a remote command — a one-shot,
+    // not a session to follow.
+    if tokens.next().is_some() {
+        return None;
+    }
+    Some((target, opts))
+}
+
 use crate::app::window_event::touch::TouchPurpose;
 use crate::bindings::{
     Action as Act, BindingKey, BindingMode, FontSizeAction, MouseBinding, SearchAction,
@@ -692,6 +750,21 @@ pub struct Screen<'screen> {
     /// In-flight WalkTree listings of a joined workspace's `Notes/`
     /// folder — replies feed the notes sidebar, not the file tree.
     pending_remote_notes_listing: std::collections::HashSet<u64>,
+    /// Follow-the-terminal `ssh` file browsing. When a terminal pane
+    /// enters an `ssh` session the tree flips onto a
+    /// [`crate::daemon_client::ssh_files::SshFiles`] backend whose
+    /// listing threads have no runtime handle — they push finished
+    /// replies onto `ssh_files_tx` and fire `RioEvent::SshFilesReady`,
+    /// and `drain_ssh_files_replies` applies them on the UI thread.
+    ssh_files_tx: std_mpsc::Sender<crate::daemon_client::ssh_files::SshFilesReply>,
+    ssh_files_rx: std_mpsc::Receiver<crate::daemon_client::ssh_files::SshFilesReply>,
+    /// Monotonic id source for each `SshFiles` session's ControlMaster
+    /// socket name (this screen owns the counter so the backend takes
+    /// no rand/clock dependency).
+    ssh_files_next_id: u64,
+    /// Local workspace root captured when the tree flipped to `ssh`, so
+    /// `exit`/`logout` restores the exact tree the user left.
+    ssh_pre_local_root: Option<PathBuf>,
     workspace_roots: HashMap<WorkspaceKey, PathBuf>,
     workspace_buffer_tabs: HashMap<
         WorkspaceKey,
@@ -1542,6 +1615,8 @@ impl Screen<'_> {
         #[cfg(not(target_arch = "wasm32"))]
         let (acp_events_tx, acp_events_rx) = std_mpsc::channel();
 
+        let (ssh_files_tx, ssh_files_rx) = std_mpsc::channel();
+
         // We always launch with a terminal, so seed its tab now — otherwise
         // the buffer-tab strip (and the trailing "+" button) start empty until
         // the first tab op. `ensure_terminal_tab` is a no-op once a terminal
@@ -1623,6 +1698,10 @@ impl Screen<'_> {
             markdown_image_overlay_ids: std::collections::HashSet::new(),
             pending_remote_git_status: HashMap::new(),
             pending_remote_notes_listing: std::collections::HashSet::new(),
+            ssh_files_tx,
+            ssh_files_rx,
+            ssh_files_next_id: 1,
+            ssh_pre_local_root: None,
             workspace_roots: HashMap::new(),
             workspace_buffer_tabs: HashMap::new(),
             workspace_notes_sidebars: HashMap::new(),

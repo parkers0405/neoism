@@ -15,6 +15,8 @@ pub enum TerminalShellKind {
     Bash,
     Zsh,
     Fish,
+    PowerShell,
+    Cmd,
     Unknown,
 }
 
@@ -24,6 +26,8 @@ impl TerminalShellKind {
             TerminalShellKind::Bash => "bash",
             TerminalShellKind::Zsh => "zsh",
             TerminalShellKind::Fish => "fish",
+            TerminalShellKind::PowerShell => "powershell",
+            TerminalShellKind::Cmd => "cmd",
             TerminalShellKind::Unknown => "sh",
         }
     }
@@ -33,14 +37,19 @@ impl TerminalShellKind {
     /// `/usr/bin/zsh`, `zsh`, and the login-shell `-zsh` form all
     /// produce `Zsh`.
     pub fn detect(program: &str) -> Self {
-        match std::path::Path::new(program)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| name.trim_start_matches('-'))
-        {
-            Some("bash") => TerminalShellKind::Bash,
-            Some("zsh") => TerminalShellKind::Zsh,
-            Some("fish") => TerminalShellKind::Fish,
+        let name = program
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(program)
+            .trim_start_matches('-')
+            .to_ascii_lowercase();
+        let name = name.strip_suffix(".exe").unwrap_or(&name);
+        match name {
+            "bash" => TerminalShellKind::Bash,
+            "zsh" => TerminalShellKind::Zsh,
+            "fish" => TerminalShellKind::Fish,
+            "powershell" | "pwsh" => TerminalShellKind::PowerShell,
+            "cmd" => TerminalShellKind::Cmd,
             _ => TerminalShellKind::Unknown,
         }
     }
@@ -55,6 +64,7 @@ impl TerminalShellKind {
         bytes.extend_from_slice(sanitized.as_bytes());
         bytes.extend_from_slice(match self {
             TerminalShellKind::Fish => b" \x08\n",
+            TerminalShellKind::PowerShell | TerminalShellKind::Cmd => b"\r",
             _ => b"\n",
         });
         bytes

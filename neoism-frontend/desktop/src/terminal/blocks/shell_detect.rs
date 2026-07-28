@@ -48,9 +48,7 @@ pub fn detect_foreground_shell(
 /// `foreground_process_name` walk the ConPTY descendant tree for the
 /// foreground program (most recently created leaf; `.exe` already
 /// stripped). `TerminalShellKind::detect` then maps it exactly like the
-/// Linux `comm` path: bash/zsh/fish (e.g. an MSYS or WSL-interop shell
-/// running inside the pane) resolve, pwsh/cmd stay `Unknown` → `None`
-/// so callers keep the kind seeded from the configured program.
+/// Linux `comm` path, including native PowerShell and cmd processes.
 #[cfg(target_os = "windows")]
 pub fn detect_foreground_shell(shell_pid: u32) -> Option<TerminalShellKind> {
     if shell_pid == 0 {

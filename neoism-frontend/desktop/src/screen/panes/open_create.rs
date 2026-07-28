@@ -391,11 +391,29 @@ impl Screen<'_> {
             rich_text_id,
             &mut self.sugarloaf,
         ) {
-            // Nothing adoptable (no live sessions / no link) — undo the
-            // strip reservation and fall back to the pointer switch.
+            // Adopt failed (no live link/runtime yet, or capacity). Undo
+            // the strip reservation. On a HOME link the pointer switch is
+            // a real action; on a PEER (joined) link it is guarded out and
+            // does nothing — which is exactly the "click Join, nothing
+            // happens" black hole. Log why, and if we are joined, tell the
+            // user instead of silently swallowing it.
             self.resize_top_or_bottom_line(num_tabs);
-            self.context_manager
-                .switch_daemon_host_workspace(workspace_id);
+            let on_peer = self.context_manager.daemon_link_is_peer();
+            tracing::warn!(
+                target: "neoism::workspaces",
+                workspace_id = %workspace_id,
+                link_is_peer = on_peer,
+                "adopt_daemon_workspace returned false — join produced no tab"
+            );
+            if on_peer {
+                self.renderer.notifications.push(
+                    "Couldn't open that workspace — the server link isn't ready. Try again in a moment.",
+                    neoism_ui::panels::notifications::NotificationLevel::Warn,
+                );
+            } else {
+                self.context_manager
+                    .switch_daemon_host_workspace(workspace_id);
+            }
             self.mark_dirty();
             return;
         }

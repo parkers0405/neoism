@@ -9,8 +9,15 @@ name: Release Neoism
 #
 # NOTE: the older `release.yml` + `.goreleaser.yaml` are inherited from Rio
 # (build `rioterm`, GoReleaser Pro). Disable that workflow so the two don't
-# both fire on tags. macOS .dmg signing/notarization is a later add (needs an
-# Apple Developer account).
+# both fire on tags.
+#
+# macOS Developer ID signing + notarization activates automatically when
+# these repo secrets exist (otherwise the app ships ad-hoc signed):
+#   MACOS_SIGN_P12            base64 of the "Developer ID Application" .p12
+#   MACOS_SIGN_P12_PASSWORD   the .p12 export password
+#   APPLE_ID                  Apple ID email of the developer account
+#   APPLE_TEAM_ID             10-char team id (developer.apple.com → Membership)
+#   APPLE_APP_SPECIFIC_PASSWORD  from appleid.apple.com → App-Specific Passwords
 
 on:
   push:
@@ -62,6 +69,10 @@ jobs:
     needs: precheck
     if: needs.precheck.outputs.reuse_run == ''
     runs-on: ${{ matrix.runner }}
+    env:
+      # Secrets aren't allowed in step-level `if:` directly; this job-level
+      # indirection is the documented pattern.
+      HAVE_MAC_SIGNING: ${{ secrets.MACOS_SIGN_P12 != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -158,14 +169,75 @@ jobs:
           if command -v sha256sum >/dev/null; then sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256";
           else shasum -a 256 "$OUT.tar.gz" > "$OUT.tar.gz.sha256"; fi
 
+      # Developer ID signing + notarization. Signs the CLI binaries and the
+      # .app inside-out with hardened runtime, notarizes, staples, and
+      # re-tars the tarball so it carries the stapled app. Skipped (ad-hoc
+      # signature ships) until the MACOS_SIGN_* / APPLE_* secrets exist.
+      - name: Sign and notarize Neoism.app (Developer ID)
+        if: matrix.goos == 'darwin' && env.HAVE_MAC_SIGNING == 'true'
+        shell: bash
+        env:
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          OUT="neoism-${{ matrix.goos }}-${{ matrix.goarch }}"
+          APP="stage/$OUT/Neoism.app"
+
+          # Import the Developer ID certificate into a throwaway keychain.
+          KEYCHAIN="$RUNNER_TEMP/sign.keychain-db"
+          KEYCHAIN_PASS="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          printf '%s' "$MACOS_SIGN_P12" | base64 --decode > "$RUNNER_TEMP/sign.p12"
+          security import "$RUNNER_TEMP/sign.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_SIGN_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASS" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk -F'"' '/Developer ID Application/{print $2; exit}')
+          [ -n "$IDENTITY" ] || { echo "::error::p12 has no Developer ID Application identity"; exit 1; }
+          echo "signing as: $IDENTITY"
+
+          # Inside-out: nested executables first, then the bundle, then the
+          # loose CLI copies at the tarball root. Hardened runtime is a
+          # notarization requirement.
+          for bin in "$APP/Contents/MacOS/"*; do
+            codesign --force --options runtime --timestamp --sign "$IDENTITY" "$bin"
+          done
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+          for bin in neoism neoism-workspace-daemon neoism-agent; do
+            codesign --force --options runtime --timestamp --sign "$IDENTITY" "stage/$OUT/$bin"
+          done
+          codesign --verify --strict --verbose=2 "$APP"
+
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/Neoism.app.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/Neoism.app.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+          xcrun stapler staple "$APP"
+
+          # The tarball from the packaging step contains the ad-hoc app;
+          # rebuild it around the signed, stapled one.
+          tar -C stage -czf "$OUT.tar.gz" "$OUT"
+          shasum -a 256 "$OUT.tar.gz" > "$OUT.tar.gz.sha256"
+
       # Drag-to-install DMG: the same Neoism.app plus an /Applications
-      # symlink, compressed with hdiutil (no third-party tooling). Until an
-      # Apple Developer ID signs + notarizes the app, Gatekeeper makes users
-      # right-click → Open on first launch; wire notarytool here once the
-      # DEVELOPER_ID_* secrets exist.
+      # symlink, compressed with hdiutil (no third-party tooling). When
+      # signing secrets exist the DMG is itself signed, notarized, and
+      # stapled; otherwise it ships ad-hoc (right-click → Open once).
       - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.dmg
         if: matrix.goos == 'darwin'
         shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
           OUT="neoism-${{ matrix.goos }}-${{ matrix.goarch }}"
@@ -173,6 +245,16 @@ jobs:
           cp -R "stage/$OUT/Neoism.app" stage/dmg/
           ln -s /Applications stage/dmg/Applications
           hdiutil create -volname "Neoism" -srcfolder stage/dmg -ov -format UDZO "$OUT.dmg"
+          if [ "$HAVE_MAC_SIGNING" = "true" ]; then
+            IDENTITY=$(security find-identity -v -p codesigning \
+              | awk -F'"' '/Developer ID Application/{print $2; exit}')
+            codesign --force --timestamp --sign "$IDENTITY" "$OUT.dmg"
+            xcrun notarytool submit "$OUT.dmg" \
+              --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+            xcrun stapler staple "$OUT.dmg"
+          fi
+          # Hash LAST — stapling rewrites the dmg.
           shasum -a 256 "$OUT.dmg" > "$OUT.dmg.sha256"
 
       - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip

@@ -279,7 +279,18 @@ impl Screen<'_> {
             .renderer
             .file_tree
             .is_visible()
-            .then(|| self.renderer.file_tree.root().map(Path::to_path_buf))
+            // A REMOTE tree (JOINED workspace, or a followed `ssh`
+            // session whose root is a bare `.`) has no local `.git` to
+            // watch — a JOINED root is an absolute host path that isn't
+            // present here, and an ssh `.` would otherwise resolve to
+            // this process's cwd and watch the wrong repo.
+            .then(|| {
+                if self.renderer.file_tree.is_remote() {
+                    None
+                } else {
+                    self.renderer.file_tree.root().map(Path::to_path_buf)
+                }
+            })
             .flatten();
         if self.file_tree_git_watch_root == next_root {
             return;

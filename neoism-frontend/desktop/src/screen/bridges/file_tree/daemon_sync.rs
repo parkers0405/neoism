@@ -14,6 +14,100 @@ impl Screen<'_> {
         self.start_file_tree_git_status_refresh();
     }
 
+    /// Cloneable sender the `SshFiles` backend pushes finished listings
+    /// / file reads onto. Each reply is followed by a
+    /// `RioEvent::SshFilesReady` nudge; the app loop drains them via
+    /// [`Self::drain_ssh_files_replies`].
+    pub(crate) fn ssh_files_reply_sender(
+        &self,
+    ) -> std::sync::mpsc::Sender<crate::daemon_client::ssh_files::SshFilesReply> {
+        self.ssh_files_tx.clone()
+    }
+
+    /// Apply every queued `ssh` files reply on the UI thread. Reuses the
+    /// exact daemon inbound path (`apply_daemon_files_message`) so the
+    /// listing splices into the tree's pending map identically to the
+    /// JOINED-workspace flow.
+    pub(crate) fn drain_ssh_files_replies(&mut self) {
+        while let Ok((request_id, message)) = self.ssh_files_rx.try_recv() {
+            self.apply_daemon_files_message(request_id, &message);
+        }
+        self.mark_dirty();
+    }
+
+    /// True while the file tree is following a terminal `ssh` session.
+    /// Guards the per-frame cwd → workspace-root sync (the local `ssh`
+    /// process cwd is on the WRONG disk and would otherwise re-root and
+    /// clobber the remote listing every frame).
+    pub(crate) fn file_tree_follows_ssh(&self) -> bool {
+        self.ssh_pre_local_root.is_some()
+    }
+
+    /// Flip the file tree onto a remote host reached by a terminal
+    /// `ssh [user@]host`. Roots at the remote login home (`.`) and lists
+    /// it through a shelled-out `ssh` backend; the reply lands via
+    /// `drain_ssh_files_replies`. Remembers the pre-ssh LOCAL root so
+    /// `exit`/`logout` restores the tree the user left.
+    pub(crate) fn enter_ssh_file_tree(&mut self, target: String, ssh_opts: Vec<String>) {
+        // Already following a session (nested `ssh`, or a re-entry) —
+        // keep the original saved root so the eventual `exit` still
+        // lands back on the local tree.
+        if self.ssh_pre_local_root.is_none() {
+            self.ssh_pre_local_root = self
+                .renderer
+                .file_tree
+                .root()
+                .map(Path::to_path_buf)
+                .or_else(|| self.active_workspace_root.clone());
+        }
+        let id = self.ssh_files_next_id;
+        self.ssh_files_next_id = self.ssh_files_next_id.wrapping_add(1);
+        let reply_tx = self.ssh_files_reply_sender();
+        let event_proxy = self.context_manager.event_proxy();
+        let window_id = self.context_manager.window_id();
+        let backend = std::sync::Arc::new(
+            crate::daemon_client::ssh_files::SshFiles::new(
+                target,
+                ssh_opts,
+                PathBuf::from("."),
+                id,
+                reply_tx,
+                event_proxy,
+                window_id,
+            ),
+        )
+            as std::sync::Arc<dyn crate::editor::file_tree::state::RemoteFileSource>;
+        self.renderer.file_tree.set_remote_files(Some(backend));
+        // Open the tree if it was hidden so the flip is actually visible,
+        // then kick the root listing DIRECTLY (not through
+        // `populate_file_tree_from_dir`, whose `sync_file_tree_remote_mode`
+        // would immediately reset the backend to the local/daemon source
+        // for this non-joined workspace). Root `.` resolves to the remote
+        // login home; git badges are skipped (no local repo to scan, and
+        // git-over-ssh is out of scope for v1).
+        self.renderer.file_tree.set_visible(true);
+        self.renderer.file_tree.populate_from_dir(Path::new("."));
+        self.mark_dirty();
+    }
+
+    /// Restore the local tree when a followed `ssh` session ends
+    /// (`exit`/`logout`). Clears the ssh backend and repopulates from the
+    /// saved pre-ssh local root.
+    pub(crate) fn leave_ssh_file_tree(&mut self) {
+        if self.ssh_pre_local_root.is_none() {
+            return;
+        }
+        let restore_root = self
+            .ssh_pre_local_root
+            .take()
+            .or_else(|| self.active_workspace_root.clone());
+        self.renderer.file_tree.set_remote_files(None);
+        if let Some(root) = restore_root {
+            self.populate_file_tree_from_dir(&root);
+        }
+        self.mark_dirty();
+    }
+
     /// Liveness backstop for a JOINED workspace's tree: fired ~3s
     /// after every remote ListDir dispatch. If the tree is visible,
     /// remote, and STILL has no entries, the request was lost (redial
@@ -57,6 +151,9 @@ impl Screen<'_> {
                             window_id,
                         ),
                     )
+                        as std::sync::Arc<
+                            dyn crate::editor::file_tree::state::RemoteFileSource,
+                        >
                 },
             )
         } else {

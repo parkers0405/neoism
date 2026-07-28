@@ -946,6 +946,20 @@ impl Screen<'_> {
                         .terminal_input
                         .set_passthrough_session_active(entering_passthrough);
                 }
+                // Follow-the-terminal file tree: an `ssh [user@]host`
+                // login flips the tree onto the remote host's disk;
+                // `exit`/`logout` restores the local root. Only real
+                // interactive logins flip — `parse_ssh_target` returns
+                // `None` for a non-ssh program or a one-shot
+                // `ssh host <cmd>`, and `leave_ssh_file_tree` no-ops
+                // unless a flip actually happened.
+                if entering_passthrough {
+                    if let Some((target, ssh_opts)) = parse_ssh_target(&command) {
+                        self.enter_ssh_file_tree(target, ssh_opts);
+                    }
+                } else if leaving_passthrough {
+                    self.leave_ssh_file_tree();
+                }
                 self.clear_selection();
                 self.ctx_mut().current_mut().messenger.send_write(bytes);
             }

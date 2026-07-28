@@ -237,6 +237,15 @@ impl Screen<'_> {
         root: PathBuf,
         force_tree_refresh: bool,
     ) -> bool {
+        // While the tree is following a terminal `ssh` session, every
+        // cwd heuristic below reports the LOCAL `ssh` process's
+        // directory — the wrong disk. Letting it re-root would
+        // repopulate (and clobber) the remote listing every frame, so
+        // freeze the workspace root until `leave_ssh_file_tree` restores
+        // it.
+        if self.file_tree_follows_ssh() {
+            return false;
+        }
         // The is_dir gate is LOCAL — a JOINED workspace's root lives on
         // the host machine and must pass through untested (rejecting it
         // left the guest's tree permanently empty when it was opened

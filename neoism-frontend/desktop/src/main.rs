@@ -946,6 +946,11 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
+    if let Some(exit_code) = background_process::run_background_command() {
+        std::process::exit(exit_code);
+    }
+
+    #[cfg(windows)]
     panic::attach_handler();
 
     // When linked with the windows subsystem windows won't automatically attach

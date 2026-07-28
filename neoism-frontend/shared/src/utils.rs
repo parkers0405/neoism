@@ -17,6 +17,32 @@
 //!   palette into the chrome via setters — see the doc-comment below
 //!   for the contract.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn background_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let executable = std::env::current_exe().unwrap_or_default();
+        if !executable
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case("neoism.exe"))
+        {
+            let mut command = std::process::Command::new(program);
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            return command;
+        }
+        let mut command = std::process::Command::new(executable);
+        command
+            .arg("--neoism-internal-background-command")
+            .arg(program)
+            .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        return command;
+    }
+    #[cfg(not(windows))]
+    std::process::Command::new(program)
+}
+
 /// Constants the native fork pulled from `crate::constants`. Reproduced
 /// here so the shared `padding_top_from_config` body matches the desktop
 /// path byte-for-byte instead of accepting yet another parameter.

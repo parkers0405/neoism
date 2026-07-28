@@ -515,7 +515,7 @@ fn git_changed_file_candidates(
     token: &str,
     cwd: Option<&Path>,
 ) -> Vec<CompletionCandidate> {
-    let mut command = std::process::Command::new("git");
+    let mut command = crate::utils::background_command("git");
     command.args(["status", "--porcelain", "--untracked-files=normal"]);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);

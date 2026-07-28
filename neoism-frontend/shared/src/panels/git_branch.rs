@@ -14,7 +14,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use web_time::Duration;
 use web_time::Instant;
@@ -211,7 +210,7 @@ fn refresh_change_summary(repo_root: PathBuf) {
 fn read_change_summary(repo_root: &Path) -> Option<GitChangeSummary> {
     // Tracked file line changes via numstat — same source the diff
     // panel uses, so the status pill agrees with what the panel shows.
-    let (mut added, deleted) = Command::new("git")
+    let (mut added, deleted) = crate::utils::background_command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(repo_root)
@@ -224,7 +223,7 @@ fn read_change_summary(repo_root: &Path) -> Option<GitChangeSummary> {
 
     // Untracked files don't show up in `diff HEAD`. Count their
     // contents as additions so the totals match the side panel.
-    if let Ok(output) = Command::new("git")
+    if let Ok(output) = crate::utils::background_command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(repo_root)

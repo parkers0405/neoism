@@ -13,7 +13,6 @@
 //! to leave the workspaces flow blind until neoism was relaunched.
 
 use std::net::IpAddr;
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -108,7 +107,8 @@ fn cli_candidates() -> &'static [&'static str] {
 
 fn probe_ipv4() -> Option<IpAddr> {
     cli_candidates().iter().find_map(|cli| {
-        let output = Command::new(cli).args(["ip", "-4"]).output().ok()?;
+        let mut command = crate::background_process::command(cli);
+        let output = command.args(["ip", "-4"]).output().ok()?;
         if !output.status.success() {
             return None;
         }

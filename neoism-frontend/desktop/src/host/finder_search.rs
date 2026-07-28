@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Mutex;
 
 use neoism_ui::services::{
@@ -275,7 +275,7 @@ impl SearchService for NativeSearchService {
     }
 
     fn git_repo_root(&self, cwd: &Path) -> Option<PathBuf> {
-        let output = Command::new("git")
+        let output = crate::background_process::command("git")
             .arg("-C")
             .arg(cwd)
             .arg("rev-parse")
@@ -328,7 +328,7 @@ pub(crate) fn build_fff_picker(cwd: &Path) -> Option<fff_search::FilePicker> {
 
 fn collect_files_with_rg(cwd: &Path) -> Vec<String> {
     let loose = !is_project_workspace(cwd);
-    let mut command = Command::new("rg");
+    let mut command = crate::background_process::command("rg");
     command.arg("--files").arg("--hidden");
     for glob in ALWAYS_EXCLUDE_GLOBS {
         command.arg("--glob").arg(*glob);

@@ -12,14 +12,16 @@ use crate::event::sync::FairMutex;
 use crate::layout::ContextDimension;
 use crate::neoism::agent::NeoismAgentPane;
 use crate::workspace::tags_view::NeoismTagsPane;
+#[cfg(target_os = "windows")]
+use base64::Engine as _;
 use neoism_backend::config::Shell;
 use neoism_backend::event::WindowId;
 use neoism_terminal_core::crosswords::Crosswords;
+#[cfg(not(target_os = "windows"))]
+use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-
-use std::fs;
 
 // Global atomic counter for generating unique route IDs
 pub(super) static ROUTE_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -391,8 +393,8 @@ bind \cp 'commandline ""'
     }
 }
 
-/// Windows twin of the unix rc wrappers above: a `neoism_profile.ps1`
-/// dot-sourced into PowerShell so every prompt is framed with the same
+/// Windows twin of the unix rc wrappers above: an inline PowerShell command
+/// that frames every prompt with the same
 /// OSC 133 marks (`D;<exit>` closing the previous command, `A` before
 /// the prompt text, `B` after it) plus an OSC 7 `file:///C:/...` cwd
 /// report the desktop's Windows tab-cwd/workspace re-rooting reads.
@@ -401,7 +403,7 @@ bind \cp 'commandline ""'
 #[cfg(target_os = "windows")]
 pub(super) fn neoism_block_shell_for_spawn(
     shell: &Shell,
-    route_id: usize,
+    _route_id: usize,
 ) -> Option<Shell> {
     let name = std::path::Path::new(&shell.program)
         .file_name()
@@ -413,12 +415,8 @@ pub(super) fn neoism_block_shell_for_spawn(
     ) {
         return None;
     }
-    let dir = std::env::temp_dir()
-        .join(format!("neoism-shell-{}-{route_id}", std::process::id()));
-    fs::create_dir_all(&dir).ok()?;
-    let profile = dir.join("neoism_profile.ps1");
-    let profile_script = r##"# Neoism block-shell integration for PowerShell. Dot-sourced via
-# `-NoExit -Command` AFTER the user's own $PROFILE ran, mirroring the
+    let profile_script = r##"# Neoism block-shell integration for PowerShell. Run via
+# `-NoExit -EncodedCommand` AFTER the user's own $PROFILE ran, mirroring the
 # unix zsh/bash/fish rc wrappers: every prompt is framed with OSC 133
 # marks so the block UI can segment command output, and OSC 7 reports
 # the cwd for tab-cwd / workspace re-rooting.
@@ -469,21 +467,65 @@ if ($null -ne (Get-Command PSConsoleHostReadLine -ErrorAction Ignore)) {
     }
 }
 "##;
-    fs::write(&profile, profile_script).ok()?;
 
-    // Dot-source through `-Command` (no -NoProfile) so the user's own
-    // $PROFILE still runs first; appended AFTER the configured args so
-    // `-NoLogo` and friends survive. Doubling embedded quotes is the
-    // escape for a single-quoted PowerShell string literal.
-    let quoted_profile = profile.display().to_string().replace('\'', "''");
+    // PowerShell's encoded commands are UTF-16LE. Keeping the integration
+    // inline avoids execution-policy checks on a generated .ps1 file.
+    let encoded_profile = base64::engine::general_purpose::STANDARD.encode(
+        profile_script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
     let mut args = shell.args.clone();
     args.push("-NoExit".to_string());
-    args.push("-Command".to_string());
-    args.push(format!(". '{quoted_profile}'"));
+    args.push("-EncodedCommand".to_string());
+    args.push(encoded_profile);
     Some(Shell {
         program: shell.program.clone(),
         args,
     })
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_shell_tests {
+    use super::*;
+    use base64::Engine as _;
+
+    #[test]
+    fn powershell_integration_is_inline_and_preserves_configured_args() {
+        let shell = Shell {
+            program: r"C:\Windows\System32\WindowsPowerShell\v1.0\PoWeRsHeLl.ExE".into(),
+            args: vec!["-NoLogo".into()],
+        };
+
+        let wrapped = neoism_block_shell_for_spawn(&shell, 1).unwrap();
+
+        assert_eq!(wrapped.program, shell.program);
+        assert_eq!(wrapped.args[0], "-NoLogo");
+        assert_eq!(wrapped.args[1], "-NoExit");
+        assert_eq!(wrapped.args[2], "-EncodedCommand");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(wrapped.args.last().unwrap())
+            .unwrap();
+        let utf16 = bytes
+            .chunks_exact(2)
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect::<Vec<_>>();
+        let script = String::from_utf16(&utf16).unwrap();
+        assert!(script.contains("function Global:prompt"));
+        assert!(script.contains("]133;A"));
+        assert!(script.contains("]7;file:///"));
+    }
+
+    #[test]
+    fn non_powershell_program_is_not_wrapped() {
+        let shell = Shell {
+            program: "cmd.exe".into(),
+            args: vec!["/Q".into()],
+        };
+
+        assert!(neoism_block_shell_for_spawn(&shell, 1).is_none());
+    }
 }
 
 #[cfg(test)]

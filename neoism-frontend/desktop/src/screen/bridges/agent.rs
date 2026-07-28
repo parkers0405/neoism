@@ -1158,6 +1158,19 @@ impl Screen<'_> {
                 self.mark_dirty();
                 return true;
             }
+            if link.starts_with("http://") || link.starts_with("https://") {
+                if crate::background_process::open_url(&link).is_err() {
+                    let chars = link.chars().count();
+                    clipboard.set(ClipboardType::Clipboard, link);
+                    if let Some(agent) =
+                        self.context_manager.current_mut().neoism_agent.as_mut()
+                    {
+                        agent.push_copied_notice(chars);
+                    }
+                }
+                self.mark_dirty();
+                return true;
+            }
             self.open_neoism_agent_link_target(&link);
             self.mark_dirty();
             return true;

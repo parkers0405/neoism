@@ -1,12 +1,11 @@
 use std::path::Path;
-use std::process::Command;
 
 use neoism_ui::panels::git_diff::parse_numstat;
 
 use super::{FileChange, FileStatus};
 
 pub(super) fn collect_files(repo_root: &Path) -> Vec<FileChange> {
-    let status = match Command::new("git")
+    let status = match crate::background_process::command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(repo_root)
@@ -17,7 +16,7 @@ pub(super) fn collect_files(repo_root: &Path) -> Vec<FileChange> {
         _ => return Vec::new(),
     };
 
-    let numstat = Command::new("git")
+    let numstat = crate::background_process::command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(repo_root)
@@ -112,7 +111,7 @@ pub(super) fn commit(repo_root: &Path, message: &str) -> Result<(), String> {
 /// `git for-each-ref` returns them in ref order. Falls back to an empty
 /// list if git errors.
 pub(super) fn list_branches(repo_root: &Path) -> Vec<String> {
-    let output = Command::new("git")
+    let output = crate::background_process::command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(repo_root)
@@ -143,7 +142,7 @@ pub(super) fn checkout(repo_root: &Path, branch: &str) -> Result<(), String> {
 /// Run a git subcommand in `repo_root`, mapping a non-zero exit to the
 /// trimmed stderr (or stdout) so the panel can surface it.
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = crate::background_process::command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(repo_root)

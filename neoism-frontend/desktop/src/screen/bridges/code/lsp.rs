@@ -592,7 +592,7 @@ fn git_baseline(
         .spawn(move || {
             let baseline = fetch_file.parent().and_then(|dir| {
                 let name = fetch_file.file_name()?;
-                let output = std::process::Command::new("git")
+                let output = crate::background_process::command("git")
                     .arg("-C")
                     .arg(dir)
                     .arg("show")

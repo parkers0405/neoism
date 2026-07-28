@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use neoism_ui::services::{GitService, IoError};
 
@@ -34,7 +33,7 @@ impl GitService for NativeGit {
     }
 
     fn status_porcelain(&self, repo: &Path) -> Result<Vec<u8>, IoError> {
-        let output = Command::new("git")
+        let output = crate::background_process::command("git")
             .env("GIT_OPTIONAL_LOCKS", "0")
             .arg("-C")
             .arg(repo)
@@ -57,7 +56,7 @@ impl GitService for NativeGit {
 }
 
 fn git_rev_parse(cwd: &Path, arg: &str) -> Option<PathBuf> {
-    let output = Command::new("git")
+    let output = crate::background_process::command("git")
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", arg])

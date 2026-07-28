@@ -142,8 +142,58 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 self.daemon.cache.last_error = Some(message);
                 true
             }
+            WorkspaceServerMessage::HostEnded { reason } => {
+                self.handle_host_ended(reason);
+                true
+            }
             _ => false,
         }
+    }
+
+    /// The host ended the shared session (its daemon shut down, or it
+    /// stopped sharing this workspace). LEAVE, don't kill: detach every
+    /// ADOPTED grid's daemon sessions so the impending teardown can't
+    /// `ClosePty` the host's live shells out from under it, then stash
+    /// the reason for the app to drain — the app re-dials this window's
+    /// home daemon (which drops the guest connection, stopping the
+    /// reconnect-forever loop) and surfaces the reason as a notice. See
+    /// [`Self::take_host_ended_reason`].
+    fn handle_host_ended(&mut self, reason: String) {
+        // Only a GUEST (peer link) is kicked. HostEnded on our own HOME
+        // daemon (e.g. an embedded restart) must not tear down local
+        // grids or pop a "host ended" notice — there is nowhere to
+        // re-dial to, and the reconnect loop legitimately re-homes us.
+        if !self.daemon.link_is_peer {
+            return;
+        }
+        // Detach ONLY adopted grids: `detach_adopted_grid_sessions`
+        // unbinds every route in the grid it's given, so pointing it at
+        // a non-adopted grid would drop the guest's OWN local sessions.
+        let adopted: Vec<usize> = {
+            let cache = &self.daemon.cache;
+            self.contexts
+                .iter()
+                .enumerate()
+                .filter(|(_, grid)| {
+                    grid.workspace_route_id().is_some_and(|stable| {
+                        cache.adopted_workspaces.contains_key(&stable)
+                    })
+                })
+                .map(|(index, _)| index)
+                .collect()
+        };
+        for index in adopted {
+            self.detach_adopted_grid_sessions(index);
+        }
+        self.daemon.cache.host_ended_reason = Some(reason);
+    }
+
+    /// Drain the "host ended the session" reason recorded by
+    /// [`Self::handle_host_ended`]. The app polls this after ingesting
+    /// each batch of daemon messages; a `Some` result means it should
+    /// re-dial the window home and surface the reason as a notice.
+    pub fn take_host_ended_reason(&mut self) -> Option<String> {
+        self.daemon.cache.host_ended_reason.take()
     }
 
     pub fn apply_pty_server_message(&mut self, message: PtyServerMessage) -> bool {

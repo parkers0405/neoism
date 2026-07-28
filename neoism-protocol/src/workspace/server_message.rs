@@ -265,4 +265,14 @@ pub enum WorkspaceServerMessage {
         fingerprint_prefix: String,
         removed: bool,
     },
+    /// Broadcast the daemon fans out to *every* connected client when
+    /// the host is ending the shared session — the daemon is shutting
+    /// down (SIGTERM / SIGINT / console-close) or the host explicitly
+    /// stopped sharing this workspace. A guest uses it to detach its
+    /// adopted workspace (WITHOUT closing the host's live shells),
+    /// re-dial its own home daemon, and surface a short notice instead
+    /// of silently reconnecting forever against a dead / withdrawn
+    /// host. `reason` is a human-readable string suitable for a toast
+    /// or modal (e.g. "The host ended the session").
+    HostEnded { reason: String },
 }

@@ -5,6 +5,12 @@
 
 use super::*;
 
+/// Buffer depth for the process-global host-ended farewell channel.
+/// One frame fires per shutdown / stop-share, so a shallow ring is
+/// plenty; a lagging receiver just misses a redundant kick (the
+/// dropped connection stops the guest anyway).
+const HOST_ENDED_BROADCAST_CAPACITY: usize = 16;
+
 impl WorkspaceManager {
     /// Construct a manager seeded from `~/.local/share/neoism/workspaces.json`.
     /// Missing / unreadable persistence file is treated as an empty
@@ -287,6 +293,40 @@ impl WorkspaceManager {
     /// 8D-live: announce that a publish changed the tree.
     pub fn broadcast_tree_changed(&self, origin: Option<uuid::Uuid>) {
         let _ = self.tree_tx.send(TreeChangedBroadcast { origin });
+    }
+
+    /// Process-global fan-out bus for the
+    /// [`WorkspaceServerMessage::HostEnded`] farewell frame. Unlike the
+    /// per-manager `tree_tx` / `pane_layout_tx` / `preferences_tx`
+    /// buses (whose Sender fields live on the manager struct), this one
+    /// is a lazily-created process singleton so the whole helper stays
+    /// self-contained here: the daemon is a single process, so one
+    /// global channel already reaches every live socket. The Sender is
+    /// held for the process lifetime, so a `subscribe()` after boot
+    /// never observes a spurious `Closed`.
+    fn host_ended_channel() -> &'static tokio::sync::broadcast::Sender<String> {
+        static CHANNEL: std::sync::OnceLock<tokio::sync::broadcast::Sender<String>> =
+            std::sync::OnceLock::new();
+        CHANNEL.get_or_init(|| {
+            tokio::sync::broadcast::channel(HOST_ENDED_BROADCAST_CAPACITY).0
+        })
+    }
+
+    /// Subscribe a websocket task to host-ended farewell frames. Each
+    /// connection drains this in its `select!` loop and, on `recv`,
+    /// writes a `HostEnded { reason }` frame to its client. Returns a
+    /// fresh `Receiver`; dropping it auto-unsubscribes.
+    pub fn subscribe_host_ended(&self) -> tokio::sync::broadcast::Receiver<String> {
+        Self::host_ended_channel().subscribe()
+    }
+
+    /// Fan a `HostEnded { reason }` out to every connected client.
+    /// Called on daemon shutdown and on an explicit stop-share so a
+    /// guest detaches its adopted workspace and re-dials home instead
+    /// of reconnecting forever against a dead / withdrawn host. `send`
+    /// returning `Err` (no live subscribers) is intentionally ignored.
+    pub fn broadcast_host_ended(&self, reason: &str) {
+        let _ = Self::host_ended_channel().send(reason.to_string());
     }
 
     /// Snapshot the persisted preferences for `workspace_id` (or the

@@ -246,6 +246,18 @@ impl Screen<'_> {
         if self.file_tree_follows_ssh() {
             return false;
         }
+        // Same clobber guard for a JOINED workspace: its tree root is the
+        // daemon-declared HOST path, authoritative for the whole session.
+        // The per-frame cwd heuristics (`cwd_drain`) report the guest's
+        // LOCAL pane cwd — letting that re-root would repopulate (and
+        // collapse every open folder in) the remote tree each frame, the
+        // "folders open then snap shut" bug. Intentional root sets on join
+        // assign `active_workspace_root` directly / pass `force=true`, so
+        // only freeze the ambient (non-forced) per-frame path.
+        if !force_tree_refresh && self.context_manager.current_workspace_is_remote_joined()
+        {
+            return false;
+        }
         // The is_dir gate is LOCAL — a JOINED workspace's root lives on
         // the host machine and must pass through untested (rejecting it
         // left the guest's tree permanently empty when it was opened

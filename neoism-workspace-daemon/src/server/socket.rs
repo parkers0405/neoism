@@ -308,6 +308,10 @@ pub(crate) async fn handle_socket(
     // `HostWorkspaceTree` push, no polling. The origin connection is
     // skipped — it published the change.
     let mut tree_rx = workspace_manager.subscribe_tree_changes();
+    // Farewell frame: the daemon broadcasts on shutdown / stop-sharing so
+    // guests detach cleanly instead of reconnecting forever against a dead
+    // host.
+    let mut host_ended_rx = workspace_manager.subscribe_host_ended();
     let mut crdt_rx = crdt.subscribe();
     // Files-plane liveness: debounced fs-change bursts for every root
     // some client has listed. Forwarded as `FilesReply { request_id:
@@ -496,6 +500,29 @@ pub(crate) async fn handle_socket(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(skipped = n, "tree broadcast lagged; client refreshes on next push");
                     }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return;
+                    }
+                }
+                continue;
+            }
+            reason = host_ended_rx.recv() => {
+                // Host is ending the session (daemon shutdown / stop
+                // sharing): forward the farewell so the guest kicks itself
+                // out and re-dials home.
+                match reason {
+                    Ok(reason) => {
+                        let resp = ServiceServerMessage::WorkspaceReply {
+                            request_id: 0,
+                            message: WorkspaceServerMessage::HostEnded { reason },
+                        };
+                        if let Err(err) = send_json(&mut sink, &resp).await {
+                            tracing::warn!(error = %err, "websocket send error draining host-ended broadcast");
+                            poll_task.abort();
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         return;
                     }

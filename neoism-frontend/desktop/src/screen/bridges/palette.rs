@@ -206,49 +206,29 @@ impl Screen<'_> {
             return;
         };
 
-        // Installed and dev layouts both put the daemon next to the
-        // desktop binary; PATH is the fallback.
-        let sibling = |bin: &str| -> std::path::PathBuf {
-            std::env::current_exe()
-                .ok()
-                .and_then(|exe| exe.parent().map(|dir| dir.join(bin)))
-                .filter(|path| path.is_file())
-                .unwrap_or_else(|| std::path::PathBuf::from(bin))
-        };
-        let daemon_bin = sibling("neoism-workspace-daemon");
         let state_dir = neoism_backend::config::config_dir_path()
             .join("hosted-servers")
             .join(port.to_string());
-        let _ = std::fs::create_dir_all(&state_dir);
-
-        let mut daemon = std::process::Command::new(&daemon_bin);
-        daemon
-            .arg("--addr")
-            .arg(format!("0.0.0.0:{port}"))
-            .arg("--no-unix-socket")
-            .arg("--state-dir")
-            .arg(&state_dir)
-            .arg("--workspace")
-            .arg(&dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        if let Some(password) = password.as_deref() {
-            daemon
-                .env("NEOISM_DAEMON_TOKEN", password)
-                .env("NEOISM_REQUIRE_AUTH", "1");
-        }
-        if let Err(error) = daemon.spawn() {
+        let spec = crate::server_registry::HostedServerSpec {
+            state_dir,
+            workspace_dir: dir.clone(),
+            port,
+            require_auth: password.is_some(),
+        };
+        if let Err(error) = spawn_hosted_daemon(&spec, password.as_deref()) {
             self.renderer.notifications.push(
-                format!(
-                    "Could not start the server daemon ({}): {error}",
-                    daemon_bin.display()
-                ),
+                format!("Could not start the server daemon: {error}"),
                 NotificationLevel::Error,
             );
             self.mark_dirty();
             return;
         }
+        // The saved-server registry lives on the App layer, out of this
+        // Screen's reach, so we can't call `add_hosted` here directly. Leave
+        // the relaunch spec as a sidecar in the state dir; the queued add in
+        // `process_window_server_requests` reads it back and persists it onto
+        // the SavedServer so a later dead-daemon dial can rehost it.
+        write_hosted_sidecar(&spec);
 
         // Co-hosted agent on port + 1 (the convention joined clients
         // derive). Missing binary just means no remote agent — the
@@ -1429,6 +1409,110 @@ impl Screen<'_> {
 
         (entries, peer_hosts)
     }
+}
+
+/// Filename of the relaunch-spec sidecar dropped inside a hosted server's
+/// state dir. It bridges the Screen→App gap: the App-owned registry reads it
+/// back after the queued add lands (see `process_window_server_requests`).
+const HOSTED_SIDECAR_FILE: &str = "hosted-spec.json";
+
+/// Resolve a binary that installed and dev layouts both drop next to the
+/// desktop binary; PATH is the fallback.
+fn sibling_binary(bin: &str) -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(bin)))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| std::path::PathBuf::from(bin))
+}
+
+/// Spawn a detached `neoism-workspace-daemon` for `spec`. Shared by the
+/// initial Create & join and the rehost-on-dead-daemon path so both use the
+/// exact same command + detach. Detached on purpose: a server the user
+/// created keeps serving until they stop it, even across app restarts.
+pub(crate) fn spawn_hosted_daemon(
+    spec: &crate::server_registry::HostedServerSpec,
+    token: Option<&str>,
+) -> std::io::Result<()> {
+    let daemon_bin = sibling_binary("neoism-workspace-daemon");
+    let _ = std::fs::create_dir_all(&spec.state_dir);
+
+    let mut daemon = std::process::Command::new(&daemon_bin);
+    daemon
+        .arg("--addr")
+        .arg(format!("0.0.0.0:{}", spec.port))
+        .arg("--no-unix-socket")
+        .arg("--state-dir")
+        .arg(&spec.state_dir)
+        .arg("--workspace")
+        .arg(&spec.workspace_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if spec.require_auth {
+        daemon.env("NEOISM_REQUIRE_AUTH", "1");
+        if let Some(token) = token {
+            daemon.env("NEOISM_DAEMON_TOKEN", token);
+        }
+    }
+    detach_hosted_daemon(&mut daemon);
+    daemon.spawn().map(|_| ())
+}
+
+/// Detach the daemon from the desktop app's session/process group so app or
+/// terminal exit doesn't reap the server the user asked us to keep hosting.
+#[cfg(unix)]
+fn detach_hosted_daemon(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    // setsid = new session, no controlling terminal, immune to the parent's
+    // process-group SIGHUP/SIGTERM on app or terminal close.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(windows)]
+fn detach_hosted_daemon(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    // DETACHED_PROCESS (no inherited console) + CREATE_NEW_PROCESS_GROUP (its
+    // own group) so closing the app's console doesn't CTRL-signal it.
+    // `creation_flags` REPLACES any previously-set flags; this is the only
+    // flag site on this Command, so combining both here is correct.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn detach_hosted_daemon(_command: &mut std::process::Command) {}
+
+/// Best-effort: drop the relaunch spec as a sidecar in the state dir so the
+/// App layer can persist it into the registry after the queued add lands.
+fn write_hosted_sidecar(spec: &crate::server_registry::HostedServerSpec) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(spec) {
+        let _ = std::fs::write(spec.state_dir.join(HOSTED_SIDECAR_FILE), bytes);
+    }
+}
+
+/// Read the relaunch spec for a just-added local server by deriving its state
+/// dir from the loopback address `create_and_join_local_server` used. Returns
+/// None for any non-loopback / non-hosted address, so remote saved servers are
+/// never misread as hosted.
+pub(crate) fn read_hosted_sidecar(
+    address: &str,
+) -> Option<crate::server_registry::HostedServerSpec> {
+    let url = url::Url::parse(address).ok()?;
+    if !matches!(url.host_str()?, "127.0.0.1" | "localhost" | "::1") {
+        return None;
+    }
+    let path = neoism_backend::config::config_dir_path()
+        .join("hosted-servers")
+        .join(url.port()?.to_string())
+        .join(HOSTED_SIDECAR_FILE);
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 /// Two filesystem paths point at the same directory. Canonicalizes both

@@ -436,6 +436,14 @@ pub struct ContextManagerDaemonCache {
     pub last_request_at: Option<Instant>,
     pub pending_request_count: u64,
     pub last_error: Option<String>,
+    /// Set when a `HostEnded` push arrives on a GUEST (peer) link: the
+    /// host shut its daemon down or stopped sharing. The context
+    /// manager has already detached this window's adopted grids (so the
+    /// teardown can't ClosePty the host's shells) by the time this is
+    /// stored; the app drains it via
+    /// [`ContextManager::take_host_ended_reason`] to re-dial home and
+    /// surface the reason as a notice. `None` in the steady state.
+    pub host_ended_reason: Option<String>,
 }
 
 mod builders;

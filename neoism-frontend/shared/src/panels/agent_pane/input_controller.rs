@@ -275,11 +275,22 @@ impl AgentInputBuffer {
     /// is remembered in `goal_x`, so a run of Up/Down keeps aiming at
     /// the column the run STARTED in even when it crosses rows too
     /// short to reach it.
+    ///
+    /// The landed byte is floored into `to`'s own range so a run of
+    /// Up/Down always advances the visual row by exactly one. On a
+    /// soft-wrap boundary the destination row's `start` byte is shared
+    /// with the previous row's `end`; end-affinity [`visual_row_index`]
+    /// (the same rule the renderer paints the caret with) attributes that
+    /// shared byte to the PREVIOUS row, so landing there would make the
+    /// next press recompute from the wrong row and stick — the caret
+    /// oscillated over the same handful of rows instead of walking to the
+    /// top. Flooring keeps every step monotonic. See [`row_floor`].
     fn step_visual_row(&mut self, rows: &[InputWrapRow], from: usize, to: usize) {
         let x = self
             .goal_x
             .unwrap_or_else(|| rows[from].x_for_byte(&self.input, self.cursor_byte()));
-        self.cursor_byte = rows[to].byte_for_x(&self.input, x);
+        let landed = rows[to].byte_for_x(&self.input, x);
+        self.cursor_byte = landed.max(row_floor(&self.input, rows, to));
         self.goal_x = Some(x);
     }
 
@@ -498,10 +509,34 @@ pub fn cursor_line_col(value: &str, byte: usize) -> (usize, usize) {
 
 /// Index of the visual row containing `cursor`. A cursor sitting on a
 /// soft-wrap boundary (== end of row N == start of row N+1) belongs to
-/// row N, which is also the row the renderer paints its caret on.
+/// row N, which is also the row the renderer paints its caret on
+/// (end-affinity). Movement floors its landing byte with [`row_floor`] so
+/// it never relies on this attributing a shared boundary to the row it
+/// just moved INTO — that mismatch was the Up/Down sticking bug.
 pub fn visual_row_index(rows: &[InputWrapRow], cursor: usize) -> Option<usize> {
     rows.iter()
         .position(|row| cursor >= row.start && cursor <= row.end)
+}
+
+/// Smallest byte on row `row_ix` that end-affinity [`visual_row_index`]
+/// attributes to `row_ix` rather than to the previous row.
+///
+/// A soft-wrap continuation row shares its `start` byte with the previous
+/// row's `end`; under end-affinity that shared byte renders at the END of
+/// the previous row, so the first caret position that truly lives on this
+/// row is its second character boundary (column 1). A first row or a
+/// hard-newline row starts after a `\n` (or at byte 0), owns its `start`
+/// outright, and floors to `start`. A soft-wrapped row always holds at
+/// least one character, so column 1 exists; the `min(end)` guards the
+/// degenerate empty-row case.
+fn row_floor(value: &str, rows: &[InputWrapRow], row_ix: usize) -> usize {
+    let start = rows[row_ix].start;
+    let shared_start = row_ix > 0 && rows[row_ix - 1].end == start;
+    if shared_start {
+        next_char_boundary(value, start).min(rows[row_ix].end)
+    } else {
+        start
+    }
 }
 
 pub fn byte_for_line_col(value: &str, target_line: usize, target_col: usize) -> usize {
@@ -729,6 +764,139 @@ mod tests {
 
         input.move_up_with_history_visual(&rows);
         assert_eq!(input.cursor_byte, 1, "hard-newline movement used instead");
+    }
+
+    /// Four soft-wrapped rows that all SHARE boundaries
+    /// (`rows[k].start == rows[k-1].end`) — the exact layout
+    /// `wrap_agent_prompt_rows` produces for a long, newline-free draft,
+    /// and the one the sticking bug lived on.
+    fn four_shared_rows() -> [InputWrapRow; 4] {
+        [
+            row(0, 3, 3, 10.0),
+            row(3, 6, 3, 10.0),
+            row(6, 9, 3, 10.0),
+            row(9, 12, 3, 10.0),
+        ]
+    }
+
+    #[test]
+    fn visual_up_walks_every_row_then_history_without_sticking() {
+        // Start on the LAST row at the far-left column (goal_x = 0), the
+        // condition that used to stick: each Up landed on a shared start
+        // boundary that `visual_row_index` re-attributed to the row above,
+        // so the caret oscillated instead of climbing.
+        let rows = four_shared_rows();
+        let mut input = AgentInputBuffer::new(
+            "abcdefghijkl".to_string(),
+            12,
+            vec!["old".to_string()],
+            None,
+            String::new(),
+        );
+        input.goal_x = Some(0.0);
+        assert_eq!(visual_row_index(&rows, input.cursor_byte()), Some(3));
+
+        let mut visited = Vec::new();
+        for _ in 0..3 {
+            input.move_up_with_history_visual(&rows);
+            visited.push(visual_row_index(&rows, input.cursor_byte()));
+        }
+        assert_eq!(
+            visited,
+            vec![Some(2), Some(1), Some(0)],
+            "one visual row per Up, no repeats or sticking"
+        );
+        assert_eq!(input.input, "abcdefghijkl", "no history recall until row 0");
+
+        input.move_up_with_history_visual(&rows);
+        assert_eq!(input.input, "old", "Up on the first visual row recalls history");
+    }
+
+    #[test]
+    fn visual_down_walks_every_row_without_sticking() {
+        // Mirror of the Up walk: from the top-left, each Down advances
+        // exactly one visual row down the shared-boundary stack.
+        let rows = four_shared_rows();
+        let mut input = AgentInputBuffer::new(
+            "abcdefghijkl".to_string(),
+            0,
+            Vec::new(),
+            None,
+            String::new(),
+        );
+        input.goal_x = Some(0.0);
+        assert_eq!(visual_row_index(&rows, input.cursor_byte()), Some(0));
+
+        let mut visited = Vec::new();
+        for _ in 0..3 {
+            input.move_down_with_history_visual(&rows);
+            visited.push(visual_row_index(&rows, input.cursor_byte()));
+        }
+        assert_eq!(
+            visited,
+            vec![Some(1), Some(2), Some(3)],
+            "one visual row per Down, no repeats or sticking"
+        );
+    }
+
+    #[test]
+    fn visual_down_from_last_row_recalls_next_history() {
+        // The Down mirror of history recall: on the bottom (here only)
+        // visual row, Down steps FORWARD through history rather than
+        // moving the caret.
+        let rows = [row(0, 1, 1, 10.0)];
+        let mut input = AgentInputBuffer::new(
+            "a".to_string(),
+            1,
+            vec!["a".to_string(), "b".to_string()],
+            Some(0),
+            "draft".to_string(),
+        );
+
+        input.move_down_with_history_visual(&rows);
+        assert_eq!(input.input, "b", "Down on the last row advances history");
+    }
+
+    #[test]
+    fn visual_boundary_byte_is_on_the_earlier_row_and_steps_monotonically() {
+        // Byte 6 == rows[1].end == rows[2].start. End-affinity puts the
+        // caret on row 1 (where the renderer paints it), and a step from
+        // there lands cleanly on the neighbouring row — never back on the
+        // boundary's own row.
+        let rows = four_shared_rows();
+        assert_eq!(
+            visual_row_index(&rows, 6),
+            Some(1),
+            "a wrap-boundary caret belongs to the earlier row"
+        );
+
+        let mut down = AgentInputBuffer::new(
+            "abcdefghijkl".to_string(),
+            6,
+            Vec::new(),
+            None,
+            String::new(),
+        );
+        down.move_down_with_history_visual(&rows);
+        assert_eq!(
+            visual_row_index(&rows, down.cursor_byte()),
+            Some(2),
+            "Down from the boundary advances one row"
+        );
+
+        let mut up = AgentInputBuffer::new(
+            "abcdefghijkl".to_string(),
+            6,
+            Vec::new(),
+            None,
+            String::new(),
+        );
+        up.move_up_with_history_visual(&rows);
+        assert_eq!(
+            visual_row_index(&rows, up.cursor_byte()),
+            Some(0),
+            "Up from the boundary retreats one row"
+        );
     }
 
     #[test]

@@ -452,6 +452,16 @@ impl Application<'_> {
                     return;
                 }
 
+                // Spring-loaded notes-sidebar drop: same commit-or-click
+                // handling as the file tree, for the Alt+N panel.
+                if button == MouseButton::Left
+                    && route.window.screen.handle_notes_sidebar_drag_release()
+                {
+                    route.window.set_cursor(CursorIcon::Default);
+                    route.request_redraw();
+                    return;
+                }
+
                 // Stop selection auto-scroll on button release.
                 if let MouseButton::Left | MouseButton::Right = button {
                     let scroll_timer_id = route.window.screen.ctx().current_route();
@@ -762,6 +772,16 @@ impl Application<'_> {
         // Grips the cursor while live and springs dwelt-on folders open.
         if route.window.screen.handle_file_tree_drag_move() {
             if route.window.screen.renderer.file_tree.is_file_dragging() {
+                route.window.set_cursor(CursorIcon::Grabbing);
+            }
+            route.request_redraw();
+            return;
+        }
+
+        // Spring-loaded notes-sidebar drag: a page/folder row dragged onto
+        // a folder or the vault root. Same grip + spring-open as the tree.
+        if route.window.screen.handle_notes_sidebar_drag_move() {
+            if route.window.screen.notes_sidebar_dragging() {
                 route.window.set_cursor(CursorIcon::Grabbing);
             }
             route.request_redraw();

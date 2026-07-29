@@ -183,6 +183,7 @@ pub(crate) fn apply_agent_event_to_pane(
                 .collect(),
             detail: m.detail,
             usage: m.usage.map(map_usage),
+            author: None,
         }
     }
     fn map_streaming(s: ProtoStreamingState) -> NeoismAgentStreamingState {
@@ -256,6 +257,7 @@ pub(crate) fn apply_agent_event_to_pane(
                 todos: Vec::new(),
                 detail: String::new(),
                 usage: None,
+                author: None,
             };
             pane.upsert_part_message(row);
         }

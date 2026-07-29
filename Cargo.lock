@@ -4964,6 +4964,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tar",
  "thiserror 1.0.69",
  "tokio",

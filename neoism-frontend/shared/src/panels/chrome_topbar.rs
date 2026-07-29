@@ -16,9 +16,10 @@
 //!   [`TopBarAction::TogglePanel`], which the host wires to
 //!   [`crate::chrome::Chrome::toggle_file_tree`].
 //! - Left: hamburger menu (\u{f0c9}) beside the panel toggle. Its dropdown
-//!   lists `Settings`, `Themes`, `Extensions`. Each item dispatches the
-//!   matching `TopBarAction::Open*` variant; the host owns the actual
-//!   destination screens (none yet — those land in a follow-up).
+//!   lists `Settings`, `Start Web Server`, `Themes`, `Extensions`, each
+//!   with a leading nerd-font icon (see [`MenuItem::icon`]). Each item
+//!   dispatches the matching `TopBarAction` variant; the host owns the
+//!   actual destination screens.
 //! - Right: a standalone server-rack button with a connection-status dot.
 //!
 //! The strip is render-only on the shared crate: it doesn't reach into
@@ -58,9 +59,14 @@ const EDGE_PAD_X: f32 = 8.0;
 const BTN_GAP: f32 = 4.0;
 const BTN_SIZE: f32 = 22.0;
 const MENU_ITEM_HEIGHT: f32 = 26.0;
-const MENU_WIDTH: f32 = 168.0;
+const MENU_WIDTH: f32 = 196.0;
 const MENU_PAD_Y: f32 = 4.0;
 const MENU_ITEM_PAD_X: f32 = 12.0;
+/// Width of the leading icon column each dropdown row reserves. The
+/// glyph is centered inside it; the label starts after `MENU_ICON_GAP`
+/// so every row's text aligns regardless of glyph width.
+const MENU_ICON_COL: f32 = 18.0;
+const MENU_ICON_GAP: f32 = 8.0;
 /// Corner radius for the dropdown card.
 const MENU_RADIUS: f32 = 8.0;
 
@@ -101,16 +107,18 @@ pub enum ServerIndicatorStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuItem {
     Settings,
-    Workspaces,
     StartWebServer,
     Themes,
     Extensions,
 }
 
 impl MenuItem {
-    const ALL: [MenuItem; 5] = [
+    // `Workspaces` deliberately absent: switching workspaces is already
+    // reachable from the top-right server/workspace corner, so listing it
+    // here duplicated the same action. `TopBarAction::OpenWorkspaces`
+    // stays defined for those other call sites.
+    const ALL: [MenuItem; 4] = [
         MenuItem::Settings,
-        MenuItem::Workspaces,
         MenuItem::StartWebServer,
         MenuItem::Themes,
         MenuItem::Extensions,
@@ -119,17 +127,35 @@ impl MenuItem {
     fn label(self) -> &'static str {
         match self {
             MenuItem::Settings => "Settings",
-            MenuItem::Workspaces => "Workspaces",
             MenuItem::StartWebServer => "Start Web Server",
             MenuItem::Themes => "Themes",
             MenuItem::Extensions => "Extensions",
         }
     }
 
+    /// Leading nerd-font glyph for the row. Each reuses the app's
+    /// established icon vocabulary so the item reads the same here as
+    /// elsewhere:
+    /// - Settings → cog (`\u{f013}`), the notes-sidebar settings / config
+    ///   glyph.
+    /// - Start Web Server → globe (`\u{f0ac}`) — it launches the web
+    ///   frontend and opens a browser.
+    /// - Themes → paint-brush (`\u{f1fc}`), the same glyph the completion
+    ///   menu / neodraw use for "Color".
+    /// - Extensions → puzzle-piece (`\u{f12e}`), the universal
+    ///   plugin/extension mark.
+    fn icon(self) -> &'static str {
+        match self {
+            MenuItem::Settings => "\u{f013}",
+            MenuItem::StartWebServer => "\u{f0ac}",
+            MenuItem::Themes => "\u{f1fc}",
+            MenuItem::Extensions => "\u{f12e}",
+        }
+    }
+
     fn action(self) -> TopBarAction {
         match self {
             MenuItem::Settings => TopBarAction::OpenSettings,
-            MenuItem::Workspaces => TopBarAction::OpenWorkspaces,
             MenuItem::StartWebServer => TopBarAction::StartWebServer,
             MenuItem::Themes => TopBarAction::OpenThemes,
             MenuItem::Extensions => TopBarAction::OpenExtensions,
@@ -691,15 +717,23 @@ impl ChromeTopBar {
         // centre) — the icon's own left/right pane fills in, no extra
         // chrome behind it.
         if let Some(half) = active_half {
-            let half_w = glyph_w * 0.5;
-            let clip_x = match half {
-                ActiveHalf::Left => gx,
-                ActiveHalf::Right => gx + half_w,
+            // Split at the glyph's horizontal centre, then extend the accent
+            // clip all the way to the button edge on the active side. Using a
+            // fixed `half_w`-wide window (half the *measured advance*) left the
+            // codicon's ink — which is drawn WIDER than its advance — only
+            // partly filled, so the accent stopped short of the right edge and
+            // read as a strip down the MIDDLE of the icon. Extending to the
+            // edge fills the entire right (or left) pane regardless of the
+            // ink-vs-advance mismatch.
+            let center = gx + glyph_w * 0.5;
+            let (clip_x, clip_w) = match half {
+                ActiveHalf::Left => (rect.x, center - rect.x),
+                ActiveHalf::Right => (center, rect.x + rect.w - center),
             };
             let accent_opts = DrawOpts {
                 font_size: icon_size,
                 color: theme.u8(theme.accent),
-                clip_rect: Some([clip_x, rect.y, half_w, rect.h]),
+                clip_rect: Some([clip_x, rect.y, clip_w.max(0.0), rect.h]),
                 ..DrawOpts::default()
             };
             sugarloaf.text_mut().draw(gx, gy, glyph, &accent_opts);
@@ -885,16 +919,38 @@ impl ChromeTopBar {
                     ORDER_MENU_HOVER,
                 );
             }
-            let opts = DrawOpts {
+            let ty = row.y + (row.h - font) * 0.5;
+            let col_x = row.x + MENU_ITEM_PAD_X * self.scale;
+            // Leading icon column: the glyph brightens to `fg` on the
+            // hovered row (mirroring the top-bar icon buttons) and stays
+            // muted otherwise, so each row reads as an icon+label pair
+            // rather than a bare string. Centered in its column so glyphs
+            // of slightly different widths still align the labels.
+            let icon_opts = DrawOpts {
+                font_size: font,
+                color: if hovered {
+                    theme.u8(theme.fg)
+                } else {
+                    theme.u8(theme.dim)
+                },
+                ..DrawOpts::default()
+            };
+            let glyph = item.icon();
+            let glyph_w = sugarloaf.overlay_text_mut().measure(glyph, &icon_opts);
+            let icon_x = col_x + (MENU_ICON_COL * self.scale - glyph_w) * 0.5;
+            sugarloaf
+                .overlay_text_mut()
+                .draw(icon_x, ty, glyph, &icon_opts);
+
+            let label_opts = DrawOpts {
                 font_size: font,
                 color: theme.u8(theme.fg),
                 ..DrawOpts::default()
             };
-            let tx = row.x + MENU_ITEM_PAD_X * self.scale;
-            let ty = row.y + (row.h - font) * 0.5;
+            let tx = col_x + (MENU_ICON_COL + MENU_ICON_GAP) * self.scale;
             sugarloaf
                 .overlay_text_mut()
-                .draw(tx, ty, item.label(), &opts);
+                .draw(tx, ty, item.label(), &label_opts);
         }
         let _ = ORDER_MENU_TEXT;
     }

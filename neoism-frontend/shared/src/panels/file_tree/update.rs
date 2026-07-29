@@ -358,7 +358,17 @@ impl FileTree {
                 while end < self.entries.len() && self.entries[end].depth > parent_depth {
                     end += 1;
                 }
-                self.entries.splice(parent_ix + 1..end, children);
+                // Carry NESTED expansion across the replace. A live re-list
+                // of an open dir (fs-watch push / liveness re-check) used to
+                // splice in the fresh, all-CLOSED children — collapsing every
+                // sub-sub folder the user had opened underneath. Merge the
+                // fresh children with the subtree we're replacing so any dir
+                // that was open stays open and keeps its own (recursively
+                // nested) rows. Same fix the Root arm already applies.
+                let old_subtree: Vec<TreeEntry> =
+                    self.entries[parent_ix + 1..end].to_vec();
+                let merged = merge_children_preserving_open(children, &old_subtree);
+                self.entries.splice(parent_ix + 1..end, merged);
                 if self.selected >= self.entries.len() {
                     self.selected = self.entries.len().saturating_sub(1);
                     self.cursor_spring.reset();
@@ -1331,4 +1341,53 @@ impl FileTree {
         }
         Some(row)
     }
+}
+
+/// Splice-merge that PRESERVES nested expansion. `fresh` is a directory's
+/// freshly-listed children (all closed); `old_subtree` is the rows that
+/// listing is replacing (the dir's previous subtree, in render order). Any
+/// dir that was open in `old_subtree` stays open in the result and keeps its
+/// own descendant rows verbatim — so a live re-list never collapses the
+/// sub-sub folders the user had opened. Used by both the Root and Expand
+/// reply arms.
+fn merge_children_preserving_open(
+    fresh: Vec<TreeEntry>,
+    old_subtree: &[TreeEntry],
+) -> Vec<TreeEntry> {
+    let open_dirs: HashSet<PathBuf> = old_subtree
+        .iter()
+        .filter(|entry| matches!(entry.kind, NodeKind::Dir { open: true }))
+        .filter_map(|entry| entry.path.clone())
+        .collect();
+    let mut merged = Vec::with_capacity(fresh.len());
+    for mut child in fresh {
+        let child_path = child.path.clone();
+        let reopen = child_path
+            .as_ref()
+            .is_some_and(|path| open_dirs.contains(path));
+        if reopen {
+            child.kind = NodeKind::Dir { open: true };
+        }
+        merged.push(child);
+        if reopen {
+            if let Some(path) = child_path {
+                if let Some(ix) = old_subtree
+                    .iter()
+                    .position(|entry| entry.path.as_deref() == Some(path.as_path()))
+                {
+                    // Everything deeper than this dir is its subtree — copy
+                    // it wholesale, which carries arbitrarily deep nesting.
+                    let depth = old_subtree[ix].depth;
+                    let mut sub_end = ix + 1;
+                    while sub_end < old_subtree.len()
+                        && old_subtree[sub_end].depth > depth
+                    {
+                        sub_end += 1;
+                    }
+                    merged.extend(old_subtree[ix + 1..sub_end].iter().cloned());
+                }
+            }
+        }
+    }
+    merged
 }

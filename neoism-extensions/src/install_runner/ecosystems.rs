@@ -15,7 +15,33 @@ pub(super) async fn install_npm(
     tokio::fs::create_dir_all(install_dir).await?;
 
     let package_specs = npm_package_specs(pkg, version, extra_packages)?;
-    let mut cmd = host_command("npm");
+
+    // Prefer a Neoism-managed Node so npm installs "just work" with zero user
+    // setup (Zed-style). Provisioning failures (offline, unsupported arch,
+    // mirror down) fall back to the system `npm` so users who already have Node
+    // are never regressed. `used_managed` selects the spawn-failure message.
+    let (mut cmd, used_managed) = match ensure_managed_node(progress).await {
+        Ok(managed) => {
+            emit(
+                progress,
+                ProgressEvent::Waiting {
+                    status: format!("using managed Node {NODE_VERSION}"),
+                },
+            );
+            (managed_npm_command(&managed), true)
+        }
+        Err(error) => {
+            emit(
+                progress,
+                ProgressEvent::Waiting {
+                    status: format!(
+                        "managed Node unavailable ({error}); using system npm"
+                    ),
+                },
+            );
+            (host_command("npm"), false)
+        }
+    };
     cmd.arg("install")
         .arg("--prefix")
         .arg(install_dir)
@@ -23,6 +49,14 @@ pub(super) async fn install_npm(
         .arg("--no-fund")
         .arg("--loglevel=info")
         .args(&package_specs)
+        // Disable npm's update-notifier: it spawns a DETACHED background
+        // process that inherits (and holds open) our stdout/stderr pipes long
+        // after `npm install` itself exits — which used to hang the pipe
+        // reader for the full 5-minute timeout even though the install
+        // finished in seconds. `wait_for_command` now also drives off process
+        // exit, but keeping the grandchild from spawning is the clean fix.
+        .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
+        .env("NO_UPDATE_NOTIFIER", "1")
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -30,7 +64,7 @@ pub(super) async fn install_npm(
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !used_managed => {
             return Err(InstallError::MissingTool("npm"))
         }
         Err(e) => return Err(InstallError::Io(e)),

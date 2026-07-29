@@ -33,25 +33,25 @@ pub(crate) fn neoism_agent_server() -> String {
         .to_string()
 }
 
-/// Agent endpoint for a JOINED server — the agent runs NEXT TO the
-/// daemon on the machine that owns the workspace (its tools must
-/// execute where the files live), and the self-host container
-/// publishes it on daemon port + 1 by convention:
-/// `ws://host:7981/session` → `http://host:7982`. `None` for unix
-/// sockets or unparseable endpoints — callers keep the local agent.
-pub(crate) fn agent_server_for_daemon_endpoint(endpoint: &str) -> Option<String> {
-    let rest = endpoint
-        .strip_prefix("ws://")
-        .or_else(|| endpoint.strip_prefix("wss://"))?;
-    let hostport = rest.split('/').next()?;
-    let (host, port) = hostport.rsplit_once(':')?;
-    let port: u16 = port.parse().ok()?;
-    let scheme = if endpoint.starts_with("wss://") {
-        "https"
+/// Agent endpoint for a JOINED server — the HOST daemon
+/// reverse-proxies its loopback neoism-agent at `/agent` on the SAME
+/// endpoint the guest already joined over, so the guest reuses the
+/// joined connection and reads the host's chats/threads/SSE:
+/// `ws://host:7981/session` → `http://host:7981/agent`. `None` for
+/// unix sockets or unparseable endpoints — callers keep the local
+/// agent. Shared derivation for both agent-endpoint resolvers (see
+/// `ContextManager::agent_server_override_for_current`).
+pub(crate) fn agent_reverse_proxy_for_daemon_endpoint(endpoint: &str) -> Option<String> {
+    let endpoint = endpoint.trim();
+    let http = if let Some(rest) = endpoint.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = endpoint.strip_prefix("wss://") {
+        format!("https://{rest}")
     } else {
-        "http"
+        return None;
     };
-    Some(format!("{scheme}://{host}:{}", port.checked_add(1)?))
+    let base = http.trim_end_matches("/session").trim_end_matches('/');
+    Some(format!("{base}/agent"))
 }
 
 pub(super) fn fetch_model_options(

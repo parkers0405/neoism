@@ -759,10 +759,14 @@ fn history_refresh_keeps_compaction_marker_in_original_slot() {
         NeoismAgentMessage::assistant("second answer").with_id("answer-2"),
     ];
 
-    // The idle history refresh never echoes the local-only compaction marker.
+    // Compactions are now server-persisted (see
+    // `persisted_compaction_is_only_compaction_message_source`), so the idle
+    // history snapshot re-sends the marker in its original slot rather than
+    // dropping it — the refresh is server-authoritative and preserves it.
     let server_messages = vec![
         NeoismAgentMessage::user("first"),
         NeoismAgentMessage::assistant("first answer").with_id("answer-1"),
+        NeoismAgentMessage::compaction("summary", "model").with_id("compaction-1"),
         NeoismAgentMessage::user("second"),
         NeoismAgentMessage::assistant("second answer").with_id("answer-2"),
     ];

@@ -7,6 +7,12 @@ use super::state::{
 
 const SUBTASK_COMPLETION_SYSTEM_MARKER: &str =
     "Neoism runtime notification: background subagent completion.";
+/// Marker the agent-server stamps on a background-job completion prompt's
+/// `info.system` (see `background_job.rs`). The prompt is injected with
+/// `role: "user"` so the model sees the captured output, but the human did
+/// NOT type it — so we render it as a system notice, never a user bubble.
+const BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER: &str =
+    "Neoism runtime notification: background shell task completion.";
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct ConfigDefaults {
@@ -302,6 +308,7 @@ fn agent_message_new(
         todos: Vec::new(),
         detail: String::new(),
         usage: None,
+        author: None,
     }
 }
 
@@ -411,11 +418,27 @@ pub fn message_blocks(message: &Value) -> Vec<NeoismAgentMessage> {
         let system = info.get("system").and_then(Value::as_str).unwrap_or("");
         let message = if system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER) {
             agent_message_system("Subagent", text)
+        } else if system.contains(BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER) {
+            // Injected as a user-role turn so the model sees the captured
+            // output, but the user didn't send it — render as a system
+            // notice (no user bubble / presence orb), matching how opencode
+            // surfaces tool/runtime output rather than as a fake user turn.
+            agent_message_system("Background task", text)
         } else {
             agent_message_user(text)
         };
         let mut message = message;
         message.id = id;
+        // TODO(shared-author): in a shared session the sender's display
+        // name would ride on the message `info`; read it here so a peer's
+        // prompt shows THEIR presence orb. The agent-server does not tag
+        // sender identity yet (`PromptRequest` has no author field), so
+        // this is `None` today and the renderer falls back to the local
+        // presence name.
+        message.author = info
+            .get("author")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         return vec![message];
     }
 
@@ -804,10 +827,23 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
         // user-prompt parts it broadcasts with `role: "user"` so
         // remote viewers render them as user bubbles, not assistant
         // text.
-        "text" if part.get("role").and_then(Value::as_str) == Some("user") => part
-            .get("text")
-            .and_then(Value::as_str)
-            .map(agent_message_user),
+        "text" if part.get("role").and_then(Value::as_str) == Some("user") => {
+            // A user-role part carrying a runtime-notification `system` marker
+            // (stamped by the agent-server on background-job / subagent
+            // completion prompts) is NOT a human turn — render it as a system
+            // notice, not a user bubble, live. History reload does the same in
+            // `message_blocks`.
+            let system = part.get("system").and_then(Value::as_str).unwrap_or("");
+            part.get("text").and_then(Value::as_str).map(|text| {
+                if system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER) {
+                    agent_message_system("Subagent", text)
+                } else if system.contains(BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER) {
+                    agent_message_system("Background task", text)
+                } else {
+                    agent_message_user(text)
+                }
+            })
+        }
         "text" => part
             .get("text")
             .and_then(Value::as_str)
@@ -853,6 +889,18 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
             message.id = message_id.to_string();
             return Some(message);
         }
+    }
+    // TODO(shared-author): the agent-server tags broadcast user parts with
+    // `role: "user"` but no sender identity (see `session_prompt::
+    // append_prompt` — `PromptRequest` carries no author). When it also
+    // tags the sender's display name, this reads it so a remote peer's
+    // prompt renders THEIR presence orb; until then it stays `None` and
+    // the local presence name is used as the fallback seed.
+    if message.kind == NeoismAgentMessageKind::User {
+        message.author = part
+            .get("author")
+            .and_then(Value::as_str)
+            .map(str::to_string);
     }
     message.id = id;
     Some(message)

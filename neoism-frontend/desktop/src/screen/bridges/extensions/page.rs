@@ -208,11 +208,23 @@ impl Screen<'_> {
             .iter()
             .map(|m| (m.id.clone(), m.clone()))
             .collect();
-        for manifest in catalog_manifests_for_engine_adapters() {
+        // The catalog manifests are exactly the language-server packages whose
+        // managed install can really supply the binary. Capture their ids as
+        // the "installable" set so the LSP rows only advertise Install when it
+        // will actually work, and cache them for the install dispatcher.
+        let catalog_manifests = catalog_manifests_for_engine_adapters();
+        let installable_packages: std::collections::HashSet<String> =
+            catalog_manifests.iter().map(|m| m.id.clone()).collect();
+        for manifest in catalog_manifests {
             self.renderer
                 .bundled_manifests
                 .insert(manifest.id.clone(), manifest);
         }
+        // Whether the on-disk catalog snapshot exists yet. Until it does, LSP
+        // rows stay optimistically installable (the background seed re-seeds
+        // the page once it lands); after it does, non-installable packages are
+        // shown honestly as unavailable.
+        let catalog_available = neoism_extensions::mason::mason_cache_path().is_file();
 
         let mut entries: Vec<ExtensionEntry> = manifests
             .into_iter()
@@ -225,6 +237,8 @@ impl Screen<'_> {
         entries.extend(language_server_entries(
             workspace_root.as_deref(),
             &installed,
+            &installable_packages,
+            catalog_available,
         ));
         entries.extend(built_in_syntax_entries());
         entries
@@ -244,8 +258,17 @@ impl Screen<'_> {
         // `render_neoism_extensions_panels` watches `CATALOG_CACHE_FRESH`
         // and re-seeds the visible pane's entries once this lands.
         ext_runtime_handle().spawn(async move {
-            let _ = neoism_extensions::ensure_cached_mason_registry().await;
-            CATALOG_CACHE_FRESH.store(true, Ordering::Release);
+            match neoism_extensions::ensure_cached_mason_registry().await {
+                Ok(_) => CATALOG_CACHE_FRESH.store(true, Ordering::Release),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "neoism::extensions",
+                        %error,
+                        "extension catalog fetch failed; language-server installs unavailable until it syncs"
+                    );
+                    CATALOG_SEED_FAILED.store(true, Ordering::Release);
+                }
+            }
         });
     }
 
@@ -255,6 +278,17 @@ impl Screen<'_> {
     /// install state via `installed.json`) so the language-server rows'
     /// install plans resolve without the user closing/reopening the tab.
     pub(crate) fn drain_catalog_cache_refresh(&mut self) {
+        // Surface a one-time, actionable notice if the background catalog fetch
+        // failed, so a user who tries to install a language server understands
+        // why it's unavailable instead of hitting a silent dead-end.
+        if CATALOG_SEED_FAILED.swap(false, Ordering::AcqRel) {
+            self.renderer.notifications.push(
+                "Couldn't reach the extension catalog (offline or blocked). Language-server installs are unavailable until it syncs; other extensions still install."
+                    .to_string(),
+                NotificationLevel::Error,
+            );
+            self.mark_dirty();
+        }
         if !CATALOG_CACHE_FRESH.swap(false, Ordering::AcqRel) {
             return;
         }
@@ -309,6 +343,10 @@ impl Screen<'_> {
     ) {
         // First pass: drain progress channels and identify completions.
         let mut completed: Vec<String> = Vec::new();
+        // Jobs that blew past the last-resort wall-clock ceiling without
+        // finishing. These are cancelled and force-failed so a row can never
+        // hang on "Installing…" forever.
+        let mut timed_out: Vec<String> = Vec::new();
         for (id, job) in self.renderer.install_tracker.in_flight.iter_mut() {
             while let Ok(event) = job.progress_rx.try_recv() {
                 match event {
@@ -317,6 +355,7 @@ impl Screen<'_> {
                         job.last_status = status;
                     }
                     ProgressEvent::Waiting { status } => {
+                        tracing::info!(target: "neoism::extensions", id = %id, phase = "waiting", status = %status, "install phase");
                         job.last_percent = None;
                         job.last_status = status;
                     }
@@ -341,17 +380,21 @@ impl Screen<'_> {
                         job.last_status = "starting…".to_string();
                     }
                     ProgressEvent::Extracting => {
+                        tracing::info!(target: "neoism::extensions", id = %id, phase = "extracting", "install phase");
                         job.last_percent = None;
                         job.last_status = "extracting".to_string();
                     }
                     ProgressEvent::Linking => {
+                        tracing::info!(target: "neoism::extensions", id = %id, phase = "linking", "install phase");
                         job.last_percent = None;
                         job.last_status = "linking".to_string();
                     }
                     ProgressEvent::Done => {
+                        tracing::info!(target: "neoism::extensions", id = %id, phase = "done", "install phase (runner finished OK)");
                         job.last_percent = Some(100);
                     }
                     ProgressEvent::Failed { message } => {
+                        tracing::warn!(target: "neoism::extensions", id = %id, message = %message, "install phase FAILED (runner emitted Failed)");
                         job.last_percent = None;
                         job.last_status = format!("failed: {message}");
                     }
@@ -392,7 +435,32 @@ impl Screen<'_> {
 
             if job.install_handle.is_finished() {
                 completed.push(id.clone());
+            } else if job.started_at.elapsed() > INSTALL_WALL_CLOCK_TIMEOUT {
+                // Last-resort watchdog: abort the runaway task so its
+                // subprocesses are killed (they carry `kill_on_drop`), then
+                // force the row to a terminal failure below.
+                job.install_handle.cancel();
+                timed_out.push(id.clone());
             }
+        }
+
+        // Force-fail any timed-out jobs first so the row leaves Installing.
+        for id in &timed_out {
+            tracing::warn!(target: "neoism::extensions", id = %id, "install exceeded the wall-clock watchdog — cancelling");
+            let Some(job) = self.renderer.install_tracker.in_flight.remove(id) else {
+                continue;
+            };
+            let source = job.source.clone();
+            if let Some(p) = pane.as_deref_mut() {
+                if let Some(entry) = p.entries_mut().iter_mut().find(|e| e.id == *id) {
+                    entry.status = ExtensionStatus::NotInstalled;
+                }
+            }
+            self.finalize_install_failure(
+                id,
+                &source,
+                "installation timed out and was cancelled; check your network and that the required toolchain is installed, then try again",
+            );
         }
 
         // Second pass: finalise completed jobs. We have to remove them
@@ -410,6 +478,27 @@ impl Screen<'_> {
             // already reports finished, so the underlying task completed
             // and the await is just a synchronous unwrap of its result.
             let outcome = futures::executor::block_on(job.install_handle.join());
+            match &outcome {
+                Ok(Ok(entry)) => tracing::info!(
+                    target: "neoism::extensions",
+                    id = %id,
+                    bin = ?entry.bin_path,
+                    version = %entry.version,
+                    "install task SUCCEEDED"
+                ),
+                Ok(Err(err)) => tracing::warn!(
+                    target: "neoism::extensions",
+                    id = %id,
+                    error = %err,
+                    "install task FAILED"
+                ),
+                Err(join_err) => tracing::error!(
+                    target: "neoism::extensions",
+                    id = %id,
+                    error = %join_err,
+                    "install task CRASHED (panicked/aborted)"
+                ),
+            }
             match outcome {
                 Ok(Ok(installed_entry)) => {
                     let mut index = match InstalledIndex::load() {

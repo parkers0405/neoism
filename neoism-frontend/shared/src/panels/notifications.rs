@@ -30,6 +30,9 @@ const TOP_OFFSET: f32 = 16.0;
 const MAX_VISIBLE: usize = 5;
 const LIFETIME_MS: u128 = 4_000;
 const FADE_MS: u128 = 350;
+/// Upper bound on wrapped lines per toast so a pathologically long message
+/// can't grow a single card off-screen; the last kept line is ellipsised.
+const MAX_TOAST_LINES: usize = 10;
 
 const DEPTH: f32 = 0.0;
 // Toasts are top-right system messages and must read clearly over
@@ -64,7 +67,6 @@ struct Toast {
     created: Instant,
     paused_for: Duration,
     hover_started: Option<Instant>,
-    scroll_x: f32,
 }
 
 pub struct Notifications {
@@ -109,7 +111,6 @@ impl Notifications {
         }) {
             existing.created = now;
             existing.paused_for = Duration::ZERO;
-            existing.scroll_x = 0.0;
             return;
         }
         self.toasts.push(Toast {
@@ -118,7 +119,6 @@ impl Notifications {
             created: now,
             paused_for: Duration::ZERO,
             hover_started: None,
-            scroll_x: 0.0,
         });
         if self.toasts.len() > MAX_VISIBLE {
             let drop = self.toasts.len() - MAX_VISIBLE;
@@ -178,21 +178,6 @@ impl Notifications {
         changed
     }
 
-    pub fn scroll_hovered(&mut self, delta_x: f32) -> bool {
-        if delta_x.abs() < f32::EPSILON {
-            return false;
-        }
-
-        let Some(toast) = self.toasts.iter_mut().find(|t| t.hover_started.is_some())
-        else {
-            return false;
-        };
-
-        let old = toast.scroll_x;
-        toast.scroll_x = (toast.scroll_x + delta_x).max(0.0);
-        (toast.scroll_x - old).abs() > f32::EPSILON
-    }
-
     pub fn clear_hover(&mut self) -> bool {
         let now = Instant::now();
         let mut changed = false;
@@ -215,16 +200,24 @@ impl Notifications {
     ) -> Option<usize> {
         let logical_w = window_width / scale_factor;
         let toast_w = TOAST_WIDTH * self.scale;
+        let pad_x = TOAST_PADDING_X * self.scale;
         let pad_y = TOAST_PADDING_Y * self.scale;
         let gap = TOAST_GAP * self.scale;
         let font_size = FONT_SIZE * self.scale;
         let right_margin = RIGHT_MARGIN * self.scale;
-        let toast_h = pad_y * 2.0 + font_size;
+        let available_text_w = toast_w - ACCENT_WIDTH * self.scale - pad_x * 2.0;
         let x = (logical_w - toast_w - right_margin).max(0.0);
         let mut y = top_offset + TOP_OFFSET * self.scale;
         let now = Instant::now();
 
         for (idx, toast) in self.toasts.iter().enumerate() {
+            // Height varies per toast now that long messages wrap — use the
+            // same wrap the renderer does so hover/hit-testing lines up.
+            let lines = wrap_message(&toast.message, available_text_w, font_size);
+            let toast_h = toast_height(lines.len(), font_size, pad_y);
+            // Fully-faded toasts are skipped WITHOUT advancing `y`, matching
+            // the renderer (which `continue`s on alpha<=0 before its `y +=`),
+            // so hit-testing stays aligned with what's actually drawn.
             if visible_age(toast, now) >= LIFETIME_MS + FADE_MS
                 && toast.hover_started.is_none()
             {
@@ -274,20 +267,19 @@ impl Notifications {
         // calls inside the loop alongside the per-toast field reads.
         let now = Instant::now();
         let available_text_w = toast_w - ACCENT_WIDTH * self.scale - pad_x * 2.0;
-        let snapshot: Vec<(String, NotificationLevel, u128)> = self
+        let snapshot: Vec<(Vec<String>, NotificationLevel, u128)> = self
             .toasts
-            .iter_mut()
+            .iter()
             .map(|t| {
-                clamp_scroll(t, available_text_w, font_size);
                 (
-                    display_message(t, available_text_w, font_size),
+                    wrap_message(&t.message, available_text_w, font_size),
                     t.level,
                     visible_age(t, now),
                 )
             })
             .collect();
 
-        for (message, level, age) in snapshot {
+        for (lines, level, age) in snapshot {
             // Linear fade once we cross LIFETIME_MS — clamps so that
             // the very last frame paints at zero alpha rather than a
             // sudden snap-out.
@@ -305,10 +297,11 @@ impl Notifications {
                 continue;
             }
 
-            // Estimate text height: single-line for now. Future: wrap
-            // long messages — keeping toasts single-line keeps this
-            // simple and matches noice's compact style.
-            let toast_h = pad_y * 2.0 + font_size;
+            // Long messages wrap across multiple lines so the whole toast
+            // is readable (install-failure reasons, LSP errors, etc.). The
+            // card grows to fit; `toast_height` mirrors the same wrap used by
+            // `hit_test` so hover/expiry line up.
+            let toast_h = toast_height(lines.len(), font_size, pad_y);
 
             // Background card with corner radius. The toast must NEVER be
             // see-through over the page behind it. We draw on Sugarloaf's
@@ -374,11 +367,16 @@ impl Notifications {
             };
 
             let text_x = x + ACCENT_WIDTH * self.scale + pad_x;
-            let text_y = y + (toast_h - font_size) / 2.0;
+            let line_h = line_height(font_size);
             // Overlay text pass: renders above the overlay quads above,
-            // matching the chrome topbar menu's label path.
+            // matching the chrome topbar menu's label path. Each wrapped line
+            // stacks down from the top padding.
             let ui = sugarloaf.overlay_text_mut();
-            ui.draw(text_x, text_y, &message, &opts);
+            let mut line_y = y + pad_y;
+            for line in &lines {
+                ui.draw(text_x, line_y, line, &opts);
+                line_y += line_h;
+            }
 
             y += toast_h + gap;
         }
@@ -406,40 +404,82 @@ fn visible_char_count(available_width: f32, font_size: f32) -> usize {
         .max(4.0) as usize
 }
 
-fn clamp_scroll(toast: &mut Toast, available_width: f32, font_size: f32) {
-    let visible = visible_char_count(available_width, font_size);
-    let total = toast.message.chars().count();
-    let max_offset = total.saturating_sub(visible) as f32 * approx_char_width(font_size);
-    toast.scroll_x = toast.scroll_x.clamp(0.0, max_offset.max(0.0));
+/// Vertical advance between wrapped lines.
+fn line_height(font_size: f32) -> f32 {
+    font_size * 1.35
 }
 
-fn display_message(toast: &Toast, available_width: f32, font_size: f32) -> String {
-    let visible = visible_char_count(available_width, font_size);
-    let chars: Vec<char> = toast.message.chars().collect();
-    if chars.len() <= visible {
-        return toast.message.clone();
-    }
+/// Card height for a toast with `line_count` wrapped lines.
+fn toast_height(line_count: usize, font_size: f32, pad_y: f32) -> f32 {
+    let block = font_size + line_count.saturating_sub(1) as f32 * line_height(font_size);
+    pad_y * 2.0 + block
+}
 
-    if toast.hover_started.is_none() {
-        let take = visible.saturating_sub(3).max(1);
-        return format!("{}...", chars.iter().take(take).collect::<String>());
+/// Greedy word-wrap a message to fit `available_width`, capped at
+/// `MAX_TOAST_LINES` (the last kept line is ellipsised when it overflows).
+/// Honours explicit newlines; hard-splits words longer than one line so a
+/// single URL/path can't overflow the card. Replaces the old single-line
+/// truncate-with-… + hover-scroll so long install/LSP errors are fully
+/// readable.
+fn wrap_message(message: &str, available_width: f32, font_size: f32) -> Vec<String> {
+    let max_chars = visible_char_count(available_width, font_size).max(1);
+    let mut lines: Vec<String> = Vec::new();
+    for raw_line in message.split('\n') {
+        wrap_one_line(raw_line, max_chars, &mut lines);
     }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    if lines.len() > MAX_TOAST_LINES {
+        lines.truncate(MAX_TOAST_LINES);
+        if let Some(last) = lines.last_mut() {
+            let mut chars: Vec<char> = last.chars().collect();
+            while chars.len() >= max_chars && !chars.is_empty() {
+                chars.pop();
+            }
+            *last = chars.into_iter().collect::<String>();
+            last.push('…');
+        }
+    }
+    lines
+}
 
-    let offset = (toast.scroll_x / approx_char_width(font_size)).round() as usize;
-    let offset = offset.min(chars.len().saturating_sub(visible));
-    let has_prefix = offset > 0;
-    let has_suffix = offset + visible < chars.len();
-    let marker_count = has_prefix as usize + (has_suffix as usize * 3);
-    let take = visible.saturating_sub(marker_count).max(1);
-    let mut out = String::new();
-    if has_prefix {
-        out.push('<');
+fn wrap_one_line(raw_line: &str, max_chars: usize, out: &mut Vec<String>) {
+    if raw_line.trim().is_empty() {
+        out.push(String::new());
+        return;
     }
-    out.extend(chars.iter().skip(offset).take(take));
-    if has_suffix {
-        out.push_str("...");
+    let mut current = String::new();
+    for word in raw_line.split_whitespace() {
+        // A single word longer than a line is hard-split into chunks.
+        if word.chars().count() > max_chars {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            let mut chunk = String::new();
+            for ch in word.chars() {
+                if chunk.chars().count() >= max_chars {
+                    out.push(std::mem::take(&mut chunk));
+                }
+                chunk.push(ch);
+            }
+            current = chunk;
+            continue;
+        }
+        let sep = usize::from(!current.is_empty());
+        if current.chars().count() + sep + word.chars().count() > max_chars {
+            out.push(std::mem::take(&mut current));
+            current.push_str(word);
+        } else {
+            if sep == 1 {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
     }
-    out
+    if !current.is_empty() {
+        out.push(current);
+    }
 }
 
 impl Default for Notifications {

@@ -7,10 +7,13 @@ use crate::panels::agent_pane::state::{
     NeoismAgentStreamingState,
 };
 
-use super::draw::{draw_rect_clipped, draw_text_clipped, opts_with_clip, wrap_text};
+use super::draw::{
+    draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped, opts_with_clip,
+    wrap_text,
+};
 use super::wordmark::{format_elapsed, hsl_to_u8_simple};
 use super::{
-    DEPTH, INPUT_LINE_H, MAX_INPUT_LINES, ORDER_PANEL, ORDER_TEXT,
+    DEPTH, INPUT_LINE_H, MAX_INPUT_LINES, ORDER_CARET, ORDER_PANEL, ORDER_TEXT,
     STREAMING_STATUS_LINE_H,
 };
 use crate::panels::file_tree::FRAME_STROKE;
@@ -501,6 +504,60 @@ impl AgentUserInputPane for NeoismAgentPane {
     }
 }
 
+/// Logical size (pre-scale) of the user-message presence orb — roughly
+/// one line height, matching the editor caret / top-chrome orb. The orb
+/// now sits INSIDE the message bubble's top-left, with the text inset past
+/// it (see `render_user_message`).
+const USER_ORB_SIZE: f32 = 18.0;
+
+/// Resolved presence identity for one user message: the deterministic
+/// avatar `seed` (fed straight into `AvatarProfile::from_seed`) and the
+/// `label` shown in the hover tooltip.
+pub struct UserMessageOrbIdentity {
+    pub seed: String,
+    pub label: String,
+}
+
+/// THE choke point that turns a user message's optional `author` name
+/// into its presence orb + hover tooltip — the single, deliberately
+/// small "author name → orb" seam. A future integration only has to set
+/// [`NeoismAgentMessage::author`] (from the shared-session sender, a
+/// plugin, wherever) and both the orb seed and the hover label follow;
+/// nothing else decides either. Deterministic-from-name is the whole
+/// hook, so the author stays a plain name string.
+///
+/// `local_name` is the local peer's presence display name (the same seed
+/// the editor caret / top-chrome orb use). A message with no explicit
+/// author is the local user's own message, so it seeds off `local_name`
+/// — matching your caret orb — and labels the tooltip "You".
+///
+/// [`NeoismAgentMessage::author`]:
+///   crate::panels::agent_pane::state::NeoismAgentMessage
+pub fn user_message_orb_identity(
+    author: Option<&str>,
+    local_name: Option<&str>,
+) -> UserMessageOrbIdentity {
+    match author.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => UserMessageOrbIdentity {
+            seed: name.to_string(),
+            label: name.to_string(),
+        },
+        None => {
+            let seed = local_name
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                // No presence name published — a stable generic seed so
+                // the orb is still deterministic (and never empty).
+                .unwrap_or("you")
+                .to_string();
+            UserMessageOrbIdentity {
+                seed,
+                label: "You".to_string(),
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_user_message(
     sugarloaf: &mut Sugarloaf,
@@ -509,19 +566,51 @@ pub fn render_user_message(
     w: f32,
     h: f32,
     text: &str,
+    // Presence identity resolved by `user_message_orb_identity` — the
+    // orb seed (a display name) and the hover-tooltip label.
+    orb_seed: &str,
+    orb_label: &str,
+    // Live cursor position, for the orb hover tooltip. `None` = no hover.
+    mouse: Option<(f32, f32)>,
     theme: &IdeTheme,
     s: f32,
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    let bubble_w = w.max(160.0 * s);
+    // The grey bubble spans the FULL row now; the orb lives INSIDE it at
+    // the top-left (avatar-left chat layout) with the text indented past
+    // it — it used to float in a transparent left gutter outside the card.
     let bubble_x = x;
+    let bubble_w = w.max(160.0 * s);
     draw_rect_clipped(
         sugarloaf,
         [bubble_x, y, bubble_w, h],
         theme.f32(theme.surface),
         ORDER_PANEL,
         viewport_clip,
+    );
+    // Sender presence orb INSIDE the bubble, aligned to the first text line.
+    // Deterministic in `orb_seed` (a display name), so the same author
+    // always wears the same round pixel-plasma orb — the very generator the
+    // editor carets / top-chrome face-pile use. MUST feed the dedicated
+    // `presence_orb_now_seconds()` clock (a small wrapped value), NOT the
+    // render's raw epoch `now_seconds`: at ~1.75e9 an f32 can't resolve a
+    // 16ms frame step, so the plasma would animate then stall. The
+    // `presence_orb` animation_reason keeps the pane redrawing.
+    let orb = USER_ORB_SIZE * s;
+    let pad_x = 14.0 * s;
+    let orb_x = bubble_x + pad_x;
+    let orb_y = y + 12.0 * s;
+    crate::editor::markdown::render::draw::draw_presence_orb_clipped(
+        sugarloaf,
+        viewport_clip,
+        orb_seed,
+        orb_x,
+        orb_y,
+        orb,
+        crate::editor::crdt::presence_orb_now_seconds(),
+        DEPTH,
+        ORDER_TEXT,
     );
     let Some(opts) = opts_with_clip(
         DrawOpts {
@@ -533,17 +622,14 @@ pub fn render_user_message(
     ) else {
         return h;
     };
+    // Text sits to the RIGHT of the orb, inside the same grey bubble.
+    let text_x = orb_x + orb + 10.0 * s;
+    let text_w = (bubble_x + bubble_w - text_x - pad_x).max(80.0 * s);
     let mut line_y = y + 12.0 * s;
-    for line in wrap_text(
-        sugarloaf,
-        text,
-        (bubble_w - 34.0 * s).max(80.0 * s),
-        &opts,
-        6,
-    ) {
+    for line in wrap_text(sugarloaf, text, text_w, &opts, 6) {
         draw_agent_prompt_text(
             sugarloaf,
-            bubble_x + 18.0 * s,
+            text_x,
             line_y,
             &line,
             &opts,
@@ -552,7 +638,71 @@ pub fn render_user_message(
         );
         line_y += 19.0 * s;
     }
+    // Hover tooltip: when the cursor is over the orb, name the sender —
+    // the same read as the top-chrome presence face-pile. Hit-test the
+    // live mouse against the orb rect (drawn this frame, so it can't go
+    // stale) and draw a small surface pill below it.
+    if let Some((mx, my)) = mouse {
+        if mx >= orb_x && mx <= orb_x + orb && my >= orb_y && my <= orb_y + orb {
+            draw_user_orb_tooltip(
+                sugarloaf,
+                orb_x,
+                orb_y,
+                orb,
+                orb_label,
+                theme,
+                s,
+                viewport_clip,
+            );
+        }
+    }
     h
+}
+
+/// Small name pill under a hovered user-message orb. Mirrors the
+/// top-chrome presence tooltip: a surface rounded-rect + label, clamped
+/// inside the timeline's viewport, painted above the message cards.
+#[allow(clippy::too_many_arguments)]
+fn draw_user_orb_tooltip(
+    sugarloaf: &mut Sugarloaf,
+    orb_x: f32,
+    orb_y: f32,
+    orb: f32,
+    label: &str,
+    theme: &IdeTheme,
+    s: f32,
+    clip: [f32; 4],
+) {
+    let font_size = 11.0 * s;
+    let opts = DrawOpts {
+        font_size,
+        color: theme.u8(theme.fg),
+        ..DrawOpts::default()
+    };
+    let pad_x = 7.0 * s;
+    let tip_h = 20.0 * s;
+    let tip_w = sugarloaf.text_mut().measure(label, &opts) + pad_x * 2.0;
+    let margin = 4.0 * s;
+    let min_x = clip[0] + margin;
+    let max_x = (clip[0] + clip[2] - tip_w - margin).max(min_x);
+    let tip_x = (orb_x + orb * 0.5 - tip_w * 0.5).clamp(min_x, max_x);
+    let tip_y = orb_y + orb + margin;
+    draw_rounded_rect_clipped(
+        sugarloaf,
+        [tip_x, tip_y, tip_w, tip_h],
+        theme.f32(theme.surface),
+        5.0 * s,
+        ORDER_CARET + 1,
+        clip,
+    );
+    let mut text_opts = opts;
+    text_opts.clip_rect = Some([tip_x, tip_y, tip_w, tip_h]);
+    sugarloaf.text_mut().draw(
+        tip_x + pad_x,
+        tip_y + (tip_h - font_size) * 0.5,
+        label,
+        &text_opts,
+    );
 }
 
 pub fn render_input(

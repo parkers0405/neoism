@@ -525,6 +525,7 @@ pub enum ModalActionTag {
     NotesVaultPromptRename,
     NotesVaultRename,
     NotesVaultSwitch,
+    NotesVaultSwitchShared,
     NotesVaultOpenVaultsRoot,
     NotesVaultLinkCurrentWorkspace,
     NotesVaultPromptLinkProject,
@@ -570,6 +571,7 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         | T::ServerRemoveConfirm
         | T::NotesVaultRename
         | T::NotesVaultSwitch
+        | T::NotesVaultSwitchShared
         | T::NotesVaultOpenVaultsRoot
         | T::NotesVaultLinkCurrentWorkspace
         | T::NotesVaultLinkProject

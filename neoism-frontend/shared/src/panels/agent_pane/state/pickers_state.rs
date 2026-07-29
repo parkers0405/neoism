@@ -369,8 +369,22 @@ impl NeoismAgentPane {
         if self.running_background_task_count() > 0 {
             return Some("background_tasks");
         }
-        if self.side_panel.is_animating() {
+        // Only an on-screen side panel drives the render loop. A pane
+        // that has never been laid out (fresh/backgrounded) must not
+        // spin redraws off its still-unloaded sessions skeleton — the
+        // shimmer only needs to animate once the panel is actually
+        // painted (`last_panel_rect` is stamped during render).
+        if self.side_panel.last_panel_rect().is_some() && self.side_panel.is_animating() {
             return Some("side_panel");
+        }
+        // Animated presence orbs on user-message bubbles breathe off the
+        // wall clock, so keep the (visible) agent pane redrawing while a
+        // conversation with its user bubbles is on screen — the same deal as
+        // the caret / top-chrome presence orbs, which own a redraw while
+        // visible. The aggregator upstream only samples RENDERED panes, so a
+        // backgrounded chat never spins the loop.
+        if self.has_conversation() {
+            return Some("presence_orb");
         }
         None
     }

@@ -86,7 +86,8 @@ fn built_in_syntax_entries_reflect_compiled_in_grammars() {
 #[test]
 fn language_server_catalog_is_derived_from_runtime_adapters() {
     let installed = InstalledIndex::default();
-    let entries = language_server_entries(None, &installed);
+    let entries =
+        language_server_entries(None, &installed, &std::collections::HashSet::new(), false);
 
     // TCP endpoint adapters (host application provides the server).
     let godot = entries
@@ -131,7 +132,8 @@ fn language_server_catalog_is_derived_from_runtime_adapters() {
 #[test]
 fn formatter_and_linter_tabs_are_curated_not_capability_driven() {
     let installed = InstalledIndex::default();
-    let entries = language_server_entries(None, &installed);
+    let entries =
+        language_server_entries(None, &installed, &std::collections::HashSet::new(), false);
 
     // taplo (the TOML adapter) is the only format-first tool in the
     // built-in registry, so it alone joins the Formatters tab.
@@ -153,6 +155,39 @@ fn formatter_and_linter_tabs_are_curated_not_capability_driven() {
         .categories
         .iter()
         .any(|c| c == "Language Server" || c == "LSP")));
+}
+
+#[test]
+fn lsp_missing_status_only_offers_install_when_really_installable() {
+    use std::collections::HashSet;
+    let installable: HashSet<String> =
+        ["rust-analyzer".to_string()].into_iter().collect();
+
+    // Catalog present + package installable → offer Install.
+    assert_eq!(
+        lsp_missing_status(Some("rust-analyzer"), &installable, true),
+        ExtensionStatus::NotInstalled
+    );
+    // Catalog present + package NOT installable here → honest Unavailable,
+    // so the row stops advertising an Install that would only error.
+    assert_eq!(
+        lsp_missing_status(Some("some-platform-only-lsp"), &installable, true),
+        ExtensionStatus::Unavailable
+    );
+    // Catalog not fetched yet → optimistic NotInstalled (the seed re-seeds).
+    assert_eq!(
+        lsp_missing_status(Some("some-platform-only-lsp"), &HashSet::new(), false),
+        ExtensionStatus::NotInstalled
+    );
+    // No catalog package at all → nothing to install, ever.
+    assert_eq!(
+        lsp_missing_status(None, &installable, true),
+        ExtensionStatus::Unavailable
+    );
+    assert_eq!(
+        lsp_missing_status(None, &HashSet::new(), false),
+        ExtensionStatus::Unavailable
+    );
 }
 
 #[test]

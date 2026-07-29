@@ -234,6 +234,17 @@ impl Screen<'_> {
                     self.mark_dirty();
                     return true;
                 }
+                // Space arrives as a NAMED key, not a Character, so without
+                // this arm it fell through to the swallow branch below and no
+                // space was ever inserted — "hello world" searched as
+                // "helloworld". Route it to the query like any other char.
+                Key::Named(NamedKey::Space) => {
+                    agent.side_panel_mut().push_session_query(" ");
+                    let query = agent.side_panel().session_query().to_string();
+                    agent.kick_semantic_session_search(query);
+                    self.mark_dirty();
+                    return true;
+                }
                 // Typed characters filter the session list (home-mode search).
                 Key::Character(text) => {
                     let text = text.to_string();
@@ -598,6 +609,15 @@ impl Screen<'_> {
         // top-bar strip, leaving the panel one row above the tree.
         let (sidebar_top, sidebar_bottom) = self.side_panel_band();
 
+        // Local presence display name — the same seed the editor caret /
+        // top-chrome presence orb use. Threaded into each agent pane so a
+        // user message with no explicit `author` renders the local user's
+        // own presence orb (and a "You" hover tooltip).
+        let local_presence_name = crate::screen::presence::local_presence_identity(
+            self.presence_display_name_override.as_deref(),
+        )
+        .1;
+
         let mut agent_animating = false;
         let mut agent_animating_reason = None;
         let mut agent_ui_events = Vec::new();
@@ -614,6 +634,7 @@ impl Screen<'_> {
             let Some(agent) = item.val.neoism_agent.as_mut() else {
                 continue;
             };
+            agent.set_local_presence_name(Some(local_presence_name.clone()));
             if agent.drain_server_updates() {
                 agent_animating = true;
             }

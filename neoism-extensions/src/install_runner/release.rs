@@ -19,75 +19,7 @@ pub(super) async fn install_github_release(
     let asset_name = safe_asset_name(&asset.file)?;
     let url = github_asset_url(owner, repo, tag, &asset.file);
     let staged_file = staging.join(asset_name);
-    let partial_file = staging.join(format!("{asset_name}.part"));
-    let _ = tokio::fs::remove_file(&partial_file).await;
-    let mut partial_guard = RemovePartialOnDrop::new(partial_file.clone());
-
-    emit(
-        progress,
-        ProgressEvent::Waiting {
-            status: format!("connecting to GitHub for {asset_name}"),
-        },
-    );
-    let client = reqwest::Client::builder()
-        .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
-        .timeout(DOWNLOAD_REQUEST_TIMEOUT)
-        .user_agent(concat!("neoism/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|error| InstallError::Network(error.to_string()))?;
-    let response =
-        tokio::time::timeout(DOWNLOAD_CONNECT_TIMEOUT, client.get(&url).send())
-            .await
-            .map_err(|_| InstallError::TimedOut {
-                tool: format!("GitHub connection for {asset_name}"),
-                seconds: DOWNLOAD_CONNECT_TIMEOUT.as_secs(),
-            })?
-            .map_err(|error| InstallError::Network(error.to_string()))?
-            .error_for_status()
-            .map_err(|error| InstallError::Network(error.to_string()))?;
-    let total = response.content_length().filter(|total| *total > 0);
-    emit(progress, ProgressEvent::Downloading { bytes: 0, total });
-
-    let mut out = tokio::fs::File::create(&partial_file).await?;
-    let mut stream = response.bytes_stream();
-    let mut downloaded: u64 = 0;
-    let mut last_percent = download_percent(downloaded, total);
-    let mut last_emit = Instant::now();
-    loop {
-        let next = tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, stream.next())
-            .await
-            .map_err(|_| InstallError::TimedOut {
-                tool: format!("download of {asset_name}"),
-                seconds: DOWNLOAD_IDLE_TIMEOUT.as_secs(),
-            })?;
-        let Some(chunk) = next else {
-            break;
-        };
-        let bytes = chunk.map_err(|error| InstallError::Network(error.to_string()))?;
-        out.write_all(&bytes).await?;
-        downloaded = downloaded.saturating_add(bytes.len() as u64);
-        let percent = download_percent(downloaded, total);
-        // At most one event per percentage point (known total) or four per
-        // second (unknown total). A 40 MB binary must not enqueue thousands
-        // of chunk events faster than the UI can drain them.
-        if percent != last_percent || last_emit.elapsed() >= Duration::from_millis(250) {
-            last_percent = percent;
-            last_emit = Instant::now();
-            emit(
-                progress,
-                ProgressEvent::Downloading {
-                    bytes: downloaded,
-                    total,
-                },
-            );
-        }
-    }
-    out.flush().await?;
-    drop(out);
-
-    let _ = tokio::fs::remove_file(&staged_file).await;
-    tokio::fs::rename(&partial_file, &staged_file).await?;
-    partial_guard.disarm();
+    download_to_file(&url, &staged_file, asset_name, progress).await?;
 
     emit(progress, ProgressEvent::Extracting);
 
@@ -131,6 +63,97 @@ pub(super) async fn install_github_release(
     let _ = tokio::fs::remove_file(&staged_file).await;
 
     Ok(resolved)
+}
+
+/// Stream `url` to `dest`, buffering through a sibling `<dest>.part` file with a
+/// cancellation-safe drop guard, and emitting `Waiting`/`Downloading` progress.
+///
+/// Shared by the GitHub-release installer and the managed Node provisioner so
+/// both get the same bounded (connect/request/idle) timeouts and the same
+/// no-half-file guarantee. `label` names the download in progress + timeout
+/// messages (e.g. the asset file name, or "Node 22.11.0").
+pub(super) async fn download_to_file(
+    url: &str,
+    dest: &Path,
+    label: &str,
+    progress: &UnboundedSender<ProgressEvent>,
+) -> Result<(), InstallError> {
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let partial_file = {
+        let mut raw = dest.as_os_str().to_owned();
+        raw.push(".part");
+        PathBuf::from(raw)
+    };
+    let _ = tokio::fs::remove_file(&partial_file).await;
+    let mut partial_guard = RemovePartialOnDrop::new(partial_file.clone());
+
+    emit(
+        progress,
+        ProgressEvent::Waiting {
+            status: format!("connecting to {label}"),
+        },
+    );
+    let client = reqwest::Client::builder()
+        .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+        .timeout(DOWNLOAD_REQUEST_TIMEOUT)
+        .user_agent(concat!("neoism/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| InstallError::Network(error.to_string()))?;
+    let response = tokio::time::timeout(DOWNLOAD_CONNECT_TIMEOUT, client.get(url).send())
+        .await
+        .map_err(|_| InstallError::TimedOut {
+            tool: format!("connection for {label}"),
+            seconds: DOWNLOAD_CONNECT_TIMEOUT.as_secs(),
+        })?
+        .map_err(|error| InstallError::Network(error.to_string()))?
+        .error_for_status()
+        .map_err(|error| InstallError::Network(error.to_string()))?;
+    let total = response.content_length().filter(|total| *total > 0);
+    emit(progress, ProgressEvent::Downloading { bytes: 0, total });
+
+    let mut out = tokio::fs::File::create(&partial_file).await?;
+    let mut stream = response.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut last_percent = download_percent(downloaded, total);
+    let mut last_emit = Instant::now();
+    loop {
+        let next = tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| InstallError::TimedOut {
+                tool: format!("download of {label}"),
+                seconds: DOWNLOAD_IDLE_TIMEOUT.as_secs(),
+            })?;
+        let Some(chunk) = next else {
+            break;
+        };
+        let bytes = chunk.map_err(|error| InstallError::Network(error.to_string()))?;
+        out.write_all(&bytes).await?;
+        downloaded = downloaded.saturating_add(bytes.len() as u64);
+        let percent = download_percent(downloaded, total);
+        // At most one event per percentage point (known total) or four per
+        // second (unknown total). A 40 MB binary must not enqueue thousands
+        // of chunk events faster than the UI can drain them.
+        if percent != last_percent || last_emit.elapsed() >= Duration::from_millis(250) {
+            last_percent = percent;
+            last_emit = Instant::now();
+            emit(
+                progress,
+                ProgressEvent::Downloading {
+                    bytes: downloaded,
+                    total,
+                },
+            );
+        }
+    }
+    out.flush().await?;
+    drop(out);
+
+    let _ = tokio::fs::remove_file(dest).await;
+    tokio::fs::rename(&partial_file, dest).await?;
+    partial_guard.disarm();
+    Ok(())
 }
 
 pub(super) fn safe_asset_name(file: &str) -> Result<&str, InstallError> {

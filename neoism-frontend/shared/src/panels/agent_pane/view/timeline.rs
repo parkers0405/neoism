@@ -393,6 +393,7 @@ macro_rules! neoism_ui_impl_agent_timeline_message {
                     todos: Vec::new(),
                     detail,
                     usage: None,
+                    author: None,
                 }
             }
         }

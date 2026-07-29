@@ -26,6 +26,7 @@ xz2 = "0.1"
 zstd = "0.13"
 bzip2 = "0.5"
 tar = "0.4"
+sha2 = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]

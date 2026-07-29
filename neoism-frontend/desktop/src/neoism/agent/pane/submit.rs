@@ -344,11 +344,21 @@ impl NeoismAgentPane {
         if self.sent_history.last().is_none_or(|last| last != text) {
             self.sent_history.push(text.to_string());
         }
-        const MAX_HISTORY: usize = 100;
-        if self.sent_history.len() > MAX_HISTORY {
-            let extra = self.sent_history.len() - MAX_HISTORY;
+        // Match the persistent file's cap so a freshly-seeded pane's recall
+        // depth and the on-disk history stay in lock-step (see
+        // `prompt_history`). The oldest entries drop first.
+        let cap = crate::neoism::agent::prompt_history::MAX_PROMPT_HISTORY;
+        if self.sent_history.len() > cap {
+            let extra = self.sent_history.len() - cap;
             self.sent_history.drain(0..extra);
         }
+        // Persist to the GLOBAL prompt history so other/next sessions and
+        // future launches recall this prompt too. Host-only std::fs, so it
+        // is compiled out of test builds (which would otherwise write to the
+        // real history file via `submit()`); the store is unit-tested on its
+        // own.
+        #[cfg(not(test))]
+        crate::neoism::agent::prompt_history::append(text);
     }
 
     pub(crate) fn update_picker_query(&mut self, text: &str) {

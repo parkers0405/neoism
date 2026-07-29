@@ -1763,8 +1763,21 @@ impl Screen<'_> {
         ensure_workers(proxy, window_id)
     }
 
-    /// `(workspace root, file)` for the focused code pane.
+    /// True when the focused code pane belongs to a remote-joined
+    /// workspace: its `root`/`file` are HOST paths, so the in-process
+    /// language server must NOT touch them (it would spawn a local
+    /// server against files that don't exist here). LSP for joined
+    /// workspaces is served by the daemon that owns the files.
+    fn code_lsp_is_remote(&self) -> bool {
+        self.context_manager.current_workspace_is_remote_joined()
+    }
+
+    /// `(workspace root, file)` for the focused code pane. `None` for a
+    /// remote-joined pane so every query/apply path no-ops locally.
     fn code_lsp_target(&self) -> Option<(PathBuf, PathBuf)> {
+        if self.code_lsp_is_remote() {
+            return None;
+        }
         let root = self.active_pane_workspace_root();
         let code = self.context_manager.current().code.as_ref()?;
         let file = code.path.clone();
@@ -1790,6 +1803,10 @@ impl Screen<'_> {
         let shared = ensure_workers(proxy, window_id);
         let global_version = DIAG_VERSION.load(Ordering::SeqCst);
         let root = self.active_pane_workspace_root();
+        // Remote-joined panes never drive the in-process language
+        // server (host paths — a local server would start against files
+        // that don't exist here); diagnostics/LSP come from the daemon.
+        let remote = self.code_lsp_is_remote();
         let Some(code) = self.context_manager.current_mut().code.as_mut() else {
             return;
         };
@@ -1807,7 +1824,7 @@ impl Screen<'_> {
             ))
             .filter(|binding| binding.is_seeded());
 
-        if code.lsp_synced_revision != Some(code.buffer.revision) {
+        if !remote && code.lsp_synced_revision != Some(code.buffer.revision) {
             code.lsp_synced_revision = Some(code.buffer.revision);
             let _ = shared.jobs.send(CodeLspJob::Sync {
                 root: root.clone(),
@@ -2716,6 +2733,11 @@ impl Screen<'_> {
     /// Notify the engine after a successful save (didSave triggers
     /// slow-lane checks like `cargo check` on rust-analyzer).
     pub(crate) fn notify_code_lsp_saved(&mut self, file: &Path) {
+        // Remote-joined pane: the host daemon owns didSave for its own
+        // files; never fire a local server's slow-lane check here.
+        if self.code_lsp_is_remote() {
+            return;
+        }
         let Some(shared) = CODE_LSP.get() else {
             return;
         };

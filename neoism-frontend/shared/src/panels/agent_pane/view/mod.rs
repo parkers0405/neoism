@@ -260,6 +260,10 @@ pub fn render_agent_pane_with<P, D, I>(
     }
     clear_overlays(sugarloaf);
     sugarloaf.rect(None, x, y, w, h, theme.f32(theme.bg), DEPTH, ORDER_BG);
+    // The "NEOISM" home page and the chat timeline render immediately —
+    // no body skeleton. First-load shimmer belongs on the recent-sessions
+    // TREE (date/name rows) in the side panel, handled there by
+    // `draw_session_loading_skeleton`, not over this welcome/entry body.
     if chat::AgentChatPane::has_conversation(pane) {
         chat::render_chat_with::<P, D>(
             sugarloaf,
@@ -286,7 +290,7 @@ pub fn render_agent_pane_with<P, D, I>(
             input_rect,
             &local_occlusions,
         );
-    };
+    }
     if let Some(panel_rect) = side_panel_rect {
         side_panel::render_side_panel_with_icons::<P, I>(
             sugarloaf,
@@ -347,3 +351,4 @@ pub fn render_agent_pane_with<P, D, I>(
         panel_top_override,
     );
 }
+

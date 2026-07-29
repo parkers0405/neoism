@@ -331,6 +331,9 @@ impl Screen<'_> {
             ModalAction::NotesVaultSwitch { name } => {
                 self.switch_notes_vault(name);
             }
+            ModalAction::NotesVaultSwitchShared => {
+                self.switch_to_shared_notes_vault();
+            }
             ModalAction::NotesVaultOpenVaultsRoot => {
                 self.open_notes_vaults_root();
             }

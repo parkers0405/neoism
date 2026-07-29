@@ -16,6 +16,7 @@ use crate::paths;
 
 mod ecosystems;
 mod managed;
+mod managed_node;
 mod process;
 mod release;
 mod resolution;
@@ -23,6 +24,7 @@ mod runtime;
 
 use ecosystems::*;
 pub use managed::*;
+use managed_node::*;
 use process::*;
 pub use release::*;
 use resolution::*;
@@ -95,7 +97,7 @@ pub enum InstallError {
         exit: std::process::ExitStatus,
         tail: String,
     },
-    #[error("tool `{0}` not found on PATH")]
+    #[error("{}", missing_tool_message(.0))]
     MissingTool(&'static str),
     #[error("{tool} install timed out after {seconds} seconds")]
     TimedOut { tool: String, seconds: u64 },
@@ -115,6 +117,24 @@ pub enum InstallError {
     ParseManifest(String),
     #[error("invalid {kind} package specification `{value}`")]
     InvalidPackageSpec { kind: &'static str, value: String },
+}
+
+/// Actionable message for a missing package-manager. A bare "tool `npm` not
+/// found on PATH" leaves the user guessing; naming the toolchain that provides
+/// it ("install Node.js") turns a dead-end into a next step. Used by both the
+/// `InstallError::MissingTool` Display and any UI surfacing the failure.
+pub fn missing_tool_message(tool: &str) -> String {
+    let hint = match tool {
+        "npm" => " — install Node.js (which provides npm), then try again",
+        "python3" => " — install Python 3, then try again",
+        "cargo" => {
+            " — install the Rust toolchain via rustup (https://rustup.rs), then try again"
+        }
+        "go" => " — install Go (https://go.dev/dl), then try again",
+        "gem" => " — install Ruby (which provides gem), then try again",
+        _ => ", and make sure it is on your PATH",
+    };
+    format!("`{tool}` is required but was not found on your PATH{hint}")
 }
 
 const INSTALL_PROCESS_TIMEOUT: Duration = Duration::from_secs(5 * 60);

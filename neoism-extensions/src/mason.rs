@@ -12,6 +12,14 @@ use crate::manifest::{ExtensionManifest, GithubAsset, InstallKind, RunSpec};
 const MASON_SNAPSHOT_URL: &str =
     "https://github.com/mason-org/mason-registry/releases/latest/download/registry.json.zip";
 const CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// Bounds on the registry-snapshot download. Without these, a stalled or
+/// unreachable network (offline, captive portal, GitHub blocked by a proxy)
+/// leaves the background catalog seed awaiting forever — which is why the
+/// language-server rows' install buttons could never resolve a real plan and
+/// the page appeared to hang on "syncing". reqwest defaults to *no* timeout,
+/// so we must set these explicitly.
+const FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const FETCH_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub type MasonRegistry = Vec<MasonPackage>;
 
@@ -146,19 +154,32 @@ pub async fn fetch_mason_snapshot() -> Result<Vec<u8>, InstallError> {
     let ua = format!("neoism/{}", env!("CARGO_PKG_VERSION"));
     let client = reqwest::Client::builder()
         .user_agent(ua)
+        .connect_timeout(FETCH_CONNECT_TIMEOUT)
+        .timeout(FETCH_TOTAL_TIMEOUT)
         .build()
         .map_err(|e| InstallError::Network(e.to_string()))?;
-    let resp = client
-        .get(MASON_SNAPSHOT_URL)
-        .send()
-        .await
-        .map_err(|e| InstallError::Network(e.to_string()))?
-        .error_for_status()
-        .map_err(|e| InstallError::Network(e.to_string()))?;
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| InstallError::Network(e.to_string()))?;
+    // Belt-and-suspenders wall-clock cap: `reqwest`'s `.timeout()` covers the
+    // request lifecycle, but wrapping the whole send+read guarantees the future
+    // resolves even if the client options are ever bypassed. The seed task must
+    // ALWAYS complete so the Extensions page stops waiting on the catalog.
+    let deadline = FETCH_TOTAL_TIMEOUT + FETCH_CONNECT_TIMEOUT;
+    let bytes = tokio::time::timeout(deadline, async {
+        let resp = client
+            .get(MASON_SNAPSHOT_URL)
+            .send()
+            .await
+            .map_err(|e| InstallError::Network(e.to_string()))?
+            .error_for_status()
+            .map_err(|e| InstallError::Network(e.to_string()))?;
+        resp.bytes()
+            .await
+            .map_err(|e| InstallError::Network(e.to_string()))
+    })
+    .await
+    .map_err(|_| InstallError::TimedOut {
+        tool: "extension catalog download".to_string(),
+        seconds: deadline.as_secs(),
+    })??;
     Ok(bytes.to_vec())
 }
 

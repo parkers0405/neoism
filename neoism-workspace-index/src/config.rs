@@ -677,6 +677,40 @@ mod tests {
     }
 
     #[test]
+    fn linked_vault_resolves_to_one_scoped_vault_dir() {
+        // Mirrors how the daemon advertises `linked_vault_dir` to guests:
+        // resolve the code dir's linked project, then take its
+        // `notes_workspace_dir()`. It must be exactly the ONE vault dir
+        // under `~/Neoism/Vaults`, never the `Vaults` parent (which would
+        // leak every vault to a joined guest).
+        let notes_home = temp_notes_home("linked-vault-scope");
+        let code_root = temp_root("linked-vault-scope-code");
+        fs::create_dir_all(&code_root).unwrap();
+        fs::create_dir_all(code_root.join(NEOISM_DIR)).unwrap();
+
+        let mut workspace = NeoismWorkspace {
+            root: code_root.clone(),
+            config: WorkspaceConfig::new(&code_root),
+        };
+        workspace.config.notes.workspace = "ProjectVault".to_string();
+        let vault_dir =
+            link_code_dir_to_workspace_vault(&mut workspace, &code_root).unwrap();
+
+        let resolved = linked_project_for_code_dir(&code_root).unwrap().unwrap();
+        let advertised = resolved.notes_workspace_dir();
+
+        assert_eq!(advertised, vault_dir);
+        assert_eq!(advertised, notes_vaults_dir().join("ProjectVault"));
+        // Scoped: the advertised path is a single vault, and its parent is
+        // the Vaults root — the guest can never walk up to sibling vaults.
+        assert_eq!(advertised.parent().unwrap(), notes_vaults_dir());
+        assert_ne!(advertised, notes_vaults_dir());
+
+        let _ = fs::remove_dir_all(code_root);
+        let _ = fs::remove_dir_all(notes_home);
+    }
+
+    #[test]
     fn default_notes_workspace_has_stable_global_identity() {
         let first = default_notes_workspace();
         let second = default_notes_workspace();

@@ -500,22 +500,9 @@ impl Screen<'_> {
                     self.sync_active_code_modified();
                     self.mark_dirty();
                 }
-                // Ctrl-P in Normal mode: the fuzzy file finder (the
-                // ctrlp/telescope reflex; insert-mode Ctrl-P is
-                // completion, matching nvim).
-                Key::Character("p") => {
-                    self.open_finder_files();
-                }
                 // Ctrl-D / Ctrl-U: half-page cursor sweep (vim).
                 Key::Character("d") | Key::Character("u") => {
                     let down = matches!(key.logical_key.as_ref(), Key::Character("d"));
-                    let rows = self
-                        .context_manager
-                        .current()
-                        .code
-                        .as_ref()
-                        .map(|code| (code.geometry.viewport_rows() / 2).max(1))
-                        .unwrap_or(1);
                     if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                         let extend = code.buffer.mode == CodeMode::Visual;
                         code.half_page_scroll(down, extend);

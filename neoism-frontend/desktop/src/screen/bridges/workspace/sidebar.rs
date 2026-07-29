@@ -119,10 +119,10 @@ impl Screen<'_> {
         if !self.renderer.notes_sidebar.is_visible() {
             return false;
         }
-        // A served workspace's notes live on the daemon — a local fs
-        // re-walk would wipe the listing to empty; re-request instead.
-        // Keyed on the served root so a self-hosting host re-lists too.
-        if self.served_workspace_root().is_some() {
+        // The shared vault lives on the daemon — a local fs re-walk would
+        // wipe the listing to empty; re-request instead. A LOCAL vault
+        // picked while joined still refreshes from this machine's disk.
+        if self.notes_sidebar_shows_shared_vault() {
             self.request_remote_notes_listing();
             return true;
         }
@@ -151,6 +151,12 @@ impl Screen<'_> {
                     self.open_notes_new_file_prompt(dir);
                 }
             }
+            NotesSidebarHit::CreateWorkspaceVault => {
+                self.link_current_workspace_to_notes_vault();
+            }
+            NotesSidebarHit::SelectVault => {
+                self.open_notes_vault_menu_for_selector();
+            }
             NotesSidebarHit::WorkspacePicker => {
                 self.open_notes_vault_menu(x, y);
             }
@@ -161,8 +167,25 @@ impl Screen<'_> {
                 }
             }
             NotesSidebarHit::Note(index) => {
+                // Select the row now, but ARM a Finder-style drag and
+                // DEFER the folder toggle to release: a plain click
+                // toggles/opens, a press+drag MOVES. Mirrors the file
+                // tree. A NOTE opens on press (instant, like Enter);
+                // FOLDERS toggle on release so a folder drag doesn't flip
+                // them open/closed mid-grab.
                 self.renderer.notes_sidebar.set_selected(index);
-                if self.renderer.notes_sidebar.note_is_dir(index) {
+                let (mx, my) = self.mouse_logical_for_hit_test();
+                self.notes_sidebar_opened_on_press = false;
+                if self.renderer.notes_sidebar.begin_notes_drag(index, mx, my) {
+                    if !self.renderer.notes_sidebar.note_is_dir(index) {
+                        self.renderer.notes_sidebar.set_focused(false);
+                        if let Some(path) = self.renderer.notes_sidebar.note_path(index) {
+                            self.open_path_from_notes_sidebar(path);
+                        }
+                        self.notes_sidebar_opened_on_press = true;
+                    }
+                } else if self.renderer.notes_sidebar.note_is_dir(index) {
+                    // Path-less row (shouldn't happen): activate as before.
                     self.renderer.notes_sidebar.toggle_selected_dir();
                 } else {
                     self.renderer.notes_sidebar.set_focused(false);
@@ -174,6 +197,154 @@ impl Screen<'_> {
         }
         self.mark_dirty();
         true
+    }
+
+    /// Drive a live/armed notes-sidebar drag from a pointer move. Returns
+    /// true while a drag is armed or live (so the host keeps gripping and
+    /// skips normal hover). Springs a dwelt-on folder open. `false` when
+    /// nothing is being dragged. Mirrors `handle_file_tree_drag_move`.
+    pub(crate) fn handle_notes_sidebar_drag_move(&mut self) -> bool {
+        if self.renderer.notes_sidebar.notes_drag().is_none() {
+            return false;
+        }
+        let (mx, my) = self.mouse_logical_for_hit_test();
+        let hovered = self.renderer.notes_sidebar.row_at(mx, my);
+        if let Some(dir) = self.renderer.notes_sidebar.update_notes_drag(mx, my, hovered)
+        {
+            // Dwell elapsed over a closed folder — spring it open.
+            self.renderer.notes_sidebar.reveal_dir(&dir);
+        }
+        self.mark_dirty();
+        true
+    }
+
+    /// True while a notes-sidebar drag has crossed the activation
+    /// threshold — the host uses this to flip the cursor to "grabbing".
+    pub(crate) fn notes_sidebar_dragging(&self) -> bool {
+        self.renderer.notes_sidebar.is_notes_dragging()
+    }
+
+    /// Finish a notes-sidebar drag on release: commit a move onto the
+    /// hovered folder / vault root, or fall back to a click (open note /
+    /// toggle folder) when the press never became a drag. Returns true
+    /// iff a drag was in progress. Mirrors `handle_file_tree_drag_release`.
+    pub(crate) fn handle_notes_sidebar_drag_release(&mut self) -> bool {
+        use neoism_ui::panels::notes_sidebar::NotesDropOutcome;
+        if self.renderer.notes_sidebar.notes_drag().is_none() {
+            return false;
+        }
+        let opened_on_press =
+            std::mem::take(&mut self.notes_sidebar_opened_on_press);
+        match self.renderer.notes_sidebar.end_notes_drag() {
+            // A note already opened on press; only a folder (deferred)
+            // still needs its toggle here.
+            NotesDropOutcome::Click if opened_on_press => {}
+            NotesDropOutcome::Click => {
+                let index = self.renderer.notes_sidebar.selected_index();
+                if self.renderer.notes_sidebar.note_is_dir(index) {
+                    self.renderer.notes_sidebar.toggle_selected_dir();
+                } else if let Some(path) =
+                    self.renderer.notes_sidebar.note_path(index)
+                {
+                    self.renderer.notes_sidebar.set_focused(false);
+                    self.open_path_from_notes_sidebar(path);
+                }
+            }
+            NotesDropOutcome::Move { source, dest_dir } => {
+                self.move_notes_sidebar_path(source, dest_dir);
+            }
+            NotesDropOutcome::Cancel => {}
+        }
+        self.mark_dirty();
+        true
+    }
+
+    /// Move `source` (a page or folder) into `dest_dir` — the commit half
+    /// of a spring-loaded notes-sidebar drag. A move is a rename into a
+    /// new parent: on the HOST's shared vault it goes to the daemon as
+    /// `FilesClientMessage::Rename` scoped to the vault root, otherwise
+    /// it's a local `fs::rename`. Mirrors `move_file_tree_path`, and
+    /// keeps the per-vault note index + link graph consistent via the
+    /// same refresh the notes RENAME uses.
+    pub(crate) fn move_notes_sidebar_path(
+        &mut self,
+        source: PathBuf,
+        dest_dir: PathBuf,
+    ) {
+        use neoism_ui::panels::notifications::NotificationLevel;
+
+        let Some(file_name) = source.file_name() else {
+            return;
+        };
+        let target = dest_dir.join(file_name);
+        if target == source {
+            return;
+        }
+
+        // Shared vault on a served/joined workspace: the move happens on
+        // the HOST, through the files plane scoped to the vault root.
+        // Path math is pure here; existence checks belong to the daemon.
+        // A LOCAL vault picked while joined falls through to the on-disk
+        // move below — it lives on this machine's disk.
+        if self.notes_sidebar_shows_shared_vault() {
+            if let Some(vault_root) = self.served_notes_vault_root() {
+                // Vault-relative forms (fall back to absolute, which the
+                // daemon tolerates) — computed before `vault_root` moves
+                // into the send.
+                let strip = |path: &Path| -> String {
+                    path.strip_prefix(&vault_root)
+                        .map(|rel| rel.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+                };
+                let (from, to) = (strip(&source), strip(&target));
+                if self.send_remote_notes_move(vault_root, from, to) {
+                    // Open the destination so the moved item is in view
+                    // when the host's relist lands.
+                    self.renderer.notes_sidebar.reveal_dir(&dest_dir);
+                    self.mark_dirty();
+                    return;
+                }
+            }
+            // No daemon link attached — fall through to the local path.
+        }
+
+        if !source.exists() {
+            self.renderer.notifications.push(
+                "Path no longer exists.".to_string(),
+                NotificationLevel::Warn,
+            );
+            self.mark_dirty();
+            return;
+        }
+        if target.exists() {
+            self.renderer.notifications.push(
+                "A file or folder with that name already exists there.".to_string(),
+                NotificationLevel::Warn,
+            );
+            self.mark_dirty();
+            return;
+        }
+        match std::fs::rename(&source, &target) {
+            Ok(()) => {
+                // Same index/link-graph refresh the notes rename runs, so
+                // wiki-links and the graph track the moved page/subtree.
+                self.refresh_note_graph_after_rename(&source, &target);
+                // Reveal the destination folder so the moved item shows,
+                // re-list the panel, and keep the sidebar focused.
+                self.renderer.notes_sidebar.reveal_dir(&dest_dir);
+                self.renderer.notes_sidebar.refresh_notes();
+                self.renderer.notes_sidebar.set_focused(true);
+                self.renderer.notifications.push(
+                    format!("Moved {}", target.display()),
+                    NotificationLevel::Info,
+                );
+            }
+            Err(err) => self.renderer.notifications.push(
+                format!("Move failed: {err}"),
+                NotificationLevel::Error,
+            ),
+        }
+        self.mark_dirty();
     }
 
     pub(crate) fn handle_notes_sidebar_context_click(&mut self) -> bool {
@@ -198,7 +369,9 @@ impl Screen<'_> {
             }
             NotesSidebarHit::WorkspacePicker
             | NotesSidebarHit::Settings
-            | NotesSidebarHit::CreateFirstNote => {
+            | NotesSidebarHit::CreateFirstNote
+            | NotesSidebarHit::CreateWorkspaceVault
+            | NotesSidebarHit::SelectVault => {
                 self.renderer.notes_sidebar.workspace_path()
             }
         };
@@ -419,10 +592,11 @@ impl Screen<'_> {
     /// nothing. Resolve + create the vault, then retry. Remote-joined
     /// workspaces stay None — their notes live on the host.
     pub(crate) fn notes_sidebar_create_target(&mut self) -> Option<PathBuf> {
-        if self.served_workspace_root().is_some() {
-            // Served notes live under the workspace's `Notes/` on the
-            // daemon; `is_dir` can't vouch for a path that isn't on
-            // this disk, so hand back the panel's root as-is.
+        if self.notes_sidebar_shows_shared_vault() {
+            // The shared vault lives on the host; `is_dir` can't vouch for
+            // a path that isn't on this disk, so hand back the panel's
+            // vault root as-is. (A local vault picked while joined falls
+            // through to the on-disk resolution below.)
             return self.renderer.notes_sidebar.workspace_path();
         }
         if let Some(dir) = self.notes_sidebar_target_dir().filter(|dir| dir.is_dir()) {
@@ -486,26 +660,21 @@ impl Screen<'_> {
         if Path::new(&name).extension().is_none() {
             name.push_str(".md");
         }
-        // Served workspace: the note is created ON THE DAEMON through
-        // the files plane. The `FileCreated` reply opens it in markdown
-        // and re-lists the panel. Keyed on the served root so a
-        // self-hosting host writes into the shared workspace `Notes/`
-        // (its local tree root can't carry the op).
-        if let Some(served_root) = self.served_workspace_root() {
-            {
+        // Shared vault on a served/joined workspace: the note is created
+        // ON THE HOST in its linked vault, through the files plane. The
+        // `FileCreated` reply opens it in markdown and re-lists the panel.
+        // `dir` is made vault-relative (empty for the vault top). A LOCAL
+        // vault picked from the selector while joined falls through to the
+        // ordinary local create below — it lives on this machine's disk.
+        if self.notes_sidebar_shows_shared_vault() {
+            if let Some(vault_root) = self.served_notes_vault_root() {
                 let rel_dir = dir
-                    .strip_prefix(&served_root)
+                    .strip_prefix(&vault_root)
                     .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| dir.to_string_lossy().into_owned());
-                if self.send_remote_files_op_with_root(
-                    served_root.clone(),
-                    neoism_protocol::files::FilesClientMessage::CreateFile {
-                        dir: rel_dir,
-                        name: name.clone(),
-                    },
-                ) {
+                    .unwrap_or_default();
+                if self.send_remote_notes_create(vault_root, rel_dir, name.clone()) {
                     self.renderer.notifications.push(
-                        format!("Creating note {name} on the server…"),
+                        format!("Creating note {name} in the shared vault…"),
                         NotificationLevel::Info,
                     );
                     self.mark_dirty();

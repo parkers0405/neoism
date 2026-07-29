@@ -199,25 +199,53 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    /// Point the notes sidebar at the current served/joined workspace's
+    /// notes source: the HOST's ONE linked vault (listed over the daemon
+    /// files plane), or the "no linked vault" empty state when the host
+    /// linked none. Returns `false` when this window is NOT a client of a
+    /// served workspace, so callers fall through to the local-vault path.
+    /// Configures the panel only — visibility/focus stay the caller's job.
+    pub(crate) fn point_notes_sidebar_at_served_vault(&mut self) -> bool {
+        if self.served_workspace_root().is_none() {
+            return false;
+        }
+        match self.served_notes_vault_root() {
+            Some(vault) => {
+                let name = vault
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "Shared vault".to_string());
+                self.renderer.notes_sidebar.set_vault_actions(false);
+                self.renderer.notes_sidebar.set_workspace(name, Some(vault));
+                self.request_remote_notes_listing();
+            }
+            // Host linked no vault → the Notion-style "no linked vault"
+            // empty state (Create / Select), not the host's other vaults.
+            None => {
+                self.renderer.notes_sidebar.set_vault_actions(true);
+                self.renderer
+                    .notes_sidebar
+                    .set_workspace("Shared workspace".to_string(), None);
+            }
+        }
+        true
+    }
+
     pub(crate) fn open_neoism_notes_sidebar(&mut self) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
         // WORKSPACE-SCOPED notes: whenever this window is a CLIENT of a
         // daemon-served workspace — a guest that joined, OR the host
         // viewing its own served workspace (self-hosted on a spawned
-        // daemon, or docker-hosted on a pod) — notes live in a `Notes/`
-        // folder inside the project on the server: one store, shared by
-        // every client, versioned with the repo, co-edited over the same
-        // CRDT path as any other md file, listed over the files plane
-        // (`apply_daemon_files_message`). Only a plain local `home`
-        // session (no served root) falls through to this machine's
+        // daemon, or docker-hosted on a pod) — notes are the HOST's ONE
+        // linked vault for the shared dir (advertised over the tree,
+        // listed through the files plane in `apply_daemon_files_message`).
+        // If the host linked no vault, the "no linked vault" empty state
+        // shows instead of the host's other vaults. Only a plain local
+        // `home` session (no served root) falls through to this machine's
         // personal vault below.
-        if let Some(served_root) = self.served_workspace_root() {
-            self.renderer.notes_sidebar.set_workspace(
-                "Workspace notes".to_string(),
-                Some(served_root.join("Notes")),
-            );
-            self.request_remote_notes_listing();
+        if self.point_notes_sidebar_at_served_vault() {
             let visibility_changed =
                 self.renderer.notes_sidebar.toggle_focus_or_visibility();
             if self.renderer.notes_sidebar.is_visible() {
@@ -229,6 +257,9 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
+        // Local workspace: never the vault-actions empty state (local
+        // always resolves a vault) — keep the empty state byte-identical.
+        self.renderer.notes_sidebar.set_vault_actions(false);
 
         let root = self
             .active_workspace_root
@@ -275,6 +306,9 @@ impl Screen<'_> {
         if neo_workspace::ensure_notes_workspace(&workspace).is_err() {
             return;
         }
+        // Local vault: the single "+ New note" empty state, never the
+        // served no-linked-vault actions.
+        self.renderer.notes_sidebar.set_vault_actions(false);
         self.renderer.notes_sidebar.set_workspace(
             notes_sidebar_workspace_name(&workspace),
             Some(workspace.notes_workspace_dir()),

@@ -68,6 +68,7 @@ fn modal_action_policy_tag(
         A::NotesVaultPromptRename => Tag::NotesVaultPromptRename,
         A::NotesVaultRename { .. } => Tag::NotesVaultRename,
         A::NotesVaultSwitch { .. } => Tag::NotesVaultSwitch,
+        A::NotesVaultSwitchShared => Tag::NotesVaultSwitchShared,
         A::NotesVaultOpenVaultsRoot => Tag::NotesVaultOpenVaultsRoot,
         A::NotesVaultLinkCurrentWorkspace => Tag::NotesVaultLinkCurrentWorkspace,
         A::NotesVaultPromptLinkProject { .. } => Tag::NotesVaultPromptLinkProject,

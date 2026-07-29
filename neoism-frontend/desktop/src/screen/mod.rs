@@ -755,6 +755,18 @@ pub struct Screen<'screen> {
     /// In-flight WalkTree listings of a joined workspace's `Notes/`
     /// folder — replies feed the notes sidebar, not the file tree.
     pending_remote_notes_listing: std::collections::HashSet<u64>,
+    /// In-flight files-plane note CREATES on a served/joined workspace,
+    /// by request id → the host's linked-vault root the create was fired
+    /// against. Notes now live in the host's linked vault (a different
+    /// root than the workspace tree), so the `FileCreated` reply must
+    /// join the returned relative path onto THIS vault root to open the
+    /// new note — the generic tree-op path assumes the workspace root.
+    pending_remote_notes_creates: HashMap<u64, PathBuf>,
+    /// In-flight files-plane note MOVES (spring-loaded drag) on a
+    /// served/joined workspace, by request id. The `Renamed` reply
+    /// re-lists the notes sidebar (not the file tree) — the notes
+    /// counterpart of `pending_remote_file_ops`.
+    pending_remote_notes_moves: std::collections::HashSet<u64>,
     /// Follow-the-terminal `ssh` file browsing. When a terminal pane
     /// enters an `ssh` session the tree flips onto a
     /// [`crate::daemon_client::ssh_files::SshFiles`] backend whose
@@ -812,6 +824,10 @@ pub struct Screen<'screen> {
     /// Enter) so the drag-release `Click` outcome must not re-open it.
     /// Folders still toggle on release, so their drag doesn't toggle.
     file_tree_opened_on_press: bool,
+    /// The notes-sidebar counterpart of `file_tree_opened_on_press`: a
+    /// note opened on press so its drag-release `Click` doesn't re-open
+    /// it (folders still toggle on release).
+    notes_sidebar_opened_on_press: bool,
     #[cfg(not(target_arch = "wasm32"))]
     acp_events_tx: std_mpsc::Sender<crate::neoism::acp::AcpUiEvent>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -1708,6 +1724,8 @@ impl Screen<'_> {
             markdown_image_overlay_ids: std::collections::HashSet::new(),
             pending_remote_git_status: HashMap::new(),
             pending_remote_notes_listing: std::collections::HashSet::new(),
+            pending_remote_notes_creates: HashMap::new(),
+            pending_remote_notes_moves: std::collections::HashSet::new(),
             ssh_files_tx,
             ssh_files_rx,
             ssh_files_next_id: 1,
@@ -1733,6 +1751,7 @@ impl Screen<'_> {
             file_tree_git_refresh_pending: false,
             file_tree_git_self_event_suppressed_until: None,
             file_tree_opened_on_press: false,
+            notes_sidebar_opened_on_press: false,
             #[cfg(not(target_arch = "wasm32"))]
             acp_events_tx,
             #[cfg(not(target_arch = "wasm32"))]

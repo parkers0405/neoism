@@ -370,42 +370,43 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    /// This machine's own vault directory names under `~/Neoism/Vaults`,
+    /// sorted case-insensitively — the "local vaults" the selector lists.
+    fn local_vault_names(&self) -> Vec<String> {
+        let vaults_dir = neo_workspace::notes_vaults_dir();
+        let _ = std::fs::create_dir_all(&vaults_dir);
+        let mut vaults = std::fs::read_dir(&vaults_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                if !path.is_dir() {
+                    return None;
+                }
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        vaults.sort_by_key(|name| name.to_lowercase());
+        vaults
+    }
+
     pub(crate) fn open_notes_vault_menu(&mut self, x: f32, y: f32) {
         use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
         use neoism_ui::panels::notifications::NotificationLevel;
         use neoism_ui::widgets::modal::ModalAction;
 
         let _ = (x, y);
-        // Served workspace: there is exactly one place its notes can
-        // live — the project's `Notes/` on the daemon. Personal vaults
-        // are this machine's and never leak into a shared workspace.
+        // JOINED / served workspace: Notion-style two-section selector —
+        // this machine's LOCAL vaults, a separator, then the ONE shared
+        // vault the host linked to this project. Never the host's other
+        // vaults. Selecting a local vault shows your own notes; selecting
+        // the shared vault shows the project's.
         if self.served_workspace_root().is_some() {
-            self.renderer.notifications.push(
-                "Shared workspaces keep notes in the project's Notes/ folder on the server."
-                    .to_string(),
-                NotificationLevel::Info,
-            );
-            self.mark_dirty();
-            return;
-        }
-        let mut items = Vec::new();
-        let vaults_dir = neo_workspace::notes_vaults_dir();
-        let _ = std::fs::create_dir_all(&vaults_dir);
-        if let Ok(entries) = std::fs::read_dir(&vaults_dir) {
-            let mut vaults = entries
-                .filter_map(Result::ok)
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    if !path.is_dir() {
-                        return None;
-                    }
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .map(str::to_string)
-                })
-                .collect::<Vec<_>>();
-            vaults.sort_by_key(|name| name.to_lowercase());
-            for vault in vaults {
+            let mut items = Vec::new();
+            for vault in self.local_vault_names() {
                 items.push(ContextMenuItem::new(
                     vault.clone(),
                     "",
@@ -414,6 +415,66 @@ impl Screen<'_> {
                     ),
                 ));
             }
+            items.push(ContextMenuItem::new(
+                "Open Vaults Root",
+                "o",
+                ContextMenuAction::Modal(ModalAction::NotesVaultOpenVaultsRoot.into()),
+            ));
+            // Separator + the shared section (its own group).
+            let mut separator = ContextMenuItem::new(
+                "Shared project",
+                "",
+                ContextMenuAction::Modal(ModalAction::Close.into()),
+            );
+            separator.enabled = false;
+            items.push(separator);
+            match self.served_notes_vault_root() {
+                Some(vault) => {
+                    let name = vault
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| "Shared vault".to_string());
+                    items.push(ContextMenuItem::new(
+                        name,
+                        "",
+                        ContextMenuAction::Modal(
+                            ModalAction::NotesVaultSwitchShared.into(),
+                        ),
+                    ));
+                }
+                None => {
+                    let mut none_item = ContextMenuItem::new(
+                        "No linked vault",
+                        "",
+                        ContextMenuAction::Modal(ModalAction::Close.into()),
+                    );
+                    none_item.enabled = false;
+                    items.push(none_item);
+                }
+            }
+            let scale = self.sugarloaf.scale_factor();
+            let size = self.sugarloaf.window_size();
+            self.renderer.context_menu.open(
+                "Vaults".to_string(),
+                items,
+                x,
+                y,
+                size.width as f32 / scale,
+                self.context_menu_logical_height(),
+            );
+            self.mark_dirty();
+            return;
+        }
+        let mut items = Vec::new();
+        for vault in self.local_vault_names() {
+            items.push(ContextMenuItem::new(
+                vault.clone(),
+                "",
+                ContextMenuAction::Modal(
+                    ModalAction::NotesVaultSwitch { name: vault }.into(),
+                ),
+            ));
         }
         items.push(ContextMenuItem::new(
             "Add New Vault",

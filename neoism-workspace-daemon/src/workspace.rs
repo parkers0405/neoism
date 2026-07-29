@@ -345,6 +345,24 @@ fn declare_workspace_dir(root_dir: Option<PathBuf>) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap_or(dir)
 }
 
+/// Resolve the ONE notes vault the host has linked to a workspace's code
+/// dir, for advertising over `WorkspaceSummary::linked_vault_dir`. The
+/// vaults physically live on THIS (host) machine's disk, so the daemon —
+/// which always runs on the host — is the authority. Returns the exact,
+/// scoped vault directory (`~/Neoism/Vaults/{name}`), never the
+/// `Neoism/Vaults` parent, and only when it exists on disk (the files
+/// plane requires an existing directory to serve). `None` when the code
+/// dir is linked to no vault, so a guest shows the empty state rather
+/// than the host's other vaults.
+pub(crate) fn resolve_linked_vault_dir(root: &Path) -> Option<PathBuf> {
+    let vault = neoism_workspace_index::linked_project_for_code_dir(root)
+        .ok()
+        .flatten()
+        .filter(|workspace| workspace.config.notes.enabled)
+        .map(|workspace| workspace.notes_workspace_dir())?;
+    vault.is_dir().then_some(vault)
+}
+
 /// Fill an empty/None `root_dir` with the daemon's default so a workspace
 /// summary never reaches a client without a directory to root at. Used on
 /// read paths to normalize legacy records.
@@ -356,6 +374,14 @@ fn ensure_workspace_dir(mut workspace: WorkspaceSummary) -> WorkspaceSummary {
         .unwrap_or(true);
     if missing {
         workspace.root_dir = Some(crate::files::workspace_root());
+    }
+    // Re-resolve the advertised linked vault on every read/broadcast so a
+    // vault linked (or unlinked) on disk AFTER the workspace was created
+    // is reflected without recreating the workspace, and legacy persisted
+    // records (which predate the field) gain it. Cheap: runs on tree
+    // changes, not per frame.
+    if let Some(root) = workspace.root_dir.as_deref() {
+        workspace.linked_vault_dir = resolve_linked_vault_dir(root);
     }
     workspace
 }

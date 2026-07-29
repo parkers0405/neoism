@@ -258,44 +258,127 @@ impl Screen<'_> {
             .daemon_host_workspace_root(&workspace_id)
     }
 
-    /// Like [`Self::send_remote_files_op`] but fires at an explicit
-    /// workspace root instead of the file tree's remote root — used for
-    /// notes ops on a self-hosting host, whose tree root is local while
-    /// its notes live in the served workspace's `Notes/`.
-    pub(crate) fn send_remote_files_op_with_root(
+    /// The host's single LINKED NOTES VAULT for the current served/joined
+    /// workspace, as advertised over the daemon tree
+    /// (`WorkspaceSummary::linked_vault_dir`). This is where a guest lists
+    /// this shared project's notes — the exact vault dir on the host, not
+    /// `<root>/Notes` and never the host's other vaults. `None` when the
+    /// window isn't a peer client, isn't adopted, or the host linked no
+    /// vault (the sidebar then shows the "no linked vault" empty state).
+    pub(crate) fn served_notes_vault_root(&self) -> Option<std::path::PathBuf> {
+        if !self.context_manager.daemon_link_is_peer() {
+            return None;
+        }
+        let workspace_id = self.context_manager.current_adopted_workspace_id()?;
+        self.context_manager
+            .daemon_host_workspace_linked_vault(&workspace_id)
+    }
+
+    /// True when the notes panel is currently showing the HOST's shared
+    /// vault (as opposed to one of the user's OWN local vaults picked from
+    /// the selector while inside a joined workspace). Notes ops route to
+    /// the daemon only in this case; a local vault reads/writes this
+    /// machine's disk exactly as it does outside a joined workspace.
+    pub(crate) fn notes_sidebar_shows_shared_vault(&self) -> bool {
+        let Some(shared) = self.served_notes_vault_root() else {
+            return false;
+        };
+        self.renderer.notes_sidebar.workspace_path().as_deref() == Some(shared.as_path())
+    }
+
+    /// Create a note in the host's linked vault over the files plane.
+    /// Unlike [`Self::send_remote_files_op`], the request id is recorded
+    /// in `pending_remote_notes_creates` (keyed to the vault root) so the
+    /// `FileCreated` reply opens the new note relative to the VAULT —
+    /// notes no longer live under the workspace tree root. `dir` is
+    /// vault-relative (empty for the vault top). Returns false when no
+    /// daemon link is attached (caller runs the local path).
+    pub(crate) fn send_remote_notes_create(
         &mut self,
-        root: std::path::PathBuf,
-        message: neoism_protocol::files::FilesClientMessage,
+        vault_root: std::path::PathBuf,
+        dir: String,
+        name: String,
     ) -> bool {
         let Some((handle, runtime)) =
             self.context_manager.daemon_link_handle_and_runtime()
         else {
-            return true;
+            return false;
         };
         let request_id = handle.allocate_request_id();
-        self.pending_remote_file_ops.insert(request_id);
+        self.pending_remote_notes_creates
+            .insert(request_id, vault_root.clone());
         runtime.spawn(async move {
             if let Err(error) = handle
-                .send_files_with_request_id(request_id, message, Some(root))
+                .send_files_with_request_id(
+                    request_id,
+                    neoism_protocol::files::FilesClientMessage::CreateFile {
+                        dir,
+                        name,
+                    },
+                    Some(vault_root),
+                )
                 .await
             {
                 tracing::warn!(
                     target: "neoism::remote_files",
                     %error,
                     request_id,
-                    "remote notes op send failed"
+                    "remote note create send failed"
                 );
             }
         });
         true
     }
 
-    /// List the joined workspace's `Notes/` folder on the server —
-    /// feeds the notes sidebar via the `TreeListing` reply. A missing
-    /// folder is fine (the daemon answers with an Error; the panel
-    /// shows the empty state and the first create makes the dir).
+    /// Move a note/folder within the host's linked vault over the files
+    /// plane (the commit half of a spring-loaded notes-sidebar drag on a
+    /// shared vault). Like [`Self::send_remote_notes_create`] the op is
+    /// scoped to the VAULT root and its request id is recorded in
+    /// `pending_remote_notes_moves`, so the `Renamed` reply re-lists the
+    /// notes sidebar (not the file tree). `from`/`to` are vault-relative.
+    /// Returns false when no daemon link is attached (caller runs local).
+    pub(crate) fn send_remote_notes_move(
+        &mut self,
+        vault_root: std::path::PathBuf,
+        from: String,
+        to: String,
+    ) -> bool {
+        let Some((handle, runtime)) =
+            self.context_manager.daemon_link_handle_and_runtime()
+        else {
+            return false;
+        };
+        let request_id = handle.allocate_request_id();
+        self.pending_remote_notes_moves.insert(request_id);
+        runtime.spawn(async move {
+            if let Err(error) = handle
+                .send_files_with_request_id(
+                    request_id,
+                    neoism_protocol::files::FilesClientMessage::Rename { from, to },
+                    Some(vault_root),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "neoism::remote_files",
+                    %error,
+                    request_id,
+                    "remote note move send failed"
+                );
+            }
+        });
+        true
+    }
+
+    /// List the served/joined workspace's notes on the host — feeds the
+    /// notes sidebar via the `TreeListing` reply. Notes live in the host's
+    /// ONE linked vault (advertised over the tree), so the files-plane
+    /// root is the vault dir itself and we walk it from the top (empty
+    /// path) rather than assuming a `<root>/Notes` subfolder. When the
+    /// host linked no vault there is nothing to list — the panel shows the
+    /// "no linked vault" empty state instead.
     pub(crate) fn request_remote_notes_listing(&mut self) {
-        let Some(root) = self.served_workspace_root() else {
+        let Some(vault_root) = self.served_notes_vault_root() else {
             return;
         };
         let Some((handle, runtime)) =
@@ -310,10 +393,10 @@ impl Screen<'_> {
                 .send_files_with_request_id(
                     request_id,
                     neoism_protocol::files::FilesClientMessage::WalkTree {
-                        path: "Notes".to_string(),
+                        path: String::new(),
                         max_depth: Some(6),
                     },
-                    Some(root),
+                    Some(vault_root),
                 )
                 .await
             {
@@ -410,7 +493,57 @@ impl Screen<'_> {
 
         let own_op = self.pending_remote_file_ops.remove(&request_id);
         let notes_listing = self.pending_remote_notes_listing.remove(&request_id);
+        let notes_create_vault =
+            self.pending_remote_notes_creates.remove(&request_id);
+        let notes_move = self.pending_remote_notes_moves.remove(&request_id);
         match message {
+            // A note just created in the host's linked vault: the reply
+            // path is vault-relative, so join it onto the vault root (NOT
+            // the workspace tree root) to open it and re-list the panel.
+            FilesServerMessage::FileCreated { path, is_dir }
+                if notes_create_vault.is_some() =>
+            {
+                self.renderer.modal.close();
+                self.file_tree_notify(
+                    format!("Created `{path}` in the shared vault"),
+                    NotificationLevel::Info,
+                );
+                if !is_dir {
+                    if let Some(vault_root) = notes_create_vault {
+                        self.open_path_in_markdown(vault_root.join(path));
+                    }
+                }
+                self.request_remote_notes_listing();
+                self.mark_dirty();
+                true
+            }
+            FilesServerMessage::Error { .. } if notes_create_vault.is_some() => {
+                self.file_tree_notify(
+                    "Could not create the note on the host".to_string(),
+                    NotificationLevel::Error,
+                );
+                self.mark_dirty();
+                true
+            }
+            // A note/folder was moved in the host's linked vault: re-list
+            // the sidebar so the row lands in its new home.
+            FilesServerMessage::Renamed { to, .. } if notes_move => {
+                self.file_tree_notify(
+                    format!("Moved `{to}` in the shared vault"),
+                    NotificationLevel::Info,
+                );
+                self.request_remote_notes_listing();
+                self.mark_dirty();
+                true
+            }
+            FilesServerMessage::Error { .. } if notes_move => {
+                self.file_tree_notify(
+                    "Could not move the note on the host".to_string(),
+                    NotificationLevel::Error,
+                );
+                self.mark_dirty();
+                true
+            }
             FilesServerMessage::TreeListing { entries, .. } if notes_listing => {
                 let Some(notes_root) = self.renderer.notes_sidebar.workspace_path()
                 else {

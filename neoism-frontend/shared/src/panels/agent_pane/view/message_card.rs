@@ -25,7 +25,7 @@ use super::tool_message::{
     draw_checkbox, measure_tool_message_height, render_tool_message, AgentToolMessage,
     AgentToolPane, AgentToolTodo, TodoVisualState, ToolDiffSection, TODO_ROW_HEIGHT,
 };
-use super::user_input::render_user_message;
+use super::user_input::{render_user_message, user_message_orb_identity};
 use super::{ORDER_PANEL, ORDER_TEXT};
 use crate::primitives::ide_theme::IdeTheme;
 
@@ -57,6 +57,12 @@ pub trait AgentMessageCardMessage: AgentToolMessage + AgentCodeMessage {
     fn kind(&self) -> AgentMessageCardKind;
     fn output_kind(&self) -> AgentMessageCardOutputKind;
     fn card_todos(&self) -> &[Self::CardTodo];
+    /// Display name of who sent this (user) message — seeds the presence
+    /// orb + hover tooltip. `None` = the local user (see
+    /// [`AgentMessageCardPane::local_author_name`]).
+    fn author(&self) -> Option<&str> {
+        None
+    }
 }
 
 pub trait AgentMessageCardPane<M>:
@@ -65,6 +71,13 @@ where
     M: AgentMessageCardMessage,
 {
     fn selected_tool_group_child(&self, group_id: &str) -> Option<&str>;
+    /// The local peer's presence display name — the fallback orb seed for
+    /// a user message with no explicit `author` (so the local user's own
+    /// messages wear their own presence orb). `None` on hosts that don't
+    /// publish presence.
+    fn local_author_name(&self) -> Option<&str> {
+        None
+    }
 }
 
 pub trait AgentMessageCardDelegate<P, M>
@@ -152,6 +165,9 @@ where
         w: f32,
         h: f32,
         text: &str,
+        orb_seed: &str,
+        orb_label: &str,
+        mouse: Option<(f32, f32)>,
         theme: &IdeTheme,
         s: f32,
         viewport_clip: [f32; 4],
@@ -164,6 +180,9 @@ where
             w,
             h,
             text,
+            orb_seed,
+            orb_label,
+            mouse,
             theme,
             s,
             viewport_clip,
@@ -304,6 +323,10 @@ macro_rules! neoism_ui_impl_agent_message_card_message {
             fn card_todos(&self) -> &[Self::CardTodo] {
                 &self.todos
             }
+
+            fn author(&self) -> Option<&str> {
+                self.author.as_deref()
+            }
         }
     };
 }
@@ -317,6 +340,10 @@ macro_rules! neoism_ui_impl_agent_message_card_pane {
         {
             fn selected_tool_group_child(&self, group_id: &str) -> Option<&str> {
                 <$pane>::selected_tool_group_child(self, group_id)
+            }
+
+            fn local_author_name(&self) -> Option<&str> {
+                <$pane>::local_presence_name(self)
             }
         }
     };
@@ -350,11 +377,19 @@ impl AgentMessageCardMessage for NeoismAgentMessage {
     fn card_todos(&self) -> &[Self::CardTodo] {
         &self.todos
     }
+
+    fn author(&self) -> Option<&str> {
+        self.author.as_deref()
+    }
 }
 
 impl AgentMessageCardPane<NeoismAgentMessage> for NeoismAgentPane {
     fn selected_tool_group_child(&self, group_id: &str) -> Option<&str> {
         NeoismAgentPane::selected_tool_group_child(self, group_id)
+    }
+
+    fn local_author_name(&self) -> Option<&str> {
+        NeoismAgentPane::local_presence_name(self)
     }
 }
 
@@ -463,6 +498,14 @@ where
             );
         }
         AgentMessageCardKind::User => {
+            // Choke point: resolve who sent this into (orb seed, tooltip
+            // label). The message's own `author` wins; absent, the pane's
+            // local presence name stands in so the local user's message
+            // wears their own orb.
+            let identity = user_message_orb_identity(
+                AgentMessageCardMessage::author(message),
+                AgentMessageCardPane::local_author_name(pane),
+            );
             return D::render_user_message(
                 sugarloaf,
                 x,
@@ -470,6 +513,9 @@ where
                 w,
                 h,
                 AgentToolMessage::text(message),
+                &identity.seed,
+                &identity.label,
+                mouse,
                 theme,
                 s,
                 viewport_clip,
@@ -778,13 +824,15 @@ where
             42.0 * s + markdown_h
         }
         AgentMessageCardKind::User => {
-            let bubble_w = width.max(160.0 * s);
+            // Match `render_user_message`: full-width bubble with the text
+            // inset past the in-bubble orb column (pad 14 + orb 18 + gap 10 +
+            // right pad 14 = 56s), so the measured height equals what's drawn.
             let mut user_opts = body_opts;
             user_opts.font_size = 13.5 * s;
             let lines = wrap_text(
                 sugarloaf,
                 AgentToolMessage::text(message),
-                (bubble_w - 34.0 * s).max(80.0 * s),
+                (width - 56.0 * s).max(80.0 * s),
                 &user_opts,
                 6,
             );

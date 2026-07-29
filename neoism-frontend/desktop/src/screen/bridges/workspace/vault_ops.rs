@@ -143,6 +143,33 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    /// Point the notes panel at the HOST's shared vault for the current
+    /// joined workspace — the single "Shared" section of the selector.
+    /// Reads through the daemon files plane exactly like the initial
+    /// open. No-op (with a notice) if the host advertised no vault.
+    pub(crate) fn switch_to_shared_notes_vault(&mut self) {
+        use neoism_ui::panels::notifications::NotificationLevel;
+
+        let Some(vault) = self.served_notes_vault_root() else {
+            self.renderer.notifications.push(
+                "This shared workspace has no linked vault yet".to_string(),
+                NotificationLevel::Info,
+            );
+            self.mark_dirty();
+            return;
+        };
+        let name = vault
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Shared vault".to_string());
+        self.renderer.notes_sidebar.set_vault_actions(false);
+        self.renderer.notes_sidebar.set_workspace(name, Some(vault));
+        self.request_remote_notes_listing();
+        self.renderer.notes_sidebar.set_focused(true);
+        self.mark_dirty();
+    }
+
     pub(crate) fn switch_notes_vault(&mut self, name: String) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
@@ -152,6 +179,29 @@ impl Screen<'_> {
                 "Vault name cannot be empty".to_string(),
                 NotificationLevel::Warn,
             );
+            self.mark_dirty();
+            return;
+        }
+        // Inside a JOINED workspace there is no local workspace config to
+        // write — selecting one of the user's OWN vaults simply points the
+        // panel at that local vault on this machine's disk (read straight
+        // from the filesystem, exactly as outside a joined workspace).
+        if self.served_workspace_root().is_some() {
+            let local_vault = neo_workspace::vault_notes_workspace(&name);
+            if let Err(err) = neo_workspace::ensure_notes_workspace(&local_vault) {
+                self.renderer.notifications.push(
+                    format!("Could not open vault: {err}"),
+                    NotificationLevel::Error,
+                );
+                self.mark_dirty();
+                return;
+            }
+            self.renderer.notes_sidebar.set_vault_actions(false);
+            self.renderer
+                .notes_sidebar
+                .set_workspace(name, Some(local_vault.notes_workspace_dir()));
+            self.renderer.notes_sidebar.refresh_notes();
+            self.renderer.notes_sidebar.set_focused(true);
             self.mark_dirty();
             return;
         }

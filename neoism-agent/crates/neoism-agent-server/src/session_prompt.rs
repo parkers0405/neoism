@@ -108,6 +108,16 @@ pub(crate) async fn append_prompt(
     let reply_model = model.clone();
     info.model = Some(model_ref_from_user_model(&reply_model));
     let request_system = system.filter(|system| !system.trim().is_empty());
+    // Runtime notifications (background-job / subagent completions) are
+    // injected as user-role turns so the model sees the captured output, but
+    // they must NOT render as user bubbles. The live part broadcast below
+    // carries only the part (not the message `system`), so stamp the marker
+    // onto each broadcast part so live/remote viewers can reclassify it as a
+    // system notice; history reload already sees the marker via message info.
+    let broadcast_system = request_system
+        .as_deref()
+        .filter(|system| crate::message_model::is_runtime_system_notification(system))
+        .map(str::to_string);
     let run_system =
         run_system_for_request(agent_info.prompt.as_deref(), request_system.as_deref());
     let user = UserMessage {
@@ -214,6 +224,9 @@ pub(crate) async fn append_prompt(
         };
         if let Some(obj) = part_value.as_object_mut() {
             obj.insert("role".to_string(), json!("user"));
+            if let Some(system) = &broadcast_system {
+                obj.insert("system".to_string(), json!(system));
+            }
         }
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,

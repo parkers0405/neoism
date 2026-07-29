@@ -116,7 +116,16 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     pub(super) fn prepared_remote_pty(
         &self,
     ) -> Option<crate::context::remote_pty::PreparedRemotePty> {
-        if !crate::context::remote_pty::daemon_tabs_enabled() {
+        // On a JOINED (peer) workspace every new terminal must run on
+        // the HOST — ssh-into-the-host semantics — so bypass the
+        // ambient `NEOISM_DAEMON_TABS` cutover gate and always bind a
+        // remote PTY. A HOME link keeps the env gate while the cutover
+        // bakes. All new-terminal builders (split / new tab / stacked
+        // terminal) funnel through here, so this single check makes the
+        // guest host-hosted everywhere.
+        if !self.daemon_link_is_peer()
+            && !crate::context::remote_pty::daemon_tabs_enabled()
+        {
             return None;
         }
         let link = self.daemon.link.as_ref()?;
@@ -324,6 +333,24 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .iter()
             .find(|workspace| workspace.id == workspace_id)
             .and_then(|workspace| workspace.root_dir.clone())
+    }
+
+    /// The host's single LINKED NOTES VAULT for a workspace, as the host
+    /// advertised it (`WorkspaceSummary::linked_vault_dir`). A guest lists
+    /// this shared project's notes from exactly this vault dir over the
+    /// files plane. `None` when the host linked no vault — the guest shows
+    /// the "no linked vault" empty state instead of the host's other
+    /// vaults.
+    pub fn daemon_host_workspace_linked_vault(
+        &self,
+        workspace_id: &str,
+    ) -> Option<PathBuf> {
+        self.daemon
+            .cache
+            .daemon_host_workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .and_then(|workspace| workspace.linked_vault_dir.clone())
     }
 
     /// The CURRENT grid's tree identity (daemon id when adopted).

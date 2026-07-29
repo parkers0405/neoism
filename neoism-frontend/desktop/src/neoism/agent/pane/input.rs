@@ -569,8 +569,10 @@ impl NeoismAgentPane {
     }
 
     /// Re-fetch sessions and refresh the open Session picker + side panel
-    /// after a pin / delete / rename mutation.
-    fn refresh_sessions_after_mutation(&mut self) {
+    /// after a pin / delete / rename mutation — or after a server switch
+    /// (`switch_server`), so a guest moved onto the host's agent-server pulls
+    /// the host's session list.
+    pub(crate) fn refresh_sessions_after_mutation(&mut self) {
         let current = self.session_id.clone();
         let directory = self.directory.clone();
         if let Ok(options) =

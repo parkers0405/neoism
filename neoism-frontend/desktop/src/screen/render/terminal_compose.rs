@@ -177,7 +177,14 @@ impl Screen<'_> {
                     && ctx.neoism_agent.is_none()
                     && ctx.neoism_tags.is_none()
                     && shell_prompt_state.awaiting_command
-                    && !terminal_alt_screen;
+                    && !terminal_alt_screen
+                    // In a passthrough session the composer is hidden and
+                    // does NOT own the prompt row — so the raw remote/ssh
+                    // prompt must stay in the composed stream instead of
+                    // being dropped as composer chrome. (Local panes only
+                    // enter passthrough on ssh/sh, where `awaiting_command`
+                    // is already false, so this is byte-identical locally.)
+                    && !ctx.terminal_input.passthrough_session_active();
                 let prompt_abs_row = block_input_active
                     .then(|| terminal.absolute_row_for_line(terminal.cursor().pos.row));
                 let terminal_cursor_abs =
@@ -201,6 +208,26 @@ impl Screen<'_> {
             if ctx.terminal_input.sync_shell_state(shell_prompt_state) {
                 if let Some(injection) = ctx.splash_injection {
                     ctx.splash_last_cursor_row = injection.baseline_cursor_row;
+                }
+            }
+            // Remote/joined (daemon-hosted) panes use the neoism composer
+            // only as a splash-phase launcher: the `>>>` composer owns
+            // input while the splash is up, then the pane drops to raw
+            // passthrough so the remote shell takes keystrokes directly —
+            // exactly like an ssh session. Drive `passthrough_session_active`
+            // off the SAME splash-phase signal the splash uses
+            // (`command_block_count() == 0`), which also overrides the
+            // OSC-133 auto-clear inside `sync_shell_state`, so the composer,
+            // its reserved rows, the terminal tail and the raw prompt all
+            // follow the splash in lock-step: hidden once the first command
+            // is submitted, shown again whenever `clear` resets the blocks.
+            // Local panes have no `remote_pty` (`None`) and are untouched.
+            if let Some(target) = crate::host::composer::remote_pty_passthrough_target(
+                ctx.remote_pty.is_some(),
+                ctx.terminal_input.command_block_count(),
+            ) {
+                if ctx.terminal_input.passthrough_session_active() != target {
+                    ctx.terminal_input.set_passthrough_session_active(target);
                 }
             }
             drop_composer_owned_prompt_row(

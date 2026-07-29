@@ -169,6 +169,32 @@ pub(super) fn splash_composer_reserved_rows<T: neoism_backend::event::EventListe
     )
 }
 
+/// Desired `passthrough_session_active` for a terminal pane, or `None`
+/// when the pane's passthrough state must be left untouched.
+///
+/// A daemon-hosted (JOINED / remote-PTY) pane uses the neoism composer
+/// only as a **splash-phase launcher**: while it has no command blocks
+/// (a fresh pane, or one just returned to the splash by `clear`) the
+/// `>>>` composer is shown and owns input; the instant the first
+/// command is submitted (`command_block_count() > 0`) the pane drops to
+/// raw passthrough so the remote shell takes keystrokes directly —
+/// exactly like an ssh session — hiding the composer and revealing the
+/// raw remote prompt. This mirrors the splash-phase signal
+/// (`command_block_count() == 0`) that `terminal_splash_wants_visible`
+/// uses, so the composer and the splash toggle in lock-step: both up
+/// during the launcher phase, both gone once a command runs, both back
+/// when `clear` resets the blocks.
+///
+/// Returns `None` for a LOCAL pane (`is_remote_pty == false`), whose
+/// passthrough state is driven solely by ssh/sh command detection
+/// (`starts_passthrough_session`) and must stay byte-identical.
+pub(crate) fn remote_pty_passthrough_target(
+    is_remote_pty: bool,
+    command_block_count: usize,
+) -> Option<bool> {
+    is_remote_pty.then(|| command_block_count > 0)
+}
+
 impl Renderer {
     /// Paint parked composers for inactive terminal splits. The active
     /// composer is stateful because it owns completion/caret animation; these
@@ -505,5 +531,35 @@ impl Renderer {
             classification,
             current.terminal_shell_kind.into(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_pty_passthrough_target;
+
+    #[test]
+    fn local_pane_passthrough_is_never_forced() {
+        // Local panes: `None` at every block count → their passthrough
+        // state is left entirely to ssh/sh detection (byte-identical).
+        assert_eq!(remote_pty_passthrough_target(false, 0), None);
+        assert_eq!(remote_pty_passthrough_target(false, 1), None);
+        assert_eq!(remote_pty_passthrough_target(false, 5), None);
+    }
+
+    #[test]
+    fn remote_pane_shows_composer_during_splash_phase() {
+        // Fresh remote pane (no command blocks) — or one returned to the
+        // splash by `clear` — stays out of passthrough so the composer
+        // is visible and owns input.
+        assert_eq!(remote_pty_passthrough_target(true, 0), Some(false));
+    }
+
+    #[test]
+    fn remote_pane_drops_to_passthrough_after_first_command() {
+        // Once the first command is submitted the remote pane enters raw
+        // passthrough: composer hidden, raw remote prompt shown.
+        assert_eq!(remote_pty_passthrough_target(true, 1), Some(true));
+        assert_eq!(remote_pty_passthrough_target(true, 3), Some(true));
     }
 }

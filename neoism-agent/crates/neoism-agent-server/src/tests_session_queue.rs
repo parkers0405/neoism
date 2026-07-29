@@ -160,6 +160,85 @@ async fn session_abort_cancels_running_bash_tool() {
 }
 
 #[tokio::test]
+async fn prompt_async_preserves_the_sender_author_end_to_end() {
+    // A guest sends a prompt carrying its presence-name `author`. The WHOLE
+    // server chain — the real `/session/{id}/prompt_async` HTTP route →
+    // enqueue (serde round-trip through the store) → drain → append_prompt →
+    // persisted user message — must carry it, so a remote viewer renders the
+    // true sender instead of "You". This is the headless proof of the server
+    // half of the shared-author feature.
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-author-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/session?directory={}", root.to_string_lossy()),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/session/{}/prompt_async", session.id),
+            Some(json!({
+                "noReply": true,
+                "author": "piss-desktop",
+                "parts": [{ "type": "text", "text": "hi from the peer" }]
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let user = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let messages = state
+                .inner
+                .store
+                .list_messages(session.id.as_str())
+                .await
+                .unwrap();
+            if let Some(user) = messages.into_iter().find(|m| {
+                matches!(m.info, neoism_agent_core::MessageInfo::User(_))
+            }) {
+                break user;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the user message should persist");
+
+    // Assert the SERIALIZED JSON the frontend actually reads (`info.author`),
+    // not just the in-memory struct — MessageInfo is `#[serde(tag = "role")]`
+    // so UserMessage fields flatten to info's top level.
+    let json = serde_json::to_value(&user).unwrap();
+    assert_eq!(
+        json["info"]["author"].as_str(),
+        Some("piss-desktop"),
+        "the persisted user message's info JSON (what the frontend reads) must carry the author: {json:#}"
+    );
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn prompt_async_queues_while_session_is_running() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-prompt-queue-{}",

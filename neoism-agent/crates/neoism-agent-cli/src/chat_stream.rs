@@ -51,6 +51,7 @@ pub(crate) async fn stream_chat_prompt(
                 no_reply: false,
                 system: None,
                 tools: None,
+                author: None,
                 parts: prompt_parts,
             })
             .send()

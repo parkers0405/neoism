@@ -885,6 +885,7 @@ mod tests {
             no_reply: false,
             system: None,
             tools: None,
+            author: None,
             parts: vec![PromptPart::Text {
                 text: "queued".to_string(),
             }],

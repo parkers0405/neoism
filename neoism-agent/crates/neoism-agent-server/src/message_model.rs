@@ -677,6 +677,7 @@ mod tests {
                 },
                 system: None,
                 tools: None,
+                author: None,
             }),
             parts: vec![
                 Part::Text(TextPart {
@@ -727,6 +728,7 @@ mod tests {
                 },
                 system: None,
                 tools: None,
+                author: None,
             }),
             parts: vec![
                 Part::Text(TextPart {
@@ -809,6 +811,7 @@ mod tests {
                 },
                 system: Some("legacy agent prompt that should not replay".to_string()),
                 tools: None,
+                author: None,
             }),
             parts: vec![Part::Text(TextPart {
                 id: text_part_id,
@@ -844,6 +847,7 @@ mod tests {
                 },
                 system: Some(SUBTASK_COMPLETION_SYSTEM_MARKER.to_string()),
                 tools: None,
+                author: None,
             }),
             parts: vec![Part::Text(TextPart {
                 id: text_part_id,

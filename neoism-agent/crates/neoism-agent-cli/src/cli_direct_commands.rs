@@ -164,6 +164,7 @@ pub(super) async fn run(
                 no_reply: false,
                 system: None,
                 tools: None,
+                author: None,
                 parts: vec![PromptPart::Text { text: message }],
             })
             .send()

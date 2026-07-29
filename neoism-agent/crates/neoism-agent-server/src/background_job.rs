@@ -444,6 +444,7 @@ fn background_task_completion_request(job: &BackgroundJob) -> PromptRequest {
         no_reply: false,
         system: Some(background_task_completion_system()),
         tools: None,
+        author: None,
         parts: vec![PromptPart::Text {
             text: background_task_completion_prompt(job),
         }],

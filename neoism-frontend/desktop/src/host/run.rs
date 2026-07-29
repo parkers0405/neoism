@@ -8,6 +8,7 @@ fn terminal_splash_wants_visible(
     current_cursor_row: i32,
     last_cursor_row: &mut i32,
     baseline_cursor_row: i32,
+    is_remote_pty: bool,
 ) -> bool {
     if no_command_yet
         && !alt_screen
@@ -17,7 +18,25 @@ fn terminal_splash_wants_visible(
         *last_cursor_row = current_cursor_row;
     }
 
-    let cursor_advanced_past_splash = *last_cursor_row > baseline_cursor_row;
+    // On a LOCAL pane neoism owns the empty initial state, so any
+    // cursor advance past the splash baseline means the user pressed
+    // Enter at the raw shell prompt (bypassing the composer's command
+    // blocks) and the splash must dismiss.
+    //
+    // On a REMOTE / joined pane (`is_remote_pty`) the daemon-hosted
+    // shell prints its OWN prompt (and any MOTD / login banner) the
+    // instant the pane attaches, which advances the cursor past the
+    // baseline before the user has run anything. Letting that count as
+    // "advanced past splash" is exactly what dismisses the splash
+    // immediately on joined terminals. So for remote panes we ignore
+    // the cursor-advance term entirely and keep the splash up until the
+    // first REAL command is submitted (`no_command_yet` flips to
+    // `false`) or a TUI / foreground command takes the pane
+    // (`alt_screen` / `running_command`). Before the first command a
+    // remote pane's raw prompt is still owned by the composer
+    // (`should_capture_input`), so there is no raw-Enter path to miss.
+    let cursor_advanced_past_splash =
+        !is_remote_pty && *last_cursor_row > baseline_cursor_row;
     !alt_screen && no_command_yet && !running_command && !cursor_advanced_past_splash
 }
 
@@ -626,6 +645,11 @@ impl Renderer {
                 // bug the user reported.
                 let injection = injection.unwrap();
                 let no_command_yet = ctx.terminal_input.command_block_count() == 0;
+                // A daemon-hosted (JOINED / remote-PTY) pane is bound
+                // to a `remote_pty`; its shell prints its own prompt on
+                // attach, so the splash baseline must ignore that first
+                // cursor advance (see `terminal_splash_wants_visible`).
+                let is_remote_pty = ctx.remote_pty.is_some();
                 if let Some(terminal) = ctx.terminal.try_lock_unfair() {
                     let alt = terminal
                         .mode()
@@ -639,6 +663,7 @@ impl Renderer {
                         cursor_row,
                         &mut ctx.splash_last_cursor_row,
                         injection.baseline_cursor_row,
+                        is_remote_pty,
                     );
                 }
             }
@@ -1550,6 +1575,7 @@ mod tests {
             12,
             &mut last_cursor_row,
             12,
+            false,
         ));
         assert_eq!(last_cursor_row, 12);
     }
@@ -1565,6 +1591,7 @@ mod tests {
             12,
             &mut last_cursor_row,
             12,
+            false,
         ));
     }
 
@@ -1579,6 +1606,7 @@ mod tests {
             13,
             &mut last_cursor_row,
             12,
+            false,
         ));
         assert_eq!(last_cursor_row, 12);
     }
@@ -1594,6 +1622,7 @@ mod tests {
             13,
             &mut last_cursor_row,
             12,
+            false,
         ));
         assert_eq!(last_cursor_row, 13);
     }
@@ -1609,6 +1638,7 @@ mod tests {
             12,
             &mut last_cursor_row,
             12,
+            false,
         ));
         assert_eq!(last_cursor_row, 13);
     }
@@ -1623,6 +1653,7 @@ mod tests {
             12,
             &mut last_cursor_row,
             12,
+            false,
         ));
         assert!(!terminal_splash_wants_visible(
             true,
@@ -1631,6 +1662,91 @@ mod tests {
             12,
             &mut last_cursor_row,
             12,
+            false,
+        ));
+    }
+
+    // --- Remote / joined (daemon-hosted) PTY panes ---------------------
+
+    /// On a remote pane the daemon-hosted shell prints its own prompt
+    /// the instant the pane attaches, advancing the cursor past the
+    /// splash baseline. That must NOT dismiss the splash — it should
+    /// stay up until the first real command is submitted. This is the
+    /// exact input that dismisses a LOCAL splash
+    /// (`terminal_splash_hides_after_raw_prompt_enter`); flipping only
+    /// the `is_remote_pty` flag keeps the splash visible.
+    #[test]
+    fn terminal_splash_survives_remote_prompt_paint() {
+        let mut last_cursor_row = 12;
+
+        assert!(terminal_splash_wants_visible(
+            true,
+            false,
+            false,
+            13,
+            &mut last_cursor_row,
+            12,
+            true,
+        ));
+    }
+
+    /// Even after the remote shell scrolls its prompt / MOTD several
+    /// rows past the baseline, the splash stays until the first command.
+    #[test]
+    fn terminal_splash_survives_remote_scrolled_prompt() {
+        let mut last_cursor_row = 12;
+
+        assert!(terminal_splash_wants_visible(
+            true,
+            false,
+            false,
+            40,
+            &mut last_cursor_row,
+            12,
+            true,
+        ));
+    }
+
+    /// Once the user submits a real command on a remote pane
+    /// (`no_command_yet == false`) the splash dismisses exactly like
+    /// local — the `no_command_yet` term still drives it.
+    #[test]
+    fn terminal_splash_hides_after_remote_first_command() {
+        let mut last_cursor_row = 40;
+
+        assert!(!terminal_splash_wants_visible(
+            false,
+            false,
+            false,
+            41,
+            &mut last_cursor_row,
+            12,
+            true,
+        ));
+    }
+
+    /// A remote TUI (alt-screen) or foreground command still hides the
+    /// splash, same as local.
+    #[test]
+    fn terminal_splash_hides_for_remote_alt_or_running() {
+        let mut last_cursor_row = 12;
+        assert!(!terminal_splash_wants_visible(
+            true,
+            true,
+            false,
+            13,
+            &mut last_cursor_row,
+            12,
+            true,
+        ));
+        assert!(!terminal_splash_wants_visible(
+            true,
+            false,
+            true,
+            13,
+            &mut last_cursor_row,
+            12,
+            true,
         ));
     }
 }

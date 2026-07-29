@@ -190,6 +190,7 @@ pub(crate) async fn append_child_subtask_prompt(
             no_reply: false,
             system: None,
             tools: None,
+            author: None,
             parts: vec![PromptPart::Text {
                 text: prompt.to_string(),
             }],
@@ -535,6 +536,7 @@ fn parent_subtask_completions_request(
         no_reply: false,
         system: Some(parent_subtask_completion_system()),
         tools: None,
+        author: None,
         parts: vec![PromptPart::Text {
             text: parent_subtask_completions_prompt(completions),
         }],
@@ -785,6 +787,7 @@ pub(crate) async fn session_command(
                 no_reply: false,
                 system: None,
                 tools: None,
+                author: None,
                 parts: vec![PromptPart::Subtask {
                     prompt: text,
                     description,
@@ -808,6 +811,7 @@ pub(crate) async fn session_command(
             no_reply: false,
             system: None,
             tools: None,
+            author: None,
             parts: vec![PromptPart::Text { text }],
         },
         true,
@@ -831,6 +835,7 @@ pub(crate) async fn session_shell(
             no_reply: false,
             system: None,
             tools: None,
+            author: None,
             parts: vec![PromptPart::Text {
                 text: format!("Run shell command: {}", request.command),
             }],

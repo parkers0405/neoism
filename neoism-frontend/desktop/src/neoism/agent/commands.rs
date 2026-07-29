@@ -541,6 +541,14 @@ impl NeoismAgentPane {
             return Err("subagent sessions are view-only".to_string());
         }
         let session_id = self.ensure_session()?;
+        // Stamp who is sending this prompt so a shared/joined session
+        // attributes the turn to the true sender: the host's agent-server
+        // persists this on the user message and re-broadcasts it to every
+        // attached client, and a remote peer renders THIS name + its
+        // deterministic presence orb (instead of a generic "You"). The local
+        // sender's own bubble still reads "You" — its optimistic echo carries
+        // no author and the server echo is deduped onto it by text.
+        let author = self.local_presence_name().map(str::to_string);
         let body = json!({
             "messageId": null,
             "model": prompt_model_json(model.as_str(), thinking.as_deref()),
@@ -548,6 +556,7 @@ impl NeoismAgentPane {
             "noReply": false,
             "system": system,
             "tools": null,
+            "author": author,
             "parts": parts,
         });
         self.start_session_updates(&session_id);

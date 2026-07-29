@@ -549,6 +549,7 @@ async fn prompt_queue_survives_server_restart() {
                 no_reply: true,
                 system: None,
                 tools: None,
+                author: None,
                 parts: vec![PromptPart::Text {
                     text: "queued before restart".to_string(),
                 }],

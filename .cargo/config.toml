@@ -11,3 +11,15 @@ rustflags = "-Ctarget-cpu=apple-m1"
 [target.'cfg(target_os = "windows")']
 # This cfg will reduce the size of `windows::core::Error` from 16 bytes to 4 bytes.
 rustflags = "--cfg windows_slim_errors"
+
+[target.'cfg(target_os = "linux")']
+# `shaderc` (native Vulkan backend, unconditional dep) and
+# `librashader-reflect` (the wgpu filter chain, enabled on the Linux desktop
+# build for shader-pack CRT filters) each statically vendor their OWN copy of
+# glslang/SPIRV, so `spv::Builder::*` ends up defined twice. GNU ld/gold/mold
+# silently take the first archive and link fine — which is why it builds for
+# us — but strict linkers (rust-lld) reject it with "duplicate symbol" and
+# fail `cargo build` from source (reported on Debian Sid). Permit the overlap:
+# both copies are the same upstream glslang, so first-definition-wins is safe.
+# Passed via the cc driver (`-Wl,`) to match the default linux linker flavor.
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]

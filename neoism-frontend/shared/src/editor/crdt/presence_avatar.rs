@@ -79,7 +79,35 @@ impl Rng {
 
 impl AvatarProfile {
     pub fn from_seed(seed: &str) -> Self {
-        let h = hash_seed(if seed.is_empty() { " " } else { seed });
+        // Memoize by seed. `from_seed` is a pure function of the seed
+        // (hash → hues/frequencies) with NO time dependence, yet it runs
+        // for every presence orb on every frame — the editor caret, the
+        // roster, and the top-chrome cluster each draw the same peer's orb,
+        // 2–3× per peer per frame. Caching the tiny `Copy` result removes
+        // that per-frame hashing/RNG cost (a real contributor to frames
+        // tipping over the vblank budget in a busy shared session). The orb
+        // ANIMATION is untouched: `cells(t)` still recomputes each frame.
+        // Cache is per-thread (rendering is single-threaded) and bounded by
+        // the number of distinct collaborator identities seen this session.
+        thread_local! {
+            static PROFILE_CACHE: std::cell::RefCell<
+                std::collections::HashMap<String, AvatarProfile>,
+            > = std::cell::RefCell::new(std::collections::HashMap::new());
+        }
+        let key = if seed.is_empty() { " " } else { seed };
+        if let Some(cached) = PROFILE_CACHE.with(|cache| cache.borrow().get(key).copied())
+        {
+            return cached;
+        }
+        let profile = Self::compute_from_seed(key);
+        PROFILE_CACHE.with(|cache| {
+            cache.borrow_mut().insert(key.to_string(), profile);
+        });
+        profile
+    }
+
+    fn compute_from_seed(seed: &str) -> Self {
+        let h = hash_seed(seed);
         let mut r = Rng::new(h);
         let base = (h % 360) as f32;
         // Vibrant palette the pixels cycle through: an analogous run plus

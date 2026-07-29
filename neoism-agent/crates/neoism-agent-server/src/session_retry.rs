@@ -82,6 +82,20 @@ pub(crate) fn retryable_message(message: &str) -> bool {
         "connection refused",
         "incomplete message",
         "stream error",
+        // Provider-worded transient failures that carry no status code
+        // because they arrive MID-STREAM (HTTP 200, error in the body).
+        // OpenAI's generic 500 reads "An error occurred while processing
+        // your request. You can retry your request..." — an explicit
+        // retry signal, so honor it instead of cold-stopping the turn.
+        "an error occurred while processing",
+        "you can retry",
+        "please try again",
+        "internal server error",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "server had an error",
+        "server error",
     ]
     .iter()
     .any(|pattern| lower.contains(pattern))

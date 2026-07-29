@@ -73,9 +73,29 @@ pub fn default_shell() -> crate::config::Shell {
 
 #[cfg(not(target_os = "windows"))]
 fn find_shell_in_path(name: &str) -> Option<String> {
-    use std::path::Path;
-    for fixed in ["/bin", "/usr/bin", "/usr/local/bin"] {
-        let candidate = Path::new(fixed).join(name);
+    use std::path::PathBuf;
+    // System locations first, then the common user-profile package-manager
+    // bin dirs (Nix, Homebrew, ~/.local). A neoism launched from a display
+    // manager / app launcher frequently inherits a MINIMAL $PATH that omits
+    // these, so a zsh installed via `nix profile` or Homebrew would go unseen
+    // and we'd silently fall back to bash — the "I installed zsh but the
+    // terminal is still bash" trap. Probe them explicitly so the zsh default
+    // actually wins wherever zsh is present.
+    let mut probe: Vec<PathBuf> = vec![
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/home/linuxbrew/.linuxbrew/bin"),
+        PathBuf::from("/nix/var/nix/profiles/default/bin"),
+    ];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        probe.push(home.join(".nix-profile/bin"));
+        probe.push(home.join(".local/state/nix/profile/bin"));
+        probe.push(home.join(".local/bin"));
+    }
+    for dir in &probe {
+        let candidate = dir.join(name);
         if candidate.exists() {
             return Some(candidate.to_string_lossy().into_owned());
         }

@@ -902,6 +902,11 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
             .get("author")
             .and_then(Value::as_str)
             .map(str::to_string);
+        tracing::info!(
+            target: "neoism::author",
+            author = ?message.author,
+            "live user part received (author=None means the SENDER's client didn't stamp it — usually an older build; a real name means it flowed through)"
+        );
     }
     message.id = id;
     Some(message)

@@ -364,11 +364,25 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// can read the same chats/threads/SSE the host sees. `None` when
     /// the current workspace is local (use the local default).
     pub fn agent_server_override_for_current(&self) -> Option<String> {
-        if !self.current_workspace_is_remote_joined() {
-            return None;
-        }
-        let endpoint = self.daemon.link.as_ref()?.endpoint.as_str();
-        crate::neoism::agent::agent_reverse_proxy_for_daemon_endpoint(endpoint)
+        let joined = self.current_workspace_is_remote_joined();
+        let endpoint = self.daemon.link.as_ref().map(|l| l.endpoint.clone());
+        let resolved = if joined {
+            endpoint
+                .as_deref()
+                .and_then(crate::neoism::agent::agent_reverse_proxy_for_daemon_endpoint)
+        } else {
+            None
+        };
+        tracing::info!(
+            target: "neoism::agent_server",
+            joined,
+            link_is_peer = self.daemon.link_is_peer,
+            adopted = self.current_adopted_workspace_id().is_some(),
+            endpoint = ?endpoint,
+            resolved = ?resolved,
+            "agent_server_override_for_current: which agent-server the guest pane will use (None = local)"
+        );
+        resolved
     }
 
     /// The daemon tree's host id for `workspace_id`, if known.

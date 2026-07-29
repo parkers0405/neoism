@@ -755,6 +755,13 @@ impl Screen<'_> {
             directory,
         )?;
         self.renderer.buffer_tabs.open_neoism_agent(route_id);
+        // A freshly-created agent pane defaults to the LOCAL agent server.
+        // If the current workspace is a joined guest, point it at the HOST's
+        // reverse-proxied agent-server NOW so its session sidebar + SSE read
+        // the host's chats — otherwise opening the agent AFTER joining leaves
+        // it on the local server and shows the guest's own sessions. The
+        // workspace-switch path already syncs; opening the tab did not.
+        self.sync_agent_server_for_current_workspace();
         self.renderer.file_tree.set_focused(false);
         self.renderer.file_tree.set_active_path(None);
         self.reapply_chrome_layout();

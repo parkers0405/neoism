@@ -507,6 +507,11 @@ impl NotesSidebar {
     /// override is remembered so refreshes between the edit and the
     /// flush re-apply it instead of reverting to the disk value.
     pub fn set_note_icon(&mut self, path: &Path, icon: Option<String>) {
+        // Normalise an empty/whitespace-only frontmatter value to `None`:
+        // an empty `icon:` is "no icon", not a real glyph, and storing
+        // `Some("")` would both render blank and (as a live override) clobber
+        // a real icon read from the map or a later frontmatter edit.
+        let icon = icon.filter(|glyph| !glyph.trim().is_empty());
         self.icon_overrides.insert(path.to_path_buf(), icon.clone());
         for entry in &mut self.all_entries {
             if entry.path == path {
@@ -1573,7 +1578,13 @@ impl NotesSidebar {
                 // Notion-style icon/emoji picker for this entry.
                 self.icon_rects
                     .push(([cursor_x - 2.0, row_y, icon_size + 4.0, row_h], absolute_ix));
-                if let Some(custom) = entry.icon.as_deref() {
+                // A blank/whitespace-only custom icon is treated as "no
+                // custom icon" so it falls back to the default glyph instead
+                // of rendering an empty box (belt-and-suspenders: the icon
+                // map already drops empty values in `load_notes_icons`).
+                if let Some(custom) =
+                    entry.icon.as_deref().filter(|glyph| !glyph.trim().is_empty())
+                {
                     let custom_opts = DrawOpts {
                         font_size: icon_size,
                         color: fade_u8(theme.u8(theme.fg), row_dim),
@@ -2106,11 +2117,25 @@ fn collect_note_entries(
 /// Read the vault's icon map (`.neoism-icons.json`: relative path → glyph).
 /// Missing/invalid files mean no overrides; wasm has no fs so this is a
 /// graceful no-op there.
+///
+/// EMPTY (or whitespace-only) values are dropped: the map is applied LAST
+/// as the highest-priority override, so a stale `""` value — left by an
+/// older "reset to default" that wrote an empty string instead of removing
+/// the key — would otherwise clobber the note's real frontmatter `icon:`
+/// with `Some("")`, which renders as no glyph. Only the ROOT note tends to
+/// carry such a stale entry, so before this filter root notes silently lost
+/// their icon on every re-list (set -> collapse/expand -> revert) while
+/// nested notes, absent from the map, kept theirs. A "reset" is the ABSENCE
+/// of a key, never an empty value, so dropping empties changes no real
+/// override.
 fn load_notes_icons(root: &Path) -> HashMap<String, String> {
-    std::fs::read_to_string(root.join(NOTES_ICONS_FILE))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+    let mut icons: HashMap<String, String> =
+        std::fs::read_to_string(root.join(NOTES_ICONS_FILE))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+    icons.retain(|_, glyph| !glyph.trim().is_empty());
+    icons
 }
 
 fn should_skip_note_entry(root: &Path, path: &Path) -> bool {
@@ -2290,6 +2315,109 @@ mod tests {
             local_icon.as_deref(),
             Some("\u{1f525}"),
             "refresh_notes must surface the frontmatter icon"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// REPRO scratch: mimic the picker writing `.neoism-icons.json`, the
+    /// way `notes_menus.rs::set_notes_entry_icon` does (key = strip_prefix
+    /// of the VAULT), for a note path.
+    fn picker_write_icon(vault: &Path, note: &Path, icon: &str) {
+        let rel = note.strip_prefix(vault).unwrap().to_string_lossy().into_owned();
+        let icons_path = vault.join(NOTES_ICONS_FILE);
+        let mut icons: HashMap<String, String> = std::fs::read_to_string(&icons_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        icons.insert(rel, icon.to_string());
+        std::fs::write(&icons_path, serde_json::to_string_pretty(&icons).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn empty_icon_map_entry_never_clobbers_a_root_note_frontmatter_icon() {
+        // Faithful to the user's real vault: `.neoism-icons.json` holds a
+        // STALE empty-string value for the root note (`{"TASKS.md": ""}`,
+        // left by an older reset that wrote `""` instead of removing the
+        // key), while the note itself carries a real `icon:` frontmatter.
+        // A NESTED note carries a frontmatter icon and has NO map entry.
+        //
+        // Before the fix, the map was applied LAST as the highest-priority
+        // override and stored `Some("")`, clobbering the root note's real
+        // frontmatter icon on every re-list (set -> collapse/expand ->
+        // re-fetch reverts it). The nested note, absent from the map, kept
+        // its icon — exactly the reported root-vs-folder asymmetry.
+        let root = std::env::temp_dir().join("neoism-empty-icon-map-vault");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("folder")).unwrap();
+        let root_note = root.join("TASKS.md");
+        let nested_note = root.join("folder").join("nested.md");
+        std::fs::write(&root_note, "---\nicon: \u{2b50}\ncover: creation\n---\n# TASKS\n")
+            .unwrap();
+        std::fs::write(
+            &nested_note,
+            "---\nicon: \u{1f525}\n---\n# nested\n",
+        )
+        .unwrap();
+        // The stale empty-string map entry for the ROOT note only.
+        std::fs::write(root.join(NOTES_ICONS_FILE), "{\n  \"TASKS.md\": \"\"\n}").unwrap();
+
+        // Daemon-style entry list, exactly like daemon_sync.rs:
+        // notes_root.join(relative_path) for each TreeListing entry.
+        let entries = || {
+            vec![
+                (root.join("TASKS.md"), false),
+                (root.join("folder"), true),
+                (root.join("folder").join("nested.md"), false),
+            ]
+        };
+        let root_icon = |s: &NotesSidebar| {
+            s.all_entries.iter().find(|e| e.path == root_note).and_then(|e| e.icon.clone())
+        };
+        let nested_icon = |s: &NotesSidebar| {
+            s.all_entries.iter().find(|e| e.path == nested_note).and_then(|e| e.icon.clone())
+        };
+
+        // Daemon path (set_entries_from_host) — the desktop re-list.
+        let mut s = NotesSidebar::default();
+        s.set_workspace("Test", Some(root.clone()));
+        s.set_visible(true);
+        s.set_entries_from_host(entries());
+        s.reveal_dir(&root.join("folder"));
+        assert_eq!(
+            root_icon(&s).as_deref(),
+            Some("\u{2b50}"),
+            "root note frontmatter icon must survive an empty map entry (set_entries_from_host)"
+        );
+        assert_eq!(nested_icon(&s).as_deref(), Some("\u{1f525}"), "nested icon (host)");
+
+        // Collapse + expand + re-fetch (the toggle-panel cycle).
+        s.open_dirs.remove(&root.join("folder"));
+        s.rebuild_rows();
+        s.reveal_dir(&root.join("folder"));
+        s.set_entries_from_host(entries());
+        assert_eq!(
+            root_icon(&s).as_deref(),
+            Some("\u{2b50}"),
+            "root note icon reverted after collapse/expand re-fetch"
+        );
+
+        // Local fs-walk path (refresh_notes).
+        s.refresh_notes();
+        assert_eq!(
+            root_icon(&s).as_deref(),
+            Some("\u{2b50}"),
+            "root note frontmatter icon must survive an empty map entry (refresh_notes)"
+        );
+        assert_eq!(nested_icon(&s).as_deref(), Some("\u{1f525}"), "nested icon (local)");
+
+        // A NON-empty map entry still wins over the frontmatter (picker set).
+        picker_write_icon(&root, &root_note, "\u{f135}");
+        s.refresh_notes();
+        assert_eq!(
+            root_icon(&s).as_deref(),
+            Some("\u{f135}"),
+            "a real picker icon must still override the frontmatter"
         );
 
         let _ = std::fs::remove_dir_all(&root);

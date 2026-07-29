@@ -43,6 +43,24 @@ const VULKAN_FRAME_LOG_ENV: &str = "NEOISM_VULKAN_FRAME_LOG";
 const VULKAN_FRAME_SPIKE_US_ENV: &str = "NEOISM_VULKAN_FRAME_SPIKE_US";
 const DEFAULT_FRAME_SPIKE_US: u128 = 8_000;
 
+/// Number of live `VulkanContext`s in this process.
+///
+/// NVIDIA's Vulkan ICD (`libnvidia-glcore`) keeps process-global
+/// dispatch state. Destroying one window's `VkInstance` while another
+/// window is still rendering nulls out the survivor's swapchain
+/// dispatch entry — the next `vkCreateSwapchainKHR` (fired by the
+/// resize when the closing window vacates the compositor layout) then
+/// jumps through a null function pointer and SIGSEGVs deep inside the
+/// driver (`libnvidia-glcore` → `libvulkan` → `create_swapchain`).
+///
+/// So we defer `destroy_device` / `destroy_surface` / `destroy_instance`
+/// until the *last* context drops; earlier drops leak their instance +
+/// device (cheap — windows close rarely and the OS reclaims everything
+/// at process exit). Mesa/AMD keeps per-instance state and never tripped
+/// this, which is why the crash only reproduced on discrete NVIDIA.
+static LIVE_VULKAN_CONTEXTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// One set of synchronisation objects + a command pool & pre-allocated
 /// primary buffer, reused each time the same slot comes around. The
 /// `in_flight` fence is signalled by the submit that uses this slot so
@@ -241,6 +259,11 @@ impl VulkanContext {
             swapchain_images.len()
         );
         log_memory_heap_choice(&instance, physical_device);
+
+        // Paired with the decrement in `Drop`. Counts only fully-built
+        // contexts — a panic earlier in `new` never runs `Drop`, so the
+        // increment lives here at the successful-construction boundary.
+        LIVE_VULKAN_CONTEXTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         VulkanContext {
             size,
@@ -1102,9 +1125,31 @@ impl Drop for VulkanContext {
             }
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
-            self.device.destroy_device(None);
-            self.surface_loader.destroy_surface(self.surface, None);
-            self.instance.destroy_instance(None);
+
+            // Only tear down the device / surface / instance when this is
+            // the final live context in the process. Destroying an
+            // instance while a sibling window is still rendering corrupts
+            // the NVIDIA driver's process-global dispatch table and
+            // SIGSEGVs the survivor's next `vkCreateSwapchainKHR`. See
+            // `LIVE_VULKAN_CONTEXTS`. `fetch_sub` returns the value
+            // *before* the subtraction, so `remaining` is the count that
+            // stays alive after this drop.
+            let remaining = LIVE_VULKAN_CONTEXTS
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+                .saturating_sub(1);
+            if remaining == 0 {
+                self.device.destroy_device(None);
+                self.surface_loader.destroy_surface(self.surface, None);
+                self.instance.destroy_instance(None);
+            } else {
+                tracing::warn!(
+                    target: "sugarloaf::context::vulkan",
+                    remaining,
+                    "deferring VkInstance/VkDevice teardown until the last window closes \
+                     (NVIDIA multi-instance swapchain crash guard); leaking this \
+                     window's instance/device until process exit"
+                );
+            }
         }
     }
 }

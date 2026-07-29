@@ -1921,7 +1921,22 @@ impl Sugarloaf<'_> {
             }
             Err(error) => match error {
                 wgpu::SurfaceError::OutOfMemory => {
-                    panic!("Swapchain error: {error}. Rendering cannot continue.")
+                    // Do NOT panic here: this render runs on the shared event
+                    // loop, so aborting the process takes down EVERY window.
+                    // Closing one of several windows can transiently surface
+                    // `OutOfMemory` on a sibling window's swapchain acquire on
+                    // some drivers (observed: NVIDIA/RTX on Wayland-Hyprland
+                    // closing one of two neoism windows kills them all; an AMD
+                    // iGPU is unaffected). Treat it like a lost surface —
+                    // reconfigure and skip this frame — so one window's swap
+                    // hiccup can never take its siblings (or the whole app)
+                    // down. A genuinely unrecoverable OOM just keeps failing
+                    // to present THIS one window.
+                    tracing::warn!(
+                        target: "sugarloaf::wgpu",
+                        "wgpu surface reported OutOfMemory; reconfiguring this window instead of aborting the process"
+                    );
+                    ctx.resize(ctx.size.width as u32, ctx.size.height as u32);
                 }
                 wgpu::SurfaceError::Lost => {
                     tracing::warn!(

@@ -1520,6 +1520,12 @@ impl From<neoism_ui::panels::agent_pane::state::NeoismAgentMessage>
         out.line_offset = message.line_offset;
         out.detail = message.detail;
         out.usage = message.usage.map(NeoismAgentUsage::from);
+        // Carry the sender's presence name through the shared→desktop
+        // conversion. Without this every user bubble renders as "You" with
+        // the LOCAL orb/color even for remote peers, because the constructors
+        // above default `author` to None — the shared api_mapping already
+        // resolved it from info.author / part.author, so just keep it.
+        out.author = message.author;
         out
     }
 }

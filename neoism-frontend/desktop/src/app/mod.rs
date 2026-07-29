@@ -1560,7 +1560,30 @@ impl Application<'_> {
                 }
 
                 if animating && !redraw_pending && !redraw_retry_due {
-                    if let Some(wait) = route.window.wait_until() {
+                    // Pace pure-animation frames to the refresh rate even
+                    // after an over-budget frame. `wait_until()` returns None
+                    // the moment a frame overruns the vblank interval; without
+                    // clamping we fall through to the immediate redraw below
+                    // and the loop free-runs at 100% CPU — every completed
+                    // frame instantly requests the next. A redraw owner that
+                    // never settles (presence_orbs stays "animating" for as
+                    // long as ANY peer is connected) then pins the main thread
+                    // and freezes every window (they share one event loop).
+                    // This bites on a shared workspace the instant a heavy
+                    // frame (reparse + per-frame presence-orb regeneration)
+                    // tips over budget. Genuine damage (`pending_dirty`) still
+                    // renders immediately.
+                    let paced_wait = if pending_dirty {
+                        route.window.wait_until()
+                    } else {
+                        Some(
+                            route
+                                .window
+                                .wait_until()
+                                .unwrap_or(route.window.vblank_interval),
+                        )
+                    };
+                    if let Some(wait) = paced_wait {
                         if let Some(reason) = redraw_reason {
                             crate::app::freeze_watchdog::note_sampled(
                                 format!("frame_source:{window_id:?}:{reason}"),

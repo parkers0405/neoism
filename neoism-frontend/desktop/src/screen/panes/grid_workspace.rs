@@ -458,16 +458,11 @@ impl Screen<'_> {
             self.notes_sidebar_workspace = Some(id.clone());
             // A fresh LOCAL panel resolves its vault on entry while the
             // sidebar is open; a daemon-served workspace (guest OR a
-            // self-hosting host) points at the project's `Notes/` on the
-            // server and asks the daemon for the listing.
+            // self-hosting host) points at the HOST's ONE linked vault
+            // (or the no-linked-vault empty state) and asks the daemon
+            // for the listing.
             if visible && self.renderer.notes_sidebar.workspace_path().is_none() {
-                if let Some(served_root) = self.served_workspace_root() {
-                    self.renderer.notes_sidebar.set_workspace(
-                        "Workspace notes".to_string(),
-                        Some(served_root.join("Notes")),
-                    );
-                    self.request_remote_notes_listing();
-                } else {
+                if !self.point_notes_sidebar_at_served_vault() {
                     self.assign_local_vault_to_notes_sidebar();
                 }
             }

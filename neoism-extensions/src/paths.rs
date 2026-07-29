@@ -31,6 +31,13 @@ pub fn staging_dir() -> PathBuf {
     extensions_dir().join("staging")
 }
 
+/// Root for Neoism-managed Node.js runtimes. Each pinned version is cached
+/// under `node_dir().join(format!("v{VERSION}"))` so npm-based language servers
+/// can be installed with zero user setup, Zed-style.
+pub fn node_dir() -> PathBuf {
+    extensions_dir().join("node")
+}
+
 pub fn installed_record_path() -> PathBuf {
     extensions_dir().join("installed.json")
 }

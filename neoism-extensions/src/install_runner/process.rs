@@ -11,52 +11,81 @@ pub(super) async fn wait_for_command(
     progress: &UnboundedSender<ProgressEvent>,
     tool: &str,
 ) -> Result<(std::process::ExitStatus, Vec<String>), InstallError> {
-    let run = async {
-        let tail = drive_command_progress(stdout, stderr, progress, tool).await;
-        let status = child.wait().await?;
-        Ok::<_, std::io::Error>((status, tail))
-    };
-    match tokio::time::timeout(INSTALL_PROCESS_TIMEOUT, run).await {
-        Ok(result) => result.map_err(InstallError::Io),
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err(InstallError::TimedOut {
-                tool: tool.to_string(),
-                seconds: INSTALL_PROCESS_TIMEOUT.as_secs(),
-            })
-        }
-    }
-}
-
-/// Read stdout + stderr line-by-line, emit progress events, return the last
-/// ~20 stderr lines for error reporting.
-pub(super) async fn drive_command_progress(
-    stdout: Option<tokio::process::ChildStdout>,
-    stderr: Option<tokio::process::ChildStderr>,
-    progress: &UnboundedSender<ProgressEvent>,
-    tool: &str,
-) -> Vec<String> {
     use std::sync::{Arc, Mutex};
 
     let tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let stdout_task = stdout.map(|s| {
-        let progress = progress.clone();
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(s).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                emit_command_line(&progress, line);
-            }
-        })
-    });
+    let stdout_task = spawn_line_reader(stdout, progress.clone(), None);
+    let stderr_task = spawn_line_reader(stderr, progress.clone(), Some(tail.clone()));
 
-    let stderr_task = stderr.map(|s| {
-        let progress = progress.clone();
-        let tail = tail.clone();
+    // Completion is driven by the CHILD PROCESS EXITING, not by the output
+    // pipes reaching EOF. A grandchild — npm's detached update-notifier, a
+    // spawned node-gyp, etc. — can inherit and hold stdout/stderr open long
+    // after the tool itself exits; waiting on pipe-EOF then hung us until the
+    // timeout (observed: npm reported "still running" for 300s though the
+    // install actually finished in ~2s). So we wait on `child.wait()`, emit a
+    // liveness heartbeat every 5s, then drain + abort the readers below.
+    let started = Instant::now();
+    let wait_child = async {
+        loop {
+            tokio::select! {
+                status = child.wait() => return status,
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    let _ = progress.send(ProgressEvent::Waiting {
+                        status: format!(
+                            "{tool} is still running ({}s)",
+                            started.elapsed().as_secs()
+                        ),
+                    });
+                }
+            }
+        }
+    };
+
+    let status = match tokio::time::timeout(INSTALL_PROCESS_TIMEOUT, wait_child).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(err)) => {
+            abort_reader(stdout_task);
+            abort_reader(stderr_task);
+            return Err(InstallError::Io(err));
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            abort_reader(stdout_task);
+            abort_reader(stderr_task);
+            return Err(InstallError::TimedOut {
+                tool: tool.to_string(),
+                seconds: INSTALL_PROCESS_TIMEOUT.as_secs(),
+            });
+        }
+    };
+
+    // The tool exited: give each reader a brief grace to drain the last
+    // buffered lines (so the error tail is complete on a normal failure),
+    // then abort so a pipe-holding grandchild can't keep us waiting.
+    settle_reader(stdout_task, Duration::from_millis(400)).await;
+    settle_reader(stderr_task, Duration::from_millis(400)).await;
+
+    let out = tail.lock().unwrap().clone();
+    Ok((status, out))
+}
+
+/// Spawn a task that reads a child pipe line-by-line, forwarding each line as
+/// a progress event and (for stderr) keeping the last ~20 lines for error
+/// reporting. `None` when the pipe handle is absent.
+fn spawn_line_reader<R>(
+    reader: Option<R>,
+    progress: UnboundedSender<ProgressEvent>,
+    tail: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+) -> Option<tokio::task::JoinHandle<()>>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    reader.map(|r| {
         tokio::spawn(async move {
-            let mut reader = BufReader::new(s).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                {
+            let mut lines = BufReader::new(r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(tail) = &tail {
                     let mut t = tail.lock().unwrap();
                     t.push(line.clone());
                     if t.len() > 20 {
@@ -67,32 +96,23 @@ pub(super) async fn drive_command_progress(
                 emit_command_line(&progress, line);
             }
         })
-    });
+    })
+}
 
-    let readers = async {
-        if let Some(t) = stdout_task {
-            let _ = t.await;
-        }
-        if let Some(t) = stderr_task {
-            let _ = t.await;
-        }
-        let lock = tail.lock().unwrap();
-        lock.clone()
+/// Wait up to `grace` for a reader task to finish draining, then abort it so a
+/// grandchild holding the pipe open can't keep us waiting indefinitely.
+async fn settle_reader(handle: Option<tokio::task::JoinHandle<()>>, grace: Duration) {
+    let Some(mut handle) = handle else {
+        return;
     };
-    tokio::pin!(readers);
-    let started = Instant::now();
-    loop {
-        tokio::select! {
-            tail = &mut readers => return tail,
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                let _ = progress.send(ProgressEvent::Waiting {
-                    status: format!(
-                        "{tool} is still running ({}s; waiting for output)",
-                        started.elapsed().as_secs()
-                    ),
-                });
-            }
-        }
+    if tokio::time::timeout(grace, &mut handle).await.is_err() {
+        handle.abort();
+    }
+}
+
+fn abort_reader(handle: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(handle) = handle {
+        handle.abort();
     }
 }
 

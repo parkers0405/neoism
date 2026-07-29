@@ -29,21 +29,6 @@ impl Application<'_> {
             }
         }
 
-        let notification_delta_x = match delta {
-            MouseScrollDelta::LineDelta(columns, _) => columns * 48.0,
-            MouseScrollDelta::PixelDelta(pos) => pos.x as f32,
-        };
-        if route
-            .window
-            .screen
-            .renderer
-            .notifications
-            .scroll_hovered(notification_delta_x)
-        {
-            route.request_redraw();
-            return;
-        }
-
         // Rust-owned overlays sit above the editor/tree. When
         // hovered, wheel/trackpad input scrolls their internal
         // list/body instead of leaking into the pane behind it.

@@ -424,6 +424,15 @@ impl<A: Copy> BufferTabs<A> {
                 .unwrap_or(tab.title.as_str());
             let (icon_glyph, icon_rgb) = if tab.neoism_agent_route_id.is_some() {
                 (NEOISM_AGENT_ICON, theme.u8(theme.accent))
+            } else if let Some(page) = tab.chrome_page {
+                // Chrome helper-page tabs get a dedicated glyph so the strip
+                // reads at a glance instead of the generic file icon. The
+                // Extensions tab uses the same puzzle-piece (`\u{f12e}`) as
+                // the hamburger menu's Extensions entry.
+                let glyph = match page.kind {
+                    ChromePageKind::Extensions => "\u{f12e}",
+                };
+                (glyph, theme.u8(theme.accent))
             } else if is_terminal {
                 // Mash-up override for the terminal tab icon; the base
                 // color still runs through the inactive-tab dimming

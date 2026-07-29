@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -43,6 +43,21 @@ static EXT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 /// the pane even opens, so no re-seed happens; on cache miss the flag
 /// flips a few seconds in and the pane updates in place.
 static CATALOG_CACHE_FRESH: AtomicBool = AtomicBool::new(false);
+
+/// Flipped to `true` by `kick_catalog_seed_if_needed` when the background
+/// catalog fetch FAILS (offline, GitHub unreachable, timed out). The per-frame
+/// pump surfaces a single actionable notification so the user understands why
+/// language-server installs are unavailable, instead of clicking Install and
+/// getting a silent "still syncing" dead-end forever.
+static CATALOG_SEED_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Hard wall-clock ceiling for a single install job. Every ecosystem installer
+/// already bounds its own subprocesses (5 min each) and downloads, and the
+/// catalog fetch is bounded too — but this last-resort watchdog guarantees a
+/// row can NEVER sit on "Installing…" forever even if a future code path
+/// introduces an unbounded await. Generous enough not to interrupt a slow but
+/// legitimate managed-kernel install (venv + pip + ipykernel, minutes each).
+const INSTALL_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 
 fn ext_runtime_handle() -> tokio::runtime::Handle {
     EXT_RUNTIME
@@ -103,6 +118,10 @@ pub(crate) struct InstallJob {
     /// pump owns finalisation for both kinds of work.
     pub uninstall: bool,
     pub source: InstallSource,
+    /// When the job was created. The per-frame pump uses this to force a
+    /// terminal FAILED state if a job somehow outlives every internal timeout
+    /// (see `INSTALL_WALL_CLOCK_TIMEOUT`), so a row never hangs on Installing.
+    pub started_at: Instant,
 }
 
 /// Translate a bundled `ExtensionManifest` into the panel's `ExtensionEntry`.
@@ -243,9 +262,40 @@ fn command_source_label(
 /// language servers (there is no separate formatter registry to install
 /// from), so servers that merely *support* formatting carry a badge-only
 /// `Formatting` category on their card instead of flooding those tabs.
+/// Decide the status of a language-server row whose engine command currently
+/// resolves to nothing (`LspCommandSource::Missing`). Honesty here is the fix
+/// for "the page says it can't install for me": a row may only advertise an
+/// Install action when the managed installer can actually supply the binary.
+/// - No catalog package at all → `Unavailable` (nothing to install).
+/// - Catalog not fetched yet → `NotInstalled` (optimistic; the background seed
+///   re-seeds the page once it lands, and the dispatcher gives a clear message
+///   if the user clicks before the catalog is present).
+/// - Catalog present + package installable on this host → `NotInstalled`.
+/// - Catalog present + package NOT installable here → `Unavailable`
+///   (no prebuilt binary for this platform / unsupported install kind), so the
+///   row stops offering a one-click install that would only error.
+fn lsp_missing_status(
+    package_id: Option<&str>,
+    installable_packages: &std::collections::HashSet<String>,
+    catalog_available: bool,
+) -> ExtensionStatus {
+    match package_id {
+        Some(package) => {
+            if !catalog_available || installable_packages.contains(package) {
+                ExtensionStatus::NotInstalled
+            } else {
+                ExtensionStatus::Unavailable
+            }
+        }
+        None => ExtensionStatus::Unavailable,
+    }
+}
+
 fn language_server_entries(
     workspace_root: Option<&std::path::Path>,
     installed: &InstalledIndex,
+    installable_packages: &std::collections::HashSet<String>,
+    catalog_available: bool,
 ) -> Vec<ExtensionEntry> {
     use neoism_agent_server::language_server::{
         LspAdapterOrigin, LspAdapterTransport, LspCommandSource,
@@ -348,13 +398,11 @@ fn language_server_entries(
                             LspCommandSource::Path
                             | LspCommandSource::Config
                             | LspCommandSource::BuiltIn => ExtensionStatus::Detected,
-                            LspCommandSource::Missing => {
-                                if package_id.is_some() {
-                                    ExtensionStatus::NotInstalled
-                                } else {
-                                    ExtensionStatus::Unavailable
-                                }
-                            }
+                            LspCommandSource::Missing => lsp_missing_status(
+                                package_id.as_deref(),
+                                installable_packages,
+                                catalog_available,
+                            ),
                         }
                     };
                     let mut description = format!(
@@ -369,6 +417,20 @@ fn language_server_entries(
                     }
                     if let Some(error) = &adapter.configuration_error {
                         description.push_str(&format!(" Configuration error: {error}"));
+                    }
+                    // When the row can't offer a managed install (catalog
+                    // present but this package has no plan for our platform),
+                    // tell the user how to get it rather than leaving a dead
+                    // Install button or a bare "unavailable".
+                    if matches!(status, ExtensionStatus::Unavailable)
+                        && matches!(source, LspCommandSource::Missing)
+                        && package_id.is_some()
+                        && adapter.configuration_error.is_none()
+                    {
+                        description.push_str(&format!(
+                            " No managed installer is available for `{executable}` on your platform ({}); install it manually and add it to your PATH.",
+                            neoism_extensions::install_runner::current_target()
+                        ));
                     }
                     ExtensionEntry {
                         id,

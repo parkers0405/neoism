@@ -21,6 +21,7 @@ fn tool_message(id: &str, tool: &str, title: &str, status: &str) -> NeoismAgentM
         todos: Vec::new(),
         detail: format!("{title} detail"),
         usage: None,
+        author: None,
     }
 }
 
@@ -42,6 +43,7 @@ fn text_message(
         todos: Vec::new(),
         detail: String::new(),
         usage: None,
+        author: None,
     }
 }
 

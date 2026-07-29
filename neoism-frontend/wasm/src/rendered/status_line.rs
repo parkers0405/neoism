@@ -456,12 +456,21 @@ impl ChromeBridge {
     /// (the TS presence store's shape) — drawn by the SAME shared
     /// renderer the desktop uses (caret bar + name flag + roster).
     pub fn set_markdown_remote_cursors(&mut self, json: JsValue) {
+        // The web TS presence store may not forward the peer's vim mode
+        // yet; an absent flag defaults to a thin bar so existing web
+        // carets keep their current look (Normal peers upgrade to a block
+        // once the store sends `insert`).
+        fn wire_cursor_insert_default() -> bool {
+            true
+        }
         #[derive(serde::Deserialize)]
         struct WireCursor {
             name: String,
             color: [u8; 3],
             #[serde(default)]
             rainbow: bool,
+            #[serde(default = "wire_cursor_insert_default")]
+            insert: bool,
             line: usize,
             col_utf16: usize,
         }
@@ -476,6 +485,7 @@ impl ChromeBridge {
                     name: c.name,
                     color: c.color,
                     rainbow: c.rainbow,
+                    insert: c.insert,
                     line: c.line,
                     col_utf16: c.col_utf16,
                 })

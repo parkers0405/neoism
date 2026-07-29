@@ -58,6 +58,7 @@ impl Screen<'_> {
                             name: presence.display_name.clone(),
                             color: [presence.color.r, presence.color.g, presence.color.b],
                             rainbow: presence.rainbow,
+                            insert: presence.insert,
                             line: presence.cursor.line as usize,
                             col_utf16: presence.cursor.column as usize,
                         },

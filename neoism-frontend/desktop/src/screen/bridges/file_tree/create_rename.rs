@@ -219,7 +219,11 @@ impl Screen<'_> {
         }
     }
 
-    fn refresh_note_graph_after_rename(&mut self, old_path: &Path, new_path: &Path) {
+    pub(crate) fn refresh_note_graph_after_rename(
+        &mut self,
+        old_path: &Path,
+        new_path: &Path,
+    ) {
         let Some(workspace) = self.file_tree_workspace() else {
             return;
         };

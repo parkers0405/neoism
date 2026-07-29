@@ -85,6 +85,7 @@ mod tests {
             name: name.to_string(),
             color,
             rainbow: false,
+            insert: false,
             line,
             col_utf16: 0,
         }

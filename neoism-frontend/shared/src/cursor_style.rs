@@ -80,6 +80,25 @@ pub fn rainbow_now_seconds() -> f32 {
     EPOCH.get_or_init(Instant::now).elapsed().as_secs_f32()
 }
 
+/// Viewer-local caret blink on the shared process clock. Pass
+/// `now_seconds` from [`rainbow_now_seconds`] (a.k.a.
+/// `presence_orb_now_seconds()` — the SAME clock the presence redraw
+/// owner already ticks), so a remote caret pulses in phase without any
+/// synced state and animates for free while a peer is on screen.
+///
+/// Cadence mirrors the local caret's `DEFAULT_BLINK_PERIOD_MS` square
+/// wave in [`crate::editor::optimistic`]: solid for the first half of
+/// each period, hidden for the second — a remote caret blinks
+/// identically to the local one, just off the viewer's own clock.
+pub fn cursor_blink_visible(now_seconds: f32) -> bool {
+    let half_period_secs =
+        crate::editor::optimistic::DEFAULT_BLINK_PERIOD_MS.max(2) as f32 / 1000.0 / 2.0;
+    if half_period_secs <= 0.0 {
+        return true;
+    }
+    ((now_seconds / half_period_secs).floor() as i64).rem_euclid(2) == 0
+}
+
 /// The rainbow color for `now_seconds` on the shared clock.
 pub fn rainbow_color_f32(now_seconds: f32) -> [f32; 4] {
     let hue = (now_seconds * RAINBOW_HUE_DEG_PER_SEC).rem_euclid(360.0);

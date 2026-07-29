@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use web_time::Instant;
 
 use sugarloaf::text::DrawOpts;
@@ -26,6 +27,19 @@ const ORDER: u8 = 7;
 const SCROLL_ANIMATION_LENGTH: f32 = 0.30;
 const CURSOR_ANIMATION_LENGTH: f32 = 0.12;
 
+// Mac Finder-style spring-loaded drag-and-drop, lifted verbatim from
+// `file_tree::drag` so a page/folder row drags with the exact same
+// activation threshold and dwell-to-spring-open feel as the chrome
+// file tree. Kept as local copies (not `pub use` of the file tree's
+// `pub(super)` consts) so the notes panel stays self-contained.
+//
+/// Pixels the cursor must travel from the press point before an armed
+/// press becomes a live drag — mirrors `file_tree::DRAG_ACTIVATION_PX`.
+const NOTES_DRAG_ACTIVATION_PX: f32 = 5.0;
+/// How long the cursor must dwell over a closed folder before it springs
+/// open under the drag — mirrors `file_tree::SPRING_OPEN_DWELL`.
+const NOTES_SPRING_OPEN_DWELL: Duration = Duration::from_millis(450);
+
 #[derive(Clone, Debug)]
 pub struct NotesSidebar {
     visible: bool,
@@ -39,6 +53,16 @@ pub struct NotesSidebar {
     open_dirs: HashSet<PathBuf>,
     /// "+ New note" button of the empty-vault state, when drawn.
     empty_create_rect: Option<[f32; 4]>,
+    /// When set, the empty state swaps its single "+ New note" button for
+    /// the Notion-style "no linked vault" pair — "+ Create workspace
+    /// vault" and "Select vault". Set by the host only for a served/joined
+    /// workspace that has no linked vault; local workspaces never see it
+    /// (they always resolve a vault), keeping local byte-identical.
+    show_vault_actions: bool,
+    /// "+ Create workspace vault" button rect (no-linked-vault state).
+    empty_link_vault_rect: Option<[f32; 4]>,
+    /// "Select vault" button rect (no-linked-vault state).
+    empty_select_vault_rect: Option<[f32; 4]>,
     /// Live `icon:` values from OPEN buffers (value-picker accepts) —
     /// they beat the disk walk until the daemon flushes the file, else
     /// any refresh between accept and flush reverts the row's emoji.
@@ -81,6 +105,56 @@ pub struct NotesSidebar {
     pending_count: Option<usize>,
     /// True after a lone `g`, so the next `g` completes `gg` (go-to-top).
     pending_g: bool,
+    /// In-flight Finder-style drag of a page/folder row onto a folder or
+    /// the vault root (spring-loaded move). `None` when nothing is being
+    /// dragged. Mirrors `file_tree`'s `file_drag`.
+    notes_drag: Option<NotesDragState>,
+}
+
+/// Live drag state: what page/folder is being dragged, where the ghost
+/// is, and which folder (if any) is the current drop target. Mirrors
+/// `file_tree::drag::FileDragState`.
+#[derive(Clone, Debug)]
+pub struct NotesDragState {
+    /// Arm-time row of the dragged item (informational; the live drag
+    /// re-resolves source + target by PATH so a spring-open re-indexing
+    /// the rows mid-drag never loses them).
+    #[allow(dead_code)]
+    source_row: usize,
+    /// Absolute path of the dragged page/folder.
+    source_path: PathBuf,
+    /// Label painted on the cursor-following ghost.
+    source_label: String,
+    /// Whether the dragged row is a folder (drives the ghost glyph).
+    source_is_dir: bool,
+    /// True once the cursor has moved past the activation threshold. The
+    /// ghost only paints, and a release only moves, when this is set.
+    live: bool,
+    start_x: f32,
+    start_y: f32,
+    current_x: f32,
+    current_y: f32,
+    /// Path of the folder (or vault root) currently under the cursor that
+    /// is a legal drop target, if any (drives the highlight + wiggle).
+    hovered_dir: Option<PathBuf>,
+    /// When the current `hovered_dir` was first entered — the dwell clock
+    /// for spring-open and the phase origin for the wiggle.
+    hovered_since: Option<Instant>,
+    /// Folders already auto-sprung this drag, so the dwell fires once per
+    /// folder instead of every frame past the threshold.
+    sprang: HashSet<PathBuf>,
+}
+
+/// What a notes-sidebar drag release resolved to. Mirrors
+/// `file_tree::drag::FileDropOutcome`.
+pub enum NotesDropOutcome {
+    /// The press never became a drag — the caller treats it as a click
+    /// (open the note / toggle the folder).
+    Click,
+    /// Move `source` into directory `dest_dir`.
+    Move { source: PathBuf, dest_dir: PathBuf },
+    /// A live drag released over no valid target — do nothing.
+    Cancel,
 }
 
 #[derive(Clone, Debug)]
@@ -117,6 +191,12 @@ pub enum NotesSidebarHit {
     NoteIcon(usize),
     /// The "+ New note" button shown by the empty vault state.
     CreateFirstNote,
+    /// "+ Create workspace vault" — the no-linked-vault empty state's
+    /// primary button (create + link a vault to this workspace/dir).
+    CreateWorkspaceVault,
+    /// "Select vault" — the no-linked-vault empty state's secondary
+    /// button (open the vault selector).
+    SelectVault,
 }
 
 impl Default for NotesSidebar {
@@ -132,6 +212,9 @@ impl Default for NotesSidebar {
             rows: Vec::new(),
             open_dirs: HashSet::new(),
             empty_create_rect: None,
+            show_vault_actions: false,
+            empty_link_vault_rect: None,
+            empty_select_vault_rect: None,
             icon_overrides: HashMap::new(),
             selected_index: 0,
             selector_selected: false,
@@ -158,6 +241,7 @@ impl Default for NotesSidebar {
             },
             pending_count: None,
             pending_g: false,
+            notes_drag: None,
         }
     }
 }
@@ -255,6 +339,15 @@ impl NotesSidebar {
         self.refresh_notes();
     }
 
+    /// Toggle the Notion-style "no linked vault" empty state. When on,
+    /// an empty panel offers "+ Create workspace vault" and "Select
+    /// vault" instead of the single "+ New note". The host sets this only
+    /// for a served/joined workspace with no linked vault; local
+    /// workspaces leave it off so their empty state stays byte-identical.
+    pub fn set_vault_actions(&mut self, show: bool) {
+        self.show_vault_actions = show;
+    }
+
     /// Expand `dir` in the tree (no note opened, selection untouched) —
     /// used by the first-run welcome reveal. Mirrors how `set_workspace`
     /// / `refresh_notes` insert the root into `open_dirs`, then rebuilds
@@ -286,16 +379,25 @@ impl NotesSidebar {
     pub fn refresh_notes(&mut self) {
         let selected_path = self.selected_note_path();
         self.all_entries.clear();
-        if let Some(root) = self.workspace_path.clone() {
-            collect_note_entries(&root, &root, 0, &mut self.all_entries);
-            let icons = load_notes_icons(&root);
+        let root = self.workspace_path.clone();
+        if let Some(root) = &root {
+            collect_note_entries(root, root, 0, &mut self.all_entries);
+            self.open_dirs.insert(root.clone());
+        }
+        // Live in-buffer frontmatter edits first...
+        self.apply_icon_overrides();
+        // ...then the explicit `.neoism-icons.json` map LAST, so a picked
+        // icon has the highest priority. It used to be applied BEFORE
+        // `apply_icon_overrides`, so a stale `None` frontmatter override from
+        // an open note (see `set_note_icon`) clobbered a just-picked icon —
+        // the "root/open note icon doesn't stick" bug. A MISSING map entry
+        // still must not wipe an existing icon.
+        if let Some(root) = &root {
+            let icons = load_notes_icons(root);
             if !icons.is_empty() {
                 for entry in &mut self.all_entries {
-                    // Explicit `.neoism-icons.json` overrides beat the
-                    // frontmatter icon, but a MISSING override must not
-                    // wipe it.
                     if let Some(icon) =
-                        entry.path.strip_prefix(&root).ok().and_then(|rel| {
+                        entry.path.strip_prefix(root).ok().and_then(|rel| {
                             icons.get(&rel.to_string_lossy().into_owned())
                         })
                     {
@@ -303,9 +405,7 @@ impl NotesSidebar {
                     }
                 }
             }
-            self.open_dirs.insert(root);
         }
-        self.apply_icon_overrides();
         self.all_entries.sort_by(|a, b| {
             a.parent
                 .cmp(&b.parent)
@@ -348,16 +448,42 @@ impl NotesSidebar {
                 .strip_prefix(&root)
                 .map(|rel| rel.components().count().saturating_sub(1))
                 .unwrap_or(0);
+            // Mirror the note's frontmatter `icon:` onto the row, exactly
+            // like `refresh_notes`/`collect_note_entries` do. This host path
+            // (daemon-listed notes — the path the DESKTOP sidebar actually
+            // uses) previously left every icon `None`, so a note's page icon
+            // never showed unless it also had a same-session in-memory
+            // override — the "frontmatter emoji shows in the doc but the tree
+            // row keeps the default md icon" bug. On wasm the fs read is a
+            // graceful no-op (None); a remote host path that isn't local also
+            // reads None (the daemon would have to supply it).
+            let icon = if is_dir {
+                None
+            } else {
+                note_frontmatter_icon(&path)
+            };
             self.all_entries.push(NoteSidebarEntry {
                 path,
                 label,
                 is_dir,
-                icon: None,
+                icon,
                 depth,
                 parent,
             });
         }
+        // Live buffer overrides first, then the explicit `.neoism-icons.json`
+        // map LAST (highest priority) — same ordering as `refresh_notes`.
         self.apply_icon_overrides();
+        let icons = load_notes_icons(&root);
+        if !icons.is_empty() {
+            for entry in &mut self.all_entries {
+                if let Some(icon) = entry.path.strip_prefix(&root).ok().and_then(|rel| {
+                    icons.get(&rel.to_string_lossy().into_owned())
+                }) {
+                    entry.icon = Some(icon.clone());
+                }
+            }
+        }
         self.all_entries.sort_by(|a, b| {
             a.parent
                 .cmp(&b.parent)
@@ -810,6 +936,16 @@ impl NotesSidebar {
                 return Some(NotesSidebarHit::CreateFirstNote);
             }
         }
+        if let Some(r) = self.empty_link_vault_rect {
+            if rect_contains(r, x, y) {
+                return Some(NotesSidebarHit::CreateWorkspaceVault);
+            }
+        }
+        if let Some(r) = self.empty_select_vault_rect {
+            if rect_contains(r, x, y) {
+                return Some(NotesSidebarHit::SelectVault);
+            }
+        }
         if rect_contains(self.workspace_rect?, x, y) {
             return Some(NotesSidebarHit::WorkspacePicker);
         }
@@ -834,6 +970,8 @@ impl NotesSidebar {
         self.workspace_rect = None;
         self.settings_rect = None;
         self.empty_create_rect = None;
+        self.empty_link_vault_rect = None;
+        self.empty_select_vault_rect = None;
         self.note_rects.clear();
         self.icon_rects.clear();
         self.selected_cursor_rect = None;
@@ -1057,11 +1195,144 @@ impl NotesSidebar {
             }
         }
 
+        // Spring-loaded drag: resolve the lifted source row, the hovered
+        // drop-target folder, and the wiggle phase — all by PATH so a
+        // spring-open re-indexing the rows mid-drag can't lose them.
+        // Mirrors `file_tree::render`.
+        let drag_source_row = self.notes_drag_source_row();
+        let drag_hovered_row = self.notes_drag_hovered_row();
+        let drag_wiggle_dx = self
+            .notes_drag
+            .as_ref()
+            .filter(|drag| drag.live)
+            .map(|drag| {
+                let t = drag
+                    .hovered_since
+                    .map(|since| since.elapsed().as_secs_f32())
+                    .unwrap_or(0.0);
+                // Amplitude ramps in over ~120ms so the folder shivers to
+                // life instead of snapping; ~4Hz feels alive, not jittery.
+                let ramp = (t / 0.12).clamp(0.0, 1.0);
+                (t * 26.0).sin() * 2.4 * self.scale * ramp
+            })
+            .unwrap_or(0.0);
+        // The dragged row is LIFTED out of the list: its glyph + label
+        // follow the cursor on a softly raised sheet (its slot in the
+        // list dims to a placeholder). Laid out up front so the sheet's
+        // rect can join the text-occlusion set — row labels paint in a
+        // layer above plain quads and would bleed through it otherwise.
+        // The sheet itself is painted after the rows.
+        struct LiftedNoteRow {
+            rect: [f32; 4],
+            chevron: Option<&'static str>,
+            icon: String,
+            icon_color: [u8; 4],
+            label: String,
+            label_color: [u8; 4],
+            radius: f32,
+        }
+        let lifted = if self.notes_drag.as_ref().is_some_and(|drag| drag.live) {
+            let (source_label, source_is_dir, current_x, current_y) = {
+                let drag = self.notes_drag.as_ref().unwrap();
+                (
+                    drag.source_label.clone(),
+                    drag.source_is_dir,
+                    drag.current_x,
+                    drag.current_y,
+                )
+            };
+            let entry = drag_source_row.and_then(|ix| self.row_entry(ix)).cloned();
+            let is_open = entry
+                .as_ref()
+                .map(|e| self.open_dirs.contains(&e.path))
+                .unwrap_or(false);
+            let custom_icon = entry.as_ref().and_then(|e| e.icon.clone());
+            let is_markdown_note = !source_is_dir
+                && Path::new(&source_label)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("md")
+                            || ext.eq_ignore_ascii_case("markdown")
+                            || ext.eq_ignore_ascii_case("mdx")
+                    });
+            let chevron =
+                source_is_dir.then(|| if is_open { "\u{f078}" } else { "\u{f054}" });
+            let icon: String = if let Some(custom) = custom_icon {
+                custom
+            } else if source_is_dir {
+                if is_open { FOLDER_OPEN_ICON } else { FOLDER_CLOSED_ICON }.to_string()
+            } else if is_markdown_note {
+                crate::primitives::look::icon_override("note")
+                    .and_then(|over| over.glyph)
+                    .unwrap_or(NOTE_DEFAULT_ICON)
+                    .to_string()
+            } else {
+                icon_for_file(&source_label).0.to_string()
+            };
+            let icon_color = if source_is_dir {
+                theme.u8(theme.folder)
+            } else if is_markdown_note {
+                theme.u8_alpha(theme.fg, 0.72)
+            } else {
+                icon_for_file(&source_label).1
+            };
+            let pad = 10.0 * self.scale;
+            let text_opts = DrawOpts {
+                font_size,
+                ..DrawOpts::default()
+            };
+            let glyph_opts = DrawOpts {
+                font_size: icon_size,
+                ..DrawOpts::default()
+            };
+            let label =
+                truncate_label(&source_label, 240.0 * self.scale, sugarloaf, &text_opts);
+            let label_w = sugarloaf.text_mut().measure(&label, &text_opts);
+            let icon_w = sugarloaf.text_mut().measure(&icon, &glyph_opts);
+            let chevron_w = chevron
+                .map(|chev| sugarloaf.text_mut().measure(chev, &glyph_opts) + icon_gap)
+                .unwrap_or(0.0);
+            let sheet_w = pad + chevron_w + icon_w + icon_gap + label_w + pad;
+            let sheet_h = row_h;
+            // Sit the row just off the cursor's lower-right, like Finder.
+            let sheet_x = current_x + 12.0 * self.scale;
+            let sheet_y = current_y - sheet_h * 0.5;
+            Some(LiftedNoteRow {
+                rect: [sheet_x, sheet_y, sheet_w, sheet_h],
+                chevron,
+                icon,
+                icon_color,
+                label,
+                label_color: theme.u8(theme.fg),
+                radius: 6.0 * self.scale,
+            })
+        } else {
+            None
+        };
+        // Fold the lifted sheet rect into the occlusion set the row text
+        // honors, so the rows underneath don't bleed through it.
+        let mut occlusion_owned: Vec<[f32; 4]>;
+        let occlusion: &[[f32; 4]] = match lifted.as_ref() {
+            Some(l) => {
+                occlusion_owned = occlusion.to_vec();
+                occlusion_owned.push(l.rect);
+                &occlusion_owned
+            }
+            None => occlusion,
+        };
+
         if self.rows.is_empty() {
-            // Centered empty state: "No notes yet" with a "+ New note"
-            // button underneath — click (or `a`) creates the vault's
-            // first markdown file.
-            let empty_text = "No notes yet";
+            // Centered empty state: "No notes yet" plus action button(s)
+            // underneath. Local / linked vaults get the single "+ New
+            // note"; a served workspace with no linked vault gets the
+            // Notion-style pair "+ Create workspace vault" / "Select
+            // vault" (`show_vault_actions`).
+            let empty_text = if self.show_vault_actions {
+                "No notes vault linked"
+            } else {
+                "No notes yet"
+            };
             let empty_w = sugarloaf.text_mut().measure(empty_text, &muted_opts);
             draw_text_with_occlusion(
                 sugarloaf,
@@ -1071,43 +1342,64 @@ impl NotesSidebar {
                 &muted_opts,
                 occlusion,
             );
-            let btn_label = "\u{f067}  New note";
             let btn_font = font_size * 0.92;
-            let btn_opts = DrawOpts {
-                font_size: btn_font,
-                color: theme.u8(theme.blue),
-                clip_rect: Some(panel_clip),
-                ..DrawOpts::default()
+            let scale = self.scale;
+            let blue = theme.u8(theme.blue);
+            let hover = theme.f32_alpha(theme.hover, 0.5);
+            // Pill button: centered, hover-tinted, returns its rect for
+            // hit-testing. Shared by both empty-state variants.
+            let draw_btn = |sl: &mut Sugarloaf, label: &str, top: f32| -> [f32; 4] {
+                let opts = DrawOpts {
+                    font_size: btn_font,
+                    color: blue,
+                    clip_rect: Some(panel_clip),
+                    ..DrawOpts::default()
+                };
+                let label_w = sl.text_mut().measure(label, &opts);
+                let pad_h = 10.0 * scale;
+                let btn_w = label_w + pad_h * 2.0;
+                let btn = [
+                    content_x + ((content_w - btn_w) * 0.5).max(0.0),
+                    top,
+                    btn_w,
+                    row_h * 0.95,
+                ];
+                sl.quad(
+                    None,
+                    btn[0],
+                    btn[1],
+                    btn[2],
+                    btn[3],
+                    hover,
+                    [8.0 * scale; 4],
+                    DEPTH,
+                    ORDER + 2,
+                );
+                draw_text_with_occlusion(
+                    sl,
+                    btn[0] + pad_h,
+                    btn[1] + (btn[3] - btn_font) / 2.0,
+                    label,
+                    &opts,
+                    occlusion,
+                );
+                btn
             };
-            let label_w = sugarloaf.text_mut().measure(btn_label, &btn_opts);
-            let pad_h = 10.0 * self.scale;
-            let btn_w = label_w + pad_h * 2.0;
-            let btn = [
-                content_x + ((content_w - btn_w) * 0.5).max(0.0),
-                list_y + 5.0 * self.scale + row_h,
-                btn_w,
-                row_h * 0.95,
-            ];
-            sugarloaf.quad(
-                None,
-                btn[0],
-                btn[1],
-                btn[2],
-                btn[3],
-                theme.f32_alpha(theme.hover, 0.5),
-                [8.0 * self.scale; 4],
-                DEPTH,
-                ORDER + 2,
-            );
-            draw_text_with_occlusion(
-                sugarloaf,
-                btn[0] + pad_h,
-                btn[1] + (btn[3] - btn_font) / 2.0,
-                btn_label,
-                &btn_opts,
-                occlusion,
-            );
-            self.empty_create_rect = Some(btn);
+            let first_top = list_y + 5.0 * self.scale + row_h;
+            if self.show_vault_actions {
+                let link_btn =
+                    draw_btn(sugarloaf, "\u{f067}  Create workspace vault", first_top);
+                let select_btn = draw_btn(
+                    sugarloaf,
+                    "\u{f07b}  Select vault",
+                    first_top + row_h * 1.15,
+                );
+                self.empty_link_vault_rect = Some(link_btn);
+                self.empty_select_vault_rect = Some(select_btn);
+            } else {
+                self.empty_create_rect =
+                    Some(draw_btn(sugarloaf, "\u{f067}  New note", first_top));
+            }
         } else {
             // Overscan: while the lag spring is mid-flight the viewport
             // sits between two rows, so paint a row above/below the window
@@ -1133,6 +1425,34 @@ impl NotesSidebar {
                     .push(([content_x, row_y, content_w, row_h], absolute_ix));
 
                 let is_selected = absolute_ix == self.selected_index;
+                // Spring-loaded drop target: accent-tinted band so it
+                // reads as "release here". The source row dims to a
+                // placeholder while it rides the cursor. Mirrors file_tree.
+                let is_drop_target = drag_hovered_row == Some(absolute_ix);
+                if is_drop_target {
+                    sugarloaf.quad(
+                        None,
+                        content_x,
+                        visible_row_y,
+                        content_w,
+                        visible_row_h,
+                        theme.f32_alpha(theme.accent, 0.22),
+                        edge_row_radii(
+                            visible_row_y,
+                            visible_row_h,
+                            content_y,
+                            panel_bottom,
+                            content_radius,
+                        ),
+                        DEPTH,
+                        ORDER + 4,
+                    );
+                }
+                let row_dim = if drag_source_row == Some(absolute_ix) {
+                    0.32
+                } else {
+                    1.0
+                };
                 let chevron = if entry.is_dir {
                     Some(if self.open_dirs.contains(&entry.path) {
                         "\u{f078}"
@@ -1185,23 +1505,27 @@ impl NotesSidebar {
                 };
                 let chevron_opts = DrawOpts {
                     font_size,
-                    color: theme.u8(theme.muted),
+                    color: fade_u8(theme.u8(theme.muted), row_dim),
                     clip_rect: Some(panel_clip),
                     ..DrawOpts::default()
                 };
                 let icon_opts = DrawOpts {
                     font_size: icon_size,
-                    color: icon_color,
+                    color: fade_u8(icon_color, row_dim),
                     clip_rect: Some(panel_clip),
                     ..DrawOpts::default()
                 };
                 let label_opts = DrawOpts {
                     font_size,
-                    color: label_color,
+                    color: fade_u8(label_color, row_dim),
                     clip_rect: Some(panel_clip),
                     ..DrawOpts::default()
                 };
-                let base_x = content_x + row_pad_x + entry.depth as f32 * indent_px;
+                // The drop-target folder wiggles under the drag.
+                let base_x = content_x
+                    + row_pad_x
+                    + entry.depth as f32 * indent_px
+                    + if is_drop_target { drag_wiggle_dx } else { 0.0 };
                 let text_y = row_y + (row_h - font_size) / 2.0;
                 let icon_y = row_y + (row_h - icon_size) / 2.0;
                 let mut cursor_x = base_x;
@@ -1223,7 +1547,7 @@ impl NotesSidebar {
                 if let Some(custom) = entry.icon.as_deref() {
                     let custom_opts = DrawOpts {
                         font_size: icon_size,
-                        color: theme.u8(theme.fg),
+                        color: fade_u8(theme.u8(theme.fg), row_dim),
                         clip_rect: Some(panel_clip),
                         ..DrawOpts::default()
                     };
@@ -1252,6 +1576,81 @@ impl NotesSidebar {
                     occlusion,
                 );
             }
+        }
+
+        // Whole-panel "drop into the vault root" affordance: the root owns
+        // no row, so when the drag targets it we wash the list band in a
+        // faint accent tint (rows still show through) instead of a per-row
+        // band. Drawn above the rows, below the cursor ghost. Mirrors
+        // file_tree's root wash.
+        if self.is_notes_root_drop_target() {
+            sugarloaf.quad(
+                None,
+                content_x,
+                list_y,
+                content_w,
+                list_h,
+                theme.f32_alpha(theme.accent, 0.14),
+                [content_radius; 4],
+                DEPTH,
+                ORDER + 5,
+            );
+        }
+        // Paint the lifted row above the list (its rect was already cut
+        // out of the row text above). A soft shadow + faintly raised sheet
+        // reads as the real row peeled up off the list — no synthetic
+        // chrome. No clip: it follows the cursor past the panel edge.
+        if let Some(l) = lifted {
+            let s = self.scale;
+            let [lx, ly, lw, lh] = l.rect;
+            let pad = 10.0 * s;
+            sugarloaf.quad(
+                None,
+                lx + 1.5 * s,
+                ly + 3.0 * s,
+                lw,
+                lh,
+                theme.f32_alpha(theme.bg, 0.40),
+                [l.radius; 4],
+                DEPTH,
+                ORDER + 6,
+            );
+            sugarloaf.quad(
+                None,
+                lx,
+                ly,
+                lw,
+                lh,
+                theme.f32_alpha(theme.surface, 0.94),
+                [l.radius; 4],
+                DEPTH,
+                ORDER + 7,
+            );
+            let chevron_opts = DrawOpts {
+                font_size: icon_size,
+                color: theme.u8(theme.muted),
+                ..DrawOpts::default()
+            };
+            let icon_opts = DrawOpts {
+                font_size: icon_size,
+                color: l.icon_color,
+                ..DrawOpts::default()
+            };
+            let label_opts = DrawOpts {
+                font_size,
+                color: l.label_color,
+                ..DrawOpts::default()
+            };
+            let mut cx = lx + pad;
+            let icon_y = ly + (lh - icon_size) / 2.0;
+            let text_y = ly + (lh - font_size) / 2.0;
+            if let Some(chev) = l.chevron {
+                sugarloaf.text_mut().draw(cx, icon_y, chev, &chevron_opts);
+                cx += sugarloaf.text_mut().measure(chev, &chevron_opts) + icon_gap;
+            }
+            sugarloaf.text_mut().draw(cx, icon_y, &l.icon, &icon_opts);
+            cx += sugarloaf.text_mut().measure(&l.icon, &icon_opts) + icon_gap;
+            sugarloaf.text_mut().draw(cx, text_y, &l.label, &label_opts);
         }
 
         let footer_hover =
@@ -1364,6 +1763,224 @@ impl NotesSidebar {
                 .scroll_top
                 .min(self.max_scroll_top_for(self.last_panel_height_rows));
         }
+    }
+}
+
+/// Mac Finder-style spring-loaded drag-and-drop for the notes sidebar.
+/// A press on a page/folder row ARMS a drag; once the cursor travels
+/// past [`NOTES_DRAG_ACTIVATION_PX`] it goes `live` and a ghost of the
+/// dragged row follows the cursor. Dwelling on a closed folder for
+/// [`NOTES_SPRING_OPEN_DWELL`] springs it open, and releasing over a
+/// folder / the vault root MOVES the page or folder into it. Mirrors
+/// `file_tree::drag` beat for beat — the host (desktop
+/// `bridges/workspace/sidebar.rs`) drives begin/update/end and commits
+/// the move; the ghost + wiggle paint in [`NotesSidebar::render`].
+impl NotesSidebar {
+    /// Arm a potential drag from the row at `row`. Every listed row is a
+    /// real page/folder with a path under the vault, so all are
+    /// draggable; returns `true` when armed. The caller DEFERS activation
+    /// (open note / toggle folder) to release.
+    pub fn begin_notes_drag(&mut self, row: usize, mouse_x: f32, mouse_y: f32) -> bool {
+        let Some(entry) = self.row_entry(row).cloned() else {
+            return false;
+        };
+        self.notes_drag = Some(NotesDragState {
+            source_row: row,
+            source_path: entry.path,
+            source_label: entry.label,
+            source_is_dir: entry.is_dir,
+            live: false,
+            start_x: mouse_x,
+            start_y: mouse_y,
+            current_x: mouse_x,
+            current_y: mouse_y,
+            hovered_dir: None,
+            hovered_since: None,
+            sprang: HashSet::new(),
+        });
+        true
+    }
+
+    /// Drive an armed/live drag: move the ghost, flip `live` past the
+    /// activation threshold, resolve the hovered drop-target folder, and
+    /// return the path of a closed folder that has been dwelled on long
+    /// enough to spring open (returned once per folder). `hovered_row` is
+    /// the row currently under the cursor (host hit-test via
+    /// [`row_at`](Self::row_at)).
+    pub fn update_notes_drag(
+        &mut self,
+        mouse_x: f32,
+        mouse_y: f32,
+        hovered_row: Option<usize>,
+    ) -> Option<PathBuf> {
+        // Resolve the drop target against the row model BEFORE taking a
+        // mutable borrow of `self.notes_drag`.
+        let source_path = self.notes_drag.as_ref()?.source_path.clone();
+        let target = self.notes_drop_target(hovered_row, &source_path);
+
+        let drag = self.notes_drag.as_mut()?;
+        drag.current_x = mouse_x;
+        drag.current_y = mouse_y;
+        if !drag.live {
+            let dx = mouse_x - drag.start_x;
+            let dy = mouse_y - drag.start_y;
+            if (dx * dx + dy * dy).sqrt() < NOTES_DRAG_ACTIVATION_PX {
+                return None;
+            }
+            drag.live = true;
+        }
+
+        // Re-arm the dwell clock whenever the hovered folder changes.
+        let target_path = target.as_ref().map(|(path, _)| path.clone());
+        if drag.hovered_dir != target_path {
+            drag.hovered_dir = target_path;
+            drag.hovered_since = drag.hovered_dir.as_ref().map(|_| Instant::now());
+        }
+
+        if let (Some((dir, closed)), Some(since)) = (target, drag.hovered_since) {
+            if closed
+                && since.elapsed() >= NOTES_SPRING_OPEN_DWELL
+                && drag.sprang.insert(dir.clone())
+            {
+                return Some(dir);
+            }
+        }
+        None
+    }
+
+    /// Finish a drag. Returns the outcome and clears the drag state.
+    pub fn end_notes_drag(&mut self) -> NotesDropOutcome {
+        let Some(drag) = self.notes_drag.take() else {
+            return NotesDropOutcome::Cancel;
+        };
+        if !drag.live {
+            return NotesDropOutcome::Click;
+        }
+        match drag.hovered_dir {
+            Some(dest_dir) if dest_dir != drag.source_path => NotesDropOutcome::Move {
+                source: drag.source_path,
+                dest_dir,
+            },
+            _ => NotesDropOutcome::Cancel,
+        }
+    }
+
+    /// Cancel any in-flight drag without acting (e.g. on Escape or focus
+    /// loss). No-op when nothing is being dragged.
+    pub fn cancel_notes_drag(&mut self) {
+        self.notes_drag = None;
+    }
+
+    pub fn notes_drag(&self) -> Option<&NotesDragState> {
+        self.notes_drag.as_ref()
+    }
+
+    /// True only once a drag has crossed the activation threshold — the
+    /// window in which the ghost paints and the cursor shows "grabbing".
+    pub fn is_notes_dragging(&self) -> bool {
+        self.notes_drag.as_ref().is_some_and(|drag| drag.live)
+    }
+
+    /// The row (by absolute index into the visible list) whose full-width
+    /// rect contains `(x, y)`, or `None`. The host uses this to feed the
+    /// hovered row into [`update_notes_drag`](Self::update_notes_drag).
+    pub fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        for (rect, index) in &self.note_rects {
+            if rect_contains(*rect, x, y) {
+                return Some(*index);
+            }
+        }
+        None
+    }
+
+    /// The hovered folder resolved to `(path, is_closed)` when the row
+    /// under the cursor is a LEGAL drop target for `source_path`, else
+    /// `None`. A legal target is a folder that is not the source, not
+    /// inside the source's own subtree, and not the source's current
+    /// parent (a no-op move). A note (file) row, or empty space, falls
+    /// through to the vault root.
+    fn notes_drop_target(
+        &self,
+        hovered_row: Option<usize>,
+        source_path: &Path,
+    ) -> Option<(PathBuf, bool)> {
+        if let Some(entry) = hovered_row.and_then(|row| self.row_entry(row)) {
+            if entry.is_dir {
+                let dir = entry.path.clone();
+                if dir.as_path() == source_path {
+                    return None;
+                }
+                // Inside the dragged folder's own subtree.
+                if dir.starts_with(source_path) {
+                    return None;
+                }
+                // Already living directly in this folder — a no-op.
+                if source_path.parent() == Some(dir.as_path()) {
+                    return None;
+                }
+                let closed = !self.open_dirs.contains(&dir);
+                return Some((dir, closed));
+            }
+            // A note (file) row falls through to a vault-root drop below.
+        }
+        self.notes_root_drop_target(source_path)
+    }
+
+    /// The vault root as a drop target, or `None` when there is no vault,
+    /// the source already lives directly at the root (a no-op move), or
+    /// the source is the root itself. The root is always open — its
+    /// children ARE the top-level rows — so it never spring-opens.
+    fn notes_root_drop_target(&self, source_path: &Path) -> Option<(PathBuf, bool)> {
+        let root = self.workspace_path.clone()?;
+        if root.as_path() == source_path || root.starts_with(source_path) {
+            return None;
+        }
+        if source_path.parent() == Some(root.as_path()) {
+            return None;
+        }
+        Some((root, false))
+    }
+
+    /// True while a live drag's current drop target is the vault root.
+    /// The root owns no row, so the renderer paints a whole-panel wash as
+    /// its "release here" affordance instead of a per-row band.
+    fn is_notes_root_drop_target(&self) -> bool {
+        let Some(drag) = self.notes_drag.as_ref().filter(|drag| drag.live) else {
+            return false;
+        };
+        match (drag.hovered_dir.as_deref(), self.workspace_path.as_deref()) {
+            (Some(hovered), Some(root)) => hovered == root,
+            _ => false,
+        }
+    }
+
+    /// Absolute index of the row being dragged, resolved from its path so
+    /// it survives row re-indexing. `None` until the drag is live. The
+    /// renderer dims this row in place (it's been lifted out).
+    fn notes_drag_source_row(&self) -> Option<usize> {
+        let source = self
+            .notes_drag
+            .as_ref()
+            .filter(|drag| drag.live)?
+            .source_path
+            .clone();
+        self.rows.iter().position(|row| {
+            self.all_entries
+                .get(row.entry_index)
+                .is_some_and(|entry| entry.path == source)
+        })
+    }
+
+    /// Absolute index of the folder row the drag is currently hovering,
+    /// resolved from its path so it survives the row re-indexing a
+    /// spring-open causes. Drives the highlight + wiggle.
+    fn notes_drag_hovered_row(&self) -> Option<usize> {
+        let dir = self.notes_drag.as_ref()?.hovered_dir.clone()?;
+        self.rows.iter().position(|row| {
+            self.all_entries
+                .get(row.entry_index)
+                .is_some_and(|entry| entry.path == dir)
+        })
     }
 }
 
@@ -1557,6 +2174,14 @@ fn rect_contains(rect: [f32; 4], x: f32, y: f32) -> bool {
     x >= rect[0] && y >= rect[1] && x <= rect[0] + rect[2] && y <= rect[1] + rect[3]
 }
 
+/// Scale a packed `[r, g, b, a]` color's alpha by `alpha` — used to dim
+/// the drag SOURCE row to a placeholder while it rides the cursor.
+/// Mirrors `file_tree::render::fade_u8`.
+fn fade_u8(mut color: [u8; 4], alpha: f32) -> [u8; 4] {
+    color[3] = (color[3] as f32 * alpha) as u8;
+    color
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1662,5 +2287,113 @@ mod tests {
         s.mark_dirty();
         assert!(s.take_refresh());
         assert!(!s.take_refresh(), "flag is one-shot");
+    }
+
+    /// Vault: `note.md`, `docs/` (closed), `assets/` (open) > `img/`
+    /// (closed). Visible rows after rebuild: `assets`(0), `img`(1),
+    /// `docs`(2), `note.md`(3) — dirs sort before files, and `assets` is
+    /// expanded so its child folder is a real row. Mirrors the file
+    /// tree's `sample()` used for its drag tests.
+    fn drag_sidebar() -> NotesSidebar {
+        let root = PathBuf::from(VAULT);
+        let mut s = NotesSidebar::default();
+        s.set_workspace("Test", Some(root.clone()));
+        s.set_visible(true);
+        s.set_entries_from_host(vec![
+            (root.join("note.md"), false),
+            (root.join("docs"), true),
+            (root.join("assets"), true),
+            (root.join("assets").join("img"), true),
+        ]);
+        s.reveal_dir(&root.join("assets"));
+        s
+    }
+
+    #[test]
+    fn press_becomes_live_only_past_threshold() {
+        let mut s = drag_sidebar();
+        s.begin_notes_drag(3, 100.0, 100.0); // note.md
+        assert!(!s.is_notes_dragging());
+        // A tiny nudge stays a click.
+        s.update_notes_drag(101.0, 101.0, Some(2));
+        assert!(!s.is_notes_dragging());
+        assert!(matches!(s.end_notes_drag(), NotesDropOutcome::Click));
+        // Past the threshold it goes live.
+        s.begin_notes_drag(3, 100.0, 100.0);
+        s.update_notes_drag(100.0, 120.0, Some(2));
+        assert!(s.is_notes_dragging());
+    }
+
+    #[test]
+    fn dropping_a_note_into_a_folder_moves_it() {
+        let root = PathBuf::from(VAULT);
+        let mut s = drag_sidebar();
+        s.begin_notes_drag(3, 100.0, 100.0); // note.md
+        s.update_notes_drag(100.0, 130.0, Some(2)); // over docs
+        match s.end_notes_drag() {
+            NotesDropOutcome::Move { source, dest_dir } => {
+                assert_eq!(source, root.join("note.md"));
+                assert_eq!(dest_dir, root.join("docs"));
+            }
+            _ => panic!("expected a move"),
+        }
+    }
+
+    #[test]
+    fn dropping_a_folder_into_a_folder_moves_the_subtree() {
+        let root = PathBuf::from(VAULT);
+        let mut s = drag_sidebar();
+        s.begin_notes_drag(2, 100.0, 100.0); // docs
+        s.update_notes_drag(100.0, 130.0, Some(0)); // over assets
+        match s.end_notes_drag() {
+            NotesDropOutcome::Move { source, dest_dir } => {
+                assert_eq!(source, root.join("docs"));
+                assert_eq!(dest_dir, root.join("assets"));
+            }
+            _ => panic!("expected a folder move"),
+        }
+    }
+
+    #[test]
+    fn dropping_into_the_current_parent_is_a_noop() {
+        // note.md already lives at the vault root — a file/empty-space
+        // drop resolves to root, which is its current parent.
+        let mut s = drag_sidebar();
+        s.begin_notes_drag(3, 100.0, 100.0); // note.md
+        s.update_notes_drag(100.0, 130.0, None); // empty space => root
+        assert!(matches!(s.end_notes_drag(), NotesDropOutcome::Cancel));
+    }
+
+    #[test]
+    fn cannot_drop_a_folder_into_its_own_subtree() {
+        let mut s = drag_sidebar();
+        s.begin_notes_drag(0, 100.0, 100.0); // assets
+        s.update_notes_drag(100.0, 130.0, Some(1)); // over assets/img
+        assert!(matches!(s.end_notes_drag(), NotesDropOutcome::Cancel));
+    }
+
+    #[test]
+    fn dropping_a_nested_note_at_root_moves_to_root() {
+        // A note living inside a folder can be dragged out to the vault
+        // root (empty-space / file-row drop).
+        let root = PathBuf::from(VAULT);
+        let mut s = NotesSidebar::default();
+        s.set_workspace("Test", Some(root.clone()));
+        s.set_visible(true);
+        s.set_entries_from_host(vec![
+            (root.join("docs"), true),
+            (root.join("docs").join("nested.md"), false),
+        ]);
+        s.reveal_dir(&root.join("docs"));
+        // rows: docs(0), docs/nested.md(1).
+        s.begin_notes_drag(1, 100.0, 100.0); // docs/nested.md
+        s.update_notes_drag(100.0, 400.0, None); // empty space => root
+        match s.end_notes_drag() {
+            NotesDropOutcome::Move { source, dest_dir } => {
+                assert_eq!(source, root.join("docs").join("nested.md"));
+                assert_eq!(dest_dir, root);
+            }
+            _ => panic!("expected a move to the vault root"),
+        }
     }
 }

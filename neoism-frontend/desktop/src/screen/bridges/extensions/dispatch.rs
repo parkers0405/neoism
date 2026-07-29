@@ -12,13 +12,16 @@ impl Screen<'_> {
     /// `InstallTracker`. The per-frame pump (`pump_install_progress`)
     /// drains the receiver and finalises bookkeeping.
     pub(crate) fn dispatch_install(&mut self, id: &str) {
+        tracing::info!(target: "neoism::extensions", id = %id, "dispatch_install");
         // The progress button doubles as Cancel. Check before routing special
         // installers so every install kind behaves the same and a double click
         // cannot start two writers against one destination.
         if self.cancel_install_if_running(id) {
+            tracing::info!(target: "neoism::extensions", id = %id, "install click cancelled an in-flight job (button doubles as Cancel)");
             return;
         }
         if is_builtin_extension_id(id) {
+            tracing::info!(target: "neoism::extensions", id = %id, "routing to built-in MCP install");
             self.dispatch_builtin_mcp_install(id);
             return;
         }
@@ -32,15 +35,40 @@ impl Screen<'_> {
         }
 
         let Some(manifest) = self.resolve_bundled_manifest(id) else {
-            self.renderer.notifications.push(
-                format!(
-                    "No install plan for `{}` — the package catalog may still be syncing",
-                    id
-                ),
-                NotificationLevel::Error,
+            tracing::warn!(
+                target: "neoism::extensions",
+                id = %id,
+                catalog_present = neoism_extensions::mason::mason_cache_path().is_file(),
+                "no managed manifest resolved — nothing to install (catalog missing or unsupported on this platform)"
             );
+            // Distinguish "catalog hasn't landed yet" from "no managed
+            // installer exists" so the user gets an actionable message instead
+            // of a permanent, misleading "still syncing".
+            let catalog_present =
+                neoism_extensions::mason::mason_cache_path().is_file();
+            let message = if catalog_present {
+                format!(
+                    "Neoism has no managed installer for `{id}` on this platform. Install it manually and add it to your PATH."
+                )
+            } else {
+                format!(
+                    "Can't install `{id}` yet — the extension catalog hasn't finished downloading (offline or unreachable?). Try again once it syncs."
+                )
+            };
+            self.renderer
+                .notifications
+                .push(message, NotificationLevel::Error);
             return;
         };
+
+        tracing::info!(
+            target: "neoism::extensions",
+            id = %id,
+            name = %manifest.name,
+            version = %manifest.version,
+            install = ?manifest.install,
+            "resolved manifest — spawning install task (install kind reveals the required toolchain)"
+        );
 
         // Optimistic UI: flip the row to Installing immediately so the
         // user sees feedback before the first progress event arrives.
@@ -70,6 +98,7 @@ impl Screen<'_> {
             let _guard = ext_runtime_handle().enter();
             neoism_extensions::install(manifest, tx)
         };
+        tracing::info!(target: "neoism::extensions", id = %id, "install task spawned; watching progress");
         self.renderer.install_tracker.in_flight.insert(
             id.to_string(),
             InstallJob {
@@ -79,6 +108,7 @@ impl Screen<'_> {
                 last_status: "starting…".to_string(),
                 uninstall: false,
                 source: InstallSource::ExtensionsPanel,
+                started_at: std::time::Instant::now(),
             },
         );
         self.mark_dirty();
@@ -188,6 +218,7 @@ impl Screen<'_> {
                 last_status: "creating managed Python environment…".to_string(),
                 uninstall: false,
                 source,
+                started_at: std::time::Instant::now(),
             },
         );
         self.mark_dirty();
@@ -224,6 +255,7 @@ impl Screen<'_> {
                 last_status: "installing evcxr_jupyter…".to_string(),
                 uninstall: false,
                 source: InstallSource::ExtensionsPanel,
+                started_at: std::time::Instant::now(),
             },
         );
         self.mark_dirty();
@@ -310,6 +342,7 @@ impl Screen<'_> {
                 last_status: "starting…".to_string(),
                 uninstall: false,
                 source: InstallSource::MissingLspModal { server, display },
+                started_at: std::time::Instant::now(),
             },
         );
         self.mark_dirty();
@@ -320,6 +353,7 @@ impl Screen<'_> {
     /// `installed.json`, refresh the managed-bin map. The pane row
     /// flips through `Uninstalling` first so the click feels live.
     pub(crate) fn dispatch_uninstall(&mut self, id: &str) {
+        tracing::info!(target: "neoism::extensions", id = %id, "dispatch_uninstall");
         if let Some(pane) = self
             .context_manager
             .current_mut()
@@ -334,7 +368,12 @@ impl Screen<'_> {
             }
         }
 
-        let manifest = self.lookup_bundled_manifest(id);
+        // Use the REBUILDING resolver (not the plain cache read): a
+        // long-lived pane can outlast the manifest cache, so `lookup` alone
+        // returned None for real packages (logs showed `manifest_found=false`
+        // uninstalling zls), which then SKIPPED the managed-bin cleanup below
+        // and left dangling symlinks. `resolve` rebuilds the cache once.
+        let manifest = self.resolve_bundled_manifest(id);
         let builtin = is_builtin_extension_id(id)
             || manifest
                 .as_ref()
@@ -346,6 +385,14 @@ impl Screen<'_> {
         } else {
             index.remove_record(id)
         };
+        tracing::info!(
+            target: "neoism::extensions",
+            id = %id,
+            builtin,
+            manifest_found = manifest.is_some(),
+            had_install_record = removed.is_some(),
+            "uninstall: removing files + install record"
+        );
 
         // Tear down the symlink + on-disk install dir. Best-effort:
         // missing files are fine, the user might have already wiped

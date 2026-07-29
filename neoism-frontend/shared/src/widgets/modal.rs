@@ -171,6 +171,9 @@ pub enum ModalAction {
     NotesVaultSwitch {
         name: String,
     },
+    /// Switch the notes panel to the HOST's shared vault for the current
+    /// joined workspace (the one linked-vault section of the selector).
+    NotesVaultSwitchShared,
     NotesVaultOpenVaultsRoot,
     NotesVaultLinkCurrentWorkspace,
     NotesVaultPromptLinkProject {

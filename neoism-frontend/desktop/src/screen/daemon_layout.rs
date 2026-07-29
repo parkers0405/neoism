@@ -159,6 +159,7 @@ impl Screen<'_> {
         self.pending_peer_workspace_join = None;
         self.pending_daemon_go_home = false;
         self.pending_remote_file_ops.clear();
+        self.pending_remote_notes_moves.clear();
         self.pending_remote_git_status.clear();
         self.renderer.file_tree.set_entries(Vec::new());
         // Presence was just reset — drop any stale path->peers index so

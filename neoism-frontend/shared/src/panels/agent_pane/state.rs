@@ -118,6 +118,13 @@ pub struct NeoismAgentMessage {
     pub todos: Vec<NeoismAgentTodo>,
     pub detail: String,
     pub usage: Option<NeoismAgentUsage>,
+    /// Display name of who sent this message. Only meaningful on `User`
+    /// messages (the presence orb + hover tooltip seed off it). `None` =
+    /// the local user, resolved at render time to the local presence name
+    /// (see `NeoismAgentPane::local_presence_name`). In a shared session
+    /// the server would tag each broadcast user part with its sender's
+    /// name; see the `TODO(shared-author)` seam in `api_mapping::part_block`.
+    pub author: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -369,6 +376,7 @@ impl NeoismAgentMessage {
             todos: Vec::new(),
             detail: String::new(),
             usage: None,
+            author: None,
         }
     }
 }
@@ -635,6 +643,13 @@ pub struct NeoismAgentPane {
     pending_outbound: VecDeque<OutboundAgentCommand>,
     pub wordmark: NeoismWordmarkState,
     pub(super) side_panel: NeoismAgentSidePanel,
+    /// The local peer's presence display name (the same seed the editor
+    /// caret / top-chrome presence orb use — e.g. `piss-desktop`). Pushed
+    /// by the host each frame. Used as the fallback author for user
+    /// messages that carry no explicit `author`, so a message the local
+    /// user sent renders their own presence orb + a "You" tooltip. `None`
+    /// on hosts that don't publish presence (falls back to a generic orb).
+    local_presence_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -925,6 +940,7 @@ impl Default for NeoismAgentPane {
             pending_outbound: VecDeque::new(),
             wordmark: NeoismWordmarkState::default(),
             side_panel: NeoismAgentSidePanel::default(),
+            local_presence_name: None,
         }
     }
 }
@@ -932,6 +948,26 @@ impl Default for NeoismAgentPane {
 impl NeoismAgentPane {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Push the local peer's presence display name (the same seed the
+    /// editor caret / top-chrome orb use). Used as the fallback author
+    /// for user messages with no explicit `author`, so the local user's
+    /// own messages render their own presence orb.
+    pub fn set_local_presence_name(&mut self, name: Option<String>) {
+        let name = name.and_then(|name| {
+            let trimmed = name.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+        if self.local_presence_name != name {
+            self.local_presence_name = name;
+        }
+    }
+
+    /// The local peer's presence display name, if the host has published
+    /// one — the fallback orb seed for authorless user messages.
+    pub fn local_presence_name(&self) -> Option<&str> {
+        self.local_presence_name.as_deref()
     }
 
     pub fn apply_snapshot(&mut self, snapshot: NeoismAgentPaneSnapshot) {

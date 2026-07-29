@@ -1208,52 +1208,11 @@ fn draw_card_body(
         occlusion_rects,
     );
 
-    // Row 3/4: downloads under the description, author at the bottom.
-    let footer_opts = DrawOpts {
-        font_size: 11.0 * s,
-        color: theme.u8(theme.muted),
-        clip_rect: clip,
-        ..DrawOpts::default()
-    };
-    let downloads_short = entry.downloads.map(format_thousands).unwrap_or_default();
-
-    let author_y = y + h - 18.0 * s;
-    let gap = 6.0 * s;
-
-    // LEFT cluster: github icon leading the downloads count.
-    let github_glyph = "\u{f09b}";
-    let gh_w = sugarloaf.text_mut().measure(github_glyph, &footer_opts);
-    draw_text_with_occlusion(
-        sugarloaf,
-        inner_x,
-        author_y,
-        github_glyph,
-        &footer_opts,
-        occlusion_rects,
-    );
-    if !downloads_short.is_empty() {
-        draw_text_with_occlusion(
-            sugarloaf,
-            inner_x + gh_w + gap,
-            author_y,
-            &downloads_short,
-            &footer_opts,
-            occlusion_rects,
-        );
-    }
-
-    // Overflow "…" menu stays on the far right.
-    let ellipsis_glyph = "\u{f141}";
-    let ell_w = sugarloaf.text_mut().measure(ellipsis_glyph, &footer_opts);
-    let ell_x = (button_x - 12.0 * s - ell_w).max(inner_x);
-    draw_text_with_occlusion(
-        sugarloaf,
-        ell_x,
-        author_y,
-        ellipsis_glyph,
-        &footer_opts,
-        occlusion_rects,
-    );
+    // Footer intentionally left blank: the GitHub source icon, the
+    // download-count, and the "…" overflow glyph were removed — they read
+    // as clutter (and we don't surface a GitHub source or an overflow menu
+    // for bundled extensions). The install button below is the only footer
+    // affordance. `entry.downloads` is still carried in state for search.
 
     // Install / Uninstall / Installing button.
     let button_rect = [button_x, button_y, button_w, button_h];
@@ -1444,13 +1403,19 @@ fn paint_install_button(
                 let segment_w = bw * 0.32;
                 let travel = bw + segment_w;
                 let segment_x = bx - segment_w + travel * ((elapsed * 0.8) % 1.0);
+                // Clip the sweeping segment to the BUTTON, not the card. It
+                // travels from left-of-button to right-of-button, so with the
+                // card-wide clip it painted as a detached grey box sliding
+                // OUTSIDE the button ("off the bar"). Intersect with the card
+                // clip so it also respects the scroll viewport.
+                let seg_clip = intersect_clip([bx, by, bw, bh], clip);
                 draw_rounded_rect_clipped(
                     sugarloaf,
                     [segment_x, by, segment_w, bh],
                     theme.f32_alpha(theme.accent, 0.55),
                     BUTTON_RADIUS * s,
                     ORDER_PROGRESS,
-                    btn_clip,
+                    seg_clip,
                 );
             }
             let label = installing_label(*percent, status_text, hovered);
@@ -1594,6 +1559,21 @@ fn paint_outline_clipped(
 /// rect is partly off-clip we fall back to a sharp-cornered rect for
 /// the visible slice (same trick the agent pane uses for partial-row
 /// cards — the eye doesn't catch the corner change at chrome scale).
+/// Intersect a rect with an optional outer clip, returning the overlapping
+/// region (or the rect itself when there's no outer clip). Used to confine a
+/// progress element to its button while still honouring the card/scroll clip.
+fn intersect_clip(rect: [f32; 4], outer: Option<[f32; 4]>) -> [f32; 4] {
+    let Some([ox, oy, ow, oh]) = outer else {
+        return rect;
+    };
+    let [rx, ry, rw, rh] = rect;
+    let x0 = rx.max(ox);
+    let y0 = ry.max(oy);
+    let x1 = (rx + rw).min(ox + ow);
+    let y1 = (ry + rh).min(oy + oh);
+    [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]
+}
+
 fn draw_rounded_rect_clipped(
     sugarloaf: &mut Sugarloaf,
     rect: [f32; 4],
@@ -1644,6 +1624,9 @@ fn filter_index(filter: super::state::ExtensionFilter) -> usize {
     }
 }
 
+// Retained (with test coverage) even though the download-count footer no
+// longer renders it — kept ready for when a store surfaces real counts.
+#[allow(dead_code)]
 fn format_thousands(n: u64) -> String {
     let s = n.to_string();
     let bytes = s.as_bytes();

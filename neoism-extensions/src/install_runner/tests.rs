@@ -353,7 +353,11 @@ fn install_error_display_variants() {
     assert_eq!(format!("{e}"), "network error: boom");
 
     let e = InstallError::MissingTool("npm");
-    assert_eq!(format!("{e}"), "tool `npm` not found on PATH");
+    let msg = format!("{e}");
+    assert!(msg.contains("npm"), "got: {msg}");
+    assert!(msg.contains("Node.js"), "missing-tool hint should name Node.js: {msg}");
+    // Unknown tools still get a PATH-oriented, actionable message.
+    assert!(missing_tool_message("weirdtool").contains("PATH"));
 
     let e = InstallError::NoAssetForTarget("linux_x64_gnu".to_string());
     assert_eq!(format!("{e}"), "no asset matches target `linux_x64_gnu`");

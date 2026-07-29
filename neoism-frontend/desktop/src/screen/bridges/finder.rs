@@ -213,10 +213,34 @@ impl Screen<'_> {
         })
     }
 
+    /// Route the finder's searches to the HOST's disk when the current
+    /// workspace is JOINED — set the daemon search route from the finder's
+    /// cwd. The route used to be installed only as a side effect of the
+    /// file tree populating in remote mode, so opening the finder while the
+    /// tree wasn't in remote mode searched the guest's (empty) LOCAL disk
+    /// and returned nothing. Setting it at finder-open makes search work
+    /// regardless of the tree's state. Non-joined workspaces clear it (local
+    /// search); ssh-followed trees keep local finder for now (v2 gap).
+    fn sync_finder_search_route(&self, cwd: &std::path::Path) {
+        let route = if self.context_manager.current_workspace_is_remote_joined() {
+            self.context_manager
+                .daemon_link_handle_and_runtime()
+                .map(|(handle, runtime)| crate::host::finder_search::RemoteSearchRoute {
+                    root: cwd.to_path_buf(),
+                    handle,
+                    runtime,
+                })
+        } else {
+            None
+        };
+        self.renderer.finder_search.set_remote(route);
+    }
+
     pub fn open_finder_files(&mut self) {
         let _ = self.sync_workspace_root_from_active_pane();
         let target_route = self.finder_target_route_for_current_focus();
         let cwd = self.finder_cwd(target_route);
+        self.sync_finder_search_route(&cwd);
         self.finder_target_route = target_route;
         self.renderer.file_tree.set_focused(false);
         self.renderer.finder.open_files(cwd);
@@ -227,6 +251,7 @@ impl Screen<'_> {
         let _ = self.sync_workspace_root_from_active_pane();
         let target_route = self.finder_target_route_for_current_focus();
         let cwd = self.finder_cwd(target_route);
+        self.sync_finder_search_route(&cwd);
         self.finder_target_route = target_route;
         self.renderer.file_tree.set_focused(false);
         self.renderer.finder.open_grep(cwd);
@@ -238,6 +263,7 @@ impl Screen<'_> {
         let _ = self.sync_workspace_root_from_active_pane();
         let target_route = self.finder_target_route_for_current_focus();
         let cwd = self.finder_cwd(target_route);
+        self.sync_finder_search_route(&cwd);
         self.finder_target_route = target_route;
         self.renderer.file_tree.set_focused(false);
         self.renderer

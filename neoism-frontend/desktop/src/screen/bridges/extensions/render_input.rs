@@ -1,5 +1,5 @@
 use super::*;
-use neoism_ui::panels::extensions_page::{NeoismExtensionsPane, PaneAction};
+use neoism_ui::panels::extensions_page::{ExtensionStatus, NeoismExtensionsPane, PaneAction};
 use neoism_window::event::MouseButton;
 
 impl Screen<'_> {
@@ -88,6 +88,23 @@ impl Screen<'_> {
         // automatically; this reservation is what protects the TEXT
         // pipeline (which doesn't honour order).
         let status_h = self.renderer.status_line_height();
+        // Snapshot the live install jobs so we can self-heal any row left
+        // stranded in `Installing`. The pump that clears finished jobs only
+        // runs while `in_flight` is non-empty (and only mutates the pane it
+        // was handed) — so a job that fails or is abandoned while this tab
+        // isn't the visible pane can freeze its row on "Connecting…" forever.
+        // Reconciling against the live set here guarantees a row can never
+        // show an install phase with no job behind it.
+        let in_flight_ids: std::collections::HashSet<String> = self
+            .renderer
+            .install_tracker
+            .in_flight
+            .keys()
+            .cloned()
+            .collect();
+        // Lazily loaded once per frame, and only if we actually find a
+        // stranded row that needs reconciling.
+        let mut installed_index: Option<neoism_extensions::InstalledIndex> = None;
         let mut painted = false;
         for (key, item) in self
             .context_manager
@@ -101,6 +118,35 @@ impl Screen<'_> {
             let Some(pane) = item.val.neoism_extensions.as_mut() else {
                 continue;
             };
+            for entry in pane.entries_mut() {
+                if matches!(entry.status, ExtensionStatus::Installing { .. })
+                    && !in_flight_ids.contains(&entry.id)
+                {
+                    // A row showing an install phase with no live job behind
+                    // it: reconcile against the ACTUAL installed index rather
+                    // than blindly resetting to NotInstalled. A fast install
+                    // whose success landed on a frame where this pane wasn't
+                    // the one handed to the pump would otherwise flash back to
+                    // "Install" even though it succeeded — the reported
+                    // "click → Cancel flash → Install" symptom.
+                    let index = installed_index.get_or_insert_with(|| {
+                        neoism_extensions::InstalledIndex::load().unwrap_or_default()
+                    });
+                    entry.status = match index.get(&entry.id) {
+                        Some(installed) => ExtensionStatus::Installed {
+                            version: installed.version.clone(),
+                        },
+                        None => ExtensionStatus::NotInstalled,
+                    };
+                    tracing::warn!(
+                        target: "neoism::extensions",
+                        id = %entry.id,
+                        live_jobs = in_flight_ids.len(),
+                        resolved = ?entry.status,
+                        "self-heal reconciled a stranded Installing row against the installed index"
+                    );
+                }
+            }
             let pane_h = (item.layout_rect[3] / scale - status_h).max(0.0);
             let rect = [
                 (scaled_margin.left + item.layout_rect[0]) / scale,
@@ -159,6 +205,13 @@ impl Screen<'_> {
                 id,
                 currently_installed,
             } => {
+                tracing::info!(
+                    target: "neoism::extensions",
+                    id = %id,
+                    currently_installed,
+                    action = if currently_installed { "uninstall" } else { "install" },
+                    "extension button toggled"
+                );
                 if currently_installed {
                     self.dispatch_uninstall(&id);
                 } else {

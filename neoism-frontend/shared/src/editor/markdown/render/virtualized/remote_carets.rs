@@ -62,32 +62,49 @@ fn draw_remote_markdown_carets(
         }
         // Rainbow peers animate locally on the shared clock; everyone
         // else paints in the color they broadcast.
-        let color = if cursor.rainbow {
+        let rgb = if cursor.rainbow {
             let c = crate::cursor_style::rainbow_color_f32(
                 crate::cursor_style::rainbow_now_seconds(),
             );
-            [c[0], c[1], c[2], 0.9]
+            [c[0], c[1], c[2]]
         } else {
             [
                 cursor.color[0] as f32 / 255.0,
                 cursor.color[1] as f32 / 255.0,
                 cursor.color[2] as f32 / 255.0,
-                0.9,
             ]
         };
+        // The name flag keeps a steady, readable fill (0.9).
+        let color = [rgb[0], rgb[1], rgb[2], 0.9];
         let caret_h = (block.line_height * 0.82).max(10.0);
         let caret_y = y + (block.line_height - caret_h).max(0.0) * 0.25;
-        draw_rect_clipped(
-            sugarloaf,
-            clip,
-            x,
-            caret_y,
-            2.0,
-            caret_h,
-            color,
-            DEPTH,
-            ORDER_TEXT,
-        );
+        // Blink the caret off the shared local clock (the same clock the
+        // presence-orb redraw owner ticks), so it pulses like the local
+        // caret — viewer-local, no sync. Only the caret rect blinks; the
+        // name flag + orb stay put.
+        if crate::cursor_style::cursor_blink_visible(
+            crate::editor::crdt::presence_orb_now_seconds(),
+        ) {
+            // Insert/replace → thin beam; Normal (and Visual) →
+            // translucent character-width block reusing the local caret's
+            // `block.cell_width`, mirroring the native code editor.
+            let (caret_w, caret_alpha) = if cursor.insert {
+                (2.0, 0.95)
+            } else {
+                (block.cell_width, 0.38)
+            };
+            draw_rect_clipped(
+                sugarloaf,
+                clip,
+                x,
+                caret_y,
+                caret_w,
+                caret_h,
+                [rgb[0], rgb[1], rgb[2], caret_alpha],
+                DEPTH,
+                ORDER_TEXT,
+            );
+        }
         // Name tag riding the caret top: small colored flag with the
         // collaborator's name, like every co-editing UI.
         if cursor.name.is_empty() {

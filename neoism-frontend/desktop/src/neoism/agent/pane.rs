@@ -92,6 +92,12 @@ pub struct NeoismAgentMessage {
     pub todos: Vec<NeoismAgentTodo>,
     pub detail: String,
     pub usage: Option<NeoismAgentUsage>,
+    /// Display name of who sent this (user) message — seeds the presence
+    /// orb + hover tooltip. `None` = the local user, resolved at render
+    /// time to the local presence name (see
+    /// `NeoismAgentPane::local_presence_name`). See the `TODO(shared-author)`
+    /// seam in the shared `api_mapping::part_block` for the multiplayer path.
+    pub author: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -307,6 +313,7 @@ impl NeoismAgentMessage {
             todos: Vec::new(),
             detail: String::new(),
             usage: None,
+            author: None,
         }
     }
 }
@@ -644,6 +651,11 @@ pub struct NeoismAgentPane {
     pub wordmark: NeoismWordmarkState,
     pub(super) side_panel: NeoismAgentSidePanel,
     perf_frame: AgentPanePerfFrame,
+    /// The local peer's presence display name (the same seed the editor
+    /// caret / top-chrome orb use). Pushed by the screen each frame; the
+    /// fallback author for user messages with no explicit `author`, so
+    /// the local user's own messages render their own presence orb.
+    local_presence_name: Option<String>,
 }
 
 #[derive(Default)]
@@ -824,6 +836,7 @@ impl Default for NeoismAgentPane {
             wordmark: NeoismWordmarkState::default(),
             side_panel: NeoismAgentSidePanel::default(),
             perf_frame: AgentPanePerfFrame::default(),
+            local_presence_name: None,
         }
     }
 }

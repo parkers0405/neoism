@@ -2,6 +2,7 @@ mod api;
 mod commands;
 mod pane;
 pub(crate) mod picker;
+pub(crate) mod prompt_history;
 pub(crate) mod side_panel;
 mod updates;
 
@@ -27,7 +28,7 @@ pub(crate) mod perf {
     }
 }
 
-pub(crate) use api::{agent_server_for_daemon_endpoint, neoism_agent_server};
+pub(crate) use api::{agent_reverse_proxy_for_daemon_endpoint, neoism_agent_server};
 pub(crate) use pane::TimelineMeasureKey;
 pub use pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentNoticeLevel,

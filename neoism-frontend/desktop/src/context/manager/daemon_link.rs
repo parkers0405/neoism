@@ -319,6 +319,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                     visibility: Default::default(),
                     main_session_id: None,
                     root_dir: root,
+                    // Local summaries never advertise a linked vault; the
+                    // daemon resolves it for served/joined workspaces.
+                    linked_vault_dir: None,
                     active_tab_id: Some(desktop_tab_id(self.window_id, active_route_id)),
                     running_on_host_id: Some(host_id.clone()),
                     controlled_by_host_id: Some(host_id.clone()),
@@ -364,16 +367,8 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         if !self.current_workspace_is_remote_joined() {
             return None;
         }
-        let endpoint = self.daemon.link.as_ref()?.endpoint.trim().to_string();
-        let http = if let Some(rest) = endpoint.strip_prefix("ws://") {
-            format!("http://{rest}")
-        } else if let Some(rest) = endpoint.strip_prefix("wss://") {
-            format!("https://{rest}")
-        } else {
-            return None;
-        };
-        let base = http.trim_end_matches("/session").trim_end_matches('/');
-        Some(format!("{base}/agent"))
+        let endpoint = self.daemon.link.as_ref()?.endpoint.as_str();
+        crate::neoism::agent::agent_reverse_proxy_for_daemon_endpoint(endpoint)
     }
 
     /// The daemon tree's host id for `workspace_id`, if known.

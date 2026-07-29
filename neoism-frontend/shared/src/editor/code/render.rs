@@ -800,30 +800,46 @@ pub fn render(
             .clamp(text_x, (x + w - 2.0).max(text_x));
         // Rainbow peers animate locally on the shared clock; everyone
         // else paints in the color they broadcast.
-        let color = if cursor.rainbow {
+        let rgb = if cursor.rainbow {
             let c = crate::cursor_style::rainbow_color_f32(
                 crate::cursor_style::rainbow_now_seconds(),
             );
-            [c[0], c[1], c[2], 0.9]
+            [c[0], c[1], c[2]]
         } else {
             [
                 cursor.color[0] as f32 / 255.0,
                 cursor.color[1] as f32 / 255.0,
                 cursor.color[2] as f32 / 255.0,
-                0.9,
             ]
         };
+        // The name flag keeps a steady, readable fill (0.9).
+        let color = [rgb[0], rgb[1], rgb[2], 0.9];
         let peer_caret_y = ry + ((row_h - caret_h) * 0.5).max(0.0).round();
-        sugarloaf.rect(
-            None,
-            px,
-            peer_caret_y,
-            2.0,
-            caret_h,
-            color,
-            DEPTH,
-            ORDER_TEXT,
-        );
+        // Blink the caret off the shared local clock (the same clock the
+        // presence-orb redraw owner ticks) so it pulses like the local
+        // caret — viewer-local, no sync. Only the caret rect blinks.
+        if crate::cursor_style::cursor_blink_visible(
+            crate::editor::crdt::presence_orb_now_seconds(),
+        ) {
+            // Insert → thin beam; Normal/Visual → translucent full-cell
+            // block, reusing the local caret's `cell_w` width, mirroring
+            // how the peer's own cursor looks to them.
+            let (caret_w, caret_alpha) = if cursor.insert {
+                (2.0, 0.95)
+            } else {
+                (cell_w, 0.38)
+            };
+            sugarloaf.rect(
+                None,
+                px,
+                peer_caret_y,
+                caret_w,
+                caret_h,
+                [rgb[0], rgb[1], rgb[2], caret_alpha],
+                DEPTH,
+                ORDER_TEXT,
+            );
+        }
         // Name flag riding the caret top, like every co-editing UI.
         if cursor.name.is_empty() {
             continue;

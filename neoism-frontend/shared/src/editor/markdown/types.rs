@@ -453,6 +453,11 @@ pub struct MarkdownRemoteCursor {
     /// Peer uses the rainbow cursor preset → `color` is ignored and
     /// the caret animates through hues on the shared rainbow clock.
     pub rainbow: bool,
+    /// Peer is in insert/replace mode → draw a thin beam; Normal (and
+    /// Visual) → a full character-width block, mirroring how the peer's
+    /// own cursor looks to them and how the local caret picks its width.
+    /// Sourced from the peer's presence `insert` flag.
+    pub insert: bool,
     pub line: usize,
     pub col_utf16: usize,
 }

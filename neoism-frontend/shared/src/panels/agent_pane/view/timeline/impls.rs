@@ -76,6 +76,7 @@ impl AgentTimelineMessage for NeoismAgentMessage {
             todos: Vec::new(),
             detail,
             usage: None,
+            author: None,
         }
     }
 }

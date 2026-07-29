@@ -406,6 +406,7 @@ impl NotesSidebar {
                 }
             }
         }
+        self.log_resolved_note_icons("refresh_notes");
         self.all_entries.sort_by(|a, b| {
             a.parent
                 .cmp(&b.parent)
@@ -484,6 +485,7 @@ impl NotesSidebar {
                 }
             }
         }
+        self.log_resolved_note_icons("set_entries_from_host");
         self.all_entries.sort_by(|a, b| {
             a.parent
                 .cmp(&b.parent)
@@ -519,8 +521,35 @@ impl NotesSidebar {
             return;
         }
         for entry in &mut self.all_entries {
-            if let Some(icon) = self.icon_overrides.get(&entry.path) {
-                entry.icon = icon.clone();
+            // Only a LIVE `Some` icon from an open buffer overrides the
+            // disk-read value. A `None` override (the buffer simply has no
+            // frontmatter icon — e.g. a note was opened without one) must NOT
+            // wipe the icon we just read from the note's frontmatter / the
+            // `.neoism-icons.json` map. That stale-`None` wipe was the root of
+            // "the page's frontmatter emoji shows in the doc but the sidebar
+            // row keeps the default md icon". A real reset clears the JSON map
+            // entry (or the frontmatter on disk), which the next refresh reads.
+            if let Some(Some(icon)) = self.icon_overrides.get(&entry.path) {
+                entry.icon = Some(icon.clone());
+            }
+        }
+    }
+
+    /// Diagnostic: dump every note row's resolved icon so we can tell whether
+    /// a missing page icon is a LOAD problem (icon `None` here) or a RENDER
+    /// problem (icon `Some` here but the row still draws the default). Enable
+    /// with `RUST_LOG=neoism::notes=info`.
+    fn log_resolved_note_icons(&self, source: &str) {
+        for entry in &self.all_entries {
+            if !entry.is_dir {
+                tracing::info!(
+                    target: "neoism::notes",
+                    source,
+                    note = %entry.label,
+                    depth = entry.depth,
+                    icon = ?entry.icon,
+                    "resolved note row icon"
+                );
             }
         }
     }
@@ -2204,6 +2233,66 @@ mod tests {
         entries.push((root.join("folder").join("child.md"), false));
         sidebar.set_entries_from_host(entries);
         sidebar
+    }
+
+    #[test]
+    fn both_load_paths_surface_a_note_frontmatter_icon() {
+        // A REAL note on disk with an `icon:` frontmatter. Both the
+        // daemon-fed (`set_entries_from_host`, the desktop path) AND the
+        // local fs-walk (`refresh_notes`) must put the icon on the row — the
+        // "page emoji shows in the doc but the sidebar keeps the default md
+        // icon" regression was `set_entries_from_host` hard-coding `None`.
+        let root = std::env::temp_dir().join("neoism-icon-test-vault");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let note = root.join("TASKS.md");
+        std::fs::write(&note, "---\nicon: \u{1f525}\ncover: creation\n---\n# TASKS\n")
+            .unwrap();
+
+        let mut host = NotesSidebar::default();
+        host.set_workspace("Test", Some(root.clone()));
+        host.set_visible(true);
+        host.set_entries_from_host(vec![(note.clone(), false)]);
+        let host_icon = host
+            .all_entries
+            .iter()
+            .find(|e| e.path == note)
+            .and_then(|e| e.icon.clone());
+        assert_eq!(
+            host_icon.as_deref(),
+            Some("\u{1f525}"),
+            "set_entries_from_host must surface the frontmatter icon"
+        );
+        // The RENDERER reads the icon via `row_entry(row)` — verify the
+        // root note's visible row maps to the icon-bearing entry (rules out a
+        // `rebuild_rows`/`row_entry` root-specific mapping bug that the
+        // `all_entries` check above would miss).
+        let row = host
+            .row_index_for_path(&note)
+            .expect("the root note must have a visible row");
+        let row_icon = host.row_entry(row).and_then(|e| e.icon.clone());
+        assert_eq!(
+            row_icon.as_deref(),
+            Some("\u{1f525}"),
+            "the rendered row must map to the icon-bearing entry"
+        );
+
+        let mut local = NotesSidebar::default();
+        local.set_workspace("Test", Some(root.clone()));
+        local.set_visible(true);
+        local.refresh_notes();
+        let local_icon = local
+            .all_entries
+            .iter()
+            .find(|e| e.path == note)
+            .and_then(|e| e.icon.clone());
+        assert_eq!(
+            local_icon.as_deref(),
+            Some("\u{1f525}"),
+            "refresh_notes must surface the frontmatter icon"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

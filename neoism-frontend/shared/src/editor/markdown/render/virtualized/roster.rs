@@ -4,6 +4,9 @@
 /// collaborator's display name beside the row; clicking it scrolls to
 /// their cursor line (hit rects registered here, consumed by
 /// `MarkdownPane::roster_jump_at` via the desktop mouse bridge).
+// Kept for reference: the "who's here" roster moved to the top-chrome peer
+// cluster, so this in-document dot column is no longer drawn.
+#[allow(dead_code)]
 fn draw_markdown_roster(
     sugarloaf: &mut Sugarloaf,
     pane: &mut MarkdownPane,
@@ -112,6 +115,7 @@ fn draw_markdown_roster(
 
 /// Dot/flag fill for a roster entry: the peer's broadcast color, or
 /// the live rainbow color for rainbow-preset peers.
+#[allow(dead_code)]
 fn roster_entry_color(
     entry: &crate::editor::markdown::roster::MarkdownRosterEntry,
 ) -> [f32; 4] {

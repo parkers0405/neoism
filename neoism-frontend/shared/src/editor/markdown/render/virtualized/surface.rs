@@ -400,7 +400,9 @@ pub(super) fn render_virtual(
     ensure_virtual_cursor_visible(pane, clip);
     draw_remote_markdown_carets(sugarloaf, pane, theme, clip, font_scale);
     draw_markdown_scrollbar(sugarloaf, pane, rect, total_height, theme, mouse, clip);
-    draw_markdown_roster(sugarloaf, pane, rect, theme, mouse, clip, font_scale);
+    // The "who's here" roster now lives in the top chrome (connected-peer orb
+    // cluster), so we no longer draw the duplicate dot column in the md file's
+    // top-right corner.
     pane.refresh_value_picker();
     draw_value_picker(sugarloaf, pane, rect, theme, font_scale);
     true

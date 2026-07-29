@@ -38,6 +38,14 @@ impl Screen<'_> {
             neoism_backend::sugarloaf::grid::GridUniforms,
         )> = Vec::with_capacity(ctx.panels.len());
 
+        // Current workspace shared? (joined a host, or serving for peers.)
+        // Computed before the `&mut self` field borrows below, because
+        // `served_workspace_root()` borrows all of self. Gates the top-chrome
+        // presence cluster so a local/non-shared workspace shows no peers.
+        let in_shared_workspace = self
+            .context_manager
+            .current_workspace_is_remote_joined()
+            || self.served_workspace_root().is_some();
         let rasterizer = &mut self.grid_rasterizer;
         let renderer_ref = &self.renderer;
         crate::app::freeze_watchdog::mark_render_stage(
@@ -583,11 +591,41 @@ impl Screen<'_> {
                 .is_some_and(|agent| !agent.side_panel().user_hidden());
             self.renderer.top_bar.set_panel_open(tree_open);
             self.renderer.top_bar.set_right_panel_open(agent_panel_open);
-            // Connected-peer presence orbs beside the server selector.
-            // Cheap: a handful of peers deduped from the presence store.
-            self.renderer
-                .top_bar
-                .set_peers(self.remote_presence.avatar_peers());
+            // Connected-peer presence orbs beside the server selector — ONLY
+            // for a shared workspace (`in_shared_workspace`, computed above).
+            // The presence store is global to the window and is NOT cleared on
+            // a workspace switch, so without this gate the previous shared
+            // workspace's peers keep showing after switching to a local one.
+            let mut peers = if in_shared_workspace {
+                self.remote_presence.avatar_peers()
+            } else {
+                Vec::new()
+            };
+            // In the agent tab the local user is otherwise absent from the
+            // cluster (`avatar_peers()` excludes self, and there may be no
+            // editor peers), so surface the local user's OWN presence orb
+            // there too — matching how the agent messages wear the sender's
+            // orb. Same shared-workspace gate; never a duplicate.
+            if in_shared_workspace && agent_panel_open {
+                let (peer_id, display_name) =
+                    crate::screen::presence::local_presence_identity(
+                        self.presence_display_name_override.as_deref(),
+                    );
+                if !peers.iter().any(|peer| peer.peer_id == peer_id) {
+                    peers.insert(
+                        0,
+                        neoism_ui::editor::crdt::PresenceAvatarPeer {
+                            peer_id,
+                            display_name,
+                            // Orb is seeded by `display_name`; `color` only
+                            // tints the ring, so a neutral value is fine.
+                            color: [130, 130, 130],
+                            rainbow: false,
+                        },
+                    );
+                }
+            }
+            self.renderer.top_bar.set_peers(peers);
             #[cfg(target_os = "macos")]
             self.renderer.top_bar.set_left_safe_inset(if is_fullscreen {
                 0.0

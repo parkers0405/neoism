@@ -132,6 +132,7 @@ impl V2PromptRequest {
             no_reply: self.no_reply,
             system: self.system,
             tools: self.tools,
+            author: None,
             parts,
         })
     }

@@ -340,6 +340,7 @@ mod tests {
                 },
                 system: None,
                 tools: None,
+                author: None,
             }),
             parts: vec![Part::Text(TextPart {
                 id: Id::ascending(IdKind::Part),
@@ -391,6 +392,7 @@ mod tests {
             no_reply: false,
             system: None,
             tools: None,
+            author: None,
             parts: vec![PromptPart::Text {
                 text: text.to_string(),
             }],

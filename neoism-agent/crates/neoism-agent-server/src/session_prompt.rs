@@ -87,8 +87,19 @@ pub(crate) async fn append_prompt(
         no_reply: _,
         system,
         tools,
+        author,
         parts: prompt_parts,
     } = request;
+    // Sender identity for shared/joined sessions: the display name of the
+    // human who actually sent this prompt (a guest's presence name, or the
+    // host's own). Normalized to `None` when blank so an empty string never
+    // masquerades as a real author downstream. Persisted on the user message
+    // `info` (history reload) AND stamped onto each live broadcast part so
+    // remote viewers attribute the turn to the true sender.
+    let author = author.and_then(|name| {
+        let trimmed = name.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
     let agents = AgentCatalog::load(&info.directory)?;
     let agent_name = agent
         .or_else(|| info.agent.clone())
@@ -128,6 +139,7 @@ pub(crate) async fn append_prompt(
         model,
         system: request_system,
         tools,
+        author: author.clone(),
     };
     let mut parts = Vec::new();
     for part in prompt_parts {
@@ -226,6 +238,13 @@ pub(crate) async fn append_prompt(
             obj.insert("role".to_string(), json!("user"));
             if let Some(system) = &broadcast_system {
                 obj.insert("system".to_string(), json!(system));
+            }
+            // Stamp the true sender onto the live part so remote viewers
+            // render THEIR presence orb + name (the frontend `part_block`
+            // reads `part["author"]`). Absent when the sender didn't send a
+            // name — remote falls back to its own local presence name.
+            if let Some(author) = &author {
+                obj.insert("author".to_string(), json!(author));
             }
         }
         state.publish(EventPayload::new(
@@ -1717,6 +1736,7 @@ mod tests {
                 },
                 system: None,
                 tools: None,
+                author: None,
             }),
             parts: vec![Part::Compaction(neoism_agent_core::CompactionPart {
                 id: Id::ascending(IdKind::Part),
@@ -1764,6 +1784,7 @@ mod tests {
                 },
                 system: None,
                 tools: None,
+                author: None,
             }),
             parts: vec![Part::Text(TextPart {
                 id: Id::ascending(IdKind::Part),

@@ -792,6 +792,7 @@ async fn queue_child_task_prompt(
         no_reply: false,
         system: None,
         tools: None,
+        author: None,
         parts: vec![PromptPart::Text {
             text: prompt.to_string(),
         }],

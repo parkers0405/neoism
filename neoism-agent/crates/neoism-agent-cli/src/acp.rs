@@ -603,6 +603,7 @@ impl AcpBridge {
                 no_reply: false,
                 system: None,
                 tools: None,
+                author: None,
                 parts,
             })
             .send()

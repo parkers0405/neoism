@@ -326,6 +326,7 @@ pub(crate) async fn append_external_user_message(
             model: model.clone(),
             system: None,
             tools: None,
+            author: None,
         }),
         parts: vec![part.clone()],
     };

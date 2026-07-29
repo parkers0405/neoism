@@ -122,6 +122,7 @@ fn compacted_summary_is_added_to_provider_context() {
             },
             system: None,
             tools: None,
+            author: None,
         }),
         parts: vec![Part::Text(TextPart {
             id: Id::ascending(IdKind::Part),
@@ -187,6 +188,7 @@ fn provider_context_includes_active_run_system_once() {
             },
             system: Some("legacy duplicated prompt".to_string()),
             tools: None,
+            author: None,
         }),
         parts: vec![Part::Text(TextPart {
             id: Id::ascending(IdKind::Part),
@@ -260,6 +262,7 @@ fn compacted_summary_trims_messages_already_covered_by_summary() {
                 },
                 system: None,
                 tools: None,
+                author: None,
             }),
             parts: vec![Part::Text(TextPart {
                 id: Id::ascending(IdKind::Part),
@@ -283,6 +286,7 @@ fn compacted_summary_trims_messages_already_covered_by_summary() {
                 },
                 system: None,
                 tools: None,
+                author: None,
             }),
             parts: vec![Part::Text(TextPart {
                 id: Id::ascending(IdKind::Part),
@@ -411,6 +415,7 @@ async fn sqlite_store_persists_sessions_and_messages() {
                     },
                     system: None,
                     tools: None,
+                    author: None,
                 }),
                 parts: vec![Part::Text(TextPart {
                     id: Id::ascending(IdKind::Part),
@@ -483,6 +488,7 @@ fn store_test_message(
             },
             system: None,
             tools: None,
+            author: None,
         }),
         parts: vec![Part::Text(TextPart {
             id: Id::ascending(IdKind::Part),
@@ -751,6 +757,7 @@ async fn list_messages_page_pages_by_cursor_in_sql() {
                         },
                         system: None,
                         tools: None,
+                        author: None,
                     }),
                     parts: vec![Part::Text(TextPart {
                         id: part_id.clone(),
@@ -889,6 +896,7 @@ async fn compact_session_publishes_streaming_compaction_events() {
                     },
                     system: None,
                     tools: None,
+                    author: None,
                 }),
                 parts: vec![Part::Text(TextPart {
                     id: Id::ascending(IdKind::Part),
@@ -1120,6 +1128,7 @@ async fn sync_replay_projects_session_message_and_parts() {
         },
         system: None,
         tools: None,
+        author: None,
     });
     let part = Part::Text(TextPart {
         id: part_id,
@@ -2288,6 +2297,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
                     },
                     system: None,
                     tools: None,
+                    author: None,
                 }),
                 parts: vec![Part::Text(TextPart {
                     id: Id::ascending(IdKind::Part),
@@ -2345,6 +2355,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
                 no_reply: false,
                 system: None,
                 tools: None,
+                author: None,
                 parts: vec![PromptPart::Text {
                     text: "continue please".to_string(),
                 }],
@@ -2616,6 +2627,7 @@ async fn append_snapshot_test_messages(
                     },
                     system: None,
                     tools: None,
+                    author: None,
                 }),
                 parts: vec![Part::Text(TextPart {
                     id: Id::ascending(IdKind::Part),

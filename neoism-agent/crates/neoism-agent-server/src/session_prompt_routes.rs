@@ -36,6 +36,7 @@ pub(crate) async fn session_init(
             no_reply: false,
             system: None,
             tools: None,
+            author: None,
             parts: vec![PromptPart::Text {
                 text: "/init".to_string(),
             }],

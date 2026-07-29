@@ -105,6 +105,12 @@ pub struct UserMessage {
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<BTreeMap<String, bool>>,
+    /// Display name of the human who sent this turn (the sender's presence
+    /// name), stamped by the agent-server from the prompt request so history
+    /// reload attributes shared-session prompts to their true sender. `None`
+    /// = attribute to the local presence name / "You" (legacy behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -356,6 +362,14 @@ pub struct PromptRequest {
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<BTreeMap<String, bool>>,
+    /// Display name of the human who actually sent this prompt (the sender's
+    /// presence name). In a shared/joined session a guest sends its own name
+    /// so the host's agent-server can attribute the turn to the true sender
+    /// rather than a generic "You". Optional + `#[serde(default)]` for
+    /// backward compatibility: an older client omits it and it resolves to
+    /// the local presence name at render time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     pub parts: Vec<PromptPart>,
 }
 

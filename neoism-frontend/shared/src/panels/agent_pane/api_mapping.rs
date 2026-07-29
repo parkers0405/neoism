@@ -429,12 +429,13 @@ pub fn message_blocks(message: &Value) -> Vec<NeoismAgentMessage> {
         };
         let mut message = message;
         message.id = id;
-        // TODO(shared-author): in a shared session the sender's display
-        // name would ride on the message `info`; read it here so a peer's
-        // prompt shows THEIR presence orb. The agent-server does not tag
-        // sender identity yet (`PromptRequest` has no author field), so
-        // this is `None` today and the renderer falls back to the local
-        // presence name.
+        // Shared-session author (wired): the agent-server stamps the true
+        // sender's display name onto the user message `info` under the key
+        // `author` (from `PromptRequest.author` in `session_prompt::
+        // append_prompt`), so a peer's prompt shows THEIR presence orb + name
+        // on history reload. Absent (older client, or the local sender's own
+        // message) → `None`, and the renderer falls back to the local
+        // presence name / "You".
         message.author = info
             .get("author")
             .and_then(Value::as_str)
@@ -890,11 +891,11 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
             return Some(message);
         }
     }
-    // TODO(shared-author): the agent-server tags broadcast user parts with
-    // `role: "user"` but no sender identity (see `session_prompt::
-    // append_prompt` — `PromptRequest` carries no author). When it also
-    // tags the sender's display name, this reads it so a remote peer's
-    // prompt renders THEIR presence orb; until then it stays `None` and
+    // Shared-session author (wired): the agent-server stamps the true
+    // sender's display name onto each broadcast user part under the key
+    // `author`, next to `role: "user"` (see `session_prompt::append_prompt`),
+    // so a remote peer's LIVE prompt renders THEIR presence orb + name. Absent
+    // (older client, or the local sender's own optimistic echo) → `None` and
     // the local presence name is used as the fallback seed.
     if message.kind == NeoismAgentMessageKind::User {
         message.author = part

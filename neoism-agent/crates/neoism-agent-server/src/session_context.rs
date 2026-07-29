@@ -945,6 +945,7 @@ fn compaction_user_message(
             model: model.clone(),
             system: None,
             tools: None,
+            author: None,
         }),
         parts: vec![Part::Compaction(CompactionPart {
             id: part_id,
@@ -1554,6 +1555,7 @@ mod tests {
                 model: model.clone(),
                 system: None,
                 tools: None,
+                author: None,
             }),
             parts: vec![Part::Text(TextPart {
                 id: neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Part),

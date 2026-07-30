@@ -27,6 +27,20 @@ use std::time::Instant;
 use neoism_terminal_pty::{PtySession, PtySessionConfig};
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
+    /// Whether operations for the CURRENT workspace belong on the daemon link
+    /// attached to this window.
+    ///
+    /// A home link mirrors this window's local workspaces, so local pane
+    /// operations still use it. A peer link, however, only owns grids that
+    /// were explicitly adopted from that peer. Local grids remain local even
+    /// while another grid in the same window is visiting a shared server.
+    pub(crate) fn current_workspace_uses_attached_daemon(&self) -> bool {
+        workspace_uses_attached_daemon(
+            self.daemon.link_is_peer,
+            self.current_adopted_workspace_id().is_some(),
+        )
+    }
+
     fn daemon_request(&mut self, message: WorkspaceClientMessage) -> bool {
         let Some(link) = self.daemon.link.clone() else {
             return false;
@@ -55,6 +69,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         cwd: Option<String>,
         label: Option<String>,
     ) -> bool {
+        if !self.current_workspace_uses_attached_daemon() {
+            return false;
+        }
         self.daemon_request(WorkspaceClientMessage::NewSession { cwd, label })
     }
 
@@ -116,6 +133,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     pub(super) fn prepared_remote_pty(
         &self,
     ) -> Option<crate::context::remote_pty::PreparedRemotePty> {
+        // A peer connection is window-scoped, but remote PTYs are
+        // workspace-scoped. Without this guard, merely keeping one joined
+        // workspace open made every new split/tab in an unrelated local
+        // workspace run on the peer daemon.
+        if !self.current_workspace_uses_attached_daemon() {
+            return None;
+        }
         // On a JOINED (peer) workspace every new terminal must run on
         // the HOST — ssh-into-the-host semantics — so bypass the
         // ambient `NEOISM_DAEMON_TABS` cutover gate and always bind a
@@ -627,6 +651,12 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         pane_external_id: u64,
         op: PaneLayoutOp,
     ) -> bool {
+        // Do not swallow a local split/focus/resize/close by sending it to the
+        // peer daemon just because a different workspace in this window is
+        // joined. Returning false lets the caller run its normal local path.
+        if !self.current_workspace_uses_attached_daemon() {
+            return false;
+        }
         self.daemon_request(WorkspaceClientMessage::PaneLayoutOp {
             pane_external_id,
             op,
@@ -764,5 +794,33 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             neoism_tags: None,
             neoism_extensions: None,
         })
+    }
+}
+
+fn workspace_uses_attached_daemon(
+    link_is_peer: bool,
+    current_workspace_is_adopted: bool,
+) -> bool {
+    !link_is_peer || current_workspace_is_adopted
+}
+
+#[cfg(test)]
+mod workspace_isolation_tests {
+    use super::workspace_uses_attached_daemon;
+
+    #[test]
+    fn local_workspace_ignores_peer_link() {
+        assert!(!workspace_uses_attached_daemon(true, false));
+    }
+
+    #[test]
+    fn adopted_workspace_uses_peer_link() {
+        assert!(workspace_uses_attached_daemon(true, true));
+    }
+
+    #[test]
+    fn home_link_keeps_existing_local_mirroring_behavior() {
+        assert!(workspace_uses_attached_daemon(false, false));
+        assert!(workspace_uses_attached_daemon(false, true));
     }
 }

@@ -205,6 +205,25 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .is_some_and(|workspace| workspace.host_id != local)
     }
 
+    /// The CURRENT workspace participates in a shared daemon session.
+    ///
+    /// This is deliberately workspace-scoped. `link_is_peer` alone describes
+    /// the window's active connection and stays true while the user visits a
+    /// local grid beside an adopted one.
+    pub fn current_workspace_is_collaborative(&self) -> bool {
+        if self.daemon.link_is_peer {
+            // On a peer link, adoption is the authoritative boundary. Do not
+            // consult the peer's workspace cache for a local synthetic id:
+            // ids can collide, and a collision must not paint peer presence
+            // onto a local grid.
+            return self.current_adopted_workspace_id().is_some();
+        }
+        !matches!(
+            self.workspace_visibility_for_index(self.current_index),
+            neoism_ui::panels::context_menu::WorkspaceChromeVisibility::Private
+        )
+    }
+
     /// LEAVE, not kill: unbind every adopted daemon session in the
     /// grid at `index` so closing it never sends `ClosePty` (the
     /// daemon's close REMOVES the session — a guest leaving must not

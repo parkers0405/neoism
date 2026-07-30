@@ -547,6 +547,10 @@ impl Screen<'_> {
         self.renderer.editor_scroll.reset_all();
         self.renderer.terminal_scroll.reset_all();
         self.renderer.trail_cursor.reset();
+        // The presence store follows the active server connection, but tree
+        // avatars are workspace chrome. Hide the peer index on local grids
+        // and restore it when returning to a collaborative grid.
+        self.rebuild_file_tree_presence_index();
     }
 
     pub(crate) fn activate_workspace_terminal_tab(&mut self) {

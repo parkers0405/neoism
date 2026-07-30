@@ -42,10 +42,8 @@ impl Screen<'_> {
         // Computed before the `&mut self` field borrows below, because
         // `served_workspace_root()` borrows all of self. Gates the top-chrome
         // presence cluster so a local/non-shared workspace shows no peers.
-        let in_shared_workspace = self
-            .context_manager
-            .current_workspace_is_remote_joined()
-            || self.served_workspace_root().is_some();
+        let in_shared_workspace =
+            self.context_manager.current_workspace_is_collaborative();
         let rasterizer = &mut self.grid_rasterizer;
         let renderer_ref = &self.renderer;
         crate::app::freeze_watchdog::mark_render_stage(

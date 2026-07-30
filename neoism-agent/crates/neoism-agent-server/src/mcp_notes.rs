@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 pub(crate) const NOTES_MCP_ID: &str = "neoism-notes";
 
-const SCOPE_DESCRIPTION: &str = "Scope: auto uses linked project notes when cwd is linked, otherwise the active/default vault; project forces linked project notes; vault forces vault notes; all searches every vault.";
+const SCOPE_DESCRIPTION: &str = "Scope: auto uses the linked project notes when the working dir is linked to a vault, otherwise the Default vault; project forces the linked project notes; vault forces the Default vault notes; all searches every vault.";
 
 pub(crate) fn tools() -> Vec<McpToolInfo> {
     vec![
@@ -151,16 +151,38 @@ fn graphs_for_scope(
 ) -> anyhow::Result<Vec<neoism_workspace_index::NoteGraph>> {
     match scope {
         "project" => linked_project_graph(cwd).map(|graph| graph.into_iter().collect()),
-        "vault" => Ok(vec![neoism_workspace_index::NoteGraph::open(cwd)?]),
-        "all" => all_vault_graphs(cwd),
-        _ => {
-            if let Some(graph) = linked_project_graph(cwd)? {
-                Ok(vec![graph])
-            } else {
-                Ok(vec![neoism_workspace_index::NoteGraph::open(cwd)?])
-            }
-        }
+        "vault" => Ok(vec![default_vault_graph()?]),
+        "all" => all_vault_graphs(),
+        _ => Ok(vec![resolve_notes_graph(cwd)?]),
     }
+}
+
+/// Resolve the notes graph for an agent working directory: the vault the dir
+/// is LINKED to (a `[[links]]` entry in a vault's `project.toml`), else the
+/// Default vault. Mirrors the memory tool (see mcp_memory.rs `project_root`):
+/// we deliberately do NOT fall back to `NoteGraph::open` / `load_workspace`,
+/// because those read a dir-local `.neoism/workspace.toml`, and the home dir's
+/// config declares `workspace = "Neoism"` — so every agent running from `~`
+/// (the default for most sessions) was funneling unrelated work into the
+/// Neoism source vault instead of the Default vault. A dir-local config is not
+/// a vault link.
+pub(crate) fn resolve_notes_graph(
+    cwd: &Path,
+) -> anyhow::Result<neoism_workspace_index::NoteGraph> {
+    match linked_project_graph(cwd)? {
+        Some(graph) => Ok(graph),
+        None => default_vault_graph(),
+    }
+}
+
+/// The global Default vault graph — the unlinked fallback. Uses the blessed
+/// `default_notes_workspace()` (stable id, notes enabled) rather than the
+/// process cwd, so it never depends on where the agent happens to run.
+fn default_vault_graph() -> anyhow::Result<neoism_workspace_index::NoteGraph> {
+    neoism_workspace_index::NoteGraph::from_workspace(
+        neoism_workspace_index::default_notes_workspace(),
+    )
+    .map_err(Into::into)
 }
 
 fn linked_project_graph(
@@ -172,9 +194,7 @@ fn linked_project_graph(
         .map_err(Into::into)
 }
 
-fn all_vault_graphs(
-    cwd: &Path,
-) -> anyhow::Result<Vec<neoism_workspace_index::NoteGraph>> {
+fn all_vault_graphs() -> anyhow::Result<Vec<neoism_workspace_index::NoteGraph>> {
     let vaults_dir = neoism_workspace_index::notes_vaults_dir();
     let mut graphs = Vec::new();
     if let Ok(entries) = std::fs::read_dir(vaults_dir) {
@@ -186,19 +206,16 @@ fn all_vault_graphs(
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            let mut workspace = neoism_workspace_index::load_workspace(cwd)?
-                .unwrap_or_else(|| neoism_workspace_index::config::NeoismWorkspace {
-                    root: cwd.to_path_buf(),
-                    config: neoism_workspace_index::config::WorkspaceConfig::new(cwd),
-                });
-            workspace.config.notes.workspace = name.to_string();
+            // Open each vault directly by name via the blessed virtual
+            // workspace; do NOT seed from `load_workspace(cwd)` (which would
+            // pull in the home dir's `.neoism/workspace.toml`).
             graphs.push(neoism_workspace_index::NoteGraph::from_workspace(
-                workspace,
+                neoism_workspace_index::config::vault_notes_workspace(name),
             )?);
         }
     }
     if graphs.is_empty() {
-        graphs.push(neoism_workspace_index::NoteGraph::open(cwd)?);
+        graphs.push(default_vault_graph()?);
     }
     Ok(graphs)
 }

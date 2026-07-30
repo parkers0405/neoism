@@ -13,15 +13,11 @@ pub(super) fn notes_tool(
     let limit = neoism_workspace_index::NoteQueryLimit(
         usize_arg(&arguments, "limit").unwrap_or(100).max(1),
     );
-    let graph_root = match operation.as_str() {
-        "init" => context.cwd.clone(),
-        _ => neoism_workspace_index::linked_project_for_code_dir(&context.cwd)?
-            .map(|workspace| workspace.root)
-            .unwrap_or_else(|| context.cwd.clone()),
-    };
-    // `open` is vault-first and self-indexing now — the legacy per-project
-    // init is gone, so "init" is just "ensure the graph is ready".
-    let graph = neoism_workspace_index::NoteGraph::open(&graph_root)?;
+    // Resolve the notes graph exactly like the Notes MCP: the vault this dir
+    // is LINKED to, else the Default vault — never the home dir's dir-local
+    // `.neoism/workspace.toml` (which declares the Neoism source vault). "init"
+    // just means "ensure the resolved graph is ready".
+    let graph = crate::mcp_notes::resolve_notes_graph(&context.cwd)?;
     context.ensure_allowed(
         "notes",
         &display_path(&context.cwd, graph.workspace().root.as_path()),

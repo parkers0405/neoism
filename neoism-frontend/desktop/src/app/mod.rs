@@ -356,28 +356,12 @@ impl Application<'_> {
                       // not a frame variant on the daemon multiplex today.
                 }
             }
-            // Frames from a PARKED home connection (this window is visiting
-            // a guest server): pane-scoped traffic only. PTY output and
-            // editor redraws keep the background islands' shells and nvims
-            // current instead of freezing until the user switches home.
-            // Inventory planes (workspace/files/crdt/git) stay dropped —
-            // they describe the HOME daemon and would fight the guest
-            // server's state the screen is attached to; the return-home
-            // resync re-requests them.
-            let parked_messages = self
-                .window_sessions
-                .get(&window_id)
-                .and_then(|session| session.parked_home.as_ref())
-                .map(|connection| connection.drain_messages())
-                .unwrap_or_default();
-            for message in parked_messages {
-                match message {
-                    DaemonServerMessage::Pty { message, .. } => {
-                        self.apply_daemon_pty_message(window_id, message);
-                    }
-                    _ => {}
-                }
-            }
+            // Parked connections keep receiving into their own queues. Do not
+            // feed those frames through the active server's single transport
+            // cache: session ids are server-local and could collide. When a
+            // workspace activates its server, route/session bindings are
+            // rehydrated first and that connection's queued frames are then
+            // drained normally.
             self.process_window_server_requests(window_id);
             self.flush_window_outbound(window_id);
         }
@@ -581,7 +565,17 @@ impl Application<'_> {
                 .get(&window_id)
                 .is_some_and(|session| session.connection.endpoint() == daemon_url);
             if !already_connected {
-                self.switch_window_server(window_id, &daemon_url, None, None);
+                let saved = self
+                    .server_registry
+                    .servers()
+                    .iter()
+                    .find(|server| server.endpoint == daemon_url)
+                    .map(|server| server.id.clone());
+                let token = saved
+                    .as_deref()
+                    .and_then(|id| self.server_registry.token(id))
+                    .map(str::to_string);
+                self.switch_window_server(window_id, &daemon_url, token, saved);
             }
             self.send_window_message(
                 window_id,
@@ -1093,24 +1087,22 @@ impl Application<'_> {
             return;
         }
 
-        // Returning HOME reuses the parked connection when it is still
-        // open — same daemon-side nvim namespace, so the local editors
-        // survive the round trip — instead of dialling a fresh one.
-        if self.home_daemon_endpoint.as_deref() == Some(daemon_url) {
-            let parked = self
-                .window_sessions
-                .get_mut(&window_id)
-                .and_then(|session| session.parked_home.take());
-            if let Some(connection) = parked {
-                if matches!(
-                    connection.status(),
-                    crate::daemon_client::DaemonClientStatus::Open
-                ) {
-                    self.complete_server_switch(window_id, connection, server_id);
-                    return;
-                }
-                // Stale (daemon restarted while we were away) — dial.
+        // Reuse any connection parked for this endpoint. This preserves each
+        // server's daemon namespace and remote PTYs while another workspace
+        // in the same window is active.
+        let parked = self
+            .window_sessions
+            .get_mut(&window_id)
+            .and_then(|session| session.parked_connections.remove(daemon_url));
+        if let Some(connection) = parked {
+            if matches!(
+                connection.status(),
+                crate::daemon_client::DaemonClientStatus::Open
+            ) {
+                self.complete_server_switch(window_id, connection, server_id);
+                return;
             }
+            // Stale (daemon restarted while we were away) — dial.
         }
         // Dial off-thread: the handshake blocks up to its timeout, and a
         // dead endpoint would freeze the UI for the whole wait. The pump
@@ -1289,20 +1281,20 @@ impl Application<'_> {
         let home_endpoint = self.home_daemon_endpoint.clone();
         let switching_home =
             home_endpoint.as_deref() == Some(connection.endpoint());
-        let (profile_id, parked_home) = match outgoing {
-            Some(old) => {
+        let (profile_id, parked_connections, pending_peer_adopt) = match outgoing {
+            Some(mut old) => {
                 let profile_id = old.profile_id.clone();
-                // Keep the home daemon's websocket open while away — the
-                // daemon reaps the nvim sessions of a closed connection's
-                // namespace, which executed every local editor on switch.
-                let parked = if old.is_home(home_endpoint.as_deref()) {
-                    Some(old.connection)
-                } else {
-                    old.parked_home
-                };
-                (profile_id, parked)
+                let pending_peer_adopt = old.pending_peer_adopt.take();
+                let mut parked = std::mem::take(&mut old.parked_connections);
+                if old.connection.endpoint() != connection.endpoint() {
+                    parked.insert(
+                        old.connection.endpoint().to_string(),
+                        old.connection,
+                    );
+                }
+                (profile_id, parked, pending_peer_adopt)
             }
-            None => (self.next_window_profile_id(), None),
+            None => (self.next_window_profile_id(), HashMap::new(), None),
         };
         let mut session = WindowServerSession::new(profile_id, connection, server_id);
         // A foreign server needs an initial adopt so the window lands in one
@@ -1310,29 +1302,19 @@ impl Application<'_> {
         // not: this window's local grids are already alive. Auto-adopting the
         // home tree here duplicated the remaining local workspace after a
         // guest closed their last joined tab.
-        session.needs_initial_workspace_adopt = !switching_home;
-        session.parked_home = parked_home;
+        session.pending_peer_adopt = pending_peer_adopt;
+        session.needs_initial_workspace_adopt =
+            !switching_home && session.pending_peer_adopt.is_none();
+        session.parked_connections = parked_connections;
         self.window_sessions.insert(window_id, session);
         self.attach_session_to_window(window_id);
-        // Agent panes follow the server: a JOINED host reverse-proxies
-        // its neoism-agent at `<daemon-http>/agent` (tools must run
-        // where the files live), so re-point the panes at that proxy —
-        // the guest reuses the joined connection and the host streams
-        // SSE through. Home connections keep the local agent (the reset
-        // above already restored it).
-        if let Some(session) = self.window_sessions.get(&window_id) {
-            if !session.is_home(self.home_daemon_endpoint.as_deref()) {
-                if let Some(agent_url) =
-                    crate::neoism::agent::agent_reverse_proxy_for_daemon_endpoint(
-                        session.connection.endpoint(),
-                    )
-                {
-                    if let Some(route) = self.router.routes.get_mut(&window_id) {
-                        route.window.screen.set_agent_server_for_window(agent_url);
-                    }
-                }
-            }
-        }
+        // Do not broadcast this connection's agent endpoint across the
+        // window. A window may retain local grids while it adopts a peer grid;
+        // switching every pane here clears the local chats and can leave a
+        // guest chat executing locally with a host-only working directory.
+        // `load_current_workspace_chrome` resolves and applies the correct
+        // endpoint to the active grid after adoption and on every workspace
+        // switch.
         self.send_window_message(window_id, WorkspaceClientMessage::ListWindows);
         self.send_window_message(
             window_id,

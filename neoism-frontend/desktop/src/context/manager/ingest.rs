@@ -203,14 +203,16 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // Detach ONLY adopted grids: `detach_adopted_grid_sessions`
         // unbinds every route in the grid it's given, so pointing it at
         // a non-adopted grid would drop the guest's OWN local sessions.
+        let active_endpoint = self.daemon_endpoint().map(str::to_string);
         let adopted: Vec<usize> = {
-            let cache = &self.daemon.cache;
             self.contexts
                 .iter()
                 .enumerate()
                 .filter(|(_, grid)| {
                     grid.workspace_route_id().is_some_and(|stable| {
-                        cache.adopted_workspaces.contains_key(&stable)
+                        self.adopted_workspaces.get(&stable).is_some_and(|binding| {
+                            active_endpoint.as_deref() == Some(binding.endpoint.as_str())
+                        })
                     })
                 })
                 .map(|(index, _)| index)

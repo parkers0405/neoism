@@ -102,6 +102,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             config: ctx_config,
             titles,
             daemon: ContextManagerDaemonState::default(),
+            adopted_workspaces: HashMap::new(),
         })
     }
 
@@ -154,6 +155,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             config,
             titles,
             daemon: ContextManagerDaemonState::default(),
+            adopted_workspaces: HashMap::new(),
         })
     }
 

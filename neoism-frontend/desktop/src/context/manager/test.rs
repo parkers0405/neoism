@@ -102,6 +102,48 @@ fn apply_full_snapshot_replaces_daemon_cache() {
 }
 
 #[test]
+fn adopted_workspace_identity_survives_active_server_cache_reset() {
+    let window_id: WindowId = WindowId::from(0);
+    let mut context_manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+    let stable = context_manager
+        .current_grid()
+        .workspace_route_id()
+        .expect("test grid has a stable root");
+    context_manager.adopted_workspaces.insert(
+        stable,
+        AdoptedWorkspaceBinding {
+            workspace_id: "peer-workspace".to_string(),
+            endpoint: "ws://100.64.0.8:9877/session".to_string(),
+            is_peer: true,
+        },
+    );
+
+    // This is what attaching server B used to do to server A's grid.
+    context_manager.detach_daemon_client();
+
+    assert_eq!(
+        context_manager.current_adopted_workspace_id().as_deref(),
+        Some("peer-workspace")
+    );
+    assert_eq!(
+        context_manager.current_adopted_workspace_endpoint(),
+        Some("ws://100.64.0.8:9877/session")
+    );
+    assert!(context_manager.current_workspace_is_remote_joined());
+    assert_eq!(
+        context_manager
+            .agent_server_override_for_current()
+            .as_deref(),
+        Some("http://100.64.0.8:9877/agent")
+    );
+    assert_eq!(
+        context_manager.workspace_icon_kind_for_index(0).as_deref(),
+        Some("joined")
+    );
+}
+
+#[test]
 fn apply_pane_layout_changed_accepts_snapshot_json() {
     let window_id: WindowId = WindowId::from(0);
     let mut context_manager =

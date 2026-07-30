@@ -162,41 +162,15 @@ impl Screen<'_> {
         self.pending_remote_file_ops.clear();
         self.pending_remote_notes_moves.clear();
         self.pending_remote_git_status.clear();
-        self.renderer.file_tree.set_entries(Vec::new());
-        // Presence was just reset — drop any stale path->peers index so
-        // the tree doesn't paint ghost avatars for the old server.
+        // Presence was just reset — drop any stale path->peers index. The
+        // actual workspace chrome stays intact: it is workspace-owned, not
+        // connection-owned, and will be stashed/restored when adoption or a
+        // tab selection changes the active workspace.
         self.rebuild_file_tree_presence_index();
         self.renderer.git_diff_panel.reset_for_server_switch();
-        // Tab strips and the per-workspace caches are server-owned: every
-        // WorkspaceKey in them names a workspace on the daemon being left,
-        // and a different daemon can mint the same keys — carrying them
-        // across a switch resurrects the old server's tabs and trees on
-        // the new one.
-        self.renderer.buffer_tabs = neoism_ui::panels::buffer_tabs::BufferTabs::new();
-        // Every workspace always shows at least its root terminal tab —
-        // an empty strip hides the whole row (and the "+" button) until
-        // something re-seeds it.
-        let chrome_scale = self.renderer.chrome_scale();
-        self.renderer.buffer_tabs.set_scale(chrome_scale);
-        self.renderer.buffer_tabs.ensure_terminal_tab();
-        self.workspace_buffer_tabs.clear();
-        self.workspace_buf_enter_targets.clear();
-        self.workspace_file_trees.clear();
-        self.file_tree_workspace = None;
-        self.workspace_editor_active_paths.clear();
-        self.workspace_roots.clear();
-        // Notes panels are workspace-keyed too (and keys can collide
-        // across daemons) — reset to a fresh panel, keeping the
-        // window-chrome bits (visibility/width).
-        self.workspace_notes_sidebars.clear();
-        self.notes_sidebar_workspace = None;
-        let notes_visible = self.renderer.notes_sidebar.is_visible();
-        let notes_width = self.renderer.notes_sidebar.width();
-        self.renderer.notes_sidebar = Default::default();
-        self.renderer.notes_sidebar.set_visible(notes_visible);
-        self.renderer.notes_sidebar.set_width(notes_width);
-        self.renderer.notes_sidebar.set_scale(chrome_scale);
-        self.set_agent_server_for_window(crate::neoism::agent::neoism_agent_server());
+        // In particular, do not broadcast an agent-server reset here.
+        // Local and joined grids can use different agent servers, and every
+        // pane keeps its own conversation while another server is selected.
     }
 
     pub fn set_agent_server_for_window(&mut self, server: String) {
@@ -205,6 +179,27 @@ impl Screen<'_> {
                 if let Some(agent) = context.context_mut().neoism_agent.as_mut() {
                     agent.switch_server(server.clone());
                 }
+            }
+        }
+    }
+
+    /// Point only the active workspace's agent panes at `server`.
+    ///
+    /// A window can contain local and remote-joined workspaces backed by
+    /// different agent servers. Workspace navigation must not broadcast the
+    /// newly active server to every grid: `NeoismAgentPane::switch_server`
+    /// intentionally clears server-owned session state, so doing that reset
+    /// every other workspace's active conversation back to the agent home
+    /// screen.
+    pub fn set_agent_server_for_current_workspace(&mut self, server: String) {
+        for context in self
+            .context_manager
+            .current_grid_mut()
+            .contexts_mut()
+            .values_mut()
+        {
+            if let Some(agent) = context.context_mut().neoism_agent.as_mut() {
+                agent.switch_server(server.clone());
             }
         }
     }

@@ -36,6 +36,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             handle, runtime, endpoint,
         ));
         self.daemon.link_is_peer = !link_is_home;
+        // A server connection may have been parked while another workspace
+        // was active. Rebuild the route/session index from the panes
+        // themselves before the parked connection's queued PTY output is
+        // drained, otherwise that output has no route and disappears.
+        self.rehydrate_remote_routes_for_attached_daemon();
         // Mirroring is HOME-only. Pushing this desktop's workspace
         // inventory (and rebinding its panes) into a joined server copies
         // the guest's local workspaces into the foreign daemon's tree —
@@ -173,7 +178,25 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// any (8C adopt / peer join).
     pub fn current_adopted_workspace_id(&self) -> Option<String> {
         let stable = self.current_grid().workspace_route_id()?;
-        self.daemon.cache.adopted_workspaces.get(&stable).cloned()
+        self.adopted_workspaces
+            .get(&stable)
+            .map(|binding| binding.workspace_id.clone())
+    }
+
+    /// Endpoint which owns the current adopted grid. This remains available
+    /// when another workspace switches the window's active daemon link.
+    pub fn current_adopted_workspace_endpoint(&self) -> Option<&str> {
+        let stable = self.current_grid().workspace_route_id()?;
+        self.adopted_workspaces
+            .get(&stable)
+            .map(|binding| binding.endpoint.as_str())
+    }
+
+    pub fn daemon_endpoint(&self) -> Option<&str> {
+        self.daemon
+            .link
+            .as_ref()
+            .map(|link| link.endpoint.as_str())
     }
 
     /// True when the CURRENT grid is a workspace JOINED from another
@@ -193,8 +216,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let Some(workspace_id) = self.current_adopted_workspace_id() else {
             return false;
         };
-        if self.daemon.link_is_peer {
-            return true;
+        if let Some(stable) = self.current_grid().workspace_route_id() {
+            if let Some(binding) = self.adopted_workspaces.get(&stable) {
+                return binding.is_peer;
+            }
         }
         let local = self.local_host_id();
         self.daemon
@@ -211,12 +236,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// the window's active connection and stays true while the user visits a
     /// local grid beside an adopted one.
     pub fn current_workspace_is_collaborative(&self) -> bool {
+        if self.current_workspace_is_remote_joined() {
+            return true;
+        }
         if self.daemon.link_is_peer {
-            // On a peer link, adoption is the authoritative boundary. Do not
-            // consult the peer's workspace cache for a local synthetic id:
-            // ids can collide, and a collision must not paint peer presence
-            // onto a local grid.
-            return self.current_adopted_workspace_id().is_some();
+            // The active link may belong to a different adopted grid. A
+            // genuinely local grid beside it remains private.
+            return false;
         }
         !matches!(
             self.workspace_visibility_for_index(self.current_index),
@@ -234,13 +260,16 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let Some(grid) = self.contexts.get(index) else {
             return;
         };
-        let route_ids: Vec<usize> = grid
+        let routes: Vec<(usize, Option<crate::context::remote_pty::RemotePtyBinding>)> = grid
             .contexts()
             .values()
-            .map(|item| item.context().route_id)
+            .map(|item| {
+                let context = item.context();
+                (context.route_id, context.remote_pty.clone())
+            })
             .collect();
         let stable = grid.workspace_route_id();
-        for route_id in route_ids {
+        for (route_id, pane_binding) in routes {
             if let Some(session_id) = self.daemon.cache.route_sessions.remove(&route_id) {
                 self.daemon.cache.session_routes.remove(&session_id);
                 tracing::info!(
@@ -250,7 +279,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                     "detached adopted session (leave keeps the host shell alive)"
                 );
             }
-            if let Some(binding) = self.daemon.cache.remote_routes.remove(&route_id) {
+            if let Some(binding) = self
+                .daemon
+                .cache
+                .remote_routes
+                .remove(&route_id)
+                .or(pane_binding)
+            {
                 if let Ok(mut shared) = binding.shared.lock() {
                     shared.session_id = None;
                     shared.queued.clear();
@@ -258,7 +293,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             }
         }
         if let Some(stable) = stable {
-            self.daemon.cache.adopted_workspaces.remove(&stable);
+            self.adopted_workspaces.remove(&stable);
         }
     }
 
@@ -267,17 +302,22 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// session so teardown can't kill the host's shell. No-op for
     /// routes in the user's own (non-adopted) grids.
     pub fn detach_session_for_route_if_adopted(&mut self, route_id: usize) {
-        let adopted = self.contexts.iter().any(|grid| {
-            grid.contexts()
-                .values()
-                .any(|item| item.context().route_id == route_id)
-                && grid.workspace_route_id().is_some_and(|stable| {
-                    self.daemon.cache.adopted_workspaces.contains_key(&stable)
-                })
+        let pane_binding = self.contexts.iter().find_map(|grid| {
+            let adopted = grid
+                .workspace_route_id()
+                .is_some_and(|stable| self.adopted_workspaces.contains_key(&stable));
+            if !adopted {
+                return None;
+            }
+            grid.contexts().values().find_map(|item| {
+                let context = item.context();
+                (context.route_id == route_id)
+                    .then(|| context.remote_pty.clone())
+            })
         });
-        if !adopted {
+        let Some(pane_binding) = pane_binding else {
             return;
-        }
+        };
         if let Some(session_id) = self.daemon.cache.route_sessions.remove(&route_id) {
             self.daemon.cache.session_routes.remove(&session_id);
             tracing::info!(
@@ -287,7 +327,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 "detached adopted pane (close keeps the host shell alive)"
             );
         }
-        if let Some(binding) = self.daemon.cache.remote_routes.remove(&route_id) {
+        if let Some(binding) = self
+            .daemon
+            .cache
+            .remote_routes
+            .remove(&route_id)
+            .or(pane_binding)
+        {
             if let Ok(mut shared) = binding.shared.lock() {
                 shared.session_id = None;
                 shared.queued.clear();
@@ -301,7 +347,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     pub fn has_adopted_grids(&self) -> bool {
         self.contexts.iter().any(|grid| {
             grid.workspace_route_id().is_some_and(|stable| {
-                self.daemon.cache.adopted_workspaces.contains_key(&stable)
+                self.adopted_workspaces.contains_key(&stable)
             })
         })
     }
@@ -384,7 +430,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// the current workspace is local (use the local default).
     pub fn agent_server_override_for_current(&self) -> Option<String> {
         let joined = self.current_workspace_is_remote_joined();
-        let endpoint = self.daemon.link.as_ref().map(|l| l.endpoint.clone());
+        let endpoint = self
+            .current_adopted_workspace_endpoint()
+            .map(str::to_string);
         let resolved = if joined {
             endpoint
                 .as_deref()
@@ -418,11 +466,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// `workspace_id` — local knowledge, valid even while the daemon
     /// tree cache is empty right after a redial.
     pub fn workspace_is_adopted(&self, workspace_id: &str) -> bool {
-        self.daemon
-            .cache
-            .adopted_workspaces
+        self.adopted_workspaces
             .values()
-            .any(|id| id == workspace_id)
+            .any(|binding| binding.workspace_id == workspace_id)
     }
 
     /// Positive-proof ownership for PUBLISH-side effects (claiming a

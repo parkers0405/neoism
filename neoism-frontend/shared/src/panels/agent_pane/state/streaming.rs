@@ -109,10 +109,19 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_label(&self) -> String {
-        // Always render just the state label — no tool name, no slash
-        // command, no surplus chrome. Elapsed time is appended by the
-        // renderer.
-        self.streaming_state().label().to_string()
+        let state = self.streaming_state();
+        if state == NeoismAgentStreamingState::Retrying {
+            if let Some(reason) = self
+                .streaming_tool_label
+                .as_deref()
+                .and_then(crate::panels::agent_pane::status_policy::compact_retry_reason)
+            {
+                return format!("Retrying · {reason}");
+            }
+        }
+        // Other states stay intentionally terse; elapsed time is appended by
+        // the renderer.
+        state.label().to_string()
     }
 
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {

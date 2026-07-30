@@ -27,6 +27,46 @@ use std::time::Instant;
 use neoism_terminal_pty::{PtySession, PtySessionConfig};
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
+    pub(super) fn rehydrate_remote_routes_for_attached_daemon(&mut self) {
+        let Some(endpoint) = self.daemon_endpoint().map(str::to_string) else {
+            return;
+        };
+        let routes = self
+            .contexts
+            .iter()
+            .filter(|grid| {
+                grid.workspace_route_id().is_some_and(|stable| {
+                    self.adopted_workspaces
+                        .get(&stable)
+                        .is_some_and(|binding| binding.endpoint == endpoint)
+                })
+            })
+            .flat_map(|grid| grid.contexts().values())
+            .filter_map(|item| {
+                let context = item.context();
+                let binding = context.remote_pty.as_ref()?.clone();
+                let session_id = binding
+                    .shared
+                    .lock()
+                    .ok()
+                    .and_then(|shared| shared.session_id.clone())?;
+                Some((context.route_id, session_id, binding))
+            })
+            .collect::<Vec<_>>();
+
+        for (route_id, session_id, binding) in routes {
+            self.daemon
+                .cache
+                .route_sessions
+                .insert(route_id, session_id.clone());
+            self.daemon
+                .cache
+                .session_routes
+                .insert(session_id, route_id);
+            self.daemon.cache.remote_routes.insert(route_id, binding);
+        }
+    }
+
     /// Whether operations for the CURRENT workspace belong on the daemon link
     /// attached to this window.
     ///
@@ -35,9 +75,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// were explicitly adopted from that peer. Local grids remain local even
     /// while another grid in the same window is visiting a shared server.
     pub(crate) fn current_workspace_uses_attached_daemon(&self) -> bool {
+        let adopted_on_attached = self
+            .current_adopted_workspace_endpoint()
+            .zip(self.daemon_endpoint())
+            .is_some_and(|(workspace, attached)| workspace == attached);
         workspace_uses_attached_daemon(
             self.daemon.link_is_peer,
-            self.current_adopted_workspace_id().is_some(),
+            adopted_on_attached,
         )
     }
 
@@ -279,8 +323,8 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         index: usize,
     ) -> String {
         if let Some(stable) = grid.workspace_route_id() {
-            if let Some(adopted) = self.daemon.cache.adopted_workspaces.get(&stable) {
-                return adopted.clone();
+            if let Some(adopted) = self.adopted_workspaces.get(&stable) {
+                return adopted.workspace_id.clone();
             }
         }
         desktop_workspace_id(self.window_id, grid, index)
@@ -414,6 +458,19 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
 
     pub fn workspace_icon_kind_for_index(&self, index: usize) -> Option<String> {
         use neoism_protocol::workspace::{WorkspaceHostKind, WorkspaceVisibility};
+
+        // Joined-ness belongs to the grid, not whichever server cache happens
+        // to be active for the window. This is the durable fallback that
+        // keeps server A's link icon after server B is joined.
+        if self
+            .contexts
+            .get(index)
+            .and_then(|grid| grid.workspace_route_id())
+            .and_then(|stable| self.adopted_workspaces.get(&stable))
+            .is_some_and(|binding| binding.is_peer)
+        {
+            return Some("joined".to_string());
+        }
 
         let workspace_id = self.workspace_tree_id_for_index(index)?;
         let local_host = self.local_host_id();
@@ -593,10 +650,15 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // snapshot re-homes the EXISTING workspace here instead of
         // minting a desktop-flavored duplicate.
         if let Some(stable) = self.contexts[last_index].workspace_route_id() {
-            self.daemon
-                .cache
-                .adopted_workspaces
-                .insert(stable, workspace_id.to_string());
+            let endpoint = self.daemon_endpoint().unwrap_or_default().to_string();
+            self.adopted_workspaces.insert(
+                stable,
+                AdoptedWorkspaceBinding {
+                    workspace_id: workspace_id.to_string(),
+                    endpoint,
+                    is_peer: self.daemon.link_is_peer,
+                },
+            );
         }
 
         // Remaining sessions stack as sibling tabs in the new grid.

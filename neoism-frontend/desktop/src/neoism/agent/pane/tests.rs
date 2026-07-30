@@ -45,6 +45,20 @@ fn idle_clears_status_but_keeps_trace_until_session_reset() {
 }
 
 #[test]
+fn retry_status_includes_a_compact_provider_reason() {
+    let mut pane = NeoismAgentPane::default();
+    pane.note_streaming(
+        NeoismAgentStreamingState::Retrying,
+        Some(
+            "Our servers are currently overloaded. Please try again later."
+                .to_string(),
+        ),
+    );
+
+    assert_eq!(pane.streaming_label(), "Retrying · Provider overloaded");
+}
+
+#[test]
 fn expired_wordmark_click_does_not_drive_animation() {
     let mut pane = NeoismAgentPane::default();
     pane.wordmark.click_started = Some(

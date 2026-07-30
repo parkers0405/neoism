@@ -75,14 +75,23 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// were explicitly adopted from that peer. Local grids remain local even
     /// while another grid in the same window is visiting a shared server.
     pub(crate) fn current_workspace_uses_attached_daemon(&self) -> bool {
-        let adopted_on_attached = self
-            .current_adopted_workspace_endpoint()
-            .zip(self.daemon_endpoint())
-            .is_some_and(|(workspace, attached)| workspace == attached);
-        workspace_uses_attached_daemon(
-            self.daemon.link_is_peer,
-            adopted_on_attached,
-        )
+        self.grid_uses_attached_daemon(self.current_index)
+    }
+
+    /// Whether `index` belongs to the daemon currently attached to the
+    /// window. Local grids belong to HOME; adopted grids belong only to the
+    /// endpoint captured when they were adopted.
+    pub(crate) fn grid_uses_attached_daemon(&self, index: usize) -> bool {
+        let adopted_endpoint = self
+            .contexts
+            .get(index)
+            .and_then(|grid| grid.workspace_route_id())
+            .and_then(|stable| self.adopted_workspaces.get(&stable))
+            .map(|binding| binding.endpoint.as_str());
+        match adopted_endpoint {
+            Some(workspace) => self.daemon_endpoint() == Some(workspace),
+            None => workspace_uses_attached_daemon(self.daemon.link_is_peer, false),
+        }
     }
 
     fn daemon_request(&mut self, message: WorkspaceClientMessage) -> bool {

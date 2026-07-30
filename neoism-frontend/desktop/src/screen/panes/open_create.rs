@@ -241,7 +241,25 @@ impl Screen<'_> {
 
     pub(crate) fn create_tab_inner(&mut self) {
         let redirect = true;
-        let new_workspace_root = self.workspace_root_for_new_shell();
+        // A new top-level workspace is LOCAL even when the current workspace
+        // is adopted from a peer. Never feed the host's remote root into a
+        // local shell spawn: that path may not exist on this machine.
+        let new_workspace_root = if self.context_manager.daemon_link_is_peer() {
+            self.context_manager
+                .config
+                .working_dir
+                .as_ref()
+                .map(PathBuf::from)
+                .and_then(Self::normalize_workspace_dir)
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(Self::normalize_workspace_dir)
+                })
+                .or_else(|| dirs::home_dir().and_then(Self::normalize_workspace_dir))
+        } else {
+            self.workspace_root_for_new_shell()
+        };
         self.save_current_workspace_chrome();
 
         // We resize the current tab ahead to prepare the
@@ -271,11 +289,28 @@ impl Screen<'_> {
         let _ = self.sugarloaf.text(Some(rich_text_id));
         self.sugarloaf
             .set_position(rich_text_id, padding_x, padding_y_top);
-        self.context_manager.add_context_with_working_dir(
+        let created = self.context_manager.add_context_with_working_dir(
             redirect,
             rich_text_id,
             new_workspace_root.clone(),
         );
+        if !created {
+            // Creation used to continue through the "new workspace" chrome
+            // setup even though no grid was added. That reset the CURRENT
+            // shared workspace's buffer tabs and made Ctrl+Shift+W look like
+            // it closed everything.
+            self.resize_top_or_bottom_line(num_tabs);
+            #[cfg(not(target_os = "macos"))]
+            self.context_manager.contexts_mut()[old_index]
+                .update_dimensions(&mut self.sugarloaf);
+            self.renderer.notifications.push(
+                "Could not create a local workspace.",
+                neoism_ui::panels::notifications::NotificationLevel::Error,
+            );
+            self.reapply_chrome_layout();
+            self.mark_dirty();
+            return;
+        }
         let new_index = self.context_manager.current_index();
         self.context_manager.switch_context_visibility(
             &mut self.sugarloaf,

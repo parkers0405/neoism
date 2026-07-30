@@ -336,6 +336,10 @@ pub enum NeoismAgentStreamingState {
     Compacting,
     WaitingSubagents,
     BackgroundTasks,
+    /// Transient backoff after a recoverable provider error: the server is
+    /// retrying the in-flight run. Clears back to a normal streaming/idle
+    /// state as soon as the run resumes or finishes.
+    Retrying,
 }
 
 impl NeoismAgentStreamingState {
@@ -348,6 +352,7 @@ impl NeoismAgentStreamingState {
             Self::Compacting => "Compacting",
             Self::WaitingSubagents => "Sub-agents working",
             Self::BackgroundTasks => "Background",
+            Self::Retrying => "Retrying",
         }
     }
 }

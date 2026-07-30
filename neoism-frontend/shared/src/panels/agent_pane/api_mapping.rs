@@ -470,8 +470,42 @@ pub fn message_blocks(message: &Value) -> Vec<NeoismAgentMessage> {
     let mut blocks = parts.iter().filter_map(part_block).collect::<Vec<_>>();
     if role == "assistant" {
         normalize_assistant_reasoning_order(&mut blocks);
+        // Show a run that ended in a TERMINAL error. Transient errors retry
+        // silently (see session_retry) and, if they recover, leave no
+        // `info.error` — so nothing shows and the run just keeps going. An
+        // `info.error` is present only when the error was fatal (non-retryable)
+        // or a transient one that exhausted every retry — exactly the
+        // "errors that have to stop", which the user DOES want to see. Render
+        // it here so it's visible even from a reloaded snapshot (the live
+        // `session.error` broadcast is lost if the SSE dropped when it fired).
+        if let Some(text) = message
+            .get("info")
+            .and_then(|info| info.get("error"))
+            .and_then(assistant_error_message)
+        {
+            blocks.push(agent_message_system("Agent error", text));
+        }
     }
     blocks
+}
+
+/// Extract a human-readable message from an assistant `info.error`, tolerating
+/// the shapes it can take: a plain string, `{message}`, `{data:{message}}`, or
+/// `{name, data:{message}}`. Returns `None` for an absent/empty error.
+fn assistant_error_message(error: &Value) -> Option<String> {
+    if let Some(text) = error.as_str() {
+        let text = text.trim();
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    error
+        .get("data")
+        .and_then(|data| data.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| error.get("message").and_then(Value::as_str))
+        .or_else(|| error.get("name").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
 }
 
 fn normalize_assistant_reasoning_order(blocks: &mut Vec<NeoismAgentMessage>) {

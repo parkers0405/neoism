@@ -50,6 +50,7 @@ pub enum AgentStreamingStatus {
     Compacting,
     WaitingSubagents,
     BackgroundTasks,
+    Retrying,
 }
 
 pub trait AgentPendingPermission: Clone {
@@ -228,6 +229,9 @@ macro_rules! neoism_ui_impl_agent_user_input {
                     }
                     $streaming_state::BackgroundTasks => {
                         $crate::panels::agent_pane::view::user_input::AgentStreamingStatus::BackgroundTasks
+                    }
+                    $streaming_state::Retrying => {
+                        $crate::panels::agent_pane::view::user_input::AgentStreamingStatus::Retrying
                     }
                 }
             }
@@ -420,6 +424,7 @@ impl AgentUserInputPane for NeoismAgentPane {
             NeoismAgentStreamingState::BackgroundTasks => {
                 AgentStreamingStatus::BackgroundTasks
             }
+            NeoismAgentStreamingState::Retrying => AgentStreamingStatus::Retrying,
         }
     }
 
@@ -1075,6 +1080,7 @@ pub fn render_streaming_status_row(
         AgentStreamingStatus::Compacting => theme.green,
         AgentStreamingStatus::WaitingSubagents => theme.yellow,
         AgentStreamingStatus::BackgroundTasks => theme.red,
+        AgentStreamingStatus::Retrying => theme.yellow,
         AgentStreamingStatus::Idle => theme.muted,
     };
     let state = pane.streaming_state();
@@ -1175,6 +1181,7 @@ pub fn render_streaming_status_row(
                     AgentStreamingStatus::Compacting => 158.0,
                     AgentStreamingStatus::WaitingSubagents => 48.0,
                     AgentStreamingStatus::BackgroundTasks => 0.0,
+                    AgentStreamingStatus::Retrying => 30.0,
                     _ => 0.0,
                 };
                 let hue = (base_hue + wave * 18.0 - 9.0).rem_euclid(360.0);
@@ -1253,6 +1260,7 @@ pub fn render_streaming_status_row(
         AgentStreamingStatus::Compacting => "context",
         AgentStreamingStatus::WaitingSubagents => "subagents",
         AgentStreamingStatus::BackgroundTasks => "running",
+        AgentStreamingStatus::Retrying => "backoff",
         AgentStreamingStatus::Idle => "idle",
     };
     let time_label = format!("· {} · {detail}", format_elapsed(elapsed));

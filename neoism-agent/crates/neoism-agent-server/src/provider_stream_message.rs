@@ -157,6 +157,72 @@ pub(crate) async fn start_assistant_step(
     })
 }
 
+/// Wipe everything streamed into the live assistant message before a RETRY, so
+/// the next attempt re-streams into a CLEAN message instead of appending onto
+/// the partial reply (which would double the text and leave tool fragments).
+/// Used when a retryable provider error lands MID-response — see
+/// `run_provider_stream_step_with_retry`. Re-seeds the same `text_part_id`,
+/// clears the assistant error/finish/usage, then persists + republishes so
+/// every attached client drops the partial. A no-op-ish reset when nothing had
+/// streamed yet.
+pub(crate) async fn reset_live_message_for_retry(
+    state: &AppState,
+    session_id: &Id,
+    session_id_text: &str,
+    text_part_id: &Id,
+    live_message: &Arc<tokio::sync::Mutex<MessageWithParts>>,
+) -> Result<(), ApiError> {
+    let (info, step_start, text_part) = {
+        let mut assistant_message = live_message.lock().await;
+        let assistant_id = match &assistant_message.info {
+            MessageInfo::Assistant(assistant) => assistant.id.clone(),
+            _ => return Ok(()),
+        };
+        let step_start = Part::StepStart(StepStartPart {
+            id: Id::ascending(IdKind::Part),
+            session_id: session_id.clone(),
+            message_id: assistant_id.clone(),
+            snapshot: None,
+        });
+        let text_part = Part::Text(TextPart {
+            id: text_part_id.clone(),
+            session_id: session_id.clone(),
+            message_id: assistant_id.clone(),
+            text: String::new(),
+            synthetic: None,
+            time: Some(PartTime {
+                start: now_millis(),
+                end: None,
+            }),
+        });
+        assistant_message.parts = vec![step_start.clone(), text_part.clone()];
+        if let MessageInfo::Assistant(assistant) = &mut assistant_message.info {
+            assistant.error = None;
+            assistant.finish = None;
+            assistant.tokens = TokenUsage::default();
+            assistant.cost = 0.0;
+            assistant.time.completed = None;
+        }
+        state
+            .inner
+            .store
+            .update_message(session_id_text, &assistant_message)
+            .await?;
+        (assistant_message.info.clone(), step_start, text_part)
+    };
+    state.publish(EventPayload::new(
+        event_type::MESSAGE_UPDATED,
+        json!({ "sessionID": session_id, "info": info }),
+    ));
+    for part in [step_start, text_part] {
+        state.publish(EventPayload::new(
+            event_type::MESSAGE_PART_UPDATED,
+            json!({ "sessionID": session_id, "part": part, "time": now_millis() }),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn finish_provider_stream_success(
     state: &AppState,
     session_id: &Id,

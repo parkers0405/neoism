@@ -78,6 +78,16 @@ impl NeoismAgentPane {
                     self.system_message(title, body);
                     changed = true;
                 }
+                AgentSessionUpdate::Retrying { attempt, message } => {
+                    // Recoverable provider error: the server is backing off and
+                    // retrying the in-flight run. Show it inline where the
+                    // "Thinking…" indicator lives so the run doesn't look
+                    // stalled; the next part/idle event moves us back out.
+                    let _ = attempt;
+                    let reason = message.filter(|m| !m.is_empty());
+                    self.note_streaming(NeoismAgentStreamingState::Retrying, reason);
+                    changed = true;
+                }
                 AgentSessionUpdate::QueueStatus {
                     count,
                     preview,

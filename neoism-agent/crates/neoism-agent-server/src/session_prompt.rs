@@ -22,7 +22,8 @@ use crate::model_selection::{
 };
 use crate::provider::estimate_tokens;
 use crate::provider_stream_message::{
-    assistant_finish_reason, finish_provider_stream_with_error, start_assistant_step,
+    assistant_finish_reason, finish_provider_stream_with_error,
+    reset_live_message_for_retry, start_assistant_step,
 };
 use crate::provider_stream_processor::{
     run_provider_stream_step, ProviderStreamEventContext,
@@ -2006,6 +2007,18 @@ async fn run_provider_stream_step_with_retry(
                     .await?;
                     return Err(ApiError::internal("Session aborted"));
                 }
+                // Discard the partial reply streamed before this error so the
+                // retry re-streams into a clean message rather than doubling
+                // the response — this is what makes a true MID-response stop
+                // recoverable instead of a hard stop.
+                reset_live_message_for_retry(
+                    ctx.state,
+                    ctx.session_id,
+                    ctx.session_id_text,
+                    ctx.text_part_id,
+                    ctx.live_message,
+                )
+                .await?;
             }
             Err(error) if error.finalized => return Err(error.into_api_error()),
             Err(error) => {

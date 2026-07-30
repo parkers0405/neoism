@@ -49,6 +49,10 @@ pub(super) enum AgentSessionUpdate {
         title: String,
         body: String,
     },
+    Retrying {
+        attempt: u64,
+        message: Option<String>,
+    },
     QueueStatus {
         count: usize,
         preview: Option<String>,
@@ -387,6 +391,9 @@ fn send_event_updates(
             }
             SessionEventUpdate::System { title, body } => {
                 tx.send(AgentSessionUpdate::System { title, body })?;
+            }
+            SessionEventUpdate::Retrying { attempt, message } => {
+                tx.send(AgentSessionUpdate::Retrying { attempt, message })?;
             }
             SessionEventUpdate::QueueStatus {
                 count,

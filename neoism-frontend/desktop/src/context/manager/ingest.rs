@@ -101,9 +101,32 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             }
             WorkspaceServerMessage::HostWorkspaceTree {
                 hosts,
-                workspaces,
+                mut workspaces,
                 tabs,
             } => {
+                // Preserve the currently-adopted (JOINED) workspace across this
+                // full-tree REPLACE. A snapshot scoped to a single connection
+                // (e.g. delivered from the parked home daemon during a re-home
+                // race) can omit the joined workspace; replacing the cache with
+                // it then wipes the joined entry, which turns off remote-joined
+                // detection. The guest tree then falls back to the LOCAL root
+                // (join lands in the wrong dir) and the joined tab loses its
+                // link badge. Mirrors the `HostWorkspaceList` merge guard above.
+                if let Some(adopted_id) = self.current_adopted_workspace_id() {
+                    if !workspaces.iter().any(|workspace| workspace.id == adopted_id)
+                    {
+                        if let Some(existing) = self
+                            .daemon
+                            .cache
+                            .daemon_host_workspaces
+                            .iter()
+                            .find(|workspace| workspace.id == adopted_id)
+                            .cloned()
+                        {
+                            workspaces.push(existing);
+                        }
+                    }
+                }
                 self.daemon.cache.daemon_hosts = hosts;
                 self.daemon.cache.daemon_host_workspaces = workspaces;
                 self.daemon.cache.daemon_workspace_tabs = tabs;
@@ -117,6 +140,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 true
             }
             WorkspaceServerMessage::WorkspaceControlChanged { workspace } => {
+                self.upsert_daemon_host_workspace(workspace);
+                true
+            }
+            WorkspaceServerMessage::HostWorkspaceUpserted { workspace } => {
+                // The host's own "Share workspace" reply is
+                // `HostWorkspaceUpserted` (the tree broadcast that carries the
+                // new Shared bit skips the ORIGINATOR). Without handling it
+                // here the sharing host never flips its cached workspace to
+                // Shared, so `workspace_icon_kind_for_index` keeps returning
+                // "local" and the green hosting badge never appears. Mirror
+                // `WorkspaceControlChanged`.
                 self.upsert_daemon_host_workspace(workspace);
                 true
             }

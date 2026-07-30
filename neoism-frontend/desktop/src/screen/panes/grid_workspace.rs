@@ -415,6 +415,14 @@ impl Screen<'_> {
         let Some(id) = self.current_workspace_id() else {
             return;
         };
+        // The agent runtime is workspace-owned just like the tree and notes
+        // panel. A local grid uses this machine's loopback agent; a joined
+        // grid uses the host daemon's `/agent` reverse proxy so tools execute
+        // where the host files actually live. Keeping this in the canonical
+        // chrome-load path covers keyboard, mouse, close, create, and
+        // daemon-adoption navigation uniformly.
+        self.sync_agent_server_for_current_workspace();
+        self.ensure_server_for_current_workspace();
         // TREE SWAP: the tree is per-workspace STATE, not window
         // chrome. Stash the outgoing workspace's tree whole (root,
         // entries, open dirs, selection, scroll, remote wiring) and
@@ -997,7 +1005,31 @@ impl Screen<'_> {
             .context_manager
             .agent_server_override_for_current()
             .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
-        self.set_agent_server_for_window(server);
+        self.set_agent_server_for_current_workspace(server);
+    }
+
+    /// Make the active daemon follow the workspace tab, rather than letting a
+    /// later server join overwrite every tab in the window. Connections are
+    /// swapped by the app pump (and parked while inactive); the durable
+    /// adopted-workspace binding supplies the exact server to restore.
+    fn ensure_server_for_current_workspace(&mut self) {
+        if let Some(endpoint) = self
+            .context_manager
+            .current_adopted_workspace_endpoint()
+            .map(str::to_string)
+        {
+            if self.context_manager.daemon_endpoint() != Some(endpoint.as_str()) {
+                if let Some(workspace_id) =
+                    self.context_manager.current_adopted_workspace_id()
+                {
+                    self.pending_peer_workspace_join =
+                        Some((workspace_id, endpoint));
+                }
+            }
+        } else if self.context_manager.daemon_link_is_peer() {
+            // A local workspace beside joined tabs belongs to the home daemon.
+            self.pending_daemon_go_home = true;
+        }
     }
 
     pub(crate) fn sync_file_tree_root_for_current_workspace(&mut self) {

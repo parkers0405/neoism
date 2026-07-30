@@ -61,6 +61,17 @@ pub struct ContextManager<T: EventListener> {
     pub config: ContextManagerConfig,
     pub titles: ContextManagerTitles,
     daemon: ContextManagerDaemonState,
+    /// Durable daemon identity for adopted grids. This is intentionally
+    /// outside `daemon`: that state is replaced when the window attaches to
+    /// another server, while grids from earlier servers remain open.
+    adopted_workspaces: HashMap<usize, AdoptedWorkspaceBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdoptedWorkspaceBinding {
+    workspace_id: String,
+    endpoint: String,
+    is_peer: bool,
 }
 
 impl<T: EventListener + Clone> ContextManager<T> {
@@ -413,13 +424,6 @@ pub struct ContextManagerDaemonCache {
     /// `PtyOutput` into the pane's machine, the shared slot resolves
     /// the pane's input sink once `PtyCreated` names the session.
     pub remote_routes: HashMap<usize, crate::context::remote_pty::RemotePtyBinding>,
-    /// 8C: grids adopted from the daemon tree, keyed by the grid's
-    /// stable root route id → the DAEMON's workspace id. Adopted grids
-    /// keep that identity everywhere a workspace id is derived
-    /// (publish, picker rows, HostWorkspaceChanged matching) so the
-    /// tree never grows a desktop-flavored duplicate of the same
-    /// workspace.
-    pub adopted_workspaces: HashMap<usize, String>,
     /// The FILE buffer tabs (markdown/code/drawings in the strip) per
     /// grid, keyed by the grid's stable root route id. Synced by the
     /// Screen on chrome reflow and included in the published tree —

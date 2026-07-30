@@ -23,13 +23,12 @@ pub struct WindowServerSession {
     /// lands IN a workspace (fresh grid + daemon shell) instead of
     /// leaving the previous server's panes on screen.
     pub needs_initial_workspace_adopt: bool,
-    /// The HOME daemon connection, kept alive while this window visits a
-    /// guest server. Dropping it closed the websocket, and the daemon
-    /// reaps every nvim session of a closed connection's namespace — so
-    /// switching away executed all the local editors. Switching home
-    /// reuses this connection (same namespace, nvims intact) instead of
-    /// dialling a fresh one.
-    pub parked_home: Option<DesktopDaemonConnection>,
+    /// Inactive daemon connections keyed by endpoint. A single window may
+    /// contain local workspaces plus joined workspaces from several servers.
+    /// Dropping an outgoing connection reaps that server namespace and kills
+    /// its remote panes, so connections are parked and restored when their
+    /// workspace tab becomes active again.
+    pub parked_connections: HashMap<String, DesktopDaemonConnection>,
     /// Set when the host ended the shared session (its daemon shut down
     /// or it stopped sharing). Forces the status pill to `Offline`
     /// instead of the perpetual `Reconnecting` the still-backing-off
@@ -54,7 +53,7 @@ impl WindowServerSession {
             status: ServerConnectionStatus::Online,
             pending_peer_adopt: None,
             needs_initial_workspace_adopt: false,
-            parked_home: None,
+            parked_connections: HashMap::new(),
             host_ended: false,
             host_daemon_urls: HashMap::new(),
             workspace_homes: HashMap::new(),

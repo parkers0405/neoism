@@ -94,6 +94,12 @@ impl Screen<'_> {
             .context_manager
             .current_adopted_workspace_id()
             .is_some();
+        // Save while the adopted identity is still bound. Detaching first
+        // makes `current_workspace_id()` fall back to a synthetic local id;
+        // with two tabs that could overwrite the neighboring local
+        // workspace's chrome, leaving a dead Island tab that looked like a
+        // duplicate of the local one.
+        self.save_current_workspace_chrome();
         if leaving_adopted {
             // A user close is also an unsubscribe. Otherwise the next
             // HostWorkspaceTree message restores this id immediately and the
@@ -104,7 +110,6 @@ impl Screen<'_> {
             self.context_manager
                 .detach_adopted_grid_sessions(closing_index);
         }
-        self.save_current_workspace_chrome();
         self.context_manager
             .close_current_context(&mut self.sugarloaf);
         // Last joined workspace gone → point the daemon plane back at

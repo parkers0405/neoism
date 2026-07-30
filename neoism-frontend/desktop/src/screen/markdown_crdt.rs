@@ -169,7 +169,11 @@ impl Screen<'_> {
         let mut pane_changed = false;
         let state = &mut self.markdown_crdt;
         let mut open_buffer_ids: HashSet<String> = HashSet::new();
-        for grid in self.context_manager.contexts_mut() {
+        let owned_grids = (0..self.context_manager.len())
+            .filter(|index| self.context_manager.grid_uses_attached_daemon(*index))
+            .collect::<Vec<_>>();
+        for index in owned_grids {
+            let grid = &mut self.context_manager.contexts_mut()[index];
             for item in grid.contexts_mut().values_mut() {
                 let context = item.context_mut();
                 if let Some(pane) = context.markdown.as_mut() {
@@ -218,8 +222,9 @@ impl Screen<'_> {
         // (e.g. a refused switch left them desynced), routing SaveBuffer
         // there writes a host path on the wrong machine — fall back to
         // the local write instead.
-        if self.context_manager.daemon_link_is_peer()
-            && !self.context_manager.current_workspace_is_remote_joined()
+        if !self
+            .context_manager
+            .current_workspace_uses_attached_daemon()
         {
             return false;
         }

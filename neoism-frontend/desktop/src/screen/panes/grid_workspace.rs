@@ -1034,6 +1034,20 @@ impl Screen<'_> {
 
     pub(crate) fn sync_file_tree_root_for_current_workspace(&mut self) {
         self.sync_agent_server_for_current_workspace();
+        // Selecting a workspace from parked server A queues an async switch
+        // away from currently attached server B. Keep the workspace's
+        // stashed tree/backend intact during that gap; rebuilding it through
+        // B would send A's host path to the wrong files service. The
+        // completed switch calls this method again once the endpoints match.
+        if self
+            .context_manager
+            .current_adopted_workspace_endpoint()
+            .is_some_and(|workspace| {
+                self.context_manager.daemon_endpoint() != Some(workspace)
+            })
+        {
+            return;
+        }
         if !self.renderer.file_tree.is_visible() {
             return;
         }

@@ -544,8 +544,21 @@ impl Application<'_> {
                     self.switch_window_server(window_id, &home, None, None);
                 }
             }
+            // Grab the hosted spec BEFORE dropping the entry: deleting a
+            // server the user HOSTS must also KILL its daemon, or the process
+            // and its bound port leak (the orphaned-daemon pileup). A plain
+            // remote saved server has no spec, so nothing is killed.
+            let hosted = self.server_registry.hosted_spec(&server_id);
             if let Err(error) = self.server_registry.remove(&server_id) {
                 tracing::warn!(%error, "failed to remove saved server");
+            }
+            if let Some(spec) = hosted {
+                crate::screen::bridges::palette::stop_hosted_daemon(&spec);
+                tracing::info!(
+                    target: "neoism::desktop_daemon",
+                    port = spec.port,
+                    "deleted a hosted server; stopped its daemon"
+                );
             }
             self.open_server_manager(window_id);
         }

@@ -170,11 +170,20 @@ impl Screen<'_> {
         // hosts this workspace on loopback + tailnet — just flip it Shared,
         // exactly like the "Share current workspace" command. Compare
         // canonicalized roots so `~/x`, `./x`, and trailing slashes match.
+        //
+        // BUT only when the current workspace is one we OWN. If it's a JOINED
+        // (remote/adopted) workspace, "re-share" is meaningless — you're a
+        // GUEST there, ShareWorkspace no-ops on the host's daemon, and the
+        // Create Server the user asked for silently vanishes (no new daemon,
+        // no saved server, nothing in the list). Creating a server for the
+        // same folder you're VIEWING as a guest must fall through and spawn a
+        // real standalone daemon so it actually appears.
         let same_as_current = self
             .active_workspace_root
             .as_ref()
             .map(|root| paths_equivalent(root, &dir))
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && self.context_manager.current_adopted_workspace_id().is_none();
         if same_as_current {
             if let Some(workspace_id) = self.current_workspace_id() {
                 // DECLARE the shared dir as the daemon root before flipping
@@ -1509,6 +1518,43 @@ pub(crate) fn spawn_hosted_daemon(
     }
     detach_hosted_daemon(&mut daemon);
     daemon.spawn().map(|_| ())
+}
+
+/// Best-effort: STOP the detached hosted daemon serving `spec.port` when its
+/// saved server is deleted. We spawn hosted daemons detached (setsid) with no
+/// retained child handle so they survive app restarts — which also means
+/// deleting the server used to leave the daemon + its bound port running
+/// forever (the orphaned drain-zombie pileup). Match tightly on our binary AND
+/// the exact `--addr …:<port>` token (trailing space so `:9877` never matches
+/// `:98770`), so we can never signal an unrelated process.
+#[cfg(unix)]
+pub(crate) fn stop_hosted_daemon(spec: &crate::server_registry::HostedServerSpec) {
+    let pattern = format!("neoism-workspace-daemon.*:{} ", spec.port);
+    let _ = std::process::Command::new("pkill")
+        .arg("-TERM")
+        .arg("-f")
+        .arg(&pattern)
+        .status();
+}
+
+/// Windows equivalent: resolve the PID LISTENING on `spec.port` via `netstat
+/// -ano`, then `taskkill /F` it.
+#[cfg(not(unix))]
+pub(crate) fn stop_hosted_daemon(spec: &crate::server_registry::HostedServerSpec) {
+    let needle = format!(":{}", spec.port);
+    if let Ok(output) = std::process::Command::new("netstat").arg("-ano").output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let upper = line.to_uppercase();
+            if line.contains(&needle) && upper.contains("LISTENING") {
+                if let Some(pid) = line.split_whitespace().last() {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/PID", pid, "/F"])
+                        .status();
+                }
+            }
+        }
+    }
 }
 
 /// Detach the daemon from the desktop app's session/process group so app or

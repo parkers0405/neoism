@@ -277,9 +277,22 @@ impl Screen<'_> {
         let changed = self.active_workspace_root.as_deref() != Some(root.as_path());
         if changed {
             self.active_workspace_root = Some(root.clone());
-            if let Some(workspace_id) = self.current_workspace_id() {
-                self.context_manager
-                    .set_daemon_workspace_root(workspace_id, root.clone());
+            // Persist the root to the daemon — which re-points the shared
+            // workspace for EVERY joined peer and saves it to the hosted-server
+            // spec — ONLY on a deliberate root change: a folder-click "set as
+            // workspace root" or an explicit `:cd`, both of which pass
+            // `force_tree_refresh == true`. The per-frame terminal-cwd follow
+            // (and document/note/vault opens) pass `false` and must update the
+            // LOCAL tree only. Without this gate a plain `cd subdir` in the
+            // terminal silently re-roots AND persists the shared workspace to
+            // that subdir — the exact "hosted workspace jumped into the
+            // `neoism` subfolder" bug, violating the golden-standard model
+            // "workspace = declared dir; terminal `cd` is LOCAL".
+            if force_tree_refresh {
+                if let Some(workspace_id) = self.current_workspace_id() {
+                    self.context_manager
+                        .set_daemon_workspace_root(workspace_id, root.clone());
+                }
             }
         }
         // Only log on a real change — the render loop calls this every
@@ -414,8 +427,24 @@ impl Screen<'_> {
             let width = self.renderer.file_tree.width();
             if let Some(old_id) = self.file_tree_workspace.take() {
                 let outgoing = std::mem::take(&mut self.renderer.file_tree);
+                // Stash the ssh-follow root WITH the outgoing tree — it is
+                // per-workspace state, not a screen global. Without this,
+                // ssh'ing in one workspace then switching away leaves
+                // `ssh_pre_local_root` set, which freezes `set_active_workspace_root`
+                // for every later workspace (tree stuck on the remote listing,
+                // can't re-root).
+                if let Some(ssh_root) = self.ssh_pre_local_root.take() {
+                    self.workspace_ssh_pre_local_roots
+                        .insert(old_id.clone(), ssh_root);
+                } else {
+                    self.workspace_ssh_pre_local_roots.remove(&old_id);
+                }
                 self.workspace_file_trees.insert(old_id, outgoing);
             }
+            // Restore the incoming workspace's ssh-follow root (None unless it
+            // was actively following an ssh session when we left it) so its
+            // freeze guard matches its stashed remote/local tree.
+            self.ssh_pre_local_root = self.workspace_ssh_pre_local_roots.remove(&id);
             let mut incoming = self.workspace_file_trees.remove(&id).unwrap_or_default();
             incoming.set_visible(visible);
             incoming.set_focused(focused);

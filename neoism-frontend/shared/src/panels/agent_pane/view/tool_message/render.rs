@@ -13,6 +13,57 @@ fn tool_message_accent(status: &str, theme: &IdeTheme) -> u32 {
     }
 }
 
+/// Fit a tool title to `avail_w`, middle-truncating with an ellipsis when it
+/// would overflow. A tool call like `McpNeoismMemoryMemoryRead(a/very/long/
+/// path.md)  completed` is one whitespace-free token, so it can't soft-wrap —
+/// left unbounded it runs off the pane, through the scrollbar and into the
+/// usage sidebar. Keeping the head (tool name) and tail (arg end + status)
+/// while eliding the middle preserves the useful parts on one line.
+fn fit_tool_title(
+    sugarloaf: &mut Sugarloaf,
+    title: &str,
+    avail_w: f32,
+    opts: &DrawOpts,
+) -> String {
+    if avail_w <= 0.0 {
+        return String::new();
+    }
+    if sugarloaf.text_mut().measure(title, opts) <= avail_w {
+        return title.to_string();
+    }
+    let chars: Vec<char> = title.chars().collect();
+    let n = chars.len();
+    if n <= 3 {
+        return title.to_string();
+    }
+    // `keep` = total chars retained across head+tail (~55% head so the tool
+    // name stays readable, ~45% tail so the file extension and status show).
+    let build = |keep: usize| -> String {
+        let head_len = (keep * 11 / 20).max(1);
+        let tail_len = keep.saturating_sub(head_len);
+        let head: String = chars[..head_len.min(n)].iter().collect();
+        let tail: String = chars[n.saturating_sub(tail_len)..].iter().collect();
+        format!("{head}…{tail}")
+    };
+    // Binary-search the largest `keep` whose elided form still fits.
+    let mut lo = 1usize;
+    let mut hi = n.saturating_sub(1);
+    let mut best = String::from("…");
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        let candidate = build(mid);
+        if sugarloaf.text_mut().measure(&candidate, opts) <= avail_w {
+            best = candidate;
+            lo = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    best
+}
+
 /// Height of an archived, unexpanded tool card: just the header row (status
 /// dot + title). The body only exists after a click.
 fn minimal_tool_header_height(s: f32) -> f32 {
@@ -191,7 +242,12 @@ pub fn render_tool_message(
     ) else {
         return h;
     };
-    let title_text = message.title_text();
+    // Constrain the header to the same right edge the body wraps to (the body
+    // spans [x+58s, x+w-24s]); the title starts at x+22s. Without this a long
+    // tool title runs off the pane, over the scrollbar and into the sidebar.
+    let title_avail_w = (w - 46.0 * s).max(40.0 * s);
+    let title_text =
+        fit_tool_title(sugarloaf, &message.title_text(), title_avail_w, &title_opts);
     if !suppress_interactions {
         let title_w = sugarloaf
             .text_mut()

@@ -633,7 +633,17 @@ impl NeoismAgentPane {
             .messages
             .iter()
             .rev()
-            .find_map(|message| message.usage.clone())?;
+            // Skip a usage with no real token counts. An aborted or errored
+            // turn (a stop, or a failed generation) can leave a zeroed usage
+            // — `Some` with `context_limit` set but all token counts 0 — which
+            // would flash the sidebar context meter to 0% until the next turn
+            // repopulates it. Fall back to the last turn that actually
+            // consumed context so the meter holds steady across a stop/fail.
+            .find_map(|message| {
+                message.usage.clone().filter(|usage| {
+                    usage.input > 0 || usage.output > 0 || usage.total > 0
+                })
+            })?;
         if usage.context_limit.is_none() {
             usage.context_limit = self.model_context_limit;
         }

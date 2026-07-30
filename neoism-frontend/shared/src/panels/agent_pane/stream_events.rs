@@ -169,6 +169,13 @@ pub enum SessionEventUpdate {
         title: String,
         body: String,
     },
+    /// The server hit a recoverable provider error and is retrying the
+    /// in-flight run (`session.status` with `type: "retry"`). Surfaces the
+    /// backoff inline so the run doesn't look stalled.
+    Retrying {
+        attempt: u64,
+        message: Option<String>,
+    },
     QueueStatus {
         count: usize,
         preview: Option<String>,
@@ -512,6 +519,17 @@ pub fn classify_session_event(
                         .and_then(|status| status.get("startedAt"))
                         .or_else(|| properties.get("startedAt"))
                         .and_then(Value::as_u64),
+                }]
+            } else if status_type == Some("retry") {
+                vec![SessionEventUpdate::Retrying {
+                    attempt: status
+                        .and_then(|status| status.get("attempt"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    message: status
+                        .and_then(|status| status.get("message"))
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
                 }]
             } else {
                 Vec::new()

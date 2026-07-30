@@ -222,7 +222,13 @@ pub(crate) async fn run_provider_stream_step(
         let event = match event {
             Ok(event) => event,
             Err(error) => {
-                if !saw_progress && session_retry::retryable_error(&error) {
+                // Retry a retryable error even AFTER tokens have streamed (a
+                // true mid-response stop). The caller
+                // (`run_provider_stream_step_with_retry`) wipes the partial
+                // reply via `reset_live_message_for_retry` before re-streaming,
+                // so we don't double the response. Only genuinely fatal errors
+                // fall through to finalize below.
+                if session_retry::retryable_error(&error) {
                     return Err(ProviderStreamStepError::retryable_provider_error(
                         &error,
                     ));
@@ -246,7 +252,9 @@ pub(crate) async fn run_provider_stream_step(
         };
 
         if let ProviderStreamEvent::Error { message } = &event {
-            if !saw_progress && session_retry::retryable_message(message) {
+            // Retry mid-stream provider errors even after progress — the caller
+            // resets the partial reply before re-streaming (see above).
+            if session_retry::retryable_message(message) {
                 return Err(ProviderStreamStepError::unfinalized(message.clone(), true));
             }
             finish_provider_stream_with_error(

@@ -797,6 +797,12 @@ pub struct Screen<'screen> {
     /// alike). Mirrors `workspace_buffer_tabs`.
     workspace_file_trees: HashMap<WorkspaceKey, crate::editor::file_tree::FileTree>,
     file_tree_workspace: Option<WorkspaceKey>,
+    /// Per-workspace ssh-follow root (`ssh_pre_local_root`), stashed WITH the
+    /// tree on a workspace switch. `ssh_pre_local_root` is a screen global, so
+    /// without this swap an `ssh` in one workspace then a switch away leaves it
+    /// set — freezing every other workspace's tree re-root ("tree stuck on the
+    /// remote listing"). Keyed like `workspace_file_trees`.
+    workspace_ssh_pre_local_roots: HashMap<WorkspaceKey, PathBuf>,
     /// Per-workspace NOTES panel state (viewed vault, entries, open
     /// dirs, selection) — workspace switches SWAP whole panels exactly
     /// like `workspace_file_trees`, so a joined workspace never shows
@@ -1736,6 +1742,7 @@ impl Screen<'_> {
             notes_sidebar_workspace: None,
             workspace_file_trees: HashMap::new(),
             file_tree_workspace: None,
+            workspace_ssh_pre_local_roots: HashMap::new(),
             workspace_buf_enter_targets: HashMap::new(),
             workspace_editor_active_paths: HashMap::new(),
             workspace_note_indexes: HashMap::new(),

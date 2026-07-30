@@ -10,8 +10,14 @@ use crate::server_util::now_millis;
 use crate::session_loop::wait_for_cancellation;
 use crate::state::AppState;
 
-const DEFAULT_MAX_RETRIES: u64 = 3;
-const DEFAULT_INITIAL_DELAY_MS: u64 = 2_000;
+// Transient provider errors (5xx, "an error occurred… you can retry", stream
+// resets) should keep retrying so a run doesn't visibly STOP on a blip — the
+// user just sees a brief "retrying" status and it continues. A blip recovers
+// on the first attempt or two; only a sustained outage walks the full ladder
+// (~2.5 min with the backoff below), after which the error is genuinely fatal
+// and surfaces. Override with NEOISM_AGENT_PROVIDER_MAX_RETRIES.
+const DEFAULT_MAX_RETRIES: u64 = 8;
+const DEFAULT_INITIAL_DELAY_MS: u64 = 1_500;
 const DEFAULT_MAX_DELAY_MS: u64 = 30_000;
 const MAX_HEADER_DELAY_MS: u64 = 2_147_483_647;
 
@@ -56,7 +62,22 @@ fn retry_delay_ms_with_override(attempt: u64, retry_after_ms: Option<u64>) -> u6
 
 pub(crate) fn retryable_error(error: &anyhow::Error) -> bool {
     if let Some(provider_error) = error.downcast_ref::<ProviderError>() {
-        return provider_error.retryable;
+        // A context-overflow never recovers by retrying — it must surface.
+        if provider_error.context_overflow {
+            return false;
+        }
+        // Retry on a retryable STATUS code, OR when the provider's own error
+        // TEXT says it's transient ("an error occurred… you can retry",
+        // "overloaded", worded 5xx, etc). Previously this returned early on the
+        // status flag alone, so an OpenAI 200-with-error-body (no retryable
+        // status) or a message-only 5xx slipped straight to a hard stop — the
+        // "retry never fired" bug. Consult the message and raw body too.
+        return provider_error.retryable
+            || retryable_message(&provider_error.message)
+            || provider_error
+                .body
+                .as_deref()
+                .is_some_and(retryable_message);
     }
     retryable_message(&error.to_string())
 }

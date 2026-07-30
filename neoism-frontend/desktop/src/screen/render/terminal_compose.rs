@@ -227,6 +227,16 @@ impl Screen<'_> {
                 ctx.terminal_input.command_block_count(),
             ) {
                 if ctx.terminal_input.passthrough_session_active() != target {
+                    tracing::info!(
+                        target: "neoism::composer_passthrough",
+                        pane = ?*key,
+                        active = is_active,
+                        remote_pty = ctx.remote_pty.is_some(),
+                        block_count = ctx.terminal_input.command_block_count(),
+                        new_passthrough = target,
+                        source = "remote_pty_target",
+                        "composer passthrough transition"
+                    );
                     ctx.terminal_input.set_passthrough_session_active(target);
                 }
             }

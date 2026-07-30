@@ -941,6 +941,14 @@ impl Screen<'_> {
                 let leaving_passthrough =
                     passthrough_active && ends_passthrough_session(&command);
                 if entering_passthrough || leaving_passthrough {
+                    tracing::info!(
+                        target: "neoism::composer_passthrough",
+                        remote_pty = self.context_manager.current().remote_pty.is_some(),
+                        command = %command.trim(),
+                        new_passthrough = entering_passthrough,
+                        source = "ssh_command_detect",
+                        "composer passthrough transition"
+                    );
                     self.context_manager
                         .current_mut()
                         .terminal_input

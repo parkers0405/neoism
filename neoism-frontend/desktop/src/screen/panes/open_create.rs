@@ -406,7 +406,15 @@ impl Screen<'_> {
                 self.context_manager
                     .switch_daemon_host_workspace(workspace_id);
                 return;
-            } else if current_is_really_this {
+            } else if workspace_match_is_already_open(
+                current_is_really_this,
+                owned,
+            ) {
+                // Returning HOME after leaving a guest workspace lands on an
+                // existing local grid whose synthetic id legitimately matches
+                // the home daemon workspace. Treat it as open. The old
+                // adopted-only check called this a collision and created a
+                // second, inert-looking copy of the local Island tab.
                 self.context_manager
                     .switch_daemon_host_workspace(workspace_id);
                 return;
@@ -550,5 +558,32 @@ impl Screen<'_> {
         self.context_manager
             .switch_daemon_host_workspace(workspace_id);
         self.mark_dirty();
+    }
+}
+
+fn workspace_match_is_already_open(
+    current_is_adopted_workspace: bool,
+    workspace_is_owned_locally: bool,
+) -> bool {
+    current_is_adopted_workspace || workspace_is_owned_locally
+}
+
+#[cfg(test)]
+mod workspace_match_tests {
+    use super::workspace_match_is_already_open;
+
+    #[test]
+    fn owned_home_workspace_reuses_existing_grid() {
+        assert!(workspace_match_is_already_open(false, true));
+    }
+
+    #[test]
+    fn adopted_peer_workspace_reuses_existing_grid() {
+        assert!(workspace_match_is_already_open(true, false));
+    }
+
+    #[test]
+    fn unowned_unadopted_id_collision_still_requires_real_adopt() {
+        assert!(!workspace_match_is_already_open(false, false));
     }
 }

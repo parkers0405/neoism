@@ -1287,6 +1287,8 @@ impl Application<'_> {
         }
         let outgoing = self.window_sessions.remove(&window_id);
         let home_endpoint = self.home_daemon_endpoint.clone();
+        let switching_home =
+            home_endpoint.as_deref() == Some(connection.endpoint());
         let (profile_id, parked_home) = match outgoing {
             Some(old) => {
                 let profile_id = old.profile_id.clone();
@@ -1303,7 +1305,12 @@ impl Application<'_> {
             None => (self.next_window_profile_id(), None),
         };
         let mut session = WindowServerSession::new(profile_id, connection, server_id);
-        session.needs_initial_workspace_adopt = true;
+        // A foreign server needs an initial adopt so the window lands in one
+        // of its workspaces. Returning to the parked HOME connection does
+        // not: this window's local grids are already alive. Auto-adopting the
+        // home tree here duplicated the remaining local workspace after a
+        // guest closed their last joined tab.
+        session.needs_initial_workspace_adopt = !switching_home;
         session.parked_home = parked_home;
         self.window_sessions.insert(window_id, session);
         self.attach_session_to_window(window_id);

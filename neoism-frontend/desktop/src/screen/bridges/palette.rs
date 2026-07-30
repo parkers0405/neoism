@@ -164,53 +164,16 @@ impl Screen<'_> {
             return;
         }
 
-        // Sharing the folder you're ALREADY in? Don't spawn a second
-        // standalone daemon that re-declares the dir as a fresh workspace
-        // (which then opens a duplicate tab). The embedded daemon already
-        // hosts this workspace on loopback + tailnet — just flip it Shared,
-        // exactly like the "Share current workspace" command. Compare
-        // canonicalized roots so `~/x`, `./x`, and trailing slashes match.
-        //
-        // BUT only when the current workspace is one we OWN. If it's a JOINED
-        // (remote/adopted) workspace, "re-share" is meaningless — you're a
-        // GUEST there, ShareWorkspace no-ops on the host's daemon, and the
-        // Create Server the user asked for silently vanishes (no new daemon,
-        // no saved server, nothing in the list). Creating a server for the
-        // same folder you're VIEWING as a guest must fall through and spawn a
-        // real standalone daemon so it actually appears.
-        let same_as_current = self
-            .active_workspace_root
-            .as_ref()
-            .map(|root| paths_equivalent(root, &dir))
-            .unwrap_or(false)
-            && self.context_manager.current_adopted_workspace_id().is_none();
-        if same_as_current {
-            if let Some(workspace_id) = self.current_workspace_id() {
-                // DECLARE the shared dir as the daemon root before flipping
-                // Shared, or guests join into the host's home root: the
-                // per-frame cwd-follow is gated LOCAL-only, so nothing else
-                // pushes this workspace's real dir to the daemon. Only for a
-                // workspace we own.
-                if self.context_manager.current_adopted_workspace_id().is_none() {
-                    let root = self
-                        .active_pane_workspace_root()
-                        .unwrap_or_else(|| dir.clone());
-                    self.context_manager
-                        .set_daemon_workspace_root(workspace_id.clone(), root);
-                }
-                self.context_manager.send_workspace_request(
-                    neoism_protocol::workspace::WorkspaceClientMessage::ShareWorkspace {
-                        workspace_id,
-                    },
-                );
-                self.renderer.notifications.push(
-                    "Sharing your current workspace — others can join it now.",
-                    NotificationLevel::Info,
-                );
-                self.mark_dirty();
-                return;
-            }
-        }
+        // NOTE: "Create Server" ALWAYS spawns a new standalone daemon for
+        // `dir` — it never short-circuits to re-sharing the current workspace.
+        // The old code took a "same folder you're already in? just flip the
+        // embedded workspace Shared" shortcut, which silently ATE explicit
+        // Create Server requests: when the picked dir matched the active
+        // workspace root (local OR joined) it returned early with no new daemon
+        // and no saved server, so nothing appeared in the list — the exact
+        // "I clicked Create and it didn't show up" bug. The re-share intent has
+        // its own dedicated command (`Share Current Workspace`); Create Server
+        // means create.
 
         // First port that binds; dropped immediately so the daemon can
         // take it (the tiny race is fine — a failed spawn surfaces in
@@ -1613,14 +1576,3 @@ pub(crate) fn read_hosted_sidecar(
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// Two filesystem paths point at the same directory. Canonicalizes both
-/// (resolving `.`, `..`, symlinks, trailing slashes) so the create-server
-/// dir the user typed matches the current workspace root even when one is
-/// `~/x` and the other `/home/me/x/`. Falls back to a lexical compare when
-/// a path can't be canonicalized (e.g. it doesn't exist yet).
-fn paths_equivalent(a: &std::path::Path, b: &std::path::Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
-}

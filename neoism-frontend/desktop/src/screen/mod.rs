@@ -724,6 +724,10 @@ pub struct Screen<'screen> {
     pending_server_edit_submit: Option<(String, String, Option<String>, Option<String>)>,
     pending_server_remove: Option<String>,
     pending_workspace_subscription: Option<String>,
+    /// Joined workspaces explicitly closed by this window. Kept as a queue so
+    /// closing means unsubscribe, not "remove the grid until the next daemon
+    /// tree push restores it."
+    pending_workspace_unsubscriptions: Vec<String>,
     /// In-flight files-plane MUTATIONS (create/rename/delete) this
     /// screen issued for the remote tree, by request id. Replies with
     /// these ids drive toasts + re-lists; unknown ids are listing
@@ -1723,6 +1727,7 @@ impl Screen<'_> {
             pending_server_edit_submit: None,
             pending_server_remove: None,
             pending_workspace_subscription: None,
+            pending_workspace_unsubscriptions: Vec::new(),
             pending_remote_file_ops: std::collections::HashSet::new(),
             pending_remote_markdown_opens: HashMap::new(),
             pending_remote_code_opens: HashMap::new(),

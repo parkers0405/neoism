@@ -429,6 +429,7 @@ impl Application<'_> {
             join_request,
             go_home,
             workspace_subscription,
+            workspace_unsubscriptions,
         ) = {
             let Some(route) = self.router.routes.get_mut(&window_id) else {
                 return;
@@ -443,11 +444,15 @@ impl Application<'_> {
                 route.window.screen.take_peer_workspace_join(),
                 route.window.screen.take_daemon_go_home(),
                 route.window.screen.take_workspace_subscription(),
+                route.window.screen.take_workspace_unsubscriptions(),
             )
         };
 
         if let Some(workspace_id) = workspace_subscription {
             self.persist_workspace_subscription(window_id, workspace_id);
+        }
+        for workspace_id in workspace_unsubscriptions {
+            self.persist_workspace_unsubscription(window_id, workspace_id);
         }
 
         if let Some(server_id) = server_request {
@@ -658,6 +663,32 @@ impl Application<'_> {
             subscription,
         ) {
             tracing::warn!(%error, "failed to persist workspace subscription");
+        }
+    }
+
+    fn persist_workspace_unsubscription(
+        &mut self,
+        window_id: WindowId,
+        workspace_id: String,
+    ) {
+        let Some(session) = self.window_sessions.get(&window_id) else {
+            return;
+        };
+        let profile_id = session.profile_id.clone();
+        let server_id = session
+            .active_server_id
+            .clone()
+            .unwrap_or_else(|| "local".to_string());
+        if let Err(error) = self.server_registry.remove_workspace_subscription(
+            &profile_id,
+            &server_id,
+            &workspace_id,
+        ) {
+            tracing::warn!(
+                %error,
+                %workspace_id,
+                "failed to persist workspace unsubscription"
+            );
         }
     }
 

@@ -158,6 +158,7 @@ impl Screen<'_> {
         self.presence_publisher = None;
         self.pending_peer_workspace_join = None;
         self.pending_daemon_go_home = false;
+        self.pending_workspace_unsubscriptions.clear();
         self.pending_remote_file_ops.clear();
         self.pending_remote_notes_moves.clear();
         self.pending_remote_git_status.clear();
@@ -398,6 +399,19 @@ impl Screen<'_> {
 
     pub fn take_workspace_subscription(&mut self) -> Option<String> {
         self.pending_workspace_subscription.take()
+    }
+
+    pub fn report_workspace_unsubscription(&mut self, workspace_id: String) {
+        if !self
+            .pending_workspace_unsubscriptions
+            .contains(&workspace_id)
+        {
+            self.pending_workspace_unsubscriptions.push(workspace_id);
+        }
+    }
+
+    pub fn take_workspace_unsubscriptions(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_workspace_unsubscriptions)
     }
 
     pub fn request_split_pane(

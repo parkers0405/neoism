@@ -1444,14 +1444,38 @@ impl Screen<'_> {
 /// back after the queued add lands (see `process_window_server_requests`).
 const HOSTED_SIDECAR_FILE: &str = "hosted-spec.json";
 
-/// Resolve a binary that installed and dev layouts both drop next to the
-/// desktop binary; PATH is the fallback.
+/// Resolve a companion binary (the workspace daemon / agent) that the
+/// installed layout drops next to the desktop binary.
+///
+/// A DEV build breaks the naive "sibling of current_exe" assumption:
+/// `cargo run`/`target/debug/neoism` builds only `neoism`, so there is NO
+/// `target/debug/neoism-workspace-daemon`, and the launching shell's PATH
+/// usually omits `~/.local/bin` (where the installed daemon lives). The old
+/// bare-name fallback then `exec`s a name that isn't on PATH → `spawn()`
+/// fails with ENOENT → Create-Server silently launches nothing and no
+/// workspace ever appears. Probe the standard install dir before giving up
+/// to PATH so a dev build still finds the installed companion.
 fn sibling_binary(bin: &str) -> std::path::PathBuf {
-    std::env::current_exe()
+    // 1) Next to the running executable (installed/packaged layout).
+    if let Some(path) = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(bin)))
         .filter(|path| path.is_file())
-        .unwrap_or_else(|| std::path::PathBuf::from(bin))
+    {
+        return path;
+    }
+    // 2) The standard user install dir (`bootstrap`/launcher installs here).
+    if let Some(home) = std::env::var_os("HOME") {
+        let candidate = std::path::PathBuf::from(home)
+            .join(".local")
+            .join("bin")
+            .join(bin);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    // 3) Bare name → PATH lookup (last resort).
+    std::path::PathBuf::from(bin)
 }
 
 /// Spawn a detached `neoism-workspace-daemon` for `spec`. Shared by the

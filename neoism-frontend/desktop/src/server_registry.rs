@@ -122,6 +122,41 @@ impl ServerRegistry {
         self.persist().map_err(|error| error.to_string())
     }
 
+    /// Stop restoring `workspace_id` for this window/server profile.
+    /// Explicitly closing a joined workspace calls this before returning
+    /// home; otherwise every later daemon tree snapshot re-adopts it.
+    pub fn remove_workspace_subscription(
+        &mut self,
+        profile_id: &str,
+        server_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), String> {
+        let Some(subscription) = self
+            .data
+            .window_profiles
+            .get_mut(profile_id)
+            .and_then(|profile| profile.servers.get_mut(server_id))
+        else {
+            return Ok(());
+        };
+        let previous_len = subscription.subscribed_workspace_ids.len();
+        subscription
+            .subscribed_workspace_ids
+            .retain(|id| id != workspace_id);
+        let removed_last_active =
+            subscription.last_active_workspace_id.as_deref() == Some(workspace_id);
+        if removed_last_active {
+            subscription.last_active_workspace_id =
+                subscription.subscribed_workspace_ids.last().cloned();
+        }
+        if previous_len != subscription.subscribed_workspace_ids.len()
+            || removed_last_active
+        {
+            self.persist().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     pub fn add(
         &mut self,
         address: &str,
@@ -471,6 +506,35 @@ mod tests {
                 .workspace_subscription("window-b", "work")
                 .last_active_workspace_id
                 .as_deref(),
+            Some("website")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn closing_joined_workspace_persists_unsubscription() {
+        let directory = test_dir();
+        let mut registry = ServerRegistry::load(directory.clone()).unwrap();
+        registry
+            .set_workspace_subscription(
+                "window-a",
+                "work",
+                ServerWorkspaceSubscription {
+                    subscribed_workspace_ids: vec!["neoism".into(), "website".into()],
+                    last_active_workspace_id: Some("neoism".into()),
+                },
+            )
+            .unwrap();
+
+        registry
+            .remove_workspace_subscription("window-a", "work", "neoism")
+            .unwrap();
+
+        let loaded = ServerRegistry::load(directory.clone()).unwrap();
+        let subscription = loaded.workspace_subscription("window-a", "work");
+        assert_eq!(subscription.subscribed_workspace_ids, vec!["website"]);
+        assert_eq!(
+            subscription.last_active_workspace_id.as_deref(),
             Some("website")
         );
         fs::remove_dir_all(directory).unwrap();

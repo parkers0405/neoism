@@ -95,6 +95,12 @@ impl Screen<'_> {
             .current_adopted_workspace_id()
             .is_some();
         if leaving_adopted {
+            // A user close is also an unsubscribe. Otherwise the next
+            // HostWorkspaceTree message restores this id immediately and the
+            // just-removed Island tab appears to survive/recreate itself.
+            if let Some(workspace_id) = closing_workspace_id.clone() {
+                self.report_workspace_unsubscription(workspace_id);
+            }
             self.context_manager
                 .detach_adopted_grid_sessions(closing_index);
         }

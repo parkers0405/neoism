@@ -7,10 +7,22 @@ impl Screen<'_> {
         last_active_workspace_id: Option<&str>,
     ) {
         for workspace_id in workspace_ids {
+            if self
+                .pending_workspace_unsubscriptions
+                .contains(workspace_id)
+            {
+                continue;
+            }
             self.open_or_adopt_daemon_workspace(workspace_id.clone());
         }
         if let Some(workspace_id) = last_active_workspace_id {
-            self.open_or_adopt_daemon_workspace(workspace_id.to_string());
+            if !self
+                .pending_workspace_unsubscriptions
+                .iter()
+                .any(|pending| pending == workspace_id)
+            {
+                self.open_or_adopt_daemon_workspace(workspace_id.to_string());
+            }
         }
     }
 

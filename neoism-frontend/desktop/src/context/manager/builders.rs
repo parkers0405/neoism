@@ -304,7 +304,15 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             return;
         }
 
-        self.request_new_session(working_dir.clone(), None);
+        // Ctrl+Shift+W always creates a new LOCAL top-level workspace. A peer
+        // link may remain attached because another grid in this window is
+        // joined; creating through that link would make the new workspace a
+        // remote PTY and leak the joined workspace's passthrough/composer
+        // behavior into it.
+        let visiting_peer = self.daemon_link_is_peer();
+        if !visiting_peer {
+            self.request_new_session(working_dir.clone(), None);
+        }
 
         let size = self.contexts.len();
         if size < self.capacity {
@@ -324,6 +332,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 dimension = self.current_grid().grid_dimension();
             }
 
+            let remote_pty = if visiting_peer {
+                None
+            } else {
+                self.prepared_remote_pty()
+            };
             match ContextManager::create_context(
                 (&cursor, self.config.cursor_blinking),
                 self.event_proxy.clone(),
@@ -331,7 +344,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 rich_text_id,
                 dimension,
                 &cloned_config,
-                self.prepared_remote_pty(),
+                remote_pty,
             ) {
                 Ok(new_context) => {
                     self.register_remote_context(&new_context);
@@ -353,11 +366,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                         &self.contexts[last_index],
                         last_index,
                     );
-                    self.request_daemon_workspace_create(
-                        workspace_id,
-                        None,
-                        self.config.working_dir.as_ref().map(PathBuf::from),
-                    );
+                    if !visiting_peer {
+                        self.request_daemon_workspace_create(
+                            workspace_id,
+                            None,
+                            cloned_config.working_dir.as_ref().map(PathBuf::from),
+                        );
+                    }
                     self.sync_daemon_workspaces();
                 }
                 Err(..) => {

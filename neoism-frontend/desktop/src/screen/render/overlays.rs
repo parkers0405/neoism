@@ -22,7 +22,9 @@ impl Screen<'_> {
         // Presence orbs animate the same way: while any peer is present
         // their orbs are on screen, so keep repainting to flow the plasma
         // (cleared to zero cost the instant the last peer disconnects).
-        self.renderer.presence_orbs_active = self.remote_presence.has_any_peers();
+        self.renderer.presence_orbs_active =
+            self.context_manager.current_workspace_is_collaborative()
+                && self.remote_presence.has_any_peers();
 
         let initial_redraw_reason = self.renderer.redraw_reason();
         let mut has_animation = initial_redraw_reason.is_some();

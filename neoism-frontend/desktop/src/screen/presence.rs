@@ -81,6 +81,12 @@ impl Screen<'_> {
     pub(crate) fn rebuild_file_tree_presence_index(&mut self) {
         use std::collections::HashMap;
         use std::path::PathBuf;
+        if !self.context_manager.current_workspace_is_collaborative() {
+            if self.renderer.file_tree.has_presence() {
+                self.renderer.file_tree.set_presence_index(HashMap::new());
+            }
+            return;
+        }
         let by_buffer = self.remote_presence.avatar_peers_by_buffer();
         // Fast path: nobody is sharing and the tree already has no index
         // — skip the allocation churn entirely.
@@ -121,55 +127,64 @@ impl Screen<'_> {
     pub fn drain_daemon_presence_messages(&mut self) -> Vec<CrdtClientMessage> {
         let now_ms = presence_now_ms();
         let current = self.context_manager.current();
-        let active = current
-            .markdown
-            .as_ref()
-            .map(|markdown| {
-                (
-                    presence_buffer_id_for_path(&markdown.path),
-                    PeerCursor::new(
-                        markdown.cursor_line as u32,
-                        markdown.cursor_col as u32,
-                    ),
-                    markdown.mode == neoism_ui::editor::markdown::MarkdownMode::Insert,
-                )
-            })
-            .or_else(|| {
-                current.notebook.as_ref().map(|notebook| {
+        let active = if self.context_manager.current_workspace_is_collaborative() {
+            current
+                .markdown
+                .as_ref()
+                .map(|markdown| {
                     (
-                        buffer_id_for_notebook_render_path(&notebook.path),
+                        presence_buffer_id_for_path(&markdown.path),
                         PeerCursor::new(
-                            notebook.markdown.cursor_line as u32,
-                            notebook.markdown.cursor_col as u32,
+                            markdown.cursor_line as u32,
+                            markdown.cursor_col as u32,
                         ),
-                        notebook.markdown.mode
+                        markdown.mode
                             == neoism_ui::editor::markdown::MarkdownMode::Insert,
                     )
                 })
-            })
-            .or_else(|| {
-                current.code.as_ref().map(|code| {
-                    // The wire column is UTF-16 (CRDT offset policy);
-                    // the code buffer's cursor_col is a byte column —
-                    // convert against the live line text.
-                    let col_utf16 = code
-                        .buffer
-                        .lines
-                        .get(code.buffer.cursor_line)
-                        .map(|line| {
-                            let col = code.buffer.cursor_col.min(line.len());
-                            line.get(..col)
-                                .map(|prefix| prefix.encode_utf16().count())
-                                .unwrap_or(col)
-                        })
-                        .unwrap_or(0);
-                    (
-                        presence_buffer_id_for_path(&code.path),
-                        PeerCursor::new(code.buffer.cursor_line as u32, col_utf16 as u32),
-                        code.buffer.mode == neoism_ui::editor::code::CodeMode::Insert,
-                    )
+                .or_else(|| {
+                    current.notebook.as_ref().map(|notebook| {
+                        (
+                            buffer_id_for_notebook_render_path(&notebook.path),
+                            PeerCursor::new(
+                                notebook.markdown.cursor_line as u32,
+                                notebook.markdown.cursor_col as u32,
+                            ),
+                            notebook.markdown.mode
+                                == neoism_ui::editor::markdown::MarkdownMode::Insert,
+                        )
+                    })
                 })
-            });
+                .or_else(|| {
+                    current.code.as_ref().map(|code| {
+                        // The wire column is UTF-16 (CRDT offset policy);
+                        // the code buffer's cursor_col is a byte column —
+                        // convert against the live line text.
+                        let col_utf16 = code
+                            .buffer
+                            .lines
+                            .get(code.buffer.cursor_line)
+                            .map(|line| {
+                                let col = code.buffer.cursor_col.min(line.len());
+                                line.get(..col)
+                                    .map(|prefix| prefix.encode_utf16().count())
+                                    .unwrap_or(col)
+                            })
+                            .unwrap_or(0);
+                        (
+                            presence_buffer_id_for_path(&code.path),
+                            PeerCursor::new(
+                                code.buffer.cursor_line as u32,
+                                col_utf16 as u32,
+                            ),
+                            code.buffer.mode
+                                == neoism_ui::editor::code::CodeMode::Insert,
+                        )
+                    })
+                })
+        } else {
+            None
+        };
 
         if self.presence_publisher.is_none() {
             let (peer_id, display_name) =

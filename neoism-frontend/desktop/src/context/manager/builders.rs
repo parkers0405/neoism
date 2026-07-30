@@ -259,7 +259,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     #[inline]
     #[allow(dead_code)]
     pub fn add_context(&mut self, redirect: bool, rich_text_id: usize) {
-        self.add_context_with_working_dir(redirect, rich_text_id, None);
+        let _ = self.add_context_with_working_dir(redirect, rich_text_id, None);
     }
 
     #[inline]
@@ -268,7 +268,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         redirect: bool,
         rich_text_id: usize,
         working_dir_override: Option<PathBuf>,
-    ) {
+    ) -> bool {
         let mut working_dir = working_dir_override
             .map(|p| p.to_string_lossy().to_string())
             .or_else(|| self.config.working_dir.clone());
@@ -301,7 +301,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         if self.config.is_native {
             self.event_proxy
                 .send_event(RioEvent::CreateNativeTab(working_dir), self.window_id);
-            return;
+            return true;
         }
 
         // Ctrl+Shift+W always creates a new LOCAL top-level workspace. A peer
@@ -315,69 +315,72 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         }
 
         let size = self.contexts.len();
-        if size < self.capacity {
-            let last_index = self.contexts.len();
+        if size >= self.capacity {
+            return false;
+        }
+        let last_index = self.contexts.len();
 
-            let mut cloned_config = self.config.clone();
-            if working_dir.is_some() {
-                cloned_config.working_dir = working_dir;
-            }
+        let mut cloned_config = self.config.clone();
+        if working_dir.is_some() {
+            cloned_config.working_dir = working_dir;
+        }
 
-            let current = self.current();
-            let cursor = current.cursor_from_ref();
-            let mut dimension = current.dimension;
+        let current = self.current();
+        let cursor = current.cursor_from_ref();
+        let mut dimension = current.dimension;
 
-            // If current has splits then shouldn't use that dimension
-            if self.current_grid().len() > 1 {
-                dimension = self.current_grid().grid_dimension();
-            }
+        // If current has splits then shouldn't use that dimension
+        if self.current_grid().len() > 1 {
+            dimension = self.current_grid().grid_dimension();
+        }
 
-            let remote_pty = if visiting_peer {
-                None
-            } else {
-                self.prepared_remote_pty()
-            };
-            match ContextManager::create_context(
-                (&cursor, self.config.cursor_blinking),
-                self.event_proxy.clone(),
-                self.window_id,
-                rich_text_id,
-                dimension,
-                &cloned_config,
-                remote_pty,
-            ) {
-                Ok(new_context) => {
-                    self.register_remote_context(&new_context);
-                    let previous_scaled_margin =
-                        self.contexts[self.current_index].scaled_margin;
-                    self.contexts.push(ContextGrid::new(
-                        new_context,
-                        previous_scaled_margin,
-                        self.config.split_color,
-                        self.config.split_active_color,
-                        self.config.panel,
-                    ));
-                    if redirect {
-                        self.current_index = last_index;
-                        self.current_route = self.current().route_id;
-                    }
-                    let workspace_id = desktop_workspace_id(
-                        self.window_id,
-                        &self.contexts[last_index],
-                        last_index,
+        let remote_pty = if visiting_peer {
+            None
+        } else {
+            self.prepared_remote_pty()
+        };
+        match ContextManager::create_context(
+            (&cursor, self.config.cursor_blinking),
+            self.event_proxy.clone(),
+            self.window_id,
+            rich_text_id,
+            dimension,
+            &cloned_config,
+            remote_pty,
+        ) {
+            Ok(new_context) => {
+                self.register_remote_context(&new_context);
+                let previous_scaled_margin =
+                    self.contexts[self.current_index].scaled_margin;
+                self.contexts.push(ContextGrid::new(
+                    new_context,
+                    previous_scaled_margin,
+                    self.config.split_color,
+                    self.config.split_active_color,
+                    self.config.panel,
+                ));
+                if redirect {
+                    self.current_index = last_index;
+                    self.current_route = self.current().route_id;
+                }
+                let workspace_id = desktop_workspace_id(
+                    self.window_id,
+                    &self.contexts[last_index],
+                    last_index,
+                );
+                if !visiting_peer {
+                    self.request_daemon_workspace_create(
+                        workspace_id,
+                        None,
+                        cloned_config.working_dir.as_ref().map(PathBuf::from),
                     );
-                    if !visiting_peer {
-                        self.request_daemon_workspace_create(
-                            workspace_id,
-                            None,
-                            cloned_config.working_dir.as_ref().map(PathBuf::from),
-                        );
-                    }
-                    self.sync_daemon_workspaces();
                 }
-                Err(..) => {
-                    tracing::error!("not able to create a new context");
-                }
+                self.sync_daemon_workspaces();
+                true
+            }
+            Err(error) => {
+                tracing::error!(%error, "not able to create a new context");
+                false
             }
         }
     }

@@ -177,6 +177,18 @@ impl Screen<'_> {
             .unwrap_or(false);
         if same_as_current {
             if let Some(workspace_id) = self.current_workspace_id() {
+                // DECLARE the shared dir as the daemon root before flipping
+                // Shared, or guests join into the host's home root: the
+                // per-frame cwd-follow is gated LOCAL-only, so nothing else
+                // pushes this workspace's real dir to the daemon. Only for a
+                // workspace we own.
+                if self.context_manager.current_adopted_workspace_id().is_none() {
+                    let root = self
+                        .active_pane_workspace_root()
+                        .unwrap_or_else(|| dir.clone());
+                    self.context_manager
+                        .set_daemon_workspace_root(workspace_id.clone(), root);
+                }
                 self.context_manager.send_workspace_request(
                     neoism_protocol::workspace::WorkspaceClientMessage::ShareWorkspace {
                         workspace_id,
@@ -1072,6 +1084,22 @@ impl Screen<'_> {
             }
             PaletteAction::ShareCurrentWorkspace => {
                 if let Some(workspace_id) = self.current_workspace_id() {
+                    // Sharing DECLARES the current directory as the hosted
+                    // root so guests join into it. The per-frame terminal
+                    // cwd-follow is deliberately gated to LOCAL-only updates
+                    // (set_active_workspace_root, force_tree_refresh=false), so
+                    // without an explicit push here the daemon keeps the
+                    // CreateHostWorkspace default (config.working_dir — usually
+                    // unset, so the daemon falls back to the host's home root)
+                    // and every guest lands in the host's home instead of the
+                    // shared dir. Only for a workspace we OWN — never
+                    // re-declare a joined one (would steal it from its owner).
+                    if self.context_manager.current_adopted_workspace_id().is_none() {
+                        if let Some(root) = self.active_pane_workspace_root() {
+                            self.context_manager
+                                .set_daemon_workspace_root(workspace_id.clone(), root);
+                        }
+                    }
                     self.context_manager.send_workspace_request(
                         neoism_protocol::workspace::WorkspaceClientMessage::ShareWorkspace {
                             workspace_id,

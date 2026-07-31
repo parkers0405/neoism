@@ -65,6 +65,16 @@ jobs:
           env -u CI cargo build --release --locked --target ${{ matrix.target }} \
             -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
 
+      - name: Audit macOS runtime dependencies
+        if: matrix.goos == 'darwin'
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release"
+          bash scripts/audit-macos-dylibs.sh \
+            "$BIN/neoism" \
+            "$BIN/neoism-workspace-daemon" \
+            "$BIN/neoism-agent"
+
       # Runtime validation on the real OS: PTY-layer unit + ConPTY spawn
       # smoke tests, then boot the daemon and require its loopback
       # listener to come up. This is the gate Windows must pass before

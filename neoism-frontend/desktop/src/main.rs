@@ -834,24 +834,35 @@ fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
-/// Best-effort handoff after replacing the desktop executable: every other
-/// running `neoism` process still has the old image mapped in memory, even
-/// though the path on disk now points at the new release. Terminate those
-/// stale desktop processes so the next launch is guaranteed to exec the
-/// updated binary. The updater excludes itself and deliberately does not
-/// touch workspace daemons (hosted servers must survive a desktop update).
+/// Best-effort handoff after replacing the binaries: every still-running
+/// Neoism process — the GUI, the workspace daemon(s), and the agent — has the
+/// OLD image mapped in memory even though the path on disk now points at the
+/// new release. Terminate them ALL so the update actually takes effect instead
+/// of leaving stale daemons serving old code. The GUI matches by exact process
+/// NAME; the daemon/agent match by full command line, because their process
+/// names are truncated to 15 chars ("neoism-workspac") so `-x` (and a bare
+/// `pkill neoism`) misses them. The updater always excludes itself; hosted
+/// daemons are relaunched fresh immediately after (see `restart_hosted_daemons`).
 #[cfg(unix)]
 fn terminate_other_neoism_processes() -> usize {
     let current_pid = std::process::id();
-    let Ok(output) = std::process::Command::new("pgrep")
-        .args(["-x", "neoism"])
-        .output()
-    else {
-        return 0;
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
+    let mut pids: Vec<u32> = Vec::new();
+    for args in [
+        ["-x", "neoism"],
+        ["-f", "neoism-workspace-daemon"],
+        ["-f", "neoism-agent"],
+    ] {
+        if let Ok(output) = std::process::Command::new("pgrep").args(args).output() {
+            pids.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|line| line.trim().parse::<u32>().ok()),
+            );
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    pids.into_iter()
         .filter(|pid| *pid != current_pid)
         .filter(|pid| unsafe { libc::kill(*pid as i32, libc::SIGTERM) } == 0)
         .count()
@@ -859,6 +870,49 @@ fn terminate_other_neoism_processes() -> usize {
 
 #[cfg(not(unix))]
 fn terminate_other_neoism_processes() -> usize {
+    0
+}
+
+/// After the binaries are swapped and the old daemons terminated, relaunch
+/// every locally-hosted server from the saved registry so it comes back on the
+/// NEW `neoism-workspace-daemon` — reusing the identical spawn recipe the app
+/// itself uses (`spawn_hosted_daemon`). The agent server and the embedded
+/// daemon live inside the GUI process, so those relaunch when Neoism is next
+/// opened. Returns the number of hosted servers relaunched.
+#[cfg(unix)]
+fn restart_hosted_daemons() -> usize {
+    let registry = match crate::server_registry::ServerRegistry::load(
+        neoism_backend::config::config_dir_path(),
+    ) {
+        Ok(registry) => registry,
+        Err(_) => return 0,
+    };
+    let mut relaunched = 0;
+    for server in registry.servers() {
+        let Some(spec) = server.hosted.clone() else {
+            continue;
+        };
+        match crate::screen::bridges::palette::spawn_hosted_daemon(
+            &spec,
+            registry.token(&server.id),
+        ) {
+            Ok(()) => {
+                relaunched += 1;
+                println!("  ✓ restarted hosted server on :{}", spec.port);
+            }
+            Err(error) => {
+                eprintln!(
+                    "  ! could not restart hosted server :{} ({error})",
+                    spec.port
+                );
+            }
+        }
+    }
+    relaunched
+}
+
+#[cfg(not(unix))]
+fn restart_hosted_daemons() -> usize {
     0
 }
 
@@ -970,9 +1024,21 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_dir_all(&tmp);
     let stopped = terminate_other_neoism_processes();
     if stopped > 0 {
-        println!("  ✓ stopped {stopped} stale Neoism process(es)");
+        println!("  ✓ stopped {stopped} stale Neoism process(es) — GUI, daemon, agent");
     }
-    println!("Updated to {latest}. Your next Neoism launch will use it.");
+    // Let the SIGTERM'd daemons release their bound ports before we rehost on
+    // the same ones, or the relaunch races into EADDRINUSE and exits.
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let restarted = restart_hosted_daemons();
+    if restarted > 0 {
+        println!("  ✓ relaunched {restarted} hosted server(s) on the new binary");
+    }
+    println!("Updated to {latest}.");
+    println!("  • The agent server + embedded daemon relaunch when you next open Neoism.");
+    println!(
+        "  • Containerized servers are separate — rebuild with \
+         `docker compose build && docker compose up -d`."
+    );
     Ok(())
 }
 

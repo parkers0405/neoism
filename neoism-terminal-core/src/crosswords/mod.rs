@@ -78,6 +78,12 @@ pub struct ShellPromptState {
     /// True after command start until command finished.
     pub running_command: bool,
     pub last_exit_code: Option<i32>,
+    /// Monotonic count of OSC 133;D command-finished events.
+    ///
+    /// PTY output is commonly parsed in batches. A fast command can emit
+    /// C, its output, D, A, and B before the renderer samples this state, so
+    /// the final booleans alone lose the fact that the command completed.
+    pub command_finished_generation: u64,
 }
 
 // Max. number of graphics stored in a single cell.
@@ -2896,6 +2902,10 @@ impl Handler for Crosswords {
                 self.shell_prompt.awaiting_command = false;
                 self.shell_prompt.running_command = false;
                 self.shell_prompt.last_exit_code = exit_code;
+                self.shell_prompt.command_finished_generation = self
+                    .shell_prompt
+                    .command_finished_generation
+                    .wrapping_add(1);
             }
         }
         self.mark_fully_damaged();
@@ -6007,6 +6017,7 @@ mod tests {
                 awaiting_command: true,
                 running_command: false,
                 last_exit_code: None,
+                command_finished_generation: 0,
             }
         );
 
@@ -6017,6 +6028,7 @@ mod tests {
                 awaiting_command: false,
                 running_command: true,
                 last_exit_code: None,
+                command_finished_generation: 0,
             }
         );
 
@@ -6030,6 +6042,7 @@ mod tests {
                 awaiting_command: true,
                 running_command: false,
                 last_exit_code: Some(7),
+                command_finished_generation: 1,
             }
         );
     }

@@ -366,11 +366,13 @@ fn finished_clear_block_is_dropped_when_next_command_submits() {
         awaiting_command: false,
         running_command: true,
         last_exit_code: None,
+        command_finished_generation: 0,
     });
     input.sync_shell_state(ShellPromptState {
         awaiting_command: true,
         running_command: false,
         last_exit_code: Some(0),
+        command_finished_generation: 0,
     });
 
     input.insert_str("ls");
@@ -393,6 +395,7 @@ fn running_clear_block_is_dropped_when_prompt_returns() {
         awaiting_command: true,
         running_command: false,
         last_exit_code: Some(0),
+        command_finished_generation: 0,
     });
 
     input.insert_str("clear");
@@ -410,11 +413,13 @@ fn running_clear_block_is_dropped_when_prompt_returns() {
         awaiting_command: false,
         running_command: true,
         last_exit_code: None,
+        command_finished_generation: 0,
     }));
     assert!(input.sync_shell_state(ShellPromptState {
         awaiting_command: true,
         running_command: false,
         last_exit_code: Some(0),
+        command_finished_generation: 0,
     }));
     assert!(input.command_block_snapshots().is_empty());
 }
@@ -427,6 +432,7 @@ fn passthrough_session_clears_when_parent_prompt_returns() {
         awaiting_command: true,
         running_command: false,
         last_exit_code: Some(0),
+        command_finished_generation: 0,
     });
 
     assert!(!input.passthrough_session_active());
@@ -995,6 +1001,7 @@ fn shell_state(awaiting: bool, running: bool) -> ShellPromptState {
         awaiting_command: awaiting,
         running_command: running,
         last_exit_code: None,
+        command_finished_generation: 0,
     }
 }
 
@@ -1066,6 +1073,7 @@ fn composer_can_own_remote_prompt_after_a_submitted_command() {
         awaiting_command: false,
         running_command: false,
         last_exit_code: Some(0),
+        command_finished_generation: 0,
     };
     input.sync_shell_state(prompt_without_ab);
     assert_eq!(
@@ -1074,6 +1082,52 @@ fn composer_can_own_remote_prompt_after_a_submitted_command() {
     );
     assert!(input.composer_footer_active(prompt_without_ab, false, true));
     assert!(input.should_capture_input(prompt_without_ab, false, true));
+}
+
+#[test]
+fn batched_fast_command_completion_stops_block_without_observing_running_state() {
+    // A joined Bash commonly writes C, command output, D, A, and B in one
+    // websocket/parser batch. The renderer therefore sees the prompt before
+    // submit and the prompt after completion, but never samples the transient
+    // `running_command = true` state. The D generation must preserve that
+    // completion edge so a fast command such as `ls` cannot spin forever.
+    let mut input = TerminalInputBuffer::default();
+    input.sync_shell_state(ShellPromptState {
+        awaiting_command: true,
+        running_command: false,
+        last_exit_code: Some(0),
+        command_finished_generation: 7,
+    });
+    input.insert_str("ls");
+    assert_eq!(input.submit_with_context(None, Some(10)), "ls");
+
+    // Re-reading the pre-submit prompt is not completion evidence.
+    input.sync_shell_state(ShellPromptState {
+        awaiting_command: true,
+        running_command: false,
+        last_exit_code: Some(0),
+        command_finished_generation: 7,
+    });
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+
+    // This is the single final snapshot after parsing C/output/D/A/B.
+    input.sync_shell_state(ShellPromptState {
+        awaiting_command: true,
+        running_command: false,
+        last_exit_code: Some(0),
+        command_finished_generation: 8,
+    });
+
+    let block = &input.command_block_snapshots()[0];
+    assert_eq!(block.status, BlockStatusKind::Ok);
+    // A completed block snapshots a fixed duration instead of continuing to
+    // read Instant::now() on every frame.
+    let duration = block.duration_ms;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert_eq!(input.command_block_snapshots()[0].duration_ms, duration);
 }
 
 #[test]
@@ -1107,10 +1161,7 @@ fn remote_clear_reopens_composer_with_zero_blocks_for_splash() {
     input.insert_str("clear");
     input.submit_with_context(None, Some(10));
     input.clear_previous_blocks_for_active_command();
-    assert!(input.finish_unintegrated_remote_command_at_prompt(
-        "~/project ❯",
-        Some(11),
-    ));
+    assert!(input.finish_unintegrated_remote_command_at_prompt("~/project ❯", Some(11),));
 
     assert_eq!(input.command_block_count(), 0);
     assert!(input.should_capture_input(shell_state(false, false), false, true));

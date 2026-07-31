@@ -470,6 +470,9 @@ impl TerminalInputBuffer {
     }
 
     pub fn sync_shell_state(&mut self, state: ShellPromptState) -> bool {
+        let command_finished =
+            state.command_finished_generation > self.last_command_finished_generation;
+        self.last_command_finished_generation = state.command_finished_generation;
         // Latch the first prompt: once shell integration reports an
         // editable prompt we trust `awaiting_command` from here on, but
         // the boot window before it must still hand the empty command
@@ -495,7 +498,8 @@ impl TerminalInputBuffer {
         }
         if state.running_command {
             block.saw_command_start = true;
-        } else if block.saw_command_start
+        } else if command_finished
+            || block.saw_command_start
             || (state.awaiting_command
                 && Instant::now().saturating_duration_since(block.submitted_at)
                     > Duration::from_millis(150))

@@ -1,71 +1,77 @@
 #!/usr/bin/env bash
-# neoism-nuke — stop EVERYTHING neoism on this host.
+# neoism-nuke — stop all HOST-side neoism processes (GUI, workspace daemon,
+# agent). It deliberately does NOT touch anything running inside a container:
+# containerized servers own their own lifecycle (docker/podman manage them),
+# so we never signal into them.
 #
-# `pkill neoism` is not enough, by design:
-#   * The hosted server runs in a DOCKER container (neoism-server-*), whose
-#     restart policy respawns the daemon the instant pkill kills it — you must
-#     stop the container, not the process.
-#   * Wrapper / entrypoint processes (tini, `bash -c '… neoism-workspace-daemon …'`,
-#     docker-proxy) have names that do NOT contain "neoism", so `pkill neoism`
-#     (which matches the 15-char process NAME) skips them. `pkill -f` matches
-#     the full command line and catches them.
-#   * Daemons are launched detached (setsid / reparented to `systemd --user`),
-#     so they outlive the GUI — but they are still killable by name/-f.
-#
-# This tears down: docker server containers, the workspace daemon(s), the agent
-# server, and the GUI — then verifies nothing survived.
+# Why `pkill neoism` alone is not enough:
+#   * the daemon/agent process NAMES are truncated to 15 chars
+#     ("neoism-workspac"), so a name match misses them — need `pkill -f`
+#     (full command line);
+#   * but `-f` also reaches the containerized daemon (its host-visible pid),
+#     so we filter those out by PID namespace / cgroup.
 set -uo pipefail
 
-say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*"; }
 
-# --- (1) Docker: stop the hosted-server containers (the respawners) ---------
-if command -v docker >/dev/null 2>&1; then
-  containers="$(docker ps -a --filter 'name=neoism' --format '{{.ID}} {{.Names}}' 2>/dev/null)"
-  if [ -n "$containers" ]; then
-    say "stopping neoism docker containers:"
-    printf '   %s\n' "$containers"
-    # `down` (compose) tears down the whole project incl. restart policy;
-    # fall back to a direct stop/rm for any stragglers.
-    docker compose down --remove-orphans >/dev/null 2>&1 || true
-    echo "$containers" | awk '{print $1}' | xargs -r docker rm -f >/dev/null 2>&1 || true
-  else
-    say "no neoism docker containers running"
+host_pidns="$(readlink /proc/self/ns/pid 2>/dev/null || true)"
+
+# 0 = normal host process; 1 = lives inside a container (leave it alone).
+is_host_process() {
+  local pid="$1" ns
+  ns="$(readlink "/proc/$pid/ns/pid" 2>/dev/null || true)"
+  # A different PID namespace => containerized.
+  if [ -n "$host_pidns" ] && [ -n "$ns" ] && [ "$ns" != "$host_pidns" ]; then
+    return 1
   fi
-else
-  warn "docker not found — skipping container teardown"
-fi
-
-# --- (2) Processes: match by FULL command line, not just the 15-char name ---
-# Order: agent server, then daemon, then the GUI. SIGTERM first, then SIGKILL
-# for anything that ignores it.
-patterns=(
-  'neoism-agent'
-  'neoism-workspace-daemon'
-  'neoism-lsp'
-  'target/[a-z]*/neoism'   # dev build of the GUI binary
-  '/neoism$'               # installed GUI binary
-)
-
-kill_pattern() {
-  local sig="$1" pat="$2" pids
-  pids="$(pgrep -f "$pat" 2>/dev/null | grep -vw "$$" | tr '\n' ' ')"
-  [ -z "${pids// /}" ] && return 0
-  say "kill -$sig  ($pat):  $pids"
-  # shellcheck disable=SC2086
-  kill "-$sig" $pids 2>/dev/null || true
+  # A docker/containerd/podman/lxc/kube cgroup => containerized (also covers
+  # `--pid=host` containers that share our PID namespace).
+  if grep -qaE 'docker|containerd|libpod|/lxc|kubepods' "/proc/$pid/cgroup" 2>/dev/null; then
+    return 1
+  fi
+  return 0
 }
 
-for pat in "${patterns[@]}"; do kill_pattern TERM "$pat"; done
-sleep 1
-for pat in "${patterns[@]}"; do kill_pattern KILL "$pat"; done
+# Host-side neoism pids by full command line, excluding self + containers.
+# `pgrep -x neoism` catches the GUI (installed or `target/*/neoism`, both have
+# comm "neoism"); the daemon/agent need `-f`.
+collect_host_pids() {
+  { pgrep -x neoism; pgrep -f neoism-workspace-daemon; pgrep -f neoism-agent; } \
+    2>/dev/null | sort -un | while read -r pid; do
+      [ "$pid" = "$$" ] && continue
+      is_host_process "$pid" && printf '%s\n' "$pid"
+    done
+}
 
-# --- (3) Verify ------------------------------------------------------------
+pids="$(collect_host_pids | tr '\n' ' ')"
+if [ -z "${pids// /}" ]; then
+  say "no host-side neoism processes running"
+else
+  say "SIGTERM: $pids"
+  # shellcheck disable=SC2086
+  kill -TERM $pids 2>/dev/null || true
+  sleep 1
+  pids="$(collect_host_pids | tr '\n' ' ')"   # re-collect; some exited
+  if [ -n "${pids// /}" ]; then
+    say "SIGKILL: $pids"
+    # shellcheck disable=SC2086
+    kill -KILL $pids 2>/dev/null || true
+  fi
+fi
+
+# Report. Containerized neoism daemons are NOT survivors — they're intentional.
 sleep 1
-survivors="$(pgrep -af neoism 2>/dev/null | grep -vw "$$" | grep -v 'neoism-nuke')"
-if [ -n "$survivors" ]; then
-  warn "still alive (likely a docker restart loop — check 'docker ps'):"
-  printf '   %s\n' "$survivors"
+host_left="$(collect_host_pids | tr '\n' ' ')"
+if [ -n "${host_left// /}" ]; then
+  warn "still alive on host: $host_left"
   exit 1
 fi
-say "clean — no neoism processes remain"
+say "host clean — no host-side neoism processes remain"
+
+container_left="$(pgrep -f neoism-workspace-daemon 2>/dev/null \
+  | while read -r p; do is_host_process "$p" || printf '%s ' "$p"; done)"
+if [ -n "${container_left// /}" ]; then
+  say "(left untouched: containerized daemon pid(s) ${container_left}— managed by their container)"
+fi
+exit 0

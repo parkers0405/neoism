@@ -864,6 +864,9 @@ fn terminate_other_neoism_processes() -> usize {
     pids.dedup();
     pids.into_iter()
         .filter(|pid| *pid != current_pid)
+        // Never signal into a container — containerized servers own their own
+        // lifecycle, even though their daemon is visible here by its host pid.
+        .filter(|pid| is_host_process(*pid))
         .filter(|pid| unsafe { libc::kill(*pid as i32, libc::SIGTERM) } == 0)
         .count()
 }
@@ -871,6 +874,34 @@ fn terminate_other_neoism_processes() -> usize {
 #[cfg(not(unix))]
 fn terminate_other_neoism_processes() -> usize {
     0
+}
+
+/// True when `pid` is a normal host process; false when it runs inside a
+/// container (Docker/Podman/containerd/lxc). Containers manage their own
+/// processes, so the updater must never signal into them — even though a
+/// container's daemon shows up (by its host pid) in `pgrep -f`.
+#[cfg(unix)]
+fn is_host_process(pid: u32) -> bool {
+    // A different PID namespace => containerized.
+    if let (Ok(ours), Ok(theirs)) = (
+        std::fs::read_link("/proc/self/ns/pid"),
+        std::fs::read_link(format!("/proc/{pid}/ns/pid")),
+    ) {
+        if ours != theirs {
+            return false;
+        }
+    }
+    // A container cgroup => containerized (covers `--pid=host` containers that
+    // share our PID namespace).
+    if let Ok(cgroup) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) {
+        if ["docker", "containerd", "libpod", "/lxc", "kubepods"]
+            .iter()
+            .any(|marker| cgroup.contains(marker))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// After the binaries are swapped and the old daemons terminated, relaunch
@@ -1035,10 +1066,7 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("Updated to {latest}.");
     println!("  • The agent server + embedded daemon relaunch when you next open Neoism.");
-    println!(
-        "  • Containerized servers are separate — rebuild with \
-         `docker compose build && docker compose up -d`."
-    );
+    println!("  • Containerized servers are left untouched — they manage their own lifecycle.");
     Ok(())
 }
 

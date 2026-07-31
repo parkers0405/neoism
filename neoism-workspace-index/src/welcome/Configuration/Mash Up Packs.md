@@ -144,17 +144,19 @@ afterwards and your choice wins:
 - **Theme** — Theme Picker (the pack never re-forces its theme on
   restart; your last pick is what persists).
 - **Shader** — the Shaders picker.
-- **Wallpaper** — set `"window": { "background-image": ... }` in
-  config.json and it beats the pack's wallpaper.
-- **Scrollbars / markdown / icons** — a `"look"` object in
+- **Wallpaper** — set `"ui": { "window": { "background-image": ... } }`
+  in config.json and it beats the pack's wallpaper.
+- **Scrollbars / markdown / icons** — an `appearance.look` object in
   `config.json` overrides the pack field-by-field:
 
 ```json
 {
-  "look": {
-    "scrollbar": { "width": 8 },
-    "markdown": { "checkbox": "modern" },
-    "icons": { "folder": { "glyph": "", "color": "#7ebae4" } }
+  "appearance": {
+    "look": {
+      "scrollbar": { "width": 8 },
+      "markdown": { "checkbox": "modern" },
+      "icons": { "folder": { "glyph": "", "color": "#7ebae4" } }
+    }
   }
 }
 ```

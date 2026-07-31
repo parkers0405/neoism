@@ -120,17 +120,33 @@ impl TerminalInputBuffer {
     /// visibly returned to a conventional shell prompt but emitted no OSC 133
     /// lifecycle at all. The cursor-row check avoids timeout guesses: quiet
     /// commands such as `sleep` remain running until an actual prompt appears.
-    pub fn finish_unintegrated_remote_command_at_prompt(&mut self, row: &str) -> bool {
+    pub fn finish_unintegrated_remote_command_at_prompt(
+        &mut self,
+        row: &str,
+        cursor_abs_row: Option<usize>,
+    ) -> bool {
         if !looks_like_shell_prompt(row) {
             return false;
         }
-        self.remote_prompt_fallback_open = true;
         let Some(block) = self.command_blocks.last_mut() else {
             return false;
         };
         if !matches!(block.status, TerminalCommandBlockStatus::Running) {
             return false;
         }
+        // Directly after Enter the terminal can still be sitting on the OLD
+        // prompt for one paint. Do not mistake that stale row for command
+        // completion. Once the PTY cursor has moved away from the submission
+        // row, a newly visible prompt is concrete evidence that even an
+        // uninstrumented remote Bash has returned to readline.
+        if block.output_start_row.is_some()
+            && block.output_start_row == cursor_abs_row
+            && Instant::now().saturating_duration_since(block.submitted_at)
+                < Duration::from_millis(150)
+        {
+            return false;
+        }
+        self.remote_prompt_fallback_open = true;
         let clear_completed = is_clear_command(&block.command);
         block.status = TerminalCommandBlockStatus::Finished { exit_code: None };
         block.finished_at = Some(Instant::now());
@@ -1319,7 +1335,13 @@ impl TerminalInputBuffer {
 }
 
 fn looks_like_shell_prompt(row: &str) -> bool {
-    let row = row.trim_end();
+    let mut row = row.trim_end();
+    // Bash paints `^C` after an interrupt and immediately redraws the prompt.
+    // Treat the prompt portion as authoritative so one interrupt also repairs
+    // an older joined shell whose lifecycle hooks were missing.
+    while let Some(prefix) = row.strip_suffix("^C") {
+        row = prefix.trim_end();
+    }
     if row.is_empty() || row.chars().count() > 512 {
         return false;
     }

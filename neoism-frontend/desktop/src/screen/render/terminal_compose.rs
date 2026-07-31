@@ -164,7 +164,7 @@ impl Screen<'_> {
                 shell_prompt_state,
                 terminal_alt_screen,
                 terminal_cursor_abs,
-                terminal_cursor_row_text,
+                terminal_prompt_rows,
             ) = {
                 let Some(terminal) = ctx.terminal.try_lock_unfair() else {
                     ctx.renderable_content.pending_update.set_dirty();
@@ -194,11 +194,15 @@ impl Screen<'_> {
                     });
                 let cursor_line = terminal.cursor().pos.row;
                 let terminal_cursor_abs = terminal.absolute_row_for_line(cursor_line);
-                let terminal_cursor_row_text = terminal.grid[cursor_line]
+                // The editable prompt glyph is always on the live cursor row,
+                // including two-line Bash themes whose cwd/status is above it.
+                // Restricting detection to this row avoids confusing an older
+                // prompt still visible above a genuinely long-running command.
+                let terminal_prompt_rows = vec![terminal.grid[cursor_line]
                     .inner
                     .iter()
                     .map(|cell| cell.c())
-                    .collect::<String>();
+                    .collect::<String>()];
                 (
                     visible_rows,
                     visible_row_sources,
@@ -211,7 +215,7 @@ impl Screen<'_> {
                     shell_prompt_state,
                     terminal_alt_screen,
                     terminal_cursor_abs,
-                    terminal_cursor_row_text,
+                    terminal_prompt_rows,
                 )
             };
             if ctx.terminal_input.sync_shell_state(shell_prompt_state) {
@@ -219,15 +223,24 @@ impl Screen<'_> {
                     ctx.splash_last_cursor_row = injection.baseline_cursor_row;
                 }
             }
-            if ctx.remote_pty.is_some() && !shell_prompt_state.awaiting_command {
-                // A partly-integrated old shell can leave CommandStart
-                // latched forever while still painting its real prompt. The
-                // prompt row is stronger evidence than that stale bit, so
-                // allow the exact-row fallback to close it as well.
-                ctx.terminal_input
-                    .finish_unintegrated_remote_command_at_prompt(
-                        &terminal_cursor_row_text,
-                    );
+            if ctx.remote_pty.is_some() {
+                // A remote Bash can deliver C/output/D/A/B in one frame, or
+                // have no OSC integration at all. In either case a real prompt
+                // near the live cursor is stronger completion evidence than a
+                // stale lifecycle bit. Do this even when `awaiting_command`
+                // is true: the fast-command case previously missed the C→D
+                // transition and left `ls` spinning forever.
+                for row in &terminal_prompt_rows {
+                    if ctx
+                        .terminal_input
+                        .finish_unintegrated_remote_command_at_prompt(
+                            row,
+                            Some(terminal_cursor_abs),
+                        )
+                    {
+                        break;
+                    }
+                }
             }
             let block_input_active = is_active
                 && ctx.markdown.is_none()

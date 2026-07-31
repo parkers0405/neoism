@@ -334,9 +334,19 @@ pub fn attach_over_ssh_with(
         // forward and the daemon share a lifetime — killing the tunnel stops
         // both. `ExitOnForwardFailure` tears everything down on a bad bind.
         command.arg(alias);
-        command.arg("neoism-workspace-daemon");
-        command.arg("--addr");
-        command.arg(format!("127.0.0.1:{}", options.remote_port));
+        // Run the daemon through the remote user's *login* shell. A bare
+        // `ssh host neoism-workspace-daemon` executes with a stripped,
+        // non-login environment: no `~/.local/bin` on PATH (so the daemon
+        // binary may not even be found) and, crucially, no usable `$SHELL`,
+        // which makes the PTYs the daemon spawns fall back to `/bin/sh` with
+        // no OSC 133 integration — so every command's block timer spins
+        // forever. `-l` restores the interactive PATH/`$SHELL`; `exec` keeps
+        // the daemon tied to this ssh session's lifetime.
+        command.arg(format!(
+            "exec \"${{SHELL:-/bin/bash}}\" -lc \
+             'neoism-workspace-daemon --addr 127.0.0.1:{}'",
+            options.remote_port
+        ));
     } else {
         // No remote command; `-N` holds the forward open and nothing else.
         command.arg("-N");

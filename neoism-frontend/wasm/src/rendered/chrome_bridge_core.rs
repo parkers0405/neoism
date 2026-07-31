@@ -109,6 +109,18 @@ impl ChromeBridge {
             .mode()
             .contains(neoism_terminal_core::crosswords::Mode::ALT_SCREEN);
         let terminal_cwd = terminal.inner.current_directory.clone();
+        // The editable prompt glyph always lands on the live cursor row.
+        // Capture it so an unintegrated remote command can be completed when
+        // a real prompt reappears: a web PTY is always daemon-backed, and the
+        // remote shell may emit no OSC 133 lifecycle at all, in which case the
+        // block's timer would otherwise spin forever.
+        let cursor_line = terminal.inner.cursor().pos.row;
+        let cursor_abs = terminal.inner.absolute_row_for_line(cursor_line);
+        let cursor_row_text: String = terminal.inner.grid[cursor_line]
+            .inner
+            .iter()
+            .map(|cell| cell.c())
+            .collect();
         let _ = terminal;
 
         if self.chrome.is_terminal_tab_active()
@@ -117,6 +129,11 @@ impl ChromeBridge {
             self.sync_terminal_status_cwd(terminal_cwd.as_deref());
         }
         self.terminal_blocks.sync_shell_state(state);
+        self.terminal_blocks
+            .finish_unintegrated_remote_command_at_prompt(
+                &cursor_row_text,
+                Some(cursor_abs),
+            );
         if state.awaiting_command {
             // First real prompt seen — submit-time logic owns
             // splash dismissal from here on.

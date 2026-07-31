@@ -252,15 +252,6 @@ impl Screen<'_> {
     }
 
     pub(crate) fn create_tab_inner(&mut self) {
-        // In a workspace OWNED BY A REMOTE SERVER (joined), a "new tab" must be
-        // a new terminal INSTANCE on that server, not a new local top-level
-        // workspace — otherwise `ls` in the new tab lists this machine's files
-        // instead of the host's. Delegate to the workspace-terminal path, which
-        // spawns the shell on the host over the remote PTY.
-        if self.context_manager.current_workspace_is_remote_joined() {
-            self.create_workspace_terminal_tab();
-            return;
-        }
         let redirect = true;
         // A new top-level workspace is LOCAL even when the current workspace
         // is adopted from a peer. Never feed the host's remote root into a

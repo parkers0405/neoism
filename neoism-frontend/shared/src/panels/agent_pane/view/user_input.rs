@@ -18,10 +18,7 @@ use super::{
 };
 use crate::panels::file_tree::FRAME_STROKE;
 use crate::primitives::ide_theme::IdeTheme;
-use crate::render_policy::{
-    loader_animation_frame, loader_orbit_position, loader_pastel_color,
-    opencode_scanner_frame, opencode_task_spinner_frame,
-};
+use crate::render_policy::opencode_scanner_frame;
 
 /// Logical height of the dropdown-chip row (agent ˅ / model ˅ /
 /// thinking ˅) rendered below the input box, inside the outer shell.
@@ -957,11 +954,11 @@ pub fn render_input(
             }
         }
     }
-    // Square send button: filled rounded square, bottom-right. The
-    // glyph is a little square — static while idle (the reference
-    // look), and while the model responds it becomes the terminal
-    // running-block loader (pastel dot orbiting a square path with a
-    // fading trail). Enter still submits — the button mirrors state.
+    // Square send button: filled rounded square, bottom-right. While the
+    // model responds it becomes a quiet static stop-square; avoid layering
+    // another activity animation here because the status row already owns
+    // the live response treatment. Enter still submits — the button mirrors
+    // state.
     let busy = !matches!(pane.streaming_state(), AgentStreamingStatus::Idle);
     let button_alpha = if busy || !pane.input().trim().is_empty() {
         1.0
@@ -980,10 +977,7 @@ pub fn render_input(
         ORDER_TEXT,
     );
     if busy {
-        // Running state: a dark stop-square with the terminal
-        // running-block loader orbiting it (same `loader_*` helpers +
-        // cadence as the block header / side-panel spinners). The
-        // orbit is sized to stay readable on the light button.
+        // Running state: a static dark stop-square.
         let center_x = send_x + send_side * 0.5;
         let center_y = send_y + send_side * 0.5;
         let square = send_side * 0.28;
@@ -998,24 +992,6 @@ pub fn render_input(
             (1.5 * s).min(square * 0.3),
             ORDER_TEXT + 1,
         );
-        let half = send_side * 0.32;
-        let dot = (send_side * 0.15).max(2.5);
-        let loader_frame = loader_animation_frame(now_seconds);
-        for (trail, alpha) in [1.0f32, 0.58, 0.32, 0.16].into_iter().enumerate() {
-            let (dx, dy) =
-                loader_orbit_position(loader_frame.phase - trail as f32 * 0.075, half);
-            sugarloaf.quad(
-                None,
-                center_x + dx - dot * 0.5,
-                center_y + dy - dot * 0.5,
-                dot,
-                dot,
-                loader_pastel_color(loader_frame.tick, trail, alpha),
-                [dot * 0.5; 4],
-                DEPTH,
-                ORDER_TEXT + 1,
-            );
-        }
     } else {
         // Idle: send arrow.
         let arrow = "\u{2191}";
@@ -1238,32 +1214,6 @@ fn theme_color_components(color: u32) -> [f32; 3] {
     ]
 }
 
-/// Paint the one-cell braille spinner OpenCode uses for running tools and
-/// background tasks. This is the indicator that belongs beside Crafting;
-/// the wider block scanner is reserved for the composer footer.
-#[allow(clippy::too_many_arguments)]
-fn draw_opencode_task_spinner(
-    sugarloaf: &mut Sugarloaf,
-    x: f32,
-    y: f32,
-    font_size: f32,
-    accent: u32,
-    elapsed_seconds: f32,
-    clip: [f32; 4],
-    occlusion_rects: &[[f32; 4]],
-) -> f32 {
-    let color = theme_color_components(accent);
-    let opts = DrawOpts {
-        font_size,
-        color: [color[0] as u8, color[1] as u8, color[2] as u8, 255],
-        clip_rect: Some(clip),
-        ..DrawOpts::default()
-    };
-    let glyph = opencode_task_spinner_frame(elapsed_seconds);
-    draw_text_clipped(sugarloaf, x, y, glyph, &opts, occlusion_rects);
-    sugarloaf.text_mut().measure(glyph, &opts)
-}
-
 /// Streaming status row rendered as the last entry of the timeline — it
 /// scrolls with the conversation content like any other message line.
 #[allow(clippy::too_many_arguments)]
@@ -1332,18 +1282,6 @@ pub fn render_streaming_status_row(
     }
     let text_clip = [clip_x, clip_y, clip_right - clip_x, clip_bottom - clip_y];
 
-    let spinner_font_size = 14.0 * s;
-    let spinner_w = draw_opencode_task_spinner(
-        sugarloaf,
-        bar_x,
-        primary_y + (status_line_h - spinner_font_size) * 0.5 - 1.0 * s,
-        spinner_font_size,
-        accent,
-        elapsed,
-        text_clip,
-        occlusion_rects,
-    );
-
     // Per-letter scramble like the terminal composer's `>>>` chevrons:
     // each character cycles through punctuation under rainbow hues until
     // its lock_threshold passes. Once locked, the word keeps a travelling
@@ -1381,7 +1319,9 @@ pub fn render_streaming_status_row(
     let word_motion = live_phase * 3.0;
     let word_drift_x = word_motion.sin() * 1.8 * s;
     let word_drift_y = (word_motion * 0.72).cos() * 0.8 * s;
-    let mut cursor_x = bar_x + spinner_w + 10.0 * s + word_drift_x;
+    // The status word owns the row from its leading edge; there is no
+    // reserved activity-glyph column beside Crafting/Thinking/etc.
+    let mut cursor_x = bar_x + word_drift_x;
     for (ix, target_ch) in chars.iter().enumerate() {
         let lock_threshold = (ix as f32 + 1.0) * lock_per_char;
         let locked = transition >= lock_threshold;
@@ -1511,11 +1451,17 @@ pub fn render_streaming_status_row(
     );
 
     if queued_count > 0 {
-        let queue_text = if queued_count == 1 {
+        let queue_label = if queued_count == 1 {
             "queued message".to_string()
         } else {
             format!("queued messages ({queued_count})")
         };
+        // Queue state is a child of the active streaming row. Keep the tree
+        // branch here even though the root Crafting/Thinking row no longer
+        // carries a leading decoration. When another child follows, use a
+        // continuing branch and let the final background row close the tree.
+        let queue_branch = if background_count > 0 { "├─" } else { "╰─" };
+        let queue_text = format!("{queue_branch} {queue_label}");
         let queue_opts = DrawOpts {
             font_size: 13.0 * s,
             color: theme.u8(theme.accent),

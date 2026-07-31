@@ -485,20 +485,3 @@ pub fn opencode_scanner_frame(
         }
     })
 }
-
-/// The compact spinner OpenCode uses beside thinking, running tools, and
-/// background tasks. It is deliberately separate from the eight-cell footer
-/// scanner above.
-pub const OPENCODE_TASK_SPINNER_FRAMES: [&str; 10] =
-    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/// Resolve the OpenCode task spinner's current braille glyph (80ms per frame).
-pub fn opencode_task_spinner_frame(elapsed_seconds: f32) -> &'static str {
-    let frame = if elapsed_seconds.is_finite() {
-        (elapsed_seconds * 12.5 + 0.0001).floor() as isize
-    } else {
-        0
-    };
-    OPENCODE_TASK_SPINNER_FRAMES
-        [frame.rem_euclid(OPENCODE_TASK_SPINNER_FRAMES.len() as isize) as usize]
-}

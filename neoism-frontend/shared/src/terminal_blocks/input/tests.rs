@@ -1081,13 +1081,19 @@ fn raw_remote_prompt_finishes_command_without_any_osc_markers() {
     let mut input = TerminalInputBuffer::default();
     input.insert_str("lss");
     input.submit_with_context(None, Some(10));
-    assert!(!input.finish_unintegrated_remote_command_at_prompt("command not found: lss"));
+    assert!(!input.finish_unintegrated_remote_command_at_prompt(
+        "command not found: lss",
+        Some(11),
+    ));
     assert_eq!(
         input.command_block_snapshots()[0].status,
         BlockStatusKind::Running
     );
 
-    assert!(input.finish_unintegrated_remote_command_at_prompt("…/Minecraft/neoism ❯   "));
+    assert!(input.finish_unintegrated_remote_command_at_prompt(
+        "…/Minecraft/neoism ❯   ",
+        Some(11),
+    ));
     assert_eq!(
         input.command_block_snapshots()[0].status,
         BlockStatusKind::Ok
@@ -1101,10 +1107,29 @@ fn remote_clear_reopens_composer_with_zero_blocks_for_splash() {
     input.insert_str("clear");
     input.submit_with_context(None, Some(10));
     input.clear_previous_blocks_for_active_command();
-    assert!(input.finish_unintegrated_remote_command_at_prompt("~/project ❯"));
+    assert!(input.finish_unintegrated_remote_command_at_prompt(
+        "~/project ❯",
+        Some(11),
+    ));
 
     assert_eq!(input.command_block_count(), 0);
     assert!(input.should_capture_input(shell_state(false, false), false, true));
+}
+
+#[test]
+fn interrupted_bash_prompt_repairs_a_stuck_remote_block() {
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("ls");
+    input.submit_with_context(None, Some(10));
+
+    assert!(input.finish_unintegrated_remote_command_at_prompt(
+        "…/Minecraft/neoism ❯ ^C   ",
+        Some(12),
+    ));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Ok
+    );
 }
 
 #[test]

@@ -755,18 +755,17 @@ impl Screen<'_> {
             match key.key_without_modifiers() {
                 Key::Character(ch) if ch.eq_ignore_ascii_case("c") => {
                     if self.context_manager.current().terminal_input.is_empty() {
-                        self.ctx_mut()
-                            .current_mut()
-                            .messenger
-                            .send_write(vec![0x03]);
+                        // This handler only runs while Neoism's composer owns
+                        // the shell prompt. With no composed text there is no
+                        // foreground process or readline buffer to interrupt;
+                        // forwarding ETX merely makes Bash paint a raw `^C`
+                        // and another prompt behind the composer. Real running
+                        // commands bypass this gate and still receive Ctrl-C
+                        // through the normal terminal input path.
                         self.context_manager
                             .current_mut()
                             .terminal_input
                             .show_interrupt_notice();
-                        self.renderer.notifications.push(
-                            "Sent Ctrl-C",
-                            neoism_ui::panels::notifications::NotificationLevel::Info,
-                        );
                     } else {
                         let input =
                             &mut self.context_manager.current_mut().terminal_input;

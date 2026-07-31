@@ -432,8 +432,62 @@ fn block_shell_for_spawn(shell: &str) -> Option<(String, Vec<String>)> {
         .and_then(|name| name.to_str())?;
     match name {
         "zsh" => block_zsh_for_spawn(shell),
+        "bash" => block_bash_for_spawn(shell),
         _ => None,
     }
+}
+
+#[cfg(not(windows))]
+fn block_bash_for_spawn(shell: &str) -> Option<(String, Vec<String>)> {
+    let dir = std::env::temp_dir().join(format!(
+        "neoism-web-shell-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&dir).ok()?;
+    let bash_rc = dir.join("bashrc");
+    let script = block_bash_script();
+    fs::write(&bash_rc, script).ok()?;
+    Some((
+        shell.to_string(),
+        vec![
+            "--rcfile".to_string(),
+            bash_rc.display().to_string(),
+            "-i".to_string(),
+        ],
+    ))
+}
+
+#[cfg(not(windows))]
+fn block_bash_script() -> &'static str {
+    r#"if [ -r "$HOME/.bashrc" ]; then
+  . "$HOME/.bashrc"
+fi
+__neoism_hidden_ps1=$'\001\033]133;A\007\002\001\033]133;B\007\002'
+__neoism_preexec() {
+  [ "${__neoism_in_prompt:-0}" = 1 ] && return
+  case "$BASH_COMMAND" in
+    __neoism_prompt_command*|PS1=*) return ;;
+  esac
+  printf '\033]133;C\007'
+}
+__neoism_prompt_command() {
+  local __neoism_status=$?
+  __neoism_in_prompt=1
+  if [ -n "${__neoism_saved_prompt_command:-}" ]; then
+    eval "$__neoism_saved_prompt_command"
+  fi
+  PS1="$__neoism_hidden_ps1"
+  __neoism_in_prompt=0
+  printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$PWD"
+  printf '\033]133;D;%d\007' "$__neoism_status"
+}
+__neoism_saved_prompt_command=${PROMPT_COMMAND:-}
+bind '"\C-p": kill-whole-line'
+PROMPT_COMMAND=__neoism_prompt_command
+PS1="$__neoism_hidden_ps1"
+trap '__neoism_preexec' DEBUG
+"#
 }
 
 #[cfg(not(windows))]
@@ -607,6 +661,17 @@ mod tests {
             .expect("precmd section");
         assert!(precmd.contains("133;D;%d"));
         assert!(precmd.contains("133;A\\007\\033]133;B"));
+    }
+
+    #[test]
+    fn bash_shells_get_full_command_lifecycle_markers() {
+        let (program, args) = block_shell_for_spawn("/bin/bash").expect("bash wrapper");
+        assert_eq!(program, "/bin/bash");
+        assert_eq!(args.first().map(String::as_str), Some("--rcfile"));
+        let script = block_bash_script();
+        assert!(script.contains("133;C"));
+        assert!(script.contains("133;D;%d"));
+        assert!(script.contains("133;A\\007\\002\\001\\033]133;B"));
     }
 
     #[test]

@@ -557,6 +557,7 @@ impl TerminalInputBuffer {
         let command =
             sanitize_history_entry(&sanitize_input_text(&std::mem::take(&mut self.text)));
         self.cursor = 0;
+        self.remote_prompt_fallback_open = false;
         self.reset_transient_edit_state();
         self.trigger_prompt_burst();
         if !command.trim().is_empty() {

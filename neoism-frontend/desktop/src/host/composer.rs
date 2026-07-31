@@ -215,6 +215,7 @@ impl Renderer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| (d.as_secs() % 10_000) as f32 + d.subsec_nanos() as f32 / 1e9)
             .unwrap_or(0.0);
+        let show_ssh_label = context_manager.current_workspace_is_remote_joined();
 
         let grid = context_manager.current_grid();
         let active_key = grid.current;
@@ -294,7 +295,7 @@ impl Renderer {
                 path_cache,
                 &theme,
             );
-            let prompt_label = ctx.remote_pty.is_some().then_some("SSH");
+            let prompt_label = show_ssh_label.then_some("SSH");
             preview.render(
                 sugarloaf,
                 pane_left,
@@ -329,6 +330,7 @@ impl Renderer {
         scale_factor: f32,
         logical_height: f32,
     ) {
+        let show_ssh_label = context_manager.current_workspace_is_remote_joined();
         // Gate: active context must be a terminal (no editor/markdown
         // surface) and not running an alt-screen TUI.
         let (
@@ -501,7 +503,7 @@ impl Renderer {
             }
         }
         let current = context_manager.current();
-        let prompt_label = current.remote_pty.is_some().then_some("SSH");
+        let prompt_label = show_ssh_label.then_some("SSH");
         let classification = classify_input(
             current.terminal_input.text(),
             cwd_path.as_deref(),

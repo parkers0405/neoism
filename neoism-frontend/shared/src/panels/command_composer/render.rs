@@ -431,7 +431,11 @@ impl CommandComposer {
         // than the UI face. Use its visual center instead of the regular
         // baseline ratio so `SSH` shares the chevrons' centerline.
         let prompt_label_y = if pixel_font.is_some() {
-            row_center_y - prompt_label_font_size * 0.30
+            // The visual midpoint measured against the chevrons: the regular
+            // cap ratio placed P2 too high, while em-box centering placed it
+            // too low. This midpoint keeps the SSH pixels on the same row as
+            // the `>>>` strokes at every UI scale.
+            row_center_y - prompt_label_font_size * 0.50
         } else {
             row_center_y - prompt_label_font_size * CAP_CENTER_RATIO
         };

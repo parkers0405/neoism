@@ -83,7 +83,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             self.prepared_remote_pty(),
         ) {
             Ok(new_context) => {
-                self.register_remote_context(&new_context);
+                self.register_remote_context_with_cwd(
+                    &new_context,
+                    cloned_config.working_dir.clone(),
+                );
                 let new_route_id = new_context.route_id;
                 if split_down {
                     self.contexts[self.current_index].split_down(new_context, sugarloaf);
@@ -239,7 +242,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             self.prepared_remote_pty(),
         ) {
             Ok(new_context) => {
-                self.register_remote_context(&new_context);
+                self.register_remote_context_with_cwd(
+                    &new_context,
+                    context_manager_config.working_dir.clone(),
+                );
                 let new_route_id = new_context.route_id;
                 if split_down {
                     self.contexts[self.current_index].split_down(new_context, sugarloaf);
@@ -889,7 +895,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             self.prepared_remote_pty(),
         ) {
             Ok(new_context) => {
-                self.register_remote_context(&new_context);
+                self.register_remote_context_with_cwd(
+                    &new_context,
+                    cloned_config.working_dir.clone(),
+                );
                 let route_id = new_context.route_id;
                 self.contexts[self.current_index].add_stacked_context_on_parent(
                     new_context,
@@ -932,7 +941,14 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             self.prepared_remote_pty(),
         ) {
             Ok(new_context) => {
-                self.register_remote_context(&new_context);
+                // Spawn the host shell in THIS workspace's root, not the
+                // window's ambient `self.config.working_dir` (which is another
+                // workspace's dir) — otherwise a new terminal in a joined
+                // workspace `ls`es the wrong directory.
+                self.register_remote_context_with_cwd(
+                    &new_context,
+                    cloned_config.working_dir.clone(),
+                );
                 let route_id = new_context.route_id;
                 self.contexts[self.current_index]
                     .add_stacked_context(new_context, sugarloaf)?;

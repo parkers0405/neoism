@@ -567,8 +567,7 @@ impl CompletionMenu {
         let pad_x = PADDING_X * self.scale;
         let kind_w = KIND_WIDTH * self.scale;
         let menu_w = MENU_WIDTH * self.scale;
-        let visible_rows = menu.items.len().min(MAX_VISIBLE_ROWS);
-        let menu_h = visible_rows as f32 * row_h;
+        let desired_rows = menu.items.len().min(MAX_VISIBLE_ROWS);
         let menu_w_total = self.menu_width(menu, font_size, kind_w, menu_w, pad_x);
 
         let mut x = anchor_x;
@@ -577,17 +576,20 @@ impl CompletionMenu {
         }
         x = x.max(EDGE_GAP);
 
-        let room_below = panel_bottom - anchor_below;
-        let mut y = if room_below < menu_h + EDGE_GAP && anchor_above > menu_h + EDGE_GAP
-        {
-            anchor_above - menu_h
-        } else {
-            anchor_below
-        };
-        if y + menu_h > usable_bottom {
-            y = (usable_bottom - menu_h).max(EDGE_GAP);
-        }
-        y = y.max(EDGE_GAP);
+        // Keep the caret row as an exclusion zone. If the requested list
+        // cannot fit on either side, prefer the roomier side and shorten the
+        // list there instead of clamping a full-height popup through the row
+        // the user is editing (VS Code's suggest-widget policy).
+        let bottom_limit = panel_bottom.min(usable_bottom);
+        let (y, visible_rows) = vertical_menu_placement(
+            anchor_above,
+            anchor_below,
+            EDGE_GAP,
+            bottom_limit,
+            desired_rows,
+            row_h,
+        )?;
+        let menu_h = visible_rows as f32 * row_h;
 
         Some((
             menu,
@@ -665,6 +667,47 @@ impl CompletionMenu {
             .max(MIN_WIDTH * self.scale)
             .min(MAX_WIDTH * self.scale)
     }
+}
+
+/// Place a completion list wholly above or below the caret row. The returned
+/// row count may be smaller than `desired_rows`; callers keep the remaining
+/// candidates reachable through the list's existing selection/scroll logic.
+fn vertical_menu_placement(
+    anchor_above: f32,
+    anchor_below: f32,
+    top_limit: f32,
+    bottom_limit: f32,
+    desired_rows: usize,
+    row_h: f32,
+) -> Option<(f32, usize)> {
+    if desired_rows == 0 || row_h <= 0.0 {
+        return None;
+    }
+
+    let room_above = (anchor_above - top_limit).max(0.0);
+    let room_below = (bottom_limit - anchor_below).max(0.0);
+    let desired_h = desired_rows as f32 * row_h;
+
+    let place_below = if room_below >= desired_h {
+        true
+    } else if room_above >= desired_h {
+        false
+    } else {
+        room_below >= room_above
+    };
+    let available = if place_below { room_below } else { room_above };
+    let visible_rows = desired_rows.min((available / row_h).floor() as usize);
+    if visible_rows == 0 {
+        return None;
+    }
+
+    let height = visible_rows as f32 * row_h;
+    let y = if place_below {
+        anchor_below
+    } else {
+        anchor_above - height
+    };
+    Some((y, visible_rows))
 }
 
 fn detail_placement(
@@ -977,5 +1020,59 @@ mod tests {
                 && line.text.contains("Formats a date")
         }));
         assert!(lines.iter().all(|line| !line.text.contains("```")));
+    }
+
+    #[test]
+    fn completion_menu_shrinks_below_without_covering_the_caret_row() {
+        let anchor_top = 180.0;
+        let anchor_bottom = 200.0;
+        let (y, rows) = vertical_menu_placement(
+            anchor_top,
+            anchor_bottom,
+            EDGE_GAP,
+            392.0,
+            MAX_VISIBLE_ROWS,
+            ROW_HEIGHT,
+        )
+        .expect("space below should hold a shortened menu");
+
+        assert_eq!(y, anchor_bottom);
+        assert_eq!(rows, 7);
+        assert!(y >= anchor_bottom);
+    }
+
+    #[test]
+    fn completion_menu_flips_and_shrinks_above_without_covering_the_caret_row() {
+        let anchor_top = 280.0;
+        let anchor_bottom = 300.0;
+        let (y, rows) = vertical_menu_placement(
+            anchor_top,
+            anchor_bottom,
+            EDGE_GAP,
+            392.0,
+            MAX_VISIBLE_ROWS,
+            ROW_HEIGHT,
+        )
+        .expect("space above should hold a shortened menu");
+
+        assert_eq!(rows, 10);
+        assert_eq!(y + rows as f32 * ROW_HEIGHT, anchor_top);
+        assert!(y + rows as f32 * ROW_HEIGHT <= anchor_top);
+    }
+
+    #[test]
+    fn completion_menu_uses_full_height_when_it_fits_below() {
+        let (y, rows) = vertical_menu_placement(
+            40.0,
+            60.0,
+            EDGE_GAP,
+            392.0,
+            MAX_VISIBLE_ROWS,
+            ROW_HEIGHT,
+        )
+        .expect("full menu should fit below");
+
+        assert_eq!(y, 60.0);
+        assert_eq!(rows, MAX_VISIBLE_ROWS);
     }
 }

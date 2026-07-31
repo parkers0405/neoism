@@ -1174,7 +1174,16 @@ fn joined_blank_prompt_finishes_command_without_osc_or_visible_prompt() {
         BlockStatusKind::Running
     );
 
-    // Blank prompt row now sits BELOW the output (cursor advanced): finish.
+    // Blank prompt row now sits BELOW the output (cursor advanced). The first
+    // observation only arms the stability anchor — a command still streaming
+    // output would move the cursor again here, so it must NOT finish yet.
+    assert!(!input.finish_unintegrated_remote_command_at_prompt("", Some(12)));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+
+    // Second identical observation (output has stopped): finish.
     assert!(input.finish_unintegrated_remote_command_at_prompt("", Some(12)));
     assert_eq!(
         input.command_block_snapshots()[0].status,

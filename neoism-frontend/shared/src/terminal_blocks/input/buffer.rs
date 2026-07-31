@@ -129,9 +129,11 @@ impl TerminalInputBuffer {
         let visible_prompt = looks_like_shell_prompt(row);
 
         let Some(block) = self.command_blocks.last_mut() else {
+            self.remote_blank_prompt_anchor = None;
             return false;
         };
         if !matches!(block.status, TerminalCommandBlockStatus::Running) {
+            self.remote_blank_prompt_anchor = None;
             return false;
         }
 
@@ -156,7 +158,20 @@ impl TerminalInputBuffer {
                 (Some(start), Some(cursor)) if cursor > start
             );
         if !visible_prompt && !blank_prompt_below_output {
+            self.remote_blank_prompt_anchor = None;
             return false;
+        }
+
+        // Blank-prompt path has no glyph to trust, so require the blank cursor
+        // row to hold the SAME position across two observations before
+        // finishing. While a command is still streaming output the cursor row
+        // advances every frame and never matches the anchor, so a long build
+        // that happens to print a blank line is not marked done early.
+        if blank_prompt_below_output && !visible_prompt {
+            if self.remote_blank_prompt_anchor != cursor_abs_row {
+                self.remote_blank_prompt_anchor = cursor_abs_row;
+                return false;
+            }
         }
 
         // Directly after Enter the terminal can still be sitting on the OLD
@@ -172,6 +187,7 @@ impl TerminalInputBuffer {
             return false;
         }
 
+        self.remote_blank_prompt_anchor = None;
         self.remote_prompt_fallback_open = true;
         let clear_completed = is_clear_command(&block.command);
         block.status = TerminalCommandBlockStatus::Finished { exit_code: None };

@@ -1174,14 +1174,18 @@ impl Renderer {
                 return None;
             }
             let line_text = code.buffer.lines.get(session.line)?;
-            let word_col = neoism_ui::editor::code::layout::display_col_for_byte(
-                line_text,
-                session.anchor_col,
-                neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
-            ) as f32;
-            let anchor_x = geometry.text_x + word_col * geometry.cell_w;
+            let (word_segment, word_col) =
+                neoism_ui::editor::code::layout::wrap_visual_position(
+                    line_text,
+                    session.anchor_col,
+                    geometry.wrap.cols(),
+                    neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
+                );
+            let visual_row = geometry.wrap.first_row_of_line(session.line) + word_segment;
+            let anchor_x =
+                geometry.text_x + word_col as f32 * geometry.cell_w - geometry.scroll_x;
             let anchor_y =
-                geometry.rect[1] + session.line as f32 * geometry.row_h - code.scroll_y;
+                geometry.rect[1] + visual_row as f32 * geometry.row_h - geometry.scroll_y;
             let pane_bottom = geometry.rect[1] + geometry.rect[3];
             let lines_below =
                 (((pane_bottom - anchor_y) / geometry.row_h).floor()).max(1.0) as u32;
@@ -1213,14 +1217,18 @@ impl Renderer {
                 return None;
             }
             let line_text = code.buffer.lines.get(session.line)?;
-            let col_cells = neoism_ui::editor::code::layout::display_col_for_byte(
-                line_text,
-                session.col,
-                neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
-            ) as f32;
-            let anchor_x = geometry.text_x + col_cells * geometry.cell_w;
+            let (col_segment, col_cells) =
+                neoism_ui::editor::code::layout::wrap_visual_position(
+                    line_text,
+                    session.col,
+                    geometry.wrap.cols(),
+                    neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
+                );
+            let visual_row = geometry.wrap.first_row_of_line(session.line) + col_segment;
+            let anchor_x =
+                geometry.text_x + col_cells as f32 * geometry.cell_w - geometry.scroll_x;
             let anchor_y =
-                geometry.rect[1] + session.line as f32 * geometry.row_h - code.scroll_y;
+                geometry.rect[1] + visual_row as f32 * geometry.row_h - geometry.scroll_y;
             let pane_bottom = geometry.rect[1] + geometry.rect[3];
             let lines_below =
                 (((pane_bottom - anchor_y) / geometry.row_h).floor()).max(1.0) as u32;

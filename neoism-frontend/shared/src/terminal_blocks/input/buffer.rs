@@ -125,27 +125,53 @@ impl TerminalInputBuffer {
         row: &str,
         cursor_abs_row: Option<usize>,
     ) -> bool {
-        if !looks_like_shell_prompt(row) {
-            return false;
-        }
+        let trimmed = row.trim_end();
+        let visible_prompt = looks_like_shell_prompt(row);
+
         let Some(block) = self.command_blocks.last_mut() else {
             return false;
         };
         if !matches!(block.status, TerminalCommandBlockStatus::Running) {
             return false;
         }
+
+        // Two ways to recognize that a remote shell with NO OSC 133
+        // lifecycle has returned to readline:
+        //   (a) a conventional prompt glyph is visible on the cursor row
+        //       (an unwrapped remote shell keeps its real PS1), or
+        //   (b) the cursor row is BLANK and the cursor has advanced strictly
+        //       below where this command's output started. This is the
+        //       JOINED-workspace case: Neoism's own daemon block-wrapper sets
+        //       `PROMPT=''`, so a joined shell that emits no OSC 133 at all
+        //       leaves only an empty prompt row — (a) can NEVER match it,
+        //       which is exactly why `ls` spun forever. A blank last row
+        //       sitting below the block's output is that shell's "prompt is
+        //       back" tell. Requiring the cursor to be strictly below
+        //       `output_start_row` keeps a silent, still-running command
+        //       (e.g. `sleep`, whose cursor never leaves the submission row)
+        //       from being marked finished early.
+        let blank_prompt_below_output = trimmed.is_empty()
+            && matches!(
+                (block.output_start_row, cursor_abs_row),
+                (Some(start), Some(cursor)) if cursor > start
+            );
+        if !visible_prompt && !blank_prompt_below_output {
+            return false;
+        }
+
         // Directly after Enter the terminal can still be sitting on the OLD
         // prompt for one paint. Do not mistake that stale row for command
-        // completion. Once the PTY cursor has moved away from the submission
-        // row, a newly visible prompt is concrete evidence that even an
-        // uninstrumented remote Bash has returned to readline.
-        if block.output_start_row.is_some()
+        // completion. (The blank-prompt path already requires the cursor to
+        // have moved below the output, so it cannot fire on the stale row.)
+        if visible_prompt
+            && block.output_start_row.is_some()
             && block.output_start_row == cursor_abs_row
             && Instant::now().saturating_duration_since(block.submitted_at)
                 < Duration::from_millis(150)
         {
             return false;
         }
+
         self.remote_prompt_fallback_open = true;
         let clear_completed = is_clear_command(&block.command);
         block.status = TerminalCommandBlockStatus::Finished { exit_code: None };
@@ -624,6 +650,18 @@ impl TerminalInputBuffer {
         cwd: Option<String>,
         output_start_row: Option<usize>,
     ) {
+        // Submitting a new command proves the previous one already handed
+        // control back to the shell (you can only submit at a prompt). On a
+        // remote/joined shell that emits no OSC 133;D, the prior block would
+        // otherwise stay Running forever — leaving a stack of spinning
+        // timers. An integrated shell already finished it, so this is a
+        // no-op there.
+        if let Some(prev) = self.command_blocks.last_mut() {
+            if matches!(prev.status, TerminalCommandBlockStatus::Running) {
+                prev.status = TerminalCommandBlockStatus::Finished { exit_code: None };
+                prev.finished_at = Some(Instant::now());
+            }
+        }
         if std::env::var_os("NEOISM_BLOCK_LOG").is_some()
             || std::env::var_os("NEOISM_SCROLL_LOG").is_some()
         {

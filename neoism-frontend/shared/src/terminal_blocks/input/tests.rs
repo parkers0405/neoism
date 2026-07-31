@@ -1156,6 +1156,53 @@ fn raw_remote_prompt_finishes_command_without_any_osc_markers() {
 }
 
 #[test]
+fn joined_blank_prompt_finishes_command_without_osc_or_visible_prompt() {
+    // Joined workspace: Neoism's daemon block-wrapper sets `PROMPT=''`, so a
+    // remote shell that emits no OSC 133 lifecycle at all leaves only an
+    // EMPTY prompt row. `looks_like_shell_prompt` can never match it, so the
+    // command block (e.g. `ls`) spun forever. A blank cursor row that has
+    // advanced strictly below the command's output is the completion tell.
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("ls");
+    input.submit_with_context(None, Some(10));
+
+    // Still on the submission row (silent / no output yet): must NOT finish —
+    // this is what keeps a running `sleep` from being marked done early.
+    assert!(!input.finish_unintegrated_remote_command_at_prompt("", Some(10)));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+
+    // Blank prompt row now sits BELOW the output (cursor advanced): finish.
+    assert!(input.finish_unintegrated_remote_command_at_prompt("", Some(12)));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Ok
+    );
+}
+
+#[test]
+fn new_command_finishes_prior_running_block_on_joined_shell() {
+    // Submitting a second command proves the first already handed control
+    // back to the shell. Without OSC 133;D the first block would otherwise
+    // stay Running forever, stacking spinning timers.
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("first");
+    input.submit_with_context(None, Some(10));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+
+    input.insert_str("second");
+    input.submit_with_context(None, Some(20));
+    let snaps = input.command_block_snapshots();
+    assert_eq!(snaps[0].status, BlockStatusKind::Ok);
+    assert_eq!(snaps[1].status, BlockStatusKind::Running);
+}
+
+#[test]
 fn remote_clear_reopens_composer_with_zero_blocks_for_splash() {
     let mut input = TerminalInputBuffer::default();
     input.insert_str("clear");

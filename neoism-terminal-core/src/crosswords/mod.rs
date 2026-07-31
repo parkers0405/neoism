@@ -5995,6 +5995,46 @@ mod tests {
     }
 
     #[test]
+    fn osc_133_shell_lifecycle_updates_prompt_state() {
+        let mut cw = new_term(20, 4);
+        let mut processor: crate::handler::Processor<crate::handler::StdSyncHandler> =
+            crate::handler::Processor::new();
+
+        processor.advance(&mut cw, b"\x1b]133;A\x07\x1b]133;B\x07");
+        assert_eq!(
+            cw.shell_prompt_state(),
+            ShellPromptState {
+                awaiting_command: true,
+                running_command: false,
+                last_exit_code: None,
+            }
+        );
+
+        processor.advance(&mut cw, b"\x1b]133;C\x07");
+        assert_eq!(
+            cw.shell_prompt_state(),
+            ShellPromptState {
+                awaiting_command: false,
+                running_command: true,
+                last_exit_code: None,
+            }
+        );
+
+        processor.advance(
+            &mut cw,
+            b"command output\r\n\x1b]133;D;exit_code=7\x07\x1b]133;A\x07\x1b]133;B\x07",
+        );
+        assert_eq!(
+            cw.shell_prompt_state(),
+            ShellPromptState {
+                awaiting_command: true,
+                running_command: false,
+                last_exit_code: Some(7),
+            }
+        );
+    }
+
+    #[test]
     fn vs16_widens_text_presentation_emoji() {
         use crate::handler::Handler;
         let mut cw = new_term(10, 3);

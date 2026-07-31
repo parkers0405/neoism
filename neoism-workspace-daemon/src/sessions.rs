@@ -369,14 +369,19 @@ fn shell_for_create(explicit_shell: Option<String>) -> (Option<String>, Vec<Stri
 
     #[cfg(not(windows))]
     {
+        // Only zsh and bash get OSC 133 block-prompt integration (see
+        // `block_shell_for_spawn`). A shell without it makes every command
+        // show as perpetually running — the block's timer never stops
+        // because no `OSC 133;D` is ever emitted. So prefer an integrable
+        // shell over `$SHELL` whenever one exists, rather than only as a
+        // last resort: a daemon launched over `ssh host cmd` runs with a
+        // stripped env where `$SHELL` is unset or points at `/bin/sh`, yet
+        // the absolute-path probes in `preferred_*` still resolve bash/zsh
+        // (they stat fixed paths, so they don't need PATH).
         let requested = explicit_shell
             .or_else(preferred_zsh)
-            .or_else(|| std::env::var("SHELL").ok())
-            // Headless daemons (containers) often have neither zsh nor
-            // SHELL. Bare `/bin/sh` gets no block-prompt integration, so
-            // every command shows as perpetually running — prefer bash
-            // when it exists.
             .or_else(preferred_bash)
+            .or_else(|| std::env::var("SHELL").ok())
             .unwrap_or_else(|| "/bin/sh".to_string());
 
         match block_shell_for_spawn(&requested) {

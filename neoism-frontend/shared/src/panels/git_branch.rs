@@ -192,6 +192,7 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn refresh_change_summary(repo_root: PathBuf) {
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(move || {
         let value = read_change_summary(&repo_root);
         if let Ok(mut cache) = change_cache().lock() {
@@ -205,8 +206,14 @@ fn refresh_change_summary(repo_root: PathBuf) {
             );
         }
     });
+    // wasm has no subprocess/thread — the git change summary is sourced from
+    // the daemon over the wire on the web frontend, so this producer is a
+    // no-op here (the reader `change_summary_for` stays cross-platform).
+    #[cfg(target_arch = "wasm32")]
+    let _ = repo_root;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn read_change_summary(repo_root: &Path) -> Option<GitChangeSummary> {
     // Tracked file line changes via numstat — same source the diff
     // panel uses, so the status pill agrees with what the panel shows.
@@ -245,6 +252,7 @@ fn read_change_summary(repo_root: &Path) -> Option<GitChangeSummary> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sum_numstat(bytes: &[u8]) -> (u64, u64) {
     let mut added = 0u64;
     let mut deleted = 0u64;
@@ -285,6 +293,7 @@ fn sum_numstat(bytes: &[u8]) -> (u64, u64) {
     (added, deleted)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn untracked_paths(bytes: &[u8]) -> Vec<String> {
     let mut paths = Vec::new();
     let mut i = 0usize;
@@ -314,6 +323,7 @@ fn untracked_paths(bytes: &[u8]) -> Vec<String> {
     paths
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn count_lines(path: &Path) -> u32 {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,

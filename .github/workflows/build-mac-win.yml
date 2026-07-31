@@ -32,24 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install macOS build deps
-        if: matrix.goos == 'darwin'
-        run: brew install glslang
-
-      # Chocolatey's glslang package no longer exists; fetch the official
-      # Khronos build from the rolling main-tot release instead.
-      - name: Install Windows build deps (glslang)
-        if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          curl.exe -fsSL -o glslang.zip https://github.com/KhronosGroup/glslang/releases/download/main-tot/glslang-master-windows-Release.zip
-          Expand-Archive glslang.zip -DestinationPath "$env:RUNNER_TEMP\glslang"
-          $exe = Get-ChildItem -Recurse -Filter glslangValidator.exe "$env:RUNNER_TEMP\glslang" | Select-Object -First 1
-          if (-not $exe) { throw "glslangValidator.exe not found in the zip" }
-          $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          "GLSLANG_VALIDATOR=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

@@ -68,11 +68,11 @@ z         center on cursor
 
 ## Customize your own
 
-There's no separate keymap file — remap in [[Configuration|config.json]] under `"bindings"`:
+There's no separate keymap file — remap in [[Configuration|config.json]] under `"keybinds"`:
 
 ```json
 {
-  "bindings": {
+  "keybinds": {
     "keys": [
       { "key": "t", "with": "super | shift", "action": "workspaceterminaltabcreatenew" }
     ]

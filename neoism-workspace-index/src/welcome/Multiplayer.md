@@ -7,7 +7,7 @@ A workspace shouldn't be trapped inside one desktop process. Neoism is built so 
 - `neoism-workspace-daemon` owns PTYs, workspace state, pairing tokens, and web/mobile sessions.
 - The web client connects over WebSocket using `neoism-protocol`.
 - Desktop and web share UI policy through `neoism-ui`, so the workspace feels consistent across devices.
-- Your display name in presence comes from the top-level `display-name` key (see [[Configuration/Configuration|Configuration]]); set `"cursor-style": "rainbow"` and collaborators see your caret sweep colors in sync.
+- Your display name in presence comes from the `presence.display-name` key (see [[Configuration/Configuration|Configuration]]); set `presence.cursor-style` to `"rainbow"` and collaborators see your caret sweep colors in sync.
 
 ## Connect another device
 

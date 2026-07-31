@@ -17,7 +17,7 @@ pub const PROJECT_METADATA_FILE: &str = "project.json";
 /// Pre-JSON vault metadata file, read once to upgrade in place.
 const PROJECT_METADATA_FILE_LEGACY: &str = "project.toml";
 const DEFAULT_NOTES_WORKSPACE_ID: &str = "neoism-notes-default-v1";
-const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v2";
+const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v3";
 
 #[derive(Debug, Clone)]
 pub struct NeoismWorkspace {
@@ -500,26 +500,45 @@ fn seed_welcome_docs(default_vault: &Path) -> std::io::Result<()> {
     }
 
     let welcome = default_vault.join(WELCOME_DIR);
-    // Older installs predate the marker. If their Welcome directory already
-    // contains anything, treat it as initialized and preserve missing pages
-    // as deliberate deletions instead of silently restoring them.
-    let existing_welcome = welcome
+    // A Welcome directory that already has content is an established vault:
+    // it was seeded by an earlier marker version. Bumping the marker means
+    // the shipped docs changed, so REFRESH each canonical page that is still
+    // present — but never resurrect one the user deleted (deletions stay
+    // deliberate), and never touch notes the user created themselves.
+    // A fresh (empty) vault gets the full set seeded.
+    let established = welcome
         .read_dir()
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false);
-    if !existing_welcome {
-        for (name, body) in WELCOME_PAGES {
-            let page = welcome.join(name);
-            if let Some(parent) = page.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            if !page.exists() {
+    for (name, body) in WELCOME_PAGES {
+        let page = welcome.join(name);
+        if let Some(parent) = page.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if established {
+            // Refresh canonical pages in place; honor deletions.
+            if page.exists() {
                 fs::write(page, body)?;
             }
+        } else if !page.exists() {
+            fs::write(page, body)?;
         }
     }
 
     fs::create_dir_all(default_vault)?;
+    // Drop stale `.neoism-welcome-seeded-v*` markers from earlier versions
+    // so the vault root isn't littered with one per release.
+    if let Ok(entries) = default_vault.read_dir() {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(".neoism-welcome-seeded-")
+                && name != WELCOME_SEEDED_MARKER
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
     fs::write(marker, b"seeded\n")?;
     Ok(())
 }
@@ -690,6 +709,33 @@ mod tests {
         fs::remove_file(&getting_started).unwrap();
         seed_welcome_docs(&root).unwrap();
         assert!(!getting_started.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn welcome_seed_refreshes_shipped_pages_on_version_bump() {
+        let root = temp_root("welcome-refresh");
+        let welcome = root.join(WELCOME_DIR);
+        fs::create_dir_all(&welcome).unwrap();
+        // Established vault seeded by an OLDER marker version: a shipped page
+        // holds stale content, and a user note the app never shipped.
+        let shipped = welcome.join("Configuration").join("Configuration.md");
+        fs::create_dir_all(shipped.parent().unwrap()).unwrap();
+        fs::write(&shipped, "STALE OLD DOC").unwrap();
+        fs::write(root.join(".neoism-welcome-seeded-v2"), b"seeded\n").unwrap();
+        let user_note = welcome.join("My Note.md");
+        fs::write(&user_note, "keep me").unwrap();
+
+        seed_welcome_docs(&root).unwrap();
+
+        // Shipped page refreshed to current content; stale marker cleaned up;
+        // the current marker written; the user's own note left untouched.
+        let refreshed = fs::read_to_string(&shipped).unwrap();
+        assert!(refreshed.contains("Settings are grouped by domain"));
+        assert!(!root.join(".neoism-welcome-seeded-v2").exists());
+        assert!(root.join(WELCOME_SEEDED_MARKER).is_file());
+        assert_eq!(fs::read_to_string(&user_note).unwrap(), "keep me");
 
         let _ = fs::remove_dir_all(root);
     }

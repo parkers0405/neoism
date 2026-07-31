@@ -981,33 +981,39 @@ impl Renderer {
                 window_size.height,
                 sugarloaf.scale_factor(),
             );
-            self.buffer_tabs.render_with_icons(
-                sugarloaf,
-                strip_left,
-                chrome_top,
-                strip_width,
-                &self.theme,
-                self.last_agent,
-                Some(&icon_provider),
-                &strip_occlusions,
-            );
+            // Skip the top-chrome text (tabs + breadcrumbs) while the
+            // full-screen Settings panel is open — sugarloaf paints glyphs
+            // in submission order over all rects, so the panel's bg can't
+            // hide this text; not drawing it is what stops the bleed.
+            if !self.settings.is_active() {
+                self.buffer_tabs.render_with_icons(
+                    sugarloaf,
+                    strip_left,
+                    chrome_top,
+                    strip_width,
+                    &self.theme,
+                    self.last_agent,
+                    Some(&icon_provider),
+                    &strip_occlusions,
+                );
 
-            // Breadcrumbs sit directly under the buffer tabs and span
-            // the editor area only (so they don't visually fight the
-            // tree).
-            let crumbs_y = if self.buffer_tabs.is_visible() {
-                chrome_top + self.buffer_tabs.height()
-            } else {
-                chrome_top
-            };
-            self.breadcrumbs.render_with_options(
-                sugarloaf,
-                strip_left,
-                crumbs_y,
-                strip_width,
-                &self.theme,
-                !input_overlay_active,
-            );
+                // Breadcrumbs sit directly under the buffer tabs and span
+                // the editor area only (so they don't visually fight the
+                // tree).
+                let crumbs_y = if self.buffer_tabs.is_visible() {
+                    chrome_top + self.buffer_tabs.height()
+                } else {
+                    chrome_top
+                };
+                self.breadcrumbs.render_with_options(
+                    sugarloaf,
+                    strip_left,
+                    crumbs_y,
+                    strip_width,
+                    &self.theme,
+                    !input_overlay_active,
+                );
+            }
 
             // Per-pane tab strips — for every secondary editor pane
             // in the active grid (anything that isn't the workspace's
@@ -1345,6 +1351,17 @@ impl Renderer {
                 );
             }
         }
+
+        // Full-screen settings overlay, below the modal so a confirm
+        // dialog opened from it still floats on top.
+        self.settings.render(
+            sugarloaf,
+            window_size.width as f32 / scale_factor,
+            window_size.height as f32 / scale_factor,
+            &self.theme,
+            self.chrome_scale,
+            None,
+        );
 
         self.modal.render(
             sugarloaf,

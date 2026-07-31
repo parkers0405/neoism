@@ -49,6 +49,7 @@ pub mod extensions_page;
 pub mod hover_popup;
 pub mod inline_diagnostics;
 pub mod lsp_popup;
+pub mod settings_page;
 pub mod tags_view;
 
 mod chrome_shim;
@@ -68,6 +69,7 @@ pub use finder::{Finder, FinderMode};
 pub use git_diff::{DiffFile, DiffHunk, DiffLine, GitDiff};
 pub use notes_sidebar::NotesSidebar;
 pub use pairings_settings::{PairingRow, PairingsSettings, PairingsSettingsAction};
+pub use settings_page::{NeoismSettingsPane, PointerOutcome, SettingsAction};
 pub use status_line::{
     DiagnosticCounts, DiagnosticPill, GitChangeSummary, LspStatus, Mode, PillRect,
     PrimaryKind, StatusInfo, StatusLine, StatusPalette, STATUS_LINE_HEIGHT,

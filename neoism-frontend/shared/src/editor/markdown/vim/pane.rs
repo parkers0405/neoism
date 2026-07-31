@@ -15,7 +15,7 @@ impl MarkdownPane {
         paste: Option<&str>,
         record: bool,
     ) -> VimApplied {
-        let applied = match action {
+        let mut applied = match action {
             VimAction::Move { motion, count } => self.vim_apply_move(*motion, *count),
             VimAction::Operate { op, target, count } => {
                 self.vim_apply_operator(*op, *target, *count)
@@ -27,7 +27,22 @@ impl MarkdownPane {
             VimAction::ToggleCase { count } => self.vim_toggle_case(*count),
             VimAction::JoinLines { count } => self.vim_join_lines(*count),
             VimAction::Paste { count, before } => {
-                self.vim_paste(paste.unwrap_or_default(), *before, *count)
+                // Prefer a pending/named register, then host clipboard paste.
+                let reg_name = self.vim.pending_register.take().unwrap_or('"');
+                let stored = self
+                    .vim
+                    .registers
+                    .get(reg_name)
+                    .map(|v| v.text.clone())
+                    .filter(|t| !t.is_empty());
+                let text = stored
+                    .or_else(|| {
+                        matches!(reg_name, '"' | '+' | '*')
+                            .then(|| paste.unwrap_or_default().to_string())
+                            .filter(|t| !t.is_empty())
+                    })
+                    .unwrap_or_default();
+                self.vim_paste(&text, *before, *count)
             }
             VimAction::Undo { count } => {
                 let mut any = false;
@@ -60,19 +75,107 @@ impl MarkdownPane {
                 }
                 VimApplied::edit()
             }
-            VimAction::EnterVisual { linewise } => {
+            VimAction::EnterVisual {
+                linewise,
+                blockwise,
+            } => {
+                // Markdown has no true block visual yet; treat block as
+                // characterwise so Ctrl-V still enters a usable selection.
+                let linewise = *linewise && !*blockwise;
                 if matches!(self.mode, MarkdownMode::Visual) {
-                    if self.vim.visual_linewise == *linewise {
+                    if self.vim.visual_linewise == linewise
+                        && self.vim.visual_block == *blockwise
+                    {
                         self.enter_normal();
+                        self.vim.visual_block = false;
                     } else {
-                        self.vim.visual_linewise = *linewise;
+                        self.vim.visual_linewise = linewise;
+                        self.vim.visual_block = *blockwise;
                     }
-                } else if *linewise {
+                } else if linewise {
                     self.enter_visual_line();
+                    self.vim.visual_block = false;
                 } else {
                     self.enter_visual();
+                    self.vim.visual_block = *blockwise;
                 }
                 VimApplied::edit()
+            }
+            VimAction::Redo { count } => {
+                let mut any = false;
+                for _ in 0..(*count).max(1) {
+                    if !self.redo() {
+                        break;
+                    }
+                    any = true;
+                }
+                VimApplied {
+                    handled: any,
+                    snap_cursor: any,
+                    ..VimApplied::default()
+                }
+            }
+            VimAction::SetMark { name } => {
+                let cursor = self.cursor_position();
+                self.vim.marks.insert(
+                    *name,
+                    VimMark {
+                        line: cursor.line,
+                        col: cursor.col,
+                    },
+                );
+                VimApplied::noop()
+            }
+            VimAction::GotoMark { name, linewise } => {
+                let Some(mark) = self.vim.marks.get(name).copied() else {
+                    return VimApplied::noop();
+                };
+                let cur = self.cursor_position();
+                self.vim.push_jump(cur.line, cur.col);
+                self.cursor_line = mark.line.min(self.lines.len().saturating_sub(1));
+                if *linewise {
+                    let line = &self.lines[self.cursor_line];
+                    self.cursor_col = line
+                        .char_indices()
+                        .find(|(_, c)| !c.is_whitespace())
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                } else {
+                    self.cursor_col = mark.col.min(self.lines[self.cursor_line].len());
+                }
+                self.clamp_cursor();
+                self.follow_cursor = true;
+                VimApplied::motion()
+            }
+            VimAction::JumpBack { count } => self.vim_jump(*count, false),
+            VimAction::JumpForward { count } => self.vim_jump(*count, true),
+            VimAction::MacroRecordToggle { name } => {
+                if let Some(reg) = name {
+                    self.vim.recording = Some(*reg);
+                    self.vim.recording_buffer.clear();
+                } else if let Some(reg) = self.vim.recording.take() {
+                    let body = std::mem::take(&mut self.vim.recording_buffer);
+                    self.vim.registers.macros.insert(reg, body);
+                }
+                VimApplied::noop()
+            }
+            VimAction::MacroPlay { name, count } => {
+                let Some(body) = self.vim.registers.macros.get(name).cloned() else {
+                    return VimApplied::noop();
+                };
+                if body.is_empty() {
+                    return VimApplied::noop();
+                }
+                self.vim.registers.last_macro = Some(*name);
+                let mut replay = String::new();
+                for _ in 0..(*count).max(1) {
+                    replay.push_str(&body);
+                }
+                VimApplied {
+                    handled: true,
+                    replay_keys: Some(replay),
+                    ..VimApplied::default()
+                }
             }
             VimAction::VisualSwapEnds => {
                 if let Some(anchor) = self.visual_anchor {
@@ -110,7 +213,54 @@ impl MarkdownPane {
         if record && applied.handled && action.is_repeatable() {
             self.vim.last_edit = Some(action.clone());
         }
+        // Commit yank/delete payloads into the register file. Hosts still
+        // own the OS clipboard; `sync_clipboard` tells them when to mirror.
+        if let Some(text) = applied.register.clone() {
+            let name = self.vim.pending_register.take().unwrap_or('"');
+            let linewise = text.ends_with('\n');
+            let is_yank = applied.yank_notification;
+            self.vim.registers.write(
+                name,
+                VimRegisterValue {
+                    text,
+                    linewise,
+                    blockwise: false,
+                },
+                is_yank,
+            );
+            applied.sync_clipboard = matches!(name, '"' | '+' | '*');
+        }
         applied
+    }
+
+    fn vim_jump(&mut self, count: usize, forward: bool) -> VimApplied {
+        let count = count.max(1);
+        if self.vim.jumplist.is_empty() {
+            return VimApplied::noop();
+        }
+        let cur = self.cursor_position();
+        if !forward
+            && self.vim.jumplist_idx + 1 == self.vim.jumplist.len()
+            && self.vim.jumplist.last().map(|m| (m.line, m.col))
+                != Some((cur.line, cur.col))
+        {
+            self.vim.push_jump(cur.line, cur.col);
+        }
+        let idx = if forward {
+            self.vim
+                .jumplist_idx
+                .saturating_add(count)
+                .min(self.vim.jumplist.len().saturating_sub(1))
+        } else {
+            self.vim.jumplist_idx.saturating_sub(count)
+        };
+        self.vim.jumplist_idx = idx;
+        let mark = self.vim.jumplist[idx];
+        self.cursor_line = mark.line.min(self.lines.len().saturating_sub(1));
+        self.cursor_col = mark.col.min(self.lines[self.cursor_line].len());
+        self.clamp_cursor();
+        self.follow_cursor = true;
+        VimApplied::motion()
     }
 
     // -- Motions ------------------------------------------------------------
@@ -973,6 +1123,9 @@ impl MarkdownPane {
         if text.is_empty() {
             return VimApplied::noop();
         }
+        if matches!(self.mode, MarkdownMode::Visual) {
+            return self.vim_paste_over_selection(&text, count);
+        }
         self.clear_vertical_goal();
         self.clamp_cursor();
         if text.ends_with('\n') {
@@ -1019,6 +1172,78 @@ impl MarkdownPane {
                 prev_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
         }
         self.follow_cursor = true;
+        VimApplied::edit()
+    }
+
+    /// Visual `p`/`P`: replace the inclusive Visual selection with the
+    /// resolved register contents as one undoable edit.
+    fn vim_paste_over_selection(&mut self, text: &str, count: usize) -> VimApplied {
+        let Some(range) = self.vim_selection_range() else {
+            return VimApplied::noop();
+        };
+        let (start, end) = match range {
+            VimOpRange::Chars { start, end } => (start, end),
+            VimOpRange::Lines { first, last } => {
+                let first = first.min(self.lines.len().saturating_sub(1));
+                let last = last.min(self.lines.len().saturating_sub(1)).max(first);
+                let end = if last + 1 < self.lines.len() {
+                    MarkdownPosition {
+                        line: last + 1,
+                        col: 0,
+                    }
+                } else {
+                    MarkdownPosition {
+                        line: last,
+                        col: self.lines[last].len(),
+                    }
+                };
+                (
+                    MarkdownPosition {
+                        line: first,
+                        col: 0,
+                    },
+                    end,
+                )
+            }
+        };
+
+        let replacement = text.repeat(count.max(1));
+        let undo_start = start.line;
+        let undo_end = end.line.saturating_add(1).min(self.lines.len());
+        let local_undo = self.save_local_undo(undo_start, undo_end);
+        self.replace_range_with(start, end, &replacement);
+
+        if replacement.ends_with('\n') {
+            self.cursor_line = start.line.min(self.lines.len().saturating_sub(1));
+            self.cursor_col = vim_first_non_blank(&self.lines[self.cursor_line]);
+        } else {
+            let newline_count = replacement.bytes().filter(|byte| *byte == b'\n').count();
+            self.cursor_line =
+                (start.line + newline_count).min(self.lines.len().saturating_sub(1));
+            let inserted_tail_len = replacement.rsplit('\n').next().unwrap_or("").len();
+            let inserted_end = if newline_count == 0 {
+                start.col.saturating_add(inserted_tail_len)
+            } else {
+                inserted_tail_len
+            };
+            self.cursor_col = if inserted_end > 0 {
+                prev_char_boundary(
+                    &self.lines[self.cursor_line],
+                    inserted_end.min(self.lines[self.cursor_line].len()),
+                )
+            } else {
+                0
+            };
+        }
+        self.enter_normal();
+        self.clear_vertical_goal();
+        self.follow_cursor = true;
+        self.rebuild_blocks();
+        let changed_end = start
+            .line
+            .saturating_add(replacement.bytes().filter(|byte| *byte == b'\n').count())
+            .saturating_add(1);
+        self.commit_local_undo(local_undo, undo_start, changed_end);
         VimApplied::edit()
     }
 

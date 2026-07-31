@@ -270,8 +270,8 @@ impl BranchActivity {
 pub const SUBAGENT_HIDE_AFTER: Duration = Duration::from_secs(7);
 
 /// Lifecycle of the session's persistent goal, mirroring the backend
-/// `goal.status` field. Drives the colored status badge rendered next
-/// to the goal text in the side panel.
+/// `goal.status` field. Drives the status shown alongside "Goal" in the
+/// side-panel section heading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum GoalStatus {
     /// The agent is actively pursuing the goal.
@@ -294,9 +294,9 @@ impl GoalStatus {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Active => "active",
-            Self::Complete => "complete",
-            Self::Blocked => "blocked",
+            Self::Active => "Active",
+            Self::Complete => "Complete",
+            Self::Blocked => "Blocked",
         }
     }
 }
@@ -697,10 +697,10 @@ impl NeoismAgentSidePanel {
     ///    event already advanced the goal; applying its stale snapshot
     ///    made the section blink active → old → active. We drop any
     ///    update that is not strictly newer than what we've shown.
-    ///  - **Completed goals go away.** Like a finished sub-agent, a
-    ///    `Complete` goal is retired from the section (active and
-    ///    blocked stay). The version still advances so a stale poll
-    ///    can't resurrect the finished goal.
+    ///  - **Completed goals retire cleanly.** A `Complete` update hides the
+    ///    finished goal while still advancing `goal_version`, so a stale
+    ///    active snapshot cannot resurrect it and a genuinely newer goal can
+    ///    replace it normally.
     ///
     /// `version == 0` means "unversioned" — a poll that found no goal.
     /// It must never clear a goal a live event just set (authoritative

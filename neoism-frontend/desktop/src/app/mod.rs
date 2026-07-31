@@ -302,9 +302,17 @@ impl Application<'_> {
                             window_id, event_loop, message,
                         );
                     }
-                    // nvim removed — remote editor surfaces are gone;
-                    // daemon Editor messages are ignored.
-                    DaemonServerMessage::Editor { .. } => {}
+                    // Native guest code panes reuse the editor envelope for
+                    // host-owned LSP snapshots/diagnostics. Grid/nvim
+                    // messages remain harmless no-ops in the screen bridge.
+                    DaemonServerMessage::Editor { message, .. } => {
+                        if let Some(route) = self.router.routes.get_mut(&window_id) {
+                            if route.window.screen.apply_remote_code_lsp_message(&message)
+                            {
+                                route.request_redraw();
+                            }
+                        }
+                    }
                     DaemonServerMessage::Pty { message, .. } => {
                         self.apply_daemon_pty_message(window_id, message);
                     }
@@ -461,20 +469,20 @@ impl Application<'_> {
             // sidecar in its state dir; fold it onto the SavedServer so a later
             // dial that finds the daemon dead can rehost it. Non-hosted /
             // remote addresses read back None and take the plain add path.
-            let added = match crate::screen::bridges::palette::read_hosted_sidecar(
-                &address,
-            ) {
-                Some(spec) => self.server_registry.add_hosted(
-                    &address,
-                    name.as_deref(),
-                    token.as_deref(),
-                    spec,
-                ),
-                None => {
-                    self.server_registry
-                        .add(&address, name.as_deref(), token.as_deref())
-                }
-            };
+            let added =
+                match crate::screen::bridges::palette::read_hosted_sidecar(&address) {
+                    Some(spec) => self.server_registry.add_hosted(
+                        &address,
+                        name.as_deref(),
+                        token.as_deref(),
+                        spec,
+                    ),
+                    None => self.server_registry.add(
+                        &address,
+                        name.as_deref(),
+                        token.as_deref(),
+                    ),
+                };
             match added {
                 Ok(server) => {
                     let token =
@@ -602,9 +610,10 @@ impl Application<'_> {
         // the session offline so it stops showing "Reconnecting", and
         // re-dial home — which replaces the guest connection and drops
         // its reconnect loop.
-        let host_ended_reason = self.router.routes.get_mut(&window_id).and_then(|route| {
-            route.window.screen.context_manager.take_host_ended_reason()
-        });
+        let host_ended_reason =
+            self.router.routes.get_mut(&window_id).and_then(|route| {
+                route.window.screen.context_manager.take_host_ended_reason()
+            });
         if let Some(reason) = host_ended_reason {
             if let Some(session) = self.window_sessions.get_mut(&window_id) {
                 session.mark_host_ended();
@@ -874,10 +883,7 @@ impl Application<'_> {
                 // Event-driven: fold the new presence into the file
                 // tree's path->peers index exactly once per change, so
                 // the per-row avatar draw never polls the store.
-                route
-                    .window
-                    .screen
-                    .rebuild_file_tree_presence_index();
+                route.window.screen.rebuild_file_tree_presence_index();
             }
             if markdown_changed || code_changed || presence_changed {
                 route.request_redraw();
@@ -1279,18 +1285,14 @@ impl Application<'_> {
         }
         let outgoing = self.window_sessions.remove(&window_id);
         let home_endpoint = self.home_daemon_endpoint.clone();
-        let switching_home =
-            home_endpoint.as_deref() == Some(connection.endpoint());
+        let switching_home = home_endpoint.as_deref() == Some(connection.endpoint());
         let (profile_id, parked_connections, pending_peer_adopt) = match outgoing {
             Some(mut old) => {
                 let profile_id = old.profile_id.clone();
                 let pending_peer_adopt = old.pending_peer_adopt.take();
                 let mut parked = std::mem::take(&mut old.parked_connections);
                 if old.connection.endpoint() != connection.endpoint() {
-                    parked.insert(
-                        old.connection.endpoint().to_string(),
-                        old.connection,
-                    );
+                    parked.insert(old.connection.endpoint().to_string(), old.connection);
                 }
                 (profile_id, parked, pending_peer_adopt)
             }

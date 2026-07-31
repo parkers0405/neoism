@@ -31,7 +31,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::AbortHandle;
 use walkdir::WalkDir;
 
-use crate::files::{resolve_path, workspace_root};
+use crate::files::resolve_path;
 
 /// Maximum number of hits any single search reply will carry. Beyond
 /// this we truncate to keep the WebSocket frame bounded.
@@ -76,6 +76,7 @@ impl SearchRegistry {
 /// or never will.
 pub fn dispatch(
     registry: &SearchRegistry,
+    workspace_root: PathBuf,
     msg: SearchClientMessage,
     tx: UnboundedSender<SearchServerMessage>,
 ) {
@@ -85,7 +86,7 @@ pub fn dispatch(
         }
         SearchClientMessage::CollectFiles { req_id, cwd } => {
             spawn_task(registry, req_id, tx.clone(), async move {
-                collect_files(req_id, cwd).await
+                collect_files(req_id, workspace_root, cwd).await
             });
         }
         SearchClientMessage::SearchFiles {
@@ -95,7 +96,7 @@ pub fn dispatch(
             mode,
         } => {
             spawn_task(registry, req_id, tx.clone(), async move {
-                search_files(req_id, query, cwd, mode).await
+                search_files(req_id, workspace_root, query, cwd, mode).await
             });
         }
         SearchClientMessage::SearchGrep {
@@ -107,17 +108,26 @@ pub fn dispatch(
             file_patterns,
         } => {
             spawn_task(registry, req_id, tx.clone(), async move {
-                search_grep(req_id, query, cwd, mode, case_sensitive, file_patterns).await
+                search_grep(
+                    req_id,
+                    workspace_root,
+                    query,
+                    cwd,
+                    mode,
+                    case_sensitive,
+                    file_patterns,
+                )
+                .await
             });
         }
         SearchClientMessage::SearchGitChanges { req_id, cwd } => {
             spawn_task(registry, req_id, tx.clone(), async move {
-                search_git_changes(req_id, cwd).await
+                search_git_changes(req_id, workspace_root, cwd).await
             });
         }
         SearchClientMessage::GitRepoRoot { req_id, cwd } => {
             spawn_task(registry, req_id, tx.clone(), async move {
-                git_repo_root(req_id, cwd).await
+                git_repo_root(req_id, workspace_root, cwd).await
             });
         }
     }
@@ -146,8 +156,12 @@ fn spawn_task<F>(
 
 /// Resolve a workspace-relative `cwd` to an absolute path or return
 /// an `Error` reply. Used at the top of every handler.
-fn resolve_cwd(req_id: RequestId, cwd: &str) -> Result<PathBuf, SearchServerMessage> {
-    let root = workspace_root();
+fn resolve_cwd(
+    req_id: RequestId,
+    workspace_root: PathBuf,
+    cwd: &str,
+) -> Result<PathBuf, SearchServerMessage> {
+    let root = workspace_root;
     let root = if root.is_absolute() {
         root
     } else {
@@ -177,8 +191,12 @@ fn resolve_cwd(req_id: RequestId, cwd: &str) -> Result<PathBuf, SearchServerMess
 // CollectFiles
 // -----------------------------------------------------------------------
 
-async fn collect_files(req_id: RequestId, cwd: String) -> SearchServerMessage {
-    let cwd_abs = match resolve_cwd(req_id, &cwd) {
+async fn collect_files(
+    req_id: RequestId,
+    workspace_root: PathBuf,
+    cwd: String,
+) -> SearchServerMessage {
+    let cwd_abs = match resolve_cwd(req_id, workspace_root, &cwd) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -261,11 +279,12 @@ fn walkdir_files(cwd: &Path) -> Vec<String> {
 
 async fn search_files(
     req_id: RequestId,
+    workspace_root: PathBuf,
     query: String,
     cwd: String,
     mode: SearchFileMode,
 ) -> SearchServerMessage {
-    let cwd_abs = match resolve_cwd(req_id, &cwd) {
+    let cwd_abs = match resolve_cwd(req_id, workspace_root, &cwd) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -387,13 +406,14 @@ fn str_find(haystack: &str, needle: &str, smart_case: bool) -> Option<usize> {
 
 async fn search_grep(
     req_id: RequestId,
+    workspace_root: PathBuf,
     query: String,
     cwd: String,
     mode: SearchGrepMode,
     case_sensitive: Option<bool>,
     file_patterns: Vec<String>,
 ) -> SearchServerMessage {
-    let cwd_abs = match resolve_cwd(req_id, &cwd) {
+    let cwd_abs = match resolve_cwd(req_id, workspace_root, &cwd) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -514,8 +534,12 @@ fn parse_rg_json_match(line: &str) -> Option<SearchGrepHit> {
 // SearchGitChanges
 // -----------------------------------------------------------------------
 
-async fn search_git_changes(req_id: RequestId, cwd: String) -> SearchServerMessage {
-    let cwd_abs = match resolve_cwd(req_id, &cwd) {
+async fn search_git_changes(
+    req_id: RequestId,
+    workspace_root: PathBuf,
+    cwd: String,
+) -> SearchServerMessage {
+    let cwd_abs = match resolve_cwd(req_id, workspace_root, &cwd) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -605,8 +629,12 @@ fn classify_xy(xy: &str) -> SearchGitStatus {
 // GitRepoRoot
 // -----------------------------------------------------------------------
 
-async fn git_repo_root(req_id: RequestId, cwd: String) -> SearchServerMessage {
-    let cwd_abs = match resolve_cwd(req_id, &cwd) {
+async fn git_repo_root(
+    req_id: RequestId,
+    workspace_root: PathBuf,
+    cwd: String,
+) -> SearchServerMessage {
+    let cwd_abs = match resolve_cwd(req_id, workspace_root, &cwd) {
         Ok(p) => p,
         Err(e) => return e,
     };

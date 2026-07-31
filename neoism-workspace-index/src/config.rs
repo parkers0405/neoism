@@ -5,15 +5,19 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const NEOISM_DIR: &str = ".neoism";
-pub const WORKSPACE_TOML: &str = "workspace.toml";
+pub const WORKSPACE_FILE: &str = "workspace.json";
+/// Pre-JSON workspace file, read once to upgrade in place.
+const WORKSPACE_FILE_LEGACY: &str = "workspace.toml";
 pub const CURRENT_WORKSPACE_CONFIG_VERSION: u32 = 5;
 pub const DEFAULT_NOTES_WORKSPACE: &str = "Default";
 pub const DEFAULT_NOTES_VAULTS_DIR: &str = "Neoism/Vaults";
 pub const DEFAULT_NOTES_INDEX: &str = "Getting Started.md";
 pub const WELCOME_DIR: &str = "Welcome";
-pub const PROJECT_METADATA_FILE: &str = "project.toml";
+pub const PROJECT_METADATA_FILE: &str = "project.json";
+/// Pre-JSON vault metadata file, read once to upgrade in place.
+const PROJECT_METADATA_FILE_LEGACY: &str = "project.toml";
 const DEFAULT_NOTES_WORKSPACE_ID: &str = "neoism-notes-default-v1";
-const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v1";
+const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v2";
 
 #[derive(Debug, Clone)]
 pub struct NeoismWorkspace {
@@ -140,7 +144,11 @@ impl NeoismWorkspace {
 }
 
 pub fn workspace_config_path(root: &Path) -> PathBuf {
-    root.join(NEOISM_DIR).join(WORKSPACE_TOML)
+    root.join(NEOISM_DIR).join(WORKSPACE_FILE)
+}
+
+fn workspace_config_path_legacy(root: &Path) -> PathBuf {
+    root.join(NEOISM_DIR).join(WORKSPACE_FILE_LEGACY)
 }
 
 pub fn load_workspace(
@@ -148,16 +156,30 @@ pub fn load_workspace(
 ) -> std::io::Result<Option<NeoismWorkspace>> {
     let root = normalize_root(root.as_ref())?;
     let path = workspace_config_path(&root);
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let source = fs::read_to_string(&path)?;
-    let mut config = toml::from_str::<WorkspaceConfig>(&source).map_err(|err| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("failed to parse {}: {err}", path.display()),
-        )
-    })?;
+    let mut config = if path.is_file() {
+        let source = fs::read_to_string(&path)?;
+        serde_json::from_str::<WorkspaceConfig>(&source).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to parse {}: {err}", path.display()),
+            )
+        })?
+    } else {
+        // One-shot upgrade: read a pre-JSON `.neoism/workspace.toml` so the
+        // workspace keeps its persistent id, then it is rewritten as JSON
+        // the next time it is saved (e.g. on init).
+        let legacy = workspace_config_path_legacy(&root);
+        if !legacy.is_file() {
+            return Ok(None);
+        }
+        let source = fs::read_to_string(&legacy)?;
+        toml::from_str::<WorkspaceConfig>(&source).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to parse {}: {err}", legacy.display()),
+            )
+        })?
+    };
     migrate_workspace_config(&mut config);
     Ok(Some(NeoismWorkspace { root, config }))
 }
@@ -168,14 +190,14 @@ pub fn init_workspace(root: impl AsRef<Path>) -> std::io::Result<NeoismWorkspace
     let neoism_dir = root.join(NEOISM_DIR);
     fs::create_dir_all(&neoism_dir)?;
 
-    let path = neoism_dir.join(WORKSPACE_TOML);
-    if path.is_file() {
-        if let Some(workspace) = load_workspace(&root)? {
-            write_workspace_config(&workspace)?;
-            ensure_note_root_dirs(&workspace)?;
-            ensure_welcome_docs(&workspace)?;
-            return Ok(workspace);
-        }
+    // Load an existing workspace (upgrading a legacy TOML file if that is
+    // all that is present) before falling back to a fresh config, so the
+    // persistent id survives the JSON switch.
+    if let Some(workspace) = load_workspace(&root)? {
+        write_workspace_config(&workspace)?;
+        ensure_note_root_dirs(&workspace)?;
+        ensure_welcome_docs(&workspace)?;
+        return Ok(workspace);
     }
 
     let config = WorkspaceConfig::new(&root);
@@ -188,7 +210,7 @@ pub fn init_workspace(root: impl AsRef<Path>) -> std::io::Result<NeoismWorkspace
 
 /// The global notes workspace used when the user has not explicitly linked
 /// the active code directory to a vault. This is intentionally virtual: it
-/// never writes a `.neoism/workspace.toml` into the process cwd (which may be
+/// never writes a `.neoism/workspace.json` into the process cwd (which may be
 /// `/` for a packaged macOS app) and has a stable identity for graph/cache
 /// paths across launches.
 pub fn default_notes_workspace() -> NeoismWorkspace {
@@ -276,7 +298,7 @@ fn migrate_workspace_config(config: &mut WorkspaceConfig) {
 
 fn write_workspace_config(workspace: &NeoismWorkspace) -> std::io::Result<()> {
     let source =
-        toml::to_string_pretty(&workspace.config).map_err(std::io::Error::other)?;
+        serde_json::to_string_pretty(&workspace.config).map_err(std::io::Error::other)?;
     fs::write(workspace_config_path(&workspace.root), source)
 }
 
@@ -295,6 +317,18 @@ pub fn link_workspace_to_vault_project(
     code_root: impl AsRef<Path>,
 ) -> std::io::Result<PathBuf> {
     link_code_dir_to_workspace_vault(workspace, code_root)
+}
+
+/// Read a vault's `project.json`, upgrading a pre-JSON `project.toml`
+/// one time if that is all that is present.
+fn read_vault_project_metadata(vault_dir: &Path) -> Option<VaultProjectMetadata> {
+    let json_path = vault_dir.join(PROJECT_METADATA_FILE);
+    if let Ok(source) = fs::read_to_string(&json_path) {
+        return serde_json::from_str::<VaultProjectMetadata>(&source).ok();
+    }
+    let legacy = vault_dir.join(PROJECT_METADATA_FILE_LEGACY);
+    let source = fs::read_to_string(&legacy).ok()?;
+    toml::from_str::<VaultProjectMetadata>(&source).ok()
 }
 
 pub fn link_code_dir_to_workspace_vault(
@@ -318,22 +352,12 @@ pub fn link_code_dir_to_workspace_vault(
         .and_then(|name| name.to_str())
         .unwrap_or(&workspace.config.name)
         .to_string();
-    let mut metadata = if metadata_path.is_file() {
-        fs::read_to_string(&metadata_path)
-            .ok()
-            .and_then(|source| toml::from_str::<VaultProjectMetadata>(&source).ok())
-            .unwrap_or_else(|| VaultProjectMetadata {
-                version: 1,
-                name: project_name.clone(),
-                links: Vec::new(),
-            })
-    } else {
-        VaultProjectMetadata {
+    let mut metadata =
+        read_vault_project_metadata(&vault_dir).unwrap_or_else(|| VaultProjectMetadata {
             version: 1,
             name: project_name.clone(),
             links: Vec::new(),
-        }
-    };
+        });
     metadata.name = project_name;
     if !metadata.links.iter().any(|linked| {
         linked
@@ -348,19 +372,17 @@ pub fn link_code_dir_to_workspace_vault(
             label,
         });
     }
-    let source = toml::to_string_pretty(&metadata).map_err(std::io::Error::other)?;
+    let source =
+        serde_json::to_string_pretty(&metadata).map_err(std::io::Error::other)?;
     fs::write(&metadata_path, source)?;
     save_workspace(workspace)?;
     Ok(vault_dir)
 }
 
-/// Project links recorded in a vault's `project.toml` — the code dirs the
+/// Project links recorded in a vault's `project.json` — the code dirs the
 /// vault's "Page Link" (`[[@`) completion should search.
 pub fn vault_project_links(vault_dir: impl AsRef<Path>) -> Vec<ProjectLink> {
-    let metadata_path = vault_dir.as_ref().join(PROJECT_METADATA_FILE);
-    fs::read_to_string(metadata_path)
-        .ok()
-        .and_then(|source| toml::from_str::<VaultProjectMetadata>(&source).ok())
+    read_vault_project_metadata(vault_dir.as_ref())
         .map(|metadata| metadata.links)
         .unwrap_or_default()
 }
@@ -378,11 +400,7 @@ pub fn linked_project_for_code_dir(
         if !vault_path.is_dir() {
             continue;
         }
-        let metadata_path = vault_path.join(PROJECT_METADATA_FILE);
-        let Ok(source) = fs::read_to_string(metadata_path) else {
-            continue;
-        };
-        let Ok(metadata) = toml::from_str::<VaultProjectMetadata>(&source) else {
+        let Some(metadata) = read_vault_project_metadata(&vault_path) else {
             continue;
         };
         if metadata.links.iter().any(|link| {
@@ -656,8 +674,8 @@ mod tests {
             workspace.notes_workspace_dir().join(PROJECT_METADATA_FILE),
         )
         .unwrap();
-        assert!(metadata.contains(&format!("name = \"{project_name}\"")));
-        assert!(metadata.contains("kind = \"dir\""));
+        assert!(metadata.contains(&format!("\"name\": \"{project_name}\"")));
+        assert!(metadata.contains("\"kind\": \"dir\""));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(notes_home);
     }

@@ -39,6 +39,8 @@ pub(crate) enum ServiceClientMessage {
     // homogeneous across families.
     Search {
         request_id: u64,
+        #[serde(default)]
+        workspace_root: Option<String>,
         message: SearchClientMessage,
     },
     Workspace {
@@ -530,10 +532,15 @@ pub(crate) async fn handle_socket(
                 continue;
             }
             fs_event = fs_watch_rx.recv() => {
-                // Files-plane liveness pump: forward debounced fs
-                // change bursts so remote file trees update live.
+                // Files-plane liveness pump: first fold externally-written
+                // open files (agent tools, shell scripts, formatters) into
+                // the SAME CRDT stream human edits use, then forward the
+                // burst so remote file trees update too.
                 match fs_event {
                     Ok(payload) => {
+                        for path in &payload.paths {
+                            crdt.reconcile_disk_path(std::path::Path::new(path));
+                        }
                         let resp = ServiceServerMessage::FilesReply {
                             request_id: 0,
                             message: FilesServerMessage::Changed {
@@ -804,18 +811,74 @@ pub(crate) async fn handle_socket(
                             }
                         };
 
-                    // Track the focused editor file so real-time diagnostics
-                    // pushes are shown only for the buffer the user is in.
-                    if let EditorClientMessage::OpenBuffer { path, .. } = &message {
-                        active_editor_file = Some(path.to_string_lossy().into_owned());
-                    }
-
                     // The embedded-nvim backend behind this envelope is gone.
                     // LSP requests are still answered by the Neoism engine
                     // where that is possible without a live buffer; grid and
                     // input messages get the standard error reply until the
                     // native editor's daemon path lands and rewires them.
                     let reply = match message {
+                        EditorClientMessage::OpenBuffer {
+                            path,
+                            text,
+                            surface_id,
+                            ..
+                        } => {
+                            let file = if path.is_absolute() {
+                                path
+                            } else {
+                                root.join(path)
+                            };
+                            let file = match file.canonicalize() {
+                                Ok(file) if file.starts_with(&root) => file,
+                                Ok(file) => {
+                                    let resp = EditorServerMessage::Error {
+                                        surface_id,
+                                        message: format!(
+                                            "editor path is outside workspace root: {}",
+                                            file.display()
+                                        ),
+                                    };
+                                    let _ = send_json(
+                                        &mut sink,
+                                        &ServiceServerMessage::EditorReply {
+                                            request_id,
+                                            message: resp,
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let resp = EditorServerMessage::Error {
+                                        surface_id,
+                                        message: format!(
+                                            "editor path cannot be resolved: {}: {error}",
+                                            file.display()
+                                        ),
+                                    };
+                                    let _ = send_json(
+                                        &mut sink,
+                                        &ServiceServerMessage::EditorReply {
+                                            request_id,
+                                            message: resp,
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            };
+                            let text = match text {
+                                Some(text) => text,
+                                None => {
+                                    std::fs::read_to_string(&file).unwrap_or_default()
+                                }
+                            };
+                            active_editor_file =
+                                Some(file.to_string_lossy().into_owned());
+                            crate::language_server::sync_buffer_snapshot(
+                                &root, &file, text, surface_id,
+                            )
+                        }
                         EditorClientMessage::LspAction {
                             action,
                             text,
@@ -915,10 +978,9 @@ pub(crate) async fn handle_socket(
                             }
                             reply
                         }
-                        // OpenBuffer / SendKeys / Command / MouseInput /
-                        // Resize drove the embedded nvim grid. The native
-                        // editor will reuse this wire; until then the client
-                        // gets the standard error shape instead of hanging.
+                        // SendKeys / Command / MouseInput / Resize drove the
+                        // embedded nvim grid. The native editor only reuses
+                        // OpenBuffer for host-owned LSP synchronization.
                         other => EditorServerMessage::Error {
                             surface_id: other.surface_id().map(str::to_owned),
                             message: "editor backend unavailable: embedded nvim was \
@@ -962,6 +1024,7 @@ pub(crate) async fn handle_socket(
                 // arm above, then hand off to the per-module handler.
                 ServiceClientMessage::Search {
                     request_id,
+                    workspace_root,
                     message,
                 } => {
                     if let Err(denial) = check_permission(&device, Permission::ReadFiles)
@@ -969,9 +1032,25 @@ pub(crate) async fn handle_socket(
                         let _ = send_json(&mut sink, &denial).await;
                         continue;
                     }
+                    let root =
+                        match resolve_request_workspace_root(workspace_root.as_deref()) {
+                            Ok(root) => root,
+                            Err(message) => {
+                                let resp = ServiceServerMessage::SearchReply {
+                                    request_id,
+                                    message: SearchServerMessage::SearchError {
+                                        req_id: request_id,
+                                        message,
+                                    },
+                                };
+                                let _ = send_json(&mut sink, &resp).await;
+                                continue;
+                            }
+                        };
                     search_request_id = request_id;
                     search_handler::dispatch(
                         &search_registry,
+                        root,
                         message,
                         search_tx.clone(),
                     );
@@ -1069,6 +1148,27 @@ pub(crate) async fn handle_socket(
                     // suppress echoes and Drop can clean up on
                     // disconnect.
                     let message = match message {
+                        CrdtClientMessage::OpenBuffer {
+                            buffer_id,
+                            initial_text,
+                        } => {
+                            // A CRDT-open file must stay live even when the
+                            // local desktop tree never uses the daemon files
+                            // plane. Watching its parent arms external agent
+                            // writes for local and hosted workspaces alike.
+                            if let Some(path) =
+                                crate::crdt::crdt_path_for_buffer_id(&buffer_id)
+                            {
+                                if let Some(parent) = std::path::Path::new(path).parent()
+                                {
+                                    crate::fs_watch::hub().ensure_watched(parent);
+                                }
+                            }
+                            CrdtClientMessage::OpenBuffer {
+                                buffer_id,
+                                initial_text,
+                            }
+                        }
                         CrdtClientMessage::PublishPresence { mut presence } => {
                             presence.updated_at_ms = presence_now_ms();
                             presence_guard.register(&presence.peer_id);

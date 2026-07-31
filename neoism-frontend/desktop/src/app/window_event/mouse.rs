@@ -187,6 +187,11 @@ impl Application<'_> {
                         return;
                     }
 
+                    if route.window.screen.handle_settings_click() {
+                        route.request_redraw();
+                        return;
+                    }
+
                     if route
                         .window
                         .screen

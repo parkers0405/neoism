@@ -103,8 +103,7 @@ fn decode_line(line: &str) -> Option<String> {
     if line.is_empty() {
         return None;
     }
-    let value =
-        serde_json::from_str::<String>(line).unwrap_or_else(|_| line.to_string());
+    let value = serde_json::from_str::<String>(line).unwrap_or_else(|_| line.to_string());
     (!value.trim().is_empty()).then_some(value)
 }
 
@@ -167,7 +166,10 @@ mod tests {
         append_to(&path, prompt);
         append_to(&path, "after");
 
-        assert_eq!(load_from(&path), vec![prompt.to_string(), "after".to_string()]);
+        assert_eq!(
+            load_from(&path),
+            vec![prompt.to_string(), "after".to_string()]
+        );
         let _ = fs::remove_file(&path);
     }
 

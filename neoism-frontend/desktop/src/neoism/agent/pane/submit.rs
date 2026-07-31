@@ -115,6 +115,37 @@ impl NeoismAgentPane {
         true
     }
 
+    /// Setting a durable goal also starts (or queues) the first turn toward
+    /// it. The goal POST has already committed before this runs, so the
+    /// server injects the new active goal into this prompt's model context.
+    pub(crate) fn start_goal_prompt(&mut self, text: String) {
+        let prompt = text.trim().to_string();
+        if prompt.is_empty() || self.is_subagent_session() {
+            return;
+        }
+        let was_streaming = self.is_streaming();
+        if !was_streaming {
+            self.messages.push(NeoismAgentMessage::user(prompt.clone()));
+            self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
+            self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+        }
+        self.abort_requested_at = None;
+        match self.send_prompt(&prompt, !was_streaming) {
+            Ok(()) if was_streaming => {
+                self.queued_prompt_count =
+                    self.queued_prompt_count.saturating_add(1).max(1);
+                self.queued_prompt_preview.get_or_insert(prompt);
+            }
+            Ok(()) => {}
+            Err(error) => {
+                self.system_message("Prompt failed", error);
+                if !was_streaming {
+                    self.note_streaming(NeoismAgentStreamingState::Idle, None);
+                }
+            }
+        }
+    }
+
     pub(crate) fn sync_input_pickers(&mut self) {
         self.sync_slash_picker();
         if self

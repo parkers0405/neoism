@@ -18,6 +18,7 @@ mod queries;
 pub(crate) use actions::{run_action, run_code_action, run_completion};
 pub(crate) use active_buffer::{
     diagnostics_event_file, diagnostics_event_message, subscribe_diagnostics,
+    sync_buffer_snapshot,
 };
 pub use live_sync::{flush_document_sync, save_document, sync_document};
 pub(crate) use queries::{completion, hover_at};

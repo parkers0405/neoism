@@ -52,7 +52,7 @@ const HEADING_HEIGHT: f32 = 28.0;
 const LINK_ROW_HEIGHT: f32 = 24.0;
 const MAX_VISIBLE_LINES: usize = 16;
 
-const DOCS_URL: &str = "neoism.com/docs/config";
+const DOCS_URL: &str = "Open Notes  (Alt+N)  →  Getting Started";
 
 // Colors
 const BACKDROP_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.35];

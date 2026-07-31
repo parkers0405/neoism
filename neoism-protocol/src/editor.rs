@@ -23,6 +23,12 @@ pub enum EditorClientMessage {
     /// to `:edit <path>` after path-traversal validation on the daemon.
     OpenBuffer {
         path: PathBuf,
+        /// Authoritative native-editor text. Desktop guests include this so
+        /// the host LSP analyzes unsaved collaborative edits instead of a
+        /// stale file read. Older/web clients omit it and the daemon reads
+        /// `path` from disk.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
         /// Optional 0-based cursor target after opening the file.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         line: Option<u32>,
@@ -769,6 +775,7 @@ mod tests {
     fn editor_client_input_resize_mouse_roundtrip() {
         roundtrip_client(&EditorClientMessage::OpenBuffer {
             path: "src/lib.rs".into(),
+            text: Some("fn shared() {}".into()),
             line: Some(10),
             character: Some(2),
             surface_id: Some("pane:7".into()),

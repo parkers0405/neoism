@@ -123,6 +123,11 @@ pub struct SugarloafFonts {
     pub features: Option<Vec<String>>,
     #[serde(default = "Option::default")]
     pub family: Option<String>,
+    /// Global base weight (100–900). When set, overrides the regular +
+    /// italic face weight so body text can be made thicker/thinner
+    /// without editing each variant. Bold keeps its own weight.
+    #[serde(default = "Option::default")]
+    pub weight: Option<u16>,
     #[serde(default = "default_font_regular")]
     pub regular: SugarloafFont,
     #[serde(default = "default_font_bold")]
@@ -158,6 +163,7 @@ impl Default for SugarloafFonts {
             hinting: true,
             size: default_font_size(),
             family: None,
+            weight: None,
             regular: default_font_regular(),
             bold: default_font_bold(),
             bold_italic: default_font_bold_italic(),

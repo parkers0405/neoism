@@ -192,6 +192,9 @@ impl<A> AgentIconProvider<A> for NoopAgentIcons<A> {
 pub struct BufferTab<A> {
     pub title: String,
     pub modified: bool,
+    /// Per-note glyph resolved from frontmatter / Notes icon overrides.
+    /// `None` uses the same `icon_for_file` table as the file tree.
+    pub custom_icon: Option<String>,
     /// Backing file path. Tabs created from a tree click carry their
     /// path so a click on the tab can re-activate the existing buffer.
     pub path: Option<PathBuf>,

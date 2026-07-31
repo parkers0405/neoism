@@ -25,7 +25,7 @@
 //! or a tab `cwd` change the live shell is dropped and a fresh one is
 //! spawned in the recorded `cwd` — `create` already takes a `cwd`, so a
 //! respawn is just another `create` followed by a re-`link`. Agents
-//! resume from serialized state. See `docs/daemon-session-model.md`.
+//! resume from serialized state.
 
 use std::fs;
 use std::path::{Path, PathBuf};

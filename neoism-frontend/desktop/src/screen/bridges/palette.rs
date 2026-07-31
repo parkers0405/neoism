@@ -1066,7 +1066,11 @@ impl Screen<'_> {
                     // and every guest lands in the host's home instead of the
                     // shared dir. Only for a workspace we OWN — never
                     // re-declare a joined one (would steal it from its owner).
-                    if self.context_manager.current_adopted_workspace_id().is_none() {
+                    if self
+                        .context_manager
+                        .current_adopted_workspace_id()
+                        .is_none()
+                    {
                         if let Some(root) = self.active_pane_workspace_root() {
                             self.context_manager
                                 .set_daemon_workspace_root(workspace_id.clone(), root);
@@ -1575,4 +1579,3 @@ pub(crate) fn read_hosted_sidecar(
         .join(HOSTED_SIDECAR_FILE);
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
-

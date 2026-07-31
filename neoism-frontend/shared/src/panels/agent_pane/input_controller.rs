@@ -809,7 +809,10 @@ mod tests {
         assert_eq!(input.input, "abcdefghijkl", "no history recall until row 0");
 
         input.move_up_with_history_visual(&rows);
-        assert_eq!(input.input, "old", "Up on the first visual row recalls history");
+        assert_eq!(
+            input.input, "old",
+            "Up on the first visual row recalls history"
+        );
     }
 
     #[test]

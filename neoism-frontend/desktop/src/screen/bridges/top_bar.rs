@@ -47,7 +47,7 @@ impl Screen<'_> {
                 true
             }
             Some(TopBarAction::OpenSettings) => {
-                self.open_settings_config_tab();
+                self.open_settings_panel();
                 true
             }
             Some(TopBarAction::OpenWorkspaces) => {
@@ -68,6 +68,14 @@ impl Screen<'_> {
             }
             Some(TopBarAction::OpenExtensions) => {
                 self.open_extensions_page();
+                true
+            }
+            Some(TopBarAction::OpenSearch) => {
+                self.open_finder_files();
+                true
+            }
+            Some(TopBarAction::OpenAbout) => {
+                self.open_about();
                 true
             }
             None => {
@@ -102,6 +110,109 @@ impl Screen<'_> {
         self.reapply_chrome_layout();
         self.renderer.trail_cursor.reset();
         self.mark_dirty();
+    }
+
+    /// Open the About modal — app name, version, and build commit.
+    pub fn open_about(&mut self) {
+        use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
+        let version = env!("CARGO_PKG_VERSION");
+        let commit = option_env!("GIT_HASH").unwrap_or("dev");
+        let body = format!(
+            "Neoism  v{version}\n\nA terminal-first workspace for code, notes,\nagents, and multiplayer editing.\n\nCommit\n{commit}"
+        );
+        self.renderer.modal.open(ModalSpec {
+            title: "About Neoism".to_string(),
+            body,
+            meta: String::new(),
+            input: None,
+            buttons: vec![ModalButton::new("OK", "Enter", ModalAction::Close)],
+            busy: false,
+            blocking: true,
+        });
+        self.mark_dirty();
+    }
+
+    /// Open the Zed-style GUI settings panel, seeded with the current
+    /// config so its controls reflect what's on disk.
+    pub fn open_settings_panel(&mut self) {
+        // Raw config value so every key (terminal + agent) is present.
+        let values = neoism_backend::config::load_config_json_value();
+        self.renderer.settings.set_values(values);
+        let families = self.sugarloaf.font_family_names();
+        self.renderer.settings.set_font_families(families);
+        self.renderer.settings.open();
+        self.mark_dirty();
+    }
+
+    /// Click router for the settings panel — persists any control change
+    /// straight to config.json (the watcher hot-reloads it live).
+    pub fn handle_settings_click(&mut self) -> bool {
+        if !self.renderer.settings.is_active() {
+            return false;
+        }
+        let (mx, my) = self.mouse_logical_for_hit_test();
+        let outcome = self.renderer.settings.pointer_down(mx, my);
+        if let Some(action) = outcome.action {
+            self.apply_settings_action(action);
+        }
+        self.mark_dirty();
+        outcome.consumed
+    }
+
+    /// Hover router for the settings panel.
+    pub fn handle_settings_hover(&mut self) -> bool {
+        if !self.renderer.settings.is_active() {
+            return false;
+        }
+        let (mx, my) = self.mouse_logical_for_hit_test();
+        self.renderer.settings.pointer_move(mx, my);
+        true
+    }
+
+    pub(crate) fn apply_settings_action(
+        &mut self,
+        action: neoism_ui::panels::SettingsAction,
+    ) {
+        use neoism_ui::panels::SettingsAction;
+        match action {
+            SettingsAction::Set { key, value } => {
+                if let Err(err) = neoism_backend::config::write_setting(key, value) {
+                    tracing::warn!(target: "neoism::config", %err, key, "settings write failed");
+                }
+            }
+            SettingsAction::SetKeybind { action, key, with } => {
+                if let Err(err) =
+                    neoism_backend::config::write_keybind(action, &key, &with)
+                {
+                    tracing::warn!(target: "neoism::config", %err, action, "keybind write failed");
+                }
+                let msg = if key.is_empty() {
+                    format!("Reset {action} to its default — restart to apply")
+                } else {
+                    format!("Rebound {action} — restart to apply")
+                };
+                self.renderer.notifications.push(
+                    msg,
+                    neoism_ui::panels::notifications::NotificationLevel::Info,
+                );
+            }
+            SettingsAction::OpenConfigFile => {
+                self.renderer.settings.close();
+                self.open_settings_config_tab();
+            }
+            SettingsAction::RunAction(action) => {
+                if action == "open-model" {
+                    // Reuse the agent pane's model + provider (connect) picker.
+                    self.renderer.settings.close();
+                    let _ = self.open_neoism_agent_tab();
+                    if let Some(agent) =
+                        self.context_manager.current_mut().neoism_agent.as_mut()
+                    {
+                        agent.open_model_picker();
+                    }
+                }
+            }
+        }
     }
 
     /// Mouse hover bridge — keeps the bar's hover highlights in sync

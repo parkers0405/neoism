@@ -241,10 +241,10 @@ pub fn packs_dir() -> PathBuf {
     config_dir_path().join("packs")
 }
 
-/// First existing spelling of a pack-relative file: `<stem>.json`,
-/// `<stem>.jsonc`, then legacy `<stem>.toml`.
+/// First existing spelling of a pack-relative file: `<stem>.json`
+/// then `<stem>.jsonc`.
 fn existing_variant(dir: &Path, stem: &str) -> Option<PathBuf> {
-    ["json", "jsonc", "toml"]
+    ["json", "jsonc"]
         .iter()
         .map(|ext| dir.join(format!("{stem}.{ext}")))
         .find(|path| path.is_file())
@@ -277,8 +277,8 @@ fn parse_theme_file(path: &Path, fallback_name: &str) -> Option<IdeThemeSpec> {
     })
 }
 
-/// Every runtime theme on disk: `ide-themes/*.toml` first, then each
-/// pack's `theme.toml` (named after the pack dir unless the file says
+/// Every runtime theme on disk: `ide-themes/*.json` first, then each
+/// pack's `theme.json` (named after the pack dir unless the file says
 /// otherwise). Unreadable files are skipped with a warning so one typo
 /// can't hide every other theme.
 pub fn load_ide_theme_specs() -> Vec<IdeThemeSpec> {
@@ -295,7 +295,7 @@ pub fn load_ide_theme_specs() -> Vec<IdeThemeSpec> {
             .map(|entry| entry.path())
             .filter(|path| {
                 path.extension()
-                    .is_some_and(|ext| ext == "json" || ext == "jsonc" || ext == "toml")
+                    .is_some_and(|ext| ext == "json" || ext == "jsonc")
             })
             .collect();
         paths.sort();

@@ -514,10 +514,16 @@ async fn turso_store_persists_sessions_and_search_falls_back_to_like() {
         .unwrap();
     let session_id = neoism_agent_core::new_session_id();
     let now = now_millis();
-    store
-        .insert_session(&store_test_session(&session_id, now))
-        .await
-        .unwrap();
+    let mut session = store_test_session(&session_id, now);
+    session.set_goal(&neoism_agent_core::SessionGoal {
+        text: "survive a Turso reopen".to_string(),
+        created: now,
+        updated: now + 1,
+        status: neoism_agent_core::GoalStatus::Complete,
+        summary: "goal state, lifecycle, and summary are durable".to_string(),
+        ..Default::default()
+    });
+    store.insert_session(&session).await.unwrap();
     for text in ["the quick brown fox jumps", "unrelated transcript entry"] {
         store
             .append_message(
@@ -533,7 +539,18 @@ async fn turso_store_persists_sessions_and_search_falls_back_to_like() {
     let store = SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
         .await
         .unwrap();
-    assert_eq!(store.list_sessions().await.unwrap().len(), 1);
+    let sessions = store.list_sessions().await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    let persisted_goal = sessions[0].goal().expect("goal persisted through Turso");
+    assert_eq!(persisted_goal.text, "survive a Turso reopen");
+    assert_eq!(
+        persisted_goal.status,
+        neoism_agent_core::GoalStatus::Complete
+    );
+    assert_eq!(
+        persisted_goal.summary,
+        "goal state, lifecycle, and summary are durable"
+    );
     assert_eq!(
         store
             .list_messages(session_id.as_str())
@@ -565,6 +582,63 @@ async fn turso_store_persists_sessions_and_search_falls_back_to_like() {
         .await
         .unwrap()
         .is_empty());
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn setting_a_new_goal_reopens_a_completed_goal() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-goal-replacement-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let now = now_millis();
+    let mut session = store_test_session(&session_id, now);
+    session.set_goal(&neoism_agent_core::SessionGoal {
+        text: "finished goal".to_string(),
+        created: now,
+        updated: now + 10,
+        status: neoism_agent_core::GoalStatus::Complete,
+        summary: "finished summary".to_string(),
+        ..Default::default()
+    });
+    state.inner.store.insert_session(&session).await.unwrap();
+
+    let response: Value = response_json(
+        app(state.clone())
+            .oneshot(request(
+                Method::POST,
+                &format!("/session/{session_id}/goal"),
+                Some(json!({ "text": "new active goal" })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response["goal"]["text"], "new active goal");
+    assert_eq!(response["goal"]["status"], "active");
+    assert!(
+        response["goal"].get("summary").is_none(),
+        "reopening a goal clears the completed summary"
+    );
+    assert!(
+        response["goal"]["updated"].as_u64().unwrap() > now + 10,
+        "replacement must advance past the completed goal's version"
+    );
+
+    let stored = state
+        .inner
+        .store
+        .get_session(session_id.as_str())
+        .await
+        .unwrap()
+        .expect("session remains stored");
+    let goal = stored.goal().expect("replacement goal is durable");
+    assert_eq!(goal.status, neoism_agent_core::GoalStatus::Active);
+    assert_eq!(goal.text, "new active goal");
+    assert!(goal.summary.is_empty());
     cleanup_sqlite_files(&path);
 }
 

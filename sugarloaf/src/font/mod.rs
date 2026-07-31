@@ -850,6 +850,15 @@ impl FontLibraryData {
             font_family_overwrite.clone_into(&mut spec.italic.family);
         }
 
+        // `fonts.weight` bumps the BASE (regular + italic) face weight so
+        // body text can be made thicker/thinner without touching each
+        // variant. Bold / bold-italic keep their own weight so emphasis
+        // still stands apart from a heavier body weight.
+        if let Some(weight_overwrite) = spec.weight {
+            spec.regular.weight = Some(weight_overwrite);
+            spec.italic.weight = Some(weight_overwrite);
+        }
+
         // On macOS we resolve fonts through CoreText (see `find_font` below)
         // and never touch `loader::Database`, so skip its construction entirely
         // — `SystemSource::new` walks the full CoreText font list on init, which

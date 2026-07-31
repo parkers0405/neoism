@@ -29,7 +29,7 @@ const NL: &str = "\r\n";
 /// rows used are computed by `adapt_layout` against the live
 /// pane height so the splash never refuses to render on a
 /// smaller terminal.
-pub const WORDMARK_RESERVE_ROWS: usize = 9;
+pub const WORDMARK_RESERVE_ROWS: usize = 5;
 /// DESIRED gap rows between wordmark and menu.
 pub const WORDMARK_TO_MENU_GAP_ROWS: usize = 2;
 /// DESIRED menu rows.

@@ -95,7 +95,7 @@ fn builtin_file_icon(label: &str, ext: &str) -> (&'static str, [u8; 4]) {
         }
         "cargo.lock" | "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml"
         | "bun.lockb" | "poetry.lock" => Some(("\u{f023}", [180, 180, 180, 255])),
-        "readme.md" | "readme" | "readme.txt" => Some(("\u{f48a}", [221, 221, 221, 255])),
+        "readme.md" | "readme" | "readme.txt" => Some(("\u{f15c}", [221, 221, 221, 255])),
         "license" | "license.md" | "license.txt" | "copying" => {
             Some(("\u{f718}", [203, 203, 65, 255]))
         }
@@ -120,7 +120,7 @@ fn builtin_file_icon(label: &str, ext: &str) -> (&'static str, [u8; 4]) {
         "json" | "jsonc" => ("\u{e60b}", [203, 203, 65, 255]),
         "yaml" | "yml" => ("\u{e6a8}", [203, 23, 30, 255]),
         "toml" => ("\u{e6b2}", [156, 65, 60, 255]),
-        "md" | "markdown" => ("\u{f48a}", [221, 221, 221, 255]),
+        "md" | "markdown" => ("\u{f15c}", [221, 221, 221, 255]),
         "ipynb" => ("\u{e606}", [245, 146, 66, 255]),
         "neodraw" => ("\u{f040}", [240, 192, 96, 255]),
         "sh" | "bash" | "zsh" | "fish" => ("\u{f489}", [136, 175, 92, 255]),

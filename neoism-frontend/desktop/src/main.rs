@@ -834,6 +834,34 @@ fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
+/// Best-effort handoff after replacing the desktop executable: every other
+/// running `neoism` process still has the old image mapped in memory, even
+/// though the path on disk now points at the new release. Terminate those
+/// stale desktop processes so the next launch is guaranteed to exec the
+/// updated binary. The updater excludes itself and deliberately does not
+/// touch workspace daemons (hosted servers must survive a desktop update).
+#[cfg(unix)]
+fn terminate_other_neoism_processes() -> usize {
+    let current_pid = std::process::id();
+    let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-x", "neoism"])
+        .output()
+    else {
+        return 0;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != current_pid)
+        .filter(|pid| unsafe { libc::kill(*pid as i32, libc::SIGTERM) } == 0)
+        .count()
+}
+
+#[cfg(not(unix))]
+fn terminate_other_neoism_processes() -> usize {
+    0
+}
+
 fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Public binaries repo (source stays private). Override with NEOISM_REPO.
     let repo =
@@ -940,7 +968,11 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
-    println!("Updated to {latest}. Restart neoism to use it.");
+    let stopped = terminate_other_neoism_processes();
+    if stopped > 0 {
+        println!("  ✓ stopped {stopped} stale Neoism process(es)");
+    }
+    println!("Updated to {latest}. Your next Neoism launch will use it.");
     Ok(())
 }
 

@@ -136,6 +136,9 @@ pub struct Renderer {
     /// `[neoism] format-on-save` — the code pane formats via LSP
     /// before each save (default true).
     pub code_format_on_save: bool,
+    /// `[neoism] vim-mode` — new code/markdown editors open with the
+    /// vim modal layer (default true). Read at editor creation.
+    pub vim_mode: bool,
     pub fps_counter: fps::FpsCounter,
     pub terminal_block_prompt_animating: bool,
     pub notebook_animating: bool,
@@ -223,6 +226,7 @@ pub struct Renderer {
     pub minimap: minimap::Minimap,
     pub yank_flash: yank_flash::YankFlash,
     pub modal: modal::UniversalModal,
+    pub settings: neoism_ui::panels::NeoismSettingsPane,
     pub git_diff_panel: git_diff_panel::GitDiffPanel,
     pub notifications: notifications::Notifications,
     /// True while the active Neoism Agent pane wants continuous frames
@@ -397,6 +401,7 @@ impl Renderer {
             trail_cursor: trail_cursor::TrailCursor::new(),
             status_fps_enabled: config.neoism.status_fps,
             code_format_on_save: config.neoism.format_on_save,
+            vim_mode: config.neoism.vim_mode,
             fps_counter: fps::FpsCounter::default(),
             terminal_block_prompt_animating: false,
             notebook_animating: false,
@@ -423,6 +428,7 @@ impl Renderer {
             minimap: minimap::Minimap::new(),
             yank_flash: yank_flash::YankFlash::new(),
             modal: modal::UniversalModal::new(),
+            settings: neoism_ui::panels::NeoismSettingsPane::new(),
             git_diff_panel: {
                 let mut p = git_diff_panel::GitDiffPanel::new();
                 git_diff_panel::install_io(&mut p);

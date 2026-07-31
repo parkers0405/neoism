@@ -77,6 +77,7 @@ impl ChromeBridge {
                 BufferTab {
                     title: t.title,
                     modified: false,
+                    custom_icon: None,
                     // A tab with no `path` (and no scratch/agent route)
                     // is treated as the root terminal — sticky, no close
                     // button. File tabs MUST carry their path so the

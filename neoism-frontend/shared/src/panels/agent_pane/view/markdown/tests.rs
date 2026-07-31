@@ -254,10 +254,7 @@ fn selectable_line_text_is_rendered_not_raw_markdown() {
     // segments (marker-free), so its character count matches the copied text
     // — the two must stay in lock-step for `slice_line_by_x` to map an x
     // range back to the right substring.
-    assert_eq!(
-        rendered.chars().count(),
-        "bold and code".chars().count()
-    );
+    assert_eq!(rendered.chars().count(), "bold and code".chars().count());
 }
 
 #[test]

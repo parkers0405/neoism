@@ -1,5 +1,5 @@
 use super::*;
-use crate::panels::agent_pane::state::side_panel::SidePanelMode;
+use crate::panels::agent_pane::state::side_panel::{GoalStatus, SidePanelMode};
 
 struct TestPane {
     side_panel: NeoismAgentSidePanel,
@@ -276,9 +276,7 @@ fn stale_goal_poll_does_not_clobber_newer_live_goal() {
 }
 
 #[test]
-fn completed_goal_is_retired_from_the_section() {
-    // A finished goal goes away like a finished sub-agent; active/blocked
-    // stay. The version still advances so a stale poll can't resurrect it.
+fn completed_goal_hides_but_a_newer_goal_still_appears() {
     let mut panel = NeoismAgentSidePanel::default();
     panel.set_session_goal(Some(goal("ship it", GoalStatus::Active, 1)), 1);
     assert!(panel.session_goal().is_some());
@@ -286,13 +284,15 @@ fn completed_goal_is_retired_from_the_section() {
     panel.set_session_goal(Some(goal("ship it", GoalStatus::Complete, 2)), 2);
     assert!(panel.session_goal().is_none(), "completed goal is hidden");
 
-    // A stale poll of the now-completed goal must not bring it back.
+    // A stale active poll cannot resurrect the completed goal.
     panel.set_session_goal(Some(goal("ship it", GoalStatus::Active, 1)), 1);
     assert!(panel.session_goal().is_none());
 
-    // A genuinely newer goal still shows.
+    // A genuinely newer goal starts cleanly after completion.
     panel.set_session_goal(Some(goal("next goal", GoalStatus::Active, 3)), 3);
-    assert_eq!(panel.session_goal().unwrap().text, "next goal");
+    let replacement = panel.session_goal().expect("newer goal appears");
+    assert_eq!(replacement.text, "next goal");
+    assert_eq!(replacement.status, GoalStatus::Active);
 }
 
 #[test]

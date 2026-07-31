@@ -38,7 +38,7 @@
 //! serialized state. So `SetCwd` only updates the durable registry +
 //! link bookkeeping here — the actual respawn is performed by whoever
 //! owns the live `SessionRegistry` (the `/session` PTY socket task),
-//! using the recorded `cwd`. See `docs/daemon-session-model.md`.
+//! using the recorded `cwd`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -1,5 +1,7 @@
 use super::*;
-use neoism_ui::panels::extensions_page::{ExtensionStatus, NeoismExtensionsPane, PaneAction};
+use neoism_ui::panels::extensions_page::{
+    ExtensionStatus, NeoismExtensionsPane, PaneAction,
+};
 use neoism_window::event::MouseButton;
 
 impl Screen<'_> {

@@ -12,6 +12,12 @@ pub type CrdtClientId = u64;
 pub type CrdtTextOffset = u32;
 pub type CrdtPresencePeerId = String;
 
+/// Reserved origin id for edits authored by the authoritative daemon
+/// (external filesystem writers, host integrations, and similar bridges).
+/// UI replicas use this to distinguish a model/tool write from an ordinary
+/// collaborator without adding a second document transport.
+pub const CRDT_DAEMON_CLIENT_ID: CrdtClientId = 9_000_000_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrdtBufferEdit {
     Insert {

@@ -7,7 +7,7 @@ use crate::mcp::McpConfig;
 use crate::session::ModelRef;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 pub struct NeoismConfig {
     #[serde(default, rename = "$schema")]
     pub schema: Option<String>,
@@ -71,11 +71,7 @@ pub struct NeoismConfig {
     /// `"deny"` rules still deny). Applied by injecting a `"*": "allow"`
     /// base rule during config normalization. Accepts the kebab-case
     /// spelling too since it co-lives with the terminal's config keys.
-    #[serde(
-        default,
-        alias = "dangerously_skip_permissions",
-        alias = "dangerously-skip-permissions"
-    )]
+    #[serde(default, alias = "dangerously_skip_permissions")]
     pub dangerously_skip_permissions: bool,
     #[serde(default)]
     pub tools: BTreeMap<String, bool>,
@@ -128,7 +124,7 @@ where
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 pub struct SkillsConfig {
     #[serde(default)]
     pub paths: Vec<String>,
@@ -137,7 +133,7 @@ pub struct SkillsConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 pub struct WatcherConfig {
     #[serde(default)]
     pub ignore: Vec<String>,
@@ -193,7 +189,7 @@ impl Default for LspConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 pub struct ExperimentalConfig {
     #[serde(default, alias = "disable_paste_summary")]
     pub disable_paste_summary: Option<bool>,
@@ -281,7 +277,7 @@ enum PluginConfigInput {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 struct PluginConfigFields {
     #[serde(default)]
     id: Option<String>,
@@ -342,7 +338,7 @@ pub struct PluginStatusInfo {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -547,9 +543,8 @@ mod tests {
     #[test]
     fn dangerous_skip_permissions_accepts_all_spellings() {
         for key in [
-            "dangerouslySkipPermissions",
-            "dangerously_skip_permissions",
             "dangerously-skip-permissions",
+            "dangerously_skip_permissions",
         ] {
             let config: NeoismConfig =
                 serde_json::from_value(json!({ key: true })).unwrap();
@@ -624,7 +619,7 @@ mod tests {
             "experimental": {
                 "disable_paste_summary": true,
                 "batch_tool": false,
-                "openTelemetry": true,
+                "open-telemetry": true,
                 "primary_tools": ["read", "grep"],
                 "future_flag": "kept"
             }

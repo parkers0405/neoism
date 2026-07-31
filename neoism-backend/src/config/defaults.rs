@@ -225,9 +225,56 @@ pub fn default_ime_cursor_positioning() -> bool {
 }
 
 pub fn default_config_file_content() -> String {
-    // Written to a fresh `config.json`. Comments are legal — the loader
-    // accepts JSONC (`//`, `/* */`, trailing commas).
+    // Written to a fresh `config.json`. The loader accepts JSONC, so the
+    // `//` comments and trailing commas below are legal. Every key is
+    // commented out — uncomment and edit what you want; anything you omit
+    // uses its default. The examples show the common knobs; the full
+    // reference lives in the in-app docs (Alt+N → Default → Getting
+    // Started → Configuration).
     String::from(
-        "// See the full configuration reference: https://neoism.com/docs/config\n{\n}\n",
+        r##"// Neoism configuration — JSONC (// comments and trailing commas are fine).
+// One file, shared by the terminal and the agent. Uncomment a key to
+// change it; omitted keys use their default. Full reference:
+// press Alt+N → Default vault → "Getting Started" → Configuration.
+{
+    // ── Appearance ─────────────────────────────────────────────────
+    // "theme": "tokyo_night",     // IDE theme: pastel_dark | nvchad_one | tokyo_night | catppuccin_mocha
+    // "palette": "lucario",       // terminal color file in themes/<name>.json
+    // "line-height": 1.2,
+    // "minimap": true,            // code-editor minimap
+    // "mashup-pack": "synth",     // active Mash Up Pack under packs/<id>
+    // "cursor-color": "#44C9F0",  // your caret colour (collaborators see it too)
+    // "cursor-style": "rainbow",  // "solid" (default) or "rainbow"
+    // "status-fps": true,         // FPS pill on the status bar
+    // "fonts": { "family": "CascadiaCode", "size": 14.0 },
+    // "cursor": { "shape": "beam", "blinking": true },
+    // "window": { "opacity": 0.95, "blur": true },
+
+    // ── Terminal ───────────────────────────────────────────────────
+    // "shell": { "program": "/bin/fish", "args": ["--login"] },
+    // "scrollback-history-limit": 10000,
+    // "copy-on-select": false,
+    // "confirm-before-quit": false,
+    // "hide-mouse-cursor-when-typing": false,
+    // "scroll": { "multiplier": 3.0 },
+    // "navigation": { "hide-if-single": true, "use-split": true },
+
+    // ── Editor ─────────────────────────────────────────────────────
+    // "format-on-save": true,     // run the LSP formatter before every save
+
+    // ── Multiplayer ────────────────────────────────────────────────
+    // "display-name": "parker",   // the name collaborators see
+
+    // ── Agent (same file; the terminal ignores these keys) ─────────
+    // "model": "anthropic/claude-opus-5",
+    // "small-model": "anthropic/claude-haiku-4-5",
+    // "reasoning-effort": "high", // low | medium | high | xhigh | max
+    // "permission": { "edit": "ask", "bash": "ask" },
+    // "mcp": { "my-server": { "type": "local", "command": ["my-mcp"] } },
+
+    // ── Developer ──────────────────────────────────────────────────
+    // "developer": { "log-level": "info", "enable-log-file": true },
+}
+"##,
     )
 }

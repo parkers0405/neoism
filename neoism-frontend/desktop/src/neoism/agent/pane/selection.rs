@@ -58,7 +58,18 @@ impl NeoismAgentPane {
     }
 
     pub fn begin_selection_at(&mut self, x: f32, y: f32) -> bool {
-        let Some(index) = self.selectable_line_at(x, y) else {
+        // The transcript is one selectable surface, not a collection of
+        // tiny glyph-only hit targets. A press in the whitespace beside a
+        // line or on a blank Markdown row anchors to the nearest registered
+        // row as long as it is inside the timeline viewport.
+        let index = self.selectable_line_at(x, y).or_else(|| {
+            self.timeline_viewport_rect
+                .filter(|[vx, vy, vw, vh]| {
+                    x >= *vx && x <= vx + vw && y >= *vy && y <= vy + vh
+                })
+                .and_then(|_| self.nearest_selectable_line(y))
+        });
+        let Some(index) = index else {
             self.selection_anchor = None;
             self.selection_focus = None;
             return false;

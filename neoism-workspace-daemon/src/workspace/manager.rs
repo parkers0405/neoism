@@ -538,7 +538,8 @@ impl WorkspaceManager {
         // otherwise keep what the workspace already declared; otherwise
         // fall back to a default. Either way the dir is created on disk and
         // root_dir is never left None — clients root their Explorer here.
-        let declared = declare_workspace_dir(root_dir.or_else(|| workspace.root_dir.clone()));
+        let declared =
+            declare_workspace_dir(root_dir.or_else(|| workspace.root_dir.clone()));
         // Advertise the host's single linked vault (if any) so a guest
         // lists this project's notes from the exact vault dir over the
         // files plane — never the host's other vaults.

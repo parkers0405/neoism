@@ -365,7 +365,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
         }
     }
 
-    // --- Active Goal ---
+    // --- Goal ---
     // The session's persistent active/blocked goal sits ABOVE branches and
     // tasks, so Alt+H immediately shows what the agent is still pursuing.
     if let Some(goal) = pane.side_panel().session_goal().cloned() {
@@ -465,10 +465,9 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     set_back_cursor_if_focused(pane, s);
 }
 
-/// Render the Goal section: a "GOAL" header, a status badge
-/// (active/complete/blocked, plus "paused" when applicable), the goal
-/// text wrapped to a few lines, and the agent's `summary` when present.
-/// Returns the `y` below the section.
+/// Render the Goal section: a "Goal - Status" header, the goal text wrapped
+/// to a few lines, and the agent's `summary` when present. Returns the `y`
+/// below the section.
 #[allow(clippy::too_many_arguments)]
 fn render_goal_section(
     sugarloaf: &mut Sugarloaf,
@@ -481,44 +480,14 @@ fn render_goal_section(
     clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    let mut y = render_section_header(
-        sugarloaf,
-        "Active Goal",
-        x,
-        y,
-        theme,
-        s,
-        clip,
-        occlusion_rects,
-    );
-
-    // Status badge — color-coded by lifecycle, mirroring the branch dots.
-    let badge_color = theme.u8(theme.readable_accent(match goal.status {
-        GoalStatus::Active => theme.accent,
-        GoalStatus::Complete => theme.green,
-        GoalStatus::Blocked => theme.red,
-    }));
-    let badge_text = if goal.paused {
-        format!("{} · paused", goal.status.label())
+    let status_label = if goal.paused {
+        "Paused"
     } else {
-        goal.status.label().to_string()
+        goal.status.label()
     };
-    let badge_opts = DrawOpts {
-        font_size: FONT_SIZE * s * 0.82,
-        color: badge_color,
-        bold: true,
-        clip_rect: Some(clip),
-        ..DrawOpts::default()
-    };
-    draw_text_with_occlusion(
-        sugarloaf,
-        x,
-        y,
-        &badge_text.to_ascii_uppercase(),
-        &badge_opts,
-        occlusion_rects,
-    );
-    y += FONT_SIZE * s * 1.5;
+    let header = format!("Goal - {status_label}");
+    let mut y =
+        render_section_header(sugarloaf, &header, x, y, theme, s, clip, occlusion_rects);
 
     // Goal text — wrapped up to 3 lines so a long goal doesn't dominate.
     let text_opts = DrawOpts {

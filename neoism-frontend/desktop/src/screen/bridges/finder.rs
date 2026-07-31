@@ -223,13 +223,13 @@ impl Screen<'_> {
     /// search); ssh-followed trees keep local finder for now (v2 gap).
     fn sync_finder_search_route(&self, cwd: &std::path::Path) {
         let route = if self.context_manager.current_workspace_is_remote_joined() {
-            self.context_manager
-                .daemon_link_handle_and_runtime()
-                .map(|(handle, runtime)| crate::host::finder_search::RemoteSearchRoute {
+            self.context_manager.daemon_link_handle_and_runtime().map(
+                |(handle, runtime)| crate::host::finder_search::RemoteSearchRoute {
                     root: cwd.to_path_buf(),
                     handle,
                     runtime,
-                })
+                },
+            )
         } else {
             None
         };

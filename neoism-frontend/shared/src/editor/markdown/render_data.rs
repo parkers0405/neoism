@@ -280,6 +280,15 @@ impl MarkdownPane {
         Some((range, elapsed.as_secs_f32() / DRAG_DROP_FLASH.as_secs_f32()))
     }
 
+    /// Reuse the block landing treatment for text that arrived outside this
+    /// pane (another CRDT peer or an external filesystem writer).
+    pub fn flash_inbound_edit(&mut self, lines: std::ops::Range<usize>) {
+        let line_count = self.lines.len().max(1);
+        let start = lines.start.min(line_count - 1);
+        let end = lines.end.max(start + 1).min(line_count);
+        self.drag_drop_flash = Some((start..end, web_time::Instant::now()));
+    }
+
     pub fn task_toggle_progress(&mut self, line: usize) -> Option<f32> {
         let started = *self.task_toggle_animations.get(&line)?;
         let elapsed = web_time::Instant::now().saturating_duration_since(started);

@@ -29,6 +29,7 @@ mod tests {
             source_revision: 1,
             pending_line_edit: None,
             mode: MarkdownMode::Normal,
+            vim_enabled: true,
             cursor_line: 0,
             cursor_col: 0,
             visual_anchor: None,

@@ -162,7 +162,14 @@ impl AvatarProfile {
     /// draw helper does) and every quad lands on a whole pixel: crisp,
     /// no fractional-pixel blend. This replaces the old `+1` overdraw,
     /// which smeared neighbouring cells into each other at small sizes.
-    pub fn cells(&self, ox: f32, oy: f32, size: f32, t: f32, mut push: impl FnMut(AvatarCell)) {
+    pub fn cells(
+        &self,
+        ox: f32,
+        oy: f32,
+        size: f32,
+        t: f32,
+        mut push: impl FnMut(AvatarCell),
+    ) {
         let grid = self.grid as f32;
         let cell = size / grid;
         for j in 0..self.grid {
@@ -305,7 +312,10 @@ mod tests {
                 assert_eq!(*v, v.round(), "cell edge not integer-aligned: {r:?}");
             }
             // No cell collapses below a pixel, and none escapes the box.
-            assert!(r[2] >= 1.0 && r[3] >= 1.0, "cell smaller than a pixel: {r:?}");
+            assert!(
+                r[2] >= 1.0 && r[3] >= 1.0,
+                "cell smaller than a pixel: {r:?}"
+            );
             assert!(
                 r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= size && r[1] + r[3] <= size,
                 "cell outside box: {r:?}"

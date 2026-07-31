@@ -10,8 +10,8 @@ use super::types::{ParsedTable, TableCursorPosition, DEPTH, ORDER_BG};
 use crate::editor::markdown::render::draw::{
     caret_height, cursor_cell_width, cursor_position_for_prefix, cursor_y_for_text_line,
     draw_block_chrome, draw_copy_button, draw_if_visible, draw_rect_clipped,
-    draw_rounded_rect_clipped, floor_char_boundary, intersect_rect, line_height,
-    markdown_font, md_font_id, point_in_rect, wrap_lines,
+    draw_rounded_rect_clipped, draw_text_range_highlight, floor_char_boundary,
+    intersect_rect, line_height, markdown_font, md_font_id, point_in_rect, wrap_lines,
 };
 use crate::editor::markdown::render::inline::{
     clean_inline_with_active_link, draw_inline_links_for_line,
@@ -269,23 +269,39 @@ pub(super) fn render_table_with_source_base(
         sugarloaf,
         pane,
         start_line,
-        content_x,
+        source_lines
+            .get(start_line.saturating_sub(source_base_line))
+            .map(String::as_str)
+            .unwrap_or(""),
+        &table.header,
+        &col_widths,
+        content_x - scroll_x,
         row_y,
-        content_w,
         header_row_h,
+        &header_opts,
         theme,
-        pane_clip,
+        table_clip,
+        clip_top,
+        clip_bottom,
     );
     draw_table_selection_row(
         sugarloaf,
         pane,
         start_line,
-        content_x,
+        source_lines
+            .get(start_line.saturating_sub(source_base_line))
+            .map(String::as_str)
+            .unwrap_or(""),
+        &table.header,
+        &col_widths,
+        content_x - scroll_x,
         row_y,
-        content_w,
         header_row_h,
+        &header_opts,
         theme,
-        pane_clip,
+        table_clip,
+        clip_top,
+        clip_bottom,
     );
     render_table_row(
         sugarloaf,
@@ -377,23 +393,39 @@ pub(super) fn render_table_with_source_base(
             sugarloaf,
             pane,
             source_line,
-            content_x,
+            source_lines
+                .get(source_line.saturating_sub(source_base_line))
+                .map(String::as_str)
+                .unwrap_or(""),
+            row,
+            &col_widths,
+            content_x - scroll_x,
             row_y,
-            content_w,
             row_h,
+            &body_opts,
             theme,
-            pane_clip,
+            table_clip,
+            clip_top,
+            clip_bottom,
         );
         draw_table_selection_row(
             sugarloaf,
             pane,
             source_line,
-            content_x,
+            source_lines
+                .get(source_line.saturating_sub(source_base_line))
+                .map(String::as_str)
+                .unwrap_or(""),
+            row,
+            &col_widths,
+            content_x - scroll_x,
             row_y,
-            content_w,
             row_h,
+            &body_opts,
             theme,
-            pane_clip,
+            table_clip,
+            clip_top,
+            clip_bottom,
         );
         pane.register_block_rect(
             source_line,
@@ -720,23 +752,34 @@ pub(super) fn draw_table_selection_row(
     sugarloaf: &mut Sugarloaf,
     pane: &MarkdownPane,
     line_ix: usize,
+    source_line: &str,
+    row: &[String],
+    col_widths: &[f32],
     x: f32,
     y: f32,
-    w: f32,
     h: f32,
+    opts: &DrawOpts,
     theme: &IdeTheme,
     clip: [f32; 4],
+    clip_top: f32,
+    clip_bottom: f32,
 ) {
-    if pane.selection_for_line(line_ix).is_some() {
-        draw_rect_clipped(
+    if let Some((raw_start, raw_end)) = pane.selection_for_line(line_ix) {
+        draw_table_text_range_highlight(
             sugarloaf,
-            clip,
+            source_line,
+            row,
+            col_widths,
+            raw_start,
+            raw_end,
             x,
-            y + 2.0,
-            w,
-            (h - 4.0).max(8.0),
+            y,
+            h,
+            opts,
             theme.f32_alpha(theme.accent, 0.22),
-            DEPTH,
+            clip,
+            clip_top,
+            clip_bottom,
             ORDER_BG + 3,
         );
     }
@@ -747,28 +790,103 @@ pub(super) fn draw_table_yank_flash_row(
     sugarloaf: &mut Sugarloaf,
     pane: &MarkdownPane,
     line_ix: usize,
+    source_line: &str,
+    row: &[String],
+    col_widths: &[f32],
     x: f32,
     y: f32,
-    w: f32,
     h: f32,
+    opts: &DrawOpts,
     theme: &IdeTheme,
     clip: [f32; 4],
+    clip_top: f32,
+    clip_bottom: f32,
 ) {
-    if let Some((_, _, alpha)) = pane.yank_flash_for_line(line_ix) {
+    if let Some((raw_start, raw_end, alpha)) = pane.yank_flash_for_line(line_ix) {
         if alpha <= 0.001 {
             return;
         }
-        draw_rect_clipped(
+        draw_table_text_range_highlight(
             sugarloaf,
-            clip,
+            source_line,
+            row,
+            col_widths,
+            raw_start,
+            raw_end,
             x,
-            y + 2.0,
-            w,
-            (h - 4.0).max(8.0),
+            y,
+            h,
+            opts,
             theme.f32_alpha(theme.yellow, alpha),
-            DEPTH,
+            clip,
+            clip_top,
+            clip_bottom,
             ORDER_BG + 4,
         );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_table_text_range_highlight(
+    sugarloaf: &mut Sugarloaf,
+    source_line: &str,
+    row: &[String],
+    col_widths: &[f32],
+    raw_start: usize,
+    raw_end: usize,
+    x: f32,
+    y: f32,
+    row_h: f32,
+    opts: &DrawOpts,
+    color: [f32; 4],
+    clip: [f32; 4],
+    clip_top: f32,
+    clip_bottom: f32,
+    order: u8,
+) {
+    let Some(bounds) = parse_table_cell_bounds(source_line) else {
+        return;
+    };
+    let line_h = line_height(opts);
+    let mut cell_x = x;
+    for (ix, width) in col_widths.iter().enumerate() {
+        let Some(cell_bounds) = bounds.get(ix) else {
+            break;
+        };
+        let Some(cell) = row.get(ix) else {
+            cell_x += *width;
+            continue;
+        };
+        let start = raw_start
+            .max(cell_bounds.content_start)
+            .min(cell_bounds.content_end);
+        let end = raw_end
+            .max(cell_bounds.content_start)
+            .min(cell_bounds.content_end);
+        if start < end {
+            let wrap_width = (*width - 28.0).max(48.0);
+            let wrapped = wrap_lines(sugarloaf, cell, wrap_width, opts);
+            let text_h = line_h * wrapped.len().max(1) as f32;
+            let text_y = y + ((row_h - text_h) * 0.5).max(7.0);
+            draw_text_range_highlight(
+                sugarloaf,
+                cell,
+                start - cell_bounds.content_start,
+                end - cell_bounds.content_start,
+                cell_x + 16.0,
+                text_y,
+                0,
+                line_h,
+                wrap_width,
+                opts,
+                color,
+                clip,
+                clip_top,
+                clip_bottom,
+                order,
+            );
+        }
+        cell_x += *width;
     }
 }
 

@@ -10,8 +10,6 @@
 //! event and service vocabulary. Panel implementations themselves
 //! still live under `frontends/neoism/src/chrome/` and will be lifted
 //! in a follow-up phase.
-//!
-//! See `docs/NEOISM_UI_DESIGN.md` for the full design.
 
 pub mod animation;
 pub mod chrome;

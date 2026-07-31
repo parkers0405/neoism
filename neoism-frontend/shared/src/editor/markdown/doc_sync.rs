@@ -29,6 +29,7 @@
 use crate::editor::crdt::{
     CrdtTextBuffer, CrdtTextBufferError, CrdtTextEdit, CrdtTextUpdate,
 };
+use neoism_protocol::crdt::CRDT_DAEMON_CLIENT_ID;
 
 use super::helpers::{floor_char_boundary, source_from_lines};
 use super::types::{MarkdownPane, MarkdownPendingLineEdit, MarkdownPosition};
@@ -287,6 +288,11 @@ impl MarkdownDocBinding {
         }
         self.shadow = pane.lines.clone();
         self.seeded = true;
+        // A freshly-seeded pane reflects the daemon's on-disk text, so it
+        // must not read as modified — otherwise a trailing-newline
+        // normalization at seed time made the tab show unsaved on the next
+        // keystroke (e.g. `a`). Mirrors the code pane's seed fix.
+        pane.mark_saved();
         Ok(changed)
     }
 
@@ -369,7 +375,17 @@ impl MarkdownDocBinding {
                 changed: false,
             });
         };
+        // Model/filesystem writes arrive with the daemon origin. Transform
+        // the local caret through them, but disarm caret-follow first: a
+        // whole-file replacement otherwise moves the caret into the changed
+        // span and the virtual renderer pulls the user's viewport there.
+        if origin_client_id == CRDT_DAEMON_CLIENT_ID {
+            pane.follow_cursor = false;
+        }
         apply_remote_delta_to_pane(pane, &delta);
+        if origin_client_id == CRDT_DAEMON_CLIENT_ID {
+            flash_inbound_delta(pane, &delta);
+        }
         apply_delta_to_lines(&mut self.shadow, &delta);
         debug_assert_eq!(lines_to_text(&self.shadow), self.replica.text());
         Ok(MarkdownRemoteApply {
@@ -512,6 +528,15 @@ pub fn apply_remote_delta_to_pane(pane: &mut MarkdownPane, delta: &MarkdownTextD
     // already diverged the buffer, so `is_dirty()` now reads true. (A
     // CRDT save lands via `mark_saved`, which re-anchors the baseline.)
     pane.rebuild_blocks();
+}
+
+fn flash_inbound_delta(pane: &mut MarkdownPane, delta: &MarkdownTextDelta) {
+    let changed_first_line = doc_byte_to_position(&pane.lines, delta.byte_start).0;
+    let changed_last_exclusive = changed_first_line
+        .saturating_add(delta.inserted.matches('\n').count())
+        .saturating_add(1)
+        .min(pane.lines.len());
+    pane.flash_inbound_edit(changed_first_line..changed_last_exclusive);
 }
 
 #[cfg(test)]
@@ -764,8 +789,58 @@ mod tests {
         b.apply_remote(update.origin_client_id, &update.update_v1, &mut pane_b)
             .unwrap();
         assert!(
+            pane_b.drag_drop_flash_progress().is_none(),
+            "ordinary collaborator edits keep their existing live treatment"
+        );
+        assert!(
             b.flush_local(&pane_b).is_none(),
             "remote-applied change re-emitted as a local op (echo loop)"
+        );
+    }
+
+    #[test]
+    fn daemon_authored_edit_gets_inbound_landing_flash() {
+        let authority = CrdtTextBuffer::with_text(CRDT_DAEMON_CLIENT_ID, "base");
+        let seed = authority.encode_full_update_v1();
+        let mut binding = MarkdownDocBinding::new(42, "file:///notes/shared.md");
+        let mut pane = pane("base");
+        binding.seed_from_snapshot(&seed, &mut pane).unwrap();
+        pane.follow_cursor = true;
+        pane.scroll_y = 180.0;
+        pane.target_scroll_y = 180.0;
+
+        let update = authority
+            .apply_local_edit(CrdtTextEdit::Insert {
+                index: 4,
+                content: "\nagent edit".into(),
+            })
+            .unwrap();
+        let result = binding
+            .apply_remote(update.origin_client_id, &update.update_v1, &mut pane)
+            .unwrap();
+
+        assert!(result.changed);
+        assert!(pane.drag_drop_flash_progress().is_some());
+        assert!(
+            !pane.follow_cursor,
+            "daemon-authored edits must not reveal the transformed caret"
+        );
+        assert_eq!(pane.scroll_y, 180.0);
+        assert_eq!(pane.target_scroll_y, 180.0);
+    }
+
+    #[test]
+    fn snapshot_seed_is_not_presented_as_a_model_edit() {
+        let authority =
+            CrdtTextBuffer::with_text(CRDT_DAEMON_CLIENT_ID, "different snapshot text");
+        let seed = authority.encode_full_update_v1();
+        let mut binding = MarkdownDocBinding::new(42, "file:///notes/untouched.md");
+        let mut pane = pane("local load text");
+
+        assert!(binding.seed_from_snapshot(&seed, &mut pane).unwrap());
+        assert!(
+            pane.drag_drop_flash_progress().is_none(),
+            "opening an unrelated file must not show the model-edit animation"
         );
     }
 

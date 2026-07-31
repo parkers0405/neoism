@@ -16,6 +16,7 @@ use crate::editor::markdown::doc_sync::{
     apply_delta_to_lines, diff_doc_texts, doc_byte_to_position, lines_to_text,
     position_to_doc_byte, transform_doc_byte, MarkdownTextDelta,
 };
+use neoism_protocol::crdt::CRDT_DAEMON_CLIENT_ID;
 
 use super::types::{CodeBuffer, CodePosition};
 
@@ -101,6 +102,13 @@ impl CodeDocBinding {
         }
         self.shadow = buffer.lines.clone();
         self.seeded = true;
+        // The seed reflects the daemon's on-disk text, so a freshly-seeded
+        // buffer must not read as modified. Without this, a trailing-newline
+        // normalization between the local load and the daemon's file text
+        // left `saved_baseline` stale — the buffer went dirty the instant
+        // the snapshot landed, surfacing on the next keystroke (e.g. `a`
+        // entering insert looked like an unsaved edit).
+        buffer.mark_saved();
         Ok(changed)
     }
 
@@ -170,7 +178,18 @@ impl CodeDocBinding {
                 changed: false,
             });
         };
+        // Agent/filesystem reconciliation is authored by the daemon. It may
+        // replace a span containing our caret (whole-file writes are common),
+        // but it must not turn that transformed caret into navigation on the
+        // next render. Keep the viewport where the human left it; the inbound
+        // flash still marks the changed rows in place.
+        if origin_client_id == CRDT_DAEMON_CLIENT_ID {
+            buffer.follow_cursor = false;
+        }
         apply_remote_delta_to_buffer(buffer, &delta);
+        if origin_client_id == CRDT_DAEMON_CLIENT_ID {
+            flash_inbound_delta(buffer, &delta);
+        }
         apply_delta_to_lines(&mut self.shadow, &delta);
         debug_assert_eq!(lines_to_text(&self.shadow), self.replica.text());
         Ok(CodeRemoteApply {
@@ -360,6 +379,18 @@ pub fn apply_remote_delta_to_buffer(buffer: &mut CodeBuffer, delta: &MarkdownTex
     buffer.revision = buffer.revision.wrapping_add(1);
 }
 
+fn flash_inbound_delta(buffer: &mut CodeBuffer, delta: &MarkdownTextDelta) {
+    let changed_first_line = doc_byte_to_position(&buffer.lines, delta.byte_start).0;
+    let changed_last_line = changed_first_line
+        .saturating_add(delta.inserted.matches('\n').count())
+        .min(buffer.lines.len().saturating_sub(1));
+    buffer.external_edit_flash = Some((
+        changed_first_line.min(buffer.lines.len().saturating_sub(1)),
+        changed_last_line,
+        web_time::Instant::now(),
+    ));
+}
+
 /// UTF-16 document offset (the CRDT offset policy) of a
 /// `(line, byte_col)` buffer position. Lines join with a single `\n`
 /// (one UTF-16 unit). Out-of-range positions clamp to the nearest
@@ -407,4 +438,52 @@ pub fn position_for_utf16_offset(lines: &[String], offset: u32) -> (usize, usize
         remaining -= line_units + 1;
     }
     (0, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_authored_edit_gets_inbound_landing_flash() {
+        let authority = CrdtTextBuffer::with_text(CRDT_DAEMON_CLIENT_ID, "fn old() {}");
+        let seed = authority.encode_full_update_v1();
+        let mut binding = CodeDocBinding::new(42, "file:///work/live.rs");
+        let mut buffer = CodeBuffer::from_text("fn old() {}");
+        binding.seed_from_snapshot(&seed, &mut buffer).unwrap();
+        buffer.follow_cursor = true;
+
+        let update = authority
+            .apply_local_edit(CrdtTextEdit::Replace {
+                index: 3,
+                len: 3,
+                content: "new".into(),
+            })
+            .unwrap();
+        let result = binding
+            .apply_remote(update.origin_client_id, &update.update_v1, &mut buffer)
+            .unwrap();
+
+        assert!(result.changed);
+        assert!(buffer.external_edit_flash.is_some());
+        assert!(
+            !buffer.follow_cursor,
+            "daemon-authored edits must not reveal the transformed caret"
+        );
+    }
+
+    #[test]
+    fn snapshot_seed_is_not_presented_as_a_model_edit() {
+        let authority =
+            CrdtTextBuffer::with_text(CRDT_DAEMON_CLIENT_ID, "different snapshot text");
+        let seed = authority.encode_full_update_v1();
+        let mut binding = CodeDocBinding::new(42, "file:///work/untouched.rs");
+        let mut buffer = CodeBuffer::from_text("local load text");
+
+        assert!(binding.seed_from_snapshot(&seed, &mut buffer).unwrap());
+        assert!(
+            buffer.external_edit_flash.is_none(),
+            "opening an unrelated file must not show the model-edit animation"
+        );
+    }
 }

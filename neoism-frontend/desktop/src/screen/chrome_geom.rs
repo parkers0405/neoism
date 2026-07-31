@@ -89,6 +89,10 @@ impl Screen<'_> {
             "rebuilding renderer while preserving chrome"
         );
 
+        // Preserve an open Settings panel across the rebuild so a live
+        // config write (which is what triggers this reload) doesn't close
+        // it — the setting applies and the panel stays up.
+        let old_settings = std::mem::take(&mut self.renderer.settings);
         let mut renderer = Renderer::new(config);
         let chrome_scale = renderer.chrome_scale();
         renderer.file_tree = old_file_tree;
@@ -97,6 +101,7 @@ impl Screen<'_> {
         renderer.pane_breadcrumbs = old_pane_breadcrumbs;
         renderer.breadcrumbs = old_breadcrumbs;
         renderer.status_line = old_status_line;
+        renderer.settings = old_settings;
         renderer.set_chrome_scale(chrome_scale);
         self.renderer = renderer;
         self.renderer.set_ide_theme(config_theme);

@@ -177,8 +177,7 @@ impl Screen<'_> {
                                 code.buffer.cursor_line as u32,
                                 col_utf16 as u32,
                             ),
-                            code.buffer.mode
-                                == neoism_ui::editor::code::CodeMode::Insert,
+                            code.buffer.mode == neoism_ui::editor::code::CodeMode::Insert,
                         )
                     })
                 })

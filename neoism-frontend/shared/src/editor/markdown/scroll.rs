@@ -118,6 +118,11 @@ impl MarkdownPane {
         self.yank_flashes.retain(|flash| {
             now.saturating_duration_since(flash.started_at) < YANK_FLASH_ANIMATION
         });
+        let animating_change_flash =
+            self.drag_drop_flash.as_ref().is_some_and(|(_, started)| {
+                now.saturating_duration_since(*started)
+                    < web_time::Duration::from_millis(550)
+            });
 
         // Keep frames coming until the held-arrow stream settles, then drop
         // suppression and request one more frame so the cursor line reveals its
@@ -144,6 +149,7 @@ impl MarkdownPane {
             return inertial_scroll
                 || animating_tasks
                 || animating_yanks
+                || animating_change_flash
                 || reveal_pending;
         }
         self.scroll_y += delta * SCROLL_SETTLE_FACTOR;

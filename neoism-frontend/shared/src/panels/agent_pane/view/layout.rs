@@ -1,6 +1,8 @@
 use crate::panels::agent_pane::state::NeoismAgentPane;
 
-use super::{CHAT_INPUT_MIN_H, HOME_INPUT_MIN_H, INPUT_LINE_H, MAX_INPUT_LINES};
+use super::{
+    CHAT_INPUT_MIN_H, HOME_INPUT_MIN_H, INPUT_HELP_STRIP_H, INPUT_LINE_H, MAX_INPUT_LINES,
+};
 
 /// Horizontal padding applied to both the chat timeline and the input
 /// composer in the Neoism Agent pane. Keep narrow mobile panes edge-to-edge
@@ -64,7 +66,9 @@ pub fn chat_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
     // Floating island: same column as the timeline, lifted off the
     // pane bottom.
     let (input_x, input_w) = chat_column(rect, s);
-    let bottom_pad = 14.0 * s;
+    // Leave a dedicated band for the OpenCode-style live/help strip
+    // rendered immediately below the composer.
+    let bottom_pad = (14.0 + INPUT_HELP_STRIP_H) * s;
     let input_h = input_height_for_width(
         pane.input(),
         input_w,

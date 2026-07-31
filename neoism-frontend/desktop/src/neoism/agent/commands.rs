@@ -155,9 +155,12 @@ impl NeoismAgentPane {
     }
 
     fn set_goal(&mut self, text: String) {
-        let Some(session_id) = self.session_id.clone() else {
-            self.system_message("Goal", "no session has started yet");
-            return;
+        let session_id = match self.ensure_session() {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                self.system_message("Goal failed", error);
+                return;
+            }
         };
         let body = json!({ "text": text });
         match api_request_json(
@@ -169,6 +172,7 @@ impl NeoismAgentPane {
             Ok(value) => {
                 self.apply_goal_response(value.as_ref());
                 self.system_message("Goal", format!("goal set: {text}"));
+                self.start_goal_prompt(text);
             }
             Err(error) => self.system_message("Goal", error),
         }

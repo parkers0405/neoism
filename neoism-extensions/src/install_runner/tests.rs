@@ -355,7 +355,10 @@ fn install_error_display_variants() {
     let e = InstallError::MissingTool("npm");
     let msg = format!("{e}");
     assert!(msg.contains("npm"), "got: {msg}");
-    assert!(msg.contains("Node.js"), "missing-tool hint should name Node.js: {msg}");
+    assert!(
+        msg.contains("Node.js"),
+        "missing-tool hint should name Node.js: {msg}"
+    );
     // Unknown tools still get a PATH-oriented, actionable message.
     assert!(missing_tool_message("weirdtool").contains("PATH"));
 

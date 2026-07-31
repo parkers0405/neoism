@@ -11,7 +11,7 @@
 //! panel re-runs after the host delivers `UiEvent::ServiceReply`.
 //!
 //! Synchronous shape is intentional: panels run on the render thread
-//! and consume cached state. See `docs/NEOISM_UI_DESIGN.md` §5.
+//! and consume cached state.
 
 pub mod file_tree_watcher_filter;
 pub mod git_watcher_filter;

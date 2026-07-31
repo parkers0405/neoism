@@ -1626,7 +1626,21 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                     ORDER_PANEL + 2,
                 );
             }
-            AssistantMarkdownBlock::Blank => {}
+            AssistantMarkdownBlock::Blank => {
+                if !suppress_interactions {
+                    // Blank source lines are meaningful when selecting and
+                    // copying even though they paint no glyphs. Keep a
+                    // newline row in selection geometry so copied text
+                    // preserves the blank line, but do not paint a tiny
+                    // standalone highlight bar: only glyph-bearing rows get a
+                    // visible highlight, which keeps all visual gaps
+                    // consistent.
+                    pane.register_selectable_line(
+                        "",
+                        [text_x, block_top, 12.0 * s, block_h + 6.0 * s],
+                    );
+                }
+            }
         }
         // Snap to the block's exact bottom (+ inter-block gap) regardless of
         // any rounding inside the arm above, so render stays locked to
@@ -1946,8 +1960,10 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
         // sums the same per-segment widths the draw loop advances `x` by.
         let rendered = rendered_inline_text(line);
         let line_w = measure_markdown_inline_width(sugarloaf, line, opts).max(12.0);
-        let line_index = pane
-            .register_selectable_line(&rendered, [x, y - 3.0, line_w, opts.font_size + 8.0]);
+        let line_index = pane.register_selectable_line(
+            &rendered,
+            [x, y - 3.0, line_w, opts.font_size + 8.0],
+        );
         if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(line_index) {
             // Sub-line highlight follows the drag end-points so the user can
             // grab a single word instead of being forced into a full row.

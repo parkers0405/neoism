@@ -496,6 +496,10 @@ pub struct MarkdownPane {
     pub(super) source_revision: u64,
     pub(super) pending_line_edit: Option<MarkdownPendingLineEdit>,
     pub mode: MarkdownMode,
+    /// Vim modal layer active (`[neoism] vim-mode`, default on). When
+    /// false the pane stays in Insert — `enter_normal` redirects to
+    /// Insert so Esc never drops into vim Normal.
+    pub vim_enabled: bool,
     pub cursor_line: usize,
     pub cursor_col: usize,
     pub(super) visual_anchor: Option<MarkdownPosition>,

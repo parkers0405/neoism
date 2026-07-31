@@ -38,9 +38,6 @@
 //! `layout.bounds` is the panel's window-space rect. The slim panel
 //! paints a frame + inner card, then splits the inner area into the
 //! files column on the left and the hunks column on the right.
-//!
-//! See `docs/NEOISM_UI_DESIGN.md` §6 (the `Panel` trait) and
-//! `docs/CHROME_LIFT_AUDIT.md`.
 
 mod parse;
 mod render;

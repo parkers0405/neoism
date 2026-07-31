@@ -13,13 +13,14 @@ use super::draw::{
 };
 use super::wordmark::{format_elapsed, hsl_to_u8_simple};
 use super::{
-    DEPTH, INPUT_LINE_H, MAX_INPUT_LINES, ORDER_CARET, ORDER_PANEL, ORDER_TEXT,
-    STREAMING_STATUS_LINE_H,
+    DEPTH, INPUT_HELP_STRIP_H, INPUT_LINE_H, MAX_INPUT_LINES, ORDER_CARET, ORDER_PANEL,
+    ORDER_TEXT, STREAMING_STATUS_LINE_H,
 };
 use crate::panels::file_tree::FRAME_STROKE;
 use crate::primitives::ide_theme::IdeTheme;
 use crate::render_policy::{
     loader_animation_frame, loader_orbit_position, loader_pastel_color,
+    opencode_scanner_frame, opencode_task_spinner_frame,
 };
 
 /// Logical height of the dropdown-chip row (agent ˅ / model ˅ /
@@ -28,9 +29,10 @@ pub(super) const CHIPS_BAND_H: f32 = 26.0;
 
 /// Radius of the input island's rounded top corners in chat mode, and
 /// the width of the corner-notch text occluders. The streaming status
-/// row insets its connector past this so it isn't clipped by the notch
-/// occluders. `ISLAND_CORNER + a gap` — kept as one source of truth so
-/// the occluder (mod.rs) and the connector inset can't drift apart.
+/// row insets its activity indicator past this so it isn't
+/// clipped by the notch occluders. `ISLAND_CORNER + a gap` — kept as
+/// one source of truth so the occluder (mod.rs) and status inset can't
+/// drift apart.
 pub(super) const ISLAND_CORNER: f32 = 18.0;
 pub(super) const STATUS_ROW_CORNER_INSET: f32 = ISLAND_CORNER + 6.0;
 
@@ -1033,6 +1035,233 @@ pub fn render_input(
             occlusion_rects,
         );
     }
+
+    render_input_help_strip(
+        sugarloaf,
+        pane,
+        [
+            x + 8.0 * s,
+            y + h + 4.0 * s,
+            (w - 16.0 * s).max(0.0),
+            (INPUT_HELP_STRIP_H - 4.0) * s,
+        ],
+        theme,
+        s,
+        now_seconds,
+        occlusion_rects,
+    );
+}
+
+/// Small OpenCode-style legend below the composer. The left side only
+/// advertises interruption while a run is actually active; the right
+/// side mirrors the two composer shortcuts that are always available.
+fn render_input_help_strip(
+    sugarloaf: &mut Sugarloaf,
+    pane: &impl AgentUserInputPane,
+    rect: [f32; 4],
+    theme: &IdeTheme,
+    s: f32,
+    now_seconds: f32,
+    occlusion_rects: &[[f32; 4]],
+) {
+    let [x, y, w, h] = rect;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+
+    let clip = [x, y, w, h];
+    let key_opts = DrawOpts {
+        font_size: 12.5 * s,
+        color: theme.u8(theme.fg),
+        bold: true,
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    let label_opts = DrawOpts {
+        font_size: 12.5 * s,
+        color: theme.u8(theme.muted),
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    let baseline_y = y + (h - key_opts.font_size) * 0.5;
+
+    let mut activity_guard = x;
+    if !matches!(pane.streaming_state(), AgentStreamingStatus::Idle) {
+        let scanner_seconds = pane.streaming_elapsed_seconds().unwrap_or(now_seconds);
+        let activity_w = draw_opencode_activity_scanner(
+            sugarloaf,
+            x,
+            baseline_y,
+            12.5 * s,
+            theme.accent,
+            scanner_seconds,
+            clip,
+            occlusion_rects,
+        );
+        let esc_x = x + activity_w + 10.0 * s;
+        draw_text_clipped(
+            sugarloaf,
+            esc_x,
+            baseline_y,
+            "esc",
+            &key_opts,
+            occlusion_rects,
+        );
+        let esc_w = sugarloaf.text_mut().measure("esc", &key_opts);
+        draw_text_clipped(
+            sugarloaf,
+            esc_x + esc_w + 7.0 * s,
+            baseline_y,
+            "interrupt",
+            &label_opts,
+            occlusion_rects,
+        );
+        activity_guard = esc_x
+            + esc_w
+            + 7.0 * s
+            + sugarloaf.text_mut().measure("interrupt", &label_opts)
+            + 12.0 * s;
+    }
+
+    let command_label = "commands";
+    let slash = "/";
+    let tab = "tab";
+    let agents = "agents";
+    let command_label_w = sugarloaf.text_mut().measure(command_label, &label_opts);
+    let slash_w = sugarloaf.text_mut().measure(slash, &key_opts);
+    let agents_w = sugarloaf.text_mut().measure(agents, &label_opts);
+    let tab_w = sugarloaf.text_mut().measure(tab, &key_opts);
+    let group_gap = 26.0 * s;
+    let inner_gap = 7.0 * s;
+    let right_w =
+        tab_w + inner_gap + agents_w + group_gap + slash_w + inner_gap + command_label_w;
+    let right_x = x + (w - right_w).max(0.0);
+
+    // On narrow panes prefer the actionable slash-command hint. The
+    // Tab group is omitted instead of being allowed to overlap the live
+    // interruption group on the left.
+    let slash_x = right_x + tab_w + inner_gap + agents_w + group_gap;
+    if right_x >= activity_guard {
+        draw_text_clipped(
+            sugarloaf,
+            right_x,
+            baseline_y,
+            tab,
+            &key_opts,
+            occlusion_rects,
+        );
+        draw_text_clipped(
+            sugarloaf,
+            right_x + tab_w + inner_gap,
+            baseline_y,
+            agents,
+            &label_opts,
+            occlusion_rects,
+        );
+    }
+    let slash_x = if right_x >= activity_guard {
+        slash_x
+    } else {
+        x + (w - slash_w - inner_gap - command_label_w).max(0.0)
+    };
+    draw_text_clipped(
+        sugarloaf,
+        slash_x,
+        baseline_y,
+        slash,
+        &key_opts,
+        occlusion_rects,
+    );
+    draw_text_clipped(
+        sugarloaf,
+        slash_x + slash_w + inner_gap,
+        baseline_y,
+        command_label,
+        &label_opts,
+        occlusion_rects,
+    );
+}
+
+/// Paint the exact eight-cell block scanner used by OpenCode's TUI.
+///
+/// OpenCode renders each cell as terminal text, so using the same `■` /
+/// `⬝` glyphs here matters: rounded quads or an orbit read differently.
+/// Returns the occupied width so callers can place their label one cell
+/// after the scanner just like the TUI's `gap={1}`.
+#[allow(clippy::too_many_arguments)]
+fn draw_opencode_activity_scanner(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    accent: u32,
+    now_seconds: f32,
+    clip: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+) -> f32 {
+    let base = theme_color_components(accent);
+    let base_opts = DrawOpts {
+        font_size,
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    let solid_w = sugarloaf.text_mut().measure("■", &base_opts);
+    let dot_w = sugarloaf.text_mut().measure("⬝", &base_opts);
+    let cell_w = solid_w.max(dot_w);
+    let frame = opencode_scanner_frame(now_seconds);
+
+    for (index, cell) in frame.into_iter().enumerate() {
+        let mut opts = base_opts;
+        opts.color = [
+            (base[0] * cell.brightness).min(255.0) as u8,
+            (base[1] * cell.brightness).min(255.0) as u8,
+            (base[2] * cell.brightness).min(255.0) as u8,
+            (cell.alpha.clamp(0.0, 1.0) * 255.0) as u8,
+        ];
+        draw_text_clipped(
+            sugarloaf,
+            x + index as f32 * cell_w,
+            y,
+            if cell.active { "■" } else { "⬝" },
+            &opts,
+            occlusion_rects,
+        );
+    }
+    cell_w * frame.len() as f32
+}
+
+fn theme_color_components(color: u32) -> [f32; 3] {
+    [
+        ((color >> 16) & 0xff) as f32,
+        ((color >> 8) & 0xff) as f32,
+        (color & 0xff) as f32,
+    ]
+}
+
+/// Paint the one-cell braille spinner OpenCode uses for running tools and
+/// background tasks. This is the indicator that belongs beside Crafting;
+/// the wider block scanner is reserved for the composer footer.
+#[allow(clippy::too_many_arguments)]
+fn draw_opencode_task_spinner(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    accent: u32,
+    elapsed_seconds: f32,
+    clip: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+) -> f32 {
+    let color = theme_color_components(accent);
+    let opts = DrawOpts {
+        font_size,
+        color: [color[0] as u8, color[1] as u8, color[2] as u8, 255],
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    let glyph = opencode_task_spinner_frame(elapsed_seconds);
+    draw_text_clipped(sugarloaf, x, y, glyph, &opts, occlusion_rects);
+    sugarloaf.text_mut().measure(glyph, &opts)
 }
 
 /// Streaming status row rendered as the last entry of the timeline — it
@@ -1049,14 +1278,14 @@ pub fn render_streaming_status_row(
     occlusion_rects: &[[f32; 4]],
 ) {
     let [bar_x, bar_y, bar_w, bar_h] = rect;
-    // Inset the whole ╰─ connector line past the island's rounded
+    // Inset the activity indicator past the island's rounded
     // top-corner. This row is the bottom-most timeline element during
     // streaming, so it rests directly on the island's top edge; the
     // corner-notch occluders (see `render_agent_pane_with`) span the
     // island radius from the left edge, and the connector at the
     // former +8s sat inside them — losing its left half. Starting the
     // content past the corner clears the occluder AND aligns the
-    // connector under the message-card text above it.
+    // mark under the message-card text above it.
     let bar_x = bar_x + STATUS_ROW_CORNER_INSET * s;
     let bar_w = (bar_w - STATUS_ROW_CORNER_INSET * s).max(0.0);
     if bar_w <= 0.0 || bar_h <= 0.0 {
@@ -1103,24 +1332,15 @@ pub fn render_streaming_status_row(
     }
     let text_clip = [clip_x, clip_y, clip_right - clip_x, clip_bottom - clip_y];
 
-    let connector_phase = now_seconds * 3.1;
-    let connector_alpha = 0.55 + (connector_phase.sin() * 0.5 + 0.5) * 0.35;
-    let connector_opts = DrawOpts {
-        font_size: 14.0 * s,
-        color: theme.u8_alpha(accent, connector_alpha),
-        bold: true,
-        clip_rect: Some(text_clip),
-        ..DrawOpts::default()
-    };
-    let connector_x = bar_x + 8.0 * s;
-    let connector_y =
-        primary_y + (status_line_h - connector_opts.font_size) * 0.5 - 1.0 * s;
-    draw_text_clipped(
+    let spinner_font_size = 14.0 * s;
+    let spinner_w = draw_opencode_task_spinner(
         sugarloaf,
-        connector_x,
-        connector_y,
-        "╰─",
-        &connector_opts,
+        bar_x,
+        primary_y + (status_line_h - spinner_font_size) * 0.5 - 1.0 * s,
+        spinner_font_size,
+        accent,
+        elapsed,
+        text_clip,
         occlusion_rects,
     );
 
@@ -1140,10 +1360,20 @@ pub fn render_streaming_status_row(
     let frame = (now_seconds * 44.0) as usize;
     const SCRAMBLE: &[u8] = b"|/-\\+!?>?<%#=@*~&^$";
 
+    // Use the same bundled Press Start 2P face as the agent sidebar's
+    // headings for every animated state label ("Crafting", "Thinking",
+    // "Retrying", and the rest). Keep the old UI face as a graceful
+    // fallback on hosts where the bundled font cannot be registered.
+    let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
     let word_opts = DrawOpts {
-        font_size: 14.0 * s,
+        font_size: if pixel_font.is_some() {
+            12.0 * s
+        } else {
+            14.0 * s
+        },
         bold: true,
-        italic: true,
+        italic: false,
+        font_id: pixel_font,
         clip_rect: Some(text_clip),
         ..DrawOpts::default()
     };
@@ -1151,7 +1381,7 @@ pub fn render_streaming_status_row(
     let word_motion = live_phase * 3.0;
     let word_drift_x = word_motion.sin() * 1.8 * s;
     let word_drift_y = (word_motion * 0.72).cos() * 0.8 * s;
-    let mut cursor_x = bar_x + 34.0 * s + word_drift_x;
+    let mut cursor_x = bar_x + spinner_w + 10.0 * s + word_drift_x;
     for (ix, target_ch) in chars.iter().enumerate() {
         let lock_threshold = (ix as f32 + 1.0) * lock_per_char;
         let locked = transition >= lock_threshold;
@@ -1544,7 +1774,11 @@ fn wrap_agent_prompt_rows(
         opts,
         &mut wrap,
     );
-    if wrap.end > wrap.start || wrap.lines.is_empty() {
+    // A trailing hard newline creates a real empty visual row. Without
+    // preserving it, Shift+Enter updates `cursor_byte` past the last
+    // registered row and the renderer falls back to painting the caret
+    // on the first/top row.
+    if wrap.end > wrap.start || wrap.lines.is_empty() || text.ends_with('\n') {
         let end = wrap.end;
         wrap.push_row(end);
     }

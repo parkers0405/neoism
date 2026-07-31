@@ -30,6 +30,17 @@ pub struct CodePosition {
     pub col: usize,
 }
 
+/// Exact exclusive text range covered by the brief nvim-style yank flash.
+/// Keeping byte columns here (instead of only first/last rows) lets the
+/// renderer animate precisely what Visual mode highlighted, including
+/// wrapped and multi-line selections.
+#[derive(Clone, Copy, Debug)]
+pub struct CodeYankFlash {
+    pub start: CodePosition,
+    pub end: CodePosition,
+    pub started_at: Instant,
+}
+
 /// Cursor motions shared by the standard input layer and (later) the
 /// vim layer's simple movements. Vertical motions preserve the sticky
 /// goal column; horizontal ones clear it.
@@ -167,9 +178,14 @@ pub struct CodeBuffer {
     pub(super) line_ending: CodeLineEnding,
     /// The file on disk ended with a trailing newline (restored on save).
     pub(super) trailing_newline: bool,
-    /// Brief highlight of the just-yanked rows (nvim TextYankPost
-    /// flash): (first_line, last_line, when). Painter fades it out.
-    pub yank_flash: Option<(usize, usize, Instant)>,
+    /// Brief highlight of the exact just-yanked range (nvim
+    /// `TextYankPost` flash). Painter fades it out.
+    pub yank_flash: Option<CodeYankFlash>,
+    /// Brief accent settle over rows changed by an inbound CRDT update.
+    /// Agent filesystem writes are folded into that same stream, so code
+    /// visibly "lands" as it changes instead of silently swapping beneath
+    /// the reader: (first_line, last_line, when).
+    pub external_edit_flash: Option<(usize, usize, Instant)>,
     /// Vim resolver state (pending keys, find/search/repeat memory).
     /// Only consulted while the pane's input mode is `Vim`.
     pub vim: crate::editor::markdown::vim::VimState,

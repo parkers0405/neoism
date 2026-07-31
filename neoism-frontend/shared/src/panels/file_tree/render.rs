@@ -120,7 +120,14 @@ fn draw_row_presence_cluster(
         let extra_w = sugarloaf.text_mut().measure(&extra, plus_opts);
         let tx = group_left - 4.0 - extra_w;
         let ty = row_y + (row_h - plus_opts.font_size) / 2.0;
-        draw_text_with_occlusion(sugarloaf, tx, ty, &extra, plus_opts, text_occlusion_rects);
+        draw_text_with_occlusion(
+            sugarloaf,
+            tx,
+            ty,
+            &extra,
+            plus_opts,
+            text_occlusion_rects,
+        );
     }
 }
 
@@ -711,9 +718,17 @@ impl FileTree {
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()
             };
-            let presence_w =
-                presence_cluster_width(sugarloaf, &peers_here, presence_av, &presence_opts);
-            let presence_gap = if presence_w > 0.0 { 8.0 * self.scale } else { 0.0 };
+            let presence_w = presence_cluster_width(
+                sugarloaf,
+                &peers_here,
+                presence_av,
+                &presence_opts,
+            );
+            let presence_gap = if presence_w > 0.0 {
+                8.0 * self.scale
+            } else {
+                0.0
+            };
             let label_budget_px = (content_x + content_w
                 - cursor_x
                 - row_pad_x

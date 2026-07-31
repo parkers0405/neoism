@@ -15,9 +15,6 @@
 // 3. Provides `install_io(&mut panel)` so the host's constructor can
 //    plug the native IO provider into a freshly-built panel without
 //    every call site having to know the trait object exists.
-//
-// See `docs/CHROME_LIFT_AUDIT.md` (the diff panel is the fourth
-// migrated) and `docs/NEOISM_UI_DESIGN.md` §9 for the migration recipe.
 
 mod io;
 

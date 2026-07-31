@@ -140,8 +140,23 @@ impl Screen<'_> {
                     let branch = Some(active_path.as_path())
                         .or(cwd.as_deref())
                         .and_then(neoism_ui::panels::git_branch::branch_for);
+                    // With vim on, surface the modal state (Normal / Insert /
+                    // Visual) like the code editor; plain "Markdown" when off.
+                    let mode = if markdown.vim_enabled {
+                        match markdown.mode {
+                            neoism_ui::editor::markdown::MarkdownMode::Normal => {
+                                neoism_ui::panels::status_line::Mode::Normal
+                            }
+                            neoism_ui::editor::markdown::MarkdownMode::Visual => {
+                                neoism_ui::panels::status_line::Mode::Visual
+                            }
+                            _ => neoism_ui::panels::status_line::Mode::Insert,
+                        }
+                    } else {
+                        neoism_ui::panels::status_line::Mode::Markdown
+                    };
                     (
-                        neoism_ui::panels::status_line::Mode::Markdown,
+                        mode,
                         primary,
                         neoism_ui::panels::status_line::PrimaryKind::File,
                         branch,

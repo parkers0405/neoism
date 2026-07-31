@@ -71,7 +71,7 @@ pub(crate) async fn session_goal_set(
         goal.summary.clear();
     }
     goal.text = text;
-    goal.updated = now;
+    goal.updated = now.max(goal.updated.saturating_add(1));
     goal.paused = request.paused;
 
     // Optional firecrawl-backed research. Gated behind the API key: when the
@@ -138,7 +138,7 @@ pub(crate) async fn session_goal_research(
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let now = now_millis();
     goal.research.push(research_note(page, now));
-    goal.updated = now;
+    goal.updated = now.max(goal.updated.saturating_add(1));
     info.set_goal(&goal);
     persist(&state, &mut info).await?;
     Ok(Json(goal_response(&info)))
@@ -159,7 +159,10 @@ fn research_note(page: FirecrawlPage, now: u64) -> GoalResearchNote {
 }
 
 async fn persist(state: &AppState, info: &mut SessionInfo) -> Result<(), ApiError> {
-    info.time.updated = now_millis();
+    let goal_updated = info.goal().map(|goal| goal.updated).unwrap_or(0);
+    info.time.updated = now_millis()
+        .max(info.time.updated.saturating_add(1))
+        .max(goal_updated);
     state.inner.store.update_session(info).await?;
     state.publish(EventPayload::new(
         event_type::SESSION_UPDATED,

@@ -1,6 +1,7 @@
 use super::feed::*;
 use super::layout::*;
 use super::types::*;
+use crate::editor::markdown::vim::{VimAction, VimOperator, VimTarget};
 use crate::syntax::{Lang, SynTok};
 
 fn buffer(text: &str) -> CodeBuffer {
@@ -315,6 +316,72 @@ fn selection_on_line_spans_middle_lines_fully() {
     // Keyword fallback still produces tokens for real languages.
     let runs = styled_runs_for_line("let x = 1;", Lang::Rust, None, &[]);
     assert!(runs.iter().any(|run| run.token == SynTok::Keyword));
+}
+
+#[test]
+fn visual_paste_replaces_the_exact_code_selection() {
+    let mut buf = buffer("hello world");
+    buf.mode = CodeMode::Visual;
+    buf.set_cursor_position(0, 0, false);
+    buf.set_cursor_position(0, 2, true);
+
+    let applied = buf.apply_vim_action(
+        &VimAction::Paste {
+            count: 1,
+            before: false,
+        },
+        Some("ZIP"),
+    );
+
+    assert!(applied.handled);
+    assert_eq!(buf.text(), "ZIPlo world");
+    assert_eq!(buf.mode, CodeMode::Normal);
+    assert!(!buf.has_selection());
+    assert!(buf.undo());
+    assert_eq!(buf.text(), "hello world");
+}
+
+#[test]
+fn visual_paste_replaces_a_multiline_code_selection() {
+    let mut buf = buffer("alpha\nbeta\ngamma");
+    buf.mode = CodeMode::Visual;
+    buf.set_cursor_position(0, 2, false);
+    buf.set_cursor_position(1, 1, true);
+
+    let applied = buf.apply_vim_action(
+        &VimAction::Paste {
+            count: 1,
+            before: false,
+        },
+        Some("X\nY"),
+    );
+
+    assert!(applied.handled);
+    assert_eq!(buf.text(), "alX\nYta\ngamma");
+    assert_eq!(buf.mode, CodeMode::Normal);
+    assert!(!buf.has_selection());
+}
+
+#[test]
+fn visual_yank_flash_keeps_the_exact_code_columns() {
+    let mut buf = buffer("hello world");
+    buf.mode = CodeMode::Visual;
+    buf.set_cursor_position(0, 1, false);
+    buf.set_cursor_position(0, 3, true);
+
+    let applied = buf.apply_vim_action(
+        &VimAction::Operate {
+            op: VimOperator::Yank,
+            target: VimTarget::Selection,
+            count: 1,
+        },
+        None,
+    );
+
+    assert_eq!(applied.register.as_deref(), Some("ell"));
+    let flash = buf.yank_flash.expect("visual yank should flash");
+    assert_eq!(flash.start, CodePosition { line: 0, col: 1 });
+    assert_eq!(flash.end, CodePosition { line: 0, col: 4 });
 }
 
 #[test]

@@ -259,6 +259,15 @@ fn lsp_pill_store() -> &'static LspPillStore {
     STORE.get_or_init(Default::default)
 }
 
+/// Last remote LSP buffer selected per window. Revision alone cannot detect
+/// returning to an unchanged pane after another shared file became active on
+/// the same daemon; this focus key forces a fresh OpenBuffer so diagnostics
+/// pushes are routed to the pane the user actually switched back to.
+fn remote_lsp_focus_store() -> &'static Mutex<HashMap<WindowId, (String, PathBuf)>> {
+    static STORE: OnceLock<Mutex<HashMap<WindowId, (String, PathBuf)>>> = OnceLock::new();
+    STORE.get_or_init(Default::default)
+}
+
 fn refresh_lsp_pill(root: &Path, file: &Path) {
     use neoism_ui::panels::status_line::LspStatus as Pill;
     // engine::status() WALKS the workspace (up to 10k files) — running
@@ -1807,9 +1816,26 @@ impl Screen<'_> {
         // server (host paths — a local server would start against files
         // that don't exist here); diagnostics/LSP come from the daemon.
         let remote = self.code_lsp_is_remote();
+        let remote_endpoint = remote
+            .then(|| {
+                self.context_manager
+                    .current_adopted_workspace_endpoint()
+                    .or_else(|| self.context_manager.daemon_endpoint())
+                    .map(str::to_owned)
+            })
+            .flatten();
+        let remote_route = remote
+            .then(|| self.context_manager.daemon_link_handle_and_runtime())
+            .flatten();
         let Some(code) = self.context_manager.current_mut().code.as_mut() else {
             return;
         };
+        if remote && code.remote_content_pending {
+            // Never didOpen the host server with the guest pane's temporary
+            // empty placeholder. The remote file reply clears this flag; the
+            // following pump then sends the real authoritative buffer.
+            return;
+        }
         let file = code.path.clone();
         let Some(root) = root.or_else(|| file.parent().map(Path::to_path_buf)) else {
             return;
@@ -1823,6 +1849,52 @@ impl Screen<'_> {
                 &file,
             ))
             .filter(|binding| binding.is_seeded());
+
+        let remote_focus_changed = remote_endpoint.is_some_and(|endpoint| {
+            let key = (endpoint, file.clone());
+            let mut store = match remote_lsp_focus_store().lock() {
+                Ok(store) => store,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            store.insert(window_id, key.clone()) != Some(key)
+        });
+        if remote
+            && (remote_focus_changed
+                || code.lsp_synced_revision != Some(code.buffer.revision))
+        {
+            // The native guest editor owns the live text, while the language
+            // server must run beside the files on the host. Ship each new
+            // revision through the daemon editor envelope with the explicit
+            // workspace root; the reply feeds the same status/diagnostic UI
+            // caches as the local engine.
+            if let Some((handle, runtime)) = remote_route {
+                code.lsp_synced_revision = Some(code.buffer.revision);
+                let text = code.buffer.text();
+                let file = file.clone();
+                let workspace_root = root.clone();
+                runtime.spawn(async move {
+                    if let Err(error) = handle
+                        .send_editor_with_workspace_root(
+                            neoism_protocol::editor::EditorClientMessage::OpenBuffer {
+                                path: file,
+                                text: Some(text),
+                                line: None,
+                                character: None,
+                                surface_id: None,
+                            },
+                            Some(workspace_root),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            target: "neoism::remote_lsp",
+                            %error,
+                            "remote LSP buffer sync failed"
+                        );
+                    }
+                });
+            }
+        }
 
         if !remote && code.lsp_synced_revision != Some(code.buffer.revision) {
             code.lsp_synced_revision = Some(code.buffer.revision);
@@ -1884,7 +1956,7 @@ impl Screen<'_> {
             }
         }
 
-        let fold_from_store = code.lsp_diag_version != global_version && {
+        let fold_from_store = !remote && code.lsp_diag_version != global_version && {
             code.lsp_diag_version = global_version;
             // Publish gate for the sticky-anchor path: the global
             // version also moves on other files' publishes and on the
@@ -2544,6 +2616,206 @@ impl Screen<'_> {
             let label = (!label.is_empty()).then(|| label.clone());
             (*status, label)
         })
+    }
+
+    /// Fold host-daemon LSP replies into the native code pane. Joined
+    /// workspaces cannot run the in-process engine against host-only paths,
+    /// so their status snapshot and diagnostics arrive over EditorReply.
+    pub(crate) fn apply_remote_code_lsp_message(
+        &mut self,
+        message: &neoism_protocol::editor::EditorServerMessage,
+    ) -> bool {
+        use neoism_protocol::editor::{DiagnosticSeverity, EditorServerMessage};
+        match message {
+            EditorServerMessage::Batch { messages, .. } => {
+                let mut changed = false;
+                for message in messages {
+                    changed |= self.apply_remote_code_lsp_message(message);
+                }
+                changed
+            }
+            EditorServerMessage::LspSnapshot {
+                file_path, servers, ..
+            } => {
+                let Some(file) = self
+                    .context_manager
+                    .current()
+                    .code
+                    .as_ref()
+                    .map(|code| code.path.clone())
+                else {
+                    return false;
+                };
+                if file_path.as_ref().is_some_and(|path| path != &file) {
+                    return false;
+                }
+                use neoism_ui::panels::lsp_popup::LspServerState as RowState;
+                use neoism_ui::panels::status_line::LspStatus as Pill;
+                let rows = servers
+                    .iter()
+                    .map(|server| neoism_ui::panels::lsp_popup::LspServerRow {
+                        name: server.name.clone(),
+                        binary: (!server.binary.is_empty())
+                            .then(|| server.binary.clone()),
+                        filetype: (!server.filetype.is_empty())
+                            .then(|| server.filetype.clone()),
+                        state: match server.state.as_str() {
+                            "connected" | "active" => RowState::Active,
+                            "available" | "ready" => RowState::Ready,
+                            "initializing" | "starting" => RowState::Initializing,
+                            "error" | "errored" => RowState::Errored,
+                            "disabled" => RowState::Disabled,
+                            _ => RowState::Missing,
+                        },
+                        message: server.message.clone(),
+                        level: server.level.clone(),
+                        diagnostics: Default::default(),
+                        source: server.source.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let connected = servers
+                    .iter()
+                    .filter(|server| {
+                        matches!(server.state.as_str(), "connected" | "active")
+                    })
+                    .map(|server| server.name.as_str())
+                    .collect::<Vec<_>>();
+                let (status, label) = if connected.is_empty() {
+                    if servers.is_empty() {
+                        (Pill::Missing, String::new())
+                    } else {
+                        (Pill::Initializing, servers[0].name.clone())
+                    }
+                } else {
+                    let label = match connected.len() {
+                        1 => connected[0].to_string(),
+                        count => format!("{}+{}", connected[0], count - 1),
+                    };
+                    (Pill::Active, label)
+                };
+                let mut store = match lsp_pill_store().lock() {
+                    Ok(store) => store,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                store.insert(file, (status, label, rows));
+                self.mark_dirty();
+                true
+            }
+            EditorServerMessage::Diagnostics {
+                file_path, items, ..
+            } => {
+                let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+                    return false;
+                };
+                let file = file_path.clone().unwrap_or_else(|| code.path.clone());
+                if file != code.path {
+                    return false;
+                }
+
+                // Preserve the existing diagnostics popups/counts by feeding
+                // the same raw store used by local LSP, then build visible
+                // byte spans directly (remote panes intentionally skip the
+                // local-engine fold).
+                let engine_items = items
+                    .iter()
+                    .map(|item| engine::LspDiagnostic {
+                        path: file.to_string_lossy().into_owned(),
+                        range: Some(engine::LspRange {
+                            start: engine::LspPosition {
+                                line: item.line.saturating_add(1),
+                                character: item.col.saturating_add(1),
+                            },
+                            end: engine::LspPosition {
+                                line: item.end_line.saturating_add(1),
+                                character: item.end_col.saturating_add(1),
+                            },
+                        }),
+                        severity: match item.severity {
+                            DiagnosticSeverity::Error => "error",
+                            DiagnosticSeverity::Warn => "warning",
+                            DiagnosticSeverity::Info => "information",
+                            DiagnosticSeverity::Hint => "hint",
+                        }
+                        .to_string(),
+                        code: item.code.clone(),
+                        code_description: item.code_description.clone(),
+                        source: item.source.clone(),
+                        message: item.message.clone(),
+                        tags: item.tags.clone(),
+                        related_information: Vec::new(),
+                        data: None,
+                        language: None,
+                    })
+                    .collect::<Vec<_>>();
+                let server = items
+                    .first()
+                    .and_then(|item| item.source.clone())
+                    .unwrap_or_else(|| "remote".to_string());
+                {
+                    let mut store = match diag_store().lock() {
+                        Ok(store) => store,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    store
+                        .entry(canonical_key(&file))
+                        .or_default()
+                        .insert(server, engine_items);
+                }
+
+                let mut per_line: HashMap<usize, Vec<CodeLineDiagnostic>> =
+                    HashMap::new();
+                for item in items {
+                    let start_line = item.line as usize;
+                    let end_line = (item.end_line as usize).max(start_line);
+                    let severity = match item.severity {
+                        DiagnosticSeverity::Error => CodeDiagnosticSeverity::Error,
+                        DiagnosticSeverity::Warn => CodeDiagnosticSeverity::Warn,
+                        DiagnosticSeverity::Info => CodeDiagnosticSeverity::Info,
+                        DiagnosticSeverity::Hint => CodeDiagnosticSeverity::Hint,
+                    };
+                    for line_ix in start_line..=end_line {
+                        let Some(line) = code.buffer.lines.get(line_ix) else {
+                            break;
+                        };
+                        let mut from = if line_ix == start_line {
+                            byte_for_utf16_col(line, item.col as usize)
+                        } else {
+                            0
+                        };
+                        let mut to = if line_ix == end_line {
+                            byte_for_utf16_col(line, item.end_col as usize)
+                        } else {
+                            line.len()
+                        };
+                        if to <= from {
+                            if from >= line.len() && !line.is_empty() {
+                                from = line.len() - 1;
+                            }
+                            to = (from + 1).min(line.len());
+                        }
+                        if from < to {
+                            per_line.entry(line_ix).or_default().push(
+                                CodeLineDiagnostic {
+                                    start: from,
+                                    end: to,
+                                    severity,
+                                    message: if line_ix == start_line {
+                                        item.message.clone()
+                                    } else {
+                                        String::new()
+                                    },
+                                },
+                            );
+                        }
+                    }
+                }
+                code.diag_anchors.clear();
+                code.diagnostics = per_line;
+                self.mark_dirty();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Click on a diagnostic span: show its message(s) as a hover-style

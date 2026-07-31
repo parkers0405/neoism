@@ -422,6 +422,7 @@ impl<A: Copy> BufferTabs<A> {
                 .and_then(|p| p.file_name())
                 .and_then(|s| s.to_str())
                 .unwrap_or(tab.title.as_str());
+            let custom_file_icon = tab.custom_icon.as_ref();
             let (icon_glyph, icon_rgb) = if tab.neoism_agent_route_id.is_some() {
                 (NEOISM_AGENT_ICON, theme.u8(theme.accent))
             } else if let Some(page) = tab.chrome_page {
@@ -443,6 +444,8 @@ impl<A: Copy> BufferTabs<A> {
                     over.and_then(|o| o.color)
                         .unwrap_or_else(|| theme.u8(theme.accent)),
                 )
+            } else if let Some(icon) = custom_file_icon {
+                (icon.as_str(), theme.u8(theme.fg))
             } else {
                 icon_for_file(icon_label)
             };
@@ -802,6 +805,7 @@ impl<A: Copy> BufferTabs<A> {
                 let ghost: BufferTab<A> = BufferTab {
                     title: anim.title.clone(),
                     modified: false,
+                    custom_icon: None,
                     path: None,
                     markdown: false,
                     terminal_route_id: None,

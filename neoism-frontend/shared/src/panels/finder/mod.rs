@@ -11,8 +11,6 @@
 //! [`crate::services::SearchService`] / [`crate::services::FilesService`]
 //! capability traits so the same panel code runs on native winit and
 //! web wasm.
-//!
-//! See `docs/CHROME_LIFT_AUDIT.md` for the wave-6 cutover plan.
 
 pub mod file_search;
 pub mod git;

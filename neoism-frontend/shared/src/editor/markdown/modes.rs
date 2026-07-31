@@ -26,9 +26,16 @@ impl MarkdownPane {
     }
 
     pub fn enter_normal(&mut self) {
+        // Vim off (`[neoism] vim-mode = false`): never leave Insert, so
+        // Esc and other "drop to Normal" paths keep always-insert editing.
+        if !self.vim_enabled {
+            self.enter_insert();
+            return;
+        }
         self.mode = MarkdownMode::Normal;
         self.vim.clear_pending();
         self.vim.visual_linewise = false;
+        self.vim.visual_block = false;
         self.visual_anchor = None;
         self.clamp_cursor();
     }

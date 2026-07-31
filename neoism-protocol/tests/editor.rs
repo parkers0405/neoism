@@ -101,12 +101,14 @@ fn editor_client_surface_id_accessor_tracks_targeted_commands() {
 fn client_open_buffer_roundtrip() {
     roundtrip_client(&EditorClientMessage::OpenBuffer {
         path: PathBuf::from("src/lib.rs"),
+        text: None,
         line: None,
         character: None,
         surface_id: None,
     });
     roundtrip_client(&EditorClientMessage::OpenBuffer {
         path: PathBuf::from(""),
+        text: Some("shared text".into()),
         line: Some(2),
         character: Some(4),
         surface_id: Some("pane:root".into()),

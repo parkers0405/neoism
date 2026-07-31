@@ -213,9 +213,10 @@ async fn prompt_async_preserves_the_sender_author_end_to_end() {
                 .list_messages(session.id.as_str())
                 .await
                 .unwrap();
-            if let Some(user) = messages.into_iter().find(|m| {
-                matches!(m.info, neoism_agent_core::MessageInfo::User(_))
-            }) {
+            if let Some(user) = messages
+                .into_iter()
+                .find(|m| matches!(m.info, neoism_agent_core::MessageInfo::User(_)))
+            {
                 break user;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;

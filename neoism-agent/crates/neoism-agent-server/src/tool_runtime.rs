@@ -521,9 +521,11 @@ async fn execute_stateful_tool_call(
             if !summary.trim().is_empty() {
                 goal.summary = summary.trim().to_string();
             }
-            goal.updated = now_millis();
+            goal.updated = now_millis().max(goal.updated.saturating_add(1));
             info.set_goal(&goal);
-            info.time.updated = now_millis();
+            info.time.updated = now_millis()
+                .max(info.time.updated.saturating_add(1))
+                .max(goal.updated);
             state
                 .inner
                 .store

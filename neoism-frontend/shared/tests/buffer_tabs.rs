@@ -340,6 +340,7 @@ fn buffer_tab_default_layout() {
     let _tab: BufferTab<TestAgent> = BufferTab {
         title: "x".into(),
         modified: false,
+        custom_icon: None,
         path: None,
         markdown: false,
         terminal_route_id: None,
@@ -347,4 +348,18 @@ fn buffer_tab_default_layout() {
         chrome_page: None,
         agent_kind: None,
     };
+}
+
+#[test]
+fn markdown_custom_icon_stays_on_the_tab_after_rename() {
+    let mut tabs = BufferTabs::<TestAgent>::new();
+    let old = PathBuf::from("/vault/TASKS.md");
+    let new = PathBuf::from("/vault/Tasks.md");
+    tabs.open_markdown(old.clone());
+    tabs.set_path_icon(&old, Some("\u{1f4a1}".to_string()));
+    tabs.rename_path(&old, new.clone());
+
+    let tab = &tabs.tabs()[0];
+    assert_eq!(tab.path.as_deref(), Some(new.as_path()));
+    assert_eq!(tab.custom_icon.as_deref(), Some("\u{1f4a1}"));
 }

@@ -28,9 +28,6 @@
 //! lands. At that point the two halves connect via
 //! `palette.set_commands(...)` and the native palette's view layer
 //! becomes a thin adapter over the shared one.
-//!
-//! See `docs/CHROME_LIFT_AUDIT.md` (this panel is the third migrated)
-//! and `docs/NEOISM_UI_DESIGN.md` §9 for the migration recipe.
 
 pub mod actions;
 pub mod commands;

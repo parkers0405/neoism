@@ -34,7 +34,9 @@ fn detects_native_windows_shell_names() {
         TerminalShellKind::PowerShell
     );
     assert_eq!(
-        TerminalShellKind::detect(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.EXE"),
+        TerminalShellKind::detect(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.EXE"
+        ),
         TerminalShellKind::PowerShell
     );
     assert_eq!(

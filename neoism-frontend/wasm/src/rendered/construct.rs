@@ -56,6 +56,7 @@ impl ChromeBridge {
             vec![BufferTab {
                 title: "Terminal 1".to_string(),
                 modified: false,
+                custom_icon: None,
                 path: None,
                 markdown: false,
                 terminal_route_id: None,

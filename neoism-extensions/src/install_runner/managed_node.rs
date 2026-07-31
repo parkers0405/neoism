@@ -200,7 +200,10 @@ pub(crate) async fn ensure_managed_node(
             // A concurrent provision may have published first (rename onto an
             // existing dir fails). If theirs is present and working, adopt it;
             // otherwise surface the real error.
-            if existing_managed_node(&version_dir, target.os).await.is_none() {
+            if existing_managed_node(&version_dir, target.os)
+                .await
+                .is_none()
+            {
                 return Err(InstallError::Io(err));
             }
         }
@@ -482,7 +485,10 @@ cccccccc33333333  node-v22.11.0-win-x64.zip
             find_sha_for(shasums, "node-v22.11.0-win-x64.zip").as_deref(),
             Some("cccccccc33333333")
         );
-        assert_eq!(find_sha_for(shasums, "node-v22.11.0-darwin-arm64.tar.xz"), None);
+        assert_eq!(
+            find_sha_for(shasums, "node-v22.11.0-darwin-arm64.tar.xz"),
+            None
+        );
     }
 
     #[test]

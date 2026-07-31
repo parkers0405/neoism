@@ -49,10 +49,7 @@ fn retry_status_includes_a_compact_provider_reason() {
     let mut pane = NeoismAgentPane::default();
     pane.note_streaming(
         NeoismAgentStreamingState::Retrying,
-        Some(
-            "Our servers are currently overloaded. Please try again later."
-                .to_string(),
-        ),
+        Some("Our servers are currently overloaded. Please try again later.".to_string()),
     );
 
     assert_eq!(pane.streaming_label(), "Retrying · Provider overloaded");
@@ -308,6 +305,52 @@ fn submit_prompt_with_session_queues_send_prompt_only() {
         }
         other => panic!("expected SendPrompt, got {other:?}"),
     }
+}
+
+#[test]
+fn setting_goal_starts_an_agent_turn_with_the_goal_text() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("sess-1".to_string());
+
+    pane.start_goal_prompt("ship the durable goal".to_string());
+
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.messages[0].text, "ship the durable goal");
+    assert!(pane.is_streaming());
+    let drained = pane.drain_pending_outbound();
+    assert_eq!(drained.len(), 1);
+    assert!(matches!(
+        &drained[0],
+        OutboundAgentCommand::SendPrompt {
+            text,
+            transcript_echo: true,
+            ..
+        } if text == "ship the durable goal"
+    ));
+}
+
+#[test]
+fn setting_goal_during_a_run_queues_its_agent_turn() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("sess-1".to_string());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+
+    pane.start_goal_prompt("next durable goal".to_string());
+
+    assert!(pane.messages.is_empty());
+    assert_eq!(pane.queued_prompt_count, 1);
+    assert_eq!(
+        pane.queued_prompt_preview.as_deref(),
+        Some("next durable goal")
+    );
+    assert!(matches!(
+        pane.drain_pending_outbound().as_slice(),
+        [OutboundAgentCommand::SendPrompt {
+            text,
+            transcript_echo: false,
+            ..
+        }] if text == "next durable goal"
+    ));
 }
 
 #[test]
@@ -1367,6 +1410,29 @@ fn ctrl_u_d_half_page_scroll_moves_timeline_by_half_viewport() {
 
     assert!(pane.scroll_timeline_half_page(false));
     assert_eq!(pane.timeline_scroll_offset(), 0.0);
+}
+
+#[test]
+fn transcript_selection_can_start_in_whitespace_beside_text() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 200.0], 200.0, 200.0);
+    pane.register_selectable_line("select me", [20.0, 30.0, 70.0, 20.0]);
+
+    assert!(pane.begin_selection_at(300.0, 40.0));
+    assert!(pane.has_active_selection());
+}
+
+#[test]
+fn transcript_selection_preserves_registered_blank_lines() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 200.0], 200.0, 200.0);
+    pane.register_selectable_line("first", [0.0, 20.0, 50.0, 18.0]);
+    pane.register_selectable_line("", [0.0, 40.0, 12.0, 18.0]);
+    pane.register_selectable_line("second", [0.0, 60.0, 60.0, 18.0]);
+
+    assert!(pane.begin_selection_at(0.0, 20.0));
+    assert!(pane.drag_selection_to(60.0, 60.0));
+    assert_eq!(pane.end_selection().as_deref(), Some("first\n\nsecond"));
 }
 
 fn task_tool_message(task_id: &str, status: &str) -> NeoismAgentMessage {

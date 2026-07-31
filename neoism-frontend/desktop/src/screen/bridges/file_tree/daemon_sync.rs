@@ -65,17 +65,15 @@ impl Screen<'_> {
         let reply_tx = self.ssh_files_reply_sender();
         let event_proxy = self.context_manager.event_proxy();
         let window_id = self.context_manager.window_id();
-        let backend = std::sync::Arc::new(
-            crate::daemon_client::ssh_files::SshFiles::new(
-                target,
-                ssh_opts,
-                PathBuf::from("."),
-                id,
-                reply_tx,
-                event_proxy,
-                window_id,
-            ),
-        )
+        let backend = std::sync::Arc::new(crate::daemon_client::ssh_files::SshFiles::new(
+            target,
+            ssh_opts,
+            PathBuf::from("."),
+            id,
+            reply_tx,
+            event_proxy,
+            window_id,
+        ))
             as std::sync::Arc<dyn crate::editor::file_tree::state::RemoteFileSource>;
         self.renderer.file_tree.set_remote_files(Some(backend));
         // Open the tree if it was hidden so the flip is actually visible,
@@ -299,6 +297,25 @@ impl Screen<'_> {
         dir: String,
         name: String,
     ) -> bool {
+        self.send_remote_notes_create_entry(vault_root, dir, name, false)
+    }
+
+    pub(crate) fn send_remote_notes_create_dir(
+        &mut self,
+        vault_root: std::path::PathBuf,
+        dir: String,
+        name: String,
+    ) -> bool {
+        self.send_remote_notes_create_entry(vault_root, dir, name, true)
+    }
+
+    fn send_remote_notes_create_entry(
+        &mut self,
+        vault_root: std::path::PathBuf,
+        dir: String,
+        name: String,
+        is_dir: bool,
+    ) -> bool {
         let Some((handle, runtime)) =
             self.context_manager.daemon_link_handle_and_runtime()
         else {
@@ -308,15 +325,13 @@ impl Screen<'_> {
         self.pending_remote_notes_creates
             .insert(request_id, vault_root.clone());
         runtime.spawn(async move {
+            let message = if is_dir {
+                neoism_protocol::files::FilesClientMessage::CreateDir { dir, name }
+            } else {
+                neoism_protocol::files::FilesClientMessage::CreateFile { dir, name }
+            };
             if let Err(error) = handle
-                .send_files_with_request_id(
-                    request_id,
-                    neoism_protocol::files::FilesClientMessage::CreateFile {
-                        dir,
-                        name,
-                    },
-                    Some(vault_root),
-                )
+                .send_files_with_request_id(request_id, message, Some(vault_root))
                 .await
             {
                 tracing::warn!(
@@ -493,8 +508,7 @@ impl Screen<'_> {
 
         let own_op = self.pending_remote_file_ops.remove(&request_id);
         let notes_listing = self.pending_remote_notes_listing.remove(&request_id);
-        let notes_create_vault =
-            self.pending_remote_notes_creates.remove(&request_id);
+        let notes_create_vault = self.pending_remote_notes_creates.remove(&request_id);
         let notes_move = self.pending_remote_notes_moves.remove(&request_id);
         match message {
             // A note just created in the host's linked vault: the reply
@@ -519,7 +533,7 @@ impl Screen<'_> {
             }
             FilesServerMessage::Error { .. } if notes_create_vault.is_some() => {
                 self.file_tree_notify(
-                    "Could not create the note on the host".to_string(),
+                    "Could not create the note or folder on the host".to_string(),
                     NotificationLevel::Error,
                 );
                 self.mark_dirty();

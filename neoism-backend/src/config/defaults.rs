@@ -233,46 +233,66 @@ pub fn default_config_file_content() -> String {
     // Started → Configuration).
     String::from(
         r##"// Neoism configuration — JSONC (// comments and trailing commas are fine).
-// One file, shared by the terminal and the agent. Uncomment a key to
-// change it; omitted keys use their default. Full reference:
+// One file, shared by the terminal and the agent. Settings are grouped by
+// domain: uncomment a block and edit the keys you want; anything omitted
+// uses its default. Full reference:
 // press Alt+N → Default vault → "Getting Started" → Configuration.
 {
-    // ── Appearance ─────────────────────────────────────────────────
-    // "theme": "tokyo_night",     // IDE theme: pastel_dark | nvchad_one | tokyo_night | catppuccin_mocha
-    // "palette": "lucario",       // terminal color file in themes/<name>.json
-    // "line-height": 1.2,
-    // "minimap": true,            // code-editor minimap
-    // "mashup-pack": "synth",     // active Mash Up Pack under packs/<id>
-    // "cursor-color": "#44C9F0",  // your caret colour (collaborators see it too)
-    // "cursor-style": "rainbow",  // "solid" (default) or "rainbow"
-    // "status-fps": true,         // FPS pill on the status bar
-    // "fonts": { "family": "CascadiaCode", "size": 14.0 },
-    // "cursor": { "shape": "beam", "blinking": true },
-    // "window": { "opacity": 0.95, "blur": true },
+    // ── [appearance] — theming + typography ───────────────────────
+    // "appearance": {
+    //     "theme": "tokyo_night",    // IDE theme: pastel_dark | nvchad_one | tokyo_night | catppuccin_mocha
+    //     "palette": "lucario",      // terminal color file in themes/<name>.json
+    //     "line-height": 1.2,
+    //     "mashup-pack": "synth",    // active Mash Up Pack under packs/<id>
+    //     "fonts": { "family": "CascadiaCode", "size": 14.0, "weight": 400 },
+    //     "effects": { "trail-cursor": true },
+    // },
 
-    // ── Terminal ───────────────────────────────────────────────────
-    // "shell": { "program": "/bin/fish", "args": ["--login"] },
-    // "scrollback-history-limit": 10000,
-    // "copy-on-select": false,
-    // "confirm-before-quit": false,
-    // "hide-mouse-cursor-when-typing": false,
-    // "scroll": { "multiplier": 3.0 },
-    // "navigation": { "hide-if-single": true, "use-split": true },
+    // ── [editor] — the built-in code + markdown editor ────────────
+    // "editor": {
+    //     "vim-mode": true,
+    //     "format-on-save": true,    // run the LSP formatter before every save
+    //     "minimap": true,
+    // },
 
-    // ── Editor ─────────────────────────────────────────────────────
-    // "format-on-save": true,     // run the LSP formatter before every save
+    // ── [terminal] — the terminal emulator ────────────────────────
+    // "terminal": {
+    //     "shell": { "program": "/bin/fish", "args": ["--login"] },
+    //     "cursor": { "shape": "beam", "blinking": true },
+    //     "scroll": { "multiplier": 3.0 },
+    //     "scrollback-history-limit": 10000,
+    //     "copy-on-select": false,
+    //     "hide-mouse-cursor-when-typing": false,
+    // },
 
-    // ── Multiplayer ────────────────────────────────────────────────
-    // "display-name": "parker",   // the name collaborators see
+    // ── [ui] — window chrome, tabs, status line ───────────────────
+    // "ui": {
+    //     "window": { "opacity": 0.95, "blur": true },
+    //     "navigation": { "hide-if-single": true, "use-split": true },
+    //     "status-fps": true,        // FPS pill on the status bar
+    //     "confirm-before-quit": false,
+    // },
 
-    // ── Agent (same file; the terminal ignores these keys) ─────────
-    // "model": "anthropic/claude-opus-5",
-    // "small-model": "anthropic/claude-haiku-4-5",
-    // "reasoning-effort": "high", // low | medium | high | xhigh | max
-    // "permission": { "edit": "ask", "bash": "ask" },
-    // "mcp": { "my-server": { "type": "local", "command": ["my-mcp"] } },
+    // ── [presence] — how collaborators see you in multiplayer ─────
+    // "presence": {
+    //     "display-name": "parker",  // the name collaborators see
+    //     "cursor-color": "#44C9F0", // your caret colour (collaborators see it too)
+    //     "cursor-style": "rainbow", // "solid" (default) or "rainbow"
+    // },
 
-    // ── Developer ──────────────────────────────────────────────────
+    // ── [keybinds] — override the built-in shortcuts ──────────────
+    // "keybinds": { "keys": [ { "key": "t", "with": "super", "action": "CreateTab" } ] },
+
+    // ── [agent] — the coding agent (its own block, same file) ─────
+    // "agent": {
+    //     "model": "anthropic/claude-opus-5",
+    //     "small-model": "anthropic/claude-haiku-4-5",
+    //     "reasoning-effort": "high", // low | medium | high | xhigh | max
+    //     "permission": { "edit": "ask", "bash": "ask" },
+    //     "mcp": { "my-server": { "type": "local", "command": ["my-mcp"] } },
+    // },
+
+    // ── [developer] ───────────────────────────────────────────────
     // "developer": { "log-level": "info", "enable-log-file": true },
 }
 "##,

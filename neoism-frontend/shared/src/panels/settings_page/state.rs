@@ -86,51 +86,51 @@ impl Category {
 
 pub(crate) const SETTINGS: &[SettingDef] = &[
     // ── General ──
-    tog(Category::General, "confirm-before-quit", "Confirm before quit", "Ask for confirmation before closing the app.", false),
-    tog(Category::General, "copy-on-select", "Copy on select", "Automatically copy selected text to the clipboard.", false),
-    tog(Category::General, "hide-mouse-cursor-when-typing", "Hide mouse cursor when typing", "Hide the pointer while you type.", false),
-    tog(Category::General, "use-fork", "Use fork (new terminals)", "Spawn shells with fork(); applies to newly opened terminals.", true),
-    sel(Category::General, "option-as-alt", "Option as Alt (macOS)", "Treat the Option key as Alt.", &["none", "left", "right", "both"], "none"),
+    tog(Category::General, "ui.confirm-before-quit", "Confirm before quit", "Ask for confirmation before closing the app.", false),
+    tog(Category::General, "terminal.copy-on-select", "Copy on select", "Automatically copy selected text to the clipboard.", false),
+    tog(Category::General, "terminal.hide-mouse-cursor-when-typing", "Hide mouse cursor when typing", "Hide the pointer while you type.", false),
+    tog(Category::General, "terminal.use-fork", "Use fork (new terminals)", "Spawn shells with fork(); applies to newly opened terminals.", true),
+    sel(Category::General, "terminal.option-as-alt", "Option as Alt (macOS)", "Treat the Option key as Alt.", &["none", "left", "right", "both"], "none"),
 
     // ── Appearance ──
-    sel(Category::Appearance, "theme", "Theme", "The IDE theme — skins chrome, editor, and terminal.", &["pastel_dark", "nvchad_one", "tokyo_night", "catppuccin_mocha", "retro_95"], "pastel_dark"),
-    font_family(Category::Appearance, "fonts.family", "Font family", "Choose an installed system font for the terminal and editor."),
-    sel(Category::Appearance, "fonts.size", "Font size", "Terminal + editor font size.", &["12", "13", "14", "16", "18", "19", "20", "22"], "14"),
-    sel(Category::Appearance, "fonts.weight", "Font weight", "Base text thickness. 400 is normal, 700 is bold. Bold stays bold.", &["300", "400", "500", "600", "700", "800"], "400"),
-    sel(Category::Appearance, "cursor-style", "Cursor style", "Solid caret, or an animated rainbow sweep.", &["solid", "rainbow"], "solid"),
-    tog(Category::Appearance, "status-fps", "Status bar FPS", "Show the frame-rate pill on the status bar.", true),
-    sel(Category::Appearance, "line-height", "Line height", "Terminal line-height multiplier.", &["1.0", "1.1", "1.2", "1.3", "1.4", "1.5"], "1.0"),
-    sel(Category::Appearance, "cursor.shape", "Cursor shape", "Block, underline, beam, or hidden caret.", &["block", "underline", "beam", "hidden"], "block"),
-    tog(Category::Appearance, "cursor.blinking", "Blinking cursor", "Blink the caret.", false),
-    sel(Category::Appearance, "cursor.blinking-interval", "Blink interval (ms)", "Caret blink half-period.", &["400", "530", "700", "1000"], "530"),
-    tog(Category::Appearance, "fonts.hinting", "Font hinting", "Hint glyphs to the pixel grid.", true),
-    tog(Category::Appearance, "fonts.use-drawable-chars", "Native box drawing", "Draw box/block glyphs natively.", true),
-    sel(Category::Appearance, "window.opacity", "Window opacity", "Overall window opacity.", &["0.8", "0.9", "0.95", "1.0"], "1.0"),
-    tog(Category::Appearance, "window.blur", "Background blur", "Blur what's behind a translucent window.", false),
-    tog(Category::Appearance, "effects.trail-cursor", "Cursor trail", "Neovide-style cursor trail.", true),
-    tog(Category::Appearance, "effects.custom-mouse-cursor", "Custom mouse cursor", "Render the mouse pointer ourselves.", false),
+    sel(Category::Appearance, "appearance.theme", "Theme", "The IDE theme — skins chrome, editor, and terminal.", &["pastel_dark", "nvchad_one", "tokyo_night", "catppuccin_mocha", "retro_95"], "pastel_dark"),
+    font_family(Category::Appearance, "appearance.fonts.family", "Font family", "Choose an installed system font for the terminal and editor."),
+    sel(Category::Appearance, "appearance.fonts.size", "Font size", "Terminal + editor font size.", &["12", "13", "14", "16", "18", "19", "20", "22"], "14"),
+    sel(Category::Appearance, "appearance.fonts.weight", "Font weight", "Base text thickness. 400 is normal, 700 is bold. Bold stays bold.", &["300", "400", "500", "600", "700", "800"], "400"),
+    sel(Category::Appearance, "presence.cursor-style", "Cursor style", "Solid caret, or an animated rainbow sweep.", &["solid", "rainbow"], "solid"),
+    tog(Category::Appearance, "ui.status-fps", "Status bar FPS", "Show the frame-rate pill on the status bar.", true),
+    sel(Category::Appearance, "appearance.line-height", "Line height", "Terminal line-height multiplier.", &["1.0", "1.1", "1.2", "1.3", "1.4", "1.5"], "1.0"),
+    sel(Category::Appearance, "terminal.cursor.shape", "Cursor shape", "Block, underline, beam, or hidden caret.", &["block", "underline", "beam", "hidden"], "block"),
+    tog(Category::Appearance, "terminal.cursor.blinking", "Blinking cursor", "Blink the caret.", false),
+    sel(Category::Appearance, "terminal.cursor.blinking-interval", "Blink interval (ms)", "Caret blink half-period.", &["400", "530", "700", "1000"], "530"),
+    tog(Category::Appearance, "appearance.fonts.hinting", "Font hinting", "Hint glyphs to the pixel grid.", true),
+    tog(Category::Appearance, "appearance.fonts.use-drawable-chars", "Native box drawing", "Draw box/block glyphs natively.", true),
+    sel(Category::Appearance, "ui.window.opacity", "Window opacity", "Overall window opacity.", &["0.8", "0.9", "0.95", "1.0"], "1.0"),
+    tog(Category::Appearance, "ui.window.blur", "Background blur", "Blur what's behind a translucent window.", false),
+    tog(Category::Appearance, "appearance.effects.trail-cursor", "Cursor trail", "Neovide-style cursor trail.", true),
+    tog(Category::Appearance, "appearance.effects.custom-mouse-cursor", "Custom mouse cursor", "Render the mouse pointer ourselves.", false),
 
     // ── Editor ──
-    tog(Category::Editor, "vim-mode", "Vim mode", "Vim keybindings in the code AND markdown editors. Applies to editors you open next.", true),
-    tog(Category::Editor, "format-on-save", "Format on save", "Run the language server's formatter before every save.", true),
-    tog(Category::Editor, "minimap", "Minimap", "Show the code-editor minimap.", false),
+    tog(Category::Editor, "editor.vim-mode", "Vim mode", "Vim keybindings in the code AND markdown editors. Applies to editors you open next.", true),
+    tog(Category::Editor, "editor.format-on-save", "Format on save", "Run the language server's formatter before every save.", true),
+    tog(Category::Editor, "editor.minimap", "Minimap", "Show the code-editor minimap.", false),
 
     // ── Terminal ──
-    tog(Category::Terminal, "enable-scroll-bar", "Scrollbar", "Show the terminal scrollbar.", true),
-    sel(Category::Terminal, "scrollback-history-limit", "Scrollback lines", "How many lines of scrollback to keep.", &["1000", "5000", "10000", "50000", "100000"], "10000"),
-    sel(Category::Terminal, "scroll.multiplier", "Scroll speed", "Scroll wheel multiplier.", &["1", "2", "3", "4", "5"], "3"),
-    tog(Category::Terminal, "draw-bold-text-with-light-colors", "Bold uses bright colors", "Bold text draws in the bright ANSI palette.", false),
-    tog(Category::Terminal, "navigation.hide-if-single", "Hide tab bar when single", "Hide the tab strip with only one tab.", true),
-    tog(Category::Terminal, "navigation.use-split", "Enable splits", "Allow split panes.", true),
-    tog(Category::Terminal, "navigation.open-config-with-split", "Open config in a split", "Open the config file beside the current pane.", true),
-    tog(Category::Terminal, "navigation.current-working-directory", "New tab inherits CWD", "New tabs start in the current working directory.", true),
-    tog(Category::Terminal, "keyboard.ime-cursor-positioning", "IME at cursor", "Position the IME popup at the caret.", true),
-    tog(Category::Terminal, "bell.audio", "Audible bell", "Play the system sound on a terminal bell.", false),
+    tog(Category::Terminal, "terminal.enable-scroll-bar", "Scrollbar", "Show the terminal scrollbar.", true),
+    sel(Category::Terminal, "terminal.scrollback-history-limit", "Scrollback lines", "How many lines of scrollback to keep.", &["1000", "5000", "10000", "50000", "100000"], "10000"),
+    sel(Category::Terminal, "terminal.scroll.multiplier", "Scroll speed", "Scroll wheel multiplier.", &["1", "2", "3", "4", "5"], "3"),
+    tog(Category::Terminal, "terminal.draw-bold-text-with-light-colors", "Bold uses bright colors", "Bold text draws in the bright ANSI palette.", false),
+    tog(Category::Terminal, "ui.navigation.hide-if-single", "Hide tab bar when single", "Hide the tab strip with only one tab.", true),
+    tog(Category::Terminal, "ui.navigation.use-split", "Enable splits", "Allow split panes.", true),
+    tog(Category::Terminal, "ui.navigation.open-config-with-split", "Open config in a split", "Open the config file beside the current pane.", true),
+    tog(Category::Terminal, "ui.navigation.current-working-directory", "New tab inherits CWD", "New tabs start in the current working directory.", true),
+    tog(Category::Terminal, "terminal.keyboard.ime-cursor-positioning", "IME at cursor", "Position the IME popup at the caret.", true),
+    tog(Category::Terminal, "terminal.bell.audio", "Audible bell", "Play the system sound on a terminal bell.", false),
 
     // ── Agent ── (only settings the neoism agent actually reads)
     action(Category::Agent, "Model & providers", "Pick the agent model, or connect a provider (API key / OAuth).", "open-model", "Choose\u{2026}"),
-    sel(Category::Agent, "reasoning-effort", "Reasoning effort", "How hard the model thinks.", &["low", "medium", "high", "xhigh", "max"], "medium"),
-    tog(Category::Agent, "dangerously-skip-permissions", "Skip permission prompts", "Auto-allow agent actions that would prompt. Explicit deny rules still deny.", false),
+    sel(Category::Agent, "agent.reasoning-effort", "Reasoning effort", "How hard the model thinks.", &["low", "medium", "high", "xhigh", "max"], "medium"),
+    tog(Category::Agent, "agent.dangerously-skip-permissions", "Skip permission prompts", "Auto-allow agent actions that would prompt. Explicit deny rules still deny.", false),
 
     // ── Developer ──
     sel(Category::Developer, "developer.log-level", "Log level", "Tracing verbosity (applies on next launch).", &["off", "error", "warn", "info", "debug", "trace"], "off"),
@@ -895,7 +895,7 @@ impl NeoismSettingsPane {
         })
     }
     fn keybind_override(&self, action: &str) -> Option<(String, String)> {
-        let keys = self.values.get("bindings")?.get("keys")?.as_array()?;
+        let keys = self.values.get("keybinds")?.get("keys")?.as_array()?;
         keys.iter().find_map(|entry| {
             if entry.get("action").and_then(Value::as_str) == Some(action) {
                 let key = entry
@@ -1016,38 +1016,37 @@ impl NeoismSettingsPane {
         self.dropdown_rects.push((rect, idx, opt));
     }
 
+    /// Read a value at a golden dotted path (`appearance.fonts.family`),
+    /// descending one object per segment.
     fn get_value(&self, key: &str) -> Option<&Value> {
-        match key.split_once('.') {
-            Some((section, field)) => self.values.get(section)?.get(field),
-            None => self.values.get(key),
+        let mut current = &self.values;
+        for segment in key.split('.') {
+            current = current.get(segment)?;
         }
+        Some(current)
     }
 
+    /// Mirror a written value into the local view at its golden dotted
+    /// path, creating intermediate group objects as needed.
     fn set_local(&mut self, key: &str, value: Value) {
-        let root = match self.values.as_object_mut() {
-            Some(root) => root,
-            None => {
-                self.values = Value::Object(serde_json::Map::new());
-                self.values.as_object_mut().expect("just set")
-            }
-        };
-        match key.split_once('.') {
-            Some((section, field)) => {
-                let section_val = root
-                    .entry(section.to_string())
-                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                if !section_val.is_object() {
-                    *section_val = Value::Object(serde_json::Map::new());
-                }
-                section_val
-                    .as_object_mut()
-                    .expect("forced object")
-                    .insert(field.to_string(), value);
-            }
-            None => {
-                root.insert(key.to_string(), value);
-            }
+        if !self.values.is_object() {
+            self.values = Value::Object(serde_json::Map::new());
         }
+        let segments: Vec<&str> = key.split('.').collect();
+        let Some((leaf, parents)) = segments.split_last() else {
+            return;
+        };
+        let mut current = self.values.as_object_mut().expect("ensured object");
+        for segment in parents {
+            let entry = current
+                .entry((*segment).to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !entry.is_object() {
+                *entry = Value::Object(serde_json::Map::new());
+            }
+            current = entry.as_object_mut().expect("forced object");
+        }
+        current.insert((*leaf).to_string(), value);
     }
 
     pub(crate) fn visible_settings(&self) -> Vec<usize> {

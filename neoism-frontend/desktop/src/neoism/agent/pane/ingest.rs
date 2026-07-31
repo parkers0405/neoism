@@ -356,6 +356,19 @@ impl NeoismAgentPane {
                     self.execute_apply_config_defaults_command();
                     changed = true;
                 }
+                OutboundAgentCommand::SetInputHelpVisible { visible } => {
+                    if let Err(error) = neoism_backend::config::write_setting(
+                        "agent.input-hints",
+                        Value::Bool(visible),
+                    ) {
+                        tracing::warn!(
+                            target: "neoism::config",
+                            %error,
+                            "agent input hints preference write failed"
+                        );
+                    }
+                    changed = true;
+                }
                 OutboundAgentCommand::RefreshModelContextLimit => {
                     self.execute_refresh_model_context_limit_command();
                     changed = true;

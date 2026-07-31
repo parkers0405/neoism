@@ -112,6 +112,9 @@ pub fn map_outbound_command(
         Cmd::ApplyConfigDefaults => Mapping::Messages(vec![Msg::GetConfigDefaults {
             directory: context.default_directory.clone(),
         }]),
+        Cmd::SetInputHelpVisible { visible } => {
+            Mapping::Messages(vec![Msg::SetInputHelpVisible { visible }])
+        }
         Cmd::RefreshModelContextLimit | Cmd::RefreshModels => {
             Mapping::Messages(vec![Msg::ListProviders])
         }
@@ -393,5 +396,19 @@ mod tests {
             ),
             AgentProtocolMapping::Unsupported(_)
         ));
+    }
+
+    #[test]
+    fn input_help_preference_maps_to_daemon_protocol() {
+        let mapped = map_outbound_command(
+            OutboundAgentCommand::SetInputHelpVisible { visible: false },
+            &AgentProtocolMappingContext::default(),
+        );
+        assert_eq!(
+            mapped,
+            AgentProtocolMapping::Messages(vec![
+                AgentClientMessage::SetInputHelpVisible { visible: false }
+            ])
+        );
     }
 }

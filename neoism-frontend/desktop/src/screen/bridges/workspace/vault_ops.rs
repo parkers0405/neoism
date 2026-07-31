@@ -314,6 +314,39 @@ impl Screen<'_> {
     pub(crate) fn link_current_workspace_to_notes_vault(&mut self) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
+        // A joined workspace lives on the peer daemon. Creating its vault
+        // locally linked the guest machine's Default vault to the host path,
+        // which is both surprising and wrong. Ask the host daemon to create a
+        // dedicated vault beside its own vaults and link it to its own root.
+        if self.served_workspace_root().is_some() {
+            let Some(workspace_id) = self.context_manager.current_adopted_workspace_id()
+            else {
+                self.renderer.notifications.push(
+                    "Could not identify the shared workspace".to_string(),
+                    NotificationLevel::Error,
+                );
+                self.mark_dirty();
+                return;
+            };
+            if self.context_manager.send_workspace_request(
+                neoism_protocol::workspace::WorkspaceClientMessage::CreateWorkspaceVault {
+                    workspace_id,
+                },
+            ) {
+                self.renderer.notifications.push(
+                    "Creating a dedicated vault on the workspace host…".to_string(),
+                    NotificationLevel::Info,
+                );
+            } else {
+                self.renderer.notifications.push(
+                    "The workspace host is not connected".to_string(),
+                    NotificationLevel::Error,
+                );
+            }
+            self.mark_dirty();
+            return;
+        }
+
         let root = self
             .active_workspace_root
             .clone()

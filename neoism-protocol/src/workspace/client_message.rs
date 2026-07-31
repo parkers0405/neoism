@@ -362,6 +362,13 @@ pub enum WorkspaceClientMessage {
         workspace_id: String,
         root_dir: PathBuf,
     },
+    /// Create a dedicated notes vault on the workspace's running host and
+    /// link that vault to the workspace directory. This is used by a joined
+    /// guest's no-vault empty state; the mutation must happen on the daemon
+    /// machine, never against the guest's local Default vault.
+    CreateWorkspaceVault {
+        workspace_id: String,
+    },
     /// Advertise a local workspace to other clients/peers. MVP targets a
     /// direct/Tailscale connection; future registries can discover the same
     /// shared workspace metadata.

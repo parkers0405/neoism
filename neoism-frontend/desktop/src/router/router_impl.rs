@@ -227,20 +227,17 @@ impl Router<'_> {
             }
         }
 
-        let current_config: RioConfig = config.clone();
-        let editor = config.editor.clone();
+        let editor = config.editor.external.clone();
         let mut args = editor.args;
         args.push(
             neoism_backend::config::config_file_path()
                 .display()
                 .to_string(),
         );
-        let new_config = RioConfig {
-            shell: neoism_backend::config::Shell {
-                program: editor.program,
-                args,
-            },
-            ..current_config
+        let mut new_config: RioConfig = config.clone();
+        new_config.terminal.shell = neoism_backend::config::Shell {
+            program: editor.program,
+            args,
         };
 
         let window = RouteWindow::from_target(
@@ -261,20 +258,17 @@ impl Router<'_> {
     }
 
     pub fn open_config_split(&mut self, config: &RioConfig) {
-        let current_config: RioConfig = config.clone();
-        let editor = config.editor.clone();
+        let editor = config.editor.external.clone();
         let mut args = editor.args;
         args.push(
             neoism_backend::config::config_file_path()
                 .display()
                 .to_string(),
         );
-        let new_config = RioConfig {
-            shell: neoism_backend::config::Shell {
-                program: editor.program,
-                args,
-            },
-            ..current_config
+        let mut new_config: RioConfig = config.clone();
+        new_config.terminal.shell = neoism_backend::config::Shell {
+            program: editor.program,
+            args,
         };
 
         let window_id = match self.get_focused_route() {
@@ -299,7 +293,7 @@ impl Router<'_> {
         open_url: Option<String>,
         app_id: Option<&str>,
     ) -> WindowId {
-        let tab_id = if config.navigation.is_native() {
+        let tab_id = if config.ui.navigation.is_native() {
             let id = self.current_tab_id;
             self.current_tab_id = self.current_tab_id.wrapping_add(1);
             Some(id.to_string())

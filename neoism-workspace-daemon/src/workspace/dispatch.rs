@@ -183,6 +183,9 @@ fn handle_inner(
                 DispatchOutcome::just(vec![err(format!("no such host workspace: {workspace_id}"))])
             }
         },
+        WorkspaceClientMessage::CreateWorkspaceVault { workspace_id } => {
+            DispatchOutcome::just(create_workspace_vault(manager, conn, &workspace_id))
+        },
         WorkspaceClientMessage::ShareWorkspace { workspace_id } => match manager
             .set_host_workspace_visibility(
                 &workspace_id,
@@ -552,6 +555,103 @@ fn handle_inner(
         manager.remember_client_state(conn);
     }
     outcome
+}
+
+fn create_workspace_vault(
+    manager: &WorkspaceManager,
+    conn: &ConnectionWorkspace,
+    workspace_id: &str,
+) -> Vec<WorkspaceServerMessage> {
+    let Some(workspace) = manager
+        .list_host_workspaces(None)
+        .into_iter()
+        .find(|workspace| workspace.id == workspace_id)
+    else {
+        return vec![err(format!("no such host workspace: {workspace_id}"))];
+    };
+    let Some(root) = workspace.root_dir.clone() else {
+        return vec![err(format!(
+            "workspace {workspace_id} has no directory to link"
+        ))];
+    };
+
+    // Treat retries (including a double-click before the guest receives the
+    // first upsert) as success. Refreshing through the manager also repairs
+    // an older in-memory summary whose on-disk link already exists.
+    if resolve_linked_vault_dir(&root).is_some() {
+        let refreshed = manager
+            .set_host_workspace_root(workspace_id, root)
+            .unwrap_or(workspace);
+        return vec![WorkspaceServerMessage::HostWorkspaceUpserted {
+            workspace: refreshed,
+        }];
+    }
+
+    let base_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(workspace.title.as_str());
+    let base_name = sanitize_vault_name(base_name);
+    let base_name = if base_name.is_empty() {
+        "Workspace".to_string()
+    } else {
+        base_name
+    };
+    let vaults_root = neoism_workspace_index::notes_vaults_dir();
+    let mut vault_name = base_name.clone();
+    let mut suffix = 2usize;
+    while vaults_root.join(&vault_name).exists() {
+        vault_name = format!("{base_name} {suffix}");
+        suffix += 1;
+    }
+
+    let result = (|| -> std::io::Result<std::path::PathBuf> {
+        let mut notes_workspace = match neoism_workspace_index::load_workspace(&root)? {
+            Some(workspace) => workspace,
+            None => neoism_workspace_index::init_workspace(&root)?,
+        };
+        notes_workspace.config.notes.workspace = vault_name;
+        neoism_workspace_index::ensure_notes_workspace(&notes_workspace)?;
+        neoism_workspace_index::link_workspace_to_vault_project(
+            &mut notes_workspace,
+            &root,
+        )
+    })();
+
+    match result {
+        Ok(_) => {
+            manager.broadcast_tree_changed(Some(conn.client_id));
+            // Re-resolve and persist `linked_vault_dir` in the authoritative
+            // summary before replying; merely reading the manager would keep
+            // returning the pre-link `None` cached on this workspace.
+            let refreshed = manager
+                .set_host_workspace_root(workspace_id, root)
+                .unwrap_or(workspace);
+            vec![WorkspaceServerMessage::HostWorkspaceUpserted {
+                workspace: refreshed,
+            }]
+        }
+        Err(error) => vec![err(format!(
+            "could not create notes vault for workspace {workspace_id}: {error}"
+        ))],
+    }
+}
+
+fn sanitize_vault_name(name: &str) -> String {
+    name.trim()
+        .chars()
+        .map(|ch| {
+            if matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .trim()
+        .to_string()
 }
 
 /// Evaluate an inbound `Hello { token, client_name }` against the

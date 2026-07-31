@@ -19,6 +19,7 @@ pub struct ConfigDefaults {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<String>,
+    pub input_help_visible: Option<bool>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -188,10 +189,17 @@ pub fn config_defaults_from_json(value: &Value) -> ConfigDefaults {
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|s| !s.is_empty());
+    let input_help_visible = value
+        .get("input-hints")
+        .or_else(|| value.get("agent-input-hints"))
+        .or_else(|| value.get("agentInputHints"))
+        .or_else(|| value.get("agent_input_hints"))
+        .and_then(Value::as_bool);
     ConfigDefaults {
         agent,
         model,
         thinking,
+        input_help_visible,
     }
 }
 
@@ -642,11 +650,13 @@ mod tests {
         let config = config_defaults_from_json(&json!({
             "default_agent": "build",
             "model": "openai/gpt-5",
-            "reasoning_effort": "high"
+            "reasoning_effort": "high",
+            "agent_input_hints": false
         }));
         assert_eq!(config.agent.as_deref(), Some("build"));
         assert_eq!(config.model.as_deref(), Some("openai/gpt-5"));
         assert_eq!(config.thinking.as_deref(), Some("high"));
+        assert_eq!(config.input_help_visible, Some(false));
 
         let session = session_state_from_json(&json!({
             "agent": "review",

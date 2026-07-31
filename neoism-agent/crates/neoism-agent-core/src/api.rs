@@ -26,6 +26,7 @@ pub struct NeoismConfig {
     pub model: Option<String>,
     #[serde(
         default,
+        alias = "reasoning-effort",
         alias = "thinking",
         alias = "reasoning",
         alias = "reasoning_effort",
@@ -552,6 +553,15 @@ mod tests {
         }
         let default: NeoismConfig = serde_json::from_value(json!({})).unwrap();
         assert!(!default.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn reasoning_effort_accepts_unified_config_spelling() {
+        for key in ["reasoning-effort", "reasoning_effort", "reasoningEffort"] {
+            let config: NeoismConfig =
+                serde_json::from_value(json!({ key: "medium" })).unwrap();
+            assert_eq!(config.variant.as_deref(), Some("medium"), "{key}");
+        }
     }
 
     #[test]

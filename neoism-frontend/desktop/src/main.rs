@@ -503,7 +503,7 @@ pub fn setup_environment_variables(config: &neoism_backend::config::Config) {
     }
 
     // Set env vars from config.
-    for env_config in config.env_vars.iter() {
+    for env_config in config.terminal.env_vars.iter() {
         let env_vec: Vec<&str> = env_config.split('=').collect();
 
         if env_vec.len() == 2 {
@@ -1116,8 +1116,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app::freeze_watchdog::init();
 
         if let Some(command) = args.window_options.terminal_options.command() {
-            config.shell = command;
-            config.use_fork = false;
+            config.terminal.shell = command;
+            config.terminal.use_fork = false;
         }
 
         if let Some(working_dir_cli) = args.window_options.terminal_options.working_dir {
@@ -1128,8 +1128,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(not(target_os = "windows"))]
             let canonicalize_fn = std::fs::canonicalize;
 
-            config.working_dir = match canonicalize_fn(&working_dir_cli).and_then(
-                |path| {
+            config.terminal.working_dir = match canonicalize_fn(&working_dir_cli)
+                .and_then(|path| {
                     if path.is_dir() {
                         path.into_os_string().into_string().map_err(|_| {
                             std::io::Error::new(
@@ -1143,8 +1143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "Path is not a directory",
                         ))
                     }
-                },
-            ) {
+                }) {
                 Ok(canonical_path) => Some(canonical_path),
                 Err(e) => {
                     tracing::warn!("Failed to set working directory '{}': {}. Using default instead.", working_dir_cli, e);
@@ -1153,7 +1152,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
         }
 
-        config.title.placeholder = args.window_options.terminal_options.title_placeholder;
+        config.ui.title.placeholder =
+            args.window_options.terminal_options.title_placeholder;
     }
 
     #[cfg(target_os = "linux")]
@@ -1161,7 +1161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // If running inside a flatpak sandbox.
         // Rio will never use use_fork configuration as true
         if std::path::PathBuf::from("/.flatpak-info").exists() {
-            config.use_fork = false;
+            config.terminal.use_fork = false;
         }
     }
 

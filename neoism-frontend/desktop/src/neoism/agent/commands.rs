@@ -64,6 +64,9 @@ impl NeoismAgentPane {
             SlashCommandAction::CompactSession => self.compact_session(),
             SlashCommandAction::UndoSession => self.undo_session(),
             SlashCommandAction::RedoSession => self.redo_session(),
+            SlashCommandAction::ToggleInputHelp => {
+                self.toggle_input_help();
+            }
             SlashCommandAction::PissOnScreen => self.start_fx_easter_egg(
                 neoism_ui::panels::agent_pane::view::fx::AgentFxKind::Piss,
             ),
@@ -277,7 +280,6 @@ impl NeoismAgentPane {
             "plan" => self.mode = NeoismAgentMode::Plan,
             _ => {}
         }
-        self.input.clear();
         self.close_picker();
         if let Some(session_id) = self.session_id.clone() {
             if !value.is_empty() {
@@ -329,7 +331,6 @@ impl NeoismAgentPane {
         self.remember_model_value(&value);
         self.model = value;
         self.refresh_model_context_limit();
-        self.input.clear();
         self.close_picker();
         if let Some(session_id) = self.session_id.clone() {
             if let Some(model) =
@@ -362,7 +363,6 @@ impl NeoismAgentPane {
 
     pub(super) fn apply_thinking(&mut self, value: String) {
         self.thinking = (!value.is_empty()).then_some(value);
-        self.input.clear();
         self.close_picker();
         if let Some(session_id) = self.session_id.clone() {
             self.push_outbound(OutboundAgentCommand::ApplyThinking {

@@ -131,6 +131,27 @@ impl Screen<'_> {
                     s.font_size * s.scale_factor
                 });
             let is_active = *key == active_key;
+            // Joined daemon PTYs keep the same composer mounted across
+            // commands. Apply that policy before deriving the prompt row so
+            // the very first frame after a remote command cannot briefly
+            // expose the raw prompt or reclaim the composer's layout band.
+            if let Some(target) = crate::host::composer::remote_pty_passthrough_target(
+                ctx.remote_pty.is_some(),
+            ) {
+                if ctx.terminal_input.passthrough_session_active() != target {
+                    tracing::info!(
+                        target: "neoism::composer_passthrough",
+                        pane = ?*key,
+                        active = is_active,
+                        remote_pty = ctx.remote_pty.is_some(),
+                        block_count = ctx.terminal_input.command_block_count(),
+                        new_passthrough = target,
+                        source = "remote_pty_target",
+                        "composer passthrough transition"
+                    );
+                    ctx.terminal_input.set_passthrough_session_active(target);
+                }
+            }
             let (
                 mut visible_rows,
                 mut visible_row_sources,
@@ -142,9 +163,8 @@ impl Screen<'_> {
                 history_size,
                 shell_prompt_state,
                 terminal_alt_screen,
-                _block_input_active,
-                prompt_abs_row,
                 terminal_cursor_abs,
+                terminal_cursor_row_text,
             ) = {
                 let Some(terminal) = ctx.terminal.try_lock_unfair() else {
                     ctx.renderable_content.pending_update.set_dirty();
@@ -172,23 +192,13 @@ impl Screen<'_> {
                         (line.0 <= terminal.bottommost_line().0)
                             .then(|| terminal.grid[line].clone())
                     });
-                let block_input_active = is_active
-                    && ctx.markdown.is_none()
-                    && ctx.neoism_agent.is_none()
-                    && ctx.neoism_tags.is_none()
-                    && shell_prompt_state.awaiting_command
-                    && !terminal_alt_screen
-                    // In a passthrough session the composer is hidden and
-                    // does NOT own the prompt row — so the raw remote/ssh
-                    // prompt must stay in the composed stream instead of
-                    // being dropped as composer chrome. (Local panes only
-                    // enter passthrough on ssh/sh, where `awaiting_command`
-                    // is already false, so this is byte-identical locally.)
-                    && !ctx.terminal_input.passthrough_session_active();
-                let prompt_abs_row = block_input_active
-                    .then(|| terminal.absolute_row_for_line(terminal.cursor().pos.row));
-                let terminal_cursor_abs =
-                    terminal.absolute_row_for_line(terminal.cursor().pos.row);
+                let cursor_line = terminal.cursor().pos.row;
+                let terminal_cursor_abs = terminal.absolute_row_for_line(cursor_line);
+                let terminal_cursor_row_text = terminal.grid[cursor_line]
+                    .inner
+                    .iter()
+                    .map(|cell| cell.c())
+                    .collect::<String>();
                 (
                     visible_rows,
                     visible_row_sources,
@@ -200,9 +210,8 @@ impl Screen<'_> {
                     terminal.history_size(),
                     shell_prompt_state,
                     terminal_alt_screen,
-                    block_input_active,
-                    prompt_abs_row,
                     terminal_cursor_abs,
+                    terminal_cursor_row_text,
                 )
             };
             if ctx.terminal_input.sync_shell_state(shell_prompt_state) {
@@ -210,36 +219,27 @@ impl Screen<'_> {
                     ctx.splash_last_cursor_row = injection.baseline_cursor_row;
                 }
             }
-            // Remote/joined (daemon-hosted) panes use the neoism composer
-            // only as a splash-phase launcher: the `>>>` composer owns
-            // input while the splash is up, then the pane drops to raw
-            // passthrough so the remote shell takes keystrokes directly —
-            // exactly like an ssh session. Drive `passthrough_session_active`
-            // off the SAME splash-phase signal the splash uses
-            // (`command_block_count() == 0`), which also overrides the
-            // OSC-133 auto-clear inside `sync_shell_state`, so the composer,
-            // its reserved rows, the terminal tail and the raw prompt all
-            // follow the splash in lock-step: hidden once the first command
-            // is submitted, shown again whenever `clear` resets the blocks.
-            // Local panes have no `remote_pty` (`None`) and are untouched.
-            if let Some(target) = crate::host::composer::remote_pty_passthrough_target(
-                ctx.remote_pty.is_some(),
-                ctx.terminal_input.command_block_count(),
-            ) {
-                if ctx.terminal_input.passthrough_session_active() != target {
-                    tracing::info!(
-                        target: "neoism::composer_passthrough",
-                        pane = ?*key,
-                        active = is_active,
-                        remote_pty = ctx.remote_pty.is_some(),
-                        block_count = ctx.terminal_input.command_block_count(),
-                        new_passthrough = target,
-                        source = "remote_pty_target",
-                        "composer passthrough transition"
+            if ctx.remote_pty.is_some()
+                && !shell_prompt_state.running_command
+                && !shell_prompt_state.awaiting_command
+            {
+                ctx.terminal_input
+                    .finish_unintegrated_remote_command_at_prompt(
+                        &terminal_cursor_row_text,
                     );
-                    ctx.terminal_input.set_passthrough_session_active(target);
-                }
             }
+            let block_input_active = is_active
+                && ctx.markdown.is_none()
+                && ctx.neoism_agent.is_none()
+                && ctx.neoism_tags.is_none()
+                && ctx
+                    .terminal_input
+                    .prompt_window_open(shell_prompt_state, ctx.remote_pty.is_some())
+                && !terminal_alt_screen
+                // In a passthrough session the composer is hidden and does
+                // not own the raw prompt row.
+                && !ctx.terminal_input.passthrough_session_active();
+            let prompt_abs_row = block_input_active.then_some(terminal_cursor_abs);
             drop_composer_owned_prompt_row(
                 &mut visible_rows,
                 &mut visible_row_sources,
@@ -291,7 +291,7 @@ impl Screen<'_> {
                 && ctx.terminal_input.composer_footer_active(
                     shell_prompt_state,
                     terminal_alt_screen,
-                    false,
+                    ctx.remote_pty.is_some(),
                 );
             let hide_running_command_cursor = is_active
                 && !ctx.has_non_terminal_surface()

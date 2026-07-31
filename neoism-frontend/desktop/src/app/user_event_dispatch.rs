@@ -303,12 +303,12 @@ impl Application<'_> {
             Err(error) => (neoism_backend::config::Config::default(), Some(error)),
         };
 
-        let has_font_updates = self.config.fonts != config.fonts;
+        let has_font_updates = self.config.appearance.fonts != config.appearance.fonts;
         let has_config_error = config_error.is_some();
 
         let font_library_errors = if has_font_updates {
             let new_font_library = neoism_backend::sugarloaf::font::FontLibrary::new(
-                config.fonts.to_owned(),
+                config.appearance.fonts.to_owned(),
             );
             *self.router.font_library = new_font_library.0;
             new_font_library.1
@@ -324,6 +324,7 @@ impl Application<'_> {
                 let system_theme = route.window.winit_window.theme();
                 let theme = self
                     .config
+                    .appearance
                     .force_theme
                     .map(|t| t.to_window_theme())
                     .or(system_theme);
@@ -528,10 +529,11 @@ impl Application<'_> {
         let config;
         let config = match create_window_strategy(working_dir_override.is_some()) {
             CreateWindowStrategy::OverrideWorkingDir => {
-                config = neoism_backend::config::Config {
-                    working_dir: working_dir_override
-                        .map(|path| path.to_string_lossy().to_string()),
-                    ..self.config.clone()
+                config = {
+                    let mut cloned = self.config.clone();
+                    cloned.terminal.working_dir = working_dir_override
+                        .map(|path| path.to_string_lossy().to_string());
+                    cloned
                 };
                 &config
             }
@@ -558,10 +560,11 @@ impl Application<'_> {
         let config;
         let config = match create_window_strategy(working_dir_override.is_some()) {
             CreateWindowStrategy::OverrideWorkingDir => {
-                config = neoism_backend::config::Config {
-                    working_dir: working_dir_override
-                        .map(|path| path.to_string_lossy().to_string()),
-                    ..self.config.clone()
+                config = {
+                    let mut cloned = self.config.clone();
+                    cloned.terminal.working_dir = working_dir_override
+                        .map(|path| path.to_string_lossy().to_string());
+                    cloned
                 };
                 &config
             }
@@ -728,7 +731,7 @@ impl Application<'_> {
     /// either as a split inside the focused route or as a brand-new
     /// window, per `navigation.open_config_with_split`.
     pub(super) fn apply_create_config_editor(&mut self, event_loop: &ActiveEventLoop) {
-        match config_editor_target(self.config.navigation.open_config_with_split) {
+        match config_editor_target(self.config.ui.navigation.open_config_with_split) {
             ConfigEditorTarget::Split => {
                 self.router.open_config_split(&self.config);
             }
@@ -774,6 +777,7 @@ impl Application<'_> {
         };
         let current = self
             .config
+            .appearance
             .force_theme
             .or_else(|| {
                 route
@@ -784,7 +788,7 @@ impl Application<'_> {
             })
             .unwrap_or(AppearanceTheme::Dark);
         let toggled = current.toggled();
-        self.config.force_theme = Some(toggled);
+        self.config.appearance.force_theme = Some(toggled);
         apply_theme_to_config(&mut self.config, Some(toggled.to_window_theme()));
         route
             .window

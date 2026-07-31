@@ -464,8 +464,12 @@ pub(crate) fn apply_agent_event_to_pane(
             agent,
             model,
             thinking,
+            input_help_visible,
         } => {
             pane.apply_provider_state(None, model, agent, thinking, None);
+            if let Some(visible) = input_help_visible {
+                pane.set_input_help_visible(visible);
+            }
         }
         AgentServerMessage::AgentCatalog { agents } => {
             pane.set_agent_options(agent_options_from_catalog(&agents));

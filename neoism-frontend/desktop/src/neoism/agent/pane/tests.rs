@@ -624,6 +624,22 @@ fn model_change_queues_context_limit_refresh_for_runtime() {
 }
 
 #[test]
+fn agent_model_and_thinking_changes_preserve_composer_draft() {
+    let mut pane = NeoismAgentPane::default();
+    pane.insert_text("keep this question");
+    let draft = pane.input().to_string();
+
+    pane.apply_model("openai/gpt-test".to_string());
+    assert_eq!(pane.input(), draft);
+
+    pane.apply_thinking("high".to_string());
+    assert_eq!(pane.input(), draft);
+
+    pane.apply_agent("plan".to_string());
+    assert_eq!(pane.input(), draft);
+}
+
+#[test]
 fn with_directory_queues_config_defaults_for_runtime() {
     let mut pane = NeoismAgentPane::with_directory(Some("/tmp/project".to_string()));
 

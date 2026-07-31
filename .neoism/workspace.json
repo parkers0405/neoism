@@ -1,0 +1,22 @@
+{
+  "version": 5,
+  "id": "2ed75df2-733d-4dd8-94ef-5bfd4770c17e",
+  "name": "neoism",
+  "notes": {
+    "enabled": true,
+    "workspace": "Default",
+    "ignore": [
+      ".git",
+      ".hg",
+      ".svn",
+      ".direnv",
+      ".next",
+      ".claude",
+      ".codex",
+      "node_modules",
+      "target",
+      "dist",
+      "build"
+    ]
+  }
+}

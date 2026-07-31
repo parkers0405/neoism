@@ -140,7 +140,9 @@ impl Application<'_> {
                             #[allow(unused_variables)]
                             let bg_color = match bg_state {
                                 BackgroundState::Set(color) => color,
-                                BackgroundState::Reset => self.config.colors.background.1,
+                                BackgroundState::Reset => {
+                                    self.config.appearance.colors.background.1
+                                }
                             };
 
                             #[cfg(target_os = "macos")]

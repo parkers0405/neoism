@@ -1341,20 +1341,25 @@ impl Screen<'_> {
         let raw_display_handle = window_properties.raw_display_handle;
         let window_id = window_properties.window_id;
 
-        let padding_y_top = padding_top_from_config(
-            &crate::bridges::utils::nav_shim(&config.navigation),
-            config.margin.top,
-            1,
-            config.window.macos_use_unified_titlebar,
-        ) + terminal_top_padding_for_font_size(config.fonts.size);
+        let padding_y_top =
+            padding_top_from_config(
+                &crate::bridges::utils::nav_shim(&config.ui.navigation),
+                config.ui.margin.top,
+                1,
+                config.ui.window.macos_use_unified_titlebar,
+            ) + terminal_top_padding_for_font_size(config.appearance.fonts.size);
 
         // Reserve room for the bottom status line so terminal and nvim
         // both lay out within visible bounds (otherwise the last row is
         // hidden behind the chrome strip — same idea as the top buffer
         // tabs / breadcrumbs reservation).
-        let padding_y_bottom = status_line_height_for_font_size(config.fonts.size);
-        let sugarloaf_layout =
-            RootStyle::new(scale as f32, config.fonts.size, config.line_height);
+        let padding_y_bottom =
+            status_line_height_for_font_size(config.appearance.fonts.size);
+        let sugarloaf_layout = RootStyle::new(
+            scale as f32,
+            config.appearance.fonts.size,
+            config.appearance.line_height,
+        );
 
         let mut sugarloaf_errors: Option<SugarloafErrors> = None;
 
@@ -1456,8 +1461,8 @@ impl Screen<'_> {
 
         let sugarloaf_renderer = SugarloafRenderer {
             backend,
-            font_features: config.fonts.features.clone(),
-            colorspace: config.window.colorspace.to_sugarloaf_colorspace(),
+            font_features: config.appearance.fonts.features.clone(),
+            colorspace: config.ui.window.colorspace.to_sugarloaf_colorspace(),
         };
 
         crate::app::freeze_watchdog::mark_window_event(
@@ -1494,11 +1499,11 @@ impl Screen<'_> {
         crate::mashup::seed_example_packs();
         crate::mashup::sync_custom_ide_themes();
         crate::mashup::publish_active_look(
-            &config.look,
-            config.neoism.mashup_pack.as_deref(),
+            &config.appearance.look,
+            config.appearance.mashup_pack.as_deref(),
         );
         let startup_pack = config
-            .neoism
+            .appearance
             .mashup_pack
             .as_deref()
             .map(str::trim)
@@ -1549,54 +1554,54 @@ impl Screen<'_> {
 
         let bindings = crate::bindings::default_key_bindings(config);
 
-        let is_native = config.navigation.is_native();
+        let is_native = config.ui.navigation.is_native();
 
         let (shell, working_dir) = process_open_url(
-            config.shell.to_owned(),
-            config.working_dir.to_owned(),
-            config.editor.to_owned(),
+            config.terminal.shell.to_owned(),
+            config.terminal.working_dir.to_owned(),
+            config.editor.external.to_owned(),
             open_url.as_deref(),
         );
 
         let context_manager_config = context::ContextManagerConfig {
-            cwd: config.navigation.current_working_directory,
+            cwd: config.ui.navigation.current_working_directory,
             shell,
             working_dir,
             spawn_performer: true,
             #[cfg(not(target_os = "windows"))]
-            use_fork: config.use_fork,
+            use_fork: config.terminal.use_fork,
             is_native,
             // When navigation does not contain any color rule
             // does not make sense fetch for foreground process names/path
-            should_update_title_extra: !config.navigation.color_automation.is_empty(),
-            split_color: config.colors.split,
-            split_active_color: config.colors.split_active,
-            panel: config.panel,
-            title: config.title.clone(),
-            keyboard: config.keyboard,
-            scrollback_history_limit: config.scrollback_history_limit,
-            ide_theme: config.neoism.theme.clone(),
-            cursor_blinking: config.cursor.blinking,
+            should_update_title_extra: !config.ui.navigation.color_automation.is_empty(),
+            split_color: config.appearance.colors.split,
+            split_active_color: config.appearance.colors.split_active,
+            panel: config.ui.panel,
+            title: config.ui.title.clone(),
+            keyboard: config.terminal.keyboard,
+            scrollback_history_limit: config.terminal.scrollback_history_limit,
+            ide_theme: config.appearance.theme.clone(),
+            cursor_blinking: config.terminal.cursor.blinking,
         };
 
         // Create rich text with initial position accounting for island
         let rich_text_id = next_rich_text_id();
         let _ = sugarloaf.text(Some(rich_text_id));
-        sugarloaf.set_position(rich_text_id, config.margin.left, padding_y_top);
+        sugarloaf.set_position(rich_text_id, config.ui.margin.left, padding_y_top);
 
         // Create unscaled margin for ContextDimension (compute() will scale it)
         let margin = Margin::new(
             padding_y_top,
-            config.margin.right,
+            config.ui.margin.right,
             padding_y_bottom,
-            config.margin.left,
+            config.ui.margin.left,
         );
         // Create scaled margin for ContextGrid (already in physical pixels)
         let scaled_margin = Margin::new(
             padding_y_top * scale as f32,
-            config.margin.right * scale as f32,
+            config.ui.margin.right * scale as f32,
             padding_y_bottom * scale as f32,
-            config.margin.left * scale as f32,
+            config.ui.margin.left * scale as f32,
         );
         let context_dimension = ContextDimension::build(
             size.width as f32,
@@ -1604,20 +1609,20 @@ impl Screen<'_> {
             sugarloaf
                 .get_text_dimensions(&rich_text_id)
                 .unwrap_or_default(),
-            config.line_height,
+            config.appearance.line_height,
             margin,
         );
 
         let cursor = Cursor {
-            content: config.cursor.shape.into(),
-            content_ref: config.cursor.shape.into(),
-            state: CursorState::new(config.cursor.shape.into()),
+            content: config.terminal.cursor.shape.into(),
+            content_ref: config.terminal.cursor.shape.into(),
+            state: CursorState::new(config.terminal.cursor.shape.into()),
             is_ime_enabled: false,
         };
 
         let context_manager = context::ContextManager::start(
-            // config.cursor.blinking
-            (&cursor, config.cursor.blinking),
+            // config.terminal.cursor.blinking
+            (&cursor, config.terminal.cursor.blinking),
             event_proxy,
             window_id,
             0,
@@ -1636,7 +1641,13 @@ impl Screen<'_> {
         let pack_wallpaper = startup_pack
             .as_ref()
             .and_then(|pack| pack.wallpaper.as_ref());
-        if let Some(image) = config.window.background_image.as_ref().or(pack_wallpaper) {
+        if let Some(image) = config
+            .ui
+            .window
+            .background_image
+            .as_ref()
+            .or(pack_wallpaper)
+        {
             if let Err(message) = sugarloaf.set_background_image(image) {
                 renderer.assistant.set_error(RioError {
                     level: RioErrorLevel::Warning,
@@ -1660,8 +1671,9 @@ impl Screen<'_> {
 
         Ok(Screen {
             search_state: SearchState::default(),
-            hint_state: HintState::new(config.hints.alphabet.clone()),
+            hint_state: HintState::new(config.terminal.hints.alphabet.clone()),
             hints_config: config
+                .terminal
                 .hints
                 .rules
                 .iter()
@@ -1684,11 +1696,14 @@ impl Screen<'_> {
             daemon_pane_layout: daemon_layout::ScreenPaneLayoutCache::default(),
             remote_presence: neoism_ui::editor::crdt::RemotePresenceStore::new(),
             presence_publisher: None,
-            presence_display_name_override: config.neoism.display_name.clone(),
+            presence_display_name_override: config.presence.display_name.clone(),
             markdown_crdt: markdown_crdt::MarkdownCrdtState::default(),
             code_crdt: code_crdt::CodeCrdtState::default(),
             sugarloaf,
-            mouse: Mouse::new(config.scroll.multiplier, config.scroll.divider),
+            mouse: Mouse::new(
+                config.terminal.scroll.multiplier,
+                config.terminal.scroll.divider,
+            ),
             touchpurpose: TouchPurpose::default(),
             renderer,
             last_chrome_layout_signature: None,
@@ -1713,6 +1728,7 @@ impl Screen<'_> {
             mouse_hidden_by_typing: false,
             finder_target_route: None,
             active_workspace_root: config
+                .terminal
                 .working_dir
                 .clone()
                 .map(PathBuf::from)

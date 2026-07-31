@@ -258,7 +258,33 @@ impl Screen<'_> {
                 // are PERSONAL per screen (model rule 3): the inventory
                 // updates everywhere, but nothing is pushed into a
                 // strip — you pull via the picker / adopt at entry.
-                self.refresh_open_workspaces_picker()
+                let mut changed = self.refresh_open_workspaces_picker();
+                if self.renderer.notes_sidebar.is_visible()
+                    && self.renderer.notes_sidebar.shows_vault_actions()
+                    && self.served_notes_vault_root().is_some()
+                {
+                    changed |= self.point_notes_sidebar_at_served_vault();
+                }
+                changed
+            }
+            WorkspaceServerMessage::HostWorkspaceUpserted { workspace }
+                if self.renderer.notes_sidebar.is_visible()
+                    && self.renderer.notes_sidebar.shows_vault_actions()
+                    && self
+                        .context_manager
+                        .current_adopted_workspace_id()
+                        .is_some_and(|current| current == workspace.id)
+                    && workspace.linked_vault_dir.is_some() =>
+            {
+                let changed = self.point_notes_sidebar_at_served_vault();
+                if changed {
+                    self.renderer.notifications.push(
+                        "Created and linked the shared workspace vault".to_string(),
+                        neoism_ui::panels::notifications::NotificationLevel::Info,
+                    );
+                    self.mark_dirty();
+                }
+                changed
             }
             _ => false,
         }

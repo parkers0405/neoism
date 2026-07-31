@@ -258,8 +258,51 @@ fn merge_file(raw: &mut Value, path: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to read config file {}", path.display()))?;
     let next = parse_jsonc(&text)
         .with_context(|| format!("failed to parse config file {}", path.display()))?;
+    // The terminal's golden `config.json` groups agent settings under an
+    // `agent` block (and terminal settings under `terminal`, etc.). Feed
+    // the agent only its own block — plus the shared `terminal.shell` as
+    // the shell fallback. A dedicated `neoism.json` IS an agent config, so
+    // it is merged at its root unchanged.
+    let next = if is_shared_terminal_config(path) {
+        shared_config_agent_view(next)
+    } else {
+        next
+    };
     merge_value(raw, next);
     Ok(())
+}
+
+/// True for the terminal's shared `config.json` / `config.jsonc` (which
+/// nests agent keys under `agent`), false for dedicated `neoism.json`
+/// agent configs and everything else.
+fn is_shared_terminal_config(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("config.json") | Some("config.jsonc")
+    )
+}
+
+/// Project the terminal's grouped `config.json` down to just the agent's
+/// view: the `agent` block, with the shared `terminal.shell` filled in as
+/// the agent's shell when the block did not set its own. All other groups
+/// (`appearance`, `terminal`, `ui`, …) are the terminal's concern and are
+/// dropped so they never leak into the agent config.
+fn shared_config_agent_view(next: Value) -> Value {
+    let Value::Object(root) = next else {
+        return json!({});
+    };
+    let mut agent = match root.get("agent") {
+        Some(Value::Object(block)) => block.clone(),
+        _ => serde_json::Map::new(),
+    };
+    if !agent.contains_key("shell") {
+        if let Some(Value::Object(terminal)) = root.get("terminal") {
+            if let Some(shell) = terminal.get("shell") {
+                agent.insert("shell".to_string(), shell.clone());
+            }
+        }
+    }
+    Value::Object(agent)
 }
 
 /// `mcp.json` / `mcp.jsonc` in a config dir — a standalone MCP server
@@ -525,5 +568,53 @@ fn merge_permission_maps(
 ) {
     for (key, value) in source {
         target.entry(key).or_insert(value);
+    }
+}
+
+#[cfg(test)]
+mod agent_view_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn shared_config_json_is_projected_to_its_agent_block() {
+        assert!(is_shared_terminal_config(Path::new("/x/config.json")));
+        assert!(is_shared_terminal_config(Path::new("/x/config.jsonc")));
+        assert!(!is_shared_terminal_config(Path::new("/x/neoism.json")));
+
+        let view = shared_config_agent_view(json!({
+            "appearance": { "theme": "tokyo_night" },
+            "terminal": { "shell": { "program": "fish" } },
+            "ui": { "status-fps": false },
+            "agent": {
+                "model": "anthropic/claude-opus-5",
+                "permission": { "edit": "ask" }
+            }
+        }));
+        // Only the agent block survives — terminal/appearance/ui are dropped.
+        assert_eq!(view["model"], "anthropic/claude-opus-5");
+        assert_eq!(view["permission"]["edit"], "ask");
+        assert!(view.get("appearance").is_none());
+        assert!(view.get("ui").is_none());
+        // The shared terminal shell fills in as the agent's shell.
+        assert_eq!(view["shell"], json!({ "program": "fish" }));
+    }
+
+    #[test]
+    fn agent_shell_wins_over_shared_terminal_shell() {
+        let view = shared_config_agent_view(json!({
+            "terminal": { "shell": { "program": "fish" } },
+            "agent": { "shell": "bash" }
+        }));
+        assert_eq!(view["shell"], "bash");
+    }
+
+    #[test]
+    fn shared_config_without_agent_block_yields_only_shared_shell() {
+        let view = shared_config_agent_view(json!({
+            "terminal": { "shell": { "program": "zsh" } }
+        }));
+        assert_eq!(view["shell"], json!({ "program": "zsh" }));
+        assert!(view.get("model").is_none());
     }
 }

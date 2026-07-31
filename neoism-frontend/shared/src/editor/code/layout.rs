@@ -79,6 +79,74 @@ pub fn byte_for_utf16_col(line: &str, utf16: usize) -> usize {
     line.len()
 }
 
+/// Find the delimiter paired with the bracket at the exact buffer position.
+///
+/// Unlike the vim `%` motion, this never searches ahead for a bracket: it is
+/// intended for pointer/caret feedback, so ordinary text under the pointer
+/// must not light up an unrelated pair later on the line. Positions are byte
+/// columns and the returned pair keeps the hovered/caret endpoint first.
+pub(crate) fn matching_bracket_at(
+    lines: &[String],
+    line_ix: usize,
+    byte_col: usize,
+) -> Option<((usize, usize), (usize, usize))> {
+    const PAIRS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
+
+    let line = lines.get(line_ix)?;
+    if byte_col > line.len() || !line.is_char_boundary(byte_col) {
+        return None;
+    }
+    let bracket = line.get(byte_col..)?.chars().next()?;
+    let (open, close, forward) = PAIRS.iter().find_map(|&(open, close)| {
+        (bracket == open)
+            .then_some((open, close, true))
+            .or_else(|| (bracket == close).then_some((open, close, false)))
+    })?;
+    let origin = (line_ix, byte_col);
+    let mut depth = 1usize;
+
+    if forward {
+        for (scan_line_ix, scan_line) in lines.iter().enumerate().skip(line_ix) {
+            let start = if scan_line_ix == line_ix {
+                byte_col + bracket.len_utf8()
+            } else {
+                0
+            };
+            for (relative, ch) in scan_line[start..].char_indices() {
+                if ch == open {
+                    depth += 1;
+                } else if ch == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((origin, (scan_line_ix, start + relative)));
+                    }
+                }
+            }
+        }
+    } else {
+        for scan_line_ix in (0..=line_ix).rev() {
+            let scan_line = &lines[scan_line_ix];
+            let end = if scan_line_ix == line_ix {
+                byte_col
+            } else {
+                scan_line.len()
+            };
+            for (col, ch) in scan_line[..end].char_indices().rev() {
+                if ch == close {
+                    depth += 1;
+                } else if ch == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((origin, (scan_line_ix, col)));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Gutter digit count: room for the last line number, never narrower
 /// than nvim's default 3-cell `numberwidth`.
 pub fn gutter_digits(line_count: usize) -> usize {

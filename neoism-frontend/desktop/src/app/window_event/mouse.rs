@@ -36,7 +36,7 @@ impl Application<'_> {
             return;
         }
 
-        if self.config.hide_cursor_when_typing {
+        if self.config.terminal.hide_cursor_when_typing {
             route.window.set_cursor_visible(true);
             if route.window.screen.set_mouse_hidden_by_typing(false) {
                 route.request_redraw();
@@ -600,7 +600,7 @@ impl Application<'_> {
                 }
 
                 if let MouseButton::Left | MouseButton::Right = button {
-                    if self.config.copy_on_select {
+                    if self.config.terminal.copy_on_select {
                         route.window.screen.copy_selection(
                             ClipboardType::Clipboard,
                             &mut self.router.clipboard,
@@ -621,7 +621,7 @@ impl Application<'_> {
             None => return,
         };
 
-        if self.config.hide_cursor_when_typing {
+        if self.config.terminal.hide_cursor_when_typing {
             route.window.set_cursor_visible(true);
             if route.window.screen.set_mouse_hidden_by_typing(false) {
                 route.request_redraw();

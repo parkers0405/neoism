@@ -7,6 +7,10 @@ impl AgentPaneInput for NeoismAgentPane {
         self.input()
     }
 
+    fn input_help_visible(&self) -> bool {
+        self.input_help_visible()
+    }
+
     fn background_task_details_expanded(&self) -> bool {
         self.background_task_details_expanded()
     }

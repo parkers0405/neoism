@@ -606,13 +606,15 @@ impl Screen<'_> {
                 let terminal = current.terminal.lock();
                 let shell_prompt_state = terminal.shell_prompt_state();
                 let terminal_alt_screen = terminal.mode().contains(Mode::ALT_SCREEN);
-                let block_input_active =
-                    shell_prompt_state.awaiting_command && !terminal_alt_screen;
+                let block_input_active = current
+                    .terminal_input
+                    .prompt_window_open(shell_prompt_state, current.remote_pty.is_some())
+                    && !terminal_alt_screen;
                 let block_footer_active = !current.has_non_terminal_surface()
                     && current.terminal_input.composer_footer_active(
                         shell_prompt_state,
                         terminal_alt_screen,
-                        false,
+                        current.remote_pty.is_some(),
                     );
                 let block_content_top_abs = if block_footer_active {
                     let scale = self.sugarloaf.scale_factor();

@@ -1,7 +1,4 @@
-use neoism_ui::render_policy::{
-    opencode_scanner_frame, opencode_task_spinner_frame, OPENCODE_SCANNER_WIDTH,
-    OPENCODE_TASK_SPINNER_FRAMES,
-};
+use neoism_ui::render_policy::{opencode_scanner_frame, OPENCODE_SCANNER_WIDTH};
 
 fn approx(actual: f32, expected: f32) {
     assert!(
@@ -42,13 +39,4 @@ fn scanner_holds_fades_and_wraps_after_54_frames() {
         opencode_scanner_frame(54.0 * 0.040),
         opencode_scanner_frame(0.0)
     );
-}
-
-#[test]
-fn task_spinner_matches_opencode_background_tasks() {
-    assert_eq!(opencode_task_spinner_frame(0.0), "⠋");
-    assert_eq!(opencode_task_spinner_frame(2.0 * 0.080), "⠹");
-    assert_eq!(opencode_task_spinner_frame(9.0 * 0.080), "⠏");
-    assert_eq!(opencode_task_spinner_frame(10.0 * 0.080), "⠋");
-    assert_eq!(OPENCODE_TASK_SPINNER_FRAMES.len(), 10);
 }

@@ -443,6 +443,9 @@ impl NeoismAgentPane {
             }
             "/exit" => self.request_close_tab(),
             "/new" => self.start_new_conversation(),
+            "/hints" | "/helper" | "/help-strip" | "/footer" => {
+                self.toggle_input_help();
+            }
 
             // -- picker openers / arg-setters --------------------------
             //

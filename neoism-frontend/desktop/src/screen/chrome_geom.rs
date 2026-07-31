@@ -36,10 +36,10 @@ impl Screen<'_> {
             self.sugarloaf.update_font(font_library);
         }
         let s = self.sugarloaf.style_mut();
-        s.font_size = config.fonts.size;
-        s.line_height = config.line_height;
+        s.font_size = config.appearance.fonts.size;
+        s.line_height = config.appearance.line_height;
         self.sugarloaf
-            .set_default_persistent_font_size(config.fonts.size);
+            .set_default_persistent_font_size(config.appearance.fonts.size);
 
         #[cfg(feature = "wgpu")]
         self.sugarloaf
@@ -68,11 +68,11 @@ impl Screen<'_> {
         // config reload.
         crate::mashup::sync_custom_ide_themes();
         crate::mashup::publish_active_look(
-            &config.look,
-            config.neoism.mashup_pack.as_deref(),
+            &config.appearance.look,
+            config.appearance.mashup_pack.as_deref(),
         );
         let config_theme =
-            neoism_ui::primitives::ide_theme::IdeTheme::by_name(&config.neoism.theme);
+            neoism_ui::primitives::ide_theme::IdeTheme::by_name(&config.appearance.theme);
         let old_island = self.renderer.island.take();
         let old_file_tree = std::mem::take(&mut self.renderer.file_tree);
         let old_buffer_tabs = std::mem::take(&mut self.renderer.buffer_tabs);
@@ -144,7 +144,7 @@ impl Screen<'_> {
         let chrome_offset = self.chrome_x_offset();
         let chrome_margins = self.workspace_chrome_margins();
         for context_grid in self.context_manager.contexts_mut() {
-            context_grid.update_line_height(config.line_height);
+            context_grid.update_line_height(config.appearance.line_height);
 
             let reserves_editor_chrome = {
                 let current = context_grid.current();
@@ -160,16 +160,18 @@ impl Screen<'_> {
             };
             context_grid.update_scaled_margin(Margin::new(
                 top_padding * scale,
-                config.margin.right * scale,
+                config.ui.margin.right * scale,
                 chrome_margins.bottom * scale,
-                (config.margin.left + chrome_offset) * scale,
+                (config.ui.margin.left + chrome_offset) * scale,
             ));
 
             // Update font size and line height BEFORE update_dimensions
             for current_context in context_grid.contexts_mut().values_mut() {
                 let current_context = current_context.context_mut();
-                self.sugarloaf
-                    .set_text_font_size(&current_context.rich_text_id, config.fonts.size);
+                self.sugarloaf.set_text_font_size(
+                    &current_context.rich_text_id,
+                    config.appearance.fonts.size,
+                );
                 self.sugarloaf.set_text_line_height(
                     &current_context.rich_text_id,
                     current_context.dimension.line_height,
@@ -182,24 +184,26 @@ impl Screen<'_> {
                 let current_context = current_context.context_mut();
                 let mut terminal = current_context.terminal.lock();
                 current_context.renderable_content =
-                    RenderableContent::from_cursor_config(&config.cursor);
-                let shape = config.cursor.shape;
+                    RenderableContent::from_cursor_config(&config.terminal.cursor);
+                let shape = config.terminal.cursor.shape;
                 terminal.cursor_shape = shape;
                 terminal.default_cursor_shape = shape;
-                terminal.blinking_cursor = config.cursor.blinking;
-                terminal.default_blinking_cursor = config.cursor.blinking;
+                terminal.blinking_cursor = config.terminal.cursor.blinking;
+                terminal.default_blinking_cursor = config.terminal.cursor.blinking;
                 drop(terminal);
             }
         }
 
-        self.mouse
-            .set_multiplier_and_divider(config.scroll.multiplier, config.scroll.divider);
+        self.mouse.set_multiplier_and_divider(
+            config.terminal.scroll.multiplier,
+            config.terminal.scroll.divider,
+        );
 
         // Update keyboard config in context manager
-        self.context_manager.config.keyboard = config.keyboard;
+        self.context_manager.config.keyboard = config.terminal.keyboard;
         // Keep the blink seed fresh so panes created after a config
         // reload inherit the new setting.
-        self.context_manager.config.cursor_blinking = config.cursor.blinking;
+        self.context_manager.config.cursor_blinking = config.terminal.cursor.blinking;
 
         self.sugarloaf
             .set_background_color(Some(self.renderer.dynamic_background.1));
@@ -207,7 +211,7 @@ impl Screen<'_> {
         // Same precedence as startup: explicit `[window]
         // background-image` beats the active pack's wallpaper slot.
         let pack_wallpaper = config
-            .neoism
+            .appearance
             .mashup_pack
             .as_deref()
             .map(str::trim)
@@ -215,6 +219,7 @@ impl Screen<'_> {
             .and_then(neoism_backend::config::mashup::find_mashup_pack)
             .and_then(|pack| pack.wallpaper);
         if let Some(image) = config
+            .ui
             .window
             .background_image
             .as_ref()
@@ -1049,8 +1054,8 @@ impl Screen<'_> {
                 tracing::warn!(target: "neoism::config", "failed to persist pack: {err}");
             }
             let fresh_config = neoism_backend::config::Config::load();
-            crate::mashup::publish_active_look(&fresh_config.look, None);
-            if let Some(image) = fresh_config.window.background_image.as_ref() {
+            crate::mashup::publish_active_look(&fresh_config.appearance.look, None);
+            if let Some(image) = fresh_config.ui.window.background_image.as_ref() {
                 let _ = self.sugarloaf.set_background_image(image);
             } else {
                 self.sugarloaf.clear_background_image();
@@ -1111,12 +1116,13 @@ impl Screen<'_> {
         // hot-reload would get there too, but only after the watcher
         // debounce). Fresh-load the config so `[look.*]` overrides win.
         let fresh_config = neoism_backend::config::Config::load();
-        crate::mashup::publish_active_look(&fresh_config.look, Some(&id));
+        crate::mashup::publish_active_look(&fresh_config.appearance.look, Some(&id));
 
         // Wallpaper slot — the pack's value unless the user pinned an
         // explicit `[window] background-image`; a pack without a
         // wallpaper clears a previous pack's.
         if let Some(image) = fresh_config
+            .ui
             .window
             .background_image
             .as_ref()

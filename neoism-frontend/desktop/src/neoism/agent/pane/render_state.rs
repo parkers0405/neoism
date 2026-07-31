@@ -24,6 +24,21 @@ impl NeoismAgentPane {
         &self.input
     }
 
+    pub fn input_help_visible(&self) -> bool {
+        self.input_help_visible
+    }
+
+    pub fn set_input_help_visible(&mut self, visible: bool) {
+        self.input_help_visible = visible;
+    }
+
+    pub fn toggle_input_help(&mut self) -> bool {
+        self.input_help_visible = !self.input_help_visible;
+        let visible = self.input_help_visible;
+        self.push_outbound(OutboundAgentCommand::SetInputHelpVisible { visible });
+        visible
+    }
+
     pub fn messages(&self) -> &[NeoismAgentMessage] {
         &self.messages
     }
@@ -275,6 +290,9 @@ impl NeoismAgentPane {
             self.model = model;
         }
         self.thinking = defaults.thinking;
+        if let Some(visible) = defaults.input_help_visible {
+            self.set_input_help_visible(visible);
+        }
         self.execute_refresh_model_context_limit_command();
     }
 

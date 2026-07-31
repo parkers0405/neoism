@@ -109,6 +109,36 @@ fn typing_slash_opens_command_picker_with_options() {
 }
 
 #[test]
+fn hints_command_toggles_row_and_reclaims_chat_space() {
+    let mut pane = NeoismAgentPane::default();
+    let viewport = [0.0, 0.0, 1000.0, 800.0];
+    let visible_rect =
+        crate::panels::agent_pane::view::layout::chat_input_rect(&pane, viewport, 1.0);
+    assert!(pane.input_help_visible());
+
+    pane.execute_slash_text("/hints");
+    let hidden_rect =
+        crate::panels::agent_pane::view::layout::chat_input_rect(&pane, viewport, 1.0);
+    assert!(!pane.input_help_visible());
+    assert_eq!(
+        hidden_rect[1] - visible_rect[1],
+        28.0,
+        "hiding the row must move the composer into its reserved space"
+    );
+    assert_eq!(
+        pane.drain_pending_outbound(),
+        vec![OutboundAgentCommand::SetInputHelpVisible { visible: false }]
+    );
+
+    pane.execute_slash_text("/hints");
+    assert!(pane.input_help_visible());
+    assert_eq!(
+        pane.drain_pending_outbound(),
+        vec![OutboundAgentCommand::SetInputHelpVisible { visible: true }]
+    );
+}
+
+#[test]
 fn slash_picker_command_prefix_beats_description_matches() {
     let mut picker = NeoismAgentPicker::new(
         NeoismAgentPickerKind::Slash,

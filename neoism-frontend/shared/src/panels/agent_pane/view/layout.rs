@@ -17,12 +17,17 @@ pub fn chat_horizontal_pad(width: f32, s: f32) -> f32 {
 
 pub trait AgentPaneInput {
     fn input(&self) -> &str;
+    fn input_help_visible(&self) -> bool;
     fn background_task_details_expanded(&self) -> bool;
 }
 
 impl AgentPaneInput for NeoismAgentPane {
     fn input(&self) -> &str {
         self.input()
+    }
+
+    fn input_help_visible(&self) -> bool {
+        self.input_help_visible()
     }
 
     fn background_task_details_expanded(&self) -> bool {
@@ -66,9 +71,15 @@ pub fn chat_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
     // Floating island: same column as the timeline, lifted off the
     // pane bottom.
     let (input_x, input_w) = chat_column(rect, s);
-    // Leave a dedicated band for the OpenCode-style live/help strip
-    // rendered immediately below the composer.
-    let bottom_pad = (14.0 + INPUT_HELP_STRIP_H) * s;
+    // Leave a dedicated band only while the OpenCode-style help strip is
+    // visible. `/hints` removes both the paint and this reservation so the
+    // timeline/composer reclaim the full row.
+    let help_h = if pane.input_help_visible() {
+        INPUT_HELP_STRIP_H
+    } else {
+        0.0
+    };
+    let bottom_pad = (14.0 + help_h) * s;
     let input_h = input_height_for_width(
         pane.input(),
         input_w,

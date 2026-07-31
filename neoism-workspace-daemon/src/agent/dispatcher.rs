@@ -207,6 +207,11 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_get_config_defaults(inner, directory).await;
             });
         }
+        AgentClientMessage::SetInputHelpVisible { visible } => {
+            tokio::spawn(async move {
+                handle_set_input_help_visible(inner, visible).await;
+            });
+        }
         AgentClientMessage::ListAgents { directory } => {
             tokio::spawn(async move {
                 handle_list_agents(inner, directory).await;

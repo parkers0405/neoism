@@ -104,6 +104,7 @@ impl CommandComposer {
         theme: &IdeTheme,
         input: &dyn InputBuffer,
         cwd_label: Option<&str>,
+        prompt_label: Option<&str>,
         animation_phase: f32,
         focused: bool,
         cell_w: f32,
@@ -420,8 +421,36 @@ impl CommandComposer {
         let burst = input.prompt_burst_elapsed_ms();
         let prompt_x = inner_left + cwd_chip_w + CHIP_GAP * s;
         let chevron_y = row_center_y - chevron_font_size * CAP_CENTER_RATIO;
-        let chevron_advance =
-            PROMPT_CHEVRONS as f32 * (chevron_font_size * 0.62) + 6.0 * s;
+        let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
+        let prompt_label_font_size = if pixel_font.is_some() {
+            13.0 * s
+        } else {
+            chevron_font_size
+        };
+        // Press Start 2P's painted cap sits much higher inside its em box
+        // than the UI face. Use its visual center instead of the regular
+        // baseline ratio so `SSH` shares the chevrons' centerline.
+        let prompt_label_y = if pixel_font.is_some() {
+            row_center_y - prompt_label_font_size * 0.30
+        } else {
+            row_center_y - prompt_label_font_size * CAP_CENTER_RATIO
+        };
+        let prompt_label_opts = DrawOpts {
+            font_size: prompt_label_font_size,
+            color: theme.u8(theme.blue),
+            bold: true,
+            font_id: pixel_font,
+            ..DrawOpts::default()
+        };
+        let prompt_label_advance = prompt_label
+            .map(|label| {
+                sugarloaf.text_mut().measure(label, &prompt_label_opts) + 7.0 * s
+            })
+            .unwrap_or(0.0);
+        let chevron_x = prompt_x + prompt_label_advance;
+        let chevron_advance = prompt_label_advance
+            + PROMPT_CHEVRONS as f32 * (chevron_font_size * 0.62)
+            + 6.0 * s;
 
         // ── Editable text + history-suggestion ghost ────────────────
         let text_x = prompt_x + chevron_advance + 2.0 * s;
@@ -497,9 +526,17 @@ impl CommandComposer {
         let lines = wrapped_lines[first_visible_line..last_visible_line].to_vec();
         let cursor_line = cursor_line_global.saturating_sub(first_visible_line);
         if window_at_top {
+            if let Some(label) = prompt_label {
+                sugarloaf.text_mut().draw(
+                    prompt_x,
+                    prompt_label_y,
+                    label,
+                    &prompt_label_opts,
+                );
+            }
             self.draw_chevrons(
                 sugarloaf,
-                prompt_x,
+                chevron_x,
                 chevron_y,
                 chevron_font_size,
                 burst,

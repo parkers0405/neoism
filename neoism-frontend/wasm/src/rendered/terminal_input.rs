@@ -48,7 +48,7 @@ impl ChromeBridge {
             .mode()
             .contains(neoism_terminal_core::crosswords::Mode::ALT_SCREEN);
         self.terminal_blocks
-            .should_capture_input(state, terminal_alt_screen)
+            .should_capture_input(state, terminal_alt_screen, false)
     }
 
     pub fn terminal_input_insert(&mut self, text: &str) {

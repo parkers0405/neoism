@@ -600,7 +600,7 @@ impl Screen<'_> {
         if !current.terminal_input.composer_footer_active(
             shell_prompt_state,
             terminal_alt_screen,
-            false,
+            current.remote_pty.is_some(),
         ) {
             return None;
         }
@@ -641,9 +641,11 @@ impl Screen<'_> {
         // command line (including the fresh-terminal boot window before
         // the first prompt, and while mid-editing a pending command), so
         // typed input never splits between the composer and the raw PTY.
-        current
-            .terminal_input
-            .should_capture_input(shell_prompt_state, terminal_alt_screen)
+        current.terminal_input.should_capture_input(
+            shell_prompt_state,
+            terminal_alt_screen,
+            current.remote_pty.is_some(),
+        )
     }
 
     pub(crate) fn current_terminal_block_input_cursor_rect(

@@ -145,15 +145,15 @@ pub fn default_key_bindings(config: &neoism_backend::config::Config) -> Vec<KeyB
     ));
 
     bindings.extend(platform_key_bindings(
-        config.navigation.has_navigation_key_bindings(),
-        config.navigation.use_split,
-        config.keyboard,
+        config.ui.navigation.has_navigation_key_bindings(),
+        config.ui.navigation.use_split,
+        config.terminal.keyboard,
     ));
 
     // Add hint bindings
-    bindings.extend(create_hint_bindings(&config.hints.rules));
+    bindings.extend(create_hint_bindings(&config.terminal.hints.rules));
 
-    config_key_bindings(config.bindings.keys.to_owned(), bindings)
+    config_key_bindings(config.keybinds.keys.to_owned(), bindings)
 }
 
 #[inline]

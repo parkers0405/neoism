@@ -117,7 +117,7 @@ impl Application<'_> {
         let clipboard =
             unsafe { Clipboard::new(event_loop.display_handle().unwrap().as_raw()) };
 
-        let mut router = Router::new(config.fonts.to_owned(), clipboard);
+        let mut router = Router::new(config.appearance.fonts.to_owned(), clipboard);
         if let Some(error) = config_error {
             router.propagate_error_to_next_route(error.into());
         }
@@ -163,7 +163,7 @@ impl Application<'_> {
         event_loop.listen_device_events(DeviceEvents::Never);
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        event_loop.set_confirm_before_quit(config.confirm_before_quit);
+        event_loop.set_confirm_before_quit(config.ui.confirm_before_quit);
 
         neoism_notifier::request_authorization();
 
@@ -1726,6 +1726,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
 
         let theme = self
             .config
+            .appearance
             .force_theme
             .map(|t| t.to_window_theme())
             .or(event_loop.system_theme());
@@ -1821,7 +1822,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             RioEventType::Rio(RioEvent::Exit | RioEvent::Quit) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
-                    match quit_request_action(self.config.confirm_before_quit) {
+                    match quit_request_action(self.config.ui.confirm_before_quit) {
                         QuitRequestAction::ConfirmQuitAndRedraw => {
                             route.confirm_quit();
                             route.request_redraw();
@@ -1968,7 +1969,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 }
             }
             RioEventType::Rio(RioEvent::Bell) => {
-                if should_play_audio_bell(self.config.bell.audio) {
+                if should_play_audio_bell(self.config.terminal.bell.audio) {
                     play_audio_bell();
                 }
             }
@@ -2132,7 +2133,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 crate::app::freeze_watchdog::unregister_window(window_id);
                 if should_exit_event_loop_after_close_window(
                     self.router.routes.len(),
-                    self.config.confirm_before_quit,
+                    self.config.ui.confirm_before_quit,
                 ) {
                     event_loop.exit();
                 }
@@ -2240,7 +2241,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
         }
         let urls = other_urls;
 
-        if !self.config.navigation.is_native() {
+        if !self.config.ui.navigation.is_native() {
             for url in urls {
                 let window_id = self.router.create_window(
                     active_event_loop,
@@ -2418,7 +2419,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     }
 
     fn open_config(&mut self, event_loop: &ActiveEventLoop) {
-        if self.config.navigation.open_config_with_split {
+        if self.config.ui.navigation.open_config_with_split {
             self.router.open_config_split(&self.config);
         } else {
             if let Some(window_id) = self.router.get_focused_route() {

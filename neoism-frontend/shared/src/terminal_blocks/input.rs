@@ -50,6 +50,14 @@ pub struct TerminalInputBuffer {
     /// returned shell prompt (or when remote `clear` explicitly resets the
     /// pane), and cleared on the next submission/command start.
     remote_prompt_fallback_open: bool,
+    /// Stability anchor for the joined-shell BLANK-prompt completion. Neoism's
+    /// daemon block-wrapper sets `PROMPT=''`, so a joined shell that emits no
+    /// OSC 133 leaves no prompt glyph to key off. Instead we require a blank
+    /// cursor row (sitting below the block's output) to hold the SAME position
+    /// across two observations before finishing: while output is still
+    /// streaming the cursor advances every frame and never stabilizes, so a
+    /// long-running command is never marked done early.
+    remote_blank_prompt_anchor: Option<usize>,
     /// Last OSC 133;D generation observed from the terminal parser. Keeping
     /// this separately from the final running/awaiting booleans preserves a
     /// fast command's completion when all lifecycle bytes arrive in one

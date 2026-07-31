@@ -219,10 +219,11 @@ impl Screen<'_> {
                     ctx.splash_last_cursor_row = injection.baseline_cursor_row;
                 }
             }
-            if ctx.remote_pty.is_some()
-                && !shell_prompt_state.running_command
-                && !shell_prompt_state.awaiting_command
-            {
+            if ctx.remote_pty.is_some() && !shell_prompt_state.awaiting_command {
+                // A partly-integrated old shell can leave CommandStart
+                // latched forever while still painting its real prompt. The
+                // prompt row is stronger evidence than that stale bit, so
+                // allow the exact-row fallback to close it as well.
                 ctx.terminal_input
                     .finish_unintegrated_remote_command_at_prompt(
                         &terminal_cursor_row_text,

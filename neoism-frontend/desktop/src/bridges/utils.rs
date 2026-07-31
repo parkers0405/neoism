@@ -129,16 +129,16 @@ pub fn apply_theme_to_config(
     let resolved = shared_update_colors_based_on_theme(hint);
 
     if let Some(hint) = resolved {
-        if let Some(adaptive_colors) = &config.adaptive_colors {
+        if let Some(adaptive_colors) = &config.appearance.adaptive_colors {
             match hint {
                 ThemeHint::Light => {
                     if let Some(light_colors) = adaptive_colors.light {
-                        config.colors = light_colors;
+                        config.appearance.colors = light_colors;
                     }
                 }
                 ThemeHint::Dark => {
                     if let Some(dark_colors) = adaptive_colors.dark {
-                        config.colors = dark_colors;
+                        config.appearance.colors = dark_colors;
                     }
                 }
             }

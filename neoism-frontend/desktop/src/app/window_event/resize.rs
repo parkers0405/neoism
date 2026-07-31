@@ -79,7 +79,7 @@ impl Application<'_> {
             None => return,
         };
 
-        match theme_changed_action(self.config.force_theme.is_some()) {
+        match theme_changed_action(self.config.appearance.force_theme.is_some()) {
             ThemeChangedAction::IgnoreForcedTheme => return,
             ThemeChangedAction::ApplyNewTheme => {
                 apply_theme_to_config(&mut self.config, Some(new_theme));

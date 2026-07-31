@@ -305,26 +305,26 @@ impl Renderer {
         // `change_font_size` call.
         let initial_scale = renderer.chrome_scale;
         renderer.set_chrome_scale(initial_scale);
-        renderer.set_ide_theme(IdeTheme::by_name(&config.neoism.theme));
-        renderer.minimap.set_enabled(config.neoism.minimap);
+        renderer.set_ide_theme(IdeTheme::by_name(&config.appearance.theme));
+        renderer.minimap.set_enabled(config.editor.minimap);
         renderer
     }
 
     fn new_inner(config: &Config) -> Renderer {
-        let colors = List::from(&config.colors);
-        let named_colors = config.colors;
+        let colors = List::from(&config.appearance.colors);
+        let named_colors = config.appearance.colors;
 
         let mut dynamic_background =
             (named_colors.background.0, named_colors.background.1, false);
-        if config.window.opacity < 1. {
-            dynamic_background.1.a = config.window.opacity as f64;
+        if config.ui.window.opacity < 1. {
+            dynamic_background.1.a = config.ui.window.opacity as f64;
             dynamic_background.2 = true;
-        } else if config.window.background_image.is_some() {
+        } else if config.ui.window.background_image.is_some() {
             dynamic_background.1 = neoism_backend::sugarloaf::Color::TRANSPARENT;
             dynamic_background.2 = true;
         }
 
-        let island = if config.navigation.is_enabled() {
+        let island = if config.ui.navigation.is_enabled() {
             Some(island::Island::new(
                 named_colors.tabs,
                 named_colors.tabs_active,
@@ -337,7 +337,7 @@ impl Renderer {
         let top_bar = chrome_topbar::ChromeTopBar::new();
         #[cfg(target_os = "macos")]
         let macos_traffic_light_inset =
-            if config.window.decorations != Decorations::Buttonless {
+            if config.ui.window.decorations != Decorations::Buttonless {
                 let traffic_light_x = config
                     .window
                     .macos_traffic_light_position_x
@@ -349,32 +349,38 @@ impl Renderer {
             };
 
         Renderer {
-            unfocused_split_opacity: config.navigation.unfocused_split_opacity,
-            unfocused_split_fill: config.navigation.unfocused_split_fill,
+            unfocused_split_opacity: config.ui.navigation.unfocused_split_opacity,
+            unfocused_split_fill: config.ui.navigation.unfocused_split_fill,
             last_active: None,
             last_window_bg: None,
-            use_drawable_chars: config.fonts.use_drawable_chars,
-            draw_bold_text_with_light_colors: config.draw_bold_text_with_light_colors,
-            macos_use_unified_titlebar: config.window.macos_use_unified_titlebar,
-            config_blinking_interval: config.cursor.blinking_interval.clamp(350, 1200),
-            option_as_alt: config.option_as_alt.to_lowercase(),
+            use_drawable_chars: config.appearance.fonts.use_drawable_chars,
+            draw_bold_text_with_light_colors: config
+                .terminal
+                .draw_bold_text_with_light_colors,
+            macos_use_unified_titlebar: config.ui.window.macos_use_unified_titlebar,
+            config_blinking_interval: config
+                .terminal
+                .cursor
+                .blinking_interval
+                .clamp(350, 1200),
+            option_as_alt: config.terminal.option_as_alt.to_lowercase(),
             is_vi_mode_enabled: false,
-            config_has_blinking_enabled: config.cursor.blinking,
+            config_has_blinking_enabled: config.terminal.cursor.blinking,
             cursor_color_override: config
-                .neoism
+                .presence
                 .cursor_color
                 .as_deref()
                 .and_then(neoism_ui::cursor_style::parse_hex_color)
                 .map(neoism_ui::cursor_style::hex_to_f32),
             cursor_style: neoism_ui::cursor_style::CursorStyle::from_str(
-                config.neoism.cursor_style.as_deref().unwrap_or_default(),
+                config.presence.cursor_style.as_deref().unwrap_or_default(),
             ),
             remote_rainbow_active: false,
             presence_orbs_active: false,
-            ignore_selection_fg_color: config.ignore_selection_fg_color,
+            ignore_selection_fg_color: config.terminal.ignore_selection_fg_color,
             colors,
-            navigation: config.navigation.clone(),
-            margin: config.margin,
+            navigation: config.ui.navigation.clone(),
+            margin: config.ui.margin,
             island,
             top_bar,
             #[cfg(target_os = "macos")]
@@ -382,7 +388,7 @@ impl Renderer {
             pending_top_bar_action: None,
             command_palette: {
                 let mut palette = command_palette::CommandPalette::new();
-                palette.has_adaptive_theme = config.adaptive_colors.is_some();
+                palette.has_adaptive_theme = config.appearance.adaptive_colors.is_some();
                 palette
             },
             finder: finder::Finder::new(),
@@ -394,14 +400,14 @@ impl Renderer {
             dynamic_background,
             search: search::SearchOverlay::default(),
             assistant: assistant::AssistantOverlay::default(),
-            scrollbar: scrollbar::Scrollbar::new(config.enable_scroll_bar),
+            scrollbar: scrollbar::Scrollbar::new(config.terminal.enable_scroll_bar),
             is_game_mode_enabled: config.renderer.strategy.is_game(),
-            custom_mouse_cursor: config.effects.custom_mouse_cursor,
-            trail_cursor_enabled: config.effects.trail_cursor,
+            custom_mouse_cursor: config.appearance.effects.custom_mouse_cursor,
+            trail_cursor_enabled: config.appearance.effects.trail_cursor,
             trail_cursor: trail_cursor::TrailCursor::new(),
-            status_fps_enabled: config.neoism.status_fps,
-            code_format_on_save: config.neoism.format_on_save,
-            vim_mode: config.neoism.vim_mode,
+            status_fps_enabled: config.ui.status_fps,
+            code_format_on_save: config.editor.format_on_save,
+            vim_mode: config.editor.vim_mode,
             fps_counter: fps::FpsCounter::default(),
             terminal_block_prompt_animating: false,
             notebook_animating: false,
@@ -436,19 +442,20 @@ impl Renderer {
             },
             notifications: notifications::Notifications::new(),
             neoism_agent_animating: false,
-            theme: IdeTheme::by_name(&config.neoism.theme),
+            theme: IdeTheme::by_name(&config.appearance.theme),
             // Chrome scale tracks the user's configured font size. The
             // hardcoded FONT_SIZE constants in each chrome submodule
             // (file_tree, buffer_tabs, breadcrumbs, status_line) are
             // tuned for `CHROME_BASELINE_FONT_SIZE = 14pt`. Multiplying
-            // by `config.fonts.size / 14` makes chrome scale up/down
+            // by `config.appearance.fonts.size / 14` makes chrome scale up/down
             // proportionally with the user's terminal/nvim font size,
             // so a user who chose 18pt sees chrome at ~14% larger
             // strips and vice versa. Without this seed, chrome would
             // stay at the 14pt baseline regardless of user config and
             // look tiny next to a large editor font.
-            chrome_scale: (config.fonts.size / CHROME_BASELINE_FONT_SIZE).clamp(0.5, 3.0),
-            zoom_font_size: config.fonts.size.clamp(6.0, 100.0),
+            chrome_scale: (config.appearance.fonts.size / CHROME_BASELINE_FONT_SIZE)
+                .clamp(0.5, 3.0),
+            zoom_font_size: config.appearance.fonts.size.clamp(6.0, 100.0),
             agent_icons_registered: false,
             last_agent: None,
             last_agent_check: None,

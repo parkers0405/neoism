@@ -600,6 +600,69 @@ pub fn render(
         }
     }
 
+    // Matching brackets: pointer hover wins when it rests exactly on a
+    // delimiter; otherwise mirror nvim's matchparen behavior at the caret.
+    // Insert mode also recognizes the bracket immediately before the caret,
+    // so a freshly typed `}` lights both ends without requiring a left move.
+    let pointer_pair = mouse.and_then(|[mx, my]| {
+        let [gx, gy, gw, gh] = pane.geometry.rect;
+        (mx >= pane.geometry.text_x && mx <= gx + gw && my >= gy && my <= gy + gh)
+            .then(|| pane.geometry.hit_position(&pane.buffer.lines, mx, my))
+            .and_then(|(line, col)| matching_bracket_at(&pane.buffer.lines, line, col))
+    });
+    let caret_pair = matching_bracket_at(
+        &pane.buffer.lines,
+        pane.buffer.cursor_line,
+        pane.buffer.cursor_col,
+    )
+    .or_else(|| {
+        (pane.buffer.mode == CodeMode::Insert)
+            .then(|| {
+                let line = pane.buffer.lines.get(pane.buffer.cursor_line)?;
+                let before = line
+                    .get(..pane.buffer.cursor_col)?
+                    .char_indices()
+                    .next_back()?
+                    .0;
+                matching_bracket_at(&pane.buffer.lines, pane.buffer.cursor_line, before)
+            })
+            .flatten()
+    });
+    if let Some((active, matching)) = pointer_pair.or(caret_pair) {
+        let bracket_color = theme.f32_alpha(theme.accent, 0.42);
+        for &(line_ix, byte_col) in &[active, matching] {
+            let Some(line) = pane.buffer.lines.get(line_ix) else {
+                continue;
+            };
+            for rv in &visible {
+                if rv.line != line_ix || byte_col < rv.seg_start || byte_col >= rv.seg_end
+                {
+                    continue;
+                }
+                let band_y = row_screen_y(rv.vrow);
+                if band_y + row_h <= grid_y || band_y >= grid_y + h_content {
+                    continue;
+                }
+                let start_col = display_col_for_byte(line, byte_col, TAB_DISPLAY_WIDTH)
+                    .saturating_sub(rv.base_col);
+                if let Some((band_x, band_w)) =
+                    clamp_band(text_x + start_col as f32 * cell_w - scroll_x, cell_w)
+                {
+                    sugarloaf.rect(
+                        None,
+                        band_x,
+                        band_y,
+                        band_w,
+                        row_h,
+                        bracket_color,
+                        DEPTH,
+                        ORDER_BG,
+                    );
+                }
+            }
+        }
+    }
+
     // Gutter numbers + text rows. Runs are computed once per buffer
     // line and sliced per wrap segment; continuation rows draw an
     // empty gutter cell (line number only on the first segment — nvim

@@ -199,31 +199,31 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         }
 
         let (shell, working_dir) = process_open_url(
-            config.shell.to_owned(),
-            config.working_dir.to_owned(),
-            config.editor.to_owned(),
+            config.terminal.shell.to_owned(),
+            config.terminal.working_dir.to_owned(),
+            config.editor.external.to_owned(),
             None,
         );
 
         let context_manager_config = ContextManagerConfig {
-            cwd: config.navigation.current_working_directory,
+            cwd: config.ui.navigation.current_working_directory,
             shell,
             working_dir,
             spawn_performer: true,
             #[cfg(not(target_os = "windows"))]
-            use_fork: config.use_fork,
-            is_native: config.navigation.is_native(),
+            use_fork: config.terminal.use_fork,
+            is_native: config.ui.navigation.is_native(),
             // When navigation is collapsed and does not contain any color rule
             // does not make sense fetch for foreground process names
-            should_update_title_extra: !config.navigation.color_automation.is_empty(),
-            split_color: config.colors.split,
-            split_active_color: config.colors.split_active,
-            panel: config.panel,
-            title: config.title,
-            keyboard: config.keyboard,
-            scrollback_history_limit: config.scrollback_history_limit,
-            ide_theme: config.neoism.theme,
-            cursor_blinking: config.cursor.blinking,
+            should_update_title_extra: !config.ui.navigation.color_automation.is_empty(),
+            split_color: config.appearance.colors.split,
+            split_active_color: config.appearance.colors.split_active,
+            panel: config.ui.panel,
+            title: config.ui.title,
+            keyboard: config.terminal.keyboard,
+            scrollback_history_limit: config.terminal.scrollback_history_limit,
+            ide_theme: config.appearance.theme,
+            cursor_blinking: config.terminal.cursor.blinking,
         };
 
         let current = self.current();

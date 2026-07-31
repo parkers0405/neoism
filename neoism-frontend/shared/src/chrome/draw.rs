@@ -315,6 +315,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 &theme,
                 &self.terminal_input,
                 None,
+                None,
                 self.animation_phase,
                 true,
                 self.cell_w.max(1.0),

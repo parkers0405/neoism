@@ -364,6 +364,10 @@ impl NotesSidebar {
         self.show_vault_actions = show;
     }
 
+    pub fn shows_vault_actions(&self) -> bool {
+        self.show_vault_actions
+    }
+
     /// Expand `dir` in the tree (no note opened, selection untouched) —
     /// used by the first-run welcome reveal. Mirrors how `set_workspace`
     /// / `refresh_notes` insert the root into `open_dirs`, then rebuilds

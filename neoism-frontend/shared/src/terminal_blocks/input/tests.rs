@@ -1006,7 +1006,7 @@ fn fresh_terminal_captures_first_command_before_prompt_arrives() {
     // keystrokes leak to the raw PTY and the first command runs
     // wrong / "loses" its leading characters.
     let input = TerminalInputBuffer::default();
-    assert!(input.should_capture_input(shell_state(false, false), false));
+    assert!(input.should_capture_input(shell_state(false, false), false, false));
 }
 
 #[test]
@@ -1015,7 +1015,7 @@ fn boot_window_yields_once_a_command_is_running() {
     // (e.g. reconnecting to a live session) the keystrokes belong to
     // that process, not the composer.
     let input = TerminalInputBuffer::default();
-    assert!(!input.should_capture_input(shell_state(false, true), false));
+    assert!(!input.should_capture_input(shell_state(false, true), false, false));
 }
 
 #[test]
@@ -1030,9 +1030,9 @@ fn composer_never_relinquishes_a_pending_command_mid_edit() {
     input.insert_str("git stat");
 
     // Awaiting flips false but the user is mid-command.
-    assert!(input.should_capture_input(shell_state(false, false), false));
+    assert!(input.should_capture_input(shell_state(false, false), false, false));
     // Even while a command is "running", a pending edit stays ours.
-    assert!(input.should_capture_input(shell_state(false, true), false));
+    assert!(input.should_capture_input(shell_state(false, true), false, false));
 }
 
 #[test]
@@ -1045,9 +1045,66 @@ fn empty_line_after_first_prompt_follows_awaiting_command() {
     input.sync_shell_state(shell_state(true, false));
     // Prompt finished, command now running, composer empty.
     input.sync_shell_state(shell_state(false, true));
-    assert!(!input.should_capture_input(shell_state(false, true), false));
+    assert!(!input.should_capture_input(shell_state(false, true), false, false));
     // Back at a prompt with an empty line — composer owns it again.
-    assert!(input.should_capture_input(shell_state(true, false), false));
+    assert!(input.should_capture_input(shell_state(true, false), false, false));
+}
+
+#[test]
+fn composer_can_own_remote_prompt_after_a_submitted_command() {
+    // Joined panes no longer flip to permanent passthrough after command 1.
+    // A Starship-style prompt may replace the embedded OSC A/B marker, leaving
+    // the client at OSC D's idle state. Command completion must still stop the
+    // timer, hide the raw prompt row, and hand command 2 to the same composer.
+    let mut input = TerminalInputBuffer::default();
+    input.sync_shell_state(shell_state(true, false));
+    input.insert_str("pwd");
+    assert_eq!(input.submit_with_context(None, Some(10)), "pwd");
+
+    input.sync_shell_state(shell_state(false, true));
+    let prompt_without_ab = ShellPromptState {
+        awaiting_command: false,
+        running_command: false,
+        last_exit_code: Some(0),
+    };
+    input.sync_shell_state(prompt_without_ab);
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Ok
+    );
+    assert!(input.composer_footer_active(prompt_without_ab, false, true));
+    assert!(input.should_capture_input(prompt_without_ab, false, true));
+}
+
+#[test]
+fn raw_remote_prompt_finishes_command_without_any_osc_markers() {
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("lss");
+    input.submit_with_context(None, Some(10));
+    assert!(!input.finish_unintegrated_remote_command_at_prompt("command not found: lss"));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Running
+    );
+
+    assert!(input.finish_unintegrated_remote_command_at_prompt("…/Minecraft/neoism ❯   "));
+    assert_eq!(
+        input.command_block_snapshots()[0].status,
+        BlockStatusKind::Ok
+    );
+    assert!(input.should_capture_input(shell_state(false, false), false, true));
+}
+
+#[test]
+fn remote_clear_reopens_composer_with_zero_blocks_for_splash() {
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("clear");
+    input.submit_with_context(None, Some(10));
+    input.clear_previous_blocks_for_active_command();
+    assert!(input.finish_unintegrated_remote_command_at_prompt("~/project ❯"));
+
+    assert_eq!(input.command_block_count(), 0);
+    assert!(input.should_capture_input(shell_state(false, false), false, true));
 }
 
 #[test]
@@ -1055,10 +1112,10 @@ fn alt_screen_and_passthrough_never_capture() {
     let mut input = TerminalInputBuffer::default();
     input.insert_str("anything");
     // Alt-screen TUI owns the grid even with pending text.
-    assert!(!input.should_capture_input(shell_state(true, false), true));
+    assert!(!input.should_capture_input(shell_state(true, false), true, false));
     // Passthrough session (sh/ssh) bypasses our shell hooks.
     input.set_passthrough_session_active(true);
-    assert!(!input.should_capture_input(shell_state(true, false), false));
+    assert!(!input.should_capture_input(shell_state(true, false), false, false));
 }
 
 #[test]

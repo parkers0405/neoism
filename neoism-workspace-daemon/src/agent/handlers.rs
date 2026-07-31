@@ -791,9 +791,26 @@ pub(crate) async fn handle_get_config_defaults(
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
+                input_help_visible: value
+                    .get("input-hints")
+                    .or_else(|| value.get("agent-input-hints"))
+                    .or_else(|| value.get("agentInputHints"))
+                    .or_else(|| value.get("agent_input_hints"))
+                    .and_then(Value::as_bool),
             });
         }
         Err(message) => emit_error(&inner.tx, message),
+    }
+}
+
+pub(crate) async fn handle_set_input_help_visible(inner: Arc<AgentInner>, visible: bool) {
+    if let Err(error) =
+        neoism_backend::config::write_setting("agent.input-hints", Value::Bool(visible))
+    {
+        emit_error(
+            &inner.tx,
+            format!("failed to persist agent input hints: {error}"),
+        );
     }
 }
 

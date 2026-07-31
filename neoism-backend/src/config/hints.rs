@@ -364,28 +364,28 @@ mod tests {
         use crate::config::Config;
 
         let config_toml = r#"
-[hints]
+[terminal.hints]
 alphabet = "abcdef"
 
-[[hints.rules]]
+[[terminal.hints.rules]]
 regex = "test.*pattern"
 hyperlinks = false
 post-processing = true
 persist = false
 
-[hints.rules.action]
+[terminal.hints.rules.action]
 action = "Copy"
 
-[hints.rules.binding]
+[terminal.hints.rules.binding]
 key = "T"
 mods = ["Control"]
 "#;
 
         let config: Config = toml::from_str(config_toml).unwrap();
-        assert_eq!(config.hints.alphabet, "abcdef");
-        assert_eq!(config.hints.rules.len(), 1);
+        assert_eq!(config.terminal.hints.alphabet, "abcdef");
+        assert_eq!(config.terminal.hints.rules.len(), 1);
 
-        let hint = &config.hints.rules[0];
+        let hint = &config.terminal.hints.rules[0];
         assert_eq!(hint.regex, Some("test.*pattern".to_string()));
         assert!(!hint.hyperlinks);
         assert!(hint.post_processing);

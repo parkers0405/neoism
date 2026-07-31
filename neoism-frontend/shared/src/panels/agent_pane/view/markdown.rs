@@ -39,10 +39,11 @@ use mermaid::render_mermaid_block;
 const TABLE_CELL_LINE_H: f32 = 17.0;
 const TABLE_ROW_PAD_Y: f32 = 12.0;
 const TABLE_BLOCK_PAD_Y: f32 = 14.0;
-/// Left pad (in unscaled px) applied to list-item text. The bullet marker
-/// itself is no longer drawn, but its text keeps this indent so list lines
-/// align with the surrounding chat content rather than going flush-left.
-const BULLET_TEXT_INDENT: f32 = 18.0;
+/// List markers are intentionally hidden in agent prose, so their text must
+/// start on the same column as surrounding paragraphs and headings. Keeping
+/// the old marker gutter made bold list-item labels look detached from the
+/// explanation directly beneath them.
+const BULLET_TEXT_INDENT: f32 = 0.0;
 pub const COPY_LINK_PREFIX: &str = "neoism-copy://";
 const COPY_REF_LINK_PREFIX: &str = "neoism-copy-ref://";
 pub const MERMAID_TOGGLE_LINK_PREFIX: &str = "neoism-mermaid-toggle://";
@@ -1488,12 +1489,9 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                 }
             }
             AssistantMarkdownBlock::Bullet(lines) => {
-                // The leading "-" / dot marker is intentionally NOT drawn —
-                // the chat renders list items without a visible bullet. But
-                // the text still gets the same `BULLET_TEXT_INDENT` left pad
-                // the marker used to occupy, so list lines stay aligned with
-                // the surrounding chat content (tool rows, paragraphs) instead
-                // of slumping flush-left.
+                // The leading "-" / dot marker is intentionally NOT drawn.
+                // Its gutter is removed too, keeping list-item labels aligned
+                // with the paragraphs that commonly explain them below.
                 let line_h = 19.0 * s;
                 let (start_ix, end_ix) =
                     visible_line_range(cursor_y, line_h, lines.len(), viewport_clip);

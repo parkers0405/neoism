@@ -72,6 +72,7 @@ impl CommandComposer {
             &theme,
             &NullInputBuffer,
             None,
+            None,
             1.0,
             true,
             8.0,

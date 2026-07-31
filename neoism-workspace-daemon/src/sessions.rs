@@ -468,6 +468,10 @@ __neoism_precmd() {{
   local __neoism_status=$?
   printf '\033]7;file://%s%s\007' "$HOST" "$PWD"
   printf '\033]133;D;%d\007' "$__neoism_status"
+  # Emit prompt-ready from precmd as well as PROMPT. Frameworks such as
+  # Starship replace PROMPT dynamically after this wrapper loads; keeping
+  # A/B here preserves Neoism's composer lifecycle in that case.
+  printf '\033]133;A\007\033]133;B\007'
 }}
 __neoism_preexec() {{
   printf '\033]133;C\007'
@@ -593,6 +597,17 @@ fn append_backlog(backlog: &Mutex<Vec<u8>>, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zsh_wrapper_emits_prompt_ready_markers_from_precmd() {
+        let script = block_zsh_script(&PathBuf::from("/tmp/neoism-zsh-test"));
+        let precmd = script
+            .split("__neoism_preexec()")
+            .next()
+            .expect("precmd section");
+        assert!(precmd.contains("133;D;%d"));
+        assert!(precmd.contains("133;A\\007\\033]133;B"));
+    }
 
     #[test]
     fn unknown_session_input_errors() {

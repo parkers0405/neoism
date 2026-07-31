@@ -60,7 +60,7 @@ impl Application<'_> {
             return;
         }
 
-        if self.config.confirm_before_quit {
+        if self.config.ui.confirm_before_quit {
             if let Some(route) = self.router.routes.get_mut(&window_id) {
                 route.confirm_quit();
                 route.request_redraw();

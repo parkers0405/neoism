@@ -12,7 +12,9 @@ impl Application<'_> {
             None => return,
         };
 
-        if should_unhide_cursor_on_mouse_activity(self.config.hide_cursor_when_typing) {
+        if should_unhide_cursor_on_mouse_activity(
+            self.config.terminal.hide_cursor_when_typing,
+        ) {
             route.window.set_cursor_visible(true);
             if route.window.screen.set_mouse_hidden_by_typing(false) {
                 route.request_redraw();

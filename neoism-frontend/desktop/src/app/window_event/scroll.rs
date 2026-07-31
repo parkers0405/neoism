@@ -22,7 +22,7 @@ impl Application<'_> {
 
         let _ = route.window.screen.clear_inline_diagnostic_hover();
 
-        if self.config.hide_cursor_when_typing {
+        if self.config.terminal.hide_cursor_when_typing {
             route.window.set_cursor_visible(true);
             if route.window.screen.set_mouse_hidden_by_typing(false) {
                 route.request_redraw();

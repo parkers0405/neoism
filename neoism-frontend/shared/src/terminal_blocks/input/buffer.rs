@@ -25,7 +25,7 @@ impl TerminalInputBuffer {
         &self,
         state: ShellPromptState,
         terminal_alt_screen: bool,
-        _unused: bool,
+        is_remote_pty: bool,
     ) -> bool {
         // Hide the composer chassis (and the layout space it reserves)
         // whenever the terminal is fully owned by another program:
@@ -41,7 +41,7 @@ impl TerminalInputBuffer {
             return false;
         }
 
-        self.has_visible_footer(self.editing_window_open(state) && !terminal_alt_screen)
+        self.has_visible_footer(self.prompt_window_open(state, is_remote_pty))
     }
 
     /// Whether the composer — not the raw PTY — should own the next
@@ -68,6 +68,7 @@ impl TerminalInputBuffer {
         &self,
         state: ShellPromptState,
         terminal_alt_screen: bool,
+        is_remote_pty: bool,
     ) -> bool {
         if terminal_alt_screen || self.passthrough_session_active {
             return false;
@@ -79,7 +80,7 @@ impl TerminalInputBuffer {
         if state.running_command {
             return !self.text.is_empty();
         }
-        self.editing_window_open(state) || !self.text.is_empty()
+        self.prompt_window_open(state, is_remote_pty) || !self.text.is_empty()
     }
 
     /// True while the shell is at an editable prompt — either it has
@@ -91,6 +92,52 @@ impl TerminalInputBuffer {
     /// the composer gap on exactly the frames the composer is shown.
     pub fn editing_window_open(&self, state: ShellPromptState) -> bool {
         state.awaiting_command || (!self.ever_awaited_command && !state.running_command)
+    }
+
+    /// Composer-owned prompt window with a joined-PTY fallback. Some prompt
+    /// frameworks replace the shell wrapper's embedded OSC 133 A/B prompt
+    /// markers after startup. The wrapper's C/D command lifecycle still
+    /// completes the block, so a finished block plus an idle remote shell is
+    /// enough to keep the composer mounted and hide the raw painted prompt.
+    pub fn prompt_window_open(
+        &self,
+        state: ShellPromptState,
+        is_remote_pty: bool,
+    ) -> bool {
+        self.editing_window_open(state)
+            || (is_remote_pty
+                && !state.running_command
+                && (self.remote_prompt_fallback_open
+                    || self.command_blocks.last().is_some_and(|block| {
+                        matches!(
+                            block.status,
+                            TerminalCommandBlockStatus::Finished { .. }
+                        )
+                    })))
+    }
+
+    /// Complete a joined command when an old/non-integrated remote PTY has
+    /// visibly returned to a conventional shell prompt but emitted no OSC 133
+    /// lifecycle at all. The cursor-row check avoids timeout guesses: quiet
+    /// commands such as `sleep` remain running until an actual prompt appears.
+    pub fn finish_unintegrated_remote_command_at_prompt(&mut self, row: &str) -> bool {
+        if !looks_like_shell_prompt(row) {
+            return false;
+        }
+        self.remote_prompt_fallback_open = true;
+        let Some(block) = self.command_blocks.last_mut() else {
+            return false;
+        };
+        if !matches!(block.status, TerminalCommandBlockStatus::Running) {
+            return false;
+        }
+        let clear_completed = is_clear_command(&block.command);
+        block.status = TerminalCommandBlockStatus::Finished { exit_code: None };
+        block.finished_at = Some(Instant::now());
+        if clear_completed {
+            self.command_blocks.clear();
+        }
+        true
     }
 
     pub fn is_prompt_animating(&self) -> bool {
@@ -416,6 +463,11 @@ impl TerminalInputBuffer {
         if state.awaiting_command || state.running_command {
             self.ever_awaited_command = true;
         }
+        if state.running_command {
+            self.remote_prompt_fallback_open = false;
+        } else if state.awaiting_command {
+            self.remote_prompt_fallback_open = true;
+        }
         if self.passthrough_session_active && state.awaiting_command {
             self.passthrough_session_active = false;
         }
@@ -427,9 +479,9 @@ impl TerminalInputBuffer {
         }
         if state.running_command {
             block.saw_command_start = true;
-        } else if state.awaiting_command
-            && (block.saw_command_start
-                || Instant::now().saturating_duration_since(block.submitted_at)
+        } else if block.saw_command_start
+            || (state.awaiting_command
+                && Instant::now().saturating_duration_since(block.submitted_at)
                     > Duration::from_millis(150))
         {
             let clear_completed = is_clear_command(&block.command);
@@ -437,6 +489,7 @@ impl TerminalInputBuffer {
                 exit_code: state.last_exit_code,
             };
             block.finished_at = Some(Instant::now());
+            self.remote_prompt_fallback_open = true;
             if clear_completed {
                 self.command_blocks.clear();
                 return true;
@@ -471,6 +524,7 @@ impl TerminalInputBuffer {
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.remote_prompt_fallback_open = false;
         self.reset_transient_edit_state();
     }
 
@@ -1261,4 +1315,16 @@ impl TerminalInputBuffer {
             .unwrap_or(self.text.len());
         (start, end)
     }
+}
+
+fn looks_like_shell_prompt(row: &str) -> bool {
+    let row = row.trim_end();
+    if row.is_empty() || row.chars().count() > 512 {
+        return false;
+    }
+    let Some(last) = row.chars().last() else {
+        return false;
+    };
+    matches!(last, '$' | '#' | '%' | '❯' | '❱' | '➜' | 'λ')
+        || (last == '>' && row.chars().count() > 1)
 }

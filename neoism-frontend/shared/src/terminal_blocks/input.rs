@@ -45,6 +45,11 @@ pub struct TerminalInputBuffer {
     /// line editor) while later keystrokes land in the composer —
     /// which submitted a different command than what was displayed.
     ever_awaited_command: bool,
+    /// Joined-shell fallback for PTYs created before Neoism installed OSC
+    /// prompt integration. Latched when the live cursor row looks like a
+    /// returned shell prompt (or when remote `clear` explicitly resets the
+    /// pane), and cleared on the next submission/command start.
+    remote_prompt_fallback_open: bool,
     prompt_burst_started: Option<Instant>,
     /// Visual feedback for the most recent Tab press — drives the
     /// composer's success-flash + no-match-shake animations.

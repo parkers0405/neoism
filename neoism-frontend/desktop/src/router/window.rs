@@ -65,11 +65,11 @@ pub fn create_window_builder(
         })
         .with_resizable(true)
         .with_decorations(true)
-        .with_transparent(config.window.opacity < 1.)
-        .with_blur(config.window.blur)
+        .with_transparent(config.ui.window.opacity < 1.)
+        .with_blur(config.ui.window.blur)
         .with_window_icon(Some(icon));
 
-    match config.window.decorations {
+    match config.ui.window.decorations {
         Decorations::Disabled => {
             window_builder = window_builder.with_decorations(false);
         }
@@ -107,14 +107,15 @@ pub fn create_window_builder(
     #[cfg(target_os = "windows")]
     {
         use neoism_window::platform::windows::WindowAttributesExtWindows;
-        if let Some(use_undecorated_shadow) = config.window.windows_use_undecorated_shadow
+        if let Some(use_undecorated_shadow) =
+            config.ui.window.windows_use_undecorated_shadow
         {
             window_builder =
                 window_builder.with_undecorated_shadow(use_undecorated_shadow);
         }
 
         if let Some(use_no_redirection_bitmap) =
-            config.window.windows_use_no_redirection_bitmap
+            config.ui.window.windows_use_no_redirection_bitmap
         {
             // This sets WS_EX_NOREDIRECTIONBITMAP.
             window_builder =
@@ -130,20 +131,20 @@ pub fn create_window_builder(
 
         // Configure colorspace
         window_builder = window_builder
-            .with_colorspace(config.window.colorspace.to_neoism_window_colorspace());
+            .with_colorspace(config.ui.window.colorspace.to_neoism_window_colorspace());
 
         if let (Some(x), Some(y)) = (
-            config.window.macos_traffic_light_position_x,
-            config.window.macos_traffic_light_position_y,
+            config.ui.window.macos_traffic_light_position_x,
+            config.ui.window.macos_traffic_light_position_y,
         ) {
             window_builder = window_builder.with_traffic_light_position(x, y);
         }
 
-        if config.navigation.is_native() {
+        if config.ui.navigation.is_native() {
             if let Some(identifier) = tab_id {
                 window_builder = window_builder
                     .with_tabbing_identifier(identifier)
-                    .with_unified_titlebar(config.window.macos_use_unified_titlebar);
+                    .with_unified_titlebar(config.ui.window.macos_use_unified_titlebar);
             }
         } else {
             use crate::constants::TRAFFIC_LIGHT_PADDING;
@@ -152,7 +153,7 @@ pub fn create_window_builder(
                 .with_titlebar_transparent(true)
                 .with_fullsize_content_view(true);
 
-            if config.navigation.is_enabled() {
+            if config.ui.navigation.is_enabled() {
                 window_builder = window_builder.with_traffic_light_position(
                     TRAFFIC_LIGHT_PADDING,
                     TRAFFIC_LIGHT_PADDING,
@@ -169,7 +170,7 @@ pub fn create_window_builder(
         window_builder = window_builder.with_cloaked(true);
     }
 
-    match config.window.mode {
+    match config.ui.window.mode {
         WindowMode::Fullscreen => {
             window_builder =
                 window_builder.with_fullscreen(Some(Fullscreen::Borderless(None)));
@@ -180,8 +181,8 @@ pub fn create_window_builder(
         _ => {
             window_builder =
                 window_builder.with_inner_size(neoism_window::dpi::LogicalSize {
-                    width: config.window.width,
-                    height: config.window.height,
+                    width: config.ui.window.width,
+                    height: config.ui.window.height,
                 })
         }
     };
@@ -190,7 +191,7 @@ pub fn create_window_builder(
 }
 
 pub fn configure_window(winit_window: &Window, config: &Config) {
-    if config.effects.custom_mouse_cursor {
+    if config.appearance.effects.custom_mouse_cursor {
         winit_window.set_cursor_visible(false);
     } else {
         winit_window.set_cursor_visible(true);
@@ -217,7 +218,7 @@ pub fn configure_window(winit_window: &Window, config: &Config) {
         // None - No special handling is applied for `Option` key.
         use neoism_window::platform::macos::{OptionAsAlt, WindowExtMacOS};
 
-        match config.option_as_alt.to_lowercase().as_str() {
+        match config.terminal.option_as_alt.to_lowercase().as_str() {
             "both" => winit_window.set_option_as_alt(OptionAsAlt::Both),
             "left" => winit_window.set_option_as_alt(OptionAsAlt::OnlyLeft),
             "right" => winit_window.set_option_as_alt(OptionAsAlt::OnlyRight),
@@ -225,21 +226,21 @@ pub fn configure_window(winit_window: &Window, config: &Config) {
         }
     }
 
-    let is_transparent = config.window.opacity < 1.;
+    let is_transparent = config.ui.window.opacity < 1.;
     winit_window.set_transparent(is_transparent);
 
     #[cfg(target_os = "macos")]
     {
         use neoism_window::platform::macos::WindowExtMacOS;
-        let bg_color = config.colors.background.1;
+        let bg_color = config.appearance.colors.background.1;
         winit_window.set_background_color(
             bg_color.r,
             bg_color.g,
             bg_color.b,
-            config.window.opacity as f64,
+            config.ui.window.opacity as f64,
         );
 
-        if !config.window.macos_use_shadow {
+        if !config.ui.window.macos_use_shadow {
             winit_window.set_has_shadow(false);
         }
     }
@@ -249,7 +250,8 @@ pub fn configure_window(winit_window: &Window, config: &Config) {
         use neoism_backend::config::window::WindowsCornerPreference;
         use neoism_window::platform::windows::WindowExtWindows;
 
-        if let Some(with_corner_preference) = &config.window.windows_corner_preference {
+        if let Some(with_corner_preference) = &config.ui.window.windows_corner_preference
+        {
             let preference = match with_corner_preference {
                 WindowsCornerPreference::Default => {
                     neoism_window::platform::windows::CornerPreference::Default
@@ -268,11 +270,11 @@ pub fn configure_window(winit_window: &Window, config: &Config) {
             winit_window.set_corner_preference(preference);
         }
     }
-    if let Some(title) = &config.title.placeholder {
+    if let Some(title) = &config.ui.title.placeholder {
         winit_window.set_title(title);
     }
 
-    winit_window.set_blur(config.window.blur);
+    winit_window.set_blur(config.ui.window.blur);
 }
 
 pub struct RouteWindow<'a> {
@@ -521,11 +523,11 @@ impl<'a> RouteWindow<'a> {
         let screen = Screen::new(properties, config, event_proxy, font_library, open_url)
             .expect("Screen not created");
 
-        if config.window.columns.is_some() || config.window.rows.is_some() {
+        if config.ui.window.columns.is_some() || config.ui.window.rows.is_some() {
             let (physical_width, physical_height) = compute_window_size_from_grid(
-                config.window.columns,
-                config.window.rows,
-                &config.panel,
+                config.ui.window.columns,
+                config.ui.window.rows,
+                &config.ui.panel,
                 &screen.ctx().current().dimension,
                 winit_window.inner_size(),
             );

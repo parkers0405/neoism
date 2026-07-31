@@ -171,6 +171,7 @@ impl ChromeBridge {
                 agent,
                 model,
                 thinking,
+                ..
             } => {
                 self.agent_state.default_agent = agent.clone();
                 self.agent_state.default_model = model.clone();

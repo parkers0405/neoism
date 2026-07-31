@@ -106,6 +106,7 @@ The Neoism Agent reads its keys from this same `config.json`, at the top level a
   "model": "anthropic/claude-opus-5",
   "small-model": "anthropic/claude-haiku-4-5",
   "reasoning-effort": "high",     // low | medium | high | xhigh | max
+  "agent-input-hints": true,       // helper row below the input; /hints toggles and saves this
   "permission": { "edit": "ask", "bash": "ask" },
   "mcp": {
     "fff": { "type": "local", "command": ["fff-mcp"], "enabled": true }
@@ -115,6 +116,8 @@ The Neoism Agent reads its keys from this same `config.json`, at the top level a
 ```
 
 `"dangerously-skip-permissions": true` auto-allows every agent permission that would normally prompt (explicit `"permission"` deny rules still deny) — the config-level equivalent of `--dangerously-skip-permissions`. For a single session, type `/yolo` in the agent pane instead: it auto-answers "Yes" to every prompt until you `/yolo` again.
+
+`"agent-input-hints": false` hides the complete helper row below the agent input and gives that space back to the conversation. `/hints` toggles the same global preference and writes it here, so the choice survives new chats and restarts.
 
 Other agent keys: `default-agent`, `enabled-providers` / `disabled-providers`, `tools`, `instructions`, `skills`, `formatter`, `lsp`, `share`, `experimental`, and the `agent` / `mode` / `command` maps of named definitions.
 

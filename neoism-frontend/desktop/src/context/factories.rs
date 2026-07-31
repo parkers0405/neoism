@@ -293,6 +293,9 @@ __neoism_precmd() {{
   local __neoism_status=$?
   printf '\033]7;file://%s%s\007' "$HOST" "$PWD"
   printf '\033]133;D;%d\007' "$__neoism_status"
+  # Prompt frameworks may replace PROMPT after startup. Emit A/B here too so
+  # the composer still owns the next editable line.
+  printf '\033]133;A\007\033]133;B\007'
 }}
 __neoism_preexec() {{
   printf '\033]133;C\007'

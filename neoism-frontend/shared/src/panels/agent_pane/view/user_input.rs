@@ -66,6 +66,7 @@ pub trait AgentUserInputPane {
     type PendingPermission: AgentPendingPermission;
 
     fn input(&self) -> &str;
+    fn input_help_visible(&self) -> bool;
     fn cursor_byte(&self) -> usize;
     fn set_cursor_rect(&mut self, rect: Option<[f32; 4]>);
     fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>);
@@ -149,6 +150,10 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn input(&self) -> &str {
                 <$pane>::input(self)
+            }
+
+            fn input_help_visible(&self) -> bool {
+                <$pane>::input_help_visible(self)
             }
 
             fn cursor_byte(&self) -> usize {
@@ -360,6 +365,10 @@ impl AgentUserInputPane for NeoismAgentPane {
 
     fn input(&self) -> &str {
         NeoismAgentPane::input(self)
+    }
+
+    fn input_help_visible(&self) -> bool {
+        NeoismAgentPane::input_help_visible(self)
     }
 
     fn cursor_byte(&self) -> usize {
@@ -1012,20 +1021,22 @@ pub fn render_input(
         );
     }
 
-    render_input_help_strip(
-        sugarloaf,
-        pane,
-        [
-            x + 8.0 * s,
-            y + h + 4.0 * s,
-            (w - 16.0 * s).max(0.0),
-            (INPUT_HELP_STRIP_H - 4.0) * s,
-        ],
-        theme,
-        s,
-        now_seconds,
-        occlusion_rects,
-    );
+    if pane.input_help_visible() {
+        render_input_help_strip(
+            sugarloaf,
+            pane,
+            [
+                x + 8.0 * s,
+                y + h + 4.0 * s,
+                (w - 16.0 * s).max(0.0),
+                (INPUT_HELP_STRIP_H - 4.0) * s,
+            ],
+            theme,
+            s,
+            now_seconds,
+            occlusion_rects,
+        );
+    }
 }
 
 /// Small OpenCode-style legend below the composer. The left side only
@@ -1320,8 +1331,11 @@ pub fn render_streaming_status_row(
     let word_drift_x = word_motion.sin() * 1.8 * s;
     let word_drift_y = (word_motion * 0.72).cos() * 0.8 * s;
     // The status word owns the row from its leading edge; there is no
-    // reserved activity-glyph column beside Crafting/Thinking/etc.
-    let mut cursor_x = bar_x + word_drift_x;
+    // reserved activity-glyph column beside Crafting/Thinking/etc. Keep a
+    // tiny bearing guard so the first pixel glyph and its horizontal wave
+    // never spill back across the row's left inset.
+    let mut cursor_x = bar_x + 4.0 * s + word_drift_x;
+    let mut trailing_color = theme.u8(accent);
     for (ix, target_ch) in chars.iter().enumerate() {
         let lock_threshold = (ix as f32 + 1.0) * lock_per_char;
         let locked = transition >= lock_threshold;
@@ -1363,6 +1377,7 @@ pub fn render_streaming_status_row(
             let hue = (now_seconds * speed + ix as f32 * 48.0).rem_euclid(360.0);
             hsl_to_u8_simple(hue, 1.0, 0.62)
         };
+        trailing_color = color;
         opts.color = color;
         // Locked letters ride a travelling wave. Scrambling letters get
         // a smaller shake so the word feels active before it resolves.
@@ -1401,7 +1416,9 @@ pub fn render_streaming_status_row(
         ..DrawOpts::default()
     };
     cursor_x += 7.0 * s;
-    let dot_floor_y = word_y + 6.2 * s;
+    // Sit the dots a touch above the letters' baseline. Their larger UI
+    // font otherwise lets the bottom pixels disappear into the row edge.
+    let dot_floor_y = word_y + 3.0 * s;
     for ix in 0..3 {
         let phase = live_phase * 4.0 + ix as f32 * 0.95;
         let swell = phase.sin();
@@ -1410,7 +1427,8 @@ pub fn render_streaming_status_row(
         let drift = backwash * 1.0 * s;
         let alpha = 0.40 + (swell * 0.5 + 0.5) * 0.45;
         let mut opts = dot_opts;
-        opts.color = theme.u8_alpha(accent, alpha);
+        opts.color = trailing_color;
+        opts.color[3] = (alpha * 255.0).round() as u8;
         draw_text_clipped(
             sugarloaf,
             cursor_x + drift,
@@ -1460,7 +1478,11 @@ pub fn render_streaming_status_row(
         // branch here even though the root Crafting/Thinking row no longer
         // carries a leading decoration. When another child follows, use a
         // continuing branch and let the final background row close the tree.
-        let queue_branch = if background_count > 0 { "├─" } else { "╰─" };
+        let queue_branch = if background_count > 0 {
+            "├─"
+        } else {
+            "╰─"
+        };
         let queue_text = format!("{queue_branch} {queue_label}");
         let queue_opts = DrawOpts {
             font_size: 13.0 * s,

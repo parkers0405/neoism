@@ -131,7 +131,7 @@ impl Screen<'_> {
             let block_footer_active = ctx.terminal_input.composer_footer_active(
                 shell_prompt_state,
                 terminal_alt_screen,
-                false,
+                ctx.remote_pty.is_some(),
             );
             if block_footer_active {
                 let cell_h = ctx.dimension.dimension.height.round().max(1.0);

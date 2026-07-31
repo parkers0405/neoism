@@ -47,6 +47,8 @@ pub enum SlashCommandAction {
     ResumeGoal,
     UndoSession,
     RedoSession,
+    /// Toggle the OpenCode-style keyboard/help strip below the composer.
+    ToggleInputHelp,
     /// `/yolo` (`/dangerously-skip-permissions`) — toggle skipping ALL
     /// permission prompts for this pane: every request auto-answers
     /// "Yes" the moment it arrives. The config-level equivalent is
@@ -121,6 +123,9 @@ pub fn plan_slash_command(text: &str) -> SlashCommandAction {
         "/goal" => plan_goal_command(&args),
         "/undo" => SlashCommandAction::UndoSession,
         "/redo" => SlashCommandAction::RedoSession,
+        "/hints" | "/helper" | "/help-strip" | "/footer" => {
+            SlashCommandAction::ToggleInputHelp
+        }
         "/piss" => SlashCommandAction::PissOnScreen,
         "/cuss" | "/swear" => SlashCommandAction::CussOnScreen,
         "/glitch" => SlashCommandAction::GlitchOnScreen,
@@ -246,6 +251,12 @@ fn slash_option_specs() -> &'static [SlashOptionSpec] {
             description: "Restore the reverted session change",
             footer: "session",
             value: "/redo",
+        },
+        SlashOptionSpec {
+            title: "/hints",
+            description: "Toggle the helper row below the input",
+            footer: "ui",
+            value: "/hints",
         },
         SlashOptionSpec {
             title: "/piss",
@@ -432,6 +443,20 @@ mod tests {
     fn plans_undo_redo_commands() {
         assert_eq!(plan_slash_command("/undo"), SlashCommandAction::UndoSession);
         assert_eq!(plan_slash_command("/redo"), SlashCommandAction::RedoSession);
+    }
+
+    #[test]
+    fn plans_input_help_toggle_aliases() {
+        for spelling in ["/hints", "/helper", "/help-strip", "/footer"] {
+            assert_eq!(
+                plan_slash_command(spelling),
+                SlashCommandAction::ToggleInputHelp,
+                "{spelling}"
+            );
+        }
+        assert!(slash_options()
+            .iter()
+            .any(|option| option.value == "/hints"));
     }
 
     #[test]

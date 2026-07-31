@@ -594,6 +594,22 @@ fn hit_position_nowrap_honors_horizontal_scroll() {
 }
 
 #[test]
+fn matching_bracket_requires_an_exact_bracket_cell() {
+    let lines = wrap_lines(&["call({thing})"]);
+    assert_eq!(matching_bracket_at(&lines, 0, 5), Some(((0, 5), (0, 11))));
+    assert_eq!(matching_bracket_at(&lines, 0, 11), Some(((0, 11), (0, 5))));
+    assert_eq!(matching_bracket_at(&lines, 0, 7), None);
+}
+
+#[test]
+fn matching_bracket_handles_nested_multiline_pairs() {
+    let lines = wrap_lines(&["outer {", "  inner { value }", "}"]);
+    assert_eq!(matching_bracket_at(&lines, 0, 6), Some(((0, 6), (2, 0))));
+    assert_eq!(matching_bracket_at(&lines, 1, 8), Some(((1, 8), (1, 16))));
+    assert_eq!(matching_bracket_at(&lines, 2, 0), Some(((2, 0), (0, 6))));
+}
+
+#[test]
 fn wheel_drag_along_tracks_center_visual_row() {
     use std::path::PathBuf;
     let text = format!("{}\n{}\n{}\n", "w".repeat(30), "short", "tail");

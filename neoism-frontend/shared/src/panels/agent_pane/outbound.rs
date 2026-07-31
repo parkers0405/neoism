@@ -70,9 +70,15 @@ pub enum OutboundAgentCommand {
     RedoSession,
 
     /// Pull the workspace agent-server's per-directory config defaults
-    /// (agent / model / thinking) and apply them to the pane. Fired
+    /// (agent / model / thinking / input hints) and apply them to the pane. Fired
     /// from `with_directory(...)`.
     ApplyConfigDefaults,
+
+    /// Persist the OpenCode-style helper-strip preference in the host's
+    /// unified `config.json` (`agent-input-hints`).
+    SetInputHelpVisible {
+        visible: bool,
+    },
 
     /// Pull the context-window cap for the currently-selected model.
     /// Hosts return the resolved value through pane setters; the
@@ -300,6 +306,7 @@ mod tests {
         let _ = OutboundAgentCommand::AbortSession;
         let _ = OutboundAgentCommand::CompactSession;
         let _ = OutboundAgentCommand::ApplyConfigDefaults;
+        let _ = OutboundAgentCommand::SetInputHelpVisible { visible: false };
         let _ = OutboundAgentCommand::RefreshModelContextLimit;
         let _ = OutboundAgentCommand::RefreshSessions { directory: None };
         let _ = OutboundAgentCommand::RefreshModels;

@@ -68,7 +68,7 @@ impl Screen<'_> {
         let rich_text_id = next_rich_text_id();
         let _ = self.sugarloaf.text(Some(rich_text_id));
         self.sugarloaf
-            .set_position(rich_text_id, config.margin.left, padding_y_top);
+            .set_position(rich_text_id, config.ui.margin.left, padding_y_top);
         self.context_manager.split_from_config(
             rich_text_id,
             false,

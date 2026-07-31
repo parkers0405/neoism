@@ -342,11 +342,10 @@ impl Screen<'_> {
             format!("ACP wrote {} bytes to {}", bytes, path.display()),
             neoism_ui::panels::notifications::NotificationLevel::Info,
         );
-
-        if crate::editor::markdown::state::is_markdown_path(&path) {
-            self.open_path_in_markdown(path);
-        } else {
-            self.open_path_in_editor(path);
-        }
+        // The filesystem/CRDT reconciliation paths update any already-open
+        // code or Markdown pane live. Do not route an agent-authored write
+        // through `open_path_*`: those are user-navigation APIs and would
+        // steal the active tab/viewport on every write.
+        self.mark_dirty();
     }
 }

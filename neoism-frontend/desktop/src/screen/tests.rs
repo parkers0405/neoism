@@ -134,7 +134,6 @@ fn parse_ssh_target_extracts_host_and_passthrough_opts() {
     assert_eq!(parse_ssh_target("bash"), None);
 }
 
-
 #[test]
 fn git_state_event_filter_ignores_lock_churn() {
     let event =

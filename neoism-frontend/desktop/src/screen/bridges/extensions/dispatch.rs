@@ -44,8 +44,7 @@ impl Screen<'_> {
             // Distinguish "catalog hasn't landed yet" from "no managed
             // installer exists" so the user gets an actionable message instead
             // of a permanent, misleading "still syncing".
-            let catalog_present =
-                neoism_extensions::mason::mason_cache_path().is_file();
+            let catalog_present = neoism_extensions::mason::mason_cache_path().is_file();
             let message = if catalog_present {
                 format!(
                     "Neoism has no managed installer for `{id}` on this platform. Install it manually and add it to your PATH."

@@ -154,6 +154,16 @@ const MENU: [MenuSpec; 5] = [
     },
 ];
 
+/// macOS labels the Alt key "Option" — rewrite splash/menu key hints so
+/// they read natively per platform (e.g. `Alt + P` → `Option + P`).
+fn platform_keybind(keybind: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(target_os = "macos") {
+        std::borrow::Cow::Owned(keybind.replace("Alt", "Option"))
+    } else {
+        std::borrow::Cow::Borrowed(keybind)
+    }
+}
+
 const MENU_BTN_H: f32 = 42.0;
 const MENU_BTN_GAP: f32 = 8.0;
 const MENU_RADIUS: f32 = 10.0;
@@ -428,10 +438,11 @@ impl SplashOverlay {
         // capped at ~50% of pane width so it reads as a logo
         // not a billboard. The PNG is auto-trimmed (no gutter)
         // so band height = visible letter height.
-        // Slightly smaller logo per user — 80 % band height,
-        // capped at 42 % pane width (was 95 / 50). Reads as a
+        // Fill ~96 % of the (now-tightened) band so the letters hug
+        // top+bottom like the agent home wordmark — no dead padding.
+        // Width is still capped at 42 % pane width so it reads as a
         // refined header, not a pane-spanning banner.
-        let target_h = wordmark_h * 0.80;
+        let target_h = wordmark_h * 0.96;
         let aspect = crate::panels::terminal_splash::WORDMARK_ASPECT;
         let mut img_w = target_h * aspect;
         let max_w = pane_size.0 * 0.42;
@@ -613,7 +624,7 @@ impl SplashOverlay {
                     },
                 );
                 let key_w = ui.measure(
-                    &format!("[{}]", spec.keybind),
+                    &format!("[{}]", platform_keybind(spec.keybind)),
                     &DrawOpts {
                         font_size: key_font,
                         bold: true,
@@ -878,7 +889,7 @@ impl SplashOverlay {
             },
             occlusion_rects,
         );
-        let key_text = format!("[{}]", spec.keybind);
+        let key_text = format!("[{}]", platform_keybind(spec.keybind));
         let key_measure_opts = DrawOpts {
             font_size: dims.key_font,
             bold: true,

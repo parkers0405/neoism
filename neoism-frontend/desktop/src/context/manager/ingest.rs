@@ -113,7 +113,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 // (join lands in the wrong dir) and the joined tab loses its
                 // link badge. Mirrors the `HostWorkspaceList` merge guard above.
                 if let Some(adopted_id) = self.current_adopted_workspace_id() {
-                    if !workspaces.iter().any(|workspace| workspace.id == adopted_id)
+                    if !workspaces
+                        .iter()
+                        .any(|workspace| workspace.id == adopted_id)
                     {
                         if let Some(existing) = self
                             .daemon

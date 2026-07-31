@@ -136,6 +136,7 @@ mod tests {
             block_wrap_hit_stops: std::collections::HashMap::new(),
             pending_line_edit: None,
             mode: MarkdownMode::Normal,
+            vim_enabled: true,
             cursor_line: 1,
             cursor_col: 5,
             visual_anchor: None,

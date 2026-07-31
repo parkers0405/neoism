@@ -1,12 +1,11 @@
 # Shaders
 
-Neoism can run GPU post-process effects over the whole surface. Two knobs, both under `[renderer]` in [[Configuration|config.json]].
+Neoism can run GPU post-process effects over the whole surface. Two knobs, both under `"renderer"` in [[Configuration|config.json]].
 
 ## Built-in filters
 
-```toml
-[renderer]
-filters = ["crt_curve"]
+```json
+{ "renderer": { "filters": ["crt_curve"] } }
 ```
 
 `filters` is a list of full-screen filter chains, applied live. Built-in names:
@@ -18,9 +17,8 @@ Any other value is treated as a path to your own RetroArch `.slangp` preset. Fil
 
 ## Custom shader overlays
 
-```toml
-[renderer]
-shader-overlays = ["/path/to/effect.glsl"]
+```json
+{ "renderer": { "shader-overlays": ["/path/to/effect.glsl"] } }
 ```
 
 `shader-overlays` are your own GLSL overlay shaders. Once configured, the command palette's **Shaders** entry lists them (plus a **None** option to turn them off) so you can switch live. With none configured, that picker just tells you to add paths here first.

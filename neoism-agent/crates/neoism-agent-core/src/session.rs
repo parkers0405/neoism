@@ -721,6 +721,15 @@ mod goal_tests {
 
         // Survives a JSON serialize/deserialize cycle (mirrors persistence).
         let json = serde_json::to_string(&info).expect("serialize");
+        let wire: Value = serde_json::from_str(&json).expect("wire JSON");
+        assert!(
+            wire.get("goal").is_some(),
+            "the flattened extra map puts goal at info.goal on the wire"
+        );
+        assert!(
+            wire.get("extra").is_none(),
+            "SessionInfo must not serialize a nested extra object"
+        );
         let restored: SessionInfo = serde_json::from_str(&json).expect("deserialize");
         let restored_goal = restored.goal().expect("goal present after reload");
         assert_eq!(restored_goal.text, "ship the goal feature");

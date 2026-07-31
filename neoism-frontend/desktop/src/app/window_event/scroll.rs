@@ -29,6 +29,17 @@ impl Application<'_> {
             }
         }
 
+        // The full-screen settings panel scrolls its own list.
+        if route.window.screen.renderer.settings.is_active() {
+            let dy = match delta {
+                MouseScrollDelta::LineDelta(_, lines) => lines * 48.0,
+                MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+            };
+            route.window.screen.renderer.settings.scroll_by(dy);
+            route.request_redraw();
+            return;
+        }
+
         // Rust-owned overlays sit above the editor/tree. When
         // hovered, wheel/trackpad input scrolls their internal
         // list/body instead of leaking into the pane behind it.

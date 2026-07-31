@@ -12,10 +12,29 @@ const ROW_H: f32 = 46.0;
 const SKELETON_ROWS: usize = 3;
 const TITLE_H: f32 = 54.0;
 const MAX_ROWS: usize = 8;
+pub const DEFAULT_MAX_ROWS: usize = MAX_ROWS;
 const RADIUS: f32 = 14.0;
 /// Height (pre-scale) of the muted hint band drawn under the list when a
 /// picker supplies a `footer_hint` (the `/sessions` picker's key legend).
 pub const FOOTER_H: f32 = 26.0;
+
+/// Largest row window that fits entirely between `min_y` and the
+/// composer, capped by `preferred_rows`. Always returns at least one
+/// row so an empty/no-results picker remains usable on tiny panes.
+pub fn row_limit_for_space(
+    input_y: f32,
+    min_y: f32,
+    scale: f32,
+    has_footer: bool,
+    preferred_rows: usize,
+) -> usize {
+    let s = scale.clamp(0.5, 3.0);
+    let footer_h = if has_footer { FOOTER_H * s } else { 0.0 };
+    let fixed_h = TITLE_H * s + footer_h + 6.0 * s;
+    let available_rows_h = (input_y - min_y - fixed_h).max(ROW_H * s);
+    ((available_rows_h / (ROW_H * s)).floor() as usize)
+        .clamp(1, preferred_rows.clamp(1, MAX_ROWS))
+}
 
 #[derive(Clone, Copy)]
 pub struct InlinePickerRow<'a> {
@@ -112,19 +131,37 @@ pub fn layout(
     scale: f32,
     has_footer: bool,
 ) -> Option<[f32; 4]> {
+    layout_limited(
+        row_count,
+        input_rect,
+        scale,
+        has_footer,
+        MAX_ROWS,
+        8.0 * scale.clamp(0.5, 3.0),
+    )
+}
+
+pub fn layout_limited(
+    row_count: usize,
+    input_rect: [f32; 4],
+    scale: f32,
+    has_footer: bool,
+    max_rows: usize,
+    min_y: f32,
+) -> Option<[f32; 4]> {
     let s = scale.clamp(0.5, 3.0);
     let row_h = ROW_H * s;
     let title_h = TITLE_H * s;
     let footer_h = if has_footer { FOOTER_H * s } else { 0.0 };
     // An empty picker still shows one row ("No results") and stays open, so
     // a filter that matches nothing doesn't make the modal vanish.
-    let visible_rows = row_count.min(MAX_ROWS).max(1);
+    let visible_rows = row_count.min(max_rows.clamp(1, MAX_ROWS)).max(1);
     // Lock to the composer's width and x position so the popover lines up
     // edge-to-edge with the input chrome.
     let width = input_rect[2];
     let height = title_h + visible_rows as f32 * row_h + footer_h;
     let x = input_rect[0];
-    let y = (input_rect[1] - height - 6.0 * s).max(8.0 * s);
+    let y = (input_rect[1] - height - 6.0 * s).max(min_y);
     Some([x, y, width, height])
 }
 
@@ -134,6 +171,27 @@ pub fn render(
     input_rect: [f32; 4],
     theme: &IdeTheme,
     scale: f32,
+) -> Option<InlinePickerRenderState> {
+    render_limited(
+        sugarloaf,
+        view,
+        input_rect,
+        theme,
+        scale,
+        MAX_ROWS,
+        8.0 * scale.clamp(0.5, 3.0),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_limited(
+    sugarloaf: &mut Sugarloaf,
+    view: InlinePickerView<'_>,
+    input_rect: [f32; 4],
+    theme: &IdeTheme,
+    scale: f32,
+    max_rows: usize,
+    min_y: f32,
 ) -> Option<InlinePickerRenderState> {
     let s = scale.clamp(0.5, 3.0);
     let row_h = ROW_H * s;
@@ -146,8 +204,9 @@ pub fn render(
     } else {
         view.rows.len()
     };
-    let [x, y, width, height] = layout(layout_rows, input_rect, scale, has_footer)?;
-    let visible_rows = layout_rows.min(MAX_ROWS).max(1);
+    let [x, y, width, height] =
+        layout_limited(layout_rows, input_rect, scale, has_footer, max_rows, min_y)?;
+    let visible_rows = layout_rows.min(max_rows.clamp(1, MAX_ROWS)).max(1);
     let selected = view.selected.min(view.rows.len().saturating_sub(1));
     let first = view
         .scroll_offset

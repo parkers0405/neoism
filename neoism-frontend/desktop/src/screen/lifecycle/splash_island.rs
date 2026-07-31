@@ -109,7 +109,10 @@ impl Screen<'_> {
                         self.renderer.assistant.clear();
                     }
                     AssistantOverlayAction::OpenDocs => {
-                        Self::open_docs_url();
+                        // Point users at the in-app Getting Started notes
+                        // (Alt+N → Default vault) rather than a web URL.
+                        self.renderer.assistant.clear();
+                        self.open_neoism_notes_sidebar();
                     }
                 }
                 self.mark_dirty();
@@ -125,24 +128,6 @@ impl Screen<'_> {
                 self.mark_dirty();
                 true
             }
-        }
-    }
-
-    pub(crate) fn open_docs_url() {
-        let url = "https://neoism.com/docs/config";
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open").arg(url).spawn();
-        }
-        #[cfg(not(any(target_os = "macos", windows)))]
-        {
-            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-        }
-        #[cfg(windows)]
-        {
-            let _ = std::process::Command::new("cmd")
-                .args(["/c", "start", "", url])
-                .spawn();
         }
     }
 

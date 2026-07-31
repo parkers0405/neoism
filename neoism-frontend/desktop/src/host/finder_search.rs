@@ -82,11 +82,23 @@ impl NativeSearchService {
             return None;
         }
         let request_id = route.handle.allocate_request_id();
-        let message = build(request_id, cwd.to_string_lossy().into_owned());
+        // SearchClientMessage::cwd is relative to the explicit workspace
+        // root carried by the service envelope. Sending the host's absolute
+        // path without that root made a multi-workspace daemon resolve the
+        // request against its default root and return an empty "NO FILES".
+        let relative_cwd = cwd
+            .strip_prefix(&route.root)
+            .ok()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_string_lossy()
+            .into_owned();
+        let message = build(request_id, relative_cwd);
         let handle = route.handle.clone();
+        let workspace_root = route.root.clone();
         route.runtime.spawn(async move {
             if let Err(error) = handle
-                .send_search_with_request_id(request_id, message)
+                .send_search_with_request_id(request_id, message, Some(workspace_root))
                 .await
             {
                 tracing::warn!(

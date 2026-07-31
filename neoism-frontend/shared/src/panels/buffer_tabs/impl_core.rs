@@ -77,6 +77,16 @@ impl<A> BufferTabs<A> {
         self.pending_ensure_active = !self.tabs.is_empty();
     }
 
+    pub fn set_path_icon(&mut self, path: &Path, icon: Option<String>) {
+        let icon = icon.filter(|glyph| !glyph.trim().is_empty());
+        for tab in &mut self.tabs {
+            if tab.path.as_deref() == Some(path) {
+                tab.custom_icon = icon.clone();
+            }
+        }
+        self.layout.clear();
+    }
+
     /// Effective strip height in logical pixels (base * scale).
     pub fn height(&self) -> f32 {
         BUFFER_TABS_HEIGHT * self.scale
@@ -558,6 +568,7 @@ impl<A> BufferTabs<A> {
             BufferTab {
                 title: TERMINAL_TITLE.to_string(),
                 modified: false,
+                custom_icon: None,
                 path: None,
                 markdown: false,
                 terminal_route_id: None,
@@ -587,6 +598,7 @@ impl<A> BufferTabs<A> {
         self.tabs.push(BufferTab {
             title: format!("Terminal {number}"),
             modified: false,
+            custom_icon: None,
             path: None,
             markdown: false,
             terminal_route_id: Some(route_id),
@@ -625,6 +637,7 @@ impl<A> BufferTabs<A> {
                 format!("Neoism Agent {number}")
             },
             modified: false,
+            custom_icon: None,
             path: None,
             markdown: false,
             terminal_route_id: None,
@@ -661,6 +674,7 @@ impl<A> BufferTabs<A> {
         self.tabs.push(BufferTab {
             title: kind.title().to_string(),
             modified: false,
+            custom_icon: None,
             path: None,
             markdown: false,
             terminal_route_id: None,
@@ -735,6 +749,7 @@ impl<A> BufferTabs<A> {
             self.tabs.push(BufferTab {
                 title,
                 modified: false,
+                custom_icon: None,
                 path: Some(path),
                 markdown: false,
                 terminal_route_id: None,
@@ -766,6 +781,7 @@ impl<A> BufferTabs<A> {
             self.tabs.push(BufferTab {
                 title,
                 modified: false,
+                custom_icon: None,
                 path: Some(path),
                 markdown: true,
                 terminal_route_id: None,

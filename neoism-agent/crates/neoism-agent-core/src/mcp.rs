@@ -61,7 +61,7 @@ pub enum McpOAuthSetting {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 pub struct McpOAuthConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,

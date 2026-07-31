@@ -23,8 +23,6 @@
 //!   the resolved palette. The trait `draw` is a thin shim that
 //!   delegates to `render` once the host has stashed an
 //!   `StatusInfo`-supplying closure / context on the struct.
-//!
-//! See `docs/NEOISM_UI_DESIGN.md` for the broader migration plan.
 
 use web_time::Duration;
 

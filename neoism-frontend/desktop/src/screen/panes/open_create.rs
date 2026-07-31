@@ -406,10 +406,7 @@ impl Screen<'_> {
                 self.context_manager
                     .switch_daemon_host_workspace(workspace_id);
                 return;
-            } else if workspace_match_is_already_open(
-                current_is_really_this,
-                owned,
-            ) {
+            } else if workspace_match_is_already_open(current_is_really_this, owned) {
                 // Returning HOME after leaving a guest workspace lands on an
                 // existing local grid whose synthetic id legitimately matches
                 // the home daemon workspace. Treat it as open. The old

@@ -52,15 +52,25 @@ pub struct Shell {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct Scroll {
+    #[serde(default = "default_scroll_multiplier")]
     pub multiplier: f64,
+    #[serde(default = "default_scroll_divider")]
     pub divider: f64,
+}
+
+fn default_scroll_multiplier() -> f64 {
+    3.0
+}
+
+fn default_scroll_divider() -> f64 {
+    1.0
 }
 
 impl Default for Scroll {
     fn default() -> Scroll {
         Scroll {
-            multiplier: 3.0,
-            divider: 1.0,
+            multiplier: default_scroll_multiplier(),
+            divider: default_scroll_divider(),
         }
     }
 }
@@ -104,10 +114,6 @@ pub struct Neoism {
     /// static color. Unknown names fall back to solid.
     #[serde(default, rename = "cursor-style")]
     pub cursor_style: Option<String>,
-    /// Friendlier alias for `[cursor] blinking` — when set it wins, so
-    /// `[neoism] blinking-cursor = true` works on its own.
-    #[serde(default, rename = "blinking-cursor")]
-    pub blinking_cursor: Option<bool>,
     /// Active Mash Up Pack id (a directory under `packs/`). Applied on
     /// startup: the pack's theme wins over `theme` above, and its
     /// shader overlay / filters are re-applied. Empty/unset = no pack.
@@ -118,6 +124,12 @@ pub struct Neoism {
     /// `status-fps = false` to hide it.
     #[serde(default = "default_bool_true", rename = "status-fps")]
     pub status_fps: bool,
+    /// Vim keybindings in the code AND markdown editors. On by default;
+    /// set `vim-mode = false` for plain (always-insert) editing. New
+    /// editors honor this on open; toggling it re-applies on the next
+    /// editor you open.
+    #[serde(default = "default_bool_true", rename = "vim-mode")]
+    pub vim_mode: bool,
 }
 
 impl Default for Neoism {
@@ -128,10 +140,10 @@ impl Default for Neoism {
             display_name: None,
             cursor_color: None,
             cursor_style: None,
-            blinking_cursor: None,
             mashup_pack: None,
             format_on_save: true,
             status_fps: true,
+            vim_mode: true,
         }
     }
 }
@@ -168,9 +180,11 @@ pub struct Config {
     pub working_dir: Option<String>,
     #[serde(rename = "line-height", default = "default_line_height")]
     pub line_height: f32,
+    /// Terminal color palette file (`themes/<name>.json`). The IDE
+    /// theme is the flattened `theme` key just below (from `neoism`).
     #[serde(default = "String::default")]
-    pub theme: String,
-    #[serde(default)]
+    pub palette: String,
+    #[serde(flatten)]
     pub neoism: Neoism,
     #[serde(default = "Scroll::default")]
     pub scroll: Scroll,
@@ -184,7 +198,7 @@ pub struct Config {
     pub fonts: SugarloafFonts,
     #[serde(default = "default_editor")]
     pub editor: Shell,
-    #[serde(default = "default_margin", alias = "margin")]
+    #[serde(default = "default_margin")]
     pub margin: Margin,
     #[serde(default = "Panel::default")]
     pub panel: Panel,
@@ -211,11 +225,7 @@ pub struct Config {
     pub confirm_before_quit: bool,
     #[serde(default = "bool::default", rename = "copy-on-select")]
     pub copy_on_select: bool,
-    #[serde(
-        default = "bool::default",
-        rename = "hide-mouse-cursor-when-typing",
-        alias = "hide-cursor-when-typing"
-    )]
+    #[serde(default = "bool::default", rename = "hide-mouse-cursor-when-typing")]
     pub hide_cursor_when_typing: bool,
     #[serde(default = "Renderer::default")]
     pub renderer: Renderer,
@@ -294,51 +304,27 @@ pub fn json_config_file_path() -> PathBuf {
     config_dir_path().join("config.json")
 }
 
-/// Active config file. JSON is the primary format; a legacy
-/// `config.toml` is still honored when no `config.json` exists, and
-/// fresh installs (neither present) get `config.json`.
+/// Active config file: always `config.json` (JSONC). Neoism is
+/// JSON-only — there is no legacy `config.toml` fallback.
 #[inline]
 pub fn config_file_path() -> PathBuf {
-    let json = json_config_file_path();
-    if json.exists() {
-        return json;
-    }
-    let toml = config_dir_path().join("config.toml");
-    if toml.exists() {
-        return toml;
-    }
-    json
+    json_config_file_path()
 }
 
-/// Whether `path` should be parsed (and written) as JSON rather than
-/// TOML. Decided purely by extension so tests and the daemon's
-/// `NEOISM_CONFIG_DIR` runs behave identically.
-fn config_path_is_json(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|ext| ext.to_str()),
-        Some("json") | Some("jsonc")
-    )
-}
-
-/// Parse config file content by format: JSONC (comments + trailing
-/// commas tolerated) for `.json`/`.jsonc`, TOML otherwise. Shared with
-/// the mashup-pack loader so pack.json / theme.json speak the same
-/// dialect as config.json.
+/// Parse config file content as JSONC (comments + trailing commas
+/// tolerated). Shared with the mashup-pack loader so pack.json /
+/// theme.json speak the same dialect as config.json.
 pub(crate) fn parse_config_content<T: serde::de::DeserializeOwned>(
-    path: &Path,
+    _path: &Path,
     content: &str,
 ) -> Result<T, String> {
-    if config_path_is_json(path) {
-        let cleaned = strip_trailing_commas(&strip_json_comments(content));
-        let cleaned = if cleaned.trim().is_empty() {
-            "{}".to_string()
-        } else {
-            cleaned
-        };
-        serde_json::from_str::<T>(&cleaned).map_err(|err| err.to_string())
+    let cleaned = strip_trailing_commas(&strip_json_comments(content));
+    let cleaned = if cleaned.trim().is_empty() {
+        "{}".to_string()
     } else {
-        toml::from_str::<T>(content).map_err(|err| err.to_string())
-    }
+        cleaned
+    };
+    serde_json::from_str::<T>(&cleaned).map_err(|err| err.to_string())
 }
 
 /// Strip `//` line and `/* */` block comments outside strings so a
@@ -498,7 +484,100 @@ pub fn write_neoism_preferences(
         // in the file.
         updates.push(("mashup-pack", serde_json::Value::String(pack.to_string())));
     }
-    write_config_section("neoism", &updates)
+    // The former `[neoism]` keys are flattened to the document root now.
+    write_config_keys(None, &updates)
+}
+
+/// Persist one setting to `config.json` for the GUI settings panel. A
+/// dotted `section.field` key writes into that `[section]` object; a flat
+/// key writes at the document root. The fs-watcher then hot-reloads it.
+pub fn write_setting(key: &str, value: serde_json::Value) -> std::io::Result<()> {
+    match key.split_once('.') {
+        Some((section, field)) => write_config_keys(Some(section), &[(field, value)]),
+        None => write_config_keys(None, &[(key, value)]),
+    }
+}
+
+/// Upsert (or clear) a `[bindings]` keybinding override for `action` in
+/// config.json — backs the GUI Keybinds section. Replaces any existing
+/// binding for the same action; an empty `key` removes the override so
+/// the built-in default applies again. Bindings are read at launch, so a
+/// change here takes effect on the next start.
+pub fn write_keybind(action: &str, key: &str, with: &str) -> std::io::Result<()> {
+    let config_dir = config_dir_path();
+    std::fs::create_dir_all(&config_dir)?;
+    let path = config_file_path();
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let cleaned = strip_trailing_commas(&strip_json_comments(&content));
+    let mut root: serde_json::Value = if cleaned.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(&cleaned).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to parse {}: {err}", path.display()),
+            )
+        })?
+    };
+    if !root.is_object() {
+        root = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let obj = root.as_object_mut().expect("root forced to object above");
+    let bindings = obj
+        .entry("bindings".to_string())
+        .or_insert_with(|| serde_json::json!({ "keys": [] }));
+    if !bindings.is_object() {
+        *bindings = serde_json::json!({ "keys": [] });
+    }
+    let keys = bindings
+        .as_object_mut()
+        .expect("bindings forced to object")
+        .entry("keys".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !keys.is_array() {
+        *keys = serde_json::Value::Array(Vec::new());
+    }
+    let arr = keys.as_array_mut().expect("keys forced to array");
+    arr.retain(|entry| {
+        entry.get("action").and_then(serde_json::Value::as_str) != Some(action)
+    });
+    if !key.is_empty() {
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "key".to_string(),
+            serde_json::Value::String(key.to_string()),
+        );
+        if !with.is_empty() {
+            entry.insert(
+                "with".to_string(),
+                serde_json::Value::String(with.to_string()),
+            );
+        }
+        entry.insert(
+            "action".to_string(),
+            serde_json::Value::String(action.to_string()),
+        );
+        arr.push(serde_json::Value::Object(entry));
+    }
+    let mut out = serde_json::to_string_pretty(&root).map_err(|err| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+    })?;
+    out.push('\n');
+    std::fs::write(path, out)
+}
+
+/// Load the active `config.json` as a raw JSON value (all keys — terminal
+/// AND agent) so the GUI settings panel can reflect current values,
+/// including keys the terminal `Config` struct doesn't model.
+pub fn load_config_json_value() -> serde_json::Value {
+    let path = config_file_path();
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let cleaned = strip_trailing_commas(&strip_json_comments(&content));
+    if cleaned.trim().is_empty() {
+        return serde_json::Value::Object(serde_json::Map::new());
+    }
+    serde_json::from_str(&cleaned)
+        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
 }
 
 /// Persist `[fonts] family` — Mash Up Packs use this so their font
@@ -511,12 +590,21 @@ pub fn write_fonts_family(family: &str) -> std::io::Result<()> {
     )
 }
 
-/// Update keys inside one section of the ACTIVE config file — the JSON
-/// object for `config.json` (structure-preserving via serde; comments
-/// in a hand-edited JSONC file are lost on programmatic writes), or a
-/// comment-preserving line edit for a legacy `config.toml`.
+/// Update keys inside one `[section]` of the ACTIVE `config.json`
+/// (structure-preserving via serde; comments in a hand-edited JSONC
+/// file are lost on programmatic writes).
 fn write_config_section(
     section: &str,
+    updates: &[(&str, serde_json::Value)],
+) -> std::io::Result<()> {
+    write_config_keys(Some(section), updates)
+}
+
+/// Merge `updates` into `config.json`: under `section` when given,
+/// otherwise at the document root (used for the flattened former
+/// `[neoism]` keys, which now live at top level).
+fn write_config_keys(
+    section: Option<&str>,
     updates: &[(&str, serde_json::Value)],
 ) -> std::io::Result<()> {
     if updates.is_empty() {
@@ -525,217 +613,52 @@ fn write_config_section(
     let config_dir = config_dir_path();
     std::fs::create_dir_all(&config_dir)?;
     let path = config_file_path();
-    if config_path_is_json(&path) {
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let cleaned = strip_trailing_commas(&strip_json_comments(&content));
-        let mut root = if cleaned.trim().is_empty() {
-            serde_json::Value::Object(serde_json::Map::new())
-        } else {
-            serde_json::from_str::<serde_json::Value>(&cleaned).map_err(|err| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("failed to parse {}: {err}", path.display()),
-                )
-            })?
-        };
-        if !root.is_object() {
-            root = serde_json::Value::Object(serde_json::Map::new());
-        }
-        let object = root.as_object_mut().expect("root forced to object above");
-        let entry = object
-            .entry(section.to_string())
-            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-        if !entry.is_object() {
-            *entry = serde_json::Value::Object(serde_json::Map::new());
-        }
-        let section_map = entry.as_object_mut().expect("section forced to object");
-        for (key, value) in updates {
-            section_map.insert((*key).to_string(), value.clone());
-        }
-        let mut out = serde_json::to_string_pretty(&root).map_err(|err| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
-        })?;
-        out.push('\n');
-        std::fs::write(path, out)
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let cleaned = strip_trailing_commas(&strip_json_comments(&content));
+    let mut root = if cleaned.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
     } else {
-        let toml_updates = updates
-            .iter()
-            .map(|(key, value)| {
-                let literal = match value {
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::String(s) => toml_string_literal(s),
-                    other => toml_string_literal(&other.to_string()),
-                };
-                (*key, literal)
-            })
-            .collect::<Vec<_>>();
-        let content = std::fs::read_to_string(&path)
-            .unwrap_or_else(|_| String::from(LEGACY_TOML_HEADER));
-        let content = update_toml_section(&content, section, &toml_updates);
-        std::fs::write(path, content)
+        serde_json::from_str::<serde_json::Value>(&cleaned).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to parse {}: {err}", path.display()),
+            )
+        })?
+    };
+    if !root.is_object() {
+        root = serde_json::Value::Object(serde_json::Map::new());
     }
-}
-
-const LEGACY_TOML_HEADER: &str =
-    "# See the full configuration reference: https://neoism.com/docs/config\n";
-
-fn toml_string_literal(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
-}
-
-fn update_toml_section(
-    content: &str,
-    section: &str,
-    updates: &[(&str, String)],
-) -> String {
-    let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
-    let mut pending = updates
-        .iter()
-        .map(|(key, value)| (*key, value.clone()))
-        .collect::<Vec<_>>();
-    let header = format!("[{section}]");
-
-    if let Some(start) = lines.iter().position(|line| line.trim() == header) {
-        let mut end = start + 1;
-        while end < lines.len() {
-            let trimmed = lines[end].trim();
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                break;
+    let object = root.as_object_mut().expect("root forced to object above");
+    let target = match section {
+        Some(section) => {
+            let entry = object
+                .entry(section.to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if !entry.is_object() {
+                *entry = serde_json::Value::Object(serde_json::Map::new());
             }
-            end += 1;
+            entry.as_object_mut().expect("section forced to object")
         }
-
-        for line in lines.iter_mut().take(end).skip(start + 1) {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with('#') {
-                continue;
-            }
-            let Some((key, _)) = trimmed.split_once('=') else {
-                continue;
-            };
-            let key = key.trim();
-            if let Some(pos) = pending
-                .iter()
-                .position(|(pending_key, _)| *pending_key == key)
-            {
-                let (key, value) = pending.remove(pos);
-                *line = format!("{key} = {value}");
-            }
-        }
-
-        let inserted = pending
-            .into_iter()
-            .map(|(key, value)| format!("{key} = {value}"));
-        lines.splice(end..end, inserted);
-    } else {
-        if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
-            lines.push(String::new());
-        }
-        lines.push(header);
-        lines.extend(
-            pending
-                .into_iter()
-                .map(|(key, value)| format!("{key} = {value}")),
-        );
+        None => object,
+    };
+    for (key, value) in updates {
+        target.insert((*key).to_string(), value.clone());
     }
-
-    let mut out = lines.join("\n");
+    let mut out = serde_json::to_string_pretty(&root).map_err(|err| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+    })?;
     out.push('\n');
-    out
+    std::fs::write(path, out)
 }
 
 impl Config {
-    #[cfg(test)]
-    fn load_from_path(path: &PathBuf) -> Self {
-        if path.exists() {
-            let content = std::fs::read_to_string(path).unwrap();
-            let decoded: Config = parse_config_content(path, &content)
-                .unwrap_or_else(|_| Config::default());
-            decoded
-        } else {
-            Config::default()
-        }
-    }
-    #[cfg(test)]
-    fn load_from_path_without_fallback(path: &PathBuf) -> Result<Self, String> {
-        if path.exists() {
-            let content = std::fs::read_to_string(path).unwrap();
-            match parse_config_content::<Config>(path, &content) {
-                Ok(mut decoded) => {
-                    let theme = &decoded.theme;
-                    if theme.is_empty() {
-                        return Ok(decoded);
-                    }
-
-                    let tmp = std::env::temp_dir();
-                    let path = tmp.join(theme).with_extension("toml");
-                    if let Ok(loaded_theme) = Config::load_theme(&path) {
-                        decoded.colors = loaded_theme.colors;
-                    } else {
-                        warn!("failed to load theme: {}", theme);
-                    }
-
-                    if let Some(adaptive_theme) = &decoded.adaptive_theme {
-                        let light_theme = &adaptive_theme.light;
-                        let path = tmp.join(light_theme).with_extension("toml");
-                        let mut adaptive_colors = AdaptiveColors {
-                            dark: None,
-                            light: None,
-                        };
-
-                        if let Ok(light_loaded_theme) = Config::load_theme(&path) {
-                            adaptive_colors.light = Some(light_loaded_theme.colors);
-                        } else {
-                            warn!("failed to load light theme: {}", light_theme);
-                        }
-
-                        let dark_theme = &adaptive_theme.dark;
-                        let path = tmp.join(dark_theme).with_extension("toml");
-                        if let Ok(dark_loaded_theme) = Config::load_theme(&path) {
-                            adaptive_colors.dark = Some(dark_loaded_theme.colors);
-                        } else {
-                            warn!("failed to load dark theme: {}", dark_theme);
-                        }
-
-                        if adaptive_colors.light.is_some()
-                            && adaptive_colors.dark.is_some()
-                        {
-                            decoded.adaptive_colors = Some(adaptive_colors);
-                        }
-                    }
-
-                    Ok(decoded)
-                }
-                Err(err_message) => Err(format!("error parsing: {err_message:?}")),
-            }
-        } else {
-            Err(String::from("filepath does not exist"))
-        }
-    }
-
     fn load_theme(path: &PathBuf) -> Result<Theme, String> {
         if path.exists() {
             let content = std::fs::read_to_string(path).unwrap();
-            match toml::from_str::<Theme>(&content) {
-                Ok(decoded) => Ok(decoded),
-                Err(err_message) => Err(format!("error parsing: {err_message:?}")),
-            }
+            parse_config_content::<Theme>(path, &content)
+                .map_err(|err_message| format!("error parsing: {err_message:?}"))
         } else {
             Err(String::from("filepath does not exist"))
-        }
-    }
-
-    pub fn to_string(&self) -> Result<String, toml::ser::Error> {
-        toml::to_string(self)
-    }
-
-    /// Fold `[neoism]` convenience aliases into the canonical fields
-    /// so every consumer keeps reading the canonical location.
-    fn apply_neoism_aliases(&mut self) {
-        if let Some(blinking) = self.neoism.blinking_cursor {
-            self.cursor.blinking = blinking;
         }
     }
 
@@ -746,20 +669,19 @@ impl Config {
             let content = std::fs::read_to_string(&path).unwrap();
             match parse_config_content::<Config>(&path, &content) {
                 Ok(mut decoded) => {
-                    decoded.apply_neoism_aliases();
-                    let theme = &decoded.theme;
-                    if theme.is_empty() {
+                    let palette = &decoded.palette;
+                    if palette.is_empty() {
                         return decoded;
                     }
 
                     let path = config_path
                         .join("themes")
-                        .join(theme)
-                        .with_extension("toml");
+                        .join(palette)
+                        .with_extension("json");
                     if let Ok(loaded_theme) = Config::load_theme(&path) {
                         decoded.colors = loaded_theme.colors;
                     } else {
-                        warn!("failed to load theme: {}", theme);
+                        warn!("failed to load palette: {}", palette);
                     }
 
                     decoded
@@ -780,11 +702,10 @@ impl Config {
             match std::fs::read_to_string(&path) {
                 Ok(content) => match parse_config_content::<Config>(&path, &content) {
                     Ok(mut decoded) => {
-                        decoded.apply_neoism_aliases();
-                        let theme = &decoded.theme;
+                        let palette = &decoded.palette;
                         let theme_path = config_dir_path().join("themes");
-                        if !theme.is_empty() {
-                            let path = theme_path.join(theme).with_extension("toml");
+                        if !palette.is_empty() {
+                            let path = theme_path.join(palette).with_extension("json");
                             match Config::load_theme(&path) {
                                 Ok(loaded_theme) => {
                                     decoded.colors = loaded_theme.colors;
@@ -805,7 +726,7 @@ impl Config {
 
                             let light_theme = &adaptive_theme.light;
                             let path =
-                                theme_path.join(light_theme).with_extension("toml");
+                                theme_path.join(light_theme).with_extension("json");
                             match Config::load_theme(&path) {
                                 Ok(light_loaded_theme) => {
                                     adaptive_colors.light =
@@ -820,7 +741,7 @@ impl Config {
                             }
 
                             let dark_theme = &adaptive_theme.dark;
-                            let path = theme_path.join(dark_theme).with_extension("toml");
+                            let path = theme_path.join(dark_theme).with_extension("json");
                             match Config::load_theme(&path) {
                                 Ok(dark_loaded_theme) => {
                                     adaptive_colors.dark = Some(dark_loaded_theme.colors)
@@ -1005,7 +926,7 @@ impl Config {
 
         // Override theme
         if let Some(theme_overwrite) = &platform_config.theme {
-            self.theme = theme_overwrite.clone();
+            self.palette = theme_overwrite.clone();
         }
     }
 }
@@ -1029,12 +950,12 @@ impl Default for Config {
             line_height: default_line_height(),
             navigation: Navigation::default(),
             option_as_alt: default_option_as_alt(),
+            palette: String::default(),
             margin: default_margin(),
             panel: Panel::default(),
             renderer: Renderer::default(),
             shell: default_shell(),
             platform: Platform::default(),
-            theme: String::default(),
             neoism: Neoism::default(),
             use_fork: default_use_fork(),
             window: Window::default(),
@@ -1067,64 +988,49 @@ impl Default for CursorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use colors::{hex_to_color_arr, hex_to_color_wgpu};
-    use std::io::Write;
-    use sugarloaf::font::fonts::parse_unicode;
+    use std::path::Path;
 
-    fn tmp_dir() -> PathBuf {
-        std::env::temp_dir()
-    }
-
-    fn create_temporary_config(prefix: &str, toml_str: &str) -> Config {
-        let file_name = tmp_dir().join(format!("test-rio-{prefix}-config.toml"));
-        let mut file = std::fs::File::create(&file_name).unwrap();
-        writeln!(file, "{toml_str}").unwrap();
-
-        match Config::load_from_path_without_fallback(&file_name) {
-            Ok(config) => config,
-            Err(e) => panic!("{e}"),
-        }
-    }
-
-    fn create_temporary_theme(theme: &str, toml_str: &str) {
-        let file_name = tmp_dir().join(theme).with_extension("toml");
-        let mut file = std::fs::File::create(file_name).unwrap();
-        writeln!(file, "{toml_str}").unwrap();
-    }
-
-    fn create_temporary_json_config(prefix: &str, json_str: &str) -> Config {
-        let file_name = tmp_dir().join(format!("test-rio-{prefix}-config.json"));
-        let mut file = std::fs::File::create(&file_name).unwrap();
-        writeln!(file, "{json_str}").unwrap();
-
-        match Config::load_from_path_without_fallback(&file_name) {
-            Ok(config) => config,
-            Err(e) => panic!("{e}"),
-        }
+    fn parse(json: &str) -> Config {
+        parse_config_content::<Config>(Path::new("config.json"), json)
+            .expect("config should parse")
     }
 
     #[test]
-    fn json_config_parses_with_comments_and_trailing_commas() {
-        let config = create_temporary_json_config(
-            "jsonc",
+    fn empty_config_uses_defaults() {
+        let config = parse("{}");
+        assert_eq!(config.palette, String::default());
+        assert_eq!(config.cursor.shape, default_cursor());
+        assert_eq!(config.fonts, SugarloafFonts::default());
+        assert_eq!(config.colors, Colors::default());
+        assert_eq!(config.developer, Developer::default());
+        assert!(!config.renderer.disable_unfocused_render);
+        // Flattened former-`[neoism]` keys default correctly at the root.
+        assert_eq!(config.neoism.theme, default_neoism_theme());
+        assert!(config.neoism.status_fps);
+        assert!(config.neoism.format_on_save);
+        assert!(!config.neoism.minimap);
+    }
+
+    #[test]
+    fn jsonc_comments_and_trailing_commas_are_tolerated() {
+        let config = parse(
             r#"
-// unified config — comments are legal
+// line comment — legal in the unified config
 {
     /* block comment */
-    "line-height": 1.2,
-    "neoism": {
-        "theme": "tokyo_night",
-        "minimap": true,
-        "status-fps": false,
-    },
+    "line-height": 1.4,
+    "palette": "lucario",
+    "theme": "tokyo_night",   // IDE theme, flattened to root
+    "minimap": true,
+    "status-fps": false,
     "fonts": { "size": 16.0 },
     // agent-server keys co-live in the same file; the app ignores them
-    "mcp": { "fff": { "type": "local", "command": ["fff-mcp"] } },
-    "model": "anthropic/claude-fable-5",
+    "model": "anthropic/claude-opus-5",
 }
 "#,
         );
-        assert_eq!(config.line_height, 1.2);
+        assert_eq!(config.line_height, 1.4);
+        assert_eq!(config.palette, "lucario");
         assert_eq!(config.neoism.theme, "tokyo_night");
         assert!(config.neoism.minimap);
         assert!(!config.neoism.status_fps);
@@ -1132,25 +1038,92 @@ mod tests {
     }
 
     #[test]
-    fn json_section_writer_updates_and_preserves_other_keys() {
-        // Exercise write_config_section's JSON merge logic directly via
-        // the same primitives (parse → mutate → pretty).
+    fn neoism_keys_live_at_root_not_under_a_section() {
+        // The former `[neoism]` block is flattened: its keys sit at the
+        // top level. A nested `neoism` object is ignored, not honored.
+        let flat = parse(r#"{ "display-name": "parker", "mashup-pack": "synth" }"#);
+        assert_eq!(flat.neoism.display_name.as_deref(), Some("parker"));
+        assert_eq!(flat.neoism.mashup_pack.as_deref(), Some("synth"));
+
+        let nested = parse(r#"{ "neoism": { "display-name": "parker" } }"#);
+        assert_eq!(nested.neoism.display_name, None);
+    }
+
+    #[test]
+    fn theme_is_ide_and_palette_is_terminal_colors() {
+        let config = parse(r#"{ "theme": "catppuccin_mocha", "palette": "lucario" }"#);
+        assert_eq!(config.neoism.theme, "catppuccin_mocha"); // IDE theme
+        assert_eq!(config.palette, "lucario"); // terminal color file
+    }
+
+    #[test]
+    fn renderer_and_cursor_sections_parse() {
+        let config = parse(
+            r#"{
+                "cursor": { "shape": "underline" },
+                "renderer": { "backend": "Vulkan" }
+            }"#,
+        );
+        assert_eq!(config.cursor.shape, CursorShape::Underline);
+        assert_eq!(config.renderer.backend, renderer::Backend::Vulkan);
+    }
+
+    #[test]
+    fn colors_parse_from_hex() {
+        let config = parse(r##"{ "colors": { "foreground": "#000000" } }"##);
+        assert_eq!(config.colors.foreground, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(config.colors.background, colors::defaults::background());
+    }
+
+    #[test]
+    fn env_vars_and_option_as_alt_parse() {
+        let config = parse(r#"{ "env-vars": ["A=5", "B=8"], "option-as-alt": "Both" }"#);
+        assert_eq!(config.env_vars, [String::from("A=5"), String::from("B=8")]);
+        assert_eq!(config.option_as_alt, String::from("Both"));
+    }
+
+    #[test]
+    fn dropped_aliases_are_no_longer_accepted() {
+        // cwd / hide-cursor-when-typing / blinking-cursor were removed;
+        // they now parse as ignored unknown keys, leaving the defaults.
+        let config = parse(
+            r#"{ "cwd": false, "hide-cursor-when-typing": true, "blinking-cursor": true }"#,
+        );
+        assert!(config.navigation.current_working_directory); // default true
+        assert!(!config.hide_cursor_when_typing); // default false
+        assert!(!config.cursor.blinking); // default false
+    }
+
+    #[test]
+    fn default_template_parses_to_defaults() {
+        let config = parse(&default_config_file_content());
+        assert_eq!(config.palette, String::default());
+        assert_eq!(config.fonts, SugarloafFonts::default());
+        assert_eq!(config.bindings, Bindings::default());
+        assert!(config.neoism.status_fps);
+    }
+
+    #[test]
+    fn write_merge_handles_root_and_section_keys() {
+        // Exercise the JSON merge primitive used by write_config_keys at
+        // both the root (flattened neoism theme) and a named section.
         let content =
             "// note\n{ \"fonts\": { \"size\": 14.0 }, \"mcp\": { \"x\": {} } }";
         let cleaned = strip_trailing_commas(&strip_json_comments(content));
         let mut root: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
         let object = root.as_object_mut().unwrap();
-        let entry = object
-            .entry("neoism".to_string())
+        object.insert("theme".into(), serde_json::Value::String("phosphor".into()));
+        let fonts = object
+            .entry("fonts".to_string())
             .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-        entry
+        fonts
             .as_object_mut()
             .unwrap()
-            .insert("theme".into(), serde_json::Value::String("phosphor".into()));
+            .insert("size".into(), serde_json::json!(16.0));
         let out = serde_json::to_string_pretty(&root).unwrap();
         let reparsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(reparsed["neoism"]["theme"], "phosphor");
-        assert_eq!(reparsed["fonts"]["size"], 14.0);
+        assert_eq!(reparsed["theme"], "phosphor");
+        assert_eq!(reparsed["fonts"]["size"], 16.0);
         assert!(reparsed["mcp"]["x"].is_object());
     }
 
@@ -1161,901 +1134,5 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
         assert_eq!(parsed["a"], "http://not/a//comment");
         assert_eq!(parsed["b"], "star /* keep */");
-    }
-
-    #[test]
-    fn neoism_preferences_append_managed_section() {
-        let content = "# config\n";
-        let updated = update_toml_section(
-            content,
-            "neoism",
-            &[
-                ("theme", toml_string_literal("tokyo_night")),
-                ("minimap", "true".to_string()),
-            ],
-        );
-
-        assert!(updated.contains("[neoism]\n"));
-        assert!(updated.contains("theme = \"tokyo_night\""));
-        assert!(updated.contains("minimap = true"));
-    }
-
-    #[test]
-    fn neoism_preferences_update_existing_section() {
-        let content = "[window]\nwidth = 900\n\n[neoism]\ntheme = \"pastel_dark\"\n# keep me\n\n[renderer]\nperformance = \"High\"\n";
-        let updated = update_toml_section(
-            content,
-            "neoism",
-            &[
-                ("theme", toml_string_literal("catppuccin_mocha")),
-                ("minimap", "false".to_string()),
-            ],
-        );
-
-        assert!(updated.contains("theme = \"catppuccin_mocha\""));
-        assert!(updated.contains("minimap = false"));
-        assert!(updated.contains("# keep me"));
-        assert!(updated.contains("[renderer]"));
-    }
-
-    #[test]
-    fn neoism_status_fps_defaults_on_and_toggles_off() {
-        let default = create_temporary_config("status-fps-default", "# empty\n");
-        assert!(default.neoism.status_fps);
-
-        let disabled =
-            create_temporary_config("status-fps-off", "[neoism]\nstatus-fps = false\n");
-        assert!(!disabled.neoism.status_fps);
-    }
-
-    #[test]
-    fn test_filepath_does_not_exist_without_fallback() {
-        let should_fail = Config::load_from_path_without_fallback(
-            &tmp_dir().join("it-should-never-exist"),
-        );
-        assert!(should_fail.is_err(), "{}", true);
-    }
-
-    #[test]
-    fn test_filepath_does_not_exist_with_fallback() {
-        let config = Config::load_from_path(&tmp_dir().join("it-should-never-exist"));
-        assert_eq!(config.theme, String::default());
-        assert_eq!(config.cursor.shape, default_cursor());
-    }
-
-    #[test]
-    fn test_empty_config_file() {
-        let result = create_temporary_config(
-            "empty",
-            r#"
- # Config is empty
-        "#,
-        );
-
-        assert!(!result.renderer.disable_unfocused_render);
-
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.theme, String::default());
-
-        // Colors
-        assert_eq!(result.colors, Colors::default());
-
-        // Developer
-        assert_eq!(result.developer.log_level, default_log_level());
-        assert!(!result.developer.enable_fps_counter);
-    }
-
-    #[test]
-    fn test_if_explicit_defaults_match() {
-        // The default template is JSONC now — parse it through the JSON
-        // path like a real fresh install would.
-        let result =
-            create_temporary_json_config("defaults", &default_config_file_content());
-
-        let env_vars: Vec<String> = vec![];
-        assert_eq!(result.env_vars, env_vars);
-        assert_eq!(result.cursor.shape, default_cursor());
-        assert_eq!(result.theme, String::default());
-        assert_eq!(result.cursor.shape, default_cursor());
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.shell, default_shell());
-        assert!(!result.renderer.disable_unfocused_render);
-        assert_eq!(result.use_fork, default_use_fork());
-        assert_eq!(result.line_height, default_line_height());
-
-        // Colors
-        assert_eq!(result.colors, Colors::default());
-        // Developer
-        assert_eq!(result.developer, Developer::default());
-        assert_eq!(result.bindings, Bindings::default());
-    }
-
-    #[test]
-    fn test_invalid_config_file() {
-        let toml_str = r#"
-            Performance = 2
-            width = "big"
-            height = "small"
-        "#;
-
-        let file_name = tmp_dir()
-            .join("test-rio-invalid-config")
-            .with_extension("toml");
-        let mut file = std::fs::File::create(&file_name).unwrap();
-        writeln!(file, "{toml_str}").unwrap();
-
-        let result = Config::load_from_path(&file_name);
-
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.theme, String::default());
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_change_config_renderer() {
-        let result = create_temporary_config(
-            "change-performance",
-            r#"
-            [renderer]
-            performance = "Low"
-            backend = "Vulkan"
-        "#,
-        );
-
-        assert_eq!(result.renderer.backend, renderer::Backend::Vulkan);
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.theme, String::default());
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_change_config_renderer_occlusion() {
-        let result = create_temporary_config(
-            "change-renderer-occlusion",
-            r#"
-            [renderer]
-            disable-occluded-render = false
-        "#,
-        );
-
-        assert!(!result.renderer.disable_occluded_render);
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.theme, String::default());
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_change_config_environment_variables() {
-        let result = create_temporary_config(
-            "change-env-vars",
-            r#"
-            env-vars = ['A=5', 'B=8']
-        "#,
-        );
-
-        assert_eq!(result.env_vars, [String::from("A=5"), String::from("B=8")]);
-        assert_eq!(result.cursor.shape, default_cursor());
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.theme, String::default());
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(
-            result.colors.selection_background,
-            colors::defaults::selection_background()
-        );
-        assert_eq!(
-            result.colors.selection_foreground,
-            colors::defaults::selection_foreground()
-        );
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_change_config_cursor() {
-        let result = create_temporary_config(
-            "change-cursor",
-            r#"
-            [cursor]
-            shape = 'underline'
-        "#,
-        );
-
-        assert_eq!(result.cursor.shape, CursorShape::Underline);
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.theme, String::default());
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_change_option_as_alt() {
-        let result = create_temporary_config(
-            "change-option-as-alt",
-            r#"
-            option-as-alt = 'Both'
-        "#,
-        );
-
-        assert_eq!(result.option_as_alt, String::from("Both"));
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.theme, String::default());
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_change_config_width_height() {
-        let result = create_temporary_config(
-            "change-width-height",
-            r#"
-            width = 400
-            height = 500
-        "#,
-        );
-
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.theme, String::default());
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_change_bindings() {
-        let result = create_temporary_config(
-            "change-key-bindings",
-            r#"
-            [bindings]
-            keys = [
-                { key = 'Q', with = 'super', action = 'Quit' }
-            ]
-        "#,
-        );
-
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.theme, String::default());
-        // Bindings
-        assert_eq!(result.bindings.keys[0].key, "Q");
-        assert_eq!(result.bindings.keys[0].with, "super");
-        assert_eq!(result.bindings.keys[0].action.to_owned(), "Quit");
-        assert!(result.bindings.keys[0].esc.to_owned().is_empty());
-    }
-
-    #[test]
-    fn test_change_style() {
-        let result = create_temporary_config(
-            "change-style",
-            r#"
-            font-size = 14.0
-            line-height = 2.0
-            margin = [0]
-
-            [renderer]
-            performance = "Low"
-
-            [window]
-            opacity = 0.5
-            [window.background-image]
-            path = "my-image-path.png"
-
-            [fonts]
-            size = 14.0
-        "#,
-        );
-
-        assert_eq!(result.fonts.size, 14.0);
-        assert_eq!(result.line_height, 2.0);
-        assert_eq!(result.margin.top, 0.0);
-        assert_eq!(result.margin.bottom, 0.0);
-        assert_eq!(result.margin.left, 0.0);
-        assert_eq!(result.margin.right, 0.0);
-        assert_eq!(result.window.opacity, 0.5);
-        assert_eq!(
-            result.window.background_image,
-            Some(sugarloaf::ImageProperties {
-                path: String::from("my-image-path.png"),
-                ..sugarloaf::ImageProperties::default()
-            })
-        );
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_change_theme() {
-        let result = create_temporary_config(
-            "change-theme",
-            r#"
-            theme = "lucario"
-        "#,
-        );
-
-        assert_eq!(result.fonts, SugarloafFonts::default());
-        assert_eq!(result.theme, "lucario");
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_change_theme_with_colors_overwrite() {
-        create_temporary_theme(
-            "lucario-with-colors",
-            r#"
-            [colors]
-            background       = '#2B3E50'
-            foreground       = '#F8F8F2'
-        "#,
-        );
-
-        let result = create_temporary_config(
-            "change-theme-with-colors",
-            r#"
-            theme = "lucario-with-colors"
-
-            [colors]
-            background = '#333333'
-            foreground = '#333333'
-        "#,
-        );
-
-        // Colors
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-        assert_eq!(result.colors.foreground, hex_to_color_arr("#F8F8F2"));
-        assert_eq!(result.colors.background.0, hex_to_color_arr("#2B3E50"));
-    }
-
-    #[test]
-    fn test_change_one_color() {
-        let result = create_temporary_config(
-            "change-one-color",
-            r#"
-            [colors]
-            foreground = '#000000'
-        "#,
-        );
-
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, [0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_change_colors() {
-        let result = create_temporary_config(
-            "change-colors",
-            r#"
-            [colors]
-            background       = '#2B3E50'
-            tabs-active      = '#E6DB74'
-            selection-background = '#111111'
-            selection-foreground = '#222222'
-            foreground       = '#F8F8F2'
-            cursor           = '#E6DB74'
-            black            = '#FFFFFF'
-            blue             = '#030303'
-            cyan             = '#030303'
-            green            = '#030303'
-            magenta          = '#030303'
-            red              = '#030303'
-            tabs             = '#030303'
-            white            = '#000000'
-            yellow           = '#030303'
-            dim-black        = '#030303'
-            dim-blue         = '#030303'
-            dim-cyan         = '#030303'
-            dim-foreground   = '#030303'
-            dim-green        = '#030303'
-            dim-magenta      = '#030303'
-            dim-red          = '#030303'
-            dim-white        = '#030303'
-            dim-yellow       = '#030303'
-            light-black      = '#030303'
-            light-blue       = '#030303'
-            light-cyan       = '#030303'
-            light-foreground = '#030303'
-            light-green      = '#030303'
-            light-magenta    = '#030303'
-            light-red        = '#030303'
-            light-white      = '#030303'
-            light-yellow     = '#030303'
-        "#,
-        );
-
-        // assert_eq!(
-        // result.colors.background,
-        // ColorBuilder::from_hex(String::from("#2B3E50"), Format::SRGB0_1)
-        // .unwrap()
-        // .to_wgpu()
-        // );
-
-        assert_eq!(result.colors.background.0, hex_to_color_arr("#2B3E50"));
-        assert_eq!(result.colors.background.1, hex_to_color_wgpu("#2B3E50"));
-        assert_eq!(result.colors.cursor, hex_to_color_arr("#E6DB74"));
-        assert_eq!(result.colors.foreground, hex_to_color_arr("#F8F8F2"));
-        assert_eq!(result.colors.tabs_active, hex_to_color_arr("#E6DB74"));
-        assert_eq!(result.colors.black, hex_to_color_arr("#FFFFFF"));
-        assert_eq!(result.colors.blue, hex_to_color_arr("#030303"));
-        assert_eq!(result.colors.cyan, hex_to_color_arr("#030303"));
-        assert_eq!(result.colors.green, hex_to_color_arr("#030303"));
-        assert_eq!(result.colors.magenta, hex_to_color_arr("#030303"));
-        assert_eq!(result.colors.red, hex_to_color_arr("#030303"));
-        assert_eq!(result.colors.tabs, hex_to_color_arr("#030303"));
-        assert_eq!(result.colors.white, hex_to_color_arr("#000000"));
-        assert_eq!(result.colors.yellow, hex_to_color_arr("#030303"));
-        assert_eq!(
-            result.colors.selection_background,
-            hex_to_color_arr("#111111")
-        );
-        assert_eq!(
-            result.colors.selection_foreground,
-            hex_to_color_arr("#222222")
-        );
-    }
-
-    #[test]
-    fn test_use_fork() {
-        let result = create_temporary_config(
-            "change-use-fork",
-            r#"
-            use-fork = true
-
-            [renderer]
-            disable-unfocused-render = true
-            performance = "Low"
-        "#,
-        );
-
-        // Advanced
-        assert!(result.renderer.disable_unfocused_render);
-        assert!(result.use_fork);
-
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_shell() {
-        let result = create_temporary_config(
-            "change-shell-and-editor",
-            r#"
-            shell = { program = "/bin/fish", args = ["--hello"] }
-        "#,
-        );
-
-        assert_eq!(result.shell.program, "/bin/fish");
-        assert_eq!(result.shell.args, ["--hello"]);
-    }
-
-    #[test]
-    fn test_shell_no_args() {
-        let result = create_temporary_config(
-            "change-shell-and-editor-no-args",
-            r#"
-            shell = { program = "/bin/fish" }
-        "#,
-        );
-
-        assert_eq!(result.shell.program, "/bin/fish");
-        assert_eq!(result.shell.args, Vec::<&str>::new());
-    }
-
-    #[test]
-    fn test_change_developer_and_performance() {
-        let result = create_temporary_config(
-            "change-developer",
-            r#"
-            [renderer]
-            performance = "Low"
-            backend = "GL"
-
-            [developer]
-            enable-fps-counter = true
-            log-level = "INFO"
-        "#,
-        );
-
-        assert_eq!(result.renderer.backend, renderer::Backend::GL);
-        // Developer
-        assert_eq!(result.developer.log_level, String::from("INFO"));
-        assert!(result.developer.enable_fps_counter);
-
-        // Colors
-        assert_eq!(result.colors.background, colors::defaults::background());
-        assert_eq!(result.colors.foreground, colors::defaults::foreground());
-        assert_eq!(result.colors.tabs_active, colors::defaults::tabs_active());
-        assert_eq!(result.colors.cursor, colors::defaults::cursor());
-    }
-
-    #[test]
-    fn test_symbol_map() {
-        let result = create_temporary_config(
-            "symbol-map",
-            r#"
-            fonts.symbol-map = [
- # covers: '⊗','⊘','⊙'
-                { start = "2297", end = "2299", font-family = "PowerlineSymbols" },
-                { start = "E0C0", end = "E0C7", font-family = "Cascadia Code NF" },
-            ]
-        "#,
-        );
-
-        assert!(result.fonts.symbol_map.is_some());
-        let symbol_map = result.fonts.symbol_map.unwrap();
-        assert_eq!(symbol_map.len(), 2);
-        assert_eq!(symbol_map[0].font_family, "PowerlineSymbols");
-        assert_eq!(symbol_map[0].start, "2297");
-        assert_eq!(symbol_map[0].end, "2299");
-
-        assert_eq!(parse_unicode(&symbol_map[0].start), Some('\u{2297}'));
-        assert_eq!(parse_unicode(&symbol_map[0].end), Some('\u{2299}'));
-
-        assert_eq!(symbol_map[1].font_family, "Cascadia Code NF");
-        assert_eq!(symbol_map[1].start, "E0C0");
-        assert_eq!(symbol_map[1].end, "E0C7");
-
-        assert_eq!(parse_unicode(&symbol_map[1].start), Some('\u{E0C0}'));
-        assert_eq!(parse_unicode(&symbol_map[1].end), Some('\u{E0C7}'));
-    }
-
-    #[test]
-    fn test_window_colorspace() {
-        let result = create_temporary_config(
-            "window-colorspace",
-            r#"
-            [window]
-            colorspace = "display-p3"
-        "#,
-        );
-
-        assert_eq!(result.window.colorspace, window::Colorspace::DisplayP3);
-    }
-
-    #[test]
-    fn test_scrollback_history_limit_default() {
-        let result = create_temporary_config(
-            "scrollback-default",
-            r#"
-            [window]
-            width = 800
-        "#,
-        );
-        assert_eq!(result.scrollback_history_limit, 10_000);
-    }
-
-    #[test]
-    fn test_scrollback_history_limit_custom() {
-        let result = create_temporary_config(
-            "scrollback-custom",
-            r#"
-            scrollback-history-limit = 50000
-        "#,
-        );
-        assert_eq!(result.scrollback_history_limit, 50_000);
-    }
-
-    #[test]
-    fn test_scrollback_history_limit_zero_disables() {
-        // A value of 0 disables scrollback. Must round-trip cleanly.
-        let result = create_temporary_config(
-            "scrollback-zero",
-            r#"
-            scrollback-history-limit = 0
-        "#,
-        );
-        assert_eq!(result.scrollback_history_limit, 0);
-    }
-
-    #[test]
-    fn test_window_colorspace_default() {
-        let result = create_temporary_config(
-            "window-colorspace-default",
-            r#"
-            [window]
-            width = 800
-            height = 600
-        "#,
-        );
-
-        // Default is sRGB on every platform — same semantics as ghostty's
-        // `window-colorspace` default. `[window] colorspace` describes how
-        // input color bytes are *interpreted*, not the surface gamut.
-        assert_eq!(result.window.colorspace, window::Colorspace::Srgb);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_platform_specific_env_vars() {
-        let mut result = create_temporary_config(
-            "platform-env-vars",
-            r#"
-            env-vars = ["GLOBAL=value", "FOO=bar"]
-
-            [platform]
-            macos.env-vars = ["MACOS_ONLY=yes", "PLATFORM_VAR=macos"]
-        "#,
-        );
-
-        // Apply platform overrides
-        result.overwrite_based_on_platform();
-
-        // Should have both global and platform-specific env vars
-        assert_eq!(result.env_vars.len(), 4);
-        assert!(result.env_vars.contains(&String::from("GLOBAL=value")));
-        assert!(result.env_vars.contains(&String::from("FOO=bar")));
-        assert!(result.env_vars.contains(&String::from("MACOS_ONLY=yes")));
-        assert!(result
-            .env_vars
-            .contains(&String::from("PLATFORM_VAR=macos")));
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn test_platform_specific_env_vars_linux() {
-        let mut result = create_temporary_config(
-            "platform-env-vars-linux",
-            r#"
-            env-vars = ["GLOBAL=value"]
-
-            [platform]
-            linux.env-vars = ["LINUX_ONLY=yes"]
-        "#,
-        );
-
-        result.overwrite_based_on_platform();
-
-        assert_eq!(result.env_vars.len(), 2);
-        assert!(result.env_vars.contains(&String::from("GLOBAL=value")));
-        assert!(result.env_vars.contains(&String::from("LINUX_ONLY=yes")));
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn test_platform_specific_env_vars_windows() {
-        let mut result = create_temporary_config(
-            "platform-env-vars-windows",
-            r#"
-            env-vars = ["GLOBAL=value"]
-
-            [platform]
-            windows.env-vars = ["WINDOWS_ONLY=yes"]
-        "#,
-        );
-
-        result.overwrite_based_on_platform();
-
-        assert_eq!(result.env_vars.len(), 2);
-        assert!(result.env_vars.contains(&String::from("GLOBAL=value")));
-        assert!(result.env_vars.contains(&String::from("WINDOWS_ONLY=yes")));
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_platform_window_field_level_merge() {
-        let mut result = create_temporary_config(
-            "platform-window-merge",
-            r#"
-            [window]
-            width = 800
-            height = 600
-            opacity = 0.75
-            blur = true
-
-            [platform]
-            macos.window.mode = "Maximized"
-        "#,
-        );
-
-        result.overwrite_based_on_platform();
-
-        // Mode should be overridden
-        assert_eq!(result.window.mode, window::WindowMode::Maximized);
-        // But other fields should be preserved
-        assert_eq!(result.window.width, 800);
-        assert_eq!(result.window.height, 600);
-        assert_eq!(result.window.opacity, 0.75);
-        assert!(result.window.blur);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_platform_shell_replace() {
-        let mut result = create_temporary_config(
-            "platform-shell-replace",
-            r#"
-            shell = { program = "/bin/bash", args = ["--login"] }
-
-            [platform]
-            macos.shell = { program = "/bin/zsh", args = ["-l"] }
-        "#,
-        );
-
-        result.overwrite_based_on_platform();
-
-        // Shell should be completely replaced
-        assert_eq!(result.shell.program, "/bin/zsh");
-        assert_eq!(result.shell.args, vec!["-l"]);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_platform_renderer_merge() {
-        let mut result = create_temporary_config(
-            "platform-renderer-merge",
-            r#"
-            [renderer]
-            performance = "High"
-            disable-unfocused-render = true
-
-            [platform]
-            macos.renderer.backend = "Metal"
-        "#,
-        );
-
-        result.overwrite_based_on_platform();
-
-        // Backend should be set
-        assert_eq!(result.renderer.backend, renderer::Backend::Metal);
-        // Other fields should be preserved
-        assert!(result.renderer.disable_unfocused_render);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_platform_navigation_merge() {
-        let mut result = create_temporary_config(
-            "platform-navigation-merge",
-            r#"
-            [navigation]
-            mode = "Tab"
-            clickable = true
-
-            [platform]
-            macos.navigation.mode = "NativeTab"
-        "#,
-        );
-
-        result.overwrite_based_on_platform();
-
-        // Mode should be overridden
-        assert_eq!(
-            result.navigation.mode,
-            navigation::NavigationMode::NativeTab
-        );
-        // Clickable should be preserved
-        assert!(result.navigation.clickable);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_platform_theme_override() {
-        let mut result = create_temporary_config(
-            "platform-theme-override",
-            r#"
-            theme = "default-theme"
-
-            [platform]
-            macos.theme = "macos-specific-theme"
-        "#,
-        );
-
-        result.overwrite_based_on_platform();
-
-        // Theme should be overridden
-        assert_eq!(result.theme, "macos-specific-theme");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_platform_complex_merge() {
-        let mut result = create_temporary_config(
-            "platform-complex-merge",
-            r#"
-            env-vars = ["GLOBAL=1"]
-            theme = "default"
-
-            [window]
-            width = 1024
-            height = 768
-            opacity = 0.9
-            blur = false
-
-            [renderer]
-            performance = "Low"
-            disable-unfocused-render = false
-
-            [navigation]
-            mode = "Tab"
-            clickable = false
-
-            shell = { program = "/bin/sh", args = ["-c"] }
-
-            [platform]
-            macos.env-vars = ["MACOS=1"]
-            macos.theme = "macos-theme"
-            macos.window.opacity = 1.0
-            macos.window.blur = true
-            macos.renderer.performance = "High"
-            macos.navigation.clickable = true
-            macos.shell = { program = "/bin/zsh", args = ["--login"] }
-        "#,
-        );
-
-        result.overwrite_based_on_platform();
-
-        // Env vars should be merged
-        assert!(result.env_vars.contains(&String::from("GLOBAL=1")));
-        assert!(result.env_vars.contains(&String::from("MACOS=1")));
-
-        // Theme overridden
-        assert_eq!(result.theme, "macos-theme");
-
-        // Window: opacity and blur overridden, others preserved
-        assert_eq!(result.window.opacity, 1.0);
-        assert!(result.window.blur);
-        assert_eq!(result.window.width, 1024);
-        assert_eq!(result.window.height, 768);
-
-        // Renderer: performance overridden, disable_unfocused_render preserved
-        assert!(!result.renderer.disable_unfocused_render);
-
-        // Navigation: clickable overridden, mode preserved
-        assert!(result.navigation.clickable);
-        assert_eq!(result.navigation.mode, navigation::NavigationMode::Tab);
-
-        // Shell: completely replaced
-        assert_eq!(result.shell.program, "/bin/zsh");
-        assert_eq!(result.shell.args, vec!["--login"]);
-    }
-
-    #[test]
-    fn test_multiple_platform_configs_dont_interfere() {
-        let result = create_temporary_config(
-            "multi-platform",
-            r#"
-            env-vars = ["GLOBAL=1"]
-
-            [platform]
-            linux.env-vars = ["LINUX=1"]
-            windows.env-vars = ["WINDOWS=1"]
-            macos.env-vars = ["MACOS=1"]
-        "#,
-        );
-
-        // Before applying platform overrides, should only have global env vars
-        assert_eq!(result.env_vars.len(), 1);
-        assert!(result.env_vars.contains(&String::from("GLOBAL=1")));
     }
 }

@@ -15,6 +15,14 @@ const CRDT_BROADCAST_CAPACITY: usize = 512;
 #[derive(Clone)]
 pub struct CrdtSyncHub {
     buffers: CrdtBufferRegistry,
+    /// Last text observed on disk for every file-backed CRDT buffer.
+    ///
+    /// Agent tools and other external processes write files directly,
+    /// outside the CRDT document plane. Remembering the disk baseline lets
+    /// us distinguish one of those writes from a second client merely
+    /// opening a buffer while collaborators have unsaved CRDT edits: an
+    /// unchanged disk must never overwrite the newer in-memory document.
+    disk_texts: Arc<Mutex<HashMap<CrdtBufferId, String>>>,
     presence:
         Arc<Mutex<HashMap<CrdtBufferId, BTreeMap<CrdtPresencePeerId, CrdtPeerPresence>>>>,
     peer_state_vectors:
@@ -40,6 +48,7 @@ impl CrdtSyncHub {
         let (tx, _) = tokio::sync::broadcast::channel(CRDT_BROADCAST_CAPACITY);
         Self {
             buffers,
+            disk_texts: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(HashMap::new())),
             peer_state_vectors: Arc::new(Mutex::new(HashMap::new())),
             compaction: Arc::new(Mutex::new(HashMap::new())),
@@ -68,7 +77,42 @@ impl CrdtSyncHub {
         buffer_id: impl Into<CrdtBufferId>,
         initial_text: impl AsRef<str>,
     ) -> CrdtServerMessage {
-        let snapshot = self.buffers.open_buffer(buffer_id, initial_text);
+        let buffer_id = buffer_id.into();
+        // The file itself is fresher than a pane/cache used to compose
+        // OpenBuffer. This also establishes the disk baseline on first open.
+        let disk_text = read_file_backing(&buffer_id);
+        let seed = disk_text
+            .as_deref()
+            .unwrap_or_else(|| initial_text.as_ref());
+        self.buffers.open_buffer(buffer_id.clone(), seed);
+
+        if let Some(disk_text) = disk_text {
+            let changed_since_last_observation = {
+                let mut disk_texts = self.disk_texts.lock();
+                match disk_texts.entry(buffer_id.clone()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(disk_text.clone());
+                        false
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        if entry.get() == &disk_text {
+                            false
+                        } else {
+                            entry.insert(disk_text.clone());
+                            true
+                        }
+                    }
+                }
+            };
+            if changed_since_last_observation {
+                self.apply_external_text(&buffer_id, &disk_text);
+            }
+        }
+
+        let snapshot = self
+            .buffers
+            .snapshot_for(&buffer_id, &[])
+            .expect("buffer was opened immediately above");
         let _ = self.refresh_compaction_for(&snapshot.buffer_id);
         CrdtServerMessage::Snapshot {
             buffer_id: snapshot.buffer_id,
@@ -209,6 +253,9 @@ impl CrdtSyncHub {
         };
         match std::fs::write(path, text.as_bytes()) {
             Ok(()) => {
+                self.disk_texts
+                    .lock()
+                    .insert(buffer_id.to_string(), text.clone());
                 let message = CrdtServerMessage::Saved {
                     buffer_id: buffer_id.to_string(),
                     bytes_written: text.len() as u64,
@@ -220,6 +267,87 @@ impl CrdtSyncHub {
                 buffer_id: Some(buffer_id.to_string()),
                 message: format!("save failed for {path}: {err}"),
             },
+        }
+    }
+
+    /// Fold an external filesystem write (agent tool, formatter, shell, etc.)
+    /// into an already-open authoritative CRDT document and broadcast it to
+    /// every collaborator. Returns true only when document text changed.
+    ///
+    /// The remembered disk baseline is essential: CRDT state may legitimately
+    /// be newer than disk while a human has unsaved edits. We only treat disk
+    /// as authoritative after its bytes differ from the last bytes we observed
+    /// or wrote ourselves.
+    pub fn reconcile_disk_path(&self, path: &std::path::Path) -> bool {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let buffer_id = crate::crdt::crdt_buffer_id_for_path(&path);
+        if !self.buffers.has_buffer(&buffer_id) {
+            return false;
+        }
+        let Ok(disk_text) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let changed_since_last_observation = {
+            let mut disk_texts = self.disk_texts.lock();
+            match disk_texts.entry(buffer_id.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(disk_text.clone());
+                    false
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if entry.get() == &disk_text {
+                        false
+                    } else {
+                        entry.insert(disk_text.clone());
+                        true
+                    }
+                }
+            }
+        };
+        changed_since_last_observation && self.apply_external_text(&buffer_id, &disk_text)
+    }
+
+    fn apply_external_text(&self, buffer_id: &str, disk_text: &str) -> bool {
+        let Ok(old) = self.buffers.text(buffer_id) else {
+            return false;
+        };
+        let Some((index, len, content)) = min_utf16_replace(&old, disk_text) else {
+            return false;
+        };
+        match self.buffers.apply_daemon_edit(
+            buffer_id,
+            CrdtBufferEdit::Replace {
+                index,
+                len,
+                content,
+            },
+        ) {
+            Ok(accepted) => {
+                self.broadcast_accepted(accepted);
+                // External bytes are already durable on disk. Following the
+                // Sync with Saved re-anchors every pane's dirty baseline.
+                let saved = CrdtServerMessage::Saved {
+                    buffer_id: buffer_id.to_string(),
+                    bytes_written: disk_text.len() as u64,
+                };
+                let _ = self.tx.send(saved);
+                tracing::info!(
+                    target: "neoism::crdt_fold",
+                    buffer_id,
+                    bytes = disk_text.len(),
+                    "[crdt-fold] external file write reconciled"
+                );
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "neoism::crdt_fold",
+                    buffer_id,
+                    %error,
+                    "[crdt-fold] external file reconciliation failed"
+                );
+                false
+            }
         }
     }
 
@@ -604,6 +732,11 @@ impl CrdtSyncHub {
             }
         }
     }
+}
+
+fn read_file_backing(buffer_id: &str) -> Option<String> {
+    let path = crate::crdt::crdt_path_for_buffer_id(buffer_id)?;
+    std::fs::read_to_string(path).ok()
 }
 
 /// Compute the minimal single-span replacement turning `old` into `new`,
@@ -1047,6 +1180,78 @@ mod tests {
         );
         assert!(hub.presence_snapshot("shared", None).is_empty());
         assert_eq!(hub.buffers().text("shared").unwrap(), "text");
+    }
+
+    #[test]
+    fn external_file_write_broadcasts_live_sync_and_saved() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("live.rs");
+        std::fs::write(&path, "fn old() {}\n").unwrap();
+        let buffer_id = crate::crdt::crdt_buffer_id_for_path(&path);
+        let hub = CrdtSyncHub::default();
+        hub.open_buffer(&buffer_id, "stale cache");
+        let mut rx = hub.subscribe();
+
+        std::fs::write(&path, "fn new() {}\n").unwrap();
+        assert!(hub.reconcile_disk_path(&path));
+        assert_eq!(hub.buffers().text(&buffer_id).unwrap(), "fn new() {}\n");
+
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            CrdtServerMessage::Sync { .. }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            CrdtServerMessage::Update { .. }
+        ));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            CrdtServerMessage::Saved {
+                buffer_id,
+                bytes_written: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn unchanged_disk_does_not_clobber_unsaved_crdt_edits_on_open() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("shared.md");
+        std::fs::write(&path, "disk").unwrap();
+        let buffer_id = crate::crdt::crdt_buffer_id_for_path(&path);
+        let hub = CrdtSyncHub::default();
+        hub.open_buffer(&buffer_id, "stale cache");
+        hub.buffers()
+            .apply_daemon_edit(
+                &buffer_id,
+                CrdtBufferEdit::Insert {
+                    index: 4,
+                    content: " + unsaved".into(),
+                },
+            )
+            .unwrap();
+
+        // A later client can arrive with stale cached text, but because disk
+        // itself did not change, the authoritative collaborative doc wins.
+        hub.open_buffer(&buffer_id, "older client cache");
+
+        assert_eq!(hub.buffers().text(&buffer_id).unwrap(), "disk + unsaved");
+    }
+
+    #[test]
+    fn reopening_after_missed_watcher_event_reconciles_fresh_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("note.md");
+        std::fs::write(&path, "before").unwrap();
+        let buffer_id = crate::crdt::crdt_buffer_id_for_path(&path);
+        let hub = CrdtSyncHub::default();
+        hub.open_buffer(&buffer_id, "before");
+
+        // Model an edit made while no socket was around to drain fs-watch.
+        std::fs::write(&path, "after agent").unwrap();
+        hub.open_buffer(&buffer_id, "stale pane cache");
+
+        assert_eq!(hub.buffers().text(&buffer_id).unwrap(), "after agent");
     }
 
     #[test]

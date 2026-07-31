@@ -50,6 +50,7 @@ impl MarkdownPane {
             source_revision: 1,
             pending_line_edit: None,
             mode: MarkdownMode::Normal,
+            vim_enabled: true,
             cursor_line: 0,
             cursor_col: 0,
             visual_anchor: None,
@@ -123,6 +124,10 @@ impl MarkdownPane {
     /// Replace the pane's source text and re-parse blocks. Cheap to
     /// call every time the host pushes a new content snapshot.
     pub fn set_source(&mut self, source: &str) {
+        // A newly loaded source has no relationship to the previous pane
+        // animation. In particular, never carry a still-fading inbound edit
+        // band across a file reload/switch.
+        self.drag_drop_flash = None;
         self.lines = source.lines().map(str::to_string).collect();
         if self.lines.is_empty() {
             self.lines.push(String::new());
@@ -154,7 +159,6 @@ impl MarkdownPane {
         let mode = self.mode;
         let scroll_y = self.scroll_y;
         let target_scroll_y = self.target_scroll_y;
-        let follow_cursor = self.follow_cursor;
         let goal_visual_col = self.goal_visual_col;
         self.set_source(source);
         self.mode = mode;
@@ -162,7 +166,10 @@ impl MarkdownPane {
         self.cursor_col = cursor_col.min(self.lines[self.cursor_line].len());
         self.scroll_y = scroll_y;
         self.target_scroll_y = target_scroll_y;
-        self.follow_cursor = follow_cursor;
+        // External source replacement is a content update, not a navigation
+        // request. In particular, do not revive a pending local caret reveal
+        // after transforming/clamping that caret into the new document.
+        self.follow_cursor = false;
         self.goal_visual_col = goal_visual_col;
         self.pending_line_edit = Some(MarkdownPendingLineEdit::Complex);
         self.virtual_render = MarkdownVirtualRenderState::default();
@@ -182,6 +189,7 @@ impl MarkdownPane {
             source_revision: 1,
             pending_line_edit: None,
             mode: MarkdownMode::Normal,
+            vim_enabled: true,
             cursor_line: 0,
             cursor_col: 0,
             visual_anchor: None,
@@ -265,6 +273,7 @@ impl MarkdownPane {
     }
 
     fn apply_source(&mut self, source: &str) {
+        self.drag_drop_flash = None;
         self.lines = source.lines().map(str::to_string).collect();
         if self.lines.is_empty() {
             self.lines.push(String::new());

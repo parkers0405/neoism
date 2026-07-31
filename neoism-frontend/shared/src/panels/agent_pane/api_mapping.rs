@@ -167,7 +167,8 @@ pub fn model_context_limit_from_providers_json(
 
 pub fn config_defaults_from_json(value: &Value) -> ConfigDefaults {
     let agent = value
-        .get("defaultAgent")
+        .get("default-agent")
+        .or_else(|| value.get("defaultAgent"))
         .or_else(|| value.get("default_agent"))
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -181,6 +182,7 @@ pub fn config_defaults_from_json(value: &Value) -> ConfigDefaults {
         .get("variant")
         .or_else(|| value.get("thinking"))
         .or_else(|| value.get("reasoning"))
+        .or_else(|| value.get("reasoning-effort"))
         .or_else(|| value.get("reasoningEffort"))
         .or_else(|| value.get("reasoning_effort"))
         .and_then(Value::as_str)

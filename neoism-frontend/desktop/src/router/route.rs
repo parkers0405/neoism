@@ -376,6 +376,66 @@ impl Route<'_> {
             .update_config(config, db, should_update_font);
     }
 
+    /// Capture a chord for the Settings → Keybinds section: turn the
+    /// pressed key + held modifiers into config strings and persist the
+    /// rebind. Esc aborts; a bare modifier keeps waiting for a real key.
+    fn capture_settings_keybind(&mut self, key_event: &neoism_window::event::KeyEvent) {
+        use neoism_window::keyboard::{Key, NamedKey};
+        if matches!(key_event.logical_key, Key::Named(NamedKey::Escape)) {
+            self.window.screen.renderer.settings.cancel_capture();
+            return;
+        }
+        let base = key_event.key_without_modifiers();
+        let key_str = match base.as_ref() {
+            Key::Named(NamedKey::Space) => "space".to_string(),
+            Key::Named(NamedKey::Enter) => "return".to_string(),
+            Key::Named(NamedKey::Tab) => "tab".to_string(),
+            Key::Named(NamedKey::ArrowUp) => "up".to_string(),
+            Key::Named(NamedKey::ArrowDown) => "down".to_string(),
+            Key::Named(NamedKey::ArrowLeft) => "left".to_string(),
+            Key::Named(NamedKey::ArrowRight) => "right".to_string(),
+            Key::Named(NamedKey::Home) => "home".to_string(),
+            Key::Named(NamedKey::End) => "end".to_string(),
+            Key::Named(NamedKey::PageUp) => "pageup".to_string(),
+            Key::Named(NamedKey::PageDown) => "pagedown".to_string(),
+            Key::Named(NamedKey::Delete) => "delete".to_string(),
+            Key::Named(NamedKey::Backspace) => "back".to_string(),
+            Key::Character(c) => {
+                let c = c.trim();
+                if c.is_empty() {
+                    return;
+                }
+                c.to_lowercase()
+            }
+            // Bare modifier / unsupported key: keep waiting for a real one.
+            _ => return,
+        };
+        let mods = self.window.screen.modifiers.state();
+        let mut parts: Vec<&str> = Vec::new();
+        if mods.super_key() {
+            parts.push("super");
+        }
+        if mods.control_key() {
+            parts.push("control");
+        }
+        if mods.alt_key() {
+            parts.push("alt");
+        }
+        if mods.shift_key() {
+            parts.push("shift");
+        }
+        let with = parts.join(" | ");
+        if let Some(action) = self
+            .window
+            .screen
+            .renderer
+            .settings
+            .finish_capture(key_str, with)
+        {
+            self.window.screen.apply_settings_action(action);
+        }
+    }
+
     #[inline]
     #[allow(unused_variables)]
     pub fn set_window_subtitle(&mut self, subtitle: &str) {
@@ -563,6 +623,41 @@ impl Route<'_> {
                 self.request_overlay_redraw();
                 return true;
             }
+        }
+
+        // GUI settings panel — a full-screen overlay. While it's open it
+        // owns the keyboard: Esc steps out (clear search → unfocus →
+        // close), typing filters when the search box is focused, and
+        // every other key is swallowed so nothing leaks to the editor or
+        // terminal beneath it. A modal opened from it takes priority.
+        if self.window.screen.renderer.settings.is_active()
+            && !self.window.screen.renderer.modal.is_active()
+        {
+            if key_event.state == ElementState::Pressed {
+                // Keybind capture takes precedence: the next chord rebinds
+                // the pending action (Esc aborts, bare modifiers wait).
+                if self.window.screen.renderer.settings.capturing().is_some() {
+                    self.capture_settings_keybind(key_event);
+                    self.request_overlay_redraw();
+                    return true;
+                }
+                match &key_event.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        self.window.screen.renderer.settings.on_escape();
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        self.window.screen.renderer.settings.backspace();
+                    }
+                    Key::Character(text) => {
+                        for ch in text.chars().filter(|ch| !ch.is_control()) {
+                            self.window.screen.renderer.settings.input_char(ch);
+                        }
+                    }
+                    _ => {}
+                }
+                self.request_overlay_redraw();
+            }
+            return true;
         }
 
         // Universal modal is Rust-owned chrome. Action pickers are

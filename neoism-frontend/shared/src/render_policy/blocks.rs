@@ -339,3 +339,166 @@ pub fn loader_animation_frame(animation_phase: f32) -> LoaderAnimationFrame {
     };
     LoaderAnimationFrame { phase, tick }
 }
+
+// ---------------------------------------------------------------------------
+// OpenCode TUI activity scanner.
+//
+// This intentionally mirrors `packages/tui/src/ui/spinner.ts` in the
+// repository's OpenCode reference tree. Keep the discrete 40ms cadence,
+// asymmetric end holds, six-cell trail, and inactive-dot fading together:
+// changing any one of them produces a noticeably different animation.
+// ---------------------------------------------------------------------------
+
+pub const OPENCODE_SCANNER_WIDTH: usize = 8;
+const OPENCODE_SCANNER_TRAIL: usize = 6;
+const OPENCODE_SCANNER_HOLD_END: usize = 9;
+const OPENCODE_SCANNER_HOLD_START: usize = 30;
+const OPENCODE_SCANNER_FORWARD: usize = OPENCODE_SCANNER_WIDTH;
+const OPENCODE_SCANNER_BACKWARD: usize = OPENCODE_SCANNER_WIDTH - 1;
+const OPENCODE_SCANNER_FRAMES: usize = OPENCODE_SCANNER_FORWARD
+    + OPENCODE_SCANNER_HOLD_END
+    + OPENCODE_SCANNER_BACKWARD
+    + OPENCODE_SCANNER_HOLD_START;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OpenCodeScannerCell {
+    /// Active cells use the solid block; inactive cells use the half-height dot.
+    pub active: bool,
+    /// Alpha after applying either the six-step trail or inactive fade.
+    pub alpha: f32,
+    /// OpenCode blooms the first trailing block to 1.15x brightness.
+    pub brightness: f32,
+}
+
+/// Resolve one exact OpenCode TUI scanner frame from elapsed seconds.
+///
+/// The source spinner advances at 40ms and renders eight cells using `■`
+/// for the six-step active trail and `⬝` for inactive positions.
+pub fn opencode_scanner_frame(
+    elapsed_seconds: f32,
+) -> [OpenCodeScannerCell; OPENCODE_SCANNER_WIDTH] {
+    let frame = if elapsed_seconds.is_finite() {
+        (elapsed_seconds * 25.0 + 0.0001)
+            .floor()
+            .rem_euclid(OPENCODE_SCANNER_FRAMES as f32) as usize
+    } else {
+        0
+    };
+
+    let (
+        head,
+        holding,
+        hold_progress,
+        hold_total,
+        movement_progress,
+        movement_total,
+        forward,
+    ) = if frame < OPENCODE_SCANNER_FORWARD {
+        (frame, false, 0, 0, frame, OPENCODE_SCANNER_FORWARD, true)
+    } else if frame < OPENCODE_SCANNER_FORWARD + OPENCODE_SCANNER_HOLD_END {
+        (
+            OPENCODE_SCANNER_WIDTH - 1,
+            true,
+            frame - OPENCODE_SCANNER_FORWARD,
+            OPENCODE_SCANNER_HOLD_END,
+            0,
+            0,
+            true,
+        )
+    } else if frame
+        < OPENCODE_SCANNER_FORWARD + OPENCODE_SCANNER_HOLD_END + OPENCODE_SCANNER_BACKWARD
+    {
+        let backward_index = frame - OPENCODE_SCANNER_FORWARD - OPENCODE_SCANNER_HOLD_END;
+        (
+            OPENCODE_SCANNER_WIDTH - 2 - backward_index,
+            false,
+            0,
+            0,
+            backward_index,
+            OPENCODE_SCANNER_BACKWARD,
+            false,
+        )
+    } else {
+        (
+            0,
+            true,
+            frame
+                - OPENCODE_SCANNER_FORWARD
+                - OPENCODE_SCANNER_HOLD_END
+                - OPENCODE_SCANNER_BACKWARD,
+            OPENCODE_SCANNER_HOLD_START,
+            0,
+            0,
+            false,
+        )
+    };
+
+    let fade_factor = if holding && hold_total > 0 {
+        let progress = (hold_progress as f32 / hold_total as f32).min(1.0);
+        (1.0 - progress * 0.7).max(0.3)
+    } else if !holding && movement_total > 0 {
+        let progress = (movement_progress as f32
+            / movement_total.saturating_sub(1).max(1) as f32)
+            .min(1.0);
+        0.3 + progress * 0.7
+    } else {
+        1.0
+    };
+    let inactive_alpha = 0.6 * fade_factor;
+
+    std::array::from_fn(|cell| {
+        let directional_distance = if forward {
+            head as isize - cell as isize
+        } else {
+            cell as isize - head as isize
+        };
+        let trail_index = if holding {
+            directional_distance + hold_progress as isize
+        } else if directional_distance > 0
+            && directional_distance < OPENCODE_SCANNER_TRAIL as isize
+        {
+            directional_distance
+        } else if directional_distance == 0 {
+            0
+        } else {
+            -1
+        };
+
+        if (0..OPENCODE_SCANNER_TRAIL as isize).contains(&trail_index) {
+            let trail_index = trail_index as usize;
+            let (alpha, brightness) = match trail_index {
+                0 => (1.0, 1.0),
+                1 => (0.9, 1.15),
+                index => (0.65_f32.powi(index as i32 - 1), 1.0),
+            };
+            OpenCodeScannerCell {
+                active: true,
+                alpha,
+                brightness,
+            }
+        } else {
+            OpenCodeScannerCell {
+                active: false,
+                alpha: inactive_alpha,
+                brightness: 1.0,
+            }
+        }
+    })
+}
+
+/// The compact spinner OpenCode uses beside thinking, running tools, and
+/// background tasks. It is deliberately separate from the eight-cell footer
+/// scanner above.
+pub const OPENCODE_TASK_SPINNER_FRAMES: [&str; 10] =
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Resolve the OpenCode task spinner's current braille glyph (80ms per frame).
+pub fn opencode_task_spinner_frame(elapsed_seconds: f32) -> &'static str {
+    let frame = if elapsed_seconds.is_finite() {
+        (elapsed_seconds * 12.5 + 0.0001).floor() as isize
+    } else {
+        0
+    };
+    OPENCODE_TASK_SPINNER_FRAMES
+        [frame.rem_euclid(OPENCODE_TASK_SPINNER_FRAMES.len() as isize) as usize]
+}

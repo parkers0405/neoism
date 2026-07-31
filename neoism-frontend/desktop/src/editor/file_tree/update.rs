@@ -19,10 +19,9 @@ impl FileTree {
     ) -> R {
         let remote = self.remote.clone();
         let inner = &mut self.inner;
-        with_panel_context_files(
-            remote.as_deref().map(|r| r.as_files_service()),
-            |ctx| f(inner, ctx),
-        )
+        with_panel_context_files(remote.as_deref().map(|r| r.as_files_service()), |ctx| {
+            f(inner, ctx)
+        })
     }
 
     pub fn populate_from_dir(&mut self, root: &Path) {

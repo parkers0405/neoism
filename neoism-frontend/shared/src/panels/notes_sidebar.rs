@@ -92,10 +92,15 @@ pub struct NotesSidebar {
     selected_cursor_rect: Option<[f32; 4]>,
     workspace_rect: Option<[f32; 4]>,
     /// The footer settings gear (right of the vault selector) — opens
-    /// the Graph / Add menu. Reachable with ArrowRight from the vault
+    /// the Notes settings menu. Reachable with ArrowRight from the vault
     /// selector, clickable, focus tracked by `settings_selected`.
     settings_rect: Option<[f32; 4]>,
     settings_selected: bool,
+    /// Compact create actions directly below the Notes wordmark.
+    new_note_rect: Option<[f32; 4]>,
+    new_folder_rect: Option<[f32; 4]>,
+    /// Short accent pulse when the vault selector is activated.
+    vault_press_started_at: Option<Instant>,
     /// Per-letter NEOISM wordmark header — same hover/shimmer animation
     /// as the splash and the agent home.
     wordmark: crate::panels::agent_pane::state::NeoismWordmarkState,
@@ -173,8 +178,12 @@ pub struct NoteSidebarEntry {
 /// File name of the per-vault icon map (relative path → glyph).
 pub const NOTES_ICONS_FILE: &str = ".neoism-icons.json";
 
-/// Default icon for note files in the vault tree (the picker's "Note").
+/// Default Markdown icon shared with the file tree and buffer tabs.
 pub const NOTE_DEFAULT_ICON: &str = "\u{f15c}";
+/// Older builds wrote this former default glyph into the override map
+/// when "Note" was selected. Treat it as a reset so frontmatter icons
+/// on root-level notes are not masked forever.
+const LEGACY_NOTE_DEFAULT_ICON: &str = "\u{f48a}";
 
 #[derive(Clone, Debug)]
 struct NoteSidebarRow {
@@ -184,8 +193,12 @@ struct NoteSidebarRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotesSidebarHit {
     WorkspacePicker,
-    /// The footer settings gear — Graph / Add menu.
+    /// The footer settings gear.
     Settings,
+    /// Pencil-note action directly below the Notes title.
+    NewNote,
+    /// Folder-plus action directly below the Notes title.
+    NewFolder,
     Note(usize),
     /// The icon glyph of a row — opens the icon/emoji picker for it.
     NoteIcon(usize),
@@ -232,6 +245,9 @@ impl Default for NotesSidebar {
             workspace_rect: None,
             settings_rect: None,
             settings_selected: false,
+            new_note_rect: None,
+            new_folder_rect: None,
+            vault_press_started_at: None,
             wordmark: crate::panels::agent_pane::state::NeoismWordmarkState {
                 hover: [0.0; 6],
                 last_frame_at: None,
@@ -478,9 +494,12 @@ impl NotesSidebar {
         let icons = load_notes_icons(&root);
         if !icons.is_empty() {
             for entry in &mut self.all_entries {
-                if let Some(icon) = entry.path.strip_prefix(&root).ok().and_then(|rel| {
-                    icons.get(&rel.to_string_lossy().into_owned())
-                }) {
+                if let Some(icon) = entry
+                    .path
+                    .strip_prefix(&root)
+                    .ok()
+                    .and_then(|rel| icons.get(&rel.to_string_lossy().into_owned()))
+                {
                     entry.icon = Some(icon.clone());
                 }
             }
@@ -608,6 +627,31 @@ impl NotesSidebar {
 
     pub fn workspace_path(&self) -> Option<PathBuf> {
         self.workspace_path.clone()
+    }
+
+    pub fn contains_path(&self, path: &Path) -> bool {
+        self.all_entries.iter().any(|entry| entry.path == path)
+    }
+
+    pub fn note_icon_for_path(&self, path: &Path) -> Option<String> {
+        let saved = || {
+            let root = self.workspace_path.as_ref()?;
+            let relative = path.strip_prefix(root).ok()?.to_string_lossy();
+            load_notes_icons(root).get(relative.as_ref()).cloned()
+        };
+        saved()
+            .or_else(|| self.icon_overrides.get(path).and_then(|icon| icon.clone()))
+            .or_else(|| {
+                self.all_entries
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .and_then(|entry| entry.icon.clone())
+            })
+            .or_else(|| note_frontmatter_icon(path))
+    }
+
+    pub fn animate_workspace_selector_press(&mut self) {
+        self.vault_press_started_at = Some(Instant::now());
     }
 
     pub fn workspace_selector_rect(&self) -> Option<[f32; 4]> {
@@ -826,14 +870,15 @@ impl NotesSidebar {
     pub fn visible_rows_for_panel_height(&self, panel_height: f32) -> usize {
         let frame_stroke = (FRAME_STROKE * self.scale).max(2.0);
         let content_h = (panel_height - frame_stroke * 2.0).max(0.0);
-        // The list does not own the whole content rect: the header strip
-        // and the footer vault selector eat ~2.25 + 1 rows. Subtract them
+        // The list does not own the whole content rect: the single-row
+        // title/actions header and footer vault selector consume about
+        // three rows including their gaps. Subtract them
         // so wheel/keyboard paging matches what the user actually sees.
         let row_h = self.row_height();
         if row_h <= 0.0 {
             return 1;
         }
-        let chrome_rows = 3.5; // header (≈1.25 + 1 gap) + footer selector.
+        let chrome_rows = 3.0;
         ((content_h / row_h) - chrome_rows).floor().max(1.0) as usize
     }
 
@@ -943,10 +988,14 @@ impl NotesSidebar {
             .hover
             .iter()
             .any(|hover| *hover > 0.005 && *hover < 0.995);
+        let vault_press_animating = self
+            .vault_press_started_at
+            .is_some_and(|started| started.elapsed() < Duration::from_millis(360));
         self.visible
             && (self.scroll.position != 0.0
                 || self.cursor_spring.position != 0.0
-                || wordmark_settling)
+                || wordmark_settling
+                || vault_press_animating)
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NotesSidebarHit> {
@@ -963,6 +1012,16 @@ impl NotesSidebar {
         if let Some(r) = self.settings_rect {
             if rect_contains(r, x, y) {
                 return Some(NotesSidebarHit::Settings);
+            }
+        }
+        if let Some(r) = self.new_note_rect {
+            if rect_contains(r, x, y) {
+                return Some(NotesSidebarHit::NewNote);
+            }
+        }
+        if let Some(r) = self.new_folder_rect {
+            if rect_contains(r, x, y) {
+                return Some(NotesSidebarHit::NewFolder);
             }
         }
         if let Some(r) = self.empty_create_rect {
@@ -1003,6 +1062,8 @@ impl NotesSidebar {
         }
         self.workspace_rect = None;
         self.settings_rect = None;
+        self.new_note_rect = None;
+        self.new_folder_rect = None;
         self.empty_create_rect = None;
         self.empty_link_vault_rect = None;
         self.empty_select_vault_rect = None;
@@ -1043,7 +1104,7 @@ impl NotesSidebar {
         };
         let action_opts = DrawOpts {
             font_size: icon_size,
-            color: theme.u8(theme.blue),
+            color: theme.u8_alpha(theme.fg, 0.72),
             clip_rect: Some(panel_clip),
             ..DrawOpts::default()
         };
@@ -1052,8 +1113,7 @@ impl NotesSidebar {
         // "Notes" splash header — the bundled Press Start 2P arcade
         // face (same as the agent side-panel headings) with the
         // wordmark's per-letter hover lift + shimmer, sized to span
-        // the full panel top. Graph + create actions live in the
-        // footer settings gear.
+        // the full panel top.
         let wordmark_h;
         {
             use crate::panels::agent_pane::view::wordmark::WordmarkState;
@@ -1124,16 +1184,83 @@ impl NotesSidebar {
             }
         }
 
+        // Quick-create actions share the title row: Notes on the left,
+        // new note + folder hugging the right edge.
+        let create_size = (row_h * 0.86).max(22.0 * self.scale);
+        // Nerd Font glyphs carry more ascent padding than the bundled
+        // pixel face, so geometric centering reads visibly low. Lift the
+        // whole button/hit row to align the glyphs' optical centers.
+        let create_y = header_y + (wordmark_h - create_size) * 0.5 - 4.0 * self.scale;
+        let create_gap = 4.0 * self.scale;
+        let create_right = content_x + content_w - row_pad_x;
+        let new_folder_rect = [
+            create_right - create_size,
+            create_y,
+            create_size,
+            create_size,
+        ];
+        let new_note_rect = [
+            new_folder_rect[0] - create_gap - create_size,
+            create_y,
+            create_size,
+            create_size,
+        ];
+        self.new_note_rect = Some(new_note_rect);
+        self.new_folder_rect = Some(new_folder_rect);
+        let create_opts = DrawOpts {
+            font_size: icon_size * 1.08,
+            color: theme.u8_alpha(theme.fg, 0.72),
+            clip_rect: Some(panel_clip),
+            ..DrawOpts::default()
+        };
+        for (rect, glyph) in [(new_note_rect, "\u{f044}"), (new_folder_rect, "\u{f07b}")]
+        {
+            if mouse.is_some_and(|(mx, my)| rect_contains(rect, mx, my)) {
+                sugarloaf.quad(
+                    None,
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    theme.f32_alpha(theme.hover, 0.5),
+                    [5.0 * self.scale; 4],
+                    DEPTH,
+                    ORDER + 2,
+                );
+            }
+            let glyph_w = sugarloaf.text_mut().measure(glyph, &create_opts);
+            draw_text_with_occlusion(
+                sugarloaf,
+                rect[0] + ((rect[2] - glyph_w) * 0.5).max(0.0),
+                rect[1] + (rect[3] - create_opts.font_size) * 0.5,
+                glyph,
+                &create_opts,
+                occlusion,
+            );
+        }
+
         let footer_y = content_y + content_h - row_h - 6.0 * self.scale;
         // Footer: vault selector row + the settings gear on its right
-        // (Graph / Add menu — the old header icons live here now).
+        // (vault and graph/settings controls stay out of the create row).
+        let footer_divider_y = footer_y - 6.0 * self.scale;
+        sugarloaf.rect(
+            None,
+            content_x + 6.0 * self.scale,
+            footer_divider_y,
+            (content_w - 12.0 * self.scale).max(0.0),
+            (2.5 * self.scale).max(2.0),
+            theme.f32_alpha(theme.border, 0.78),
+            DEPTH,
+            ORDER + 1,
+        );
         let settings_w = row_h;
-        self.workspace_rect = Some([
+        let workspace_rect = [
             content_x + 6.0 * self.scale,
             footer_y,
             (content_w - settings_w - 16.0 * self.scale).max(0.0),
             row_h,
-        ]);
+        ];
+        self.workspace_rect = Some(workspace_rect);
         let settings_rect = [
             content_x + content_w - settings_w - 6.0 * self.scale,
             footer_y,
@@ -1173,7 +1300,8 @@ impl NotesSidebar {
             &action_opts,
             occlusion,
         );
-        let list_y = header_y + wordmark_h + 12.0 * self.scale;
+        let header_bottom = (header_y + wordmark_h).max(create_y + create_size);
+        let list_y = header_bottom + 8.0 * self.scale;
         let list_h = (footer_y - list_y - 8.0 * self.scale).max(row_h);
         let rows_visible = (list_h / row_h).floor().max(1.0) as usize;
         // Re-clamp before painting — a terminal resize can shrink the
@@ -1295,7 +1423,12 @@ impl NotesSidebar {
             let icon: String = if let Some(custom) = custom_icon {
                 custom
             } else if source_is_dir {
-                if is_open { FOLDER_OPEN_ICON } else { FOLDER_CLOSED_ICON }.to_string()
+                if is_open {
+                    FOLDER_OPEN_ICON
+                } else {
+                    FOLDER_CLOSED_ICON
+                }
+                .to_string()
             } else if is_markdown_note {
                 crate::primitives::look::icon_override("note")
                     .and_then(|over| over.glyph)
@@ -1582,8 +1715,10 @@ impl NotesSidebar {
                 // custom icon" so it falls back to the default glyph instead
                 // of rendering an empty box (belt-and-suspenders: the icon
                 // map already drops empty values in `load_notes_icons`).
-                if let Some(custom) =
-                    entry.icon.as_deref().filter(|glyph| !glyph.trim().is_empty())
+                if let Some(custom) = entry
+                    .icon
+                    .as_deref()
+                    .filter(|glyph| !glyph.trim().is_empty())
                 {
                     let custom_opts = DrawOpts {
                         font_size: icon_size,
@@ -1695,18 +1830,55 @@ impl NotesSidebar {
 
         let footer_hover =
             self.focused && self.selector_selected && !self.settings_selected;
-        if footer_hover {
+        let pointer_hover =
+            mouse.is_some_and(|(mx, my)| rect_contains(workspace_rect, mx, my));
+        let press_progress = self.vault_press_started_at.and_then(|started| {
+            let progress = started.elapsed().as_secs_f32() / 0.36;
+            if progress >= 1.0 {
+                self.vault_press_started_at = None;
+                None
+            } else {
+                Some(progress)
+            }
+        });
+        if footer_hover || pointer_hover || press_progress.is_some() {
+            let pulse = press_progress
+                .map(|progress| (progress * std::f32::consts::PI).sin())
+                .unwrap_or(0.0);
+            let expand_x = pulse * 3.0 * self.scale;
+            let expand_y = pulse * 1.5 * self.scale;
             sugarloaf.quad(
                 None,
-                content_x + 6.0 * self.scale,
-                footer_y,
-                (content_w - 12.0 * self.scale).max(0.0),
-                row_h,
-                theme.f32_alpha(theme.hover, 0.42),
-                [8.0 * self.scale; 4],
+                workspace_rect[0] - expand_x,
+                workspace_rect[1] - expand_y,
+                workspace_rect[2] + expand_x * 2.0,
+                workspace_rect[3] + expand_y * 2.0,
+                theme.f32_alpha(
+                    if pulse > 0.0 {
+                        theme.accent
+                    } else {
+                        theme.hover
+                    },
+                    0.34 + pulse * 0.24,
+                ),
+                [8.0 * self.scale + pulse * 3.0 * self.scale; 4],
                 DEPTH,
                 ORDER + 2,
             );
+            if pulse > 0.0 {
+                sugarloaf.rect(
+                    None,
+                    workspace_rect[0],
+                    workspace_rect[1] + workspace_rect[3] - 2.0 * self.scale,
+                    workspace_rect[2],
+                    (2.0 * self.scale).max(1.0),
+                    theme.f32_alpha(theme.accent, 0.45 * pulse),
+                    DEPTH,
+                    ORDER + 3,
+                );
+            }
+        }
+        if footer_hover {
             let cursor_w = (font_size * 0.6).max(2.0);
             let cursor_x = content_x + (row_pad_x - cursor_w).max(0.0);
             let cursor_h = (row_h - 6.0 * self.scale).max(font_size).min(row_h);
@@ -2118,23 +2290,24 @@ fn collect_note_entries(
 /// Missing/invalid files mean no overrides; wasm has no fs so this is a
 /// graceful no-op there.
 ///
-/// EMPTY (or whitespace-only) values are dropped: the map is applied LAST
-/// as the highest-priority override, so a stale `""` value — left by an
-/// older "reset to default" that wrote an empty string instead of removing
-/// the key — would otherwise clobber the note's real frontmatter `icon:`
-/// with `Some("")`, which renders as no glyph. Only the ROOT note tends to
-/// carry such a stale entry, so before this filter root notes silently lost
-/// their icon on every re-list (set -> collapse/expand -> revert) while
-/// nested notes, absent from the map, kept theirs. A "reset" is the ABSENCE
-/// of a key, never an empty value, so dropping empties changes no real
-/// override.
+/// Empty values and old/current default note glyphs are dropped. Older
+/// builds persisted the default glyph instead of removing the key when a
+/// note returned to its default icon. Because this map is applied last,
+/// that stale root-note entry masked a later frontmatter `icon:` while
+/// nested notes (without a stale entry) worked. Defaults are fallbacks,
+/// not real overrides, so absence is their canonical representation.
 fn load_notes_icons(root: &Path) -> HashMap<String, String> {
     let mut icons: HashMap<String, String> =
         std::fs::read_to_string(root.join(NOTES_ICONS_FILE))
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
-    icons.retain(|_, glyph| !glyph.trim().is_empty());
+    icons.retain(|_, glyph| {
+        let glyph = glyph.trim();
+        !glyph.is_empty()
+            && glyph != NOTE_DEFAULT_ICON
+            && glyph != LEGACY_NOTE_DEFAULT_ICON
+    });
     icons
 }
 
@@ -2271,8 +2444,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let note = root.join("TASKS.md");
-        std::fs::write(&note, "---\nicon: \u{1f525}\ncover: creation\n---\n# TASKS\n")
-            .unwrap();
+        std::fs::write(
+            &note,
+            "---\nicon: \u{1f525}\ncover: creation\n---\n# TASKS\n",
+        )
+        .unwrap();
 
         let mut host = NotesSidebar::default();
         host.set_workspace("Test", Some(root.clone()));
@@ -2324,14 +2500,19 @@ mod tests {
     /// way `notes_menus.rs::set_notes_entry_icon` does (key = strip_prefix
     /// of the VAULT), for a note path.
     fn picker_write_icon(vault: &Path, note: &Path, icon: &str) {
-        let rel = note.strip_prefix(vault).unwrap().to_string_lossy().into_owned();
+        let rel = note
+            .strip_prefix(vault)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let icons_path = vault.join(NOTES_ICONS_FILE);
         let mut icons: HashMap<String, String> = std::fs::read_to_string(&icons_path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
         icons.insert(rel, icon.to_string());
-        std::fs::write(&icons_path, serde_json::to_string_pretty(&icons).unwrap()).unwrap();
+        std::fs::write(&icons_path, serde_json::to_string_pretty(&icons).unwrap())
+            .unwrap();
     }
 
     #[test]
@@ -2352,15 +2533,15 @@ mod tests {
         std::fs::create_dir_all(root.join("folder")).unwrap();
         let root_note = root.join("TASKS.md");
         let nested_note = root.join("folder").join("nested.md");
-        std::fs::write(&root_note, "---\nicon: \u{2b50}\ncover: creation\n---\n# TASKS\n")
-            .unwrap();
         std::fs::write(
-            &nested_note,
-            "---\nicon: \u{1f525}\n---\n# nested\n",
+            &root_note,
+            "---\nicon: \u{2b50}\ncover: creation\n---\n# TASKS\n",
         )
         .unwrap();
+        std::fs::write(&nested_note, "---\nicon: \u{1f525}\n---\n# nested\n").unwrap();
         // The stale empty-string map entry for the ROOT note only.
-        std::fs::write(root.join(NOTES_ICONS_FILE), "{\n  \"TASKS.md\": \"\"\n}").unwrap();
+        std::fs::write(root.join(NOTES_ICONS_FILE), "{\n  \"TASKS.md\": \"\"\n}")
+            .unwrap();
 
         // Daemon-style entry list, exactly like daemon_sync.rs:
         // notes_root.join(relative_path) for each TreeListing entry.
@@ -2372,10 +2553,16 @@ mod tests {
             ]
         };
         let root_icon = |s: &NotesSidebar| {
-            s.all_entries.iter().find(|e| e.path == root_note).and_then(|e| e.icon.clone())
+            s.all_entries
+                .iter()
+                .find(|e| e.path == root_note)
+                .and_then(|e| e.icon.clone())
         };
         let nested_icon = |s: &NotesSidebar| {
-            s.all_entries.iter().find(|e| e.path == nested_note).and_then(|e| e.icon.clone())
+            s.all_entries
+                .iter()
+                .find(|e| e.path == nested_note)
+                .and_then(|e| e.icon.clone())
         };
 
         // Daemon path (set_entries_from_host) — the desktop re-list.
@@ -2389,7 +2576,11 @@ mod tests {
             Some("\u{2b50}"),
             "root note frontmatter icon must survive an empty map entry (set_entries_from_host)"
         );
-        assert_eq!(nested_icon(&s).as_deref(), Some("\u{1f525}"), "nested icon (host)");
+        assert_eq!(
+            nested_icon(&s).as_deref(),
+            Some("\u{1f525}"),
+            "nested icon (host)"
+        );
 
         // Collapse + expand + re-fetch (the toggle-panel cycle).
         s.open_dirs.remove(&root.join("folder"));
@@ -2409,7 +2600,11 @@ mod tests {
             Some("\u{2b50}"),
             "root note frontmatter icon must survive an empty map entry (refresh_notes)"
         );
-        assert_eq!(nested_icon(&s).as_deref(), Some("\u{1f525}"), "nested icon (local)");
+        assert_eq!(
+            nested_icon(&s).as_deref(),
+            Some("\u{1f525}"),
+            "nested icon (local)"
+        );
 
         // A NON-empty map entry still wins over the frontmatter (picker set).
         picker_write_icon(&root, &root_note, "\u{f135}");
@@ -2419,6 +2614,31 @@ mod tests {
             Some("\u{f135}"),
             "a real picker icon must still override the frontmatter"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_default_map_icon_never_clobbers_a_root_note_frontmatter_icon() {
+        let root = std::env::temp_dir().join("neoism-legacy-root-icon-vault");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let note = root.join("TASKS.md");
+        std::fs::write(&note, "---\nicon: \u{1f4a1}\n---\n# TASKS\n").unwrap();
+        std::fs::write(
+            root.join(NOTES_ICONS_FILE),
+            format!("{{\"TASKS.md\":\"{LEGACY_NOTE_DEFAULT_ICON}\"}}"),
+        )
+        .unwrap();
+
+        let mut sidebar = NotesSidebar::default();
+        sidebar.set_workspace("Test", Some(root.clone()));
+        let icon = sidebar
+            .all_entries
+            .iter()
+            .find(|entry| entry.path == note)
+            .and_then(|entry| entry.icon.as_deref());
+        assert_eq!(icon, Some("\u{1f4a1}"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -206,25 +206,18 @@ impl MarkdownPane {
     ) {
         let start_line = start.line.min(self.lines.len().saturating_sub(1));
         let end_line = end.line.min(self.lines.len().saturating_sub(1));
-        if start_line == end_line {
-            let Some(line) = self.lines.get_mut(start_line) else {
-                return;
-            };
-            let start_col = floor_char_boundary(line, start.col.min(line.len()));
-            let end_col = floor_char_boundary(line, end.col.min(line.len()));
-            line.replace_range(start_col..end_col, replacement);
-            self.reset_source_len_from_lines();
-            self.pending_line_edit = Some(MarkdownPendingLineEdit::Complex);
-            return;
-        }
-
         let first = self.lines.get(start_line).cloned().unwrap_or_default();
         let last = self.lines.get(end_line).cloned().unwrap_or_default();
         let start_col = floor_char_boundary(&first, start.col.min(first.len()));
         let end_col = floor_char_boundary(&last, end.col.min(last.len()));
         let merged =
             format!("{}{}{}", &first[..start_col], replacement, &last[end_col..]);
-        self.lines.splice(start_line..=end_line, [merged]);
+        // A replacement may itself be multi-line (Visual paste). Preserve the
+        // pane invariant that each Vec entry is one source line instead of
+        // leaving embedded `\n` bytes inside a single line string.
+        let replacement_lines =
+            merged.split('\n').map(str::to_string).collect::<Vec<_>>();
+        self.lines.splice(start_line..=end_line, replacement_lines);
         self.reset_source_len_from_lines();
         self.pending_line_edit = Some(MarkdownPendingLineEdit::Complex);
     }

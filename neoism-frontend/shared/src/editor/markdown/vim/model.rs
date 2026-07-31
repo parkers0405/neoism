@@ -127,11 +127,16 @@ pub enum VimAction {
     Undo {
         count: usize,
     },
+    Redo {
+        count: usize,
+    },
     EnterInsert {
         kind: VimInsertKind,
     },
     EnterVisual {
         linewise: bool,
+        /// `Ctrl-V` blockwise visual. Mutually exclusive with `linewise`.
+        blockwise: bool,
     },
     VisualSwapEnds,
     VisualToggleCase,
@@ -152,6 +157,33 @@ pub enum VimAction {
     },
     Repeat {
         count: Option<usize>,
+    },
+    /// `m{a-z}` — set a buffer-local mark at the cursor.
+    SetMark {
+        name: char,
+    },
+    /// `'{a-z}` (linewise) or `` `{a-z} `` (exact).
+    GotoMark {
+        name: char,
+        linewise: bool,
+    },
+    /// `Ctrl-O` — older jumplist entry.
+    JumpBack {
+        count: usize,
+    },
+    /// `Ctrl-I` / Tab — newer jumplist entry.
+    JumpForward {
+        count: usize,
+    },
+    /// `q{reg}` starts recording; bare `q` while recording stops.
+    MacroRecordToggle {
+        /// `None` means stop. `Some(name)` starts recording into that register.
+        name: Option<char>,
+    },
+    /// `@{reg}` / `@@`.
+    MacroPlay {
+        name: char,
+        count: usize,
     },
 }
 
@@ -181,6 +213,16 @@ pub enum VimStage {
     /// `i`/`a` seen after an operator (or in visual); waiting for the
     /// object kind.
     Object { around: bool },
+    /// `"` seen; waiting for the register name.
+    RegisterName,
+    /// `m` seen; waiting for the mark name.
+    MarkSet,
+    /// `'` or `` ` `` seen; waiting for the mark name.
+    MarkGoto { linewise: bool },
+    /// First `q` while not recording; waiting for the macro register name.
+    MacroRegister,
+    /// `@` seen; waiting for the macro register name (or `@` for last).
+    MacroPlay,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -225,6 +267,13 @@ impl VimPending {
             VimStage::Replace => out.push('r'),
             VimStage::Gee => out.push('g'),
             VimStage::Object { around } => out.push(if around { 'a' } else { 'i' }),
+            VimStage::RegisterName => out.push('"'),
+            VimStage::MarkSet => out.push('m'),
+            VimStage::MarkGoto { linewise } => {
+                out.push(if linewise { '\'' } else { '`' })
+            }
+            VimStage::MacroRegister => out.push('q'),
+            VimStage::MacroPlay => out.push('@'),
         }
         out
     }
@@ -286,9 +335,120 @@ pub struct MarkdownIncSearch {
     pub current: usize,
 }
 
+/// One yank/delete payload stored in a vim register.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VimRegisterValue {
+    pub text: String,
+    pub linewise: bool,
+    pub blockwise: bool,
+}
+
+/// Named + special registers. Unnamed (`"`) is always mirrored here; the
+/// host clipboard is synced from/to unnamed (and `+`/`*`) by the applier.
+#[derive(Clone, Debug, Default)]
+pub struct VimRegisters {
+    pub unnamed: VimRegisterValue,
+    /// `"0` last yank.
+    pub yank: VimRegisterValue,
+    /// `"1`..`"9` delete history (1 = most recent).
+    pub deletes: [VimRegisterValue; 9],
+    /// `"a`..`"z` (lowercase keys). Uppercase append is handled on write.
+    pub named: std::collections::BTreeMap<char, VimRegisterValue>,
+    /// Last played macro register, for `@@`.
+    pub last_macro: Option<char>,
+    /// Recorded key sequences for `q{reg}` macros (`a`..`z` only).
+    pub macros: std::collections::BTreeMap<char, String>,
+}
+
+impl VimRegisters {
+    pub fn get(&self, name: char) -> Option<&VimRegisterValue> {
+        match name {
+            '"' | '+' | '*' => Some(&self.unnamed),
+            '0' => Some(&self.yank),
+            '1'..='9' => {
+                let idx = (name as u8 - b'1') as usize;
+                Some(&self.deletes[idx])
+            }
+            'a'..='z' => self.named.get(&name),
+            'A'..='Z' => self.named.get(&name.to_ascii_lowercase()),
+            '_' => None, // black hole
+            _ => None,
+        }
+    }
+
+    pub fn write(&mut self, name: char, mut value: VimRegisterValue, is_yank: bool) {
+        if name == '_' {
+            return;
+        }
+        // Uppercase named registers append.
+        if matches!(name, 'A'..='Z') {
+            let key = name.to_ascii_lowercase();
+            if let Some(existing) = self.named.get(&key) {
+                let mut merged = existing.clone();
+                if merged.linewise || value.linewise {
+                    if !merged.text.ends_with('\n') && !merged.text.is_empty() {
+                        merged.text.push('\n');
+                    }
+                    merged.linewise = true;
+                }
+                merged.blockwise = merged.blockwise || value.blockwise;
+                merged.text.push_str(&value.text);
+                value = merged;
+            }
+            self.named.insert(key, value.clone());
+            self.unnamed = value;
+            return;
+        }
+        match name {
+            '"' | '+' | '*' => {
+                if is_yank {
+                    self.yank = value.clone();
+                } else {
+                    self.push_delete(value.clone());
+                }
+                self.unnamed = value;
+            }
+            '0' => {
+                self.yank = value.clone();
+                self.unnamed = value;
+            }
+            '1'..='9' => {
+                self.push_delete(value.clone());
+                self.unnamed = value;
+            }
+            'a'..='z' => {
+                self.named.insert(name, value.clone());
+                self.unnamed = value;
+            }
+            _ => {
+                if is_yank {
+                    self.yank = value.clone();
+                } else {
+                    self.push_delete(value.clone());
+                }
+                self.unnamed = value;
+            }
+        }
+    }
+
+    fn push_delete(&mut self, value: VimRegisterValue) {
+        for i in (1..9).rev() {
+            self.deletes[i] = self.deletes[i - 1].clone();
+        }
+        self.deletes[0] = value;
+    }
+}
+
+/// Buffer-local mark position (line, byte col).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VimMark {
+    pub line: usize,
+    pub col: usize,
+}
+
 /// Per-pane vim state: the pending key sequence plus the sticky pieces
-/// (`;`/`,` find memory, `n`/`N` search memory, `.` repeat memory, and
-/// whether the current visual selection is linewise).
+/// (`;`/`,` find memory, `n`/`N` search memory, `.` repeat memory,
+/// visual selection shape, registers, marks, jumplist, macros).
 #[derive(Clone, Debug, Default)]
 pub struct VimState {
     pub pending: VimPending,
@@ -299,6 +459,22 @@ pub struct VimState {
     pub incsearch: Option<MarkdownIncSearch>,
     pub last_edit: Option<VimAction>,
     pub visual_linewise: bool,
+    /// `Ctrl-V` blockwise visual (takes precedence over `visual_linewise`).
+    pub visual_block: bool,
+    /// `"x` prefix waiting to be consumed by the next yank/delete/paste.
+    pub pending_register: Option<char>,
+    pub registers: VimRegisters,
+    /// Local marks `a`..`z`.
+    pub marks: std::collections::BTreeMap<char, VimMark>,
+    /// Jumplist entries (line, col). Index points at the current slot.
+    pub jumplist: Vec<VimMark>,
+    pub jumplist_idx: usize,
+    /// Macro register currently recording into (`a`..`z`), if any.
+    pub recording: Option<char>,
+    /// Keys captured while `recording` is set (normal/visual chars only).
+    pub recording_buffer: String,
+    /// True while replaying a macro, so nested `q` recording is ignored.
+    pub replaying_macro: bool,
 }
 
 /// What the applier reports back to the host dispatch.
@@ -309,8 +485,13 @@ pub struct VimApplied {
     /// Text for the unnamed register (host clipboard); linewise content
     /// carries a trailing `'\n'`.
     pub register: Option<String>,
+    /// When set, the host should write `register` into the system clipboard
+    /// (`+`/`*`/unnamed yank-delete path). Named-only writes leave this false.
+    pub sync_clipboard: bool,
     /// Show the "Yanked N lines" style notification.
     pub yank_notification: bool,
+    /// Macro key sequence the host should replay through `feed`.
+    pub replay_keys: Option<String>,
 }
 
 impl VimApplied {
@@ -348,6 +529,19 @@ impl VimState {
 
     /// Feed one plain-character key from Normal or Visual mode.
     pub fn feed(&mut self, ch: char, visual: bool) -> VimKeyFeed {
+        // Capture keys into the active macro buffer before the stage
+        // machine consumes them (skip nested replay).
+        if self.recording.is_some() && !self.replaying_macro {
+            // Don't record the terminating `q` itself; MacroRecordToggle
+            // handles stop. Prefix digits and the rest are recorded.
+            let recording_stop = ch == 'q'
+                && self.pending.stage == VimStage::Ready
+                && self.pending.operator.is_none()
+                && !self.pending.count_given();
+            if !recording_stop {
+                self.recording_buffer.push(ch);
+            }
+        }
         match self.pending.stage {
             VimStage::Find(kind) => {
                 self.last_find = Some((kind, ch));
@@ -424,6 +618,61 @@ impl VimState {
                     None => VimAction::VisualTextObject { kind, around },
                 });
             }
+            VimStage::RegisterName => {
+                self.clear_pending();
+                if matches!(
+                    ch,
+                    '"' | '+'
+                        | '*'
+                        | '_'
+                        | '0'..='9'
+                        | 'a'..='z'
+                        | 'A'..='Z'
+                ) {
+                    self.pending_register = Some(ch);
+                    return VimKeyFeed::Pending;
+                }
+                return VimKeyFeed::Cancelled;
+            }
+            VimStage::MarkSet => {
+                self.clear_pending();
+                if matches!(ch, 'a'..='z') {
+                    return VimKeyFeed::Action(VimAction::SetMark { name: ch });
+                }
+                return VimKeyFeed::Cancelled;
+            }
+            VimStage::MarkGoto { linewise } => {
+                self.clear_pending();
+                if matches!(ch, 'a'..='z') {
+                    return VimKeyFeed::Action(VimAction::GotoMark {
+                        name: ch,
+                        linewise,
+                    });
+                }
+                return VimKeyFeed::Cancelled;
+            }
+            VimStage::MacroRegister => {
+                self.clear_pending();
+                if matches!(ch, 'a'..='z') {
+                    return VimKeyFeed::Action(VimAction::MacroRecordToggle {
+                        name: Some(ch),
+                    });
+                }
+                return VimKeyFeed::Cancelled;
+            }
+            VimStage::MacroPlay => {
+                let count = self.pending.effective_count();
+                self.clear_pending();
+                let name = match ch {
+                    '@' => self.registers.last_macro.unwrap_or('\0'),
+                    'a'..='z' => ch,
+                    _ => '\0',
+                };
+                if name == '\0' {
+                    return VimKeyFeed::Cancelled;
+                }
+                return VimKeyFeed::Action(VimAction::MacroPlay { name, count });
+            }
             VimStage::Ready => {}
         }
 
@@ -463,6 +712,43 @@ impl VimState {
                     VimKeyFeed::Cancelled
                 }
             };
+        }
+
+        // Register / mark / macro prefixes (normal + visual).
+        match ch {
+            '"' if self.pending.operator.is_none() => {
+                self.pending.stage = VimStage::RegisterName;
+                return VimKeyFeed::Pending;
+            }
+            'm' if self.pending.operator.is_none() && !visual => {
+                self.pending.stage = VimStage::MarkSet;
+                return VimKeyFeed::Pending;
+            }
+            '\'' if self.pending.operator.is_none() => {
+                self.pending.stage = VimStage::MarkGoto { linewise: true };
+                return VimKeyFeed::Pending;
+            }
+            '`' if self.pending.operator.is_none() => {
+                self.pending.stage = VimStage::MarkGoto { linewise: false };
+                return VimKeyFeed::Pending;
+            }
+            'q' if self.pending.operator.is_none()
+                && !visual
+                && !self.replaying_macro =>
+            {
+                if self.recording.is_some() {
+                    return VimKeyFeed::Action(VimAction::MacroRecordToggle {
+                        name: None,
+                    });
+                }
+                self.pending.stage = VimStage::MacroRegister;
+                return VimKeyFeed::Pending;
+            }
+            '@' if self.pending.operator.is_none() && !visual => {
+                self.pending.stage = VimStage::MacroPlay;
+                return VimKeyFeed::Pending;
+            }
+            _ => {}
         }
 
         match ch {
@@ -530,8 +816,21 @@ impl VimState {
                     target: VimTarget::Selection,
                     count,
                 },
-                'v' => VimAction::EnterVisual { linewise: false },
-                'V' => VimAction::EnterVisual { linewise: true },
+                // Visual put replaces the selected range. `p` and `P` are
+                // equivalent here because there is no before/after edge once
+                // the selection itself is the insertion target.
+                'p' | 'P' => VimAction::Paste {
+                    count,
+                    before: ch == 'P',
+                },
+                'v' => VimAction::EnterVisual {
+                    linewise: false,
+                    blockwise: false,
+                },
+                'V' => VimAction::EnterVisual {
+                    linewise: true,
+                    blockwise: false,
+                },
                 _ => {
                     if self.clear_pending() {
                         return VimKeyFeed::Cancelled;
@@ -626,8 +925,14 @@ impl VimState {
                 'O' => VimAction::EnterInsert {
                     kind: VimInsertKind::LineAbove,
                 },
-                'v' => VimAction::EnterVisual { linewise: false },
-                'V' => VimAction::EnterVisual { linewise: true },
+                'v' => VimAction::EnterVisual {
+                    linewise: false,
+                    blockwise: false,
+                },
+                'V' => VimAction::EnterVisual {
+                    linewise: true,
+                    blockwise: false,
+                },
                 _ => {
                     if self.clear_pending() {
                         return VimKeyFeed::Cancelled;
@@ -652,6 +957,57 @@ impl VimState {
             },
             None => VimAction::Move { motion, count },
         })
+    }
+
+    /// Control-key chords that don't produce a character feed.
+    /// `key` is a lowercase letter for Ctrl-X (`'v'`, `'r'`, `'o'`, `'i'`).
+    pub fn feed_ctrl(&mut self, key: char, visual: bool) -> VimKeyFeed {
+        let key = key.to_ascii_lowercase();
+        let count = self.pending.effective_count().max(1);
+        // Cancel multi-key stages on bare control chords.
+        if self.pending.stage != VimStage::Ready {
+            self.clear_pending();
+            return VimKeyFeed::Cancelled;
+        }
+        match key {
+            'v' if !visual || self.pending.operator.is_none() => {
+                self.clear_pending();
+                VimKeyFeed::Action(VimAction::EnterVisual {
+                    linewise: false,
+                    blockwise: true,
+                })
+            }
+            'r' if !visual => {
+                self.clear_pending();
+                VimKeyFeed::Action(VimAction::Redo { count })
+            }
+            'o' if !visual => {
+                self.clear_pending();
+                VimKeyFeed::Action(VimAction::JumpBack { count })
+            }
+            'i' if !visual => {
+                self.clear_pending();
+                VimKeyFeed::Action(VimAction::JumpForward { count })
+            }
+            _ => VimKeyFeed::Unhandled,
+        }
+    }
+
+    /// Push the current cursor into the jumplist (dedup consecutive).
+    pub fn push_jump(&mut self, line: usize, col: usize) {
+        let mark = VimMark { line, col };
+        if self.jumplist_idx + 1 < self.jumplist.len() {
+            self.jumplist.truncate(self.jumplist_idx + 1);
+        }
+        if self.jumplist.last() != Some(&mark) {
+            self.jumplist.push(mark);
+            // Cap history.
+            if self.jumplist.len() > 100 {
+                let drop_n = self.jumplist.len() - 100;
+                self.jumplist.drain(0..drop_n);
+            }
+        }
+        self.jumplist_idx = self.jumplist.len().saturating_sub(1);
     }
 }
 
@@ -688,6 +1044,10 @@ impl VimAction {
             | VimAction::JoinLines { count: c }
             | VimAction::Paste { count: c, .. }
             | VimAction::Undo { count: c }
+            | VimAction::Redo { count: c }
+            | VimAction::JumpBack { count: c }
+            | VimAction::JumpForward { count: c }
+            | VimAction::MacroPlay { count: c, .. }
             | VimAction::Search { count: c, .. }
             | VimAction::SearchWord { count: c, .. } => *c = count,
             _ => {}

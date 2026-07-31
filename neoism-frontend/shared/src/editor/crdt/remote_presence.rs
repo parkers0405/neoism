@@ -580,7 +580,12 @@ mod tests {
         store.apply_server_message(&upsert(wire_presence("file://a.rs", "alice", 1, 10)));
         store.apply_server_message(&upsert(wire_presence("file://b.rs", "alice", 2, 11)));
         store.apply_server_message(&upsert(wire_presence("file://a.rs", "bob", 3, 12)));
-        store.apply_server_message(&upsert(wire_presence("file://a.rs", "me@host", 4, 13)));
+        store.apply_server_message(&upsert(wire_presence(
+            "file://a.rs",
+            "me@host",
+            4,
+            13,
+        )));
 
         // Distinct-peer cluster: alice + bob once each, local excluded,
         // stable order by peer_id.
@@ -595,7 +600,9 @@ mod tests {
         let a = by_buffer
             .iter()
             .find(|(id, _)| id == "file://a.rs")
-            .map(|(_, peers)| peers.iter().map(|p| p.peer_id.as_str()).collect::<Vec<_>>())
+            .map(|(_, peers)| {
+                peers.iter().map(|p| p.peer_id.as_str()).collect::<Vec<_>>()
+            })
             .unwrap();
         assert_eq!(a, ["alice", "bob"]);
         let b = by_buffer

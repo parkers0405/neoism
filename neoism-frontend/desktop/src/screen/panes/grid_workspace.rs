@@ -254,7 +254,8 @@ impl Screen<'_> {
         // "folders open then snap shut" bug. Intentional root sets on join
         // assign `active_workspace_root` directly / pass `force=true`, so
         // only freeze the ambient (non-forced) per-frame path.
-        if !force_tree_refresh && self.context_manager.current_workspace_is_remote_joined()
+        if !force_tree_refresh
+            && self.context_manager.current_workspace_is_remote_joined()
         {
             return false;
         }
@@ -1022,8 +1023,7 @@ impl Screen<'_> {
                 if let Some(workspace_id) =
                     self.context_manager.current_adopted_workspace_id()
                 {
-                    self.pending_peer_workspace_join =
-                        Some((workspace_id, endpoint));
+                    self.pending_peer_workspace_join = Some((workspace_id, endpoint));
                 }
             }
         } else if self.context_manager.daemon_link_is_peer() {

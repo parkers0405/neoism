@@ -20,7 +20,9 @@ use std::{
 
 use neoism_protocol::crdt::{CrdtClientMessage, CrdtServerMessage, CrdtSyncEnvelope};
 use neoism_ui::editor::crdt::CrdtTextUpdate;
-use neoism_ui::editor::markdown::doc_sync::MarkdownDocBinding;
+use neoism_ui::editor::markdown::doc_sync::{
+    diff_doc_texts, doc_byte_to_position, lines_to_text, MarkdownDocBinding,
+};
 use neoism_ui::editor::markdown::MarkdownPane;
 use neoism_ui::editor::notebook::NotebookPane;
 
@@ -598,7 +600,15 @@ fn reload_markdown_pane_from_disk(
         return Ok((None, false));
     }
 
+    let old_text = lines_to_text(&pane.lines);
+    let changed_lines = diff_doc_texts(&old_text, &text).map(|delta| {
+        let first = doc_byte_to_position(&pane.lines, delta.byte_start).0;
+        first..first.saturating_add(delta.inserted.matches('\n').count() + 1)
+    });
     pane.set_source_preserving_view(&text);
+    if let Some(lines) = changed_lines {
+        pane.flash_inbound_edit(lines);
+    }
 
     let buffer_id = buffer_id_for_markdown_path(&pane.path);
     let message = bindings
@@ -677,6 +687,7 @@ mod tests {
             ]
         );
         assert!(!pane.is_dirty());
+        assert!(pane.drag_drop_flash_progress().is_some());
 
         let _ = std::fs::remove_dir_all(root);
     }

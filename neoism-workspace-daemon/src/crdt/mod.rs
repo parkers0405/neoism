@@ -10,14 +10,13 @@ use std::sync::Arc;
 
 use neoism_protocol::crdt::{
     CrdtBufferEdit, CrdtBufferId, CrdtBufferUpdate, CrdtClientId, CrdtServerMessage,
+    CRDT_DAEMON_CLIENT_ID,
 };
 use neoism_ui::editor::crdt::{CrdtTextBuffer, CrdtTextBufferError, CrdtTextEdit};
 use parking_lot::Mutex;
 use thiserror::Error;
 
 pub mod sync;
-
-const DEFAULT_DAEMON_CLIENT_ID: CrdtClientId = 9_000_000_000;
 
 /// Derive the daemon-authoritative CRDT buffer id for a file path.
 ///
@@ -58,7 +57,7 @@ impl Default for CrdtBufferRegistry {
 
 impl CrdtBufferRegistry {
     pub fn new() -> Self {
-        Self::with_daemon_client_id(DEFAULT_DAEMON_CLIENT_ID)
+        Self::with_daemon_client_id(CRDT_DAEMON_CLIENT_ID)
     }
 
     pub fn with_daemon_client_id(daemon_client_id: CrdtClientId) -> Self {

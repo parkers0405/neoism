@@ -68,13 +68,16 @@ z         center on cursor
 
 ## Customize your own
 
-There's no separate keymap file — remap in [[Configuration|config.json]] under `[bindings]`:
+There's no separate keymap file — remap in [[Configuration|config.json]] under `"bindings"`:
 
-```toml
-[[bindings.keys]]
-key = "t"
-with = "super | shift"
-action = "workspaceterminaltabcreatenew"
+```json
+{
+  "bindings": {
+    "keys": [
+      { "key": "t", "with": "super | shift", "action": "workspaceterminaltabcreatenew" }
+    ]
+  }
+}
 ```
 
 - `key`: a character or a named key (`home`, `space`, `tab`, `f1`, …).

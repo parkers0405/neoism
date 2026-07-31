@@ -770,7 +770,8 @@ pub(crate) async fn handle_get_config_defaults(
         Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ConfigDefaults {
                 agent: value
-                    .get("defaultAgent")
+                    .get("default-agent")
+                    .or_else(|| value.get("defaultAgent"))
                     .or_else(|| value.get("default_agent"))
                     .and_then(Value::as_str)
                     .map(str::to_string)
@@ -784,6 +785,7 @@ pub(crate) async fn handle_get_config_defaults(
                     .get("variant")
                     .or_else(|| value.get("thinking"))
                     .or_else(|| value.get("reasoning"))
+                    .or_else(|| value.get("reasoning-effort"))
                     .or_else(|| value.get("reasoningEffort"))
                     .or_else(|| value.get("reasoning_effort"))
                     .and_then(Value::as_str)

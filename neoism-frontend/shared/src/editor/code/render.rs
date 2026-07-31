@@ -449,22 +449,89 @@ pub fn render(
         }
     }
 
-    // Yank flash: quick fading band over the yanked rows.
+    // Yank flash: quick fading band over the exact yanked byte range.
     const YANK_FLASH_SECS: f32 = 0.28;
     let mut flash_animating = false;
-    if let Some((first, last, at)) = pane.buffer.yank_flash {
-        let age = at.elapsed().as_secs_f32();
+    if let Some(flash) = pane.buffer.yank_flash {
+        let age = flash.started_at.elapsed().as_secs_f32();
         if age >= YANK_FLASH_SECS {
             pane.buffer.yank_flash = None;
         } else {
             flash_animating = true;
             let alpha = 0.35 * (1.0 - age / YANK_FLASH_SECS);
-            // Buffer-line span → visual-row span → one clamped band.
+            let flash_color = theme.f32_alpha(theme.accent, alpha);
+            for rv in &visible {
+                if rv.line < flash.start.line || rv.line > flash.end.line {
+                    continue;
+                }
+                let band_y = row_screen_y(rv.vrow);
+                if band_y + row_h <= grid_y || band_y >= grid_y + h_content {
+                    continue;
+                }
+                let line = &pane.buffer.lines[rv.line];
+                let raw_start = if rv.line == flash.start.line {
+                    flash.start.col
+                } else {
+                    0
+                }
+                .min(line.len());
+                let raw_end = if rv.line == flash.end.line {
+                    flash.end.col
+                } else {
+                    line.len()
+                }
+                .min(line.len());
+                let start = raw_start.max(rv.seg_start);
+                let end = raw_end.min(rv.seg_end);
+                if start >= end {
+                    continue;
+                }
+                let start_col = display_col_for_byte(line, start, TAB_DISPLAY_WIDTH)
+                    .saturating_sub(rv.base_col);
+                let end_col = display_col_for_byte(line, end, TAB_DISPLAY_WIDTH)
+                    .saturating_sub(rv.base_col);
+                let Some((band_x, band_w)) = clamp_band(
+                    text_x + start_col as f32 * cell_w - scroll_x,
+                    (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w,
+                ) else {
+                    continue;
+                };
+                sugarloaf.rect(
+                    None,
+                    band_x,
+                    band_y,
+                    band_w,
+                    row_h,
+                    flash_color,
+                    DEPTH,
+                    ORDER_BG,
+                );
+            }
+        }
+    }
+
+    // Inbound edit settle: the affected rows drop the last few pixels into
+    // place under a fading accent band. Markdown uses the same 550ms
+    // post-drop treatment, so agent changes read as one coherent motion in
+    // either editor rather than an unexplained cache swap.
+    const EXTERNAL_EDIT_FLASH_SECS: f32 = 0.55;
+    let mut external_flash_animating = false;
+    if let Some((first, last, at)) = pane.buffer.external_edit_flash {
+        let age = at.elapsed().as_secs_f32();
+        if age >= EXTERNAL_EDIT_FLASH_SECS {
+            pane.buffer.external_edit_flash = None;
+        } else {
+            external_flash_animating = true;
+            let progress = age / EXTERNAL_EDIT_FLASH_SECS;
+            let settle = crate::animation::ease_out_cubic(progress);
+            let lift = -6.0 * (1.0 - settle);
+            let alpha = 0.30 * (1.0 - progress);
             let first = first.min(line_count.saturating_sub(1));
             let last = last.min(line_count.saturating_sub(1));
-            let band_top = row_screen_y(wrap.first_row_of_line(first)).max(grid_y);
-            let band_bottom =
-                row_screen_y(wrap.first_row_of_line(last + 1)).min(grid_y + h_content);
+            let band_top =
+                (row_screen_y(wrap.first_row_of_line(first)) + lift).max(grid_y);
+            let band_bottom = (row_screen_y(wrap.first_row_of_line(last + 1)) + lift)
+                .min(grid_y + h_content);
             if band_bottom > band_top {
                 sugarloaf.rect(
                     None,
@@ -1051,7 +1118,10 @@ pub fn render(
 
     // Keep frames coming while the glide settles or a debounced
     // symbol-trail parse is waiting for the cursor to go still.
-    scroll_animating || flash_animating || pane.symbol_trail_pending.is_some()
+    scroll_animating
+        || flash_animating
+        || external_flash_animating
+        || pane.symbol_trail_pending.is_some()
 }
 
 fn rects_intersect(a: [f32; 4], b: [f32; 4]) -> bool {

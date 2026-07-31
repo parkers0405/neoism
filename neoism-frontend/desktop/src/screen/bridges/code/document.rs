@@ -85,6 +85,16 @@ impl Screen<'_> {
                 neoism_ui::panels::notifications::NotificationLevel::Error,
             );
         }
+        // Honor `[neoism] vim-mode` (default on): the pane defaults to the
+        // Vim modal layer, so opt OUT to Standard (always-insert) editing
+        // when the setting is off.
+        if !self.renderer.vim_mode {
+            use neoism_ui::editor::code::{CodeInputMode, CodeMode};
+            if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                code.input_mode = CodeInputMode::Standard;
+                code.buffer.mode = CodeMode::Insert;
+            }
+        }
     }
 
     pub(crate) fn save_current_code(&mut self) -> bool {

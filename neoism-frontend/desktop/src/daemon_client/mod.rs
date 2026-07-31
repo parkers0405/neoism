@@ -331,10 +331,12 @@ impl DaemonClientHandle {
         &self,
         request_id: u64,
         message: SearchClientMessage,
+        workspace_root: Option<PathBuf>,
     ) -> Result<()> {
         self.tx
             .send(OutboundServiceMessage::Search {
                 request_id,
+                workspace_root,
                 message,
             })
             .await
@@ -692,6 +694,7 @@ enum OutboundServiceMessage {
     },
     Search {
         request_id: u64,
+        workspace_root: Option<PathBuf>,
         message: SearchClientMessage,
     },
 }
@@ -726,6 +729,8 @@ enum ServiceClientMessage<'a> {
     },
     Search {
         request_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_root: Option<&'a Path>,
         message: &'a SearchClientMessage,
     },
 }
@@ -792,9 +797,11 @@ fn serialize_outbound_service_message(
         },
         OutboundServiceMessage::Search {
             request_id,
+            workspace_root,
             message,
         } => ServiceClientMessage::Search {
             request_id: *request_id,
+            workspace_root: workspace_root.as_deref(),
             message,
         },
     };

@@ -193,10 +193,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     pub fn daemon_endpoint(&self) -> Option<&str> {
-        self.daemon
-            .link
-            .as_ref()
-            .map(|link| link.endpoint.as_str())
+        self.daemon.link.as_ref().map(|link| link.endpoint.as_str())
     }
 
     /// True when the CURRENT grid is a workspace JOINED from another
@@ -260,14 +257,14 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let Some(grid) = self.contexts.get(index) else {
             return;
         };
-        let routes: Vec<(usize, Option<crate::context::remote_pty::RemotePtyBinding>)> = grid
-            .contexts()
-            .values()
-            .map(|item| {
-                let context = item.context();
-                (context.route_id, context.remote_pty.clone())
-            })
-            .collect();
+        let routes: Vec<(usize, Option<crate::context::remote_pty::RemotePtyBinding>)> =
+            grid.contexts()
+                .values()
+                .map(|item| {
+                    let context = item.context();
+                    (context.route_id, context.remote_pty.clone())
+                })
+                .collect();
         let stable = grid.workspace_route_id();
         for (route_id, pane_binding) in routes {
             if let Some(session_id) = self.daemon.cache.route_sessions.remove(&route_id) {
@@ -311,8 +308,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             }
             grid.contexts().values().find_map(|item| {
                 let context = item.context();
-                (context.route_id == route_id)
-                    .then(|| context.remote_pty.clone())
+                (context.route_id == route_id).then(|| context.remote_pty.clone())
             })
         });
         let Some(pane_binding) = pane_binding else {
@@ -346,9 +342,8 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// is gone and the daemon connection can re-dial home.
     pub fn has_adopted_grids(&self) -> bool {
         self.contexts.iter().any(|grid| {
-            grid.workspace_route_id().is_some_and(|stable| {
-                self.adopted_workspaces.contains_key(&stable)
-            })
+            grid.workspace_route_id()
+                .is_some_and(|stable| self.adopted_workspaces.contains_key(&stable))
         })
     }
 

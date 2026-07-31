@@ -359,6 +359,8 @@ impl ChromeBridge {
                 neoism_ui::panels::TopBarAction::ToggleRightPanel => {
                     "toggle_right_panel".to_string()
                 }
+                neoism_ui::panels::TopBarAction::OpenSearch => "open_search".to_string(),
+                neoism_ui::panels::TopBarAction::OpenAbout => "open_about".to_string(),
             })
     }
 

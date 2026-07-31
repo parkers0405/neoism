@@ -14,8 +14,8 @@ use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::icon::{self as agent_icon, SIDE_PANEL_ICON_PANEL_ID};
 use crate::panels::agent_pane::state::side_panel::{
-    BranchActivity, BranchStatus, GoalStatus, SessionGoal, FONT_SIZE, FRAME_RADIUS,
-    FRAME_STROKE, ROW_HEIGHT, ROW_PADDING_X, SIDE_PANEL_MIN_PANE_WIDTH,
+    BranchActivity, BranchStatus, SessionGoal, FONT_SIZE, FRAME_RADIUS, FRAME_STROKE,
+    ROW_HEIGHT, ROW_PADDING_X, SIDE_PANEL_MIN_PANE_WIDTH,
 };
 use crate::panels::agent_pane::state::side_panel::{
     NeoismAgentSessionEntry, NeoismAgentSidePanel,
@@ -375,8 +375,7 @@ pub fn render_side_panel_with_icons<P, I>(
     // yet OR the user tapped "← Back" to peek at recent chats while keeping
     // the live one open (`show_home_override`). Chat mode (session info) is
     // shown otherwise.
-    let show_home =
-        !pane.has_conversation() || pane.side_panel().show_home_override();
+    let show_home = !pane.has_conversation() || pane.side_panel().show_home_override();
     let mode = if show_home {
         crate::panels::agent_pane::state::side_panel::SidePanelMode::Sessions
     } else {

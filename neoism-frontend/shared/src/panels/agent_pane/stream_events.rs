@@ -217,10 +217,10 @@ pub enum SessionEventUpdate {
     QuestionRemoved {
         request_id: String,
     },
-    /// The main session's persistent goal changed. `goal` is the parsed
-    /// `info.extra.goal` when the event carried it (apply live), else
-    /// `None` to signal "cleared / refetch to confirm". The consumer also
-    /// invalidates its goal cache so a fetch reconciles the truth.
+    /// The main session's persistent goal changed. `goal` is parsed from the
+    /// flattened `info.goal` field carried by `SessionInfo`; otherwise `None`
+    /// signals a clear. The consumer also invalidates its goal cache so a
+    /// fetch reconciles the truth.
     GoalUpdated {
         goal: Option<SessionGoal>,
         /// Monotonic version for this update: the goal's own backend
@@ -291,14 +291,13 @@ pub fn classify_session_event(
                 // Main session updated — surface its persistent goal so the
                 // side panel's Goal section reflects set / change / pause /
                 // complete / blocked / clear live. SESSION_UPDATED always
-                // carries the full `info`, so `info.extra.goal` is
+                // carries the full `info`, so its goal field is
                 // AUTHORITATIVE: present = the current goal, absent/null =
-                // cleared. We only emit when `info` is present so a `None`
-                // here always means "cleared", never "thin event".
-                let goal = info
-                    .get("extra")
-                    .and_then(|extra| extra.get("goal"))
-                    .and_then(SessionGoal::from_json);
+                // cleared. `SessionInfo.extra` is `#[serde(flatten)]`, making
+                // the real wire shape `info.goal` rather than
+                // `info.extra.goal`. Only the real flattened field is valid;
+                // accepting another shape would hide future wire regressions.
+                let goal = info.get("goal").and_then(SessionGoal::from_json);
                 // Version a set by the goal's own `updated`; version a clear
                 // (no goal) by the session's `time.updated`, which the
                 // backend bumps on every goal mutation — so the clear still
@@ -1229,7 +1228,8 @@ mod tests {
     fn session_updated_emits_authoritative_goal_including_clear() {
         let mut state = SessionEventUpdateState::default();
 
-        // Goal present → live GoalUpdated(Some), versioned by goal.updated.
+        // Goal present in the real flattened SessionInfo wire shape → live
+        // GoalUpdated(Some), versioned by goal.updated.
         let with_goal = json!({
             "type": "session.updated",
             "properties": {
@@ -1237,7 +1237,7 @@ mod tests {
                 "info": {
                     "id": "ses_root",
                     "time": { "updated": 1_000 },
-                    "extra": { "goal": { "text": "ship it", "status": "active", "updated": 4_200 } }
+                    "goal": { "text": "ship it", "status": "active", "updated": 4_200 }
                 }
             }
         });
@@ -1254,7 +1254,7 @@ mod tests {
             "type": "session.updated",
             "properties": {
                 "sessionId": "ses_root",
-                "info": { "id": "ses_root", "time": { "updated": 5_000 }, "extra": {} }
+                "info": { "id": "ses_root", "time": { "updated": 5_000 } }
             }
         });
         assert!(matches!(

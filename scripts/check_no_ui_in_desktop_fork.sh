@@ -31,8 +31,8 @@
 # When you bypass, please update the ALLOWLIST_* arrays below in the
 # same commit so the guard stays useful for the next contributor.
 #
-# See docs/NEOISM_UI_DESIGN.md for the migration plan and the shared
-# crate's service trait boundaries.
+# Rule of thumb: shared UI lives in neoism-frontend/shared/; the desktop
+# fork only wires it up.
 
 set -u
 
@@ -189,7 +189,7 @@ VIOLATIONS=()
 report() {
     local path="$1"
     VIOLATIONS+=("${path}")
-    echo "Forbidden file: ${path}. UI code must live in neoism-frontend/shared/. See docs/NEOISM_UI_DESIGN.md." >&2
+    echo "Forbidden file: ${path}. UI code must live in neoism-frontend/shared/." >&2
 }
 
 report_detail() {

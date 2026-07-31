@@ -159,14 +159,11 @@ impl Screen<'_> {
     }
 
     fn apply_code_crdt_saved(&mut self, buffer_id: &str) -> bool {
-        let Some(path) = self.find_code_path_for_buffer_id(buffer_id) else {
+        let Some(code) = find_code_pane_mut(&mut self.context_manager, buffer_id) else {
             return false;
         };
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
-            if code.path == path {
-                code.buffer.mark_saved();
-            }
-        }
+        code.buffer.mark_saved();
+        let path = code.path.clone();
         self.sync_markdown_tab_modified(&path, false);
         self.notify_code_lsp_saved(&path);
         self.renderer.notifications.push(
@@ -245,22 +242,6 @@ impl Screen<'_> {
                 false
             }
         }
-    }
-
-    fn find_code_path_for_buffer_id(
-        &mut self,
-        buffer_id: &str,
-    ) -> Option<std::path::PathBuf> {
-        for grid in self.context_manager.contexts_mut() {
-            for item in grid.contexts_mut().values_mut() {
-                if let Some(code) = item.context_mut().code.as_mut() {
-                    if buffer_id_for_markdown_path(&code.path) == buffer_id {
-                        return Some(code.path.clone());
-                    }
-                }
-            }
-        }
-        None
     }
 }
 

@@ -252,8 +252,7 @@ pub(crate) fn render_back_button(
     let row_rect = [cx, row_top, cw, row_h];
     pane.side_panel_mut().set_back_button_rect(row_rect);
 
-    let focused =
-        pane.side_panel().is_focused() && pane.side_panel().back_focused();
+    let focused = pane.side_panel().is_focused() && pane.side_panel().back_focused();
     if focused {
         sugarloaf.quad(
             None,
@@ -323,10 +322,7 @@ pub(crate) fn render_back_button(
 /// once per frame *after* the row/branch cursor logic so it wins cleanly
 /// (the two states are mutually exclusive, but the row code runs a
 /// `clear_selected_cursor_rect` we must land after).
-pub(crate) fn set_back_cursor_if_focused(
-    pane: &mut impl AgentSidePanelPane,
-    s: f32,
-) {
+pub(crate) fn set_back_cursor_if_focused(pane: &mut impl AgentSidePanelPane, s: f32) {
     if !(pane.side_panel().is_focused() && pane.side_panel().back_focused()) {
         return;
     }

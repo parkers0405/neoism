@@ -14,7 +14,7 @@ impl Screen<'_> {
         // aren't in the bundled font fallback and rendered as tofu boxes.
         let mut items: Vec<ContextMenuItem> = [
             ("\u{f07b}", "Folder"),
-            ("\u{f15c}", "Note"),
+            (neoism_ui::panels::notes_sidebar::NOTE_DEFAULT_ICON, "Note"),
             ("\u{f135}", "Rocket"),
             ("\u{f005}", "Star"),
             ("\u{f0eb}", "Idea"),
@@ -136,7 +136,11 @@ impl Screen<'_> {
             .map_err(std::io::Error::other)
             .and_then(|json| std::fs::write(&icons_path, json));
         match result {
-            Ok(()) => self.renderer.notes_sidebar.refresh_notes(),
+            Ok(()) => {
+                self.renderer.notes_sidebar.refresh_notes();
+                let resolved = self.renderer.notes_sidebar.note_icon_for_path(&path);
+                self.sync_note_tab_icon(&path, resolved);
+            }
             Err(err) => self.renderer.notifications.push(
                 format!("Could not save icon map: {err}"),
                 NotificationLevel::Error,
@@ -145,24 +149,17 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    /// The footer settings gear menu: Graph, or Add… (which opens the
-    /// existing create menu as its submenu).
+    /// The footer settings gear menu. Creation has dedicated buttons
+    /// beneath the Notes title, so it does not need another menu layer.
     pub(crate) fn open_notes_settings_menu(&mut self) {
         use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
         use neoism_ui::widgets::modal::ModalAction;
 
-        let items = vec![
-            ContextMenuItem::new(
-                "Visualize Graph",
-                "g",
-                ContextMenuAction::Modal(ModalAction::NotesOpenGraph.into()),
-            ),
-            ContextMenuItem::new(
-                "Add\u{2026}",
-                "a",
-                ContextMenuAction::Modal(ModalAction::NotesOpenCreateMenu.into()),
-            ),
-        ];
+        let items = vec![ContextMenuItem::new(
+            "Visualize Graph",
+            "g",
+            ContextMenuAction::Modal(ModalAction::NotesOpenGraph.into()),
+        )];
         let (x, y) = self
             .renderer
             .notes_sidebar
@@ -191,6 +188,9 @@ impl Screen<'_> {
     }
 
     pub(crate) fn open_notes_vault_menu_for_selector(&mut self) {
+        self.renderer
+            .notes_sidebar
+            .animate_workspace_selector_press();
         if let Some(rect) = self.renderer.notes_sidebar.workspace_selector_rect() {
             self.open_notes_vault_menu(rect[0], rect[1]);
         } else {

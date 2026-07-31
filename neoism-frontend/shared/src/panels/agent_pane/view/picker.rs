@@ -32,11 +32,14 @@ pub fn render_picker(
     input_rect: [f32; 4],
     theme: &IdeTheme,
     s: f32,
+    max_rows: usize,
+    min_y: f32,
 ) {
     let rename = pane.picker_rename_buffer();
     let Some(picker) = pane.picker_mut() else {
         return;
     };
+    picker.set_visible_row_limit(max_rows);
     let is_session = picker.kind == NeoismAgentPickerKind::Session;
     let footer_hint = is_session.then_some(SESSION_PICKER_FOOTER);
     // Rename only applies while a session picker is open.
@@ -63,7 +66,7 @@ pub fn render_picker(
             is_pinned: option.pinned,
         })
         .collect::<Vec<_>>();
-    if let Some(render_state) = crate::widgets::inline_picker::render(
+    if let Some(render_state) = crate::widgets::inline_picker::render_limited(
         sugarloaf,
         InlinePickerView {
             title: &picker.title,
@@ -83,6 +86,8 @@ pub fn render_picker(
         input_rect,
         theme,
         s,
+        max_rows,
+        min_y,
     ) {
         picker.set_last_rect(render_state.rect);
         picker.set_footer_h(render_state.footer_h);

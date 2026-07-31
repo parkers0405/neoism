@@ -446,7 +446,12 @@ mod tests {
             require_auth: true,
         };
         let server = registry
-            .add_hosted("ws://127.0.0.1:9877/session", Some("Repo"), None, spec.clone())
+            .add_hosted(
+                "ws://127.0.0.1:9877/session",
+                Some("Repo"),
+                None,
+                spec.clone(),
+            )
             .unwrap();
         let loaded = ServerRegistry::load(directory.clone()).unwrap();
         assert_eq!(loaded.hosted_spec(&server.id), Some(spec));

@@ -109,6 +109,34 @@ fn typing_slash_opens_command_picker_with_options() {
 }
 
 #[test]
+fn slash_picker_command_prefix_beats_description_matches() {
+    let mut picker = NeoismAgentPicker::new(
+        NeoismAgentPickerKind::Slash,
+        "Commands",
+        crate::panels::agent_pane::command_controller::slash_options(),
+        0,
+    );
+
+    picker.set_query("sess".to_string());
+
+    assert_eq!(
+        picker.options().first().map(|option| option.value.as_str()),
+        Some("/sessions")
+    );
+    assert_eq!(
+        picker.selected_option().map(|option| option.value.as_str()),
+        Some("/sessions")
+    );
+    assert!(
+        picker
+            .options()
+            .iter()
+            .any(|option| option.value == "/compact"),
+        "description matches should remain available below command-name matches"
+    );
+}
+
+#[test]
 fn model_picker_headers_are_not_selectable() {
     let mut picker = NeoismAgentPicker::new(
         NeoismAgentPickerKind::Model,

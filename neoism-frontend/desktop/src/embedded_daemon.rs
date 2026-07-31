@@ -891,6 +891,7 @@ mod tests {
                 .send_editor_with_workspace_root(
                     neoism_protocol::editor::EditorClientMessage::OpenBuffer {
                         path: file.clone(),
+                        text: None,
                         line: None,
                         character: None,
                         surface_id: surface.clone(),

@@ -5,6 +5,7 @@ use crate::widgets::scroll::Scroll;
 
 const PICKER_VISIBLE_ROWS: usize = 8;
 const PICKER_ROW_HEIGHT: f32 = 46.0;
+const PICKER_TITLE_HEIGHT: f32 = 54.0;
 // Snappy critically-damped catch-up matching the side-panel home-list
 // scroll rework (`side_panel::SCROLL_ANIMATION_LENGTH`), so trackpad /
 // wheel / held-arrow scrolling tracks the gesture tightly.
@@ -124,6 +125,10 @@ pub struct NeoismAgentPicker {
     /// "No results".
     pub loading: bool,
     loading_started: Option<Instant>,
+    /// Rendered list-window size. Chat uses the standard eight rows;
+    /// the centered pre-chat surface lowers this so the picker stays
+    /// between the composer and the pane chrome.
+    visible_row_limit: usize,
 }
 
 impl NeoismAgentPicker {
@@ -153,6 +158,7 @@ impl NeoismAgentPicker {
             last_cursor_frame: Instant::now(),
             loading: false,
             loading_started: None,
+            visible_row_limit: PICKER_VISIBLE_ROWS,
         }
     }
 
@@ -185,7 +191,24 @@ impl NeoismAgentPicker {
     /// the visible window. Kept in sync with the renderer's row count so
     /// click hit-testing lands on the same rows the renderer draws.
     fn visible_rows(&self) -> usize {
-        self.filtered_options.len().min(PICKER_VISIBLE_ROWS).max(1)
+        self.filtered_options
+            .len()
+            .min(self.visible_row_limit)
+            .max(1)
+    }
+
+    pub fn set_visible_row_limit(&mut self, limit: usize) {
+        let limit = limit.clamp(1, PICKER_VISIBLE_ROWS);
+        if self.visible_row_limit == limit {
+            return;
+        }
+        self.visible_row_limit = limit;
+        self.scroll_px = self.scroll_px.min(self.max_scroll_px());
+        self.list_scroll.reset();
+        self.list_scroll.set_target(self.scroll_px);
+        self.scroll_offset =
+            (self.scroll_px / PICKER_ROW_HEIGHT).floor().max(0.0) as usize;
+        self.clamp_scroll();
     }
 
     pub fn selected_option(&self) -> Option<&NeoismAgentPickerOption> {
@@ -234,8 +257,8 @@ impl NeoismAgentPicker {
 
     /// Translate a click into a row index and select+return true. The
     /// caller is expected to commit the picker; we just move the cursor.
-    /// Header / row ratios mirror `renderer::inline_picker` (`TITLE_H = 30`,
-    /// `ROW_H = PICKER_ROW_HEIGHT = 34`); we derive the per-row pixel
+    /// Header / row ratios mirror `widgets::inline_picker` (`TITLE_H = 54`,
+    /// `ROW_H = PICKER_ROW_HEIGHT = 46`); we derive the per-row pixel
     /// height from the cached rect so the live scale factor doesn't need
     /// to be plumbed through.
     pub fn activate_row_at(&mut self, x: f32, y: f32) -> bool {
@@ -245,7 +268,6 @@ impl NeoismAgentPicker {
         if x < rx || x > rx + rw || y < ry || y > ry + rh {
             return false;
         }
-        const HEADER_BASE: f32 = 30.0;
         let visible_rows = self.visible_rows();
         // The footer band sits below the row grid; exclude it so the
         // per-row height derivation matches the list area only.
@@ -253,8 +275,8 @@ impl NeoismAgentPicker {
             return false;
         }
         let total_h = (rh - self.footer_h_px).max(1.0);
-        let header_ratio =
-            HEADER_BASE / (HEADER_BASE + PICKER_ROW_HEIGHT * visible_rows as f32);
+        let header_ratio = PICKER_TITLE_HEIGHT
+            / (PICKER_TITLE_HEIGHT + PICKER_ROW_HEIGHT * visible_rows as f32);
         let header_h_px = total_h * header_ratio;
         let body_top = ry + header_h_px;
         if y < body_top {
@@ -285,7 +307,7 @@ impl NeoismAgentPicker {
 
     pub fn scroll_pixels(&mut self, delta_pixels: f32) -> bool {
         let count = self.filtered_options.len();
-        if count <= PICKER_VISIBLE_ROWS || delta_pixels == 0.0 {
+        if count <= self.visible_row_limit || delta_pixels == 0.0 {
             return false;
         }
         // Pixel-precise continuous scroll: move the committed position by
@@ -364,7 +386,7 @@ impl NeoismAgentPicker {
     /// at the bottom of the visible window.
     fn max_scroll_px(&self) -> f32 {
         let count = self.filtered_options.len();
-        let visible = count.min(PICKER_VISIBLE_ROWS);
+        let visible = count.min(self.visible_row_limit);
         count.saturating_sub(visible) as f32 * PICKER_ROW_HEIGHT
     }
 
@@ -390,7 +412,7 @@ impl NeoismAgentPicker {
             self.set_scroll_px(0.0);
             return;
         }
-        let visible = count.min(PICKER_VISIBLE_ROWS).max(1) as f32;
+        let visible = count.min(self.visible_row_limit).max(1) as f32;
         // Keep the selected row inside the visible window, springing the
         // list flush to whichever edge the selection ran past. Held-arrow
         // navigation nudges the position one row at a time, so the list
@@ -412,7 +434,7 @@ impl NeoismAgentPicker {
             self.selected = 0;
             return;
         }
-        let visible = count.min(PICKER_VISIBLE_ROWS).max(1);
+        let visible = count.min(self.visible_row_limit).max(1);
         // Window derived from the committed continuous position so a
         // wheel/trackpad scroll keeps the keyboard selection on a visible
         // row (Enter always commits something in view).
@@ -525,6 +547,16 @@ impl NeoismAgentPicker {
             }
             output.push(option.clone());
         }
+        if self.kind == NeoismAgentPickerKind::Slash {
+            // Slash commands are navigational, so what the user typed
+            // after `/` is overwhelmingly intended to name a command.
+            // A command-title prefix must beat incidental matches in
+            // descriptions/footer text (`sess` => `/sessions`, not
+            // `/compact` because it says "Compact session context").
+            // `sort_by_key` is stable, preserving catalog order inside
+            // the same relevance tier.
+            output.sort_by_key(|option| slash_option_match_rank(option, &needle));
+        }
         self.filtered_options = output;
         self.selected =
             selectable_index_near(&self.filtered_options, self.selected).unwrap_or(0);
@@ -539,11 +571,18 @@ impl NeoismAgentPicker {
             return;
         }
         self.query = query;
-        let previous_value = self
-            .filtered_options
-            .get(self.selected)
-            .filter(|option| option.is_selectable())
-            .map(|option| option.value.clone());
+        // Ordinary pickers keep the current row if it survives a query
+        // update. Slash search instead follows the best command match on
+        // every keystroke; otherwise the old highlighted command can stay
+        // selected even after the newly ranked first result changes.
+        let previous_value = (self.kind != NeoismAgentPickerKind::Slash)
+            .then(|| {
+                self.filtered_options
+                    .get(self.selected)
+                    .filter(|option| option.is_selectable())
+                    .map(|option| option.value.clone())
+            })
+            .flatten();
         self.rebuild_filtered_options();
         // Keep the cursor on the same option across filter changes
         // when it survives the filter, so the trail-cursor doesn't
@@ -694,4 +733,36 @@ fn option_matches(option: &NeoismAgentPickerOption, words: &[&str]) -> bool {
     haystack.push_str(&option.section);
     haystack.make_ascii_lowercase();
     words.iter().all(|word| haystack.contains(word))
+}
+
+fn slash_option_match_rank(option: &NeoismAgentPickerOption, query: &str) -> (u8, usize) {
+    let query = query.trim().trim_start_matches('/');
+    let command = option
+        .value
+        .trim()
+        .trim_start_matches('/')
+        .to_ascii_lowercase();
+    if command == query {
+        return (0, 0);
+    }
+    if command.starts_with(query) {
+        return (1, command.len().saturating_sub(query.len()));
+    }
+    if let Some(index) = command.find(query) {
+        return (2, index);
+    }
+
+    let description = option.description.to_ascii_lowercase();
+    if let Some(index) = description.find(query) {
+        return (3, index);
+    }
+    let footer = option.footer.to_ascii_lowercase();
+    if let Some(index) = footer.find(query) {
+        return (4, index);
+    }
+    let section = option.section.to_ascii_lowercase();
+    if let Some(index) = section.find(query) {
+        return (5, index);
+    }
+    (6, usize::MAX)
 }

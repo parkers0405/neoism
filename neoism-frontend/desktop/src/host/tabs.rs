@@ -175,6 +175,12 @@ impl Renderer {
         if let Some(rect) = self.modal.active_rect(window_width, scale_factor) {
             rects.push(rect);
         }
+        if let Some(rect) =
+            self.settings
+                .active_rect(window_width, window_height, scale_factor)
+        {
+            rects.push(rect);
+        }
         if let Some(rect) = self.context_menu.rect() {
             rects.push(rect);
         }

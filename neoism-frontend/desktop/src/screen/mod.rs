@@ -377,8 +377,8 @@ fn ends_passthrough_session(command: &str) -> bool {
 fn parse_ssh_target(command: &str) -> Option<(String, Vec<String>)> {
     // Flags that consume the following token as their value.
     const VALUE_FLAGS: &[&str] = &[
-        "-p", "-i", "-o", "-l", "-F", "-J", "-b", "-c", "-D", "-E", "-e", "-I",
-        "-L", "-m", "-Q", "-R", "-S", "-W", "-w",
+        "-p", "-i", "-o", "-l", "-F", "-J", "-b", "-c", "-D", "-E", "-e", "-I", "-L",
+        "-m", "-Q", "-R", "-S", "-W", "-w",
     ];
 
     let mut tokens = command.split_whitespace();

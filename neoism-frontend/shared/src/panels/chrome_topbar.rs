@@ -43,6 +43,7 @@ const CHROME_PEER_CAP: usize = 4;
 
 const PANEL_BTN_GLYPH: &str = "\u{eb56}"; // codicon split-horizontal — same as status-line split pill
 const HAMBURGER_GLYPH: &str = "\u{f0c9}"; // FA bars
+const SEARCH_GLYPH: &str = "\u{f002}"; // FA magnifying-glass — opens the finder
 
 /// Which half of the split-pane toggle glyph paints in the accent
 /// color while its panel is open — the left half for the left (file
@@ -94,6 +95,10 @@ pub enum TopBarAction {
     StartWebServer,
     OpenThemes,
     OpenExtensions,
+    /// Magnifying-glass button beside the hamburger — opens the finder.
+    OpenSearch,
+    /// Hamburger → About — opens the version/commit modal.
+    OpenAbout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +115,7 @@ enum MenuItem {
     StartWebServer,
     Themes,
     Extensions,
+    About,
 }
 
 impl MenuItem {
@@ -117,7 +123,8 @@ impl MenuItem {
     // reachable from the top-right server/workspace corner, so listing it
     // here duplicated the same action. `TopBarAction::OpenWorkspaces`
     // stays defined for those other call sites.
-    const ALL: [MenuItem; 4] = [
+    const ALL: [MenuItem; 5] = [
+        MenuItem::About,
         MenuItem::Settings,
         MenuItem::StartWebServer,
         MenuItem::Themes,
@@ -130,6 +137,7 @@ impl MenuItem {
             MenuItem::StartWebServer => "Start Web Server",
             MenuItem::Themes => "Themes",
             MenuItem::Extensions => "Extensions",
+            MenuItem::About => "About",
         }
     }
 
@@ -150,6 +158,7 @@ impl MenuItem {
             MenuItem::StartWebServer => "\u{f0ac}",
             MenuItem::Themes => "\u{f1fc}",
             MenuItem::Extensions => "\u{f12e}",
+            MenuItem::About => "\u{f05a}", // FA info-circle
         }
     }
 
@@ -159,6 +168,7 @@ impl MenuItem {
             MenuItem::StartWebServer => TopBarAction::StartWebServer,
             MenuItem::Themes => TopBarAction::OpenThemes,
             MenuItem::Extensions => TopBarAction::OpenExtensions,
+            MenuItem::About => TopBarAction::OpenAbout,
         }
     }
 }
@@ -183,11 +193,13 @@ pub struct ChromeTopBar {
     /// activate the wrong region.
     panel_btn_rect: Rect,
     menu_btn_rect: Rect,
+    search_btn_rect: Rect,
     server_btn_rect: Rect,
     right_btn_rect: Rect,
     menu_rect: Rect,
     hover_panel_btn: bool,
     hover_menu_btn: bool,
+    hover_search_btn: bool,
     hover_server_btn: bool,
     hover_right_btn: bool,
     hover_menu_item: Option<usize>,
@@ -216,11 +228,13 @@ impl ChromeTopBar {
             left_safe_inset: 0.0,
             panel_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            search_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             server_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             right_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             hover_panel_btn: false,
             hover_menu_btn: false,
+            hover_search_btn: false,
             hover_server_btn: false,
             hover_right_btn: false,
             hover_menu_item: None,
@@ -362,6 +376,7 @@ impl ChromeTopBar {
         let left_x = strip.x + edge + self.left_safe_inset * scale;
         self.panel_btn_rect = Rect::new(left_x, cy, btn, btn);
         self.menu_btn_rect = Rect::new(left_x + btn + gap, cy, btn, btn);
+        self.search_btn_rect = Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn);
         self.server_btn_rect = Rect::new(strip.x + strip.w - edge - btn, cy, btn, btn);
         self.right_btn_rect = if self.right_button_visible {
             Rect::new(self.server_btn_rect.x - gap - btn, cy, btn, btn)
@@ -422,6 +437,7 @@ impl ChromeTopBar {
         let handled = self.handle_pointer_down(x, y);
         let inside_strip = self.panel_btn_rect.contains(x, y)
             || self.menu_btn_rect.contains(x, y)
+            || self.search_btn_rect.contains(x, y)
             || self.server_btn_rect.contains(x, y)
             || (self.right_button_visible && self.right_btn_rect.contains(x, y))
             || self
@@ -434,6 +450,7 @@ impl ChromeTopBar {
     fn handle_pointer_move(&mut self, x: f32, y: f32) {
         self.hover_panel_btn = self.panel_btn_rect.contains(x, y);
         self.hover_menu_btn = self.menu_btn_rect.contains(x, y);
+        self.hover_search_btn = self.search_btn_rect.contains(x, y);
         self.hover_server_btn = self.server_btn_rect.contains(x, y);
         self.hover_right_btn =
             self.right_button_visible && self.right_btn_rect.contains(x, y);
@@ -455,6 +472,11 @@ impl ChromeTopBar {
         }
         if self.menu_btn_rect.contains(x, y) {
             self.menu_open = !self.menu_open;
+            return true;
+        }
+        if self.search_btn_rect.contains(x, y) {
+            self.pending_action = Some(TopBarAction::OpenSearch);
+            self.menu_open = false;
             return true;
         }
         if self.server_btn_rect.contains(x, y) {
@@ -544,6 +566,15 @@ impl ChromeTopBar {
             None,
             theme,
         );
+        // Search button — opens the finder (project-wide search).
+        self.draw_icon_button(
+            sugarloaf,
+            self.search_btn_rect,
+            SEARCH_GLYPH,
+            self.hover_search_btn,
+            None,
+            theme,
+        );
         // Standalone server selector at the far-right edge.
         self.draw_server_button(sugarloaf, theme);
 
@@ -580,7 +611,12 @@ impl ChromeTopBar {
     /// left. The plasma animates on the shared process clock — while any
     /// peer is present the render loop keeps repainting (the presence-orb
     /// redraw owner), and stops for zero cost once the room empties.
-    fn draw_peer_cluster(&self, sugarloaf: &mut Sugarloaf, strip: Rect, theme: &IdeTheme) {
+    fn draw_peer_cluster(
+        &self,
+        sugarloaf: &mut Sugarloaf,
+        strip: Rect,
+        theme: &IdeTheme,
+    ) {
         if self.peer_rects.is_empty() {
             return;
         }
@@ -634,7 +670,12 @@ impl ChromeTopBar {
     /// Mirrors the breadcrumbs action-tooltip: a surface pill + label,
     /// clamped inside the strip's horizontal bounds, painted above the
     /// dropdown order so it never hides behind other chrome.
-    fn draw_peer_tooltip(&self, sugarloaf: &mut Sugarloaf, strip: Rect, theme: &IdeTheme) {
+    fn draw_peer_tooltip(
+        &self,
+        sugarloaf: &mut Sugarloaf,
+        strip: Rect,
+        theme: &IdeTheme,
+    ) {
         let Some(idx) = self.hover_peer else {
             return;
         };

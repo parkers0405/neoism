@@ -45,6 +45,10 @@ pub(super) const HOME_INPUT_MIN_H: f32 = 106.0;
 pub(super) const CHAT_INPUT_MIN_H: f32 = 98.0;
 pub(super) const INPUT_LINE_H: f32 = 22.0;
 pub(super) const MAX_INPUT_LINES: usize = 5;
+/// Help/status strip painted immediately below the composer island.
+/// Chat layout reserves this much bottom space so the strip never gets
+/// clipped by the pane edge.
+pub(super) const INPUT_HELP_STRIP_H: f32 = 28.0;
 /// Height (in logical px, pre-scale) reserved at the very bottom of the pane
 /// for the streaming status line. Stays fixed regardless of the input rect.
 pub(super) const STREAMING_STATUS_LINE_H: f32 = 26.0;
@@ -223,19 +227,44 @@ pub fn render_agent_pane_with<P, D, I>(
                 (rect, None)
             }
         };
-    let input_rect = if chat::AgentChatPane::has_conversation(pane) {
+    let has_conversation = chat::AgentChatPane::has_conversation(pane);
+    let input_rect = if has_conversation {
         layout::chat_input_rect(pane, main_rect, chrome_scale)
     } else {
         layout::home_input_rect(pane, main_rect, chrome_scale)
     };
-    let mut local_occlusions = occlusion_rects.to_vec();
+    // The pre-chat composer sits around the pane midpoint, leaving much
+    // less safe vertical room than the bottom-docked chat composer. Give
+    // its picker a compact five-row window and clamp it below this pane's
+    // chrome boundary. Its horizontal edges still match the composer
+    // exactly, just like the full-chat picker.
+    let picker_input_rect = input_rect;
+    let picker_min_y = if has_conversation {
+        8.0 * chrome_scale
+    } else {
+        main_rect[1] + 12.0 * chrome_scale
+    };
     let picker_has_footer = pane.picker_has_session_footer();
-    if let Some(picker_rect) = pane.picker_options_len().and_then(|len| {
-        crate::widgets::inline_picker::layout(
-            len,
-            input_rect,
+    let picker_max_rows = if has_conversation {
+        crate::widgets::inline_picker::DEFAULT_MAX_ROWS
+    } else {
+        crate::widgets::inline_picker::row_limit_for_space(
+            picker_input_rect[1],
+            picker_min_y,
             chrome_scale,
             picker_has_footer,
+            5,
+        )
+    };
+    let mut local_occlusions = occlusion_rects.to_vec();
+    if let Some(picker_rect) = pane.picker_options_len().and_then(|len| {
+        crate::widgets::inline_picker::layout_limited(
+            len,
+            picker_input_rect,
+            chrome_scale,
+            picker_has_footer,
+            picker_max_rows,
+            picker_min_y,
         )
     }) {
         local_occlusions.push(picker_rect);
@@ -247,7 +276,7 @@ pub fn render_agent_pane_with<P, D, I>(
     // square at each top corner, hung 2px ABOVE the line downward:
     // only rows whose boxes actually cross the clip line (i.e. rows
     // being sliced) intersect it, so intact rows resting above the
-    // island — like the streaming status row's ╰─ connector — keep
+    // island — like the streaming status row's square activity mark — keep
     // their corner-column glyphs.
     let corner = user_input::ISLAND_CORNER * chrome_scale;
     for corner_x in [input_rect[0], input_rect[0] + input_rect[2] - corner] {
@@ -264,7 +293,7 @@ pub fn render_agent_pane_with<P, D, I>(
     // no body skeleton. First-load shimmer belongs on the recent-sessions
     // TREE (date/name rows) in the side panel, handled there by
     // `draw_session_loading_skeleton`, not over this welcome/entry body.
-    if chat::AgentChatPane::has_conversation(pane) {
+    if has_conversation {
         chat::render_chat_with::<P, D>(
             sugarloaf,
             pane,
@@ -320,7 +349,15 @@ pub fn render_agent_pane_with<P, D, I>(
     );
     pane.set_prompt_picker_rect(prompt_rect);
     if prompt_rect.is_none() {
-        picker::render_picker(sugarloaf, pane, input_rect, theme, chrome_scale);
+        picker::render_picker(
+            sugarloaf,
+            pane,
+            picker_input_rect,
+            theme,
+            chrome_scale,
+            picker_max_rows,
+            picker_min_y,
+        );
     }
     if let Some(kind) = pane.take_fx_request() {
         pane.set_fx_started(Some((kind, now_seconds)));
@@ -351,4 +388,3 @@ pub fn render_agent_pane_with<P, D, I>(
         panel_top_override,
     );
 }
-

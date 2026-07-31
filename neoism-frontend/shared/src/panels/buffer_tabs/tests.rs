@@ -4,6 +4,7 @@ fn terminal(title: &str, route: Option<usize>) -> BufferTab<()> {
     BufferTab {
         title: title.to_string(),
         modified: false,
+        custom_icon: None,
         path: None,
         markdown: false,
         terminal_route_id: route,
@@ -17,6 +18,7 @@ fn file(path: &str) -> BufferTab<()> {
     BufferTab {
         title: path.rsplit('/').next().unwrap_or(path).to_string(),
         modified: false,
+        custom_icon: None,
         path: Some(PathBuf::from(path)),
         markdown: false,
         terminal_route_id: None,
@@ -718,6 +720,20 @@ fn focused_on_new_tab_requires_focus() {
     // Park the cursor on the "+" index but leave the strip unfocused.
     tabs.focused_index = tabs.tabs().len();
     assert!(!tabs.focused_on_new_tab());
+}
+
+#[test]
+fn note_custom_icon_follows_its_buffer_tab_and_rename() {
+    let mut tabs = BufferTabs::<()>::new();
+    let old = PathBuf::from("/vault/TASKS.md");
+    let new = PathBuf::from("/vault/Tasks.md");
+    tabs.open_markdown(old.clone());
+    tabs.set_path_icon(&old, Some("\u{1f4a1}".to_string()));
+    assert_eq!(tabs.tabs[0].custom_icon.as_deref(), Some("\u{1f4a1}"));
+
+    tabs.rename_path(&old, new.clone());
+    assert_eq!(tabs.tabs[0].path.as_deref(), Some(new.as_path()));
+    assert_eq!(tabs.tabs[0].custom_icon.as_deref(), Some("\u{1f4a1}"));
 }
 
 #[test]

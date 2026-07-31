@@ -143,13 +143,13 @@ pub(crate) fn validate_loaded(info: &NeoismConfig) -> ConfigValidation {
     if let Some(default_agent) = info.default_agent.as_deref() {
         if !default_agent.trim().is_empty() && !info.agent.contains_key(default_agent) {
             diagnostics.push(warning(
-                "defaultAgent",
+                "default-agent",
                 format!("default agent `{default_agent}` is not configured"),
             ));
         }
     }
     validate_model_ref("model", info.model.as_deref(), &mut diagnostics);
-    validate_model_ref("smallModel", info.small_model.as_deref(), &mut diagnostics);
+    validate_model_ref("small-model", info.small_model.as_deref(), &mut diagnostics);
 
     for (name, agent) in &info.agent {
         if name.trim().is_empty() {

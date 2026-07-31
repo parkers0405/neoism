@@ -478,8 +478,14 @@ pub enum MarkdownCtrlAction {
     MoveTableCellPrev,
     /// Ctrl+ArrowRight — move table cell forward.
     MoveTableCellNext,
-    /// Ctrl+R — redo.
+    /// Ctrl+R — redo (vim / standard).
     Redo,
+    /// Ctrl+V — blockwise visual (vim).
+    VimBlockVisual,
+    /// Ctrl+O — jumplist back (vim).
+    VimJumpBack,
+    /// Ctrl+I — jumplist forward (vim).
+    VimJumpForward,
 }
 
 /// Resolve a Ctrl-only key event to a known [`MarkdownCtrlAction`].
@@ -494,6 +500,9 @@ pub enum MarkdownCtrlKeyKind {
     CharD,
     CharU,
     CharR,
+    CharV,
+    CharO,
+    CharI,
     ArrowUp,
     ArrowDown,
     ArrowLeft,
@@ -515,6 +524,9 @@ pub fn markdown_ctrl_action(
         MarkdownCtrlKeyKind::ArrowLeft => MarkdownCtrlAction::MoveTableCellPrev,
         MarkdownCtrlKeyKind::ArrowRight => MarkdownCtrlAction::MoveTableCellNext,
         MarkdownCtrlKeyKind::CharR => MarkdownCtrlAction::Redo,
+        MarkdownCtrlKeyKind::CharV => MarkdownCtrlAction::VimBlockVisual,
+        MarkdownCtrlKeyKind::CharO => MarkdownCtrlAction::VimJumpBack,
+        MarkdownCtrlKeyKind::CharI => MarkdownCtrlAction::VimJumpForward,
     })
 }
 

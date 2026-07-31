@@ -26,8 +26,9 @@ The full list is in [[Keybindings]].
 
 ## Make it yours
 
-- [[Configuration/Configuration|Configuration]] — the `config.json` reference.
+- [[Configuration/Configuration|Configuration]] — the `config.json` reference: one JSONC file for terminal, editor, *and* agent.
 - [[Configuration/Themes, Cursor and Fonts|Themes, Cursor & Fonts]] — pick a theme, set your cursor color, choose a font.
+- [[Configuration/Mash Up Packs|Mash Up Packs]] — skin the whole app as one look (theme + shader + fonts + icons).
 - [[Configuration/Shaders|Shaders]] — optional CRT and post-process filters.
 
 ## Where things live

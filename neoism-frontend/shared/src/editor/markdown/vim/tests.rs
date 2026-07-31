@@ -23,8 +23,27 @@ fn feed(pane: &mut MarkdownPane, register: &mut String, keys: &str) {
         if let VimKeyFeed::Action(action) = pane.vim.feed(ch, visual) {
             let paste = action.wants_paste().then(|| register.clone());
             let applied = pane.apply_vim_action(&action, paste.as_deref());
+            // Host clipboard stand-in: only unnamed / + / * writes.
             if let Some(text) = applied.register {
-                *register = text;
+                if applied.sync_clipboard {
+                    *register = text;
+                }
+            }
+            if let Some(replay) = applied.replay_keys {
+                pane.vim.replaying_macro = true;
+                for rch in replay.chars() {
+                    let visual = matches!(pane.mode, MarkdownMode::Visual);
+                    if let VimKeyFeed::Action(action) = pane.vim.feed(rch, visual) {
+                        let paste = action.wants_paste().then(|| register.clone());
+                        let nested = pane.apply_vim_action(&action, paste.as_deref());
+                        if let Some(text) = nested.register {
+                            if nested.sync_clipboard {
+                                *register = text;
+                            }
+                        }
+                    }
+                }
+                pane.vim.replaying_macro = false;
             }
         }
     }
@@ -486,10 +505,42 @@ fn vim_visual_charwise_extend_and_operate() {
     assert!(matches!(p.mode, MarkdownMode::Normal));
     let (p, register) = run_reg("one two", 0, 0, "vey");
     assert_eq!(register, "one");
+    assert_eq!(
+        p.yank_flash_for_line(0).map(|(start, end, _)| (start, end)),
+        Some((0, 3))
+    );
     assert!(matches!(p.mode, MarkdownMode::Normal));
     let p = run("one two", 0, 0, "vec");
     assert_eq!(text(&p), " two");
     assert!(matches!(p.mode, MarkdownMode::Insert));
+}
+
+#[test]
+fn vim_visual_paste_replaces_the_exact_markdown_selection() {
+    let mut p = pane_at("hello world", 0, 0);
+    let mut register = "ZIP".to_string();
+
+    feed(&mut p, &mut register, "vllp");
+
+    assert_eq!(text(&p), "ZIPlo world");
+    assert!(matches!(p.mode, MarkdownMode::Normal));
+    assert!(p.visual_anchor.is_none());
+    assert!(p.undo());
+    assert_eq!(text(&p), "hello world");
+}
+
+#[test]
+fn vim_visual_paste_replaces_a_multiline_markdown_selection() {
+    let mut p = pane_at("alpha\nbeta\ngamma", 1, 1);
+    p.mode = MarkdownMode::Visual;
+    p.visual_anchor = Some(MarkdownPosition { line: 0, col: 2 });
+    let mut register = "X\nY".to_string();
+
+    feed(&mut p, &mut register, "p");
+
+    assert_eq!(text(&p), "alX\nYta\ngamma");
+    assert!(matches!(p.mode, MarkdownMode::Normal));
+    assert!(p.visual_anchor.is_none());
 }
 
 #[test]
@@ -627,4 +678,77 @@ fn vim_operator_edits_are_undoable() {
     assert_eq!(text(&p), "c");
     assert!(p.undo());
     assert_eq!(text(&p), "a\nb\nc");
+}
+
+// -- Vim substrate v2: registers, marks, jumps, macros, block visual, redo ------
+
+#[test]
+fn vim_named_register_stores_payload() {
+    let mut p = pane_at("hello world", 0, 0);
+    let mut register = String::new();
+    feed(&mut p, &mut register, "\"ayw");
+    assert_eq!(
+        p.vim.registers.named.get(&'a').map(|v| v.text.as_str()),
+        Some("hello ")
+    );
+    // Unnamed is mirrored on named writes.
+    assert_eq!(p.vim.registers.unnamed.text, "hello ");
+}
+
+#[test]
+fn vim_marks_roundtrip() {
+    let mut p = pane_at("one\ntwo\nthree", 2, 1);
+    let mut register = String::new();
+    feed(&mut p, &mut register, "ma");
+    assert_eq!(
+        p.vim.marks.get(&'a').copied(),
+        Some(VimMark { line: 2, col: 1 })
+    );
+    p.cursor_line = 0;
+    p.cursor_col = 0;
+    feed(&mut p, &mut register, "`a");
+    assert_eq!(cursor(&p), (2, 1));
+}
+
+#[test]
+fn vim_ctrl_block_visual_and_redo_resolve() {
+    let mut state = VimState::default();
+    assert_eq!(
+        state.feed_ctrl('v', false),
+        VimKeyFeed::Action(VimAction::EnterVisual {
+            linewise: false,
+            blockwise: true,
+        })
+    );
+    assert_eq!(
+        state.feed_ctrl('r', false),
+        VimKeyFeed::Action(VimAction::Redo { count: 1 })
+    );
+    assert_eq!(
+        state.feed_ctrl('o', false),
+        VimKeyFeed::Action(VimAction::JumpBack { count: 1 })
+    );
+    assert_eq!(
+        state.feed_ctrl('i', false),
+        VimKeyFeed::Action(VimAction::JumpForward { count: 1 })
+    );
+}
+
+#[test]
+fn vim_macro_record_and_play() {
+    let mut p = pane_at("abc\ndef\n", 0, 0);
+    let mut register = String::new();
+    feed(&mut p, &mut register, "qqxq");
+    assert_eq!(
+        p.vim.registers.macros.get(&'q').map(String::as_str),
+        Some("x")
+    );
+    assert_eq!(text(&p).chars().next(), Some('b'));
+    p.cursor_line = 1;
+    p.cursor_col = 0;
+    feed(&mut p, &mut register, "@q");
+    assert_eq!(
+        text(&p).lines().nth(1).and_then(|l| l.chars().next()),
+        Some('e')
+    );
 }

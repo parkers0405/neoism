@@ -493,12 +493,21 @@ impl Screen<'_> {
                     }
                     self.mark_dirty();
                 }
+                // Ctrl-V: blockwise visual. Falls through the shared
+                // resolver so pending counts (`3<C-v>`) still apply.
+                Key::Character("v") => {
+                    self.code_vim_ctrl('v', clipboard);
+                }
+                // Ctrl-R: vim redo (also available as a bare host redo).
                 Key::Character("r") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
-                        code.buffer.redo();
-                    }
-                    self.sync_active_code_modified();
-                    self.mark_dirty();
+                    self.code_vim_ctrl('r', clipboard);
+                }
+                // Ctrl-O / Ctrl-I: jumplist back / forward.
+                Key::Character("o") => {
+                    self.code_vim_ctrl('o', clipboard);
+                }
+                Key::Character("i") | Key::Named(NamedKey::Tab) => {
+                    self.code_vim_ctrl('i', clipboard);
                 }
                 // Ctrl-D / Ctrl-U: half-page cursor sweep (vim).
                 Key::Character("d") | Key::Character("u") => {
@@ -770,7 +779,22 @@ impl Screen<'_> {
             return;
         };
         let visual = code.buffer.mode == CodeMode::Visual;
-        match code.buffer.vim.feed(ch, visual) {
+        let feed = code.buffer.vim.feed(ch, visual);
+        self.code_vim_apply_feed(feed, clipboard);
+    }
+
+    fn code_vim_ctrl(&mut self, key: char, clipboard: &mut Clipboard) {
+        self.renderer.code_lsp.dismiss_popups();
+        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            return;
+        };
+        let visual = code.buffer.mode == CodeMode::Visual;
+        let feed = code.buffer.vim.feed_ctrl(key, visual);
+        self.code_vim_apply_feed(feed, clipboard);
+    }
+
+    fn code_vim_apply_feed(&mut self, feed: VimKeyFeed, clipboard: &mut Clipboard) {
+        match feed {
             VimKeyFeed::Pending | VimKeyFeed::Cancelled => {}
             VimKeyFeed::Unhandled => return,
             VimKeyFeed::Action(action) => {
@@ -795,12 +819,61 @@ impl Screen<'_> {
                             neoism_ui::panels::notifications::NotificationLevel::Info,
                         );
                     }
-                    clipboard.set(ClipboardType::Clipboard, register);
+                    if applied.sync_clipboard {
+                        clipboard.set(ClipboardType::Clipboard, register);
+                    }
+                }
+                if let Some(keys) = applied.replay_keys {
+                    self.code_vim_replay_keys(&keys, clipboard);
                 }
             }
         }
         self.sync_active_code_modified();
         self.mark_dirty();
+    }
+
+    /// Replay a recorded macro body through the same char feed path.
+    fn code_vim_replay_keys(&mut self, keys: &str, clipboard: &mut Clipboard) {
+        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            code.buffer.vim.replaying_macro = true;
+        }
+        for ch in keys.chars() {
+            let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+                break;
+            };
+            // Macros only replay Normal/Visual keystreams.
+            if code.buffer.mode == CodeMode::Insert {
+                break;
+            }
+            let visual = code.buffer.mode == CodeMode::Visual;
+            let feed = code.buffer.vim.feed(ch, visual);
+            // Inline apply without nested macro recursion flags.
+            match feed {
+                VimKeyFeed::Pending | VimKeyFeed::Cancelled => {}
+                VimKeyFeed::Unhandled => {}
+                VimKeyFeed::Action(action) => {
+                    let paste = matches!(
+                        action,
+                        VimAction::Paste { .. } | VimAction::Repeat { .. }
+                    )
+                    .then(|| clipboard.get(ClipboardType::Clipboard));
+                    let Some(code) = self.context_manager.current_mut().code.as_mut()
+                    else {
+                        break;
+                    };
+                    let applied = code.buffer.apply_vim_action(&action, paste.as_deref());
+                    if let Some(register) = applied.register {
+                        if applied.sync_clipboard {
+                            clipboard.set(ClipboardType::Clipboard, register);
+                        }
+                    }
+                    // Nested macro play is ignored while replaying.
+                }
+            }
+        }
+        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            code.buffer.vim.replaying_macro = false;
+        }
     }
 
     pub(crate) fn code_scrollbar_drag_active(&self) -> bool {

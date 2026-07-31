@@ -86,8 +86,12 @@ fn built_in_syntax_entries_reflect_compiled_in_grammars() {
 #[test]
 fn language_server_catalog_is_derived_from_runtime_adapters() {
     let installed = InstalledIndex::default();
-    let entries =
-        language_server_entries(None, &installed, &std::collections::HashSet::new(), false);
+    let entries = language_server_entries(
+        None,
+        &installed,
+        &std::collections::HashSet::new(),
+        false,
+    );
 
     // TCP endpoint adapters (host application provides the server).
     let godot = entries
@@ -132,8 +136,12 @@ fn language_server_catalog_is_derived_from_runtime_adapters() {
 #[test]
 fn formatter_and_linter_tabs_are_curated_not_capability_driven() {
     let installed = InstalledIndex::default();
-    let entries =
-        language_server_entries(None, &installed, &std::collections::HashSet::new(), false);
+    let entries = language_server_entries(
+        None,
+        &installed,
+        &std::collections::HashSet::new(),
+        false,
+    );
 
     // taplo (the TOML adapter) is the only format-first tool in the
     // built-in registry, so it alone joins the Formatters tab.

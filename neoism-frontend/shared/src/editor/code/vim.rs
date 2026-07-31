@@ -98,14 +98,94 @@ impl CodeBuffer {
                 }
                 VimApplied::edit()
             }
+            VimAction::Redo { count } => {
+                for _ in 0..(*count).max(1) {
+                    if !self.redo() {
+                        break;
+                    }
+                }
+                VimApplied::edit()
+            }
             VimAction::EnterInsert { kind } => self.vim_enter_insert(*kind),
-            VimAction::EnterVisual { linewise } => {
+            VimAction::EnterVisual {
+                linewise,
+                blockwise,
+            } => {
+                // Toggle off when re-entering the same visual shape.
+                if self.mode == CodeMode::Visual
+                    && self.vim.visual_linewise == *linewise
+                    && self.vim.visual_block == *blockwise
+                {
+                    self.mode = CodeMode::Normal;
+                    self.vim.visual_linewise = false;
+                    self.vim.visual_block = false;
+                    self.visual_anchor = None;
+                    return VimApplied::motion();
+                }
                 self.mode = CodeMode::Visual;
-                self.vim.visual_linewise = *linewise;
+                self.vim.visual_linewise = *linewise && !*blockwise;
+                self.vim.visual_block = *blockwise;
                 if self.visual_anchor.is_none() {
                     self.visual_anchor = Some(self.cursor());
                 }
                 VimApplied::motion()
+            }
+            VimAction::SetMark { name } => {
+                let cursor = self.cursor();
+                self.vim.marks.insert(
+                    *name,
+                    crate::editor::markdown::vim::VimMark {
+                        line: cursor.line,
+                        col: cursor.col,
+                    },
+                );
+                VimApplied::noop()
+            }
+            VimAction::GotoMark { name, linewise } => {
+                let Some(mark) = self.vim.marks.get(name).copied() else {
+                    return VimApplied::noop();
+                };
+                let cur = self.cursor();
+                self.vim.push_jump(cur.line, cur.col);
+                self.cursor_line = mark.line.min(self.lines.len().saturating_sub(1));
+                if *linewise {
+                    self.cursor_col = vim_first_non_blank(&self.lines[self.cursor_line]);
+                } else {
+                    self.cursor_col = mark.col.min(self.lines[self.cursor_line].len());
+                }
+                self.clamp_cursor();
+                self.follow_cursor = true;
+                VimApplied::motion()
+            }
+            VimAction::JumpBack { count } => self.vim_jump(*count, false),
+            VimAction::JumpForward { count } => self.vim_jump(*count, true),
+            VimAction::MacroRecordToggle { name } => {
+                if let Some(reg) = name {
+                    self.vim.recording = Some(*reg);
+                    self.vim.recording_buffer.clear();
+                } else if let Some(reg) = self.vim.recording.take() {
+                    let body = std::mem::take(&mut self.vim.recording_buffer);
+                    self.vim.registers.macros.insert(reg, body);
+                }
+                VimApplied::noop()
+            }
+            VimAction::MacroPlay { name, count } => {
+                let Some(body) = self.vim.registers.macros.get(name).cloned() else {
+                    return VimApplied::noop();
+                };
+                if body.is_empty() {
+                    return VimApplied::noop();
+                }
+                self.vim.registers.last_macro = Some(*name);
+                let mut replay = String::new();
+                for _ in 0..(*count).max(1) {
+                    replay.push_str(&body);
+                }
+                VimApplied {
+                    handled: true,
+                    replay_keys: Some(replay),
+                    ..VimApplied::default()
+                }
             }
             VimAction::VisualSwapEnds => {
                 if let Some(anchor) = self.visual_anchor {
@@ -142,6 +222,93 @@ impl CodeBuffer {
         }
     }
 
+    fn vim_jump(&mut self, count: usize, forward: bool) -> VimApplied {
+        let count = count.max(1);
+        if self.vim.jumplist.is_empty() {
+            return VimApplied::noop();
+        }
+        let cur = self.cursor();
+        // Seed current position when jumping back from the tip.
+        if !forward
+            && self.vim.jumplist_idx + 1 == self.vim.jumplist.len()
+            && self.vim.jumplist.last().map(|m| (m.line, m.col))
+                != Some((cur.line, cur.col))
+        {
+            self.vim.push_jump(cur.line, cur.col);
+        }
+        let idx = if forward {
+            self.vim
+                .jumplist_idx
+                .saturating_add(count)
+                .min(self.vim.jumplist.len().saturating_sub(1))
+        } else {
+            self.vim.jumplist_idx.saturating_sub(count)
+        };
+        self.vim.jumplist_idx = idx;
+        let mark = self.vim.jumplist[idx];
+        self.cursor_line = mark.line.min(self.lines.len().saturating_sub(1));
+        self.cursor_col = mark.col.min(self.lines[self.cursor_line].len());
+        self.clamp_cursor();
+        self.follow_cursor = true;
+        VimApplied::motion()
+    }
+
+    fn vim_store_register(
+        &mut self,
+        text: String,
+        linewise: bool,
+        blockwise: bool,
+        is_yank: bool,
+    ) -> VimApplied {
+        let name = self.vim.pending_register.take().unwrap_or('"');
+        let value = crate::editor::markdown::vim::VimRegisterValue {
+            text: text.clone(),
+            linewise,
+            blockwise,
+        };
+        self.vim.registers.write(name, value, is_yank);
+        let sync_clipboard = matches!(name, '"' | '+' | '*');
+        VimApplied {
+            handled: true,
+            snap_cursor: !is_yank,
+            register: Some(text),
+            sync_clipboard,
+            yank_notification: is_yank && linewise,
+            ..VimApplied::default()
+        }
+    }
+
+    fn vim_paste_block(&mut self, text: &str, count: usize, before: bool) -> VimApplied {
+        let mut rows: Vec<String> = text.split('\n').map(str::to_string).collect();
+        if text.ends_with('\n') {
+            rows.pop();
+        }
+        if rows.is_empty() {
+            return VimApplied::noop();
+        }
+        let start_line = self.cursor_line;
+        let start_col = self.cursor_col;
+        for (i, row) in rows.iter().enumerate() {
+            let line_ix = start_line + i;
+            while line_ix >= self.lines.len() {
+                self.lines.push(String::new());
+            }
+            let line = &mut self.lines[line_ix];
+            let mut col = start_col.min(line.len());
+            if !before && col < line.len() {
+                col = next_char_boundary(line, col);
+            }
+            while line.len() < col {
+                line.push(' ');
+            }
+            let repeated = row.repeat(count);
+            line.insert_str(col, &repeated);
+        }
+        self.mark_edited();
+        self.follow_cursor = true;
+        VimApplied::edit()
+    }
+
     /// Normal-mode caret can't rest past the last char of the line.
     pub fn snap_normal_cursor(&mut self) {
         self.clamp_cursor();
@@ -155,6 +322,18 @@ impl CodeBuffer {
 
     fn vim_move(&mut self, motion: VimMotion, count: usize) -> VimApplied {
         let count = count.max(1);
+        let jumpish = matches!(
+            motion,
+            VimMotion::GotoLine(_)
+                | VimMotion::LastLine
+                | VimMotion::ParagraphForward
+                | VimMotion::ParagraphBack
+                | VimMotion::MatchPair
+        );
+        if jumpish {
+            let cur = self.cursor();
+            self.vim.push_jump(cur.line, cur.col);
+        }
         match motion {
             VimMotion::Up => {
                 for _ in 0..count {
@@ -417,13 +596,31 @@ impl CodeBuffer {
             VimOperator::Yank => {
                 let (text, linewise) = self.vim_range_text(&range);
                 let register = if linewise { format!("{text}\n") } else { text };
-                // TextYankPost-style flash over the yanked rows.
-                let flash_rows = match &range {
-                    VimOpRange::Lines { first, last } => (*first, *last),
-                    VimOpRange::Chars { start, end } => (start.line, end.line),
+                // TextYankPost-style flash over the exact yanked bytes. For a
+                // linewise yank the range covers the lines' text, not the
+                // unused width to the right of each line.
+                let (flash_start, flash_end) = match &range {
+                    VimOpRange::Lines { first, last } => {
+                        let first = (*first).min(self.lines.len() - 1);
+                        let last = (*last).min(self.lines.len() - 1).max(first);
+                        (
+                            CodePosition {
+                                line: first,
+                                col: 0,
+                            },
+                            CodePosition {
+                                line: last,
+                                col: self.lines[last].len(),
+                            },
+                        )
+                    }
+                    VimOpRange::Chars { start, end } => (cp(*start), cp(*end)),
                 };
-                self.yank_flash =
-                    Some((flash_rows.0, flash_rows.1, web_time::Instant::now()));
+                self.yank_flash = Some(CodeYankFlash {
+                    start: flash_start,
+                    end: flash_end,
+                    started_at: web_time::Instant::now(),
+                });
                 // Yank ends Visual mode with the cursor at the start of
                 // what was yanked (vim semantics) — without this the
                 // selection lingers and the yank looks like a no-op.
@@ -438,13 +635,14 @@ impl CodeBuffer {
                     }
                 }
                 self.visual_anchor = None;
+                self.vim.visual_block = false;
+                self.vim.visual_linewise = false;
                 self.mode = CodeMode::Normal;
-                VimApplied {
-                    handled: true,
-                    snap_cursor: true,
-                    register: Some(register),
-                    yank_notification: true,
-                }
+                let mut applied =
+                    self.vim_store_register(register, linewise, false, true);
+                applied.snap_cursor = true;
+                applied.yank_notification = true;
+                applied
             }
             VimOperator::Delete | VimOperator::Change => {
                 let (text, linewise) = self.vim_range_text(&range);
@@ -470,6 +668,8 @@ impl CodeBuffer {
                     }
                 }
                 self.visual_anchor = None;
+                self.vim.visual_block = false;
+                self.vim.visual_linewise = false;
                 if change {
                     self.mode = CodeMode::Insert;
                 } else {
@@ -477,12 +677,10 @@ impl CodeBuffer {
                 }
                 self.mark_edited();
                 self.commit_undo();
-                VimApplied {
-                    handled: true,
-                    snap_cursor: !change,
-                    register: Some(register),
-                    yank_notification: false,
-                }
+                let mut applied =
+                    self.vim_store_register(register, linewise, false, false);
+                applied.snap_cursor = !change;
+                applied
             }
             VimOperator::Indent | VimOperator::Outdent => {
                 let (first, last) = match range {
@@ -681,12 +879,9 @@ impl CodeBuffer {
         self.cursor_col = start;
         self.mark_edited();
         self.commit_local_undo(self.cursor_line, self.cursor_line + 1);
-        VimApplied {
-            handled: true,
-            snap_cursor: true,
-            register: Some(removed),
-            yank_notification: false,
-        }
+        let mut applied = self.vim_store_register(removed, false, false, false);
+        applied.snap_cursor = true;
+        applied
     }
 
     fn vim_replace_char(&mut self, ch: char, count: usize) -> VimApplied {
@@ -770,13 +965,32 @@ impl CodeBuffer {
         count: usize,
         before: bool,
     ) -> VimApplied {
-        let Some(text) = paste.filter(|text| !text.is_empty()) else {
-            return VimApplied::noop();
-        };
+        // Prefer an explicit pending register, then unnamed store, then
+        // host clipboard (for `+`/`*` / first-run bootstrap).
+        let reg_name = self.vim.pending_register.take().unwrap_or('"');
+        let stored = self.vim.registers.get(reg_name).cloned();
+        let (text, linewise, blockwise) =
+            if let Some(val) = stored.filter(|v| !v.text.is_empty()) {
+                (val.text, val.linewise, val.blockwise)
+            } else if matches!(reg_name, '"' | '+' | '*') {
+                let Some(text) = paste.filter(|text| !text.is_empty()) else {
+                    return VimApplied::noop();
+                };
+                let linewise = text.ends_with('\n');
+                (text.to_string(), linewise, false)
+            } else {
+                return VimApplied::noop();
+            };
         let count = count.max(1);
+        if self.mode == CodeMode::Visual {
+            return self.vim_paste_over_selection(&text, count);
+        }
         self.break_undo_group();
         self.save_undo();
-        if text.ends_with('\n') {
+        if blockwise {
+            return self.vim_paste_block(&text, count, before);
+        }
+        if linewise || text.ends_with('\n') {
             // Linewise paste: whole lines below (p) or above (P).
             let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
             lines.pop();
@@ -827,6 +1041,74 @@ impl CodeBuffer {
             }
         }
         self.mode = CodeMode::Normal;
+        self.mark_edited();
+        self.commit_undo();
+        VimApplied::edit()
+    }
+
+    /// Visual `p`/`P`: replace the inclusive Visual selection with the
+    /// resolved register contents as one undoable edit.
+    fn vim_paste_over_selection(&mut self, text: &str, count: usize) -> VimApplied {
+        let Some(range) =
+            self.vim_target_range(VimOperator::Delete, VimTarget::Selection, 1)
+        else {
+            return VimApplied::noop();
+        };
+        let (start, end) = match range {
+            VimOpRange::Chars { start, end } => (cp(start), cp(end)),
+            VimOpRange::Lines { first, last } => {
+                let first = first.min(self.lines.len() - 1);
+                let last = last.min(self.lines.len() - 1).max(first);
+                let end = if last + 1 < self.lines.len() {
+                    CodePosition {
+                        line: last + 1,
+                        col: 0,
+                    }
+                } else {
+                    CodePosition {
+                        line: last,
+                        col: self.lines[last].len(),
+                    }
+                };
+                (
+                    CodePosition {
+                        line: first,
+                        col: 0,
+                    },
+                    end,
+                )
+            }
+        };
+
+        let replacement = text.replace('\r', "").repeat(count.max(1));
+        self.break_undo_group();
+        self.save_undo();
+        self.delete_span(start, end);
+
+        let mut segments = replacement.split('\n').peekable();
+        while let Some(segment) = segments.next() {
+            if !segment.is_empty() {
+                self.insert_str_at_cursor(segment);
+            }
+            if segments.peek().is_some() {
+                self.split_line_at_cursor(false);
+            }
+        }
+
+        // Like nvim, leave Visual mode after putting. For linewise register
+        // text (trailing newline), park on the first inserted line; otherwise
+        // rest on the final inserted character.
+        if replacement.ends_with('\n') {
+            self.cursor_line = start.line.min(self.lines.len() - 1);
+            self.cursor_col = vim_first_non_blank(&self.lines[self.cursor_line]);
+        } else if self.cursor_col > 0 {
+            let line = &self.lines[self.cursor_line];
+            self.cursor_col = prev_char_boundary(line, self.cursor_col.min(line.len()));
+        }
+        self.mode = CodeMode::Normal;
+        self.visual_anchor = None;
+        self.vim.visual_linewise = false;
+        self.vim.visual_block = false;
         self.mark_edited();
         self.commit_undo();
         VimApplied::edit()

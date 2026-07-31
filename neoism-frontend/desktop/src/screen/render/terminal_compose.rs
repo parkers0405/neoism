@@ -820,7 +820,12 @@ impl Screen<'_> {
                     // dead PTY whose parked cursor must never paint — the
                     // surface draws its own caret.
                     cursor_state_visible: cursor.state.is_visible()
-                        && !ctx.has_non_terminal_surface(),
+                        && !ctx.has_non_terminal_surface()
+                        // The Settings panel is a full-window overlay. The
+                        // terminal cursor is emitted as a rich-text sprite,
+                        // which paints OVER panel rects (like glyphs do), so
+                        // it bleeds through the overlay unless suppressed.
+                        && !self.renderer.settings.is_active(),
                     tree_focused,
                     trail_cursor_enabled: self.renderer.trail_cursor_enabled,
                 }),

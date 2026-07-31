@@ -86,7 +86,9 @@ async fn e2e_github_release_elixir_ls() {
         }),
         env_keys: vec![],
     };
-    let bin = run_install(manifest).await.expect("elixir-ls install failed");
+    let bin = run_install(manifest)
+        .await
+        .expect("elixir-ls install failed");
     assert!(bin.exists(), "installed bin should exist at {bin:?}");
 }
 

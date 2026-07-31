@@ -222,6 +222,7 @@ impl CodeBuffer {
             trailing_newline,
             vim: crate::editor::markdown::vim::VimState::default(),
             yank_flash: None,
+            external_edit_flash: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             insert_burst: None,
@@ -322,6 +323,8 @@ impl CodeBuffer {
 
     pub fn clear_selection(&mut self) {
         self.visual_anchor = None;
+        self.vim.visual_linewise = false;
+        self.vim.visual_block = false;
     }
 
     pub fn select_all(&mut self) {

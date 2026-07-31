@@ -3,6 +3,61 @@ use std::path::Path;
 use neoism_agent_server::language_server;
 use neoism_protocol::{diagnostics::DiagnosticItem, editor::EditorServerMessage};
 
+/// Feed the native guest editor's authoritative text into the host LSP and
+/// return the status snapshot used by the desktop status bar. The ordered
+/// barrier makes the first snapshot meaningful (Connected/Error rather than
+/// racing the queued didOpen), while subsequent revision syncs reuse the
+/// already-live server.
+pub(crate) fn sync_buffer_snapshot(
+    workspace_root: &Path,
+    file: &Path,
+    text: String,
+    surface_id: Option<String>,
+) -> EditorServerMessage {
+    super::live_sync::sync_document(workspace_root, file, text);
+    super::live_sync::flush_document_sync(workspace_root, file);
+    let statuses = language_server::status(workspace_root, Some(file));
+    let filetype = language_server::language_id_for_path_in(workspace_root, file)
+        .unwrap_or_default();
+    let servers = statuses
+        .into_iter()
+        .map(|status| {
+            use neoism_agent_server::language_server::{
+                LspCommandSource, LspServerState,
+            };
+            neoism_protocol::editor::LspSnapshotServer {
+                name: status.name,
+                binary: status.command.first().cloned().unwrap_or_default(),
+                filetype: status.language,
+                state: match status.status {
+                    LspServerState::Connected => "connected",
+                    LspServerState::Available => "available",
+                    LspServerState::Error => "error",
+                }
+                .to_string(),
+                source: Some(
+                    match status.command_source {
+                        LspCommandSource::BuiltIn => "built-in",
+                        LspCommandSource::Extension => "managed",
+                        LspCommandSource::Config => "config",
+                        LspCommandSource::Path => "path",
+                        LspCommandSource::Missing => "missing",
+                    }
+                    .to_string(),
+                ),
+                message: None,
+                level: None,
+            }
+        })
+        .collect();
+    EditorServerMessage::LspSnapshot {
+        surface_id,
+        file_path: Some(file.to_path_buf()),
+        filetype,
+        servers,
+    }
+}
+
 // The active-buffer snapshot poll (`poll`/`read_active_file_buffer`) was fed
 // by the embedded nvim session and was deleted with it. The engine's
 // event-driven `publishDiagnostics` bus below is editor-agnostic and remains

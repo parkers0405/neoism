@@ -449,7 +449,10 @@ impl Screen<'_> {
                 // the sidebar entry was built from a disk walk and stays
                 // stale until the daemon flushes the buffer.
                 if let Some((path, icon)) = accepted_icon {
-                    self.renderer.notes_sidebar.set_note_icon(&path, icon);
+                    self.renderer
+                        .notes_sidebar
+                        .set_note_icon(&path, icon.clone());
+                    self.sync_note_tab_icon(&path, icon);
                 }
                 self.mark_dirty();
                 return;
@@ -576,15 +579,24 @@ impl Screen<'_> {
             }
 
             let ctrl_key_kind = if ctrl_only {
-                match key.key_without_modifiers().as_ref() {
-                    Key::Character(ch) if ch.eq_ignore_ascii_case("d") => {
+                match key.logical_key.as_ref() {
+                    Key::Character("d") => {
                         Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::CharD)
                     }
-                    Key::Character(ch) if ch.eq_ignore_ascii_case("u") => {
+                    Key::Character("u") => {
                         Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::CharU)
                     }
-                    Key::Character(ch) if ch.eq_ignore_ascii_case("r") => {
+                    Key::Character("r") => {
                         Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::CharR)
+                    }
+                    Key::Character("v") => {
+                        Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::CharV)
+                    }
+                    Key::Character("o") => {
+                        Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::CharO)
+                    }
+                    Key::Character("i") | Key::Named(NamedKey::Tab) => {
+                        Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::CharI)
                     }
                     Key::Named(NamedKey::ArrowUp) => {
                         Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::ArrowUp)
@@ -638,11 +650,57 @@ impl Screen<'_> {
                         snap_cursor = handled;
                     }
                     Some(MarkdownCtrlAction::Redo) => {
-                        handled = markdown.redo();
+                        // Prefer the vim redo path so pending counts work.
+                        let visual = matches!(
+                            markdown.mode,
+                            neoism_ui::editor::markdown::MarkdownMode::Visual
+                        );
+                        let feed = markdown.vim.feed_ctrl('r', visual);
+                        let (h, snap, message) =
+                            Self::apply_markdown_vim_feed(markdown, clipboard, feed);
+                        handled = h;
+                        snap_cursor = snap;
+                        if let Some(message) = message {
+                            self.renderer.notifications.push(
+                                message,
+                                neoism_ui::panels::notifications::NotificationLevel::Info,
+                            );
+                        }
                         if handled {
                             self.renderer.trail_cursor.reset();
                             self.sync_active_markdown_modified();
                         }
+                    }
+                    Some(MarkdownCtrlAction::VimBlockVisual) => {
+                        let visual = matches!(
+                            markdown.mode,
+                            neoism_ui::editor::markdown::MarkdownMode::Visual
+                        );
+                        let feed = markdown.vim.feed_ctrl('v', visual);
+                        let (h, snap, message) =
+                            Self::apply_markdown_vim_feed(markdown, clipboard, feed);
+                        handled = h;
+                        snap_cursor = snap;
+                        if let Some(message) = message {
+                            self.renderer.notifications.push(
+                                message,
+                                neoism_ui::panels::notifications::NotificationLevel::Info,
+                            );
+                        }
+                    }
+                    Some(MarkdownCtrlAction::VimJumpBack) => {
+                        let feed = markdown.vim.feed_ctrl('o', false);
+                        let (h, snap, _) =
+                            Self::apply_markdown_vim_feed(markdown, clipboard, feed);
+                        handled = h;
+                        snap_cursor = snap;
+                    }
+                    Some(MarkdownCtrlAction::VimJumpForward) => {
+                        let feed = markdown.vim.feed_ctrl('i', false);
+                        let (h, snap, _) =
+                            Self::apply_markdown_vim_feed(markdown, clipboard, feed);
+                        handled = h;
+                        snap_cursor = snap;
                     }
                     None => handled = false,
                 }
@@ -942,7 +1000,29 @@ impl Screen<'_> {
                     if applied.yank_notification {
                         message = Some(Self::markdown_yank_message(&register));
                     }
-                    clipboard.set(ClipboardType::Clipboard, register);
+                    if applied.sync_clipboard {
+                        clipboard.set(ClipboardType::Clipboard, register);
+                    }
+                }
+                // Macro replay for markdown: feed chars while replaying.
+                if let Some(keys) = applied.replay_keys {
+                    markdown.vim.replaying_macro = true;
+                    for ch in keys.chars() {
+                        if !matches!(
+                            markdown.mode,
+                            neoism_ui::editor::markdown::MarkdownMode::Normal
+                                | neoism_ui::editor::markdown::MarkdownMode::Visual
+                        ) {
+                            break;
+                        }
+                        let visual = matches!(
+                            markdown.mode,
+                            neoism_ui::editor::markdown::MarkdownMode::Visual
+                        );
+                        let feed = markdown.vim.feed(ch, visual);
+                        let _ = Self::apply_markdown_vim_feed(markdown, clipboard, feed);
+                    }
+                    markdown.vim.replaying_macro = false;
                 }
                 (applied.handled, applied.snap_cursor, message)
             }

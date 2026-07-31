@@ -146,6 +146,8 @@ impl Screen<'_> {
         self.renderer.file_tree.set_focused(false);
         match hit {
             NotesSidebarHit::Settings => self.open_notes_settings_menu(),
+            NotesSidebarHit::NewNote => self.create_untitled_note_in_open_vault(),
+            NotesSidebarHit::NewFolder => self.create_untitled_folder_in_open_vault(),
             NotesSidebarHit::CreateFirstNote => {
                 if let Some(dir) = self.notes_sidebar_create_target() {
                     self.open_notes_new_file_prompt(dir);
@@ -158,6 +160,9 @@ impl Screen<'_> {
                 self.open_notes_vault_menu_for_selector();
             }
             NotesSidebarHit::WorkspacePicker => {
+                self.renderer
+                    .notes_sidebar
+                    .animate_workspace_selector_press();
                 self.open_notes_vault_menu(x, y);
             }
             NotesSidebarHit::NoteIcon(index) => {
@@ -209,7 +214,10 @@ impl Screen<'_> {
         }
         let (mx, my) = self.mouse_logical_for_hit_test();
         let hovered = self.renderer.notes_sidebar.row_at(mx, my);
-        if let Some(dir) = self.renderer.notes_sidebar.update_notes_drag(mx, my, hovered)
+        if let Some(dir) = self
+            .renderer
+            .notes_sidebar
+            .update_notes_drag(mx, my, hovered)
         {
             // Dwell elapsed over a closed folder — spring it open.
             self.renderer.notes_sidebar.reveal_dir(&dir);
@@ -233,8 +241,7 @@ impl Screen<'_> {
         if self.renderer.notes_sidebar.notes_drag().is_none() {
             return false;
         }
-        let opened_on_press =
-            std::mem::take(&mut self.notes_sidebar_opened_on_press);
+        let opened_on_press = std::mem::take(&mut self.notes_sidebar_opened_on_press);
         match self.renderer.notes_sidebar.end_notes_drag() {
             // A note already opened on press; only a folder (deferred)
             // still needs its toggle here.
@@ -243,9 +250,7 @@ impl Screen<'_> {
                 let index = self.renderer.notes_sidebar.selected_index();
                 if self.renderer.notes_sidebar.note_is_dir(index) {
                     self.renderer.notes_sidebar.toggle_selected_dir();
-                } else if let Some(path) =
-                    self.renderer.notes_sidebar.note_path(index)
-                {
+                } else if let Some(path) = self.renderer.notes_sidebar.note_path(index) {
                     self.renderer.notes_sidebar.set_focused(false);
                     self.open_path_from_notes_sidebar(path);
                 }
@@ -266,11 +271,7 @@ impl Screen<'_> {
     /// it's a local `fs::rename`. Mirrors `move_file_tree_path`, and
     /// keeps the per-vault note index + link graph consistent via the
     /// same refresh the notes RENAME uses.
-    pub(crate) fn move_notes_sidebar_path(
-        &mut self,
-        source: PathBuf,
-        dest_dir: PathBuf,
-    ) {
+    pub(crate) fn move_notes_sidebar_path(&mut self, source: PathBuf, dest_dir: PathBuf) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
         let Some(file_name) = source.file_name() else {
@@ -339,10 +340,10 @@ impl Screen<'_> {
                     NotificationLevel::Info,
                 );
             }
-            Err(err) => self.renderer.notifications.push(
-                format!("Move failed: {err}"),
-                NotificationLevel::Error,
-            ),
+            Err(err) => self
+                .renderer
+                .notifications
+                .push(format!("Move failed: {err}"), NotificationLevel::Error),
         }
         self.mark_dirty();
     }
@@ -369,6 +370,8 @@ impl Screen<'_> {
             }
             NotesSidebarHit::WorkspacePicker
             | NotesSidebarHit::Settings
+            | NotesSidebarHit::NewNote
+            | NotesSidebarHit::NewFolder
             | NotesSidebarHit::CreateFirstNote
             | NotesSidebarHit::CreateWorkspaceVault
             | NotesSidebarHit::SelectVault => {
@@ -604,6 +607,84 @@ impl Screen<'_> {
         }
         self.assign_local_vault_to_notes_sidebar();
         self.notes_sidebar_target_dir()
+    }
+
+    /// Root of the vault currently displayed by the Notes panel. Header
+    /// quick-create actions always use this root, never the selected row.
+    fn notes_sidebar_open_vault_root(&mut self) -> Option<PathBuf> {
+        self.renderer.notes_sidebar.workspace_path()
+    }
+
+    fn next_untitled_notes_name(&self, vault: &Path, folder: bool) -> Option<String> {
+        for index in 1..=999 {
+            let stem = if index == 1 {
+                "Untitled".to_string()
+            } else {
+                format!("Untitled {index}")
+            };
+            let name = if folder { stem } else { format!("{stem}.md") };
+            let candidate = vault.join(&name);
+            if !candidate.exists()
+                && !self.renderer.notes_sidebar.contains_path(&candidate)
+            {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    fn create_untitled_note_in_open_vault(&mut self) {
+        let Some(vault) = self.notes_sidebar_open_vault_root() else {
+            return;
+        };
+        let Some(name) = self.next_untitled_notes_name(&vault, false) else {
+            return;
+        };
+        self.create_notes_file(vault, name);
+    }
+
+    fn create_untitled_folder_in_open_vault(&mut self) {
+        use neoism_ui::panels::notifications::NotificationLevel;
+
+        let Some(vault) = self.notes_sidebar_open_vault_root() else {
+            return;
+        };
+        let Some(name) = self.next_untitled_notes_name(&vault, true) else {
+            return;
+        };
+        if self.notes_sidebar_shows_shared_vault() {
+            if let Some(vault_root) = self.served_notes_vault_root() {
+                if self.send_remote_notes_create_dir(
+                    vault_root,
+                    String::new(),
+                    name.clone(),
+                ) {
+                    self.renderer.notifications.push(
+                        format!("Creating folder {name} in the shared vault…"),
+                        NotificationLevel::Info,
+                    );
+                    self.mark_dirty();
+                    return;
+                }
+            }
+        }
+
+        let target = vault.join(&name);
+        match std::fs::create_dir_all(&target) {
+            Ok(()) => {
+                self.renderer.notes_sidebar.refresh_notes();
+                self.renderer.notes_sidebar.set_focused(true);
+                self.renderer.notifications.push(
+                    format!("Created folder {}", target.display()),
+                    NotificationLevel::Info,
+                );
+            }
+            Err(err) => self.renderer.notifications.push(
+                format!("Create folder failed: {err}"),
+                NotificationLevel::Error,
+            ),
+        }
+        self.mark_dirty();
     }
 
     fn open_path_from_notes_sidebar(&mut self, path: PathBuf) {

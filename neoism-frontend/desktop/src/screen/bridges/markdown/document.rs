@@ -23,6 +23,8 @@ impl Screen<'_> {
         self.clear_current_workspace_buf_enter_guard();
         self.renderer.buffer_tabs.ensure_terminal_tab();
         self.renderer.buffer_tabs.open_markdown(path.clone());
+        let note_icon = self.renderer.notes_sidebar.note_icon_for_path(&path);
+        self.sync_note_tab_icon(&path, note_icon);
         self.renderer.file_tree.set_active_path(Some(path.clone()));
         if let Some(id) = self.current_workspace_id() {
             self.workspace_editor_active_paths.insert(id, path.clone());
@@ -33,8 +35,15 @@ impl Screen<'_> {
         // Feed the cover picker its candidates — the shared pane cannot
         // list directories.
         let covers = Self::list_available_covers();
+        let vim = self.renderer.vim_mode;
         if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(&path) {
             pane.available_covers = covers;
+            // Honor `[neoism] vim-mode` (default on): opt OUT to plain
+            // always-insert editing when the setting is off.
+            pane.vim_enabled = vim;
+            if !vim {
+                pane.enter_insert();
+            }
         }
         self.reapply_chrome_layout();
         self.renderer.trail_cursor.reset();
@@ -209,6 +218,16 @@ impl Screen<'_> {
         self.renderer.buffer_tabs.set_modified(path, modified);
         for tabs in self.renderer.pane_tabs.values_mut() {
             tabs.set_modified(path, modified);
+        }
+    }
+
+    pub(crate) fn sync_note_tab_icon(&mut self, path: &Path, icon: Option<String>) {
+        self.renderer.buffer_tabs.set_path_icon(path, icon.clone());
+        for tabs in self.renderer.pane_tabs.values_mut() {
+            tabs.set_path_icon(path, icon.clone());
+        }
+        for tabs in self.workspace_buffer_tabs.values_mut() {
+            tabs.set_path_icon(path, icon.clone());
         }
     }
 

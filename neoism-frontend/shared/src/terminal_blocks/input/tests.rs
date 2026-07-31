@@ -1212,6 +1212,30 @@ fn new_command_finishes_prior_running_block_on_joined_shell() {
 }
 
 #[test]
+fn joined_clear_completes_and_wipes_blocks_when_screen_resets_to_top() {
+    // On a joined shell with no OSC 133, `clear` snaps the cursor to the TOP
+    // (unlike a normal command, whose cursor ends below its output). Without
+    // the clear-to-top completion the clear block stays Running forever, the
+    // pane never drops to zero blocks, and the old `ls` output stays occluded.
+    let mut input = TerminalInputBuffer::default();
+    input.insert_str("ls");
+    input.submit_with_context(None, Some(10));
+    assert!(!input.finish_unintegrated_remote_command_at_prompt("", Some(12)));
+    assert!(input.finish_unintegrated_remote_command_at_prompt("", Some(12)));
+
+    input.insert_str("clear");
+    input.submit_with_context(None, Some(13));
+    input.clear_previous_blocks_for_active_command();
+
+    // Screen reset: cursor snaps to the top (<= submit row) on a blank row.
+    // First observation arms the stability anchor; the second finishes AND
+    // wipes every block so the splash returns.
+    assert!(!input.finish_unintegrated_remote_command_at_prompt("", Some(0)));
+    assert!(input.finish_unintegrated_remote_command_at_prompt("", Some(0)));
+    assert_eq!(input.command_block_count(), 0);
+}
+
+#[test]
 fn remote_clear_reopens_composer_with_zero_blocks_for_splash() {
     let mut input = TerminalInputBuffer::default();
     input.insert_str("clear");

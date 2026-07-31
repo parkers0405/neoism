@@ -152,22 +152,37 @@ impl TerminalInputBuffer {
         //       `output_start_row` keeps a silent, still-running command
         //       (e.g. `sleep`, whose cursor never leaves the submission row)
         //       from being marked finished early.
+        let clear_cmd = is_clear_command(&block.command);
         let blank_prompt_below_output = trimmed.is_empty()
             && matches!(
                 (block.output_start_row, cursor_abs_row),
                 (Some(start), Some(cursor)) if cursor > start
             );
-        if !visible_prompt && !blank_prompt_below_output {
+        // (c) `clear` reset the screen: unlike a normal command (whose cursor
+        // ends BELOW its output), a screen reset snaps the cursor to the TOP —
+        // at or above where the command was submitted. Without this a joined
+        // `clear` on a no-OSC-133 shell leaves a stuck Running block, so the
+        // pane never drops to zero blocks: the splash / clean viewport never
+        // returns and the old `ls` output (and its hover-links) stays occluded
+        // behind the "hidden" screen.
+        let cleared_to_top = clear_cmd
+            && trimmed.is_empty()
+            && matches!(
+                (block.output_start_row, cursor_abs_row),
+                (Some(start), Some(cursor)) if cursor <= start
+            );
+        let blank_completion = blank_prompt_below_output || cleared_to_top;
+        if !visible_prompt && !blank_completion {
             self.remote_blank_prompt_anchor = None;
             return false;
         }
 
-        // Blank-prompt path has no glyph to trust, so require the blank cursor
-        // row to hold the SAME position across two observations before
+        // Blank-prompt paths have no glyph to trust, so require the blank
+        // cursor row to hold the SAME position across two observations before
         // finishing. While a command is still streaming output the cursor row
         // advances every frame and never matches the anchor, so a long build
         // that happens to print a blank line is not marked done early.
-        if blank_prompt_below_output && !visible_prompt {
+        if blank_completion && !visible_prompt {
             if self.remote_blank_prompt_anchor != cursor_abs_row {
                 self.remote_blank_prompt_anchor = cursor_abs_row;
                 return false;
@@ -189,7 +204,7 @@ impl TerminalInputBuffer {
 
         self.remote_blank_prompt_anchor = None;
         self.remote_prompt_fallback_open = true;
-        let clear_completed = is_clear_command(&block.command);
+        let clear_completed = clear_cmd;
         block.status = TerminalCommandBlockStatus::Finished { exit_code: None };
         block.finished_at = Some(Instant::now());
         if clear_completed {

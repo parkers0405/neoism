@@ -87,7 +87,13 @@ fff-search = { version = "0.10.1-nightly.31be224", default-features = false, fea
     "ripgrep",
 ] }
 futures-core = "0.3"
-git2 = "0.20.2"
+# Keep libgit2's HTTPS + SSH transports, but compile its C stack and OpenSSL
+# into release binaries. Without the vendored features, openssl-sys discovers
+# Homebrew on macOS and bakes /opt/homebrew dylib paths into the executable.
+git2 = { version = "0.20.2", features = [
+    "vendored-libgit2",
+    "vendored-openssl",
+] }
 image_rs = { package = "image", version = "0.25.10", default-features = false, features = [
     "gif",
     "jpeg",

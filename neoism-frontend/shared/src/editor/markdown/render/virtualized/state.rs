@@ -250,4 +250,42 @@ mod tests {
         assert_eq!(nodes[1].content.as_ref().unwrap().line_count, 32);
         assert_eq!(nodes[2].content.as_ref().unwrap().line_start, 64);
     }
+
+    #[test]
+    fn external_source_replacement_keeps_surface_for_viewport_anchor() {
+        let source = (0..48)
+            .map(|line| format!("paragraph {line}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut pane = MarkdownPane::from_source(PathBuf::from("agent-edit.md"), &source);
+        assert!(super::prepare_surface(&mut pane, 720.0, 0.0, 400.0));
+
+        pane.scroll_y = 640.0;
+        pane.target_scroll_y = 640.0;
+        assert!(super::prepare_surface(&mut pane, 720.0, 0.0, 400.0));
+        let source_id = pane.virtual_render.source_id.clone();
+        let source_revision = pane.virtual_render.source_revision;
+
+        let edited = source.replacen("paragraph 40", "paragraph 40 — agent edit", 1);
+        pane.set_source_preserving_view(&edited);
+
+        assert_eq!(pane.scroll_y, 640.0);
+        assert_eq!(pane.target_scroll_y, 640.0);
+        assert_eq!(
+            pane.virtual_render.source_id, source_id,
+            "the old surface is the viewport anchor for the replacement frame"
+        );
+        assert_eq!(
+            pane.virtual_render.source_revision, source_revision,
+            "the renderer must observe the pane revision change itself"
+        );
+        assert!(
+            super::prepare_surface(&mut pane, 720.0, 0.0, 400.0),
+            "the replacement frame should apply cleanly"
+        );
+        assert!(
+            pane.scroll_y > 0.0,
+            "an external edit must not reset a scrolled note to the top"
+        );
+    }
 }

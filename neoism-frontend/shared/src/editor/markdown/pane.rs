@@ -172,7 +172,11 @@ impl MarkdownPane {
         self.follow_cursor = false;
         self.goal_visual_col = goal_visual_col;
         self.pending_line_edit = Some(MarkdownPendingLineEdit::Complex);
-        self.virtual_render = MarkdownVirtualRenderState::default();
+        // Keep the existing virtual surface alive. The renderer replaces its
+        // source on the next frame and uses the old surface to capture a
+        // stable scroll anchor. Resetting it here loses that anchor, so the
+        // freshly-created surface reports scroll 0 and an agent filesystem
+        // edit appears to reload the note at the top.
     }
 
     pub fn load(path: PathBuf) -> Self {

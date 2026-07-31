@@ -50,6 +50,11 @@ pub struct TerminalInputBuffer {
     /// returned shell prompt (or when remote `clear` explicitly resets the
     /// pane), and cleared on the next submission/command start.
     remote_prompt_fallback_open: bool,
+    /// Last OSC 133;D generation observed from the terminal parser. Keeping
+    /// this separately from the final running/awaiting booleans preserves a
+    /// fast command's completion when all lifecycle bytes arrive in one
+    /// parser batch.
+    last_command_finished_generation: u64,
     prompt_burst_started: Option<Instant>,
     /// Visual feedback for the most recent Tab press — drives the
     /// composer's success-flash + no-match-shake animations.

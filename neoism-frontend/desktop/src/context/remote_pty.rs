@@ -15,9 +15,8 @@
 //!   the byte feed (daemon `PtyOutput` → machine parser) and the shared
 //!   session slot.
 //!
-//! Daemon-backed tabs are the default. `NEOISM_DAEMON_TABS=0` remains a
-//! temporary diagnostic escape hatch, but ordinary users always get the
-//! one-shell-many-screens path.
+//! Gated by `NEOISM_DAEMON_TABS=1` while the cutover bakes; flip the
+//! default once desktop+web sharing has been exercised.
 
 use std::sync::{Arc, Mutex};
 
@@ -53,8 +52,8 @@ pub struct PreparedRemotePty {
 /// True when desktop terminal tabs should render daemon-hosted shells.
 pub fn daemon_tabs_enabled() -> bool {
     std::env::var("NEOISM_DAEMON_TABS")
-        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-        .unwrap_or(true)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// Build the input sink for one future daemon-backed pane. `handle` /

@@ -50,13 +50,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // cwd-less) into the host. A guest attaches without declaring
         // anything; adopt flows create sessions explicitly.
         if link_is_home {
-            // The initial pane is created before the embedded/home daemon is
-            // connected. Move that fresh local shell onto the daemon now so
-            // the host and every guest attach to the SAME PTY. Previously we
-            // created a detached daemon shell for the route while the host UI
-            // kept writing to its private PTY; guests saw a dead-looking main
-            // terminal and only terminals opened later worked.
-            self.rebind_local_terminal_routes_to_home_daemon();
             self.ensure_daemon_sessions_for_all_routes();
             self.sync_daemon_workspaces();
         }

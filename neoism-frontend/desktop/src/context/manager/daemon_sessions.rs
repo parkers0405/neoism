@@ -27,111 +27,6 @@ use std::time::Instant;
 use neoism_terminal_pty::{PtySession, PtySessionConfig};
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
-    /// Rebuild terminal-only panes that predate the HOME daemon link as real
-    /// daemon-backed panes. Neoism constructs the first grid before the async
-    /// embedded-daemon connection is ready, so without this cutover the host
-    /// and guests operate two unrelated shells under one visual tab.
-    pub(super) fn rebind_local_terminal_routes_to_home_daemon(&mut self) {
-        if self.daemon.link_is_peer
-            || self.daemon.link.is_none()
-            || !crate::context::remote_pty::daemon_tabs_enabled()
-        {
-            return;
-        }
-
-        struct RebindTarget {
-            grid_index: usize,
-            node: taffy::NodeId,
-            old_route_id: usize,
-            rich_text_id: usize,
-            dimension: ContextDimension,
-            cursor: Cursor,
-            cwd: Option<String>,
-        }
-
-        let mut targets = Vec::new();
-        for (grid_index, grid) in self.contexts.iter().enumerate() {
-            for (node, item) in grid.contexts() {
-                let context = item.context();
-                if context.remote_pty.is_some() || context.has_non_terminal_surface() {
-                    continue;
-                }
-                #[cfg(not(target_os = "windows"))]
-                let cwd = neoism_terminal_pty::foreground_process_path(
-                    *context.main_fd,
-                    context.shell_pid,
-                )
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned())
-                .or_else(|| self.config.working_dir.clone());
-                #[cfg(target_os = "windows")]
-                let cwd = context
-                    .terminal
-                    .try_lock_unfair()
-                    .and_then(|terminal| terminal.current_directory.clone())
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .or_else(|| self.config.working_dir.clone());
-
-                targets.push(RebindTarget {
-                    grid_index,
-                    node: *node,
-                    old_route_id: context.route_id,
-                    rich_text_id: context.rich_text_id,
-                    dimension: context.dimension,
-                    cursor: context.cursor_from_ref(),
-                    cwd,
-                });
-            }
-        }
-
-        for target in targets {
-            let Some(prepared) = self.prepared_remote_pty_for_adopt() else {
-                break;
-            };
-            let mut config = self.config.clone();
-            config.working_dir = target.cwd.clone();
-            let replacement = match ContextManager::create_context(
-                (&target.cursor, self.config.cursor_blinking),
-                self.event_proxy.clone(),
-                self.window_id,
-                target.rich_text_id,
-                target.dimension,
-                &config,
-                Some(prepared),
-            ) {
-                Ok(context) => context,
-                Err(error) => {
-                    tracing::warn!(
-                        ?error,
-                        route_id = target.old_route_id,
-                        "could not move initial terminal onto home daemon"
-                    );
-                    continue;
-                }
-            };
-            let new_route_id = replacement.route_id;
-            self.register_remote_context_with_cwd(&replacement, target.cwd);
-
-            let Some(grid) = self.contexts.get_mut(target.grid_index) else {
-                continue;
-            };
-            let Some(item) = grid.contexts_mut().get_mut(&target.node) else {
-                continue;
-            };
-            item.val = replacement;
-            grid.sync_session_tree();
-            if self.current_index == target.grid_index && grid.current == target.node {
-                self.current_route = new_route_id;
-            }
-            tracing::info!(
-                target: "neoism::workspaces",
-                old_route_id = target.old_route_id,
-                new_route_id,
-                "moved initial host terminal onto shared daemon PTY"
-            );
-        }
-    }
-
     pub(super) fn rehydrate_remote_routes_for_attached_daemon(&mut self) {
         let Some(endpoint) = self.daemon_endpoint().map(str::to_string) else {
             return;
@@ -300,11 +195,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         }
         // On a JOINED (peer) workspace every new terminal must run on
         // the HOST — ssh-into-the-host semantics — so bypass the
-        // ambient `NEOISM_DAEMON_TABS` diagnostic gate and always bind a
-        // remote PTY. HOME links use the same daemon-backed path by default;
-        // the env switch is retained only as an explicit local fallback.
-        // All new-terminal builders (split / new tab / stacked terminal)
-        // funnel through here.
+        // ambient `NEOISM_DAEMON_TABS` cutover gate and always bind a
+        // remote PTY. A HOME link keeps the env gate while the cutover
+        // bakes. All new-terminal builders (split / new tab / stacked
+        // terminal) funnel through here, so this single check makes the
+        // guest host-hosted everywhere.
         if !self.daemon_link_is_peer()
             && !crate::context::remote_pty::daemon_tabs_enabled()
         {
@@ -659,7 +554,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // their own strip. Session re-attach stays for the single-user
         // flow (re-adopting your OWN workspace from another screen).
         let mut tabs: Vec<WorkspaceTabSummary> =
-            if self.workspace_owned_locally(workspace_id) {
+            if should_reattach_existing_sessions(
+                self.daemon.link_is_peer,
+                self.workspace_owned_locally(workspace_id),
+            ) {
                 self.daemon
                     .cache
                     .daemon_workspace_tabs
@@ -980,9 +878,19 @@ fn workspace_uses_attached_daemon(
     !link_is_peer || current_workspace_is_adopted
 }
 
+/// Existing tabs are a same-user HOME-link roaming feature. A PEER link is a
+/// multiplayer join even when both clients happen to report the same machine
+/// identity (for example two Neoism windows during local testing); attaching
+/// the owner's published placeholder session in that case gives the guest a
+/// terminal the host is not actually using. Guests always get their own live
+/// daemon shell in the shared workspace root.
+fn should_reattach_existing_sessions(link_is_peer: bool, workspace_owned_locally: bool) -> bool {
+    !link_is_peer && workspace_owned_locally
+}
+
 #[cfg(test)]
 mod workspace_isolation_tests {
-    use super::workspace_uses_attached_daemon;
+    use super::{should_reattach_existing_sessions, workspace_uses_attached_daemon};
 
     #[test]
     fn local_workspace_ignores_peer_link() {
@@ -998,5 +906,12 @@ mod workspace_isolation_tests {
     fn home_link_keeps_existing_local_mirroring_behavior() {
         assert!(workspace_uses_attached_daemon(false, false));
         assert!(workspace_uses_attached_daemon(false, true));
+    }
+
+    #[test]
+    fn peer_join_never_attaches_the_owners_published_terminal() {
+        assert!(!should_reattach_existing_sessions(true, true));
+        assert!(!should_reattach_existing_sessions(true, false));
+        assert!(should_reattach_existing_sessions(false, true));
     }
 }

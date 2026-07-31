@@ -296,6 +296,12 @@ __neoism_precmd() {{
   # Prompt frameworks may replace PROMPT after startup. Emit A/B here too so
   # the composer still owns the next editable line.
   printf '\033]133;A\007\033]133;B\007'
+  # Keep the app-owned composer as the only visible prompt. Frameworks such
+  # as Starship rebuild PROMPT/RPROMPT in their precmd hooks, which run before
+  # this final hook; clearing both here prevents a duplicate raw prompt and
+  # its command-duration timer from painting in the terminal grid.
+  PROMPT=''
+  RPROMPT=''
 }}
 __neoism_preexec() {{
   printf '\033]133;C\007'
@@ -305,7 +311,7 @@ typeset -ga preexec_functions
 precmd_functions=(${{precmd_functions:#__neoism_precmd}} __neoism_precmd)
 preexec_functions=(${{preexec_functions:#__neoism_preexec}} __neoism_preexec)
 bindkey '^P' kill-buffer
-PROMPT=$'%{{\033]133;A\007%}}%{{\033]133;B\007%}}'
+PROMPT=''
 RPROMPT=''
 {sh_subshell_functions}
 "#

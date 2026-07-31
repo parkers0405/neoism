@@ -526,6 +526,12 @@ __neoism_precmd() {{
   # Starship replace PROMPT dynamically after this wrapper loads; keeping
   # A/B here preserves Neoism's composer lifecycle in that case.
   printf '\033]133;A\007\033]133;B\007'
+  # This hook is deliberately last. Prompt frameworks run before it and may
+  # rebuild PROMPT/RPROMPT on every command; clear those values here so their
+  # raw prompt (including command-duration timers) never paints behind the
+  # Neoism-owned composer.
+  PROMPT=''
+  RPROMPT=''
 }}
 __neoism_preexec() {{
   printf '\033]133;C\007'
@@ -537,7 +543,7 @@ preexec_functions=(${{preexec_functions:#__neoism_preexec}} __neoism_preexec)
 bindkey '^P' kill-buffer
 unsetopt PROMPT_SP
 PROMPT_EOL_MARK=''
-PROMPT=$'%{{\033]133;A\007%}}%{{\033]133;B\007%}}'
+PROMPT=''
 RPROMPT=''
 __neoism_zdotdir="{zsh_dir}"
 bash() {{
@@ -661,6 +667,8 @@ mod tests {
             .expect("precmd section");
         assert!(precmd.contains("133;D;%d"));
         assert!(precmd.contains("133;A\\007\\033]133;B"));
+        assert!(precmd.contains("PROMPT=''"));
+        assert!(precmd.contains("RPROMPT=''"));
     }
 
     #[test]

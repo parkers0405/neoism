@@ -697,10 +697,9 @@ impl Application<'_> {
         // overrides the cloned config's `working_dir` when present
         // and falls back to the app config otherwise.
         let config = if working_dir_overwrite.is_some() {
-            neoism_backend::config::Config {
-                working_dir: working_dir_overwrite,
-                ..self.config.clone()
-            }
+            let mut config = self.config.clone();
+            config.terminal.working_dir = working_dir_overwrite;
+            config
         } else {
             self.config.clone()
         };

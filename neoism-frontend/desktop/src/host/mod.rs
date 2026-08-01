@@ -339,6 +339,7 @@ impl Renderer {
         let macos_traffic_light_inset =
             if config.ui.window.decorations != Decorations::Buttonless {
                 let traffic_light_x = config
+                    .ui
                     .window
                     .macos_traffic_light_position_x
                     .unwrap_or(crate::constants::TRAFFIC_LIGHT_PADDING)

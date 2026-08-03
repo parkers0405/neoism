@@ -66,13 +66,7 @@ impl<'a> neoism_ui::session_layout::ContextGridLike for ContextGridDescriptorAda
             .and_then(|node| self.0.contexts().get(&node))
             .map(|item| {
                 let context = item.context();
-                (
-                    context.shell_pid,
-                    context.code.is_none()
-                        && context.markdown.is_none()
-                        && context.neoism_agent.is_none()
-                        && context.neoism_tags.is_none(),
-                )
+                (context.shell_pid, !context.has_non_terminal_surface())
             })
             .unwrap_or((0, false));
         neoism_ui::session_layout::ClosingContextSlot {

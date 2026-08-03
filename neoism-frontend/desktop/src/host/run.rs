@@ -199,10 +199,7 @@ impl Renderer {
                         screen_lines = screen_lines.saturating_sub(composer_rows).max(1);
                     }
                 }
-                if ctx.markdown.is_none()
-                    && ctx.neoism_agent.is_none()
-                    && ctx.neoism_tags.is_none()
-                {
+                if !ctx.has_non_terminal_surface() {
                     self.scrollbar
                         .push_panel_state(scrollbar::PanelScrollState {
                             rich_text_id: ctx.rich_text_id,
@@ -618,9 +615,7 @@ impl Renderer {
         let mut overlay_active = false;
         if let Some(grid_context) = grid.contexts_mut().get_mut(&active_key) {
             let ctx = grid_context.context_mut();
-            let is_terminal_pane = ctx.markdown.is_none()
-                && ctx.neoism_agent.is_none()
-                && ctx.neoism_tags.is_none();
+            let is_terminal_pane = !ctx.has_non_terminal_surface();
             let injection = ctx.splash_injection;
             let mut wants_visible = false;
             if is_terminal_pane && injection.is_some() {
@@ -926,10 +921,7 @@ impl Renderer {
                         let mut probes = Vec::new();
                         for (_, item) in grid.contexts() {
                             let ctx = item.context();
-                            if ctx.markdown.is_some()
-                                || ctx.neoism_agent.is_some()
-                                || ctx.neoism_tags.is_some()
-                            {
+                            if ctx.has_non_terminal_surface() {
                                 continue;
                             }
                             // tcgetpgrp on the PTY fd (unix); on Windows the
@@ -1489,9 +1481,7 @@ impl Renderer {
             let status_h = self.status_line.scaled_height();
             let status_y = (logical_height - status_h).max(0.0);
             let current = context_manager.current();
-            let is_terminal_context = current.markdown.is_none()
-                && current.neoism_agent.is_none()
-                && current.neoism_tags.is_none();
+            let is_terminal_context = !current.has_non_terminal_surface();
             let guard_overlap = if is_terminal_context {
                 4.0 * self.chrome_scale
             } else {

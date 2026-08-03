@@ -27,6 +27,10 @@ impl Screen<'_> {
     }
 
     pub fn open_path_in_editor(&mut self, path: std::path::PathBuf) {
+        if crate::screen::bridges::epub::is_epub_path(&path) {
+            self.open_path_in_epub(path);
+            return;
+        }
         if crate::editor::markdown::state::is_markdown_path(&path) {
             self.open_path_in_markdown(path);
             return;

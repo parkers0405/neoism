@@ -1,7 +1,10 @@
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
-use crate::editor::markdown::{source_map::InlineSourceMap, MarkdownPane};
+use crate::editor::markdown::{
+    source_map::InlineSourceMap, MarkdownPane, MarkdownReaderHighlightColor,
+    MarkdownWrapHitRow,
+};
 use crate::widgets::markdown as md;
 
 use super::types::{
@@ -730,10 +733,37 @@ pub(super) fn draw_selection_for_line(
     clip_top: f32,
     clip_bottom: f32,
 ) {
+    for (raw_start, raw_end, color) in pane.reader_highlights_for_line(line_ix) {
+        let color = match color {
+            MarkdownReaderHighlightColor::Yellow => theme.yellow,
+            MarkdownReaderHighlightColor::Green => theme.green,
+            MarkdownReaderHighlightColor::Blue => theme.blue,
+            MarkdownReaderHighlightColor::Pink => theme.red,
+            MarkdownReaderHighlightColor::Purple => theme.magenta,
+        };
+        draw_text_range_highlight_with_rows(
+            sugarloaf,
+            line,
+            raw_start,
+            raw_end,
+            text_x,
+            text_y,
+            marker_len,
+            line_h,
+            wrap_width,
+            opts,
+            theme.f32_alpha(color, 0.22),
+            clip,
+            clip_top,
+            clip_bottom,
+            ORDER_BG + 2,
+            pane.block_wrap_hit_stops.get(&line_ix).map(Vec::as_slice),
+        );
+    }
     let Some((raw_start, raw_end)) = pane.selection_for_line(line_ix) else {
         return;
     };
-    draw_text_range_highlight(
+    draw_text_range_highlight_with_rows(
         sugarloaf,
         line,
         raw_start,
@@ -749,6 +779,7 @@ pub(super) fn draw_selection_for_line(
         clip_top,
         clip_bottom,
         ORDER_BG + 3,
+        pane.block_wrap_hit_stops.get(&line_ix).map(Vec::as_slice),
     );
 }
 
@@ -846,6 +877,115 @@ pub(super) fn draw_search_matches_for_line(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
+fn draw_text_range_highlight_with_rows(
+    sugarloaf: &mut Sugarloaf,
+    line: &str,
+    raw_start: usize,
+    raw_end: usize,
+    text_x: f32,
+    text_y: f32,
+    marker_len: usize,
+    line_h: f32,
+    wrap_width: f32,
+    opts: &DrawOpts,
+    color: [f32; 4],
+    clip: [f32; 4],
+    clip_top: f32,
+    clip_bottom: f32,
+    order: u8,
+    hit_rows: Option<&[MarkdownWrapHitRow]>,
+) {
+    let Some(rows) = hit_rows.filter(|rows| !rows.is_empty()) else {
+        draw_text_range_highlight(
+            sugarloaf,
+            line,
+            raw_start,
+            raw_end,
+            text_x,
+            text_y,
+            marker_len,
+            line_h,
+            wrap_width,
+            opts,
+            color,
+            clip,
+            clip_top,
+            clip_bottom,
+            order,
+        );
+        return;
+    };
+    let marker_len = marker_len.min(line.len());
+    let start = raw_start.max(marker_len).min(line.len());
+    let end = raw_end.max(marker_len).min(line.len());
+    if start >= end {
+        return;
+    }
+    let body = &line[marker_len..];
+    let map = InlineSourceMap::new(body);
+    let visible_start = map.visible_for_source(start - marker_len);
+    let visible_end = map.visible_for_source(end - marker_len);
+    let point = |visible: usize| -> (usize, f32) {
+        for (index, row) in rows.iter().enumerate() {
+            let rendered_len = row.stops.len().saturating_sub(1);
+            let row_end = row.start.saturating_add(rendered_len);
+            let next_start = rows
+                .get(index + 1)
+                .map(|next| next.start)
+                .unwrap_or(usize::MAX);
+            if visible <= row_end {
+                let stop = visible.saturating_sub(row.start).min(rendered_len);
+                return (index, row.stops.get(stop).copied().unwrap_or_default());
+            }
+            // Word wrapping can consume the separating whitespace. A source
+            // boundary inside that gap belongs at the beginning of the next
+            // rendered row, not at an estimated uniform column.
+            if visible < next_start {
+                if let Some(next) = rows.get(index + 1) {
+                    return (index + 1, next.stops.first().copied().unwrap_or_default());
+                }
+                return (index, row.stops.last().copied().unwrap_or_default());
+            }
+        }
+        let index = rows.len().saturating_sub(1);
+        (index, rows[index].stops.last().copied().unwrap_or_default())
+    };
+    let (start_row, start_x) = point(visible_start);
+    let (end_row, end_x) = point(visible_end);
+    let cell_w = cursor_cell_width(opts);
+    for row_index in start_row..=end_row {
+        let row = &rows[row_index];
+        let row_start_x = row.stops.first().copied().unwrap_or_default();
+        let row_end_x = row.stops.last().copied().unwrap_or(row_start_x);
+        let x0 = if row_index == start_row {
+            start_x
+        } else {
+            row_start_x
+        };
+        let x1 = if row_index == end_row {
+            end_x
+        } else {
+            row_end_x
+        };
+        let y = text_y + row_index as f32 * line_h;
+        if y + line_h < clip_top || y > clip_bottom {
+            continue;
+        }
+        draw_rect_clipped(
+            sugarloaf,
+            clip,
+            text_x + x0.min(x1),
+            y,
+            (x1 - x0).abs().max(cell_w),
+            line_h,
+            color,
+            DEPTH,
+            order,
+        );
+    }
+}
+
 pub(super) fn draw_text_range_highlight(
     sugarloaf: &mut Sugarloaf,
     line: &str,

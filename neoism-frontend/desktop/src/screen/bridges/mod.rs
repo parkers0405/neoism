@@ -4,6 +4,7 @@ pub mod agent;
 pub mod buffer_tabs;
 pub mod code;
 pub mod draw;
+pub mod epub;
 pub mod extensions;
 pub mod file_tree;
 pub mod finder;

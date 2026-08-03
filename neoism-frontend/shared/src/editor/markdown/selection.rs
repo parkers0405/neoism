@@ -4,6 +4,38 @@ use super::helpers::*;
 use super::types::*;
 
 impl MarkdownPane {
+    pub fn visual_selection(
+        &self,
+    ) -> Option<(MarkdownPosition, MarkdownPosition, String)> {
+        let (start, end) = self.normalized_visual_range()?;
+        Some((start, end, self.text_for_range(start, end)))
+    }
+
+    pub fn reader_highlights_for_line(
+        &self,
+        line: usize,
+    ) -> Vec<(usize, usize, MarkdownReaderHighlightColor)> {
+        let line_len = self.lines.get(line).map(String::len).unwrap_or(0);
+        self.reader_highlights
+            .iter()
+            .filter_map(|highlight| {
+                let (start, end) = if highlight.start <= highlight.end {
+                    (highlight.start, highlight.end)
+                } else {
+                    (highlight.end, highlight.start)
+                };
+                if line < start.line || line > end.line {
+                    return None;
+                }
+                let start_col =
+                    if line == start.line { start.col } else { 0 }.min(line_len);
+                let end_col =
+                    if line == end.line { end.col } else { line_len }.min(line_len);
+                (start_col < end_col).then_some((start_col, end_col, highlight.color))
+            })
+            .collect()
+    }
+
     pub fn yank_current_line(&self) -> String {
         self.lines
             .get(self.cursor_line)
@@ -169,6 +201,7 @@ impl MarkdownPane {
             return self
                 .lines
                 .get(start.line)
+                .filter(|line| !is_notebook_markdown_cell_marker_line(line))
                 .map(|line| {
                     let start_col = floor_char_boundary(line, start.col.min(line.len()));
                     let end_col = floor_char_boundary(line, end.col.min(line.len()));
@@ -177,25 +210,26 @@ impl MarkdownPane {
                 .unwrap_or_default();
         }
 
-        let mut out = String::new();
+        let mut selected_lines = Vec::new();
         for line_ix in start.line..=end.line.min(self.lines.len().saturating_sub(1)) {
             let Some(line) = self.lines.get(line_ix) else {
                 continue;
             };
-            if line_ix > start.line {
-                out.push('\n');
+            if is_notebook_markdown_cell_marker_line(line) {
+                continue;
             }
-            if line_ix == start.line {
+            let selected = if line_ix == start.line {
                 let start_col = floor_char_boundary(line, start.col.min(line.len()));
-                out.push_str(&line[start_col..]);
+                line[start_col..].to_string()
             } else if line_ix == end.line {
                 let end_col = floor_char_boundary(line, end.col.min(line.len()));
-                out.push_str(&line[..end_col]);
+                line[..end_col].to_string()
             } else {
-                out.push_str(line);
-            }
+                line.clone()
+            };
+            selected_lines.push(selected);
         }
-        out
+        selected_lines.join("\n")
     }
 
     pub(super) fn replace_range_with(
@@ -210,13 +244,30 @@ impl MarkdownPane {
         let last = self.lines.get(end_line).cloned().unwrap_or_default();
         let start_col = floor_char_boundary(&first, start.col.min(first.len()));
         let end_col = floor_char_boundary(&last, end.col.min(last.len()));
+        let protected_cell_markers = self
+            .lines
+            .get(start_line.saturating_add(1)..end_line)
+            .unwrap_or_default()
+            .iter()
+            .filter(|line| is_notebook_markdown_cell_marker_line(line))
+            .cloned()
+            .collect::<Vec<_>>();
         let merged =
             format!("{}{}{}", &first[..start_col], replacement, &last[end_col..]);
         // A replacement may itself be multi-line (Visual paste). Preserve the
         // pane invariant that each Vec entry is one source line instead of
         // leaving embedded `\n` bytes inside a single line string.
-        let replacement_lines =
-            merged.split('\n').map(str::to_string).collect::<Vec<_>>();
+        let replacement_lines = if protected_cell_markers.is_empty() {
+            merged.split('\n').map(str::to_string).collect::<Vec<_>>()
+        } else {
+            let mut lines = format!("{}{}", &first[..start_col], replacement)
+                .split('\n')
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            lines.extend(protected_cell_markers);
+            lines.push(last[end_col..].to_string());
+            lines
+        };
         self.lines.splice(start_line..=end_line, replacement_lines);
         self.reset_source_len_from_lines();
         self.pending_line_edit = Some(MarkdownPendingLineEdit::Complex);

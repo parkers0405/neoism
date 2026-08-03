@@ -53,6 +53,13 @@ impl Screen<'_> {
             if let Some(notebook) = item.val.notebook.as_mut() {
                 markdown_scroll_moving |= notebook.markdown.tick_scroll();
             }
+            if let Some(epub) = item.context_mut().epub.as_mut() {
+                let moving = epub.markdown.tick_scroll();
+                markdown_scroll_moving |= moving;
+                if moving {
+                    epub.capture_location();
+                }
+            }
             if let Some(ext) = item.val.neoism_extensions.as_mut() {
                 extensions_scroll_moving |= ext.tick_scroll();
             }
@@ -110,6 +117,13 @@ impl Screen<'_> {
                     .as_ref()
                     .and_then(|notebook| notebook.markdown.cursor_rect)
             })
+            .or_else(|| {
+                self.context_manager
+                    .current()
+                    .epub
+                    .as_ref()
+                    .and_then(|epub| epub.markdown.cursor_rect)
+            })
             .is_some();
         let code_cursor_available = self
             .context_manager
@@ -119,7 +133,8 @@ impl Screen<'_> {
             .and_then(|code| code.cursor_rect)
             .is_some();
         let markdown_active = self.context_manager.current().markdown.is_some()
-            || self.context_manager.current().notebook.is_some();
+            || self.context_manager.current().notebook.is_some()
+            || self.context_manager.current().epub.is_some();
         let terminal_block_input_active = {
             #[cfg(target_os = "macos")]
             {

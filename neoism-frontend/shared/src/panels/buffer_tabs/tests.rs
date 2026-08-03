@@ -29,6 +29,26 @@ fn file(path: &str) -> BufferTab<()> {
 }
 
 #[test]
+fn long_tab_title_is_ellipsized_within_its_pixel_budget() {
+    let fitted = BufferTabs::<()>::fit_title(
+        "A very long Monocraft EPUB filename that must stay inside its tab.epub",
+        12.0,
+        |_| 1.0,
+    );
+
+    assert!(fitted.ends_with(TITLE_ELLIPSIS));
+    assert!(fitted.chars().count() <= 12);
+}
+
+#[test]
+fn short_tab_title_is_not_needlessly_changed() {
+    assert_eq!(
+        BufferTabs::<()>::fit_title("Bible.epub", 40.0, |_| 1.0),
+        "Bible.epub"
+    );
+}
+
+#[test]
 fn active_close_plan_closes_terminal_route_when_not_in_editor() {
     let mut tabs = BufferTabs::<()>::new();
     tabs.set_tabs(

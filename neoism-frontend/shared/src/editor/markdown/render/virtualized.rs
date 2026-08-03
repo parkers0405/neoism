@@ -8,7 +8,8 @@ use sugarloaf::{Sugarloaf, VirtualBounds};
 use web_time::Instant;
 
 use crate::editor::markdown::helpers::{
-    block_handle_rect, is_divider, parse_markdown_list_marker, quote_marker_len,
+    block_handle_rect, is_divider, notebook_fenced_cell_index,
+    notebook_markdown_cell_index, parse_markdown_list_marker, quote_marker_len,
     source_from_lines,
 };
 use crate::editor::markdown::{
@@ -43,6 +44,9 @@ use super::table::{measure_table, parse_table, render_table_with_source_base};
 use super::types::{
     BLOCK_RADIUS, CODE_BLOCK_BODY_PAD, CODE_BLOCK_HEADER_H, DEPTH, ORDER_BG, ORDER_TEXT,
 };
+
+const NOTEBOOK_CELL_GAP: f32 = 18.0;
+const NOTEBOOK_OUTPUT_TOP_GAP: f32 = 10.0;
 
 include!("virtualized/surface.rs");
 include!("virtualized/draw_blocks.rs");

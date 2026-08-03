@@ -621,6 +621,35 @@ fn rendered_image_outputs_decode_bitmap_outputs() {
 }
 
 #[test]
+fn rendered_image_outputs_are_cached_between_frames() {
+    let mut doc = NotebookDocument::default();
+    doc.cells.push(NotebookCell {
+        cell_type: NotebookCellType::Code,
+        metadata: Value::Object(serde_json::Map::new()),
+        source: NotebookSource::Text("display(fig)\n".to_string()),
+        execution_count: Some(1),
+        outputs: vec![serde_json::json!({
+            "output_type": "display_data",
+            "data": {
+                "image/png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+            }
+        })],
+        extra: serde_json::Map::new(),
+    });
+    let pane = NotebookPane::from_document(
+        PathBuf::from("/tmp/cached-image.ipynb"),
+        doc,
+        String::new(),
+        None,
+    );
+
+    let first = pane.rendered_image_outputs();
+    let second = pane.rendered_image_outputs();
+    assert_eq!(first.len(), 1);
+    assert!(std::ptr::eq(first.as_ptr(), second.as_ptr()));
+}
+
+#[test]
 fn rendered_image_outputs_track_marker_lines_after_text_outputs() {
     let mut doc = NotebookDocument::default();
     doc.cells.push(NotebookCell {
@@ -693,7 +722,7 @@ fn rendered_image_outputs_include_markdown_cell_attachments() {
     assert_eq!(image.cell_index, 0);
     assert_eq!(image.output_index, 0);
     assert_eq!(image.attachment_name.as_deref(), Some("plot.png"));
-    assert_eq!(image.line, 0);
+    assert_eq!(image.line, 1);
     assert_eq!(image.mime, "image/png");
     assert_eq!((image.width, image.height), (1, 1));
     assert_eq!(image.pixels.len(), 4);
@@ -728,13 +757,13 @@ fn markdown_attachment_preview_dimensions_refresh_after_source_change() {
     );
 
     assert_eq!(
-        pane.markdown.notebook_image_preview_dimensions_for_line(0),
+        pane.markdown.notebook_image_preview_dimensions_for_line(1),
         Some((1, 1))
     );
 
     assert!(pane.set_cell_source(0, "no image here\n".to_string()));
     assert_eq!(
-        pane.markdown.notebook_image_preview_dimensions_for_line(0),
+        pane.markdown.notebook_image_preview_dimensions_for_line(1),
         None
     );
 }
@@ -1184,8 +1213,184 @@ fn output_before_next_cell_has_no_blank_separator_stop() {
         .iter()
         .position(|line| *line == "%%neoism_notebook_output _ _ hi")
         .unwrap();
-    assert_eq!(lines.get(output_ix + 1), Some(&"next"));
+    assert!(lines[output_ix + 1].starts_with("%%neoism_notebook_cell 1 markdown "));
+    assert_eq!(lines.get(output_ix + 2), Some(&"next"));
     assert!(!lines.iter().any(|line| *line == "---"));
+}
+
+#[test]
+fn adjacent_markdown_cells_keep_exact_boundaries_after_multiline_edit() {
+    let mut doc = NotebookDocument::default();
+    for source in ["first\n", "second\n"] {
+        doc.cells.push(NotebookCell {
+            cell_type: NotebookCellType::Markdown,
+            metadata: Value::Object(serde_json::Map::new()),
+            source: NotebookSource::Text(source.to_string()),
+            execution_count: None,
+            outputs: Vec::new(),
+            extra: serde_json::Map::new(),
+        });
+    }
+    let mut pane = NotebookPane::from_document(
+        PathBuf::from("adjacent.ipynb"),
+        doc,
+        String::new(),
+        None,
+    );
+    let second_marker = pane.cell_ranges[1].line_start;
+    pane.markdown.lines.splice(
+        second_marker..second_marker,
+        ["first continued".to_string()],
+    );
+
+    pane.sync_from_rendered_markdown();
+
+    assert_eq!(
+        pane.document.cells[0].source.as_str(),
+        "first\nfirst continued"
+    );
+    assert_eq!(pane.document.cells[1].source.as_str(), "second");
+}
+
+#[test]
+fn sync_uses_stable_ids_when_rendered_cell_indices_are_stale() {
+    let mut doc = NotebookDocument::default();
+    for source in ["first\n", "second\n"] {
+        let mut cell = new_notebook_cell(NotebookCellType::Markdown);
+        cell.source = NotebookSource::Text(source.to_string());
+        doc.cells.push(cell);
+    }
+    let mut pane = NotebookPane::from_document(
+        PathBuf::from("stable-ids.ipynb"),
+        doc,
+        String::new(),
+        None,
+    );
+    assert!(pane
+        .markdown
+        .lines
+        .iter()
+        .filter(|line| line.starts_with(NOTEBOOK_MARKDOWN_CELL_MARKER))
+        .all(|line| line.contains("neoism_notebook_id=")
+            && !line.ends_with("neoism_notebook_id=")));
+
+    let first_marker = pane.cell_ranges[0].line_start;
+    let second_marker = pane.cell_ranges[1].line_start;
+    pane.markdown.lines[first_marker] = pane.markdown.lines[first_marker].replacen(
+        "%%neoism_notebook_cell 0 ",
+        "%%neoism_notebook_cell 1 ",
+        1,
+    );
+    pane.markdown.lines[second_marker] = pane.markdown.lines[second_marker].replacen(
+        "%%neoism_notebook_cell 1 ",
+        "%%neoism_notebook_cell 0 ",
+        1,
+    );
+
+    pane.sync_from_rendered_markdown();
+
+    assert_eq!(pane.document.cells[0].source.as_str(), "first");
+    assert_eq!(pane.document.cells[1].source.as_str(), "second");
+    assert!(pane.markdown.lines[pane.cell_ranges[0].line_start]
+        .starts_with("%%neoism_notebook_cell 0 "));
+    assert!(pane.markdown.lines[pane.cell_ranges[1].line_start]
+        .starts_with("%%neoism_notebook_cell 1 "));
+}
+
+#[test]
+fn notebook_command_mode_selects_cells_and_enter_returns_to_editing() {
+    let mut doc = NotebookDocument::default();
+    for source in ["first\n", "second\n"] {
+        let mut cell = new_notebook_cell(NotebookCellType::Markdown);
+        cell.source = NotebookSource::Text(source.to_string());
+        doc.cells.push(cell);
+    }
+    let mut pane = NotebookPane::from_document(
+        PathBuf::from("command-mode.ipynb"),
+        doc,
+        String::new(),
+        None,
+    );
+    pane.markdown.vim_enabled = false;
+
+    pane.enter_command_mode();
+    assert_eq!(
+        pane.markdown.mode,
+        crate::editor::markdown::MarkdownMode::Normal
+    );
+    assert_eq!(pane.current_cell_index(), Some(0));
+    assert!(pane.select_adjacent_cell(1));
+    assert_eq!(pane.current_cell_index(), Some(1));
+    assert_eq!(
+        pane.markdown.mode,
+        crate::editor::markdown::MarkdownMode::Normal
+    );
+
+    pane.enter_current_cell_edit_mode();
+    assert_eq!(
+        pane.markdown.mode,
+        crate::editor::markdown::MarkdownMode::Insert
+    );
+    assert_eq!(pane.current_cell_index(), Some(1));
+}
+
+#[test]
+fn markdown_and_raw_cells_reorder_as_whole_cells() {
+    let mut doc = NotebookDocument::default();
+    for (kind, source) in [
+        (NotebookCellType::Markdown, "# Notes\nbody\n"),
+        (NotebookCellType::Raw, "literal **text**\n"),
+        (NotebookCellType::Markdown, "tail\n"),
+    ] {
+        let mut cell = new_notebook_cell(kind);
+        cell.source = NotebookSource::Text(source.to_string());
+        doc.cells.push(cell);
+    }
+    let mut pane = NotebookPane::from_document(
+        PathBuf::from("mixed.ipynb"),
+        doc,
+        String::new(),
+        None,
+    );
+    let first = pane.cell_ranges[0].line_start..pane.cell_ranges[0].line_end + 1;
+    let moved = pane.markdown.lines.drain(first).collect::<Vec<_>>();
+    pane.markdown.lines.extend(moved);
+
+    pane.sync_order_from_rendered_markdown();
+
+    assert_eq!(pane.document.cells[0].cell_type, NotebookCellType::Raw);
+    assert_eq!(pane.document.cells[0].source.as_str(), "literal **text**");
+    assert_eq!(pane.document.cells[1].source.as_str(), "tail");
+    assert_eq!(pane.document.cells[2].source.as_str(), "# Notes\nbody");
+    assert!(pane
+        .document
+        .cells
+        .iter()
+        .all(|cell| !cell.source.as_str().contains("neoism_notebook")));
+}
+
+#[test]
+fn deleting_markdown_cell_range_removes_that_cell() {
+    let mut doc = NotebookDocument::default();
+    for source in ["keep\n", "remove\n", "also keep\n"] {
+        let mut cell = new_notebook_cell(NotebookCellType::Markdown);
+        cell.source = NotebookSource::Text(source.to_string());
+        doc.cells.push(cell);
+    }
+    let mut pane = NotebookPane::from_document(
+        PathBuf::from("delete-markdown.ipynb"),
+        doc,
+        String::new(),
+        None,
+    );
+    let removed = pane.cell_ranges[1].line_start..pane.cell_ranges[1].line_end + 1;
+    pane.markdown.lines.drain(removed);
+
+    pane.sync_from_rendered_markdown();
+
+    assert_eq!(pane.document.cells.len(), 2);
+    assert_eq!(pane.document.cells[0].source.as_str(), "keep");
+    assert_eq!(pane.document.cells[1].source.as_str(), "also keep");
 }
 
 #[test]

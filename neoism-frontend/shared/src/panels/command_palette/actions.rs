@@ -72,6 +72,7 @@ pub enum PaletteAction {
     CreateNeoismNote,
     DrawOnNote,
     OpenNeoismNotes,
+    OpenEpubTableOfContents,
     LspHover,
     LspCodeAction,
     LspFormat,
@@ -167,6 +168,7 @@ pub enum PaletteSurface {
     Terminal,
     Editor,
     Markdown,
+    Epub,
     Notebook,
 }
 
@@ -495,6 +497,7 @@ pub(crate) fn command_visible_for_surface(
                 PaletteSurface::Editor | PaletteSurface::Markdown | PaletteSurface::Notebook
             )
         }
+        PaletteAction::OpenEpubTableOfContents => surface == PaletteSurface::Epub,
         PaletteAction::RunNotebookCell
         | PaletteAction::RunNotebookCellAndBelow
         | PaletteAction::RunAllNotebookCells
@@ -512,7 +515,10 @@ pub(crate) fn command_visible_for_surface(
             surface == PaletteSurface::Notebook
         }
         PaletteAction::SearchForward | PaletteAction::SearchBackward => {
-            !matches!(surface, PaletteSurface::Markdown | PaletteSurface::Notebook)
+            !matches!(
+                surface,
+                PaletteSurface::Markdown | PaletteSurface::Epub | PaletteSurface::Notebook
+            )
         }
         // Line/symbol jumps only make sense when the focused pane
         // hosts a code buffer.

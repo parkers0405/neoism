@@ -5,6 +5,7 @@ use crate::app::messenger::Messenger;
 use crate::context::manager::{ContextManager, ContextManagerConfig};
 use crate::context::renderable::{Cursor, RenderableContent};
 use crate::context::tab::Context;
+use crate::editor::epub::EpubPane;
 use crate::editor::markdown::MarkdownPane;
 use crate::editor::neodraw::DrawPane;
 use crate::editor::notebook::NotebookPane;
@@ -79,6 +80,7 @@ pub fn create_dead_context<T: neoism_backend::event::EventListener>(
         code: None,
         draw: None,
         notebook: None,
+        epub: None,
         neoism_agent: None,
         neoism_tags: None,
         neoism_extensions: None,
@@ -138,6 +140,35 @@ pub fn create_notebook_context<T: neoism_backend::event::EventListener>(
     let mut context =
         create_dead_context(event_proxy, window_id, route_id, rich_text_id, dimension);
     context.notebook = Some(NotebookPane::load(path));
+    context
+}
+
+pub fn create_epub_context<T: neoism_backend::event::EventListener>(
+    event_proxy: T,
+    window_id: WindowId,
+    rich_text_id: usize,
+    dimension: ContextDimension,
+    path: PathBuf,
+) -> Context<T> {
+    let route_id = ROUTE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mut context =
+        create_dead_context(event_proxy, window_id, route_id, rich_text_id, dimension);
+    let vault = path
+        .parent()
+        .and_then(|parent| {
+            neoism_workspace_index::linked_project_for_code_dir(parent)
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_else(neoism_workspace_index::default_notes_workspace)
+        .notes_workspace_dir();
+    let legacy_state_root =
+        neoism_backend::config::config_dir_path().join("reader-state");
+    context.epub = Some(EpubPane::load_in_vault(
+        path,
+        &vault,
+        Some(&legacy_state_root),
+    ));
     context
 }
 

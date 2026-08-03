@@ -5,13 +5,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use web_time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::editor::markdown::{helpers::is_notebook_output_marker_line, MarkdownPane};
+use crate::editor::markdown::{
+    helpers::{is_notebook_output_marker_line, NOTEBOOK_MARKDOWN_CELL_MARKER},
+    MarkdownPane,
+};
 
 const NOTEBOOK_OUTPUT_DISPLAY_MAX_BYTES: usize = 128 * 1024;
 const NOTEBOOK_OUTPUT_DISPLAY_MAX_LINES: usize = 2_000;
@@ -76,6 +82,7 @@ pub struct NotebookPane {
     pub running_cell_runs: BTreeMap<usize, u64>,
     pub execution_started_at: BTreeMap<usize, Instant>,
     pub completed_elapsed_ms: BTreeMap<usize, u128>,
+    rendered_images: Vec<NotebookRenderedImageOutput>,
     next_execution_run_id: u64,
 }
 
@@ -188,6 +195,7 @@ impl NotebookPane {
             running_cell_runs: BTreeMap::new(),
             execution_started_at: BTreeMap::new(),
             completed_elapsed_ms: BTreeMap::new(),
+            rendered_images: Vec::new(),
             next_execution_run_id: 1,
         };
         pane.refresh_markdown_image_preview_dimensions();
@@ -286,9 +294,9 @@ impl NotebookPane {
 
     fn sync_document_sources_from_rendered_markdown(&mut self) {
         let rendered_lines = self.markdown.lines.clone();
-        let cell_ranges =
-            discover_rendered_cell_ranges(&rendered_lines, &self.cell_ranges);
         let old_cells = self.document.cells.clone();
+        let cell_ranges =
+            discover_rendered_cell_ranges(&rendered_lines, &self.cell_ranges, &old_cells);
         let old_running = self.running_cells.clone();
         let old_running_runs = self.running_cell_runs.clone();
         let old_started = self.execution_started_at.clone();
@@ -409,6 +417,40 @@ impl NotebookPane {
             .map(|range| range.cell_index)
     }
 
+    pub fn current_cell_type(&self) -> Option<NotebookCellType> {
+        self.current_cell_index()
+            .and_then(|index| self.document.cells.get(index))
+            .map(|cell| cell.cell_type)
+    }
+
+    pub fn enter_current_cell_edit_mode(&mut self) {
+        let cell_index = self.current_cell_index().unwrap_or(0);
+        self.focus_cell(cell_index, true);
+    }
+
+    pub fn enter_command_mode(&mut self) {
+        self.markdown.enter_notebook_command_mode();
+    }
+
+    pub fn select_adjacent_cell(&mut self, delta: isize) -> bool {
+        let Some(current) = self.current_cell_index() else {
+            return false;
+        };
+        let target = if delta < 0 {
+            current.checked_sub(delta.unsigned_abs())
+        } else {
+            current.checked_add(delta as usize)
+        };
+        let Some(target) = target.filter(|target| *target < self.document.cells.len())
+        else {
+            self.enter_command_mode();
+            return false;
+        };
+        self.focus_cell(target, false);
+        self.enter_command_mode();
+        true
+    }
+
     pub fn run_cell_at_point(&self, x: f32, y: f32) -> Option<usize> {
         self.markdown.notebook_run_at(x, y)
     }
@@ -421,7 +463,11 @@ impl NotebookPane {
         self.markdown.notebook_action_at(x, y)
     }
 
-    pub fn rendered_image_outputs(&self) -> Vec<NotebookRenderedImageOutput> {
+    pub fn rendered_image_outputs(&self) -> &[NotebookRenderedImageOutput] {
+        &self.rendered_images
+    }
+
+    fn compute_rendered_image_outputs(&self) -> Vec<NotebookRenderedImageOutput> {
         let mut images = Vec::new();
         for range in &self.cell_ranges {
             let Some(cell) = self.document.cells.get(range.cell_index) else {
@@ -515,9 +561,10 @@ impl NotebookPane {
     }
 
     fn refresh_markdown_image_preview_dimensions(&mut self) {
+        self.rendered_images = self.compute_rendered_image_outputs();
         let dimensions = self
-            .rendered_image_outputs()
-            .into_iter()
+            .rendered_images
+            .iter()
             .map(|image| (image.line, image.width, image.height));
         self.markdown
             .set_notebook_image_preview_dimensions(dimensions);
@@ -781,10 +828,11 @@ impl NotebookPane {
             return;
         };
         let line = match range.kind {
-            NotebookCellType::Code | NotebookCellType::Raw => {
+            NotebookCellType::Code
+            | NotebookCellType::Raw
+            | NotebookCellType::Markdown => {
                 range.line_start.saturating_add(1).min(range.line_end)
             }
-            NotebookCellType::Markdown => range.line_start,
         }
         .min(self.markdown.lines.len().saturating_sub(1));
         self.markdown.cursor_line = line;
@@ -1275,8 +1323,14 @@ impl NotebookDocument {
 
         for (cell_index, cell) in self.cells.iter().enumerate() {
             let line_start = markdown_line_count(&markdown);
+            let rendered_cell_id = encoded_notebook_cell_id(cell).unwrap_or_default();
             match cell.cell_type {
                 NotebookCellType::Markdown => {
+                    markdown.push_str(NOTEBOOK_MARKDOWN_CELL_MARKER);
+                    markdown.push_str(&cell_index.to_string());
+                    markdown.push_str(" markdown neoism_notebook_id=");
+                    markdown.push_str(&rendered_cell_id);
+                    markdown.push('\n');
                     append_cell_source(&mut markdown, cell.source.as_str());
                 }
                 NotebookCellType::Code => {
@@ -1297,7 +1351,7 @@ impl NotebookDocument {
                     markdown.push_str("```");
                     markdown.push_str(&lang);
                     markdown.push_str(&format!(
-                        " neoism_notebook_cell={cell_index} neoism_state={state} neoism_count={execution}"
+                        " neoism_notebook_cell={cell_index} neoism_notebook_id={rendered_cell_id} neoism_state={state} neoism_count={execution}"
                     ));
                     markdown.push('\n');
                     append_cell_source(&mut markdown, cell.source.as_str());
@@ -1314,7 +1368,11 @@ impl NotebookDocument {
                     );
                 }
                 NotebookCellType::Raw => {
-                    markdown.push_str("```text\n");
+                    markdown.push_str("```text");
+                    markdown.push_str(&format!(
+                        " neoism_notebook_cell={cell_index} neoism_notebook_id={rendered_cell_id} neoism_notebook_kind=raw"
+                    ));
+                    markdown.push('\n');
                     append_cell_source(&mut markdown, cell.source.as_str());
                     markdown.push_str("```\n");
                 }

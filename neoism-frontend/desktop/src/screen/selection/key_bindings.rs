@@ -265,6 +265,7 @@ impl Screen<'_> {
                 if matches!(action, Act::Esc(_))
                     && (self.context_manager.current().markdown.is_some()
                         || self.context_manager.current().notebook.is_some()
+                        || self.context_manager.current().epub.is_some()
                         || self.context_manager.current().code.is_some())
                 {
                     tracing::trace!(

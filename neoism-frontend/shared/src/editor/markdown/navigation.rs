@@ -622,9 +622,9 @@ impl MarkdownPane {
     }
 
     pub(crate) fn is_editable_line(&self, line: usize) -> bool {
-        self.lines
-            .get(line)
-            .is_some_and(|line| !is_table_separator_line(line))
+        self.lines.get(line).is_some_and(|line| {
+            !is_table_separator_line(line) && !is_notebook_cell_anchor_line(line)
+        })
     }
 }
 

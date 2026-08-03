@@ -304,11 +304,13 @@ impl ContextManagerDaemonLink {
         });
     }
 
-    fn send_pty(&self, message: PtyClientMessage) {
+    fn send_pty(&self, message: PtyClientMessage) -> u64 {
+        let request_id = self.handle.allocate_request_id();
         let handle = self.handle.clone();
         self.spawn_send("daemon pty request failed", async move {
-            handle.send_pty(message).await.map(|_| ())
+            handle.send_pty_with_request_id(request_id, message).await
         });
+        request_id
     }
 
     fn spawn_send<F>(&self, error_message: &'static str, fut: F)
@@ -414,6 +416,10 @@ pub struct ContextManagerDaemonCache {
     pub route_sessions: HashMap<usize, String>,
     pub session_routes: HashMap<String, usize>,
     pub pending_session_routes: Vec<usize>,
+    /// Correlated daemon PTY creates. Unlike workspace-session creation,
+    /// PTY replies can be interleaved with global output from every client;
+    /// request ids prevent one guest from binding another guest's shell.
+    pub pending_pty_routes: HashMap<u64, usize>,
     /// Daemon-tracked live cwd per PTY session id, from `SessionCwd`
     /// pushes. Desktop reads a LOCAL pane's cwd from `/proc` in-process,
     /// but a daemon-backed (remote) pane's shell lives on the daemon, so

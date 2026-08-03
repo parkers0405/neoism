@@ -218,6 +218,9 @@ pub(crate) fn context_workspace_tab_kind_and_path<T: EventListener>(
     if let Some(notebook) = context.notebook.as_ref() {
         return ("notebook".to_string(), Some(notebook.path.clone()));
     }
+    if let Some(epub) = context.epub.as_ref() {
+        return ("epub".to_string(), Some(epub.book.path.clone()));
+    }
     ("terminal".to_string(), fallback_root)
 }
 
@@ -232,6 +235,8 @@ pub(crate) fn session_leaf_spec_for_context<T: EventListener>(
         SessionLeafKind::Custom("markdown".to_string())
     } else if context.notebook.is_some() {
         SessionLeafKind::Custom("notebook".to_string())
+    } else if context.epub.is_some() {
+        SessionLeafKind::Custom("epub".to_string())
     } else if context.draw.is_some() {
         SessionLeafKind::Custom("draw".to_string())
     } else if context.neoism_tags.is_some() {

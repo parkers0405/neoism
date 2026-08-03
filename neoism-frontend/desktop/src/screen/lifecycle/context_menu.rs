@@ -193,6 +193,9 @@ impl Screen<'_> {
             neoism_ui::panels::context_menu::ContextMenuAction::Notebook(action) => {
                 self.execute_notebook_context_action(action);
             }
+            neoism_ui::panels::context_menu::ContextMenuAction::Epub(action) => {
+                self.execute_epub_context_action(action, clipboard);
+            }
             neoism_ui::panels::context_menu::ContextMenuAction::MarkdownBlock(template) => {
                 self.apply_markdown_block_template(template);
             }

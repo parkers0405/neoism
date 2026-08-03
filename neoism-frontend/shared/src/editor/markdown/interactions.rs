@@ -186,12 +186,13 @@ impl MarkdownPane {
     pub fn handle_hovered(&self) -> bool {
         self.scrollbar_hovered
             || self.table_action_hovered
-            || self.hovered_line.is_some_and(|line| {
-                self.block_rects
-                    .iter()
-                    .find(|block| block.line == line)
-                    .is_some()
-            })
+            || (!self.read_only
+                && self.hovered_line.is_some_and(|line| {
+                    self.block_rects
+                        .iter()
+                        .find(|block| block.line == line)
+                        .is_some()
+                }))
     }
 
     pub fn notebook_action_hovered(&self) -> bool {
@@ -262,7 +263,11 @@ impl MarkdownPane {
         self.drag_mouse_y = y;
         self.drag_start_y = y;
         self.drag_moved = false;
-        self.pending_block_menu_rect = Some(block.handle_rect);
+        self.pending_block_menu_rect = self
+            .lines
+            .get(block.line)
+            .filter(|line| !is_notebook_cell_anchor_line(line))
+            .map(|_| block.handle_rect);
         true
     }
 
@@ -297,7 +302,11 @@ impl MarkdownPane {
             .cloned()
         {
             self.cursor_line = cell.line.min(self.lines.len().saturating_sub(1));
-            self.cursor_col = self.cursor_col_from_table_cell_point(cell, x, y);
+            self.cursor_col = if self.read_only {
+                self.glyph_col_from_table_cell_point(cell.clone(), x, y)
+            } else {
+                self.cursor_col_from_table_cell_point(cell, x, y)
+            };
             self.mode = MarkdownMode::Insert;
             self.clamp_cursor();
             self.visual_anchor = None;
@@ -310,7 +319,21 @@ impl MarkdownPane {
             return false;
         };
         self.cursor_line = block.line.min(self.lines.len().saturating_sub(1));
-        self.cursor_col = self.cursor_col_from_point(block, x, y);
+        if self
+            .lines
+            .get(self.cursor_line)
+            .is_some_and(|line| is_notebook_cell_anchor_line(line))
+        {
+            self.cursor_line = self
+                .cursor_line
+                .saturating_add(1)
+                .min(self.lines.len().saturating_sub(1));
+        }
+        self.cursor_col = if self.read_only {
+            self.glyph_col_from_point(block, x, y)
+        } else {
+            self.cursor_col_from_point(block, x, y)
+        };
         self.mode = MarkdownMode::Insert;
         self.clamp_cursor();
         self.visual_anchor = None;
@@ -336,6 +359,38 @@ impl MarkdownPane {
 
     pub fn source_line_at_point(&self, x: f32, y: f32) -> Option<usize> {
         self.block_for_click(x, y).map(|block| block.line)
+    }
+
+    pub fn reveal_source_line(&mut self, line: usize) {
+        let line = line.min(self.lines.len().saturating_sub(1));
+        self.cursor_line = line;
+        self.cursor_col = 0;
+        self.pending_reveal_line = Some(line);
+        self.follow_cursor = true;
+    }
+
+    /// Resolve a rendered glyph position without moving the cursor. Reader
+    /// surfaces use this for hit-testing durable annotations before deciding
+    /// whether a click should select text or open annotation actions.
+    pub fn text_position_at_point(&self, x: f32, y: f32) -> Option<MarkdownPosition> {
+        let block = self.block_for_click(x, y)?;
+        let mut line = block.line.min(self.lines.len().saturating_sub(1));
+        if self
+            .lines
+            .get(line)
+            .is_some_and(|value| is_notebook_cell_anchor_line(value))
+        {
+            line = line
+                .saturating_add(1)
+                .min(self.lines.len().saturating_sub(1));
+        }
+        let column = if self.read_only {
+            self.glyph_col_from_point(block, x, y)
+        } else {
+            self.cursor_col_from_point(block, x, y)
+        }
+        .min(self.lines.get(line).map(String::len).unwrap_or_default());
+        Some(MarkdownPosition { line, col: column })
     }
 
     pub fn update_drag(&mut self, x: f32, y: f32) -> bool {
@@ -374,7 +429,11 @@ impl MarkdownPane {
                 .cloned()
             {
                 self.cursor_line = cell.line.min(self.lines.len().saturating_sub(1));
-                self.cursor_col = self.cursor_col_from_table_cell_point(cell, x, y);
+                self.cursor_col = if self.read_only {
+                    self.glyph_col_from_table_cell_point(cell.clone(), x, y)
+                } else {
+                    self.cursor_col_from_table_cell_point(cell, x, y)
+                };
                 self.clamp_cursor();
                 if self.cursor_position() != anchor {
                     self.mode = MarkdownMode::Visual;
@@ -384,11 +443,33 @@ impl MarkdownPane {
                 self.follow_cursor = true;
                 return true;
             }
-            let Some(block) = self.block_for_click(x, y) else {
+            // A text drag commonly crosses paragraph spacing or leaves the
+            // exact glyph rectangle. Keep extending from the nearest rendered
+            // row instead of dropping updates and leaving a jagged selection.
+            let Some(block) = self.block_for_click(x, y).or_else(|| {
+                self.block_rects.iter().copied().min_by(|left, right| {
+                    let distance = |block: &MarkdownBlockRect| {
+                        if y < block.rect[1] {
+                            block.rect[1] - y
+                        } else if y > block.rect[1] + block.rect[3] {
+                            y - (block.rect[1] + block.rect[3])
+                        } else {
+                            0.0
+                        }
+                    };
+                    distance(left)
+                        .partial_cmp(&distance(right))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            }) else {
                 return false;
             };
             self.cursor_line = block.line.min(self.lines.len().saturating_sub(1));
-            self.cursor_col = self.cursor_col_from_point(block, x, y);
+            self.cursor_col = if self.read_only {
+                self.glyph_col_from_point(block, x, y)
+            } else {
+                self.cursor_col_from_point(block, x, y)
+            };
             self.clamp_cursor();
             if self.cursor_position() != anchor {
                 self.mode = MarkdownMode::Visual;
@@ -521,7 +602,7 @@ impl MarkdownPane {
     }
 
     pub(super) fn drag_block_range(&self, line: usize) -> std::ops::Range<usize> {
-        if let Some(range) = self.notebook_code_cell_range_containing(line) {
+        if let Some(range) = self.notebook_cell_range_containing(line) {
             return range;
         }
         if let Some(range) = self.table_range_containing(line) {
@@ -538,73 +619,45 @@ impl MarkdownPane {
     }
 
     fn drag_anchor_line(&self, line: usize) -> usize {
-        self.notebook_code_cell_range_containing(line)
+        self.notebook_cell_range_containing(line)
             .map(|range| range.start)
             .unwrap_or(line)
     }
 
-    fn notebook_code_cell_range_containing(
+    pub(super) fn notebook_cell_range_containing(
         &self,
         line: usize,
     ) -> Option<std::ops::Range<usize>> {
-        let line = line.min(self.lines.len().saturating_sub(1));
-        let code_range = if self
-            .lines
-            .get(line)
-            .is_some_and(|text| is_notebook_output_marker_line(text))
+        let notebook_path = self.is_notebook_document();
+        if !notebook_path
+            && !self
+                .lines
+                .first()
+                .is_some_and(|text| is_notebook_cell_anchor_line(text))
         {
-            let mut probe = line;
-            while probe > 0
-                && self
-                    .lines
-                    .get(probe)
-                    .is_some_and(|text| is_notebook_output_marker_line(text))
-            {
-                probe -= 1;
-            }
-            self.notebook_code_block_range_ending_at_or_before(probe)?
-        } else {
-            self.code_block_range_containing(line)?
-        };
-        let first = self.lines.get(code_range.start)?;
-        if !first.contains("neoism_notebook_cell=") {
             return None;
         }
-        let mut end = code_range.end;
-        while self
-            .lines
-            .get(end)
-            .is_some_and(|text| is_notebook_output_marker_line(text))
-        {
-            end += 1;
-        }
-        Some(code_range.start..end)
+        let line = line.min(self.lines.len().saturating_sub(1));
+        let start = (0..=line).rev().find(|&probe| {
+            self.lines
+                .get(probe)
+                .is_some_and(|text| is_notebook_cell_anchor_line(text))
+        })?;
+        let end = (start + 1..self.lines.len())
+            .find(|&probe| {
+                self.lines
+                    .get(probe)
+                    .is_some_and(|text| is_notebook_cell_anchor_line(text))
+            })
+            .unwrap_or(self.lines.len());
+        (line < end).then_some(start..end)
     }
 
-    fn notebook_code_block_range_ending_at_or_before(
-        &self,
-        line: usize,
-    ) -> Option<std::ops::Range<usize>> {
-        let mut end = line.min(self.lines.len().saturating_sub(1));
-        while end > 0 && self.lines.get(end).is_some_and(|text| text.trim() != "```") {
-            end -= 1;
-        }
-        if !self.lines.get(end).is_some_and(|text| text.trim() == "```") {
-            return None;
-        }
-        let mut start = end;
-        while start > 0 {
-            start -= 1;
-            let Some(text) = self.lines.get(start) else {
-                break;
-            };
-            if text.trim_start().starts_with("```") {
-                return text
-                    .contains("neoism_notebook_cell=")
-                    .then_some(start..end.saturating_add(1));
-            }
-        }
-        None
+    pub(crate) fn is_notebook_document(&self) -> bool {
+        self.path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"))
     }
 
     pub(super) fn paragraph_range_containing(
@@ -816,6 +869,46 @@ impl MarkdownPane {
         line.len()
     }
 
+    /// Reader selection is glyph-based, while editor clicking is caret-based.
+    /// Convert the nearest measured caret stop into the source position of
+    /// the glyph under the pointer. Crucially, the lower bound is the current
+    /// wrapped row's real visible start, so the first glyph on a continuation
+    /// row never backs up into whitespace from the preceding row.
+    fn glyph_col_from_point(&self, block: MarkdownBlockRect, x: f32, y: f32) -> usize {
+        let caret = self.cursor_col_from_point(block, x, y);
+        let Some(line) = self.lines.get(block.line) else {
+            return caret;
+        };
+        let marker_len = block.marker_len.min(line.len());
+        let Some(rows) = self.block_wrap_hit_stops.get(&block.line) else {
+            return if caret > marker_len {
+                prev_char_boundary(line, caret)
+            } else {
+                caret
+            };
+        };
+        if rows.is_empty() {
+            return caret;
+        }
+        let row_index = (((y - block.text_y) / block.line_height.max(1.0))
+            .floor()
+            .max(0.0) as usize)
+            .min(rows.len().saturating_sub(1));
+        let row_start = rows[row_index].start;
+        if self.is_inside_code_block(block.line) || is_code_fence_line(line) {
+            let caret_visible = line[..caret.min(line.len())].chars().count();
+            let glyph_visible =
+                caret_visible.saturating_sub(usize::from(caret_visible > row_start));
+            return nth_char_boundary(line, glyph_visible.max(row_start));
+        }
+        let body = &line[marker_len..];
+        let map = InlineSourceMap::new(body);
+        let caret_visible = map.visible_for_source(caret.saturating_sub(marker_len));
+        let glyph_visible =
+            caret_visible.saturating_sub(usize::from(caret_visible > row_start));
+        marker_len + map.source_for_visible(glyph_visible.max(row_start))
+    }
+
     pub(super) fn cursor_col_from_table_cell_point(
         &self,
         cell: MarkdownTableCellRect,
@@ -844,6 +937,38 @@ impl MarkdownPane {
         }
         .min(visible_len);
         bounds.content_start + map.source_for_visible(visible_col).min(cell_source.len())
+    }
+
+    fn glyph_col_from_table_cell_point(
+        &self,
+        cell: MarkdownTableCellRect,
+        x: f32,
+        y: f32,
+    ) -> usize {
+        let caret = self.cursor_col_from_table_cell_point(cell.clone(), x, y);
+        let Some(line) = self.lines.get(cell.line) else {
+            return caret;
+        };
+        let Some(bounds) = parse_table_cell_bounds(line)
+            .and_then(|cells| cells.get(cell.cell_ix).copied())
+        else {
+            return caret;
+        };
+        let row_index = ((y - cell.text_y) / cell.line_height.max(1.0))
+            .floor()
+            .max(0.0) as usize;
+        let row_start = cell
+            .hit_rows
+            .get(row_index)
+            .map(|row| row.start)
+            .unwrap_or_default();
+        let source = &line[bounds.content_start..bounds.content_end];
+        let map = InlineSourceMap::new(source);
+        let caret_visible =
+            map.visible_for_source(caret.saturating_sub(bounds.content_start));
+        let glyph_visible =
+            caret_visible.saturating_sub(usize::from(caret_visible > row_start));
+        bounds.content_start + map.source_for_visible(glyph_visible.max(row_start))
     }
 }
 

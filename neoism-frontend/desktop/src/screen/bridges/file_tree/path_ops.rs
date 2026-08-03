@@ -14,7 +14,9 @@ impl Screen<'_> {
             self.activate_file_tree_selection();
         } else if path.is_file() {
             self.renderer.file_tree.set_focused(false);
-            if crate::editor::markdown::state::is_markdown_path(&path) {
+            if crate::screen::bridges::epub::is_epub_path(&path) {
+                self.open_path_in_epub(path);
+            } else if crate::editor::markdown::state::is_markdown_path(&path) {
                 self.open_path_in_markdown(path);
             } else if crate::editor::notebook::is_notebook_path(&path) {
                 self.open_path_in_notebook(path);

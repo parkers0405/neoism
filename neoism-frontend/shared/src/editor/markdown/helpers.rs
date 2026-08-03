@@ -28,6 +28,36 @@ pub(crate) fn is_notebook_output_marker_line(line: &str) -> bool {
     line.starts_with("%%neoism_notebook_output ")
 }
 
+pub(crate) const NOTEBOOK_MARKDOWN_CELL_MARKER: &str = "%%neoism_notebook_cell ";
+
+pub(crate) fn notebook_markdown_cell_index(line: &str) -> Option<usize> {
+    line.strip_prefix(NOTEBOOK_MARKDOWN_CELL_MARKER)?
+        .split_whitespace()
+        .next()?
+        .parse::<usize>()
+        .ok()
+}
+
+pub(crate) fn is_notebook_markdown_cell_marker_line(line: &str) -> bool {
+    notebook_markdown_cell_index(line).is_some()
+}
+
+pub(crate) fn notebook_fenced_cell_index(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("```") {
+        return None;
+    }
+    trimmed
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("neoism_notebook_cell="))
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+pub(crate) fn is_notebook_cell_anchor_line(line: &str) -> bool {
+    is_notebook_markdown_cell_marker_line(line)
+        || notebook_fenced_cell_index(line).is_some()
+}
+
 pub(super) fn word_bounds_at(line: &str, col: usize) -> Option<(usize, usize)> {
     let col = floor_char_boundary(line, col.min(line.len()));
     let mut start = None;
@@ -84,19 +114,24 @@ pub fn parse_markdown_link_parts(inner: &str) -> Option<MarkdownParsedLink> {
     if target_part.is_empty() {
         return None;
     }
-    let (target_part, heading) = target_part
-        .split_once('#')
-        .map(|(target, heading)| {
-            (
-                target.trim(),
-                (!heading.trim().is_empty()).then(|| heading.trim().to_string()),
-            )
-        })
-        .unwrap_or((target_part, None));
+    let host_owned_scheme = target_part.contains("://");
+    let (target_part, heading) = if host_owned_scheme {
+        (target_part, None)
+    } else {
+        target_part
+            .split_once('#')
+            .map(|(target, heading)| {
+                (
+                    target.trim(),
+                    (!heading.trim().is_empty()).then(|| heading.trim().to_string()),
+                )
+            })
+            .unwrap_or((target_part, None))
+    };
     if target_part.is_empty() && heading.is_none() {
         return None;
     }
-    let (target, line) = if heading.is_none() {
+    let (target, line) = if heading.is_none() && !host_owned_scheme {
         if let Some((target, line)) = target_part.rsplit_once('-') {
             if !target.trim().is_empty()
                 && !line.is_empty()

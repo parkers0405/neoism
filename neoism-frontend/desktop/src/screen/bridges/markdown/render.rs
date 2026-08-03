@@ -167,6 +167,37 @@ impl Screen<'_> {
                         markdown_font_scale,
                     );
                     overlay_ids_touched.insert(rich_text_id);
+                } else if let Some(epub) = item.val.epub.as_mut() {
+                    let rich_text_id = item.val.rich_text_id;
+                    self.sugarloaf.clear_image_overlays_for(rich_text_id);
+                    let rect = [
+                        (scaled_margin.left + item.layout_rect[0]) / scale,
+                        (scaled_margin.top + item.layout_rect[1]) / scale,
+                        item.layout_rect[2] / scale,
+                        item.layout_rect[3] / scale,
+                    ];
+                    crate::editor::markdown::render::render(
+                        &mut self.sugarloaf,
+                        &mut epub.markdown,
+                        rect,
+                        &theme,
+                        markdown_mouse,
+                        &text_occlusions,
+                        markdown_font_scale,
+                        markdown_animation_phase,
+                    );
+                    markdown_needs_redraw |=
+                        epub.markdown.scroll_cursor_into_view(rect[1], rect[3]);
+                    epub.flush_state_if_due();
+                    markdown_needs_redraw |= epub.state_save_pending();
+                    Self::sync_epub_image_overlays(
+                        &mut self.sugarloaf,
+                        rich_text_id,
+                        epub,
+                        rect,
+                        markdown_font_scale,
+                    );
+                    overlay_ids_touched.insert(rich_text_id);
                 }
                 continue;
             };
@@ -292,7 +323,7 @@ impl Screen<'_> {
                             width: image.width as usize,
                             height: image.height as usize,
                             color_type: neoism_backend::sugarloaf::ColorType::Rgba,
-                            pixels: image.pixels,
+                            pixels: image.pixels.clone(),
                             is_opaque: image.is_opaque,
                             resize: None,
                             display_width: None,
@@ -323,6 +354,97 @@ impl Screen<'_> {
             });
         }
 
+        let panel_overlays = sugarloaf.image_overlays.entry(rich_text_id).or_default();
+        panel_overlays.clear();
+        panel_overlays.extend(overlays);
+    }
+
+    fn sync_epub_image_overlays(
+        sugarloaf: &mut neoism_backend::sugarloaf::Sugarloaf<'_>,
+        rich_text_id: usize,
+        epub: &crate::editor::epub::EpubPane,
+        pane_rect: [f32; 4],
+        font_scale: f32,
+    ) {
+        if epub.rendered_images.is_empty() {
+            sugarloaf.clear_image_overlays_for(rich_text_id);
+            return;
+        }
+        let scale = sugarloaf.scale_factor();
+        let mut overlays = Vec::new();
+        let cover_only = epub.rendered_images.len() == 1
+            && epub
+                .markdown
+                .lines
+                .iter()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+                == 1;
+        for image in &epub.rendered_images {
+            let Some(block) = epub.markdown.block_rect_for_source_line(image.line) else {
+                continue;
+            };
+            if !sugarloaf.image_data.contains_key(&image.image_id) {
+                sugarloaf.image_data.insert(
+                    image.image_id,
+                    neoism_backend::sugarloaf::GraphicDataEntry::from_graphic_data(
+                        neoism_backend::sugarloaf::GraphicData {
+                            id: neoism_backend::sugarloaf::GraphicId::new(
+                                image.image_id as u64,
+                            ),
+                            width: image.width as usize,
+                            height: image.height as usize,
+                            color_type: neoism_backend::sugarloaf::ColorType::Rgba,
+                            pixels: image.pixels.clone(),
+                            is_opaque: false,
+                            resize: None,
+                            display_width: None,
+                            display_height: None,
+                            transmit_time: web_time::Instant::now(),
+                        },
+                    ),
+                );
+            }
+            let (display_w, display_h) = if cover_only {
+                let max_w = (pane_rect[2] - 96.0 * font_scale)
+                    .min(block.wrap_width)
+                    .max(1.0);
+                let max_h = (pane_rect[3] - 150.0 * font_scale).max(1.0);
+                let fit = (max_w / image.width as f32)
+                    .min(max_h / image.height as f32)
+                    .max(0.0);
+                (image.width as f32 * fit, image.height as f32 * fit)
+            } else {
+                Self::notebook_image_overlay_size(
+                    image.width as f32,
+                    image.height as f32,
+                    block.wrap_width,
+                    font_scale,
+                )
+            };
+            if display_w <= 0.0 || display_h <= 0.0 {
+                continue;
+            }
+            let image_x = if cover_only {
+                pane_rect[0] + (pane_rect[2] - display_w) * 0.5
+            } else {
+                block.text_x + (block.wrap_width - display_w).max(0.0) * 0.5
+            };
+            let image_y = if cover_only {
+                block.rect[1] + 8.0 * font_scale
+            } else {
+                block.rect[1] + block.rect[3] - display_h
+            };
+            overlays.push(neoism_backend::sugarloaf::GraphicOverlay {
+                image_id: image.image_id,
+                x: image_x * scale,
+                y: image_y * scale,
+                width: display_w * scale,
+                height: display_h * scale,
+                z_index: 1,
+                source_rect: neoism_backend::sugarloaf::GraphicOverlay::FULL_SOURCE_RECT,
+            });
+        }
         let panel_overlays = sugarloaf.image_overlays.entry(rich_text_id).or_default();
         panel_overlays.clear();
         panel_overlays.extend(overlays);
@@ -568,13 +690,18 @@ impl Screen<'_> {
 
     pub(crate) fn scroll_markdown_by(&mut self, delta_pixels: f32) -> bool {
         if self.context_manager.current().markdown.is_none() {
-            if self.context_manager.current().notebook.is_none() {
+            if self.context_manager.current().notebook.is_none()
+                && self.context_manager.current().epub.is_none()
+            {
                 return false;
             }
         }
         let viewport_height = self.markdown_viewport_height();
         if let Some(markdown) = self.context_manager.current_mut().active_markdown_mut() {
             markdown.scroll_by_content_pixels(delta_pixels, viewport_height);
+        }
+        if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+            epub.capture_location();
         }
         self.mark_dirty();
         true
@@ -583,6 +710,7 @@ impl Screen<'_> {
     pub(crate) fn scroll_markdown_page(&mut self, direction: f32, fraction: f32) -> bool {
         if self.context_manager.current().markdown.is_none()
             && self.context_manager.current().notebook.is_none()
+            && self.context_manager.current().epub.is_none()
         {
             return false;
         }
@@ -592,6 +720,9 @@ impl Screen<'_> {
     pub(crate) fn scroll_markdown_to_top(&mut self) -> bool {
         if let Some(markdown) = self.context_manager.current_mut().active_markdown_mut() {
             markdown.scroll_to_top();
+            if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+                epub.capture_location();
+            }
             self.mark_dirty();
             return true;
         }
@@ -602,6 +733,9 @@ impl Screen<'_> {
         let viewport_height = self.markdown_viewport_height();
         if let Some(markdown) = self.context_manager.current_mut().active_markdown_mut() {
             markdown.scroll_to_bottom(viewport_height);
+            if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+                epub.capture_location();
+            }
             self.mark_dirty();
             return true;
         }
@@ -646,6 +780,74 @@ impl Screen<'_> {
     ) {
         let path = target.path.clone();
         let raw_target = path.display().to_string();
+        if let Some(target) = raw_target.strip_prefix("neoism-reader://") {
+            let mut parts = target.splitn(2, '/');
+            let book_id = parts.next().unwrap_or_default();
+            let annotation_id = parts.next().unwrap_or_default();
+            let vault =
+                neoism_workspace_index::default_notes_workspace().notes_workspace_dir();
+            if let Some(path) = crate::editor::epub::resolve_book_path(&vault, book_id) {
+                self.open_path_in_epub(path);
+                if !annotation_id.is_empty() {
+                    let result = self
+                        .context_manager
+                        .current_mut()
+                        .epub
+                        .as_mut()
+                        .map(|epub| epub.go_to_annotation(annotation_id));
+                    if let Some(Err(error)) = result {
+                        self.renderer.notifications.push(
+                            format!("Could not open book annotation: {error}"),
+                            neoism_ui::panels::notifications::NotificationLevel::Error,
+                        );
+                    }
+                }
+                self.renderer.trail_cursor.reset();
+            } else {
+                self.renderer.notifications.push(
+                    "Neoism could not find that book. Open its EPUB once to reconnect it."
+                        .to_string(),
+                    neoism_ui::panels::notifications::NotificationLevel::Warn,
+                );
+            }
+            self.mark_dirty();
+            return;
+        }
+        if let Some(href) = raw_target.strip_prefix("neoism-epub://") {
+            let result = self
+                .context_manager
+                .current_mut()
+                .epub
+                .as_mut()
+                .map(|epub| epub.go_to_href(href));
+            match result {
+                Some(Ok(true)) => {
+                    self.renderer.trail_cursor.reset();
+                }
+                Some(Ok(false)) => self.renderer.notifications.push(
+                    "That EPUB link does not point to a readable spine chapter"
+                        .to_string(),
+                    neoism_ui::panels::notifications::NotificationLevel::Warn,
+                ),
+                Some(Err(error)) => self.renderer.notifications.push(
+                    format!("Could not follow EPUB link: {error}"),
+                    neoism_ui::panels::notifications::NotificationLevel::Error,
+                ),
+                None => {}
+            }
+            self.mark_dirty();
+            return;
+        }
+        if raw_target.starts_with("http://") || raw_target.starts_with("https://") {
+            if let Err(error) = crate::background_process::open_url(&raw_target) {
+                self.renderer.notifications.push(
+                    format!("Could not open link: {error}"),
+                    neoism_ui::panels::notifications::NotificationLevel::Error,
+                );
+            }
+            self.mark_dirty();
+            return;
+        }
         if let Some(cell_index) = raw_target
             .strip_prefix("neoism-notebook:/run/")
             .or_else(|| raw_target.strip_prefix("neoism-notebook://run/"))

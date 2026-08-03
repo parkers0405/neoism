@@ -15,6 +15,7 @@ pub use inline::spelling_suggestions;
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
+use crate::editor::markdown::helpers::notebook_markdown_cell_index;
 use crate::editor::markdown::{MarkdownPane, MarkdownWrapKey};
 use crate::primitives::truncate_to_fit;
 
@@ -149,6 +150,65 @@ pub fn render(
         let line_h;
         let cursor_wrap_width;
         let cursor_marker_len = parsed.marker_len;
+
+        if let Some(cell_index) = notebook_markdown_cell_index(line) {
+            let row_h = 28.0 * font_scale;
+            let block_rect = [content_x - 18.0, cursor_y, content_w + 36.0, row_h];
+            let handle_rect = [block_rect[0] - 36.0, block_rect[1], 34.0, block_rect[3]];
+            let active = pane.register_block_rect(
+                line_ix,
+                block_rect,
+                handle_rect,
+                content_x,
+                cursor_y,
+                0,
+                1.0,
+                row_h,
+                content_w,
+                mouse,
+            );
+            if active {
+                draw_block_actions(
+                    sugarloaf,
+                    block_rect,
+                    theme,
+                    clip,
+                    pane.dragging_line == Some(line_ix),
+                );
+            }
+            let divider_y = cursor_y + row_h * 0.5;
+            draw_rect_clipped(
+                sugarloaf,
+                clip,
+                content_x - 12.0,
+                divider_y,
+                content_w + 24.0,
+                1.0,
+                theme.f32_alpha(theme.border, 0.75),
+                DEPTH,
+                ORDER_BG + 2,
+            );
+            let label = format!("Markdown · Cell {}", cell_index + 1);
+            let label_opts = DrawOpts {
+                font_size: markdown_font(10.5, font_scale),
+                color: theme.u8(theme.muted),
+                bold: true,
+                clip_rect: Some(clip),
+                ..DrawOpts::default()
+            };
+            draw_if_visible(
+                sugarloaf,
+                content_x + 8.0,
+                divider_y - label_opts.font_size * 0.5,
+                &label,
+                &label_opts,
+                y,
+                bottom,
+                text_occlusions,
+            );
+            cursor_y += row_h;
+            continue;
+        }
 
         if let Some(table) = parse_table(&lines, line_ix) {
             skip_until = table.end_line;

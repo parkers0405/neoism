@@ -2,6 +2,7 @@ use crate::app::ime::Ime;
 use crate::app::messenger::Messenger;
 use crate::context::renderable::{Cursor, RenderableContent};
 use crate::context::splash::SplashInjection;
+use crate::editor::epub::EpubPane;
 use crate::editor::markdown::MarkdownPane;
 use crate::editor::neodraw::DrawPane;
 use crate::editor::notebook::NotebookPane;
@@ -83,6 +84,9 @@ pub struct Context<T: EventListener> {
     /// Rust-rendered `.ipynb` notebook surface. Owns notebook JSON while
     /// reusing the virtualized markdown renderer for cell presentation.
     pub notebook: Option<NotebookPane>,
+    /// Native `.epub` reader. Owns the package/spine/TOC and exposes the
+    /// current chapter through the shared Markdown reading surface.
+    pub epub: Option<EpubPane>,
     /// Rust-rendered Neoism agent chat surface. Mutually exclusive with
     /// terminal/markdown content.
     pub neoism_agent: Option<NeoismAgentPane>,
@@ -112,6 +116,7 @@ impl<T: neoism_backend::event::EventListener> Drop for Context<T> {
             && self.code.is_none()
             && self.draw.is_none()
             && self.notebook.is_none()
+            && self.epub.is_none()
             && self.neoism_agent.is_none()
             && self.neoism_tags.is_none()
             && self.neoism_extensions.is_none()

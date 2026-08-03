@@ -243,9 +243,7 @@ impl Screen<'_> {
                 }
             }
             let block_input_active = is_active
-                && ctx.markdown.is_none()
-                && ctx.neoism_agent.is_none()
-                && ctx.neoism_tags.is_none()
+                && !ctx.has_non_terminal_surface()
                 && ctx
                     .terminal_input
                     .prompt_window_open(shell_prompt_state, ctx.remote_pty.is_some())
@@ -736,11 +734,8 @@ impl Screen<'_> {
                 &mut ctx.renderable_content.last_frame_damage,
                 neoism_terminal_core::damage::TerminalDamage::Noop,
             );
-            let force_file_link_hover_rebuild = is_active
-                && ctx.markdown.is_none()
-                && ctx.neoism_agent.is_none()
-                && ctx.neoism_tags.is_none()
-                && hover_link_changed;
+            let force_file_link_hover_rebuild =
+                is_active && !ctx.has_non_terminal_surface() && hover_link_changed;
             let block_damage_requires_full = block_footer_active
                 && (block_frame_sources_changed
                     || !matches!(

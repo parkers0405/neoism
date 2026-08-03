@@ -52,11 +52,7 @@ impl Screen<'_> {
 
     pub(crate) fn active_terminal_process_cwd(&self) -> Option<PathBuf> {
         let current = self.context_manager.current();
-        if current.markdown.is_some()
-            || current.notebook.is_some()
-            || current.neoism_agent.is_some()
-            || current.neoism_tags.is_some()
-        {
+        if current.has_non_terminal_surface() {
             return None;
         }
         #[cfg(not(target_os = "windows"))]
@@ -98,11 +94,7 @@ impl Screen<'_> {
 
     pub(crate) fn current_terminal_completion_cwd(&self) -> Option<PathBuf> {
         let current = self.context_manager.current();
-        if current.markdown.is_some()
-            || current.notebook.is_some()
-            || current.neoism_agent.is_some()
-            || current.neoism_tags.is_some()
-        {
+        if current.has_non_terminal_surface() {
             return None;
         }
 
@@ -667,7 +659,7 @@ impl Screen<'_> {
         match target {
             neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path) => {
                 self.renderer.file_tree.set_active_path(Some(path.clone()));
-                self.activate_markdown_path(path);
+                self.activate_rich_document_path(path);
                 self.reapply_chrome_layout();
                 self.renderer.trail_cursor.reset();
                 self.mark_dirty();

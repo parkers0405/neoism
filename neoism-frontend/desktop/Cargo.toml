@@ -79,6 +79,8 @@ smallvec = { workspace = true }
 neoism-window = { workspace = true }
 lru = "0.16.0"
 neoism-notifier = { workspace = true }
+roxmltree = "0.20.0"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # Embedded-daemon mode (G8): when the desktop binary launches and
 # no external daemon is reachable, we spawn a `WorkspaceManager` +
 # axum router inside our own process and bind it to a per-user unix

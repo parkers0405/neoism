@@ -39,6 +39,16 @@ fn modal_action_policy_tag(
         A::ApplyMashupPack { .. } => Tag::ApplyMashupPack,
         A::RunEditorCommand { .. } => Tag::RunEditorCommand,
         A::RunEditorCommandWithInput { .. } => Tag::RunEditorCommandWithInput,
+        A::EpubAddNote { .. } => Tag::RunEditorCommandWithInput,
+        A::EpubUpdateAnnotation { .. } => Tag::RunEditorCommandWithInput,
+        A::EpubGoTo { .. }
+        | A::EpubOpenContents
+        | A::EpubOpenChapterPages { .. }
+        | A::EpubGoToPage { .. }
+        | A::EpubOpenAnnotation { .. }
+        | A::EpubGoToAnnotation { .. }
+        | A::EpubEditAnnotation { .. }
+        | A::EpubDeleteAnnotation { .. } => Tag::RunEditorCommand,
         A::OpenLspLocation { .. } => Tag::OpenLspLocation,
         A::ApplyLspCodeAction { .. } => Tag::ApplyLspCodeAction,
         A::InstallAgent { .. } => Tag::InstallAgent,

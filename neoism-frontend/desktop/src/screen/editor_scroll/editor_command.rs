@@ -99,6 +99,7 @@ impl Screen<'_> {
 
         if self.context_manager.current().markdown.is_some()
             || self.context_manager.current().notebook.is_some()
+            || self.context_manager.current().epub.is_some()
         {
             match MarkdownExCommandPlan::classify(&head) {
                 MarkdownExCommandPlan::JumpToLastLine => {
@@ -463,6 +464,7 @@ impl Screen<'_> {
         }
         if self.context_manager.current().markdown.is_some()
             || self.context_manager.current().notebook.is_some()
+            || self.context_manager.current().epub.is_some()
         {
             let scale = self.sugarloaf.scale_factor();
             let viewport_height = self

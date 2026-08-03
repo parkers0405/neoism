@@ -178,6 +178,13 @@ impl MarkdownPane {
     }
 
     pub(crate) fn resolve_markdown_link_path(&self, target: &str) -> PathBuf {
+        // Host-owned document schemes (notebook actions, EPUB spine links)
+        // and web URLs must survive resolution verbatim. Treating them as a
+        // relative filesystem path destroys the scheme and prevents the host
+        // from dispatching the click.
+        if target.contains("://") {
+            return PathBuf::from(target);
+        }
         let target = PathBuf::from(target);
         let base = if target.is_absolute() {
             target

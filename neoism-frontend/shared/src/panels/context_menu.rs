@@ -62,6 +62,9 @@ const TITLE_HEIGHT: f32 = 22.0;
 const ITEM_HEIGHT: f32 = 30.0;
 const MAX_VISIBLE_ITEMS: usize = 10;
 const SEPARATOR_HEIGHT: f32 = 1.0;
+const SWATCH_ROW_HEIGHT: f32 = 42.0;
+const SWATCH_SIZE: f32 = 22.0;
+const SWATCH_GAP: f32 = 14.0;
 const DEPTH_BG: f32 = 0.1;
 const DEPTH_ELEMENT: f32 = 0.2;
 const ORDER: u8 = 26;
@@ -73,6 +76,7 @@ pub enum ContextMenuAction {
     Lsp(LspContextAction),
     Workspace(WorkspaceContextAction),
     Notebook(NotebookContextAction),
+    Epub(EpubContextAction),
     MarkdownBlock(MarkdownBlockTemplate),
     MarkdownLinkCompletion(String),
     MarkdownSpellingReplace {
@@ -80,6 +84,29 @@ pub enum ContextMenuAction {
         start: usize,
         end: usize,
         replacement: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EpubContextAction {
+    SetHighlightColor {
+        annotation_id: Option<String>,
+        color: String,
+    },
+    AddNote {
+        annotation_id: Option<String>,
+    },
+    OpenBookNote {
+        annotation_id: String,
+    },
+    CopyQuote {
+        annotation_id: Option<String>,
+    },
+    AskNeoism {
+        annotation_id: Option<String>,
+    },
+    DeleteAnnotation {
+        annotation_id: String,
     },
 }
 
@@ -162,6 +189,16 @@ pub struct ContextMenuItem {
     pub preview: String,
     pub action: ContextMenuAction,
     pub enabled: bool,
+    pub swatch: Option<ContextMenuSwatch>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextMenuSwatch {
+    Yellow,
+    Green,
+    Blue,
+    Pink,
+    Purple,
 }
 
 impl ContextMenuItem {
@@ -176,11 +213,17 @@ impl ContextMenuItem {
             preview: String::new(),
             action,
             enabled: true,
+            swatch: None,
         }
     }
 
     pub fn with_preview(mut self, preview: impl Into<String>) -> Self {
         self.preview = preview.into();
+        self
+    }
+
+    pub fn with_swatch(mut self, swatch: ContextMenuSwatch) -> Self {
+        self.swatch = Some(swatch);
         self
     }
 }
@@ -497,15 +540,37 @@ impl ContextMenu {
             return Err(());
         }
         let s = self.scale;
-        let rows_y = y + MENU_PADDING * s + self.header_height();
+        let mut rows_y = y + MENU_PADDING * s + self.header_height();
+        let swatches = self.swatch_count();
+        if swatches > 0 {
+            if mouse_y < rows_y + SWATCH_ROW_HEIGHT * s {
+                let total_w = swatches as f32 * SWATCH_SIZE * s
+                    + swatches.saturating_sub(1) as f32 * SWATCH_GAP * s;
+                let start_x = x + (w - total_w) * 0.5;
+                for index in 0..swatches {
+                    let swatch_x =
+                        start_x + index as f32 * (SWATCH_SIZE + SWATCH_GAP) * s;
+                    if mouse_x >= swatch_x
+                        && mouse_x <= swatch_x + SWATCH_SIZE * s
+                        && mouse_y >= rows_y + (SWATCH_ROW_HEIGHT - SWATCH_SIZE) * 0.5 * s
+                        && mouse_y <= rows_y + (SWATCH_ROW_HEIGHT + SWATCH_SIZE) * 0.5 * s
+                    {
+                        return Ok(Some(index));
+                    }
+                }
+                return Ok(None);
+            }
+            rows_y += SWATCH_ROW_HEIGHT * s;
+        }
         let row_h = ITEM_HEIGHT * s;
         if mouse_y < rows_y {
             return Ok(None);
         }
         let row = ((mouse_y - rows_y) / row_h).floor() as usize;
         let menu = self.popover.content();
-        let index = menu.scroll_offset() + row;
-        if row < menu.visible_count() && index < menu.len() {
+        let list_visible = menu.visible_count().saturating_sub(swatches);
+        let index = swatches + menu.scroll_offset() + row;
+        if row < list_visible && index < menu.len() {
             Ok(Some(index))
         } else {
             Ok(None)
@@ -601,9 +666,54 @@ impl ContextMenu {
             y += SEPARATOR_HEIGHT + 4.0 * s;
         }
 
+        let swatches = self.swatch_count();
+        if swatches > 0 {
+            let total_w = swatches as f32 * SWATCH_SIZE * s
+                + swatches.saturating_sub(1) as f32 * SWATCH_GAP * s;
+            let start_x = self.x + (w - total_w) * 0.5;
+            let dot_y = y + (SWATCH_ROW_HEIGHT - SWATCH_SIZE) * 0.5 * s;
+            let selected = self.popover.content().selected_index();
+            for (index, item) in self.source_items.iter().take(swatches).enumerate() {
+                let dot_x = start_x + index as f32 * (SWATCH_SIZE + SWATCH_GAP) * s;
+                let color = match item.swatch {
+                    Some(ContextMenuSwatch::Yellow) => theme.yellow,
+                    Some(ContextMenuSwatch::Green) => theme.green,
+                    Some(ContextMenuSwatch::Blue) => theme.blue,
+                    Some(ContextMenuSwatch::Pink) => theme.red,
+                    Some(ContextMenuSwatch::Purple) => theme.magenta,
+                    None => theme.muted,
+                };
+                if index == selected {
+                    sugarloaf.rounded_rect(
+                        None,
+                        dot_x - 3.0 * s,
+                        dot_y - 3.0 * s,
+                        (SWATCH_SIZE + 6.0) * s,
+                        (SWATCH_SIZE + 6.0) * s,
+                        theme.f32(theme.fg),
+                        DEPTH_ELEMENT,
+                        (SWATCH_SIZE + 6.0) * 0.5 * s,
+                        ORDER + 1,
+                    );
+                }
+                sugarloaf.rounded_rect(
+                    None,
+                    dot_x,
+                    dot_y,
+                    SWATCH_SIZE * s,
+                    SWATCH_SIZE * s,
+                    theme.f32(color),
+                    DEPTH_ELEMENT + 0.01,
+                    SWATCH_SIZE * 0.5 * s,
+                    ORDER + 2,
+                );
+            }
+            y += SWATCH_ROW_HEIGHT * s;
+        }
+
         let row_h = ITEM_HEIGHT * s;
         let menu = self.popover.content();
-        let visible_count = menu.visible_count();
+        let visible_count = menu.visible_count().saturating_sub(swatches);
         let selected_index = menu.selected_index();
         let scroll_offset = menu.scroll_offset();
         let items_len = menu.len();
@@ -629,7 +739,11 @@ impl ContextMenu {
             ..DrawOpts::default()
         };
 
-        for (display_index, (index, item)) in menu.visible_items().enumerate() {
+        for (display_index, (index, item)) in menu
+            .visible_items()
+            .filter(|(index, _)| *index >= swatches)
+            .enumerate()
+        {
             let row_y = y + display_index as f32 * row_h;
             let selected = index == selected_index && item.enabled;
             let hint = self.hints.get(index).map(String::as_str).unwrap_or("");
@@ -708,8 +822,9 @@ impl ContextMenu {
 
         self.selected_cursor_rect = next_selected_cursor_rect;
 
-        if items_len > visible_count {
-            let max_offset = items_len.saturating_sub(visible_count);
+        let list_items_len = items_len.saturating_sub(swatches);
+        if list_items_len > visible_count {
+            let max_offset = list_items_len.saturating_sub(visible_count);
             let normalized = if max_offset == 0 {
                 0.0
             } else {
@@ -717,7 +832,7 @@ impl ContextMenu {
             };
             if let Some((thumb_y, thumb_h)) = scrollbar::compute_thumb(
                 visible_count,
-                items_len,
+                list_items_len,
                 list_clip[1],
                 list_clip[3],
                 normalized,
@@ -751,7 +866,8 @@ impl ContextMenu {
         let visible_count = self.popover.content().visible_count();
         let h = MENU_PADDING * 2.0 * s
             + self.header_height()
-            + visible_count as f32 * ITEM_HEIGHT * s;
+            + self.swatch_height()
+            + visible_count.saturating_sub(self.swatch_count()) as f32 * ITEM_HEIGHT * s;
         (self.menu_width() * s, h.max(MENU_PADDING * 2.0 * s))
     }
 
@@ -765,6 +881,21 @@ impl ContextMenu {
 
     fn has_previews(&self) -> bool {
         self.previews.iter().any(|preview| !preview.is_empty())
+    }
+
+    fn swatch_count(&self) -> usize {
+        self.source_items
+            .iter()
+            .take_while(|item| item.swatch.is_some())
+            .count()
+    }
+
+    fn swatch_height(&self) -> f32 {
+        if self.swatch_count() == 0 {
+            0.0
+        } else {
+            SWATCH_ROW_HEIGHT * self.scale
+        }
     }
 
     fn rebuild_menu_items(&mut self, keep_empty_markdown_block_open: bool) -> bool {
@@ -790,6 +921,7 @@ impl ContextMenu {
                     preview: String::new(),
                     action: fallback.action,
                     enabled: false,
+                    swatch: None,
                 });
             }
         }

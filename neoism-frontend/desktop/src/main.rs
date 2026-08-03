@@ -1065,8 +1065,12 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
         println!("  ✓ relaunched {restarted} hosted server(s) on the new binary");
     }
     println!("Updated to {latest}.");
-    println!("  • The agent server + embedded daemon relaunch when you next open Neoism.");
-    println!("  • Containerized servers are left untouched — they manage their own lifecycle.");
+    println!(
+        "  • The agent server + embedded daemon relaunch when you next open Neoism."
+    );
+    println!(
+        "  • Containerized servers are left untouched — they manage their own lifecycle."
+    );
     Ok(())
 }
 

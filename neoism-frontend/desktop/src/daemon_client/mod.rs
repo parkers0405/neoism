@@ -237,14 +237,22 @@ impl DaemonClientHandle {
 
     pub async fn send_pty(&self, message: PtyClientMessage) -> Result<u64> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        self.send_pty_with_request_id(request_id, message).await?;
+        Ok(request_id)
+    }
+
+    pub async fn send_pty_with_request_id(
+        &self,
+        request_id: u64,
+        message: PtyClientMessage,
+    ) -> Result<()> {
         self.tx
             .send(OutboundServiceMessage::Pty {
                 request_id,
                 message,
             })
             .await
-            .map_err(|_| DaemonClientError::ChannelClosed)?;
-        Ok(request_id)
+            .map_err(|_| DaemonClientError::ChannelClosed)
     }
 
     /// Wave 7A: CRDT/presence envelope. Used by the presence publisher
@@ -430,6 +438,7 @@ pub enum DaemonServerMessage {
         message: EditorServerMessage,
     },
     Pty {
+        request_id: u64,
         message: PtyServerMessage,
     },
     /// CRDT frame: document-plane traffic (snapshots + sync updates for
@@ -469,7 +478,7 @@ impl DaemonServerMessage {
             | Self::Files { request_id, .. }
             | Self::Search { request_id, .. }
             | Self::Git { request_id, .. } => *request_id,
-            Self::Pty { .. } => 0,
+            Self::Pty { request_id, .. } => *request_id,
         }
     }
 }
@@ -621,7 +630,9 @@ impl ClientRunner {
                     let Some(outbound) = outbound else {
                         return true;
                     };
-                    pending.push_back(outbound);
+                    if outbound_is_replayable(&outbound) {
+                        pending.push_back(outbound);
+                    }
                 }
             }
         }
@@ -711,6 +722,10 @@ enum ServiceClientMessage<'a> {
         workspace_root: Option<&'a Path>,
         message: &'a EditorClientMessage,
     },
+    Pty {
+        request_id: u64,
+        message: &'a PtyClientMessage,
+    },
     Crdt {
         request_id: u64,
         message: &'a CrdtClientMessage,
@@ -767,9 +782,13 @@ fn serialize_outbound_service_message(
             workspace_root: workspace_root.as_deref(),
             message,
         },
-        OutboundServiceMessage::Pty { message, .. } => {
-            return Ok(serde_json::to_string(message)?);
-        }
+        OutboundServiceMessage::Pty {
+            request_id,
+            message,
+        } => ServiceClientMessage::Pty {
+            request_id: *request_id,
+            message,
+        },
         OutboundServiceMessage::Crdt {
             request_id,
             message,
@@ -808,13 +827,19 @@ fn serialize_outbound_service_message(
     Ok(serde_json::to_string(&envelope)?)
 }
 
-/// Presence frames are ephemeral: a stale cursor replayed after a
-/// reconnect is actively wrong (and `PublishPresence` never receives a
-/// correlated reply, so a queued copy would survive `ack_pending`
-/// forever and replay on EVERY reconnect). Keep them out of the
-/// pending/replay queue entirely.
+/// Presence frames and PTY input are ephemeral. Replaying a cursor is wrong;
+/// replaying terminal bytes can execute a command twice. Create/attach/resize
+/// and close remain replayable control operations and receive correlated
+/// acknowledgments from current daemons.
 fn outbound_is_replayable(message: &OutboundServiceMessage) -> bool {
-    !matches!(message, OutboundServiceMessage::Crdt { .. })
+    !matches!(
+        message,
+        OutboundServiceMessage::Crdt { .. }
+            | OutboundServiceMessage::Pty {
+                message: PtyClientMessage::PtyInput { .. },
+                ..
+            }
+    )
 }
 
 fn parse_server_frame(frame: Message) -> Result<Option<DaemonServerMessage>> {
@@ -914,9 +939,25 @@ fn parse_server_frame(frame: Message) -> Result<Option<DaemonServerMessage>> {
                 message: parsed.message,
             }))
         }
+        "PtyReply" => {
+            #[derive(Debug, Deserialize)]
+            struct PtyPayload {
+                #[serde(default)]
+                request_id: u64,
+                message: PtyServerMessage,
+            }
+            let parsed: PtyPayload = serde_json::from_value(payload.clone())?;
+            Ok(Some(DaemonServerMessage::Pty {
+                request_id: parsed.request_id,
+                message: parsed.message,
+            }))
+        }
         "PtyCreated" | "PtyOutput" | "PtyClosed" | "Error" => {
             let message: PtyServerMessage = serde_json::from_value(raw.clone())?;
-            Ok(Some(DaemonServerMessage::Pty { message }))
+            Ok(Some(DaemonServerMessage::Pty {
+                request_id: 0,
+                message,
+            }))
         }
         _ => Ok(None),
     }
@@ -1029,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn pty_wire_message_is_raw_top_level() {
+    fn pty_wire_message_carries_request_correlation() {
         let message = OutboundServiceMessage::Pty {
             request_id: 9,
             message: PtyClientMessage::CreatePty {
@@ -1042,14 +1083,33 @@ mod tests {
 
         let json = serialize_outbound_service_message(&message).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(
-            value.get("Pty").is_none(),
-            "PTY must not be service-wrapped"
-        );
-        assert_eq!(value["CreatePty"]["cwd"], "/tmp");
-        assert_eq!(value["CreatePty"]["cols"], 80);
-        assert_eq!(value["CreatePty"]["rows"], 24);
-        assert_eq!(value["CreatePty"]["shell"], "/bin/sh");
+        assert_eq!(value["Pty"]["request_id"], 9);
+        assert_eq!(value["Pty"]["message"]["CreatePty"]["cwd"], "/tmp");
+        assert_eq!(value["Pty"]["message"]["CreatePty"]["cols"], 80);
+        assert_eq!(value["Pty"]["message"]["CreatePty"]["rows"], 24);
+        assert_eq!(value["Pty"]["message"]["CreatePty"]["shell"], "/bin/sh");
+    }
+
+    #[test]
+    fn pty_input_is_never_replayed_after_reconnect() {
+        let input = OutboundServiceMessage::Pty {
+            request_id: 10,
+            message: PtyClientMessage::PtyInput {
+                session_id: "pty-10".into(),
+                bytes: b"dangerous-command\n".to_vec(),
+            },
+        };
+        let resize = OutboundServiceMessage::Pty {
+            request_id: 11,
+            message: PtyClientMessage::Resize {
+                session_id: "pty-10".into(),
+                cols: 100,
+                rows: 40,
+            },
+        };
+
+        assert!(!outbound_is_replayable(&input));
+        assert!(outbound_is_replayable(&resize));
     }
 
     #[test]
@@ -1066,16 +1126,47 @@ mod tests {
             .expect("pty reply");
         match parsed {
             DaemonServerMessage::Pty {
+                request_id,
                 message:
                     PtyServerMessage::PtyCreated {
                         session_id,
                         workspace_root,
                     },
             } => {
+                assert_eq!(request_id, 0);
                 assert_eq!(session_id, "pty-1");
                 assert_eq!(workspace_root.as_deref(), Some("/work"));
             }
             other => panic!("expected raw pty reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_correlated_pty_reply() {
+        let reply = serde_json::json!({
+            "PtyReply": {
+                "request_id": 41,
+                "message": {
+                    "PtyCreated": {
+                        "session_id": "pty-41",
+                        "workspace_root": "/work"
+                    }
+                }
+            }
+        });
+
+        let parsed = parse_server_frame(Message::Text(reply.to_string()))
+            .unwrap()
+            .expect("pty reply");
+        match parsed {
+            DaemonServerMessage::Pty {
+                request_id,
+                message: PtyServerMessage::PtyCreated { session_id, .. },
+            } => {
+                assert_eq!(request_id, 41);
+                assert_eq!(session_id, "pty-41");
+            }
+            other => panic!("expected correlated pty reply, got {other:?}"),
         }
     }
 

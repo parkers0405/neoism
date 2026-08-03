@@ -78,10 +78,15 @@ fn draw_code_block(
         return;
     }
     let notebook_meta = parse_notebook_code_meta(raw_lang_label);
-    let lang_label = notebook_meta
-        .as_ref()
-        .map(|meta| meta.lang.as_str())
-        .unwrap_or(code_lang_label);
+    let raw_cell_index = parse_notebook_raw_cell_index(raw_lang_label);
+    let owned_raw_label =
+        raw_cell_index.map(|cell_index| format!("Raw · Cell {}", cell_index + 1));
+    let lang_label = owned_raw_label.as_deref().unwrap_or_else(|| {
+        notebook_meta
+            .as_ref()
+            .map(|meta| meta.lang.as_str())
+            .unwrap_or(code_lang_label)
+    });
 
     // Border ring, mirroring the git-diff card frame: a slightly larger
     // rounded backing in `theme.border` so the body + header fills above it
@@ -151,7 +156,9 @@ fn draw_code_block(
     // Live Preview for the opening fence: with the cursor on it, the header
     // shows the raw ```lang text (editable — backspace the lang, retype, or
     // delete the fence itself) instead of the pretty label.
-    let open_fence_revealed = pane.cursor_line == item.first_line
+    let open_fence_revealed = notebook_meta.is_none()
+        && raw_cell_index.is_none()
+        && pane.reveals_source_line(item.first_line)
         && local_lines
             .first()
             .is_some_and(|line| line.trim_start().starts_with("```"));
@@ -387,7 +394,7 @@ fn draw_code_block(
             // ``` itself can be edited/deleted; otherwise it stays hidden but
             // keeps a click strip + caret slot at the card's footer.
             let fence_y = block_y + header_h + top_pad + row as f32 * line_h;
-            if pane.cursor_line == source_line {
+            if pane.reveals_source_line(source_line) {
                 register_code_row_geometry(
                     sugarloaf,
                     pane,
@@ -543,6 +550,69 @@ fn draw_code_block(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn draw_notebook_markdown_cell_boundary(
+    sugarloaf: &mut Sugarloaf,
+    item: &VirtualMarkdownDrawItem,
+    x: f32,
+    width: f32,
+    clip: [f32; 4],
+    clip_top: f32,
+    clip_bottom: f32,
+    theme: &IdeTheme,
+    text_occlusions: &[[f32; 4]],
+    font_scale: f32,
+) {
+    let Some(cell_index) = notebook_markdown_cell_index(item.text.trim()) else {
+        return;
+    };
+    let y = item.screen_y + 12.0 * font_scale;
+    draw_rect_clipped(
+        sugarloaf,
+        clip,
+        x - 12.0,
+        y,
+        width + 24.0,
+        1.0,
+        theme.f32_alpha(theme.border, 0.75),
+        DEPTH,
+        ORDER_BG + 2,
+    );
+    let label = format!("Markdown · Cell {}", cell_index + 1);
+    let opts = DrawOpts {
+        font_size: markdown_font(10.5, font_scale),
+        color: theme.u8_alpha(theme.fg, 0.7),
+        bold: true,
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    let label_w = sugarloaf.text_mut().measure(&label, &opts);
+    let chip_x = x + 8.0;
+    let chip_y = y - (opts.font_size + 8.0) * 0.5;
+    draw_rounded_rect_clipped(
+        sugarloaf,
+        clip,
+        chip_x - 7.0,
+        chip_y - 3.0,
+        label_w + 14.0,
+        opts.font_size + 8.0,
+        5.0,
+        theme.f32(theme.bg),
+        DEPTH,
+        ORDER_BG + 3,
+    );
+    draw_if_visible(
+        sugarloaf,
+        chip_x,
+        chip_y,
+        &label,
+        &opts,
+        clip_top,
+        clip_bottom,
+        text_occlusions,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_mermaid_code_block(
     sugarloaf: &mut Sugarloaf,
     item: &VirtualMarkdownDrawItem,
@@ -681,6 +751,7 @@ fn parse_notebook_code_meta(label: &str) -> Option<NotebookCodeMeta> {
     let mut cell_index = None;
     let mut running = false;
     let mut count = None;
+    let mut raw_cell = false;
     for part in parts {
         if let Some(value) = part.strip_prefix("neoism_notebook_cell=") {
             cell_index = value.parse::<usize>().ok();
@@ -690,7 +761,12 @@ fn parse_notebook_code_meta(label: &str) -> Option<NotebookCodeMeta> {
             if value != "_" {
                 count = Some(value.to_string());
             }
+        } else if let Some(value) = part.strip_prefix("neoism_notebook_kind=") {
+            raw_cell = value == "raw";
         }
+    }
+    if raw_cell {
+        return None;
     }
     Some(NotebookCodeMeta {
         cell_index: cell_index?,
@@ -698,6 +774,19 @@ fn parse_notebook_code_meta(label: &str) -> Option<NotebookCodeMeta> {
         running,
         count,
     })
+}
+
+fn parse_notebook_raw_cell_index(label: &str) -> Option<usize> {
+    let mut cell_index = None;
+    let mut raw_cell = false;
+    for part in label.split_whitespace().skip(1) {
+        if let Some(value) = part.strip_prefix("neoism_notebook_cell=") {
+            cell_index = value.parse::<usize>().ok();
+        } else if let Some(value) = part.strip_prefix("neoism_notebook_kind=") {
+            raw_cell = value == "raw";
+        }
+    }
+    raw_cell.then_some(cell_index).flatten()
 }
 
 fn parse_notebook_output_meta(label: &str) -> Option<NotebookOutputMeta> {
@@ -922,14 +1011,41 @@ fn draw_notebook_output_block(
     };
     let line_h = line_height(&opts).max(1.0);
     let has_prompt = !meta.prompt.is_empty();
-    let prompt_w = if has_prompt {
-        76.0 * font_scale
-    } else {
-        0.0
-    };
+    let prompt_w = if has_prompt { 76.0 * font_scale } else { 0.0 };
     let body_x = x + prompt_w;
     let body_w = (width - prompt_w).max(36.0);
-    let prompt_y = item.screen_y + if has_prompt { 6.0 } else { 2.0 };
+    let output_top_gap = NOTEBOOK_OUTPUT_TOP_GAP * font_scale;
+    let prompt_y = item.screen_y + output_top_gap + if has_prompt { 6.0 } else { 2.0 };
+    let card_x = x - 6.0;
+    let card_y = item.screen_y + output_top_gap;
+    let card_w = width + 12.0;
+    let card_h = (item.bounds.height - output_top_gap - 1.0).max(1.0);
+    draw_rounded_rect_clipped(
+        sugarloaf,
+        clip,
+        card_x,
+        card_y,
+        card_w,
+        card_h,
+        BLOCK_RADIUS - 1.0,
+        theme.f32_alpha(theme.border, 0.72),
+        DEPTH,
+        ORDER_BG + 2,
+    );
+    if card_w > 2.0 && card_h > 2.0 {
+        draw_rounded_rect_clipped(
+            sugarloaf,
+            clip,
+            card_x + 1.0,
+            card_y + 1.0,
+            card_w - 2.0,
+            card_h - 2.0,
+            BLOCK_RADIUS - 2.0,
+            theme.f32_alpha(theme.surface, 0.38),
+            DEPTH,
+            ORDER_BG + 3,
+        );
+    }
 
     if meta.running {
         draw_notebook_running_loader(
@@ -1093,6 +1209,14 @@ mod virtualized_mermaid_tests {
             ),
             "python"
         );
+    }
+
+    #[test]
+    fn raw_notebook_metadata_is_not_treated_as_executable_code() {
+        let label = "text neoism_notebook_cell=2 neoism_notebook_id=cmF3 neoism_notebook_kind=raw";
+
+        assert_eq!(parse_notebook_raw_cell_index(label), Some(2));
+        assert!(parse_notebook_code_meta(label).is_none());
     }
 }
 

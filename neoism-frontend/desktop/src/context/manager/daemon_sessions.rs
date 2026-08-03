@@ -132,19 +132,27 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let Some(link) = self.daemon.link.as_ref() else {
             return false;
         };
-        self.daemon.cache.pending_session_routes.push(route_id);
-        link.send_pty(PtyClientMessage::CreatePty {
+        let request_id = link.send_pty(PtyClientMessage::CreatePty {
             cwd: self.config.working_dir.clone(),
             cols: MIN_COLUMNS as u16,
             rows: MIN_LINES as u16,
             shell: None,
         });
+        self.daemon
+            .cache
+            .pending_pty_routes
+            .insert(request_id, route_id);
         true
     }
 
     fn ensure_daemon_session_for_route(&mut self, route_id: usize) -> bool {
         if self.daemon.cache.route_sessions.contains_key(&route_id)
-            || self.daemon.cache.pending_session_routes.contains(&route_id)
+            || self
+                .daemon
+                .cache
+                .pending_pty_routes
+                .values()
+                .any(|pending| *pending == route_id)
             // A pane whose context already carries a remote-PTY binding is
             // running against a connection we kept alive (the parked HOME
             // link across a server round trip). The cache maps were wiped
@@ -200,9 +208,15 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // bakes. All new-terminal builders (split / new tab / stacked
         // terminal) funnel through here, so this single check makes the
         // guest host-hosted everywhere.
-        if !self.daemon_link_is_peer()
-            && !crate::context::remote_pty::daemon_tabs_enabled()
-        {
+        if self.daemon_link_is_peer() {
+            // A peer-owned workspace needs a shell on that peer. When this
+            // machine owns the adopted workspace, however, the normal local
+            // PTY is both faster and more reliable than looping terminal I/O
+            // through our own server connection.
+            if !self.current_workspace_is_remote_joined() {
+                return None;
+            }
+        } else if !crate::context::remote_pty::daemon_tabs_enabled() {
             return None;
         }
         let link = self.daemon.link.as_ref()?;
@@ -211,10 +225,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     /// 8A: after creating a daemon-backed context, ask the daemon for
-    /// its shell. Reuses the ordered pending-route queue that
-    /// `PtyCreated` replies resolve against (the same correlation the
-    /// mirror-session path uses), so remote panes and mirrors can
-    /// interleave safely.
+    /// its shell. The creation request id owns the route until its matching
+    /// `PtyCreated` reply arrives, so concurrent guests cannot claim each
+    /// other's shell.
     pub(super) fn register_remote_context(&mut self, context: &Context<T>) {
         let cwd = self.config.working_dir.clone();
         self.register_remote_context_with_cwd(context, cwd);
@@ -238,11 +251,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .cache
             .remote_routes
             .insert(context.route_id, binding.clone());
-        self.daemon
-            .cache
-            .pending_session_routes
-            .push(context.route_id);
-        link.send_pty(PtyClientMessage::CreatePty {
+        let request_id = link.send_pty(PtyClientMessage::CreatePty {
             cwd,
             cols: context
                 .dimension
@@ -256,6 +265,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 .unwrap_or(MIN_LINES as u16),
             shell: None,
         });
+        self.daemon
+            .cache
+            .pending_pty_routes
+            .insert(request_id, context.route_id);
     }
 
     /// 8C: like [`Self::prepared_remote_pty`] but NOT gated on
@@ -543,6 +556,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         rich_text_id: usize,
         sugarloaf: &mut Sugarloaf,
     ) -> bool {
+        let workspace_owned_locally = self.workspace_owned_locally(workspace_id);
+        let terminal_uses_remote_pty = workspace_terminal_uses_remote_pty(
+            self.daemon.link_is_peer,
+            workspace_owned_locally,
+        );
         // Live, terminal-kind tabs of that workspace, active first.
         // Empty is FINE — a workspace with no live shells still adopts
         // as a real Island with a fresh daemon shell in its root, so
@@ -553,27 +571,26 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // enters with one fresh shell in the workspace root and builds
         // their own strip. Session re-attach stays for the single-user
         // flow (re-adopting your OWN workspace from another screen).
-        let mut tabs: Vec<WorkspaceTabSummary> =
-            if should_reattach_existing_sessions(
-                self.daemon.link_is_peer,
-                self.workspace_owned_locally(workspace_id),
-            ) {
-                self.daemon
-                    .cache
-                    .daemon_workspace_tabs
-                    .iter()
-                    .filter(|tab| {
-                        tab.workspace_id == workspace_id
-                            && tab.session_id.is_some()
-                            && matches!(tab.kind.as_deref(), None | Some("terminal"))
-                    })
-                    .cloned()
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        let mut tabs: Vec<WorkspaceTabSummary> = if should_reattach_existing_sessions(
+            self.daemon.link_is_peer,
+            workspace_owned_locally,
+        ) {
+            self.daemon
+                .cache
+                .daemon_workspace_tabs
+                .iter()
+                .filter(|tab| {
+                    tab.workspace_id == workspace_id
+                        && tab.session_id.is_some()
+                        && matches!(tab.kind.as_deref(), None | Some("terminal"))
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         tabs.sort_by_key(|tab| std::cmp::Reverse(tab.active));
-        if self.prepared_remote_pty_for_adopt().is_none() {
+        if terminal_uses_remote_pty && self.prepared_remote_pty_for_adopt().is_none() {
             tracing::warn!(
                 target: "neoism::workspaces",
                 workspace_id,
@@ -630,7 +647,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             rich_text_id,
             dimension,
             &cloned_config,
-            self.prepared_remote_pty_for_adopt(),
+            terminal_uses_remote_pty
+                .then(|| self.prepared_remote_pty_for_adopt())
+                .flatten(),
         ) {
             Ok(context) => context,
             Err(error) => {
@@ -640,10 +659,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         };
         match root_session.as_deref() {
             Some(session_id) => self.register_adopted_context(&root_context, session_id),
-            None => self.register_remote_context_with_cwd(
+            None if terminal_uses_remote_pty => self.register_remote_context_with_cwd(
                 &root_context,
                 cloned_config.working_dir.clone(),
             ),
+            None => {}
         }
 
         let last_index = self.contexts.len();
@@ -668,7 +688,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 AdoptedWorkspaceBinding {
                     workspace_id: workspace_id.to_string(),
                     endpoint,
-                    is_peer: self.daemon.link_is_peer,
+                    is_peer: self.daemon.link_is_peer && !workspace_owned_locally,
                 },
             );
         }
@@ -689,7 +709,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 stacked_rich_text_id,
                 stacked_dimension,
                 &cloned_config,
-                self.prepared_remote_pty_for_adopt(),
+                terminal_uses_remote_pty
+                    .then(|| self.prepared_remote_pty_for_adopt())
+                    .flatten(),
             ) {
                 Ok(stacked) => {
                     self.register_adopted_context(&stacked, &session_id);
@@ -864,6 +886,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             code: None,
             draw: None,
             notebook: None,
+            epub: None,
             neoism_agent: None,
             neoism_tags: None,
             neoism_extensions: None,
@@ -884,13 +907,29 @@ fn workspace_uses_attached_daemon(
 /// the owner's published placeholder session in that case gives the guest a
 /// terminal the host is not actually using. Guests always get their own live
 /// daemon shell in the shared workspace root.
-fn should_reattach_existing_sessions(link_is_peer: bool, workspace_owned_locally: bool) -> bool {
+fn should_reattach_existing_sessions(
+    link_is_peer: bool,
+    workspace_owned_locally: bool,
+) -> bool {
     !link_is_peer && workspace_owned_locally
+}
+
+/// A home-daemon adoption intentionally reconnects to its persistent shell.
+/// Across a peer link, only a genuinely remote workspace needs the daemon PTY;
+/// the owner opening its own hosted workspace keeps a normal local terminal.
+fn workspace_terminal_uses_remote_pty(
+    link_is_peer: bool,
+    workspace_owned_locally: bool,
+) -> bool {
+    !link_is_peer || !workspace_owned_locally
 }
 
 #[cfg(test)]
 mod workspace_isolation_tests {
-    use super::{should_reattach_existing_sessions, workspace_uses_attached_daemon};
+    use super::{
+        should_reattach_existing_sessions, workspace_terminal_uses_remote_pty,
+        workspace_uses_attached_daemon,
+    };
 
     #[test]
     fn local_workspace_ignores_peer_link() {
@@ -913,5 +952,12 @@ mod workspace_isolation_tests {
         assert!(!should_reattach_existing_sessions(true, true));
         assert!(!should_reattach_existing_sessions(true, false));
         assert!(should_reattach_existing_sessions(false, true));
+    }
+
+    #[test]
+    fn only_remote_peer_workspaces_route_terminal_io_through_daemon() {
+        assert!(workspace_terminal_uses_remote_pty(true, false));
+        assert!(!workspace_terminal_uses_remote_pty(true, true));
+        assert!(workspace_terminal_uses_remote_pty(false, true));
     }
 }

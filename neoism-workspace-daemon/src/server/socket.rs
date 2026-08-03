@@ -24,6 +24,11 @@ pub(crate) enum ServiceClientMessage {
         workspace_root: Option<String>,
         message: EditorClientMessage,
     },
+    Pty {
+        #[serde(default)]
+        request_id: u64,
+        message: ClientMessage,
+    },
     /// Inbound agent (Claude API proxy) envelope. `request_id` is
     /// echoed on every emitted `AgentReply` so the bridge can route
     /// streaming events through its existing pending-correlation
@@ -78,6 +83,10 @@ pub(crate) enum ServiceServerMessage {
     EditorReply {
         request_id: u64,
         message: EditorServerMessage,
+    },
+    PtyReply {
+        request_id: u64,
+        message: ServerMessage,
     },
     /// Outbound agent stream event. `request_id` matches whichever
     /// envelope the chrome most recently submitted — unsolicited
@@ -286,6 +295,11 @@ pub(crate) async fn handle_socket(
         tokio::sync::mpsc::unbounded_channel::<SearchServerMessage>();
     let search_registry = SearchRegistry::new();
     let mut search_request_id: u64 = 0;
+    // Read-only files requests run outside the socket pump. In particular, a
+    // large ListDir must not pause PTY forwarding or prevent the next folder
+    // request from reaching the daemon.
+    let (files_tx, mut files_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, FilesServerMessage)>();
 
     // Workspace dispatch: per-connection cwd / session pointer. The
     // cross-connection registry lives on `workspace_manager`.
@@ -333,8 +347,10 @@ pub(crate) async fn handle_socket(
     presence_ttl_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
+        // Keep selection fair. With `biased`, a continuously-ready PTY output
+        // receiver could starve `stream.next()` indefinitely, leaving a
+        // joined workspace's ListDir request waiting unread on the socket.
         let frame = tokio::select! {
-            biased;
             out = output_rx.recv() => {
                 match out {
                     Ok(out) => {
@@ -430,6 +446,18 @@ pub(crate) async fn handle_socket(
                 };
                 if let Err(err) = send_json(&mut sink, &resp).await {
                     tracing::warn!(error = %err, "websocket send error draining search reply");
+                    poll_task.abort();
+                    return;
+                }
+                continue;
+            }
+            Some((request_id, message)) = files_rx.recv() => {
+                let resp = ServiceServerMessage::FilesReply {
+                    request_id,
+                    message,
+                };
+                if let Err(err) = send_json(&mut sink, &resp).await {
+                    tracing::warn!(error = %err, "websocket send error draining files reply");
                     poll_task.abort();
                     return;
                 }
@@ -683,6 +711,33 @@ pub(crate) async fn handle_socket(
         }
         if let Ok(msg) = serde_json::from_str::<ServiceClientMessage>(&text) {
             match msg {
+                ServiceClientMessage::Pty {
+                    request_id,
+                    message,
+                } => {
+                    if matches!(&message, ClientMessage::CreatePty { .. }) {
+                        if let Err(denial) =
+                            check_permission(&device, Permission::PtyCreate)
+                        {
+                            let _ = send_json(&mut sink, &denial).await;
+                            continue;
+                        }
+                    }
+                    let mut replies = registry.handle(message);
+                    if replies.is_empty() {
+                        replies.push(ServerMessage::Ack);
+                    }
+                    for message in replies {
+                        let resp = ServiceServerMessage::PtyReply {
+                            request_id,
+                            message,
+                        };
+                        if let Err(err) = send_json(&mut sink, &resp).await {
+                            tracing::warn!(error = %err, "websocket send error");
+                            return;
+                        }
+                    }
+                }
                 ServiceClientMessage::Files {
                     request_id,
                     workspace_root,
@@ -723,6 +778,26 @@ pub(crate) async fn handle_socket(
                     // client gets `Changed` pushes for that root, so
                     // a guest's remote tree stays live without polls.
                     crate::fs_watch::hub().ensure_watched(&root);
+                    if matches!(
+                        &message,
+                        FilesClientMessage::ListDir { .. }
+                            | FilesClientMessage::Stat { .. }
+                            | FilesClientMessage::ReadFile { .. }
+                            | FilesClientMessage::WalkTree { .. }
+                            | FilesClientMessage::ReadShellHistory { .. }
+                    ) {
+                        let files_tx = files_tx.clone();
+                        tokio::spawn(async move {
+                            for message in
+                                files_handler::handle_with_root(&root, message).await
+                            {
+                                if files_tx.send((request_id, message)).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                        continue;
+                    }
                     for message in files_handler::handle_with_root(&root, message).await {
                         let resp = ServiceServerMessage::FilesReply {
                             request_id,

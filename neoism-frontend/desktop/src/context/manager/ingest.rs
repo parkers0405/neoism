@@ -234,11 +234,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         self.daemon.cache.host_ended_reason.take()
     }
 
-    pub fn apply_pty_server_message(&mut self, message: PtyServerMessage) -> bool {
+    pub fn apply_pty_server_message(
+        &mut self,
+        request_id: u64,
+        message: PtyServerMessage,
+    ) -> bool {
         match message {
+            PtyServerMessage::Ack => false,
             PtyServerMessage::PtyCreated { session_id, .. } => {
-                if !self.daemon.cache.pending_session_routes.is_empty() {
-                    let route_id = self.daemon.cache.pending_session_routes.remove(0);
+                if let Some(route_id) =
+                    self.daemon.cache.pending_pty_routes.remove(&request_id)
+                {
                     self.daemon
                         .cache
                         .route_sessions
@@ -331,7 +337,24 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                     false
                 }
             }
-            PtyServerMessage::Error { .. } => false,
+            PtyServerMessage::Error { message } => {
+                let Some(route_id) =
+                    self.daemon.cache.pending_pty_routes.remove(&request_id)
+                else {
+                    return false;
+                };
+                tracing::warn!(
+                    target: "neoism::remote_pty",
+                    request_id,
+                    route_id,
+                    %message,
+                    "daemon PTY creation failed"
+                );
+                if let Some(binding) = self.daemon.cache.remote_routes.remove(&route_id) {
+                    binding.feed.child_exited(1);
+                }
+                true
+            }
         }
     }
 

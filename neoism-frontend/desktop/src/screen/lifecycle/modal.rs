@@ -110,6 +110,210 @@ impl Screen<'_> {
                 // nvim removed; native editor equivalent TBD.
                 self.renderer.modal.close();
             }
+            ModalAction::EpubAddNote { value } => {
+                self.renderer.modal.close();
+                let result = self
+                    .context_manager
+                    .current_mut()
+                    .epub
+                    .as_mut()
+                    .map(|epub| epub.add_highlight_from_selection(value));
+                match result {
+                    Some(Ok(Some(_))) => {
+                        if let Some(path) = self
+                            .context_manager
+                            .current()
+                            .epub
+                            .as_ref()
+                            .and_then(|epub| epub.book_note_path())
+                        {
+                            self.invalidate_note_index_for_path(&path);
+                            self.renderer.notes_sidebar.refresh_notes();
+                        }
+                        self.renderer.notifications.push(
+                            "Highlight and note saved to your book note".to_string(),
+                            neoism_ui::panels::notifications::NotificationLevel::Info,
+                        )
+                    }
+                    Some(Ok(None)) => self.renderer.notifications.push(
+                        "The text selection is no longer available".to_string(),
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    ),
+                    Some(Err(error)) => self.renderer.notifications.push(
+                        format!("Could not save book note: {error}"),
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    ),
+                    None => {}
+                }
+            }
+            ModalAction::EpubGoTo { href } => {
+                self.renderer.modal.close();
+                let result = self
+                    .context_manager
+                    .current_mut()
+                    .epub
+                    .as_mut()
+                    .map(|epub| epub.go_to_href(&href));
+                match result {
+                    Some(Ok(true)) => self.renderer.trail_cursor.reset(),
+                    Some(Ok(false)) => self.renderer.notifications.push(
+                        "That table-of-contents entry is not in the reading spine"
+                            .to_string(),
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    ),
+                    Some(Err(error)) => self.renderer.notifications.push(
+                        format!("Could not open chapter: {error}"),
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    ),
+                    None => {}
+                }
+            }
+            ModalAction::EpubOpenContents => {
+                self.open_epub_table_of_contents();
+            }
+            ModalAction::EpubOpenChapterPages { href } => {
+                self.open_epub_chapter_pages(&href);
+            }
+            ModalAction::EpubGoToPage { href, page } => {
+                self.renderer.modal.close();
+                let index = self
+                    .context_manager
+                    .current()
+                    .epub
+                    .as_ref()
+                    .and_then(|epub| epub.book.chapter_index_for_href(&href));
+                let result = index.and_then(|index| {
+                    self.context_manager
+                        .current_mut()
+                        .epub
+                        .as_mut()
+                        .map(|epub| epub.go_to_page(index, page))
+                });
+                match result {
+                    Some(Ok(true)) | Some(Ok(false)) => {
+                        self.renderer.trail_cursor.reset();
+                    }
+                    Some(Err(error)) => self.renderer.notifications.push(
+                        format!("Could not open reader page: {error}"),
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    ),
+                    None => self.renderer.notifications.push(
+                        "That page is not in the reading spine".to_string(),
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    ),
+                }
+            }
+            ModalAction::EpubOpenAnnotation { id } => {
+                if id.is_empty() {
+                    self.open_epub_annotations();
+                } else {
+                    self.open_epub_annotation_detail(&id);
+                }
+            }
+            ModalAction::EpubGoToAnnotation { id } => {
+                self.renderer.modal.close();
+                let note =
+                    self.context_manager
+                        .current()
+                        .epub
+                        .as_ref()
+                        .and_then(|epub| {
+                            epub.state
+                                .annotations
+                                .iter()
+                                .find(|annotation| annotation.id == id)
+                                .map(|annotation| annotation.note.clone())
+                        });
+                let result = self
+                    .context_manager
+                    .current_mut()
+                    .epub
+                    .as_mut()
+                    .map(|epub| epub.go_to_annotation(&id));
+                match result {
+                    Some(Ok(true)) => {
+                        self.renderer.trail_cursor.reset();
+                        if let Some(note) = note.filter(|note| !note.trim().is_empty()) {
+                            self.renderer.notifications.push(
+                                format!("Book note: {note}"),
+                                neoism_ui::panels::notifications::NotificationLevel::Info,
+                            );
+                        }
+                    }
+                    Some(Ok(false)) => self.renderer.notifications.push(
+                        "That annotation no longer exists".to_string(),
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    ),
+                    Some(Err(error)) => self.renderer.notifications.push(
+                        format!("Could not open annotation: {error}"),
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    ),
+                    None => {}
+                }
+            }
+            ModalAction::EpubEditAnnotation { id } => {
+                self.open_epub_annotation_edit_prompt(&id);
+            }
+            ModalAction::EpubUpdateAnnotation { id, value } => {
+                self.renderer.modal.close();
+                let result = self
+                    .context_manager
+                    .current_mut()
+                    .epub
+                    .as_mut()
+                    .map(|epub| epub.set_annotation_note(&id, value));
+                match result {
+                    Some(Ok(true)) => {
+                        if let Some(path) = self
+                            .context_manager
+                            .current()
+                            .epub
+                            .as_ref()
+                            .and_then(|epub| epub.book_note_path())
+                        {
+                            self.invalidate_note_index_for_path(&path);
+                            self.renderer.notes_sidebar.refresh_notes();
+                        }
+                        self.renderer.notifications.push(
+                            "Book note updated".to_string(),
+                            neoism_ui::panels::notifications::NotificationLevel::Info,
+                        )
+                    }
+                    Some(Ok(false)) => self.renderer.notifications.push(
+                        "That annotation no longer exists".to_string(),
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    ),
+                    Some(Err(error)) => self.renderer.notifications.push(
+                        format!("Could not update book note: {error}"),
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    ),
+                    None => {}
+                }
+            }
+            ModalAction::EpubDeleteAnnotation { id } => {
+                self.renderer.modal.close();
+                let result = self
+                    .context_manager
+                    .current_mut()
+                    .epub
+                    .as_mut()
+                    .map(|epub| epub.remove_annotation(&id));
+                match result {
+                    Some(Ok(true)) => self.renderer.notifications.push(
+                        "Book annotation deleted".to_string(),
+                        neoism_ui::panels::notifications::NotificationLevel::Info,
+                    ),
+                    Some(Ok(false)) => self.renderer.notifications.push(
+                        "That annotation no longer exists".to_string(),
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    ),
+                    Some(Err(error)) => self.renderer.notifications.push(
+                        format!("Could not delete annotation: {error}"),
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    ),
+                    None => {}
+                }
+            }
             ModalAction::OpenLspLocation {
                 uri,
                 line,

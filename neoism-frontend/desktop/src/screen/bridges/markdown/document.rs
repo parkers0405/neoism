@@ -273,6 +273,9 @@ impl Screen<'_> {
         if self.context_manager.current().notebook.is_some() {
             return self.save_current_notebook();
         }
+        if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+            return epub.save_state().is_ok();
+        }
         false
     }
 

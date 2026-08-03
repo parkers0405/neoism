@@ -1,4 +1,45 @@
+use super::impl_render::first_glyph_ink_center_y;
 use super::*;
+
+fn text_instance(
+    pos_y: f32,
+    bearing_y: i16,
+    height: u32,
+) -> sugarloaf::text::TextInstance {
+    sugarloaf::text::TextInstance {
+        pos: [0.0, pos_y],
+        glyph_size: [8, height],
+        bearings: [0, bearing_y],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn agent_logo_alignment_uses_leading_glyph_ink_center() {
+    let instances = [
+        text_instance(8.0, 3, 10),
+        // A later descender must not pull the logo down.
+        text_instance(8.0, 3, 15),
+    ];
+
+    assert_eq!(first_glyph_ink_center_y(&instances, 0, 1.0), Some(16.0));
+}
+
+#[test]
+fn agent_logo_alignment_converts_physical_ink_to_logical_pixels() {
+    let instances = [text_instance(16.0, 6, 20)];
+
+    assert_eq!(first_glyph_ink_center_y(&instances, 0, 2.0), Some(16.0));
+}
+
+#[test]
+fn agent_logo_alignment_ignores_instances_before_the_title() {
+    let instances = [text_instance(100.0, 0, 10), text_instance(12.0, 2, 8)];
+
+    assert_eq!(first_glyph_ink_center_y(&instances, 1, 1.0), Some(18.0));
+    assert_eq!(first_glyph_ink_center_y(&instances, 2, 1.0), None);
+    assert_eq!(first_glyph_ink_center_y(&instances, 1, 0.0), None);
+}
 
 fn terminal(title: &str, route: Option<usize>) -> BufferTab<()> {
     BufferTab {

@@ -419,10 +419,20 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn execute_refresh_model_context_limit_command(&mut self) {
-        self.model_context_limit =
-            fetch_model_context_limit(&self.server, self.model.as_str())
-                .ok()
-                .flatten();
+        let server = self.server.clone();
+        let model = self.model.clone();
+        let tx = self.background_tx.clone();
+        std::thread::Builder::new()
+            .name("neoism-agent-model-limit".into())
+            .spawn(move || {
+                let limit = fetch_model_context_limit(&server, &model).ok().flatten();
+                let _ =
+                    tx.send(NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {
+                        model,
+                        limit,
+                    });
+            })
+            .ok();
     }
 
     pub fn latest_usage(&self) -> Option<NeoismAgentUsage> {

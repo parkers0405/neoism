@@ -1,9 +1,9 @@
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
 use crate::editor::markdown::{
-    source_map::InlineSourceMap, MarkdownPane, MarkdownReaderHighlightColor,
-    MarkdownWrapHitRow,
+    MarkdownPane, MarkdownReaderHighlightColor, MarkdownWrapHitRow,
+    source_map::InlineSourceMap,
 };
 use crate::widgets::markdown as md;
 
@@ -11,6 +11,7 @@ use super::types::{
     BLOCK_RADIUS, DEPTH, GLOBAL_TEXT_BASELINE_FONT_SIZE, LIST_INDENT_PX,
     MARKDOWN_BODY_FONT_SIZE, ORDER_BG, ORDER_TEXT,
 };
+use crate::primitives::draw_icon_centered_with_occlusion;
 use crate::primitives::ide_theme::IdeTheme;
 
 pub(super) fn intersect_rect(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
@@ -239,7 +240,7 @@ pub(super) fn draw_task_checkbox(
     theme: &IdeTheme,
     font_scale: f32,
 ) {
-    use crate::primitives::look::{markdown_checkbox_look, CheckboxLook};
+    use crate::primitives::look::{CheckboxLook, markdown_checkbox_look};
     if markdown_checkbox_look() == CheckboxLook::Retro95 {
         draw_task_checkbox_retro95(sugarloaf, clip, x, y, checked, theme, font_scale);
         return;
@@ -300,10 +301,16 @@ pub(super) fn draw_task_checkbox(
             ..DrawOpts::default()
         };
         let glyph = "✓";
-        let glyph_w = sugarloaf.text_mut().measure(glyph, &opts);
-        let cx = x + (size - glyph_w) * 0.5;
-        let cy = y + (size - font_size) * 0.5 - font_scale;
-        sugarloaf.text_mut().draw(cx, cy, glyph, &opts);
+        let inner_size = (size - stroke).max(0.0);
+        draw_icon_centered_with_occlusion(
+            sugarloaf,
+            x + stroke,
+            [x + stroke, y + stroke, inner_size, inner_size],
+            glyph,
+            &opts,
+            &[],
+            true,
+        );
     }
 }
 
@@ -354,10 +361,16 @@ fn draw_task_checkbox_retro95(
             ..DrawOpts::default()
         };
         let glyph = "X";
-        let glyph_w = sugarloaf.text_mut().measure(glyph, &opts);
-        let cx = x + stroke + (size - stroke - glyph_w) * 0.5;
-        let cy = y + (size - font_size) * 0.5 - font_scale;
-        sugarloaf.text_mut().draw(cx, cy, glyph, &opts);
+        let inner_size = (size - stroke).max(0.0);
+        draw_icon_centered_with_occlusion(
+            sugarloaf,
+            x + stroke,
+            [x + stroke, y + stroke, inner_size, inner_size],
+            glyph,
+            &opts,
+            &[],
+            true,
+        );
     }
 }
 

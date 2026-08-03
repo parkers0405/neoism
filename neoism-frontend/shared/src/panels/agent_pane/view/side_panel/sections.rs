@@ -71,9 +71,12 @@ pub(crate) fn render_section_header(
             clip_rect: Some(clip),
         };
         let first_str = first.to_string();
-        // Lift the taller cap so its baseline matches the rest (text y is the
-        // glyph top, so a larger glyph would otherwise sit lower).
-        let cap_y = y - (cap_size - drawn_size) * 0.75;
+        // Align the two actual font-size boxes on Sugarloaf's shared
+        // primary-font baseline. This remains correct when the configured
+        // family has a different ascent/descent ratio.
+        let rest_baseline = sugarloaf.text_mut().baseline_offset(&rest_opts);
+        let cap_baseline = sugarloaf.text_mut().baseline_offset(&cap_opts);
+        let cap_y = y + rest_baseline - cap_baseline;
         draw_text_with_occlusion(
             sugarloaf,
             x,

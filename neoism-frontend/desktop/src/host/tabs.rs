@@ -1,6 +1,46 @@
 use super::*;
 
 impl Renderer {
+    /// Logical x-coordinate immediately to the right of the visible left
+    /// sidebars. Tab-strip geometry must never start before this edge: text
+    /// is rendered in Sugarloaf's overlay pass and cannot be hidden later by
+    /// painting a sidebar background over it.
+    fn left_sidebar_edge(&self) -> f32 {
+        let mut edge = 0.0;
+        if self.file_tree.is_visible() {
+            edge += self.file_tree.width();
+        }
+        if self.notes_sidebar.is_visible() {
+            edge += self.notes_sidebar.width();
+        }
+        edge
+    }
+
+    /// Add the visible left-sidebar rectangles to a text occlusion set.
+    /// This is intentionally used for tab-strip text only; adding these to
+    /// `active_text_occlusion_rects` globally would also hide the sidebars'
+    /// own labels.
+    pub(super) fn push_left_sidebar_text_occlusions(
+        &self,
+        rects: &mut Vec<[f32; 4]>,
+        top: f32,
+        bottom: f32,
+    ) {
+        let height = (bottom - top).max(0.0);
+        if height <= 0.0 {
+            return;
+        }
+        let mut x = 0.0;
+        if self.file_tree.is_visible() {
+            let width = self.file_tree.width();
+            rects.push([x, top, width, height]);
+            x += width;
+        }
+        if self.notes_sidebar.is_visible() {
+            rects.push([x, top, self.notes_sidebar.width(), height]);
+        }
+    }
+
     /// Right edge of the very-top workspace / Island tab strip. This
     /// strip spans the full window width and must IGNORE the agent side
     /// panel entirely — only true window-edge chrome (the git-diff
@@ -111,13 +151,7 @@ impl Renderer {
         scale_factor: f32,
         logical_width: f32,
     ) -> (f32, f32) {
-        let mut default_left = 0.0;
-        if self.file_tree.is_visible() {
-            default_left += self.file_tree.width();
-        }
-        if self.notes_sidebar.is_visible() {
-            default_left += self.notes_sidebar.width();
-        }
+        let default_left = self.left_sidebar_edge();
         let right_inset = self.right_chrome_inset(context_manager, logical_width);
         let default_width = (logical_width - default_left - right_inset).max(0.0);
         if self.pane_tabs.is_empty() {
@@ -143,12 +177,12 @@ impl Renderer {
         // x is `rect[0] + scaled_margin.left`. Without adding the
         // margin the strip lands shifted left by the file-tree width
         // and stops short on the right.
-        let x = (rect[0] + scaled_margin.left) / scale_factor;
-        let w = self.clamp_width_to_right_edge(
-            context_manager,
-            logical_width,
-            x,
+        let pane_x = (rect[0] + scaled_margin.left) / scale_factor;
+        let (x, w) = neoism_ui::session_layout::clamp_pane_strip_horizontal(
+            pane_x,
             rect[2] / scale_factor,
+            default_left,
+            self.content_right_edge(context_manager, logical_width),
         );
         (x, w)
     }
@@ -323,7 +357,7 @@ impl Renderer {
                 continue;
             }
             let rect = item.layout_rect;
-            let (x, y, raw_w) = neoism_ui::session_layout::pane_strip_position(
+            let (pane_x, y, raw_w) = neoism_ui::session_layout::pane_strip_position(
                 neoism_ui::session_layout::PaneStripGeomInput {
                     rect_left_phys: rect[0],
                     rect_top_phys: rect[1],
@@ -335,15 +369,27 @@ impl Renderer {
                     scale_factor,
                 },
             );
-            let w =
-                self.clamp_width_to_right_edge(context_manager, logical_width, x, raw_w);
+            let (x, w) = neoism_ui::session_layout::clamp_pane_strip_horizontal(
+                pane_x,
+                raw_w,
+                self.left_sidebar_edge(),
+                self.content_right_edge(context_manager, logical_width),
+            );
             targets.push((route, x, y, w));
         }
         let window_size = sugarloaf.window_size();
-        let occlusions = self.active_text_occlusion_rects(
+        let mut occlusions = self.active_text_occlusion_rects(
             window_size.width,
             window_size.height,
             scale_factor,
+        );
+        let logical_height = window_size.height as f32 / scale_factor;
+        let sidebar_bottom =
+            (logical_height - self.status_line.scaled_height()).max(chrome_top);
+        self.push_left_sidebar_text_occlusions(
+            &mut occlusions,
+            chrome_top,
+            sidebar_bottom,
         );
         for (route, x, y, w) in targets {
             let mut crumb_top = y;

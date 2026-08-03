@@ -330,6 +330,12 @@ impl NeoismAgentPane {
     pub(super) fn apply_model(&mut self, value: String) {
         self.remember_model_value(&value);
         self.model = value;
+        if !self.model.trim().is_empty() {
+            self.push_outbound(OutboundAgentCommand::PersistConfigChoice {
+                model: Some(self.model.clone()),
+                thinking: None,
+            });
+        }
         self.refresh_model_context_limit();
         self.close_picker();
         if let Some(session_id) = self.session_id.clone() {
@@ -363,6 +369,12 @@ impl NeoismAgentPane {
 
     pub(super) fn apply_thinking(&mut self, value: String) {
         self.thinking = (!value.is_empty()).then_some(value);
+        if self.thinking.is_some() {
+            self.push_outbound(OutboundAgentCommand::PersistConfigChoice {
+                model: None,
+                thinking: self.thinking.clone(),
+            });
+        }
         self.close_picker();
         if let Some(session_id) = self.session_id.clone() {
             self.push_outbound(OutboundAgentCommand::ApplyThinking {

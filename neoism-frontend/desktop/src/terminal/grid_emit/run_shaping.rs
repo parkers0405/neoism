@@ -41,9 +41,41 @@ pub(super) struct RunCacheEntry {
     pub glyphs: Vec<ShapedGlyph>,
 }
 
+/// Primary-font vertical metrics shared by every fallback run in a terminal
+/// cell. `baseline_px` is measured from the natural cell top; callers add
+/// half of any extra configured line-height before atlas placement.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct GridVerticalMetrics {
+    pub baseline_px: i16,
+    pub natural_cell_height_px: u16,
+}
+
+impl GridVerticalMetrics {
+    pub(super) fn fallback(size_px: u16) -> Self {
+        Self {
+            baseline_px: (f32::from(size_px) * 0.8)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+            natural_cell_height_px: size_px.max(1),
+        }
+    }
+
+    /// Centre the primary font's natural line box inside the terminal's
+    /// configured cell height and return the resulting top-to-baseline
+    /// distance. This keeps extra line-height symmetric above and below the
+    /// text instead of accumulating it all below the baseline.
+    pub(super) fn baseline_for_cell_height(self, cell_height_px: f32) -> i16 {
+        let cell_height_px = cell_height_px.round().clamp(0.0, i16::MAX as f32) as i32;
+        let extra_height = cell_height_px - i32::from(self.natural_cell_height_px);
+        self.baseline_px.saturating_add(
+            (extra_height / 2).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        )
+    }
+}
+
 pub struct GridGlyphRasterizer {
     pub(super) font_resolve: FxHashMap<(char, u8), (u32, bool)>,
-    pub(super) ascent_cache: FxHashMap<(u32, u16), i16>,
+    pub(super) vertical_metrics_cache: FxHashMap<(u32, u16), GridVerticalMetrics>,
     /// `(should_embolden, should_italicize)` per font_id. Read from
     /// `FontData` synthesis flags; matches the rich-text rasterizer's
     /// convention.
@@ -97,7 +129,7 @@ impl GridGlyphRasterizer {
     pub fn new() -> Self {
         Self {
             font_resolve: FxHashMap::default(),
-            ascent_cache: FxHashMap::default(),
+            vertical_metrics_cache: FxHashMap::default(),
             synthesis_cache: FxHashMap::default(),
             run_cache: (0..RUN_BUCKET_COUNT)
                 .map(|_| Vec::with_capacity(RUN_BUCKET_SIZE))
@@ -246,10 +278,30 @@ pub(super) fn run_cache_put(buckets: &mut [Vec<RunCacheEntry>], entry: RunCacheE
     bucket.push(entry);
 }
 
-// Platform-specific shape + ascent helpers
+fn shared_grid_vertical_metrics(
+    font_library: &FontLibrary,
+    font_id: u32,
+    size_px: u16,
+) -> GridVerticalMetrics {
+    font_library
+        .inner
+        .write()
+        .get_font_metrics(&(font_id as usize), f32::from(size_px))
+        .map(|(ascent, descent, leading)| GridVerticalMetrics {
+            baseline_px: (ascent + leading.max(0.0) * 0.5)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+            natural_cell_height_px: (ascent + descent.abs() + leading.max(0.0))
+                .round()
+                .clamp(1.0, u16::MAX as f32) as u16,
+        })
+        .unwrap_or_else(|| GridVerticalMetrics::fallback(size_px))
+}
 
-/// Shape a single run on macOS via CoreText and populate
-/// `out.ascent_px` as a side effect via the rasterizer's cache.
+// Platform-specific shape + vertical-metrics helpers
+
+/// Shape a single run on macOS via CoreText and populate shared primary-font
+/// vertical metrics as a side effect via the rasterizer's cache.
 /// Returns the glyph list if the handle is available.
 #[cfg(target_os = "macos")]
 pub(super) fn shape_run_ct(
@@ -258,7 +310,7 @@ pub(super) fn shape_run_ct(
     size_u16: u16,
     size_bucket: u16,
     font_library: &FontLibrary,
-) -> Option<(Vec<ShapedGlyph>, i16)> {
+) -> Option<(Vec<ShapedGlyph>, GridVerticalMetrics)> {
     let handle = match rasterizer.handle_cache.entry(font_id) {
         std::collections::hash_map::Entry::Occupied(e) => e.into_mut().clone(),
         std::collections::hash_map::Entry::Vacant(e) => {
@@ -267,16 +319,10 @@ pub(super) fn shape_run_ct(
             h
         }
     };
-    let ascent_px = *rasterizer
-        .ascent_cache
+    let vertical_metrics = *rasterizer
+        .vertical_metrics_cache
         .entry((font_id, size_bucket))
-        .or_insert_with(|| {
-            let m = neoism_backend::sugarloaf::font::macos::font_metrics(
-                &handle,
-                size_u16 as f32,
-            );
-            m.ascent.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
-        });
+        .or_insert_with(|| shared_grid_vertical_metrics(font_library, font_id, size_u16));
     let ct_glyphs = neoism_backend::sugarloaf::font::macos::shape_text_utf16(
         &handle,
         &rasterizer.run_utf16_scratch,
@@ -292,12 +338,11 @@ pub(super) fn shape_run_ct(
             cluster: g.cluster,
         })
         .collect();
-    Some((glyphs, ascent_px))
+    Some((glyphs, vertical_metrics))
 }
 
-/// Shape a single run on non-macOS via swash. Populates
-/// `rasterizer.ascent_cache` + `rasterizer.font_data_cache` as a side
-/// effect.
+/// Shape a single run on non-macOS via swash. Populates shared vertical
+/// metrics + `rasterizer.font_data_cache` as a side effect.
 #[cfg(not(target_os = "macos"))]
 pub(super) fn shape_run_swash(
     rasterizer: &mut GridGlyphRasterizer,
@@ -305,7 +350,7 @@ pub(super) fn shape_run_swash(
     size_u16: u16,
     size_bucket: u16,
     font_library: &FontLibrary,
-) -> Option<(Vec<ShapedGlyph>, i16)> {
+) -> Option<(Vec<ShapedGlyph>, GridVerticalMetrics)> {
     use neoism_backend::sugarloaf::swash::FontRef;
 
     let font_entry = rasterizer
@@ -322,13 +367,10 @@ pub(super) fn shape_run_swash(
         key: font_entry.2,
     };
 
-    let ascent_px = *rasterizer
-        .ascent_cache
+    let vertical_metrics = *rasterizer
+        .vertical_metrics_cache
         .entry((font_id, size_bucket))
-        .or_insert_with(|| {
-            let m = font_ref.metrics(&[]).scale(size_u16 as f32);
-            m.ascent.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
-        });
+        .or_insert_with(|| shared_grid_vertical_metrics(font_library, font_id, size_u16));
 
     let mut shaper = rasterizer
         .shape_ctx
@@ -349,5 +391,30 @@ pub(super) fn shape_run_swash(
             });
         }
     });
-    Some((glyphs, ascent_px))
+    Some((glyphs, vertical_metrics))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GridVerticalMetrics;
+
+    #[test]
+    fn configured_line_height_is_split_around_the_baseline() {
+        let metrics = GridVerticalMetrics {
+            baseline_px: 12,
+            natural_cell_height_px: 16,
+        };
+
+        assert_eq!(metrics.baseline_for_cell_height(16.0), 12);
+        assert_eq!(metrics.baseline_for_cell_height(20.0), 14);
+        assert_eq!(metrics.baseline_for_cell_height(12.0), 10);
+    }
+
+    #[test]
+    fn fallback_metrics_keep_a_stable_em_box() {
+        let metrics = GridVerticalMetrics::fallback(20);
+        assert_eq!(metrics.baseline_px, 16);
+        assert_eq!(metrics.natural_cell_height_px, 20);
+        assert_eq!(metrics.baseline_for_cell_height(24.0), 18);
+    }
 }

@@ -268,6 +268,26 @@ fn pane_strip_position_stacked_pane_renders_inside_its_area() {
 }
 
 #[test]
+fn pane_strip_horizontal_clamp_excludes_left_sidebar_without_growing_right() {
+    assert_eq!(
+        clamp_pane_strip_horizontal(100.0, 500.0, 240.0, 900.0),
+        (240.0, 360.0)
+    );
+    assert_eq!(
+        clamp_pane_strip_horizontal(300.0, 200.0, 240.0, 900.0),
+        (300.0, 200.0)
+    );
+}
+
+#[test]
+fn pane_strip_horizontal_clamp_handles_fully_occluded_strip() {
+    assert_eq!(
+        clamp_pane_strip_horizontal(20.0, 80.0, 240.0, 900.0),
+        (240.0, 0.0)
+    );
+}
+
+#[test]
 fn is_pane_top_aligned_tolerates_taffy_jitter_and_rejects_real_rows() {
     assert!(is_pane_top_aligned(2.5, 0.0));
     assert!(is_pane_top_aligned(0.0, 2.5));
@@ -598,8 +618,8 @@ fn find_closing_workspace_descriptor_returns_first_owner_in_order() {
 // every frontend ultimately renders.
 
 use neoism_protocol::workspace::{
-    PaneLayoutSnapshot, PaneLayoutSnapshotNode, PaneSplitAxis,
-    PANE_LAYOUT_SNAPSHOT_SCHEMA_VERSION,
+    PANE_LAYOUT_SNAPSHOT_SCHEMA_VERSION, PaneLayoutSnapshot, PaneLayoutSnapshotNode,
+    PaneSplitAxis,
 };
 use std::path::PathBuf;
 

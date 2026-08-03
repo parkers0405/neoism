@@ -501,6 +501,29 @@ fn with_directory_queues_apply_config_defaults() {
 }
 
 #[test]
+fn first_model_and_thinking_choices_request_insert_only_config_persistence() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_model("opencode/free".to_string());
+    pane.apply_thinking("high".to_string());
+
+    let drained = pane.drain_pending_outbound();
+    assert!(drained.iter().any(|command| matches!(
+        command,
+        OutboundAgentCommand::PersistConfigChoice {
+            model: Some(model),
+            thinking: None,
+        } if model == "opencode/free"
+    )));
+    assert!(drained.iter().any(|command| matches!(
+        command,
+        OutboundAgentCommand::PersistConfigChoice {
+            model: None,
+            thinking: Some(thinking),
+        } if thinking == "high"
+    )));
+}
+
+#[test]
 fn idle_streaming_state_clears_status_label() {
     let mut pane = NeoismAgentPane::default();
 

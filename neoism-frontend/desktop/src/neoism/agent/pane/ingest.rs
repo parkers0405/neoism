@@ -356,6 +356,51 @@ impl NeoismAgentPane {
                     self.execute_apply_config_defaults_command();
                     changed = true;
                 }
+                OutboundAgentCommand::PersistConfigChoice { model, thinking } => {
+                    // A joined workspace reads the host's config through the
+                    // reverse proxy, but this desktop process can only write
+                    // its own config file. Leave host-side persistence to the
+                    // daemon protocol instead of writing the choice locally.
+                    if self.server.trim_end_matches('/')
+                        != neoism_agent_server().trim_end_matches('/')
+                    {
+                        continue;
+                    }
+                    let Ok(defaults) =
+                        fetch_config_defaults(&self.server, self.directory.as_deref())
+                    else {
+                        continue;
+                    };
+                    for (key, value) in
+                        [("agent.model", model), ("agent.variant", thinking)]
+                    {
+                        let Some(value) = value.filter(|value| !value.trim().is_empty())
+                        else {
+                            continue;
+                        };
+                        let already_set = match key {
+                            "agent.model" => defaults.model.is_some(),
+                            _ => defaults.thinking.is_some(),
+                        };
+                        if already_set {
+                            continue;
+                        }
+                        if let Err(error) =
+                            neoism_backend::config::write_setting_if_absent(
+                                key,
+                                Value::String(value),
+                            )
+                        {
+                            tracing::warn!(
+                                target: "neoism::config",
+                                %error,
+                                key,
+                                "first-run agent preference write failed"
+                            );
+                        }
+                    }
+                    changed = true;
+                }
                 OutboundAgentCommand::SetInputHelpVisible { visible } => {
                     if let Err(error) = neoism_backend::config::write_setting(
                         "agent.input-hints",
@@ -592,6 +637,38 @@ impl NeoismAgentPane {
                 Ok(NeoismAgentBackgroundUpdate::CompactFailed(error)) => {
                     self.fail_compaction_message(error);
                     changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(defaults)) => {
+                    if let Some(agent) = defaults.agent {
+                        match agent.as_str() {
+                            "build" => self.mode = NeoismAgentMode::Build,
+                            "plan" => self.mode = NeoismAgentMode::Plan,
+                            _ => {}
+                        }
+                        self.agent = Some(agent);
+                    }
+                    if self.model.trim().is_empty() {
+                        if let Some(model) = defaults.model {
+                            self.model = model;
+                        }
+                    }
+                    if self.thinking.is_none() {
+                        self.thinking = defaults.thinking;
+                    }
+                    if let Some(visible) = defaults.input_help_visible {
+                        self.set_input_help_visible(visible);
+                    }
+                    self.execute_refresh_model_context_limit_command();
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {
+                    model,
+                    limit,
+                }) => {
+                    if self.model == model {
+                        self.model_context_limit = limit;
+                        changed = true;
+                    }
                 }
                 Ok(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed(sessions)) => {
                     self.side_panel.set_sessions(sessions);

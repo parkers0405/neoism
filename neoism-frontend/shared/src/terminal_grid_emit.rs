@@ -95,8 +95,9 @@ pub struct TerminalGlyphPlacement {
 /// coordinate convention.
 ///
 /// Platform rasterizers report `left` / `top` in their native
-/// baseline-relative convention. The grid atlas stores `bearing_y`
-/// relative to the cell bottom: `cell_h - ascent + top`.
+/// baseline-relative convention. The host supplies the primary-font baseline
+/// already centered inside the configured cell. The grid atlas stores
+/// `bearing_y` relative to the cell bottom: `cell_h - baseline + top`.
 #[inline]
 pub fn terminal_glyph_placement(
     width: u32,
@@ -104,7 +105,7 @@ pub fn terminal_glyph_placement(
     left: i32,
     top: i32,
     cell_h: f32,
-    ascent_px: i16,
+    baseline_px: i16,
 ) -> TerminalGlyphPlacement {
     let top_i16 = top.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     let cell_h_i16 = cell_h.round().clamp(0.0, i16::MAX as f32) as i16;
@@ -112,7 +113,9 @@ pub fn terminal_glyph_placement(
         width: width.min(u16::MAX as u32) as u16,
         height: height.min(u16::MAX as u32) as u16,
         bearing_x: left.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-        bearing_y: cell_h_i16.saturating_sub(ascent_px).saturating_add(top_i16),
+        bearing_y: cell_h_i16
+            .saturating_sub(baseline_px)
+            .saturating_add(top_i16),
     }
 }
 

@@ -6,22 +6,22 @@
 #![allow(clippy::uninlined_format_args)]
 
 use crate::font::FontLibrary;
+use crate::layout::TextLayout;
 use crate::layout::content_data::{ContentData, ContentState};
 use crate::layout::render_data::RenderData;
-use crate::layout::TextLayout;
 use lru::LruCache;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
-use swash::shape::ShapeContext;
-use swash::text::Script;
 #[cfg(not(target_os = "macos"))]
 use swash::FontRef;
+use swash::shape::ShapeContext;
+use swash::text::Script;
 use tracing::debug;
 
-use crate::{sugarloaf::primitives::SugarCursor, DrawableChar, Graphic};
+use crate::{DrawableChar, Graphic, sugarloaf::primitives::SugarCursor};
 use swash::Attributes;
 use swash::Setting;
 
@@ -467,6 +467,14 @@ impl Content {
     pub fn set_font_library(&mut self, font_library: &FontLibrary) {
         self.fonts = font_library.clone();
         self.shaping_cache = ShapingCache::new();
+        for content_state in self.states.values_mut() {
+            if let Some(text_state) = content_state.as_text_mut() {
+                text_state.mark_dirty();
+                text_state.layout.dimensions.width = 0.0;
+                text_state.layout.dimensions.height = 0.0;
+            }
+            content_state.render_data.needs_repaint = true;
+        }
     }
 
     /// Get text state by ID (returns None if ID doesn't exist or is not text)
@@ -1499,7 +1507,45 @@ impl ShapingCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::font::{FontLibrary, fonts::SugarloafFonts};
+    use std::sync::Arc;
     use swash::shape::cluster::Glyph;
+
+    #[test]
+    fn font_library_swap_invalidates_persistent_text_layouts() {
+        let (first, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let (second, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let mut content = Content::new(&first);
+        let layout = TextLayout {
+            font_size: 16.0,
+            original_font_size: 16.0,
+            ..TextLayout::default()
+        };
+
+        content.set_text(7, &layout);
+        content.get_state_mut(&7).expect("text state").mark_clean();
+        content
+            .get_content_state_mut(&7)
+            .expect("content state")
+            .render_data
+            .needs_repaint = false;
+
+        content.set_font_library(&second);
+
+        assert!(Arc::ptr_eq(&content.fonts.inner, &second.inner));
+        assert!(!Arc::ptr_eq(&content.fonts.inner, &first.inner));
+        let state = content.get_state(&7).expect("text state after swap");
+        assert_eq!(state.last_update, BuilderStateUpdate::Full);
+        assert_eq!(state.layout.dimensions.width, 0.0);
+        assert_eq!(state.layout.dimensions.height, 0.0);
+        assert!(
+            content
+                .get_content_state(&7)
+                .expect("content state after swap")
+                .render_data
+                .needs_repaint
+        );
+    }
 
     fn create_test_glyph(id: u16, x: f32, y: f32, advance: f32) -> Glyph {
         Glyph {

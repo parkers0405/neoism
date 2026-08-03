@@ -6,27 +6,26 @@
 //! Palette drawing pipeline: rect primitives, copy icon, and the main
 //! `render` method that walks the filtered row list each frame.
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 use web_time::Instant;
 
 use crate::panels::file_tree;
-use crate::primitives::IdeTheme;
+use crate::primitives::{IdeTheme, draw_overlay_icon_centered};
 use crate::widgets::scrollbar;
 
+use super::WORKSPACE_ROOT_DETAIL_PREFIX;
 use super::commands::CommandService;
 use super::fuzzy::{ease_out_back, ease_out_cubic, snap_to_device_px, truncate_to_fit};
 use super::modes::{PaletteMode, PaletteRow};
 use super::state::CommandPalette;
-use super::WORKSPACE_ROOT_DETAIL_PREFIX;
 use super::{
     CARET_BLINK_MS, CARET_WIDTH, COPY_ICON_H, COPY_ICON_OFFSET, COPY_ICON_PAGE_H,
     COPY_ICON_PAGE_W, COPY_ICON_RADIUS, COPY_ICON_STROKE, COPY_ICON_W,
     CURSOR_ANIMATION_LENGTH, DEPTH_BG, DEPTH_ELEMENT, INPUT_FONT_SIZE, INPUT_HEIGHT,
     INPUT_PADDING_X, LIST_SCROLL_ANIMATION_LENGTH, MAX_VISIBLE_RESULTS, OPEN_POP_MS,
-    ORDER, PALETTE_CORNER_RADIUS, PALETTE_PADDING, RESULTS_MARGIN_TOP,
-    RESULTS_PADDING_BOTTOM, RESULT_FONT_SIZE, RESULT_ITEM_HEIGHT, SEPARATOR_HEIGHT,
-    SHORTCUT_FONT_SIZE,
+    ORDER, PALETTE_CORNER_RADIUS, PALETTE_PADDING, RESULT_FONT_SIZE, RESULT_ITEM_HEIGHT,
+    RESULTS_MARGIN_TOP, RESULTS_PADDING_BOTTOM, SEPARATOR_HEIGHT, SHORTCUT_FONT_SIZE,
 };
 
 /// Paint a rounded-rect outline by layering two filled rounded rects:
@@ -629,20 +628,11 @@ impl CommandPalette {
                 }
                 _ => (None, theme.u8(theme.dim)),
             };
-            let row_icon_width = row_icon
-                .map(|icon| {
-                    sugarloaf.overlay_text_mut().measure(
-                        icon,
-                        &DrawOpts {
-                            font_size: result_font,
-                            color: row_icon_color,
-                            clip_rect: Some(list_clip),
-                            ..DrawOpts::default()
-                        },
-                    )
-                })
-                .unwrap_or(0.0);
-            let row_icon_gap = if row_icon_width > 0.0 { 8.0 * s } else { 0.0 };
+            // Every row icon owns the same square column. Its font advance
+            // is deliberately ignored: fallback/Nerd Font faces report
+            // different bearings and widths for visually equivalent icons.
+            let row_icon_width = row_icon.map(|_| result_font).unwrap_or(0.0);
+            let row_icon_gap = if row_icon.is_some() { 8.0 * s } else { 0.0 };
             let icon_x = input_x + input_pad_x + row_indent;
             // Host headers paint an online dot (`●`/`○`) between the kind
             // glyph and the label; reserve its width so the label clears
@@ -676,20 +666,8 @@ impl CommandPalette {
                 }
                 _ => (None, theme.u8(theme.muted)),
             };
-            let online_dot_width = online_dot
-                .map(|dot| {
-                    sugarloaf.overlay_text_mut().measure(
-                        dot,
-                        &DrawOpts {
-                            font_size: result_font,
-                            color: online_dot_color,
-                            clip_rect: Some(list_clip),
-                            ..DrawOpts::default()
-                        },
-                    )
-                })
-                .unwrap_or(0.0);
-            let online_dot_gap = if online_dot_width > 0.0 { 6.0 * s } else { 0.0 };
+            let online_dot_width = online_dot.map(|_| result_font * 0.8).unwrap_or(0.0);
+            let online_dot_gap = if online_dot.is_some() { 6.0 * s } else { 0.0 };
             let row_text_x = icon_x
                 + row_icon_width
                 + row_icon_gap
@@ -849,9 +827,14 @@ impl CommandPalette {
                     clip_rect: Some(list_clip),
                     ..DrawOpts::default()
                 };
-                sugarloaf
-                    .overlay_text_mut()
-                    .draw(icon_x, row_text_y, icon, &icon_opts);
+                draw_overlay_icon_centered(
+                    sugarloaf,
+                    icon_x,
+                    [icon_x, item_y, row_icon_width, row_h],
+                    icon,
+                    &icon_opts,
+                    true,
+                );
             }
             if let Some(dot) = online_dot {
                 let dot_opts = DrawOpts {
@@ -860,11 +843,14 @@ impl CommandPalette {
                     clip_rect: Some(list_clip),
                     ..DrawOpts::default()
                 };
-                sugarloaf.overlay_text_mut().draw(
-                    icon_x + row_icon_width + row_icon_gap,
-                    row_text_y,
+                let dot_x = icon_x + row_icon_width + row_icon_gap;
+                draw_overlay_icon_centered(
+                    sugarloaf,
+                    dot_x,
+                    [dot_x, item_y, online_dot_width, row_h],
                     dot,
                     &dot_opts,
+                    true,
                 );
             }
             sugarloaf.overlay_text_mut().draw(

@@ -8,16 +8,16 @@ use crate::components::filters::{Filter, FiltersBrush};
 #[cfg(feature = "wgpu")]
 use crate::components::shader_overlay::ShaderOverlayBrush;
 use crate::components::shader_overlay::{ShaderOverlayConfig, ShaderOverlayError};
-use crate::font::{fonts::SugarloafFont, FontLibrary};
-use crate::font_cache::{compute_advance, resolve_with, FontCache, ResolvedGlyph};
+use crate::font::{FontLibrary, fonts::SugarloafFont};
+use crate::font_cache::{FontCache, ResolvedGlyph, compute_advance, resolve_with};
 use crate::layout::{RootStyle, TextLayout};
 use crate::renderer::Renderer;
 use crate::sugarloaf::graphics::{GraphicDataEntry, Graphics};
 use swash::Attributes;
 
-use crate::context::Context;
 use crate::Content;
 use crate::TextDimensions;
+use crate::context::Context;
 use core::fmt::{Debug, Formatter};
 use primitives::ImageProperties;
 use raw_window_handle::{
@@ -488,6 +488,13 @@ impl Sugarloaf<'_> {
         self.cpu_cache.clear();
         // Glyph resolutions point at the old font ids — drop them.
         self.font_cache.clear();
+
+        // Immediate-mode UI text (status bar, Markdown/code editors,
+        // composer, sidebars, menus, tabs) owns cloned FontLibrary handles
+        // and font-id-specific caches.  Swap both recorders before any
+        // surface can shape another frame with the old family.
+        self.text.set_font_library(font_library);
+        self.overlay_text.set_font_library(font_library);
 
         self.state.reset();
         self.state.set_fonts(font_library, &mut self.renderer);

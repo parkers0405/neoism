@@ -10,11 +10,10 @@ impl NeoismAgentPane {
         *self = Self::default();
         self.server = server;
         self.directory = directory;
-        // Reset wiped the session list; without a re-fetch the sidebar stays
-        // empty (or, worse, keeps showing a stale list). Pull the new server's
-        // sessions now so a guest switched onto the HOST's reverse-proxied
-        // agent-server immediately sees the host's chats, not its own.
-        self.refresh_sessions_after_mutation();
+        // Keep server switching off the UI thread. The next visible sidebar
+        // render calls `maybe_refresh_side_panel_sessions`, which paints its
+        // unloaded skeleton immediately and hydrates the host's chats through
+        // the existing background channel.
     }
 
     pub fn pop_wordmark_click(&mut self, x: f32, y: f32) -> bool {

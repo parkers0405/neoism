@@ -101,7 +101,10 @@ struct ShapedRun {
     size_bucket: u16,
     synthetic_bold: bool,
     synthetic_italic: bool,
-    ascent_px: i16,
+    /// Distance from the caller's nominal em-box top to the shared text
+    /// baseline, in physical pixels.  This is derived from the primary
+    /// font's line metrics for every resolved fallback run.
+    baseline_px: i16,
     glyphs: Vec<ShapedGlyph>,
 }
 
@@ -115,6 +118,60 @@ fn shape_hash(font_id: u32, size_bucket: u16, style_flags: u8, text: &str) -> u6
     h.write_u8(style_flags);
     h.write(text.as_bytes());
     h.finish()
+}
+
+/// Place a font's natural line box in the middle of the nominal `font_size`
+/// box used by immediate-mode UI layout, returning top-to-baseline distance.
+///
+/// Font APIs report wildly different ascent/descent/leading totals for the
+/// same requested point size.  UI call sites consistently treat `font_size`
+/// as the height they centre inside a row, so using raw ascent as the draw
+/// origin makes the visible text move when the family changes.  Splitting
+/// both the font leading and any remaining em-box space evenly above/below
+/// keeps that contract stable while preserving the designer's baseline.
+fn centered_line_box_baseline_px(
+    font_size_px: f32,
+    ascent_px: f32,
+    descent_px: f32,
+    leading_px: f32,
+) -> i16 {
+    let font_size_px = font_size_px.max(1.0);
+    if !ascent_px.is_finite()
+        || !descent_px.is_finite()
+        || !leading_px.is_finite()
+        || ascent_px <= 0.0
+        || descent_px < 0.0
+    {
+        return (font_size_px * 0.8)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
+
+    let leading_px = leading_px.max(0.0);
+    let natural_line_height = ascent_px + descent_px + leading_px;
+    let line_top = (font_size_px - natural_line_height) * 0.5;
+    let baseline = line_top + leading_px * 0.5 + ascent_px;
+    baseline.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+fn instances_ink_bounds_px(instances: &[TextInstance]) -> Option<[f32; 4]> {
+    let mut bounds: Option<[f32; 4]> = None;
+    for instance in instances
+        .iter()
+        .filter(|instance| instance.glyph_size[0] > 0 && instance.glyph_size[1] > 0)
+    {
+        let left = instance.pos[0] + f32::from(instance.bearings[0]);
+        let top = instance.pos[1] + f32::from(instance.bearings[1]);
+        let right = left + instance.glyph_size[0] as f32;
+        let bottom = top + instance.glyph_size[1] as f32;
+        bounds = Some(match bounds {
+            Some([x0, y0, x1, y1]) => {
+                [x0.min(left), y0.min(top), x1.max(right), y1.max(bottom)]
+            }
+            None => [left, top, right, bottom],
+        });
+    }
+    bounds
 }
 
 //  Per-OS GPU state
@@ -217,9 +274,10 @@ pub struct Text {
     /// rasterizer's use of the same fields).
     synthesis_cache: FxHashMap<u32, (bool, bool)>,
 
-    /// `(font_id, size_bucket) → ascent_px`. Used to compute
-    /// `bearing_y` at rasterize time.
-    ascent_cache: FxHashMap<(u32, u16), i16>,
+    /// `(font_id, size_bucket) → baseline_px`. Secondary/fallback fonts use
+    /// the primary face's cell metrics, keeping mixed icon/text runs on one
+    /// baseline while each nominal font-size box remains vertically centred.
+    baseline_cache: FxHashMap<(u32, u16), i16>,
 
     /// Position-independent shape cache. Hash of
     /// `(font_id, size_bucket, style_flags, text)` → shaped run.
@@ -256,7 +314,7 @@ impl Text {
             font_library: font_library.clone(),
             font_resolve: FxHashMap::default(),
             synthesis_cache: FxHashMap::default(),
-            ascent_cache: FxHashMap::default(),
+            baseline_cache: FxHashMap::default(),
             shape_cache: FxHashMap::default(),
             #[cfg(target_os = "macos")]
             handle_cache: FxHashMap::default(),
@@ -317,7 +375,7 @@ impl Text {
     pub fn clear_glyph_cache(&mut self) {
         self.instances.clear();
         self.shape_cache.clear();
-        self.ascent_cache.clear();
+        self.baseline_cache.clear();
 
         #[cfg(target_os = "macos")]
         if let Some(state) = self.metal.as_mut() {
@@ -350,6 +408,80 @@ impl Text {
     #[inline]
     pub fn instances(&self) -> &[TextInstance] {
         &self.instances
+    }
+
+    /// Replace the font registry used by immediate-mode UI text.
+    ///
+    /// A config reload constructs a new `FontLibrary` (and therefore a new
+    /// font-id namespace).  Keeping any resolver, shape, raster, or native
+    /// handle cache from the previous library can mix old glyphs with new
+    /// layout metrics, so a library swap invalidates all font-derived state.
+    pub fn set_font_library(&mut self, font_library: &FontLibrary) {
+        self.clear_glyph_cache();
+        self.font_library = font_library.clone();
+        self.font_resolve.clear();
+        self.synthesis_cache.clear();
+        #[cfg(target_os = "macos")]
+        self.handle_cache.clear();
+        #[cfg(not(target_os = "macos"))]
+        self.font_data_cache.clear();
+    }
+
+    /// Top-to-baseline distance for the nominal font-size box described by
+    /// `opts`, returned in logical pixels.  Panels that intentionally mix
+    /// different font sizes on one baseline (drop caps, badges) can use this
+    /// instead of a font-family-specific ratio.
+    pub fn baseline_offset(&mut self, opts: &DrawOpts) -> f32 {
+        let scaled = opts.font_size * self.scale_factor;
+        let size_bucket = (scaled * 4.0).round().clamp(0.0, u16::MAX as f32) as u16;
+        let size_u16 = scaled.round().clamp(1.0, u16::MAX as f32) as u16;
+        let font_id = opts.font_id.unwrap_or(0) as u32;
+        f32::from(self.baseline_px_for(font_id, size_bucket, size_u16))
+            / self.scale_factor
+    }
+
+    /// Reposition glyphs emitted since `first_instance` so their combined
+    /// rasterized ink is centred inside a logical-pixel rectangle.
+    ///
+    /// Text labels should normally follow the shared baseline. Bitmap-like
+    /// icon glyphs inside colored chips instead need optical box centering:
+    /// their font advance and em box often contain asymmetric padding. Each
+    /// axis can be enabled independently so inline icons may keep their x
+    /// advance while centering only vertically.
+    pub fn center_instances_in_rect(
+        &mut self,
+        first_instance: usize,
+        rect: [f32; 4],
+        center_x: bool,
+        center_y: bool,
+    ) -> bool {
+        let Some(instances) = self.instances.get(first_instance..) else {
+            return false;
+        };
+        let Some([ink_left, ink_top, ink_right, ink_bottom]) =
+            instances_ink_bounds_px(instances)
+        else {
+            return false;
+        };
+
+        let target_center_x = (rect[0] + rect[2] * 0.5) * self.scale_factor;
+        let target_center_y = (rect[1] + rect[3] * 0.5) * self.scale_factor;
+        let dx = if center_x {
+            (target_center_x - (ink_left + ink_right) * 0.5).round()
+        } else {
+            0.0
+        };
+        let dy = if center_y {
+            (target_center_y - (ink_top + ink_bottom) * 0.5).round()
+        } else {
+            0.0
+        };
+
+        for instance in &mut self.instances[first_instance..] {
+            instance.pos[0] += dx;
+            instance.pos[1] += dy;
+        }
+        true
     }
 
     //  Public draw API
@@ -496,7 +628,7 @@ impl Text {
         };
 
         #[cfg(target_os = "macos")]
-        let (glyphs, ascent_px) = {
+        let glyphs = {
             let handle = match self.handle_cache.entry(font_id) {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut().clone(),
                 std::collections::hash_map::Entry::Vacant(e) => {
@@ -505,13 +637,6 @@ impl Text {
                     h
                 }
             };
-            let ascent_px = *self
-                .ascent_cache
-                .entry((font_id, size_bucket))
-                .or_insert_with(|| {
-                    let m = crate::font::macos::font_metrics(&handle, size_u16 as f32);
-                    m.ascent.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
-                });
             let ct_glyphs =
                 crate::font::macos::shape_text(&handle, text, size_u16 as f32);
             let glyphs: Vec<ShapedGlyph> = ct_glyphs
@@ -524,11 +649,11 @@ impl Text {
                     cluster: g.cluster,
                 })
                 .collect();
-            (glyphs, ascent_px)
+            glyphs
         };
 
         #[cfg(not(target_os = "macos"))]
-        let (glyphs, ascent_px) = {
+        let glyphs = {
             use swash::FontRef;
 
             // Pull (or cache) the font bytes + offset + key once per
@@ -544,15 +669,6 @@ impl Text {
                 offset: font_entry.1,
                 key: font_entry.2,
             };
-
-            // Ascent — via swash metrics scaled to device-px size.
-            let ascent_px = *self
-                .ascent_cache
-                .entry((font_id, size_bucket))
-                .or_insert_with(|| {
-                    let m = font_ref.metrics(&[]).scale(size_u16 as f32);
-                    m.ascent.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
-                });
 
             // Shape with swash. Flatten clusters to a Vec<ShapedGlyph>
             // with UTF-8 byte offset as `cluster`.
@@ -575,8 +691,10 @@ impl Text {
                     });
                 }
             });
-            (glyphs, ascent_px)
+            glyphs
         };
+
+        let baseline_px = self.baseline_px_for(font_id, size_bucket, size_u16);
 
         let run = ShapedRun {
             font_id,
@@ -584,11 +702,42 @@ impl Text {
             size_bucket,
             synthetic_bold,
             synthetic_italic,
-            ascent_px,
+            baseline_px,
             glyphs,
         };
         self.shape_cache.insert(hash, run.clone());
         Some(run)
+    }
+
+    fn baseline_px_for(&mut self, font_id: u32, size_bucket: u16, size_u16: u16) -> i16 {
+        *self
+            .baseline_cache
+            .entry((font_id, size_bucket))
+            .or_insert_with(|| {
+                let metrics = self
+                    .font_library
+                    .inner
+                    .write()
+                    .get_font_metrics(&(font_id as usize), size_u16 as f32);
+                metrics.map_or_else(
+                    || {
+                        centered_line_box_baseline_px(
+                            size_u16 as f32,
+                            size_u16 as f32 * 0.8,
+                            size_u16 as f32 * 0.2,
+                            0.0,
+                        )
+                    },
+                    |(ascent, descent, leading)| {
+                        centered_line_box_baseline_px(
+                            size_u16 as f32,
+                            ascent,
+                            descent.abs(),
+                            leading,
+                        )
+                    },
+                )
+            })
     }
 
     //  Emit pipeline — rasterize + push TextInstance
@@ -693,7 +842,7 @@ impl Text {
                 bearing_x: raw.left.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
                 bearing_y: {
                     let top_i16 = raw.top.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                    run.ascent_px.saturating_sub(top_i16)
+                    run.baseline_px.saturating_sub(top_i16)
                 },
                 bytes: &raw.bytes,
             };
@@ -769,7 +918,7 @@ impl Text {
                     bearing_y: {
                         let top_i16 =
                             raw.top.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                        run.ascent_px.saturating_sub(top_i16)
+                        run.baseline_px.saturating_sub(top_i16)
                     },
                     bytes: &raw.bytes,
                 };
@@ -819,7 +968,7 @@ impl Text {
                     bearing_y: {
                         let top_i16 =
                             raw.top.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                        run.ascent_px.saturating_sub(top_i16)
+                        run.baseline_px.saturating_sub(top_i16)
                     },
                     bytes: &raw.bytes,
                 };
@@ -921,7 +1070,7 @@ impl Text {
             bearing_x: raw_left.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
             bearing_y: {
                 let top_i16 = raw_top.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                run.ascent_px.saturating_sub(top_i16)
+                run.baseline_px.saturating_sub(top_i16)
             },
             bytes: &raw_bytes,
         };
@@ -1396,12 +1545,12 @@ fn rasterize_swash_glyph(
     synthetic_italic: bool,
     hint: bool,
 ) -> Option<SwashRawGlyph> {
+    use swash::FontRef;
     use swash::scale::{
-        image::{Content, Image as GlyphImage},
         Render, Source, StrikeWith,
+        image::{Content, Image as GlyphImage},
     };
     use swash::zeno::{Angle, Format, Transform};
-    use swash::FontRef;
 
     let font_ref = FontRef {
         data: font_entry.0.as_ref(),
@@ -2259,8 +2408,71 @@ fn cpu_clip_bounds(clip_rect: [f32; 4], buf_w: i32, buf_h: i32) -> (i32, i32, i3
 
 #[cfg(test)]
 mod tests {
-    use super::{DrawOpts, Text};
-    use crate::font::{fonts::SugarloafFonts, FontLibrary};
+    use super::{
+        DrawOpts, Text, TextInstance, centered_line_box_baseline_px,
+        instances_ink_bounds_px,
+    };
+    use crate::font::{FontLibrary, fonts::SugarloafFonts};
+    use std::sync::Arc;
+
+    #[test]
+    fn centered_line_box_uses_font_metrics_without_changing_nominal_height() {
+        // Both fonts have a 20px natural line box but put different amounts
+        // above/below the baseline.  Their natural boxes are centred inside
+        // the same 14px UI em box while preserving each baseline ratio.
+        assert_eq!(centered_line_box_baseline_px(14.0, 14.0, 6.0, 0.0), 11);
+        assert_eq!(centered_line_box_baseline_px(14.0, 12.0, 8.0, 0.0), 9);
+    }
+
+    #[test]
+    fn centered_line_box_splits_font_leading_evenly() {
+        assert_eq!(centered_line_box_baseline_px(16.0, 11.0, 3.0, 2.0), 12);
+        assert_eq!(centered_line_box_baseline_px(16.0, 11.0, 3.0, 0.0), 12);
+    }
+
+    #[test]
+    fn centered_line_box_has_a_safe_invalid_metrics_fallback() {
+        assert_eq!(centered_line_box_baseline_px(20.0, f32::NAN, 4.0, 0.0), 16);
+        assert_eq!(centered_line_box_baseline_px(20.0, 12.0, -1.0, 0.0), 16);
+    }
+
+    #[test]
+    fn instance_ink_bounds_include_bearings_and_faux_bold_copies() {
+        let instances = [
+            TextInstance {
+                pos: [10.0, 20.0],
+                glyph_size: [8, 6],
+                bearings: [-2, 3],
+                ..TextInstance::default()
+            },
+            TextInstance {
+                pos: [11.0, 20.0],
+                glyph_size: [8, 6],
+                bearings: [-2, 3],
+                ..TextInstance::default()
+            },
+        ];
+
+        assert_eq!(
+            instances_ink_bounds_px(&instances),
+            Some([8.0, 23.0, 17.0, 29.0])
+        );
+    }
+
+    #[test]
+    fn emitted_icon_ink_centers_in_a_scaled_logical_rect() {
+        let (font_library, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let mut text = Text::new(&font_library);
+        text.scale_factor = 2.0;
+        text.instances.push(TextInstance {
+            pos: [0.0, 0.0],
+            glyph_size: [8, 6],
+            ..TextInstance::default()
+        });
+
+        assert!(text.center_instances_in_rect(0, [10.0, 20.0, 20.0, 10.0], true, true));
+        assert_eq!(text.instances[0].pos, [36.0, 47.0]);
+    }
 
     #[test]
     fn shapes_icon_and_label_as_separate_font_runs() {
@@ -2279,5 +2491,27 @@ mod tests {
             runs[0].font_id, runs[1].font_id,
             "icon and ASCII label should resolve to different font runs"
         );
+    }
+
+    #[test]
+    fn font_library_swap_invalidates_every_font_derived_cache() {
+        let (first, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let (second, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let mut text = Text::new(&first);
+
+        text.shape_for("Neoism \u{f07b}", &DrawOpts::default())
+            .expect("shape text before library swap");
+        assert!(!text.shape_cache.is_empty());
+        assert!(!text.font_resolve.is_empty());
+        assert!(!text.baseline_cache.is_empty());
+
+        text.set_font_library(&second);
+
+        assert!(Arc::ptr_eq(&text.font_library.inner, &second.inner));
+        assert!(!Arc::ptr_eq(&text.font_library.inner, &first.inner));
+        assert!(text.shape_cache.is_empty());
+        assert!(text.font_resolve.is_empty());
+        assert!(text.synthesis_cache.is_empty());
+        assert!(text.baseline_cache.is_empty());
     }
 }

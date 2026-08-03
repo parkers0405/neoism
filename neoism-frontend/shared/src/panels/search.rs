@@ -3,9 +3,11 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 use web_time::Instant;
+
+use crate::primitives::draw_overlay_icon_centered;
 
 /// Convert `[f32; 4]` colour to the `[u8; 4]` non-premul form the
 /// `Text` draw path expects (the vertex shader premultiplies).
@@ -353,14 +355,14 @@ impl SearchOverlay {
                 );
             }
 
-            // Measure first so we can centre horizontally — the
-            // labels are single glyphs of varying width (arrows vs
-            // bullet).
-            let ui = sugarloaf.overlay_text_mut();
-            let label_w = ui.measure(labels[i], &btn_opts);
-            let label_x = bx + (bw - label_w) / 2.0;
-            let label_y = by + (bh - BUTTON_FONT_SIZE) / 2.0;
-            ui.draw(label_x, label_y, labels[i], &btn_opts);
+            draw_overlay_icon_centered(
+                sugarloaf,
+                *bx,
+                [*bx, *by, *bw, *bh],
+                labels[i],
+                &btn_opts,
+                true,
+            );
         }
     }
 }

@@ -968,10 +968,15 @@ impl Renderer {
 
             let icon_provider = AgentIconShim;
             let window_size = sugarloaf.window_size();
-            let strip_occlusions = self.active_text_occlusion_rects(
+            let mut strip_occlusions = self.active_text_occlusion_rects(
                 window_size.width,
                 window_size.height,
                 sugarloaf.scale_factor(),
+            );
+            self.push_left_sidebar_text_occlusions(
+                &mut strip_occlusions,
+                tree_top,
+                band_bottom,
             );
             // Skip the top-chrome text (tabs + breadcrumbs) while the
             // full-screen Settings panel is open — sugarloaf paints glyphs

@@ -850,7 +850,6 @@ impl SplashOverlay {
         // glyph box, not the baseline. Center each glyph type
         // by subtracting its font_size from the row height.
         let label_y = y + (h - dims.label_font) / 2.0;
-        let icon_y = y + (h - dims.icon_font) / 2.0;
         let key_y = y + (h - dims.key_font) / 2.0;
 
         // Use the row rect itself as the base clip — text gets
@@ -860,10 +859,12 @@ impl SplashOverlay {
         // helper public).
         let row_clip = [x, y, w, h];
 
+        let icon_x = x + dims.pad;
+        let first_icon_instance = sugarloaf.text_mut().instances().len();
         draw_text_clipped(
             sugarloaf,
-            x + dims.pad,
-            icon_y,
+            icon_x,
+            y,
             spec.icon.resolve(),
             &DrawOpts {
                 font_size: dims.icon_font,
@@ -873,6 +874,12 @@ impl SplashOverlay {
                 ..DrawOpts::default()
             },
             occlusion_rects,
+        );
+        sugarloaf.text_mut().center_instances_in_rect(
+            first_icon_instance,
+            [icon_x, y, dims.icon_slot, h],
+            true,
+            true,
         );
         let label_x = x + dims.pad + dims.icon_slot + dims.label_gap;
         draw_text_clipped(

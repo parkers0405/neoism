@@ -380,6 +380,11 @@ pub enum NeoismAgentUiEvent {
 pub(crate) enum NeoismAgentBackgroundUpdate {
     CompactFinished,
     CompactFailed(String),
+    ConfigDefaultsLoaded(neoism_ui::panels::agent_pane::api_mapping::ConfigDefaults),
+    ModelContextLimitRefreshed {
+        model: String,
+        limit: Option<u64>,
+    },
     SidePanelSessionsRefreshed(Vec<NeoismAgentSessionEntry>),
     SidePanelSubagentsRefreshed(Vec<NeoismAgentSessionEntry>),
     /// Semantic session-search results for `query`, fetched off-thread.

@@ -20,24 +20,24 @@ use neoism_terminal_core::crosswords::style::{StyleFlags, StyleSet};
 #[cfg(target_os = "macos")]
 use neoism_ui::terminal_grid_emit::glyph_cell_offsets_utf16;
 use neoism_ui::terminal_grid_emit::{
-    cell_in_row_sel, glyph_cell_offsets_utf8, rounded_terminal_cell_size,
-    shaping_style_flags, terminal_font_size_u16, terminal_size_bucket, RowSelection,
+    RowSelection, cell_in_row_sel, glyph_cell_offsets_utf8, rounded_terminal_cell_size,
+    shaping_style_flags, terminal_font_size_u16, terminal_size_bucket,
 };
 use smallvec::SmallVec;
 
 use crate::host::Renderer;
 use crate::terminal::grid_emit::cell_color::{cell_fg, cell_fg_selected};
 use crate::terminal::grid_emit::decoration::{
-    decoration_color, decoration_thickness, ensure_decoration_slot,
-    underline_style_from_flags, DecorationStyle,
+    DecorationStyle, decoration_color, decoration_thickness, ensure_decoration_slot,
+    underline_style_from_flags,
 };
 use crate::terminal::grid_emit::glyph_raster::ensure_glyph_by_id;
 use crate::terminal::grid_emit::hints::{
-    cell_fg_hinted, cell_in_hover_underline, cell_in_row_hints, HintTag, RowHint,
+    HintTag, RowHint, cell_fg_hinted, cell_in_hover_underline, cell_in_row_hints,
 };
 use crate::terminal::grid_emit::run_shaping::{
-    is_run_breaker, run_cache_get, run_cache_put, run_hash, GridGlyphRasterizer,
-    RunCacheEntry,
+    GridGlyphRasterizer, RunCacheEntry, is_run_breaker, run_cache_get, run_cache_put,
+    run_hash,
 };
 
 #[cfg(target_os = "macos")]
@@ -198,14 +198,18 @@ pub fn build_row_fg(
         let run_bytes: &[u8] = rasterizer.run_str_scratch.as_bytes();
         let hash = run_hash(font_id, size_bucket, run_style_flags, run_bytes);
 
-        // Shape (cached) and capture ascent for this (font_id, size).
-        let ascent_px = if run_cache_get(&mut rasterizer.run_cache, hash).is_some() {
-            // Cache hit — ascent already stored.
+        // Shape (cached) and capture the primary-font baseline/cell metrics
+        // shared by this fallback run.
+        let vertical_metrics = if run_cache_get(&mut rasterizer.run_cache, hash).is_some()
+        {
+            // Cache hit — vertical metrics are already stored.
             rasterizer
-                .ascent_cache
+                .vertical_metrics_cache
                 .get(&(font_id, size_bucket))
                 .copied()
-                .unwrap_or(0)
+                .unwrap_or_else(|| {
+                    super::run_shaping::GridVerticalMetrics::fallback(size_u16)
+                })
         } else {
             #[cfg(target_os = "macos")]
             let shaped_opt =
@@ -213,13 +217,18 @@ pub fn build_row_fg(
             #[cfg(not(target_os = "macos"))]
             let shaped_opt =
                 shape_run_swash(rasterizer, font_id, size_u16, size_bucket, font_library);
-            let Some((glyphs, ascent_px)) = shaped_opt else {
+            let Some((glyphs, vertical_metrics)) = shaped_opt else {
                 x = end;
                 continue;
             };
             run_cache_put(&mut rasterizer.run_cache, RunCacheEntry { hash, glyphs });
-            ascent_px
+            vertical_metrics
         };
+
+        // `cell_h` includes the user's line-height multiplier. Put half of
+        // the extra line box above the shared baseline and half below so a
+        // taller line-height does not pin every font to the row's top edge.
+        let baseline_px = vertical_metrics.baseline_for_cell_height(cell_h);
 
         let (synthetic_bold, synthetic_italic) =
             rasterizer.get_synthesis(font_id, font_library);
@@ -284,7 +293,7 @@ pub fn build_row_fg(
                 size_bucket,
                 size_u16,
                 cell_h,
-                ascent_px,
+                baseline_px,
                 is_emoji,
                 synthetic_italic,
                 synthetic_bold,

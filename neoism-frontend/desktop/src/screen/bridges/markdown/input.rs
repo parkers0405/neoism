@@ -359,6 +359,70 @@ impl Screen<'_> {
 
         let plain = !mods.control_key() && !mods.alt_key() && !mods.super_key();
         let ctrl_only = mods.control_key() && !mods.alt_key() && !mods.super_key();
+
+        // The page title is a virtual line, but global Normal-mode commands
+        // must behave exactly as they do on a document line. Handle the
+        // leader here before the title editor can swallow Space or interpret
+        // the following `x` as a title deletion. Commands which move through
+        // the document leave the virtual line, then continue through the
+        // regular Markdown dispatcher below.
+        let title_normal = self
+            .context_manager
+            .current()
+            .active_markdown()
+            .is_some_and(|markdown| {
+                markdown.title_edit.is_some()
+                    && matches!(
+                        markdown.mode,
+                        crate::editor::markdown::state::MarkdownMode::Normal
+                    )
+            });
+        if title_normal {
+            let now = std::time::Instant::now();
+            if self
+                .markdown_leader_pending
+                .is_some_and(|started| now.duration_since(started).as_millis() > LEADER_TIMEOUT_MS)
+            {
+                self.markdown_leader_pending = None;
+            }
+            if self.markdown_leader_pending.is_some() {
+                self.markdown_leader_pending = None;
+                if plain
+                    && matches!(key.logical_key.as_ref(), Key::Character(ch) if ch.eq_ignore_ascii_case("x"))
+                {
+                    if self.close_focused_buffer_tab() {
+                        self.mark_dirty();
+                    }
+                    return;
+                }
+            }
+
+            let is_space = matches!(key.logical_key.as_ref(), Key::Named(NamedKey::Space))
+                || matches!(key.logical_key.as_ref(), Key::Character(ch) if ch == " ");
+            if plain && is_space {
+                self.markdown_leader_pending = Some(now);
+                return;
+            }
+
+            let exits_title = ctrl_only
+                || matches!(
+                    key.logical_key.as_ref(),
+                    Key::Named(NamedKey::PageUp | NamedKey::PageDown)
+                )
+                || (plain
+                    && matches!(
+                        key.logical_key.as_ref(),
+                        Key::Character(ch) if ch == ":" || ch == "/" || ch == "?"
+                    ));
+            if exits_title {
+                if let Some(markdown) =
+                    self.context_manager.current_mut().active_markdown_mut()
+                {
+                    markdown.cancel_title_edit();
+                }
+            }
+        }
+
         // Virtual title line editing: ArrowUp (or `k` in Normal) from the
         // top of the buffer moves the cursor "up" into the big page title;
         // while active, every key drives the title edit. Enter commits and
@@ -1235,12 +1299,14 @@ impl Screen<'_> {
                 return;
             }
         }
-        if plain
-            && matches!(
-                key.key_without_modifiers().as_ref(),
-                Key::Character(value) if value == " "
-            )
-        {
+        let reader_leader_key = matches!(
+            key.key_without_modifiers().as_ref(),
+            Key::Named(NamedKey::Space)
+        ) || matches!(
+            key.key_without_modifiers().as_ref(),
+            Key::Character(value) if value == " "
+        );
+        if plain && reader_leader_key {
             self.markdown_leader_pending = Some(now);
             return;
         }

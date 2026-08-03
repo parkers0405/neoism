@@ -112,6 +112,13 @@ pub fn map_outbound_command(
         Cmd::ApplyConfigDefaults => Mapping::Messages(vec![Msg::GetConfigDefaults {
             directory: context.default_directory.clone(),
         }]),
+        Cmd::PersistConfigChoice { model, thinking } => {
+            Mapping::Messages(vec![Msg::PersistConfigChoice {
+                directory: context.default_directory.clone(),
+                model,
+                thinking,
+            }])
+        }
         Cmd::SetInputHelpVisible { visible } => {
             Mapping::Messages(vec![Msg::SetInputHelpVisible { visible }])
         }
@@ -408,6 +415,27 @@ mod tests {
             mapped,
             AgentProtocolMapping::Messages(vec![
                 AgentClientMessage::SetInputHelpVisible { visible: false }
+            ])
+        );
+    }
+
+    #[test]
+    fn first_run_config_choice_maps_to_insert_only_daemon_message() {
+        let mapped = map_outbound_command(
+            OutboundAgentCommand::PersistConfigChoice {
+                model: Some("opencode/free".to_string()),
+                thinking: None,
+            },
+            &AgentProtocolMappingContext::default(),
+        );
+        assert_eq!(
+            mapped,
+            AgentProtocolMapping::Messages(vec![
+                AgentClientMessage::PersistConfigChoice {
+                    directory: None,
+                    model: Some("opencode/free".to_string()),
+                    thinking: None,
+                }
             ])
         );
     }

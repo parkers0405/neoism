@@ -17,13 +17,13 @@
 
 use web_time::Instant;
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
 use crate::animation::CriticallyDampedSpring;
 use crate::editor_snapshot::{PopupMenu, PopupMenuItem};
 use crate::panels::status_line::STATUS_LINE_HEIGHT;
-use crate::primitives::IdeTheme;
+use crate::primitives::{IdeTheme, draw_overlay_icon_centered};
 
 const FONT_SIZE: f32 = 13.0;
 const ROW_HEIGHT: f32 = 26.0;
@@ -323,11 +323,7 @@ impl CompletionMenu {
             // Prefer a colored nerd-font icon for the kind (VS Code / Zed
             // style); fall back to the short text tag for kinds we don't map.
             let icon = kind_icon(&item.kind);
-            let kind = if icon.is_empty() {
-                compact_kind(&item.kind)
-            } else {
-                icon
-            };
+            let kind = compact_kind(&item.kind);
             let menu_text = truncate(&item.menu, menu_w - pad_x, font_size);
 
             let word_opts = DrawOpts {
@@ -357,13 +353,27 @@ impl CompletionMenu {
                 ..DrawOpts::default()
             };
 
-            let ui = sugarloaf.overlay_text_mut();
-            ui.draw(word_x, text_y, &word, &word_opts);
-            if !kind.is_empty() {
-                ui.draw(kind_x, text_y, kind, &kind_opts);
+            sugarloaf
+                .overlay_text_mut()
+                .draw(word_x, text_y, &word, &word_opts);
+            if !icon.is_empty() {
+                draw_overlay_icon_centered(
+                    sugarloaf,
+                    kind_x,
+                    [kind_x, row_y, kind_w, row_h],
+                    icon,
+                    &kind_opts,
+                    true,
+                );
+            } else if !kind.is_empty() {
+                sugarloaf
+                    .overlay_text_mut()
+                    .draw(kind_x, text_y, kind, &kind_opts);
             }
             if !menu_text.is_empty() {
-                ui.draw(menu_x, text_y, &menu_text, &menu_opts);
+                sugarloaf
+                    .overlay_text_mut()
+                    .draw(menu_x, text_y, &menu_text, &menu_opts);
             }
         }
 

@@ -814,6 +814,49 @@ pub(crate) async fn handle_set_input_help_visible(inner: Arc<AgentInner>, visibl
     }
 }
 
+pub(crate) async fn handle_persist_config_choice(
+    inner: Arc<AgentInner>,
+    directory: Option<String>,
+    model: Option<String>,
+    thinking: Option<String>,
+) {
+    let path = match directory {
+        Some(dir) => format!("/config?directory={}", percent_encode(&dir)),
+        None => "/config".to_string(),
+    };
+    let Ok(current) = http_get_json(&inner, &path).await else {
+        return;
+    };
+    for (key, value) in [("agent.model", model), ("agent.variant", thinking)] {
+        let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        let already_set = match key {
+            "agent.model" => current
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            _ => current
+                .get("variant")
+                .or_else(|| current.get("thinking"))
+                .or_else(|| current.get("reasoning-effort"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+        };
+        if already_set {
+            continue;
+        }
+        if let Err(error) =
+            neoism_backend::config::write_setting_if_absent(key, Value::String(value))
+        {
+            emit_error(
+                &inner.tx,
+                format!("failed to persist first-run agent preference {key}: {error}"),
+            );
+        }
+    }
+}
+
 pub(crate) fn provider_info_from_value(value: &Value) -> Option<ProviderInfo> {
     let id = value.get("id").and_then(Value::as_str)?.to_string();
     let name = value

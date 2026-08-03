@@ -38,7 +38,7 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::{Attributes, Sugarloaf};
 
 use crate::event::{Modifiers, PointerButton, UiEvent, WheelMode};
-use crate::primitives::draw_text_with_occlusion;
+use crate::primitives::{draw_icon_centered_with_occlusion, draw_text_with_occlusion};
 
 /// True when `rect` overlaps any occlusion rect — used to drop
 /// host-painted icon overlays (which bypass the text occlusion helper)
@@ -71,9 +71,7 @@ const CLOSE_BTN_SIZE: f32 = 11.0;
 const CLOSE_HIT_SIZE: f32 = 18.0;
 const CLOSE_BTN_GAP: f32 = 6.0;
 const MIN_TAB_WIDTH: f32 = 96.0;
-// Wide enough for ordinary long filenames in broad monospace faces such as
-// Monocraft, while genuinely long paths still ellipsize and the strip scrolls.
-const MAX_TAB_WIDTH: f32 = 260.0;
+const MAX_TAB_WIDTH: f32 = 220.0;
 /// The comfortable per-tab width every tab keeps regardless of how many
 /// tabs are open. Crowded strips no longer crush tabs down toward
 /// `MIN_TAB_WIDTH` and truncate titles; instead the strip overflows and

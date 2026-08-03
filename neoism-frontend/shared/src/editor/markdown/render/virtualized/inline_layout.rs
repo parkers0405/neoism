@@ -821,6 +821,13 @@ fn inline_runs_for_text(raw: &str) -> Vec<InlineRun> {
             ix += source_len;
             continue;
         }
+        if let Some(link) = web_link_at_start(rest) {
+            if let Some(label) = rest.get(link.label_start..link.label_end) {
+                push_inline_run(&mut runs, InlineRunStyle::Link(link.target), label);
+                ix += link.raw_end;
+                continue;
+            }
+        }
         if rest.starts_with("[[") {
             let inner_start = ix + 2;
             if let Some(end_rel) = text[inner_start..].find("]]") {

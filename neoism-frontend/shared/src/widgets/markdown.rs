@@ -431,6 +431,18 @@ pub struct MarkdownLink<'a> {
     pub consumed: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebLinkSpan {
+    /// Full clickable source span. For Markdown links this includes
+    /// `[label](target)`; for a bare URL it is the URL itself.
+    pub raw_start: usize,
+    pub raw_end: usize,
+    /// Visible label inside the source span.
+    pub label_start: usize,
+    pub label_end: usize,
+    pub target: String,
+}
+
 /// Parse a leading `[label](target)` link from `value`. Returns the literal
 /// label and target slices plus how many bytes the whole link consumed.
 pub fn parse_markdown_link(value: &str) -> Option<MarkdownLink<'_>> {
@@ -439,12 +451,139 @@ pub fn parse_markdown_link(value: &str) -> Option<MarkdownLink<'_>> {
     let label = &rest[..label_end];
     let rest = &rest[label_end + 1..];
     let rest = rest.strip_prefix('(')?;
-    let target_end = rest.find(')')?;
+    let mut depth = 1usize;
+    let mut escaped = false;
+    let mut target_end = None;
+    for (index, ch) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    target_end = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let target_end = target_end?;
     let target = &rest[..target_end];
     Some(MarkdownLink {
         label,
         target,
         consumed: label_end + target_end + 4,
+    })
+}
+
+/// Return a clean HTTP(S) target while preserving balanced URL parentheses.
+/// Ambient prose punctuation (`https://x.dev).`) is excluded from the target.
+pub fn web_url_target(value: &str) -> Option<&str> {
+    let value = value.trim_start_matches(|ch: char| {
+        matches!(ch, '<' | '(' | '[' | '{' | '\'' | '"' | '`')
+    });
+    if !(value.starts_with("https://") || value.starts_with("http://")) {
+        return None;
+    }
+    let mut end = value.len();
+    loop {
+        let Some(ch) = value[..end].chars().next_back() else {
+            return None;
+        };
+        let trim = matches!(
+            ch,
+            '.' | ',' | ';' | ':' | '!' | '?' | '>' | '\'' | '"' | '`'
+        ) || (ch == ')'
+            && value[..end].chars().filter(|ch| *ch == ')').count()
+                > value[..end].chars().filter(|ch| *ch == '(').count())
+            || (ch == ']'
+                && value[..end].chars().filter(|ch| *ch == ']').count()
+                    > value[..end].chars().filter(|ch| *ch == '[').count())
+            || (ch == '}'
+                && value[..end].chars().filter(|ch| *ch == '}').count()
+                    > value[..end].chars().filter(|ch| *ch == '{').count());
+        if !trim {
+            break;
+        }
+        end -= ch.len_utf8();
+    }
+    let scheme_len = if value.starts_with("https://") { 8 } else { 7 };
+    let target = &value[..end];
+    (end > scheme_len && !target.chars().any(char::is_whitespace)).then_some(target)
+}
+
+/// Parse a web link beginning at byte zero. Standard Markdown links expose
+/// only their label as visible text, while bare URLs use the URL itself.
+pub fn web_link_at_start(text: &str) -> Option<WebLinkSpan> {
+    if let Some(link) = parse_markdown_link(text) {
+        if let Some(target) = web_url_target(link.target) {
+            let label_start = 1;
+            return Some(WebLinkSpan {
+                raw_start: 0,
+                raw_end: link.consumed,
+                label_start,
+                label_end: label_start + link.label.len(),
+                target: target.to_string(),
+            });
+        }
+    }
+
+    if text.starts_with("https://") || text.starts_with("http://") {
+        let token_end = text
+            .find(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '"' | '\'' | '`'))
+            .unwrap_or(text.len());
+        if let Some(target) = web_url_target(&text[..token_end]) {
+            let end = target.len();
+            return Some(WebLinkSpan {
+                raw_start: 0,
+                raw_end: end,
+                label_start: 0,
+                label_end: end,
+                target: target.to_string(),
+            });
+        }
+    }
+
+    None
+}
+
+/// Find standard Markdown web links and bare HTTP(S) URLs without returning
+/// the destination inside `[label](destination)` a second time.
+pub fn web_link_spans(text: &str) -> Vec<WebLinkSpan> {
+    let mut spans = Vec::new();
+    let mut byte = 0usize;
+    while byte < text.len() {
+        let rest = &text[byte..];
+        if let Some(mut link) = web_link_at_start(rest) {
+            link.raw_start += byte;
+            link.raw_end += byte;
+            link.label_start += byte;
+            link.label_end += byte;
+            byte = link.raw_end;
+            spans.push(link);
+            continue;
+        }
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        byte += ch.len_utf8();
+    }
+    spans
+}
+
+pub fn web_link_at(text: &str, char_col: usize) -> Option<WebLinkSpan> {
+    web_link_spans(text).into_iter().find(|span| {
+        let start = text[..span.raw_start].chars().count();
+        let end = start + text[span.raw_start..span.raw_end].chars().count();
+        char_col >= start && char_col < end
     })
 }
 
@@ -831,6 +970,29 @@ mod tests {
         assert!(!looks_like_file_ref("Yes/No"));
         assert!(!looks_like_file_ref("and/or"));
         assert!(looks_like_file_ref("/etc/hosts"));
+    }
+
+    #[test]
+    fn web_links_cover_markdown_labels_and_bare_urls_once() {
+        let text =
+            "[Search Engineer](https://jobs.example/x) and https://neoism.dev/docs).";
+        let links = web_link_spans(text);
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            &text[links[0].label_start..links[0].label_end],
+            "Search Engineer"
+        );
+        assert_eq!(links[0].target, "https://jobs.example/x");
+        assert_eq!(links[1].target, "https://neoism.dev/docs");
+        assert_eq!(&text[links[1].raw_start..links[1].raw_end], links[1].target);
+    }
+
+    #[test]
+    fn markdown_link_parser_keeps_balanced_url_parentheses() {
+        let link = parse_markdown_link("[docs](https://x.dev/path_(one)) tail").unwrap();
+        assert_eq!(link.label, "docs");
+        assert_eq!(link.target, "https://x.dev/path_(one)");
+        assert_eq!(link.consumed, "[docs](https://x.dev/path_(one))".len());
     }
 
     #[test]

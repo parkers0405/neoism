@@ -19,6 +19,11 @@ pub trait AgentPaneInput {
     fn input(&self) -> &str;
     fn input_help_visible(&self) -> bool;
     fn background_task_details_expanded(&self) -> bool;
+    /// Exact rows registered by the most recent render, when they still
+    /// describe the current draft. Non-rendering hosts may return `None`.
+    fn input_visual_row_count(&self) -> Option<usize> {
+        None
+    }
 }
 
 impl AgentPaneInput for NeoismAgentPane {
@@ -33,23 +38,66 @@ impl AgentPaneInput for NeoismAgentPane {
     fn background_task_details_expanded(&self) -> bool {
         self.background_task_details_expanded()
     }
+
+    fn input_visual_row_count(&self) -> Option<usize> {
+        NeoismAgentPane::input_visual_row_count(self)
+    }
 }
 
 pub fn home_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f32; 4] {
     let [x, y, w, h] = rect;
+    let input_w = home_input_width(rect, s);
+    let input_h = pane.input_visual_row_count().map_or_else(
+        || {
+            input_height_for_width(
+                pane.input(),
+                input_w,
+                s,
+                true,
+                pane.background_task_details_expanded(),
+            )
+        },
+        |rows| {
+            input_height_for_visual_rows(
+                rows,
+                s,
+                true,
+                pane.background_task_details_expanded(),
+            )
+        },
+    );
+    let input_x = x + (w - input_w) * 0.5;
+    // The wordmark anchors a fixed gap above this card, so the pair
+    // reads as one group centered slightly above the pane's midline.
+    let input_y = y + h * 0.46;
+    [input_x, input_y, input_w, input_h]
+}
+
+pub fn home_input_width(rect: [f32; 4], s: f32) -> f32 {
+    let w = rect[2];
     let side_pad = (24.0 * s).min((w * 0.08).max(0.0));
     let available_w = (w - side_pad * 2.0).max(1.0);
-    let input_w = (820.0 * s).min(available_w);
-    let input_h = input_height_for_width(
-        pane.input(),
-        input_w,
+    (820.0 * s).min(available_w)
+}
+
+/// Measured-row counterpart used by the actual painter. The public
+/// approximation above remains available to hosts that only need a hit-test
+/// rect and do not own a Sugarloaf text measurer.
+pub fn home_input_rect_for_visual_rows(
+    pane: &impl AgentPaneInput,
+    rect: [f32; 4],
+    s: f32,
+    visual_rows: usize,
+) -> [f32; 4] {
+    let [x, y, w, h] = rect;
+    let input_w = home_input_width(rect, s);
+    let input_h = input_height_for_visual_rows(
+        visual_rows,
         s,
         true,
         pane.background_task_details_expanded(),
     );
     let input_x = x + (w - input_w) * 0.5;
-    // The wordmark anchors a fixed gap above this card, so the pair
-    // reads as one group centered slightly above the pane's midline.
     let input_y = y + h * 0.46;
     [input_x, input_y, input_w, input_h]
 }
@@ -80,9 +128,44 @@ pub fn chat_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
         0.0
     };
     let bottom_pad = (14.0 + help_h) * s;
-    let input_h = input_height_for_width(
-        pane.input(),
-        input_w,
+    let input_h = pane.input_visual_row_count().map_or_else(
+        || {
+            input_height_for_width(
+                pane.input(),
+                input_w,
+                s,
+                false,
+                pane.background_task_details_expanded(),
+            )
+        },
+        |rows| {
+            input_height_for_visual_rows(
+                rows,
+                s,
+                false,
+                pane.background_task_details_expanded(),
+            )
+        },
+    );
+    [input_x, y + h - input_h - bottom_pad, input_w, input_h]
+}
+
+pub fn chat_input_rect_for_visual_rows(
+    pane: &impl AgentPaneInput,
+    rect: [f32; 4],
+    s: f32,
+    visual_rows: usize,
+) -> [f32; 4] {
+    let [_x, y, _w, h] = rect;
+    let (input_x, input_w) = chat_column(rect, s);
+    let help_h = if pane.input_help_visible() {
+        INPUT_HELP_STRIP_H
+    } else {
+        0.0
+    };
+    let bottom_pad = (14.0 + help_h) * s;
+    let input_h = input_height_for_visual_rows(
+        visual_rows,
         s,
         false,
         pane.background_task_details_expanded(),
@@ -106,6 +189,21 @@ pub fn input_height_for_width(
         .sum::<usize>()
         .max(1)
         .min(MAX_INPUT_LINES);
+    input_height_for_visual_rows(
+        estimated_lines,
+        s,
+        show_status,
+        background_details_expanded,
+    )
+}
+
+pub fn input_height_for_visual_rows(
+    visual_rows: usize,
+    s: f32,
+    show_status: bool,
+    background_details_expanded: bool,
+) -> f32 {
+    let visual_rows = visual_rows.max(1).min(MAX_INPUT_LINES);
     let min_h = if show_status {
         HOME_INPUT_MIN_H
     } else {
@@ -119,5 +217,58 @@ pub fn input_height_for_width(
     } else {
         0.0
     };
-    (min_h * s).max((base_h + status_extra_h + estimated_lines as f32 * INPUT_LINE_H) * s)
+    (min_h * s).max((base_h + status_extra_h + visual_rows as f32 * INPUT_LINE_H) * s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestPane {
+        rows: Option<usize>,
+    }
+
+    impl AgentPaneInput for TestPane {
+        fn input(&self) -> &str {
+            "short"
+        }
+
+        fn input_help_visible(&self) -> bool {
+            false
+        }
+
+        fn background_task_details_expanded(&self) -> bool {
+            false
+        }
+
+        fn input_visual_row_count(&self) -> Option<usize> {
+            self.rows
+        }
+    }
+
+    #[test]
+    fn measured_rows_expand_both_composer_variants_at_the_second_row() {
+        assert_eq!(input_height_for_visual_rows(1, 1.0, false, false), 98.0);
+        assert_eq!(input_height_for_visual_rows(2, 1.0, false, false), 120.0);
+        assert_eq!(input_height_for_visual_rows(1, 1.0, true, false), 106.0);
+        assert_eq!(input_height_for_visual_rows(2, 1.0, true, false), 128.0);
+    }
+
+    #[test]
+    fn measured_rows_are_clamped_to_the_visible_composer_limit() {
+        assert_eq!(
+            input_height_for_visual_rows(MAX_INPUT_LINES + 10, 1.0, false, false),
+            input_height_for_visual_rows(MAX_INPUT_LINES, 1.0, false, false)
+        );
+    }
+
+    #[test]
+    fn host_rect_prefers_registered_rows_over_the_character_estimate() {
+        let rect = [0.0, 0.0, 800.0, 600.0];
+        let estimated = chat_input_rect(&TestPane { rows: None }, rect, 1.0);
+        let measured = chat_input_rect(&TestPane { rows: Some(2) }, rect, 1.0);
+        assert_eq!(estimated[3], 98.0, "short text estimates one row");
+        assert_eq!(measured[3], 120.0, "registered two-row geometry wins");
+        assert_eq!(estimated[1] - measured[1], 22.0);
+    }
 }

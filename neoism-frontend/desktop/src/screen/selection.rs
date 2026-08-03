@@ -12,7 +12,7 @@ use neoism_ui::editor::selection_model::{
     hyperlink_trigger_eligible, include_all_current_selection,
     left_click_selection_action, post_process_hint_match_end, selected_text,
     selection_with_range, should_open_file_link_on_click, terminal_body_visual_row,
-    terminal_file_link_hover_rect, terminal_file_link_probe,
+    terminal_file_link_hover_rect, terminal_file_link_probe, terminal_wrapped_link_probe,
     toggle_action_needs_include_all, toggle_selection_action, FileLinkOpenTarget,
     HintModifierState, HintMouseActivation, LeftClickSelectionAction, SelectionClickKind,
     SelectionEndpoint, SelectionModifiers, SelectionSnapshot, TerminalBodyMouseRowInput,

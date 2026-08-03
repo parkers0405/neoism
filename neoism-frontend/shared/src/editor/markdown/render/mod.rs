@@ -1518,7 +1518,7 @@ fn wrap_lines_cached(
 #[cfg(test)]
 mod tests {
     use super::inline::{
-        clean_inline_with_active_link, collect_inline_tags, collect_inline_wiki_links,
+        clean_inline_with_active_link, collect_inline_links, collect_inline_tags,
     };
     use super::inline::{normalized_spellcheck_word, spellcheck_words};
     use super::lines::{heading_section_tasks_complete, parse_render_line};
@@ -1552,13 +1552,25 @@ mod tests {
     #[test]
     fn bare_wiki_link_and_tags_are_collected_for_inline_rendering() {
         let text = "See [[Roadmap#Now|roadmap]] #neoism/workspace";
-        let links = collect_inline_wiki_links(text);
+        let links = collect_inline_links(text);
         let tags = collect_inline_tags(text, &links);
 
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].label, "roadmap");
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].label, "#neoism/workspace");
+    }
+
+    #[test]
+    fn standard_and_bare_web_links_are_collected_for_inline_rendering() {
+        let text = "[Search](https://example.com/jobs) and https://neoism.dev/docs.";
+        let links = collect_inline_links(text);
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].label, "Search");
+        assert_eq!(links[0].inner, "https://example.com/jobs");
+        assert_eq!(links[1].label, "https://neoism.dev/docs");
+        assert_eq!(links[1].inner, "https://neoism.dev/docs");
     }
 
     #[test]

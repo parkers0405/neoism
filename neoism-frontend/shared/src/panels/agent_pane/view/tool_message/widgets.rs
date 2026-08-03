@@ -1,4 +1,5 @@
 use super::*;
+use crate::primitives::draw_icon_centered_with_occlusion;
 
 pub fn draw_checkbox(
     sugarloaf: &mut Sugarloaf,
@@ -43,6 +44,7 @@ pub fn draw_checkbox(
     );
     match state {
         TodoVisualState::Completed => {
+            let stroke = 1.0 * s;
             let font_size = 12.0 * s;
             let opts = DrawOpts {
                 font_size,
@@ -52,10 +54,16 @@ pub fn draw_checkbox(
                 ..DrawOpts::default()
             };
             let glyph = "✓";
-            let glyph_w = sugarloaf.text_mut().measure(glyph, &opts);
-            let cx = x + (size - glyph_w) * 0.5;
-            let cy = y + (size - font_size) * 0.5 - 1.0 * s;
-            sugarloaf.text_mut().draw(cx, cy, glyph, &opts);
+            let inner_size = (size - stroke).max(0.0);
+            draw_icon_centered_with_occlusion(
+                sugarloaf,
+                x + stroke,
+                [x + stroke, y + stroke, inner_size, inner_size],
+                glyph,
+                &opts,
+                &[],
+                true,
+            );
         }
         TodoVisualState::InProgress => {
             // Smaller in-progress bullet (6px). The box's right/bottom

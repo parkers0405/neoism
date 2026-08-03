@@ -45,10 +45,10 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
             }
         }
         if let Some(link) = md::parse_markdown_link(rest) {
-            let target = (md::looks_like_file_ref(link.target)
-                || link.target.starts_with("http://")
-                || link.target.starts_with("https://"))
-            .then(|| link.target.to_string());
+            let web_target = md::web_url_target(link.target);
+            let target = web_target.map(str::to_string).or_else(|| {
+                md::looks_like_file_ref(link.target).then(|| link.target.to_string())
+            });
             out.push(MarkdownInlineSegment::MarkdownLink {
                 label: link.label.to_string(),
                 source_target: link.target.to_string(),
@@ -91,8 +91,10 @@ fn parse_plain_markdown_segment(text: &str, out: &mut Vec<MarkdownInlineSegment>
 }
 
 fn push_plain_markdown_token(token: &str, out: &mut Vec<MarkdownInlineSegment>) {
-    let target = md::clean_link_target(token);
-    let clickable = md::looks_like_file_ref(target);
+    let cleaned = md::clean_link_target(token);
+    let web_target = md::web_url_target(token);
+    let target = web_target.unwrap_or(cleaned);
+    let clickable = web_target.is_some() || md::looks_like_file_ref(target);
     out.push(MarkdownInlineSegment::PlainToken {
         text: token.to_string(),
         target: clickable.then(|| target.to_string()),

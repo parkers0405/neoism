@@ -101,6 +101,44 @@ enum MarkdownInlineSegment {
     },
 }
 
+fn inline_segment_link_target(segment: &MarkdownInlineSegment) -> Option<&str> {
+    match segment {
+        MarkdownInlineSegment::Code {
+            target: Some(target),
+            ..
+        }
+        | MarkdownInlineSegment::MarkdownLink {
+            target: Some(target),
+            ..
+        }
+        | MarkdownInlineSegment::PlainToken {
+            target: Some(target),
+            ..
+        } => Some(target),
+        _ => None,
+    }
+}
+
+fn bridged_inline_whitespace_target(
+    segments: &[MarkdownInlineSegment],
+    index: usize,
+) -> Option<&str> {
+    let MarkdownInlineSegment::Text(text) = segments.get(index)? else {
+        return None;
+    };
+    if text.is_empty() || !text.chars().all(char::is_whitespace) {
+        return None;
+    }
+    let previous = index
+        .checked_sub(1)
+        .and_then(|previous| segments.get(previous))
+        .and_then(inline_segment_link_target)?;
+    let next = segments
+        .get(index + 1)
+        .and_then(inline_segment_link_target)?;
+    (previous == next).then_some(previous)
+}
+
 struct InlineLineCache {
     values: HashMap<String, Rc<Vec<MarkdownInlineSegment>>>,
     order: VecDeque<String>,
@@ -498,12 +536,18 @@ fn inline_wrap_tokens(text: &str) -> Vec<InlineWrapToken> {
                 &mut pending_whitespace,
                 &mut tokens,
             ),
-            MarkdownInlineSegment::PlainToken { text, .. } => push_inline_segment_words(
-                text,
-                InlineWrapStyle::Plain,
-                &mut pending_whitespace,
-                &mut tokens,
-            ),
+            MarkdownInlineSegment::PlainToken { text, target, .. } => {
+                let style = target
+                    .as_ref()
+                    .map(|target| InlineWrapStyle::MarkdownLink(target.clone()))
+                    .unwrap_or(InlineWrapStyle::Plain);
+                push_inline_segment_words(
+                    text,
+                    style,
+                    &mut pending_whitespace,
+                    &mut tokens,
+                )
+            }
         }
     }
     tokens
@@ -1979,11 +2023,30 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
         }
     }
     let segments = parsed_markdown_inline_line(line);
-    for segment in segments.iter() {
+    for (segment_index, segment) in segments.iter().enumerate() {
         match segment {
             MarkdownInlineSegment::Text(text) => {
                 draw_text_clipped(sugarloaf, x, y, text, opts, occlusion_rects);
-                x += measure_text_cached(sugarloaf, text, opts);
+                let w = measure_text_cached(sugarloaf, text, opts);
+                if !suppress_interactions {
+                    if let Some(target) =
+                        bridged_inline_whitespace_target(&segments, segment_index)
+                    {
+                        draw_hover_underline(
+                            sugarloaf,
+                            pane,
+                            target,
+                            [x, y + opts.font_size + 2.0, w, 1.0],
+                            theme,
+                            viewport_clip,
+                        );
+                        pane.register_link_hit_rect(
+                            target.to_string(),
+                            [x, y - 2.0, w, opts.font_size + 8.0],
+                        );
+                    }
+                }
+                x += w;
             }
             MarkdownInlineSegment::Bold(text) => {
                 let mut bold = *opts;

@@ -14,4 +14,8 @@ impl AgentPaneInput for NeoismAgentPane {
     fn background_task_details_expanded(&self) -> bool {
         self.background_task_details_expanded()
     }
+
+    fn input_visual_row_count(&self) -> Option<usize> {
+        self.current_input_wrap_rows().map(|rows| rows.len())
+    }
 }

@@ -473,6 +473,19 @@ pub struct TerminalFileLinkProbe {
     pub col: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerminalWrappedLinkProbe {
+    /// Full logical terminal line with soft-wrapped physical rows joined.
+    pub row_text: String,
+    /// Character offset of the pointed cell in `row_text`.
+    pub col: usize,
+    /// Absolute physical row under the pointer.
+    pub abs_row: usize,
+    /// Character range occupied by that physical row inside `row_text`.
+    pub physical_row_start: usize,
+    pub physical_row_len: usize,
+}
+
 pub fn terminal_file_link_probe(
     terminal: &Crosswords,
     point: Pos,
@@ -511,6 +524,80 @@ pub fn terminal_file_link_probe(
         row_text,
         abs_row,
         col,
+    })
+}
+
+/// Build a logical-line probe for text that the terminal soft-wrapped over
+/// several physical rows. The scan is deliberately capped: links remain
+/// discoverable in very narrow panes without allowing a pathological stream
+/// of wrap flags to turn a mouse move into an unbounded grid walk.
+pub fn terminal_wrapped_link_probe(
+    terminal: &Crosswords,
+    point: Pos,
+) -> Option<TerminalWrappedLinkProbe> {
+    const MAX_WRAPPED_ROWS: usize = 64;
+
+    let history_size = terminal.history_size();
+    let abs_row = history_size as i64 + point.row.0 as i64;
+    if abs_row < 0 {
+        return None;
+    }
+    let abs_row = abs_row as usize;
+    let max_abs_row =
+        history_size.saturating_add(terminal.bottommost_line().0.max(0) as usize);
+    if abs_row > max_abs_row {
+        return None;
+    }
+
+    let last_col = terminal.grid.last_column();
+    let mut start_abs = abs_row;
+    while start_abs > 0 && abs_row - start_abs < MAX_WRAPPED_ROWS - 1 {
+        let previous = line_for_absolute_row(start_abs - 1, history_size);
+        if !terminal.grid[previous][last_col].wrapline() {
+            break;
+        }
+        start_abs -= 1;
+    }
+
+    let mut end_abs = abs_row;
+    while end_abs < max_abs_row && end_abs - start_abs < MAX_WRAPPED_ROWS - 1 {
+        let current = line_for_absolute_row(end_abs, history_size);
+        if !terminal.grid[current][last_col].wrapline() {
+            break;
+        }
+        end_abs += 1;
+    }
+
+    let mut row_text = String::new();
+    let mut physical_row_start = 0usize;
+    let mut physical_row_len = 0usize;
+    for current_abs in start_abs..=end_abs {
+        let line = line_for_absolute_row(current_abs, history_size);
+        let row = &terminal.grid[line];
+        if current_abs == abs_row {
+            physical_row_start = row_text.chars().count();
+            physical_row_len = row.inner.len();
+        }
+        row_text.extend(row.inner.iter().map(|cell| {
+            let ch = cell.c();
+            if ch == '\0' {
+                ' '
+            } else {
+                ch
+            }
+        }));
+    }
+
+    let pointed_col = point.col.0;
+    if pointed_col >= physical_row_len {
+        return None;
+    }
+    Some(TerminalWrappedLinkProbe {
+        row_text,
+        col: physical_row_start + pointed_col,
+        abs_row,
+        physical_row_start,
+        physical_row_len,
     })
 }
 

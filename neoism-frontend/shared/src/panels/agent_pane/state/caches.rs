@@ -315,4 +315,11 @@ impl NeoismAgentPane {
         (!self.input_wrap_rows.is_empty() && self.input_wrap_len == self.input.len())
             .then_some(self.input_wrap_rows.as_slice())
     }
+
+    /// Exact current visual-row count from the last completed render. The
+    /// input-length guard prevents layout and mobile hit-testing from using
+    /// stale geometry during the frame in which a keystroke lands.
+    pub fn input_visual_row_count(&self) -> Option<usize> {
+        self.current_input_wrap_rows().map(|rows| rows.len())
+    }
 }

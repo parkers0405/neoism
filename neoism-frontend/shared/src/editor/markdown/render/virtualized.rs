@@ -22,7 +22,9 @@ use crate::editor::neodraw::{render_scene, Camera, Vec2};
 use crate::primitives::ide_theme::IdeTheme;
 use crate::primitives::truncate_to_fit;
 use crate::syntax::{highlight_line, syn_color, Lang};
-use crate::widgets::markdown::{list_depth_from_indent, parse_heading_line};
+use crate::widgets::markdown::{
+    list_depth_from_indent, parse_heading_line, web_link_at_start,
+};
 use crate::widgets::mermaid::{mermaid_scene, parse_mermaid_diagram};
 
 use super::bullet_align;

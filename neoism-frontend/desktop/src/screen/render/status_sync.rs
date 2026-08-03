@@ -57,7 +57,8 @@ impl Screen<'_> {
             let current = self.context_manager.current();
             let document_chrome_active = current.code.is_some()
                 || current.markdown.is_some()
-                || current.notebook.is_some();
+                || current.notebook.is_some()
+                || current.epub.is_some();
             let (status_mode, primary, primary_kind, branch, active_path, active_cwd) =
                 if let Some(code) = current.code.as_ref() {
                     let active_path = Some(code.path.clone());
@@ -181,6 +182,50 @@ impl Screen<'_> {
                         primary,
                         neoism_ui::panels::status_line::PrimaryKind::File,
                         branch,
+                        Some(active_path),
+                        cwd,
+                    )
+                } else if let Some(epub) = current.epub.as_ref() {
+                    let active_path = epub.book.path.clone();
+                    let cwd = self
+                        .active_workspace_root
+                        .clone()
+                        .or_else(|| active_path.parent().map(Path::to_path_buf));
+                    let primary = if epub.showing_contents {
+                        format!("{} · Contents", epub.book.metadata.title)
+                    } else {
+                        let chapter = epub
+                            .book
+                            .chapters
+                            .get(epub.chapter_index)
+                            .map(|chapter| chapter.title.as_str())
+                            .filter(|title| !title.is_empty())
+                            .unwrap_or(epub.book.metadata.title.as_str());
+                        format!(
+                            "{} · {} ({}/{}) · {:.0}% · {} note{}",
+                            epub.book.metadata.title,
+                            chapter,
+                            epub.chapter_index.saturating_add(1),
+                            epub.book.chapters.len(),
+                            (epub.state.progress * 100.0).clamp(0.0, 100.0),
+                            epub.state.annotations.len(),
+                            if epub.state.annotations.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        )
+                    };
+                    (
+                        match epub.markdown.mode {
+                            neoism_ui::editor::markdown::MarkdownMode::Visual => {
+                                neoism_ui::panels::status_line::Mode::Visual
+                            }
+                            _ => neoism_ui::panels::status_line::Mode::Markdown,
+                        },
+                        primary,
+                        neoism_ui::panels::status_line::PrimaryKind::File,
+                        None,
                         Some(active_path),
                         cwd,
                     )
@@ -405,7 +450,36 @@ impl Screen<'_> {
                     }
                     None => active_path.clone(),
                 };
-                if let Some(notebook) = current.notebook.as_ref() {
+                if let Some(epub) = current.epub.as_ref() {
+                    let title = if epub.book.metadata.title.trim().is_empty() {
+                        epub.book
+                            .path
+                            .file_stem()
+                            .map(|value| value.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "Book".to_string())
+                    } else {
+                        epub.book.metadata.title.clone()
+                    };
+                    let section = if epub.showing_contents {
+                        "Contents".to_string()
+                    } else {
+                        epub.book
+                            .chapters
+                            .get(epub.chapter_index)
+                            .map(|chapter| chapter.title.clone())
+                            .unwrap_or_else(|| "Book".to_string())
+                    };
+                    let segments = if title.trim().eq_ignore_ascii_case(section.trim()) {
+                        vec![title]
+                    } else {
+                        vec![title, section]
+                    };
+                    self.renderer.breadcrumbs.set_segments(segments);
+                    self.renderer.breadcrumbs.clear_tail();
+                    self.renderer
+                        .file_tree
+                        .set_active_path(crumb_path.clone().or(active_path.clone()));
+                } else if let Some(notebook) = current.notebook.as_ref() {
                     use neoism_ui::panels::breadcrumbs::{
                         BreadcrumbAction, BreadcrumbActionItem,
                     };

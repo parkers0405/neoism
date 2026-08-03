@@ -18,15 +18,18 @@ pub(super) fn render_virtual(
 
     // Obsidian-style inline title: the frontmatter `title:` when set (edit
     // it right in the metadata rows), otherwise the file name.
-    let title_text: String = pane
-        .frontmatter_title()
-        .or_else(|| {
-            pane.path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
-                .filter(|stem| !stem.is_empty())
-        })
-        .unwrap_or_else(|| pane.title.clone());
+    let title_text: String = if pane.read_only {
+        pane.title.clone()
+    } else {
+        pane.frontmatter_title()
+            .or_else(|| {
+                pane.path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+                    .filter(|stem| !stem.is_empty())
+            })
+            .unwrap_or_else(|| pane.title.clone())
+    };
     let title_opts = DrawOpts {
         font_size: markdown_font(28.0, font_scale),
         color: theme.u8(theme.fg),
@@ -38,7 +41,12 @@ pub(super) fn render_virtual(
         font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
-    let title_h = line_height(&title_opts) + 16.0;
+    let show_title = !(pane.read_only && title_text.trim().is_empty());
+    let title_h = if show_title {
+        line_height(&title_opts) + 16.0
+    } else {
+        0.0
+    };
 
     // Notion/Thymer-style page decorations from the properties block:
     // `cover:` reserves an edge-to-edge banner band (the HOST paints the
@@ -54,9 +62,22 @@ pub(super) fn render_virtual(
     // The icon renders INLINE with the title ("{emoji} Title"), so it
     // reserves no vertical band of its own.
     let pad_x = 48.0;
-    let pad_top = 38.0 + title_h + cover_h;
+    let pad_top = if show_title {
+        38.0 + title_h + cover_h
+    } else {
+        22.0 + cover_h
+    };
     let content_w = (w - pad_x * 2.0).clamp(220.0, 920.0);
     let content_x = x + ((w - content_w) * 0.5).max(pad_x.min(w * 0.08));
+    // Notebook cells reserve a real left gutter for the same grip used by
+    // Markdown blocks. Normal Markdown keeps its established page width.
+    let notebook_gutter = if pane.is_notebook_document() {
+        28.0
+    } else {
+        0.0
+    };
+    let body_content_x = content_x + notebook_gutter;
+    let body_content_w = (content_w - notebook_gutter).max(180.0);
     let viewport_h = (h - pad_top).max(1.0);
     let clip = [x, y, w, h];
     let bottom = y + h;
@@ -144,14 +165,13 @@ pub(super) fn render_virtual(
         pane.virtual_render.font_scale_bucket = scale_bucket;
         let node_count = pane.virtual_render.surface.nodes().len();
         if node_count > 0 {
-            let _ = pane
-                .virtual_render
-                .surface
-                .apply(VirtualSurfaceCommand::MarkRangeDirty {
+            let _ = pane.virtual_render.surface.apply(
+                VirtualSurfaceCommand::MarkRangeDirty {
                     start: 0,
                     end: node_count,
                     kind: DirtyKind::Layout,
-                });
+                },
+            );
         }
     }
     // A Mash Up Pack markdown font override change is a zoom-shaped
@@ -165,14 +185,13 @@ pub(super) fn render_virtual(
         pane.virtual_render.measurement_cache.clear();
         let node_count = pane.virtual_render.surface.nodes().len();
         if node_count > 0 {
-            let _ = pane
-                .virtual_render
-                .surface
-                .apply(VirtualSurfaceCommand::MarkRangeDirty {
+            let _ = pane.virtual_render.surface.apply(
+                VirtualSurfaceCommand::MarkRangeDirty {
                     start: 0,
                     end: node_count,
                     kind: DirtyKind::Layout,
-                });
+                },
+            );
         }
     }
     // The cursor's line reveals raw markup (Live Preview) and can wrap to a
@@ -190,7 +209,9 @@ pub(super) fn render_virtual(
         pane.virtual_render.cursor_reveal_suppressed = pane
             .virtual_render
             .last_cursor_change_at
-            .is_some_and(|prev| now.saturating_duration_since(prev) < CURSOR_REVEAL_FAST_REPEAT);
+            .is_some_and(|prev| {
+                now.saturating_duration_since(prev) < CURSOR_REVEAL_FAST_REPEAT
+            });
         pane.virtual_render.last_cursor_change_at = Some(now);
         let mut dirty_nodes: Vec<usize> = previous
             .into_iter()
@@ -201,17 +222,16 @@ pub(super) fn render_virtual(
         dirty_nodes.sort_unstable();
         dirty_nodes.dedup();
         for node_ix in dirty_nodes {
-            let _ = pane
-                .virtual_render
-                .surface
-                .apply(VirtualSurfaceCommand::MarkRangeDirty {
+            let _ = pane.virtual_render.surface.apply(
+                VirtualSurfaceCommand::MarkRangeDirty {
                     start: node_ix,
                     end: node_ix + 1,
                     kind: DirtyKind::Layout,
-                });
+                },
+            );
         }
     }
-    if !prepare_surface(pane, content_w, y + pad_top, viewport_h) {
+    if !prepare_surface(pane, body_content_w, y + pad_top, viewport_h) {
         return false;
     }
     // Click-to-jump (outline rows, roster dots): center the target line
@@ -237,7 +257,13 @@ pub(super) fn render_virtual(
 
     let mut items = collect_visible_items(pane);
     if commit_visible_measurements(
-        sugarloaf, pane, &items, content_w, clip, theme, font_scale,
+        sugarloaf,
+        pane,
+        &items,
+        body_content_w,
+        clip,
+        theme,
+        font_scale,
     ) {
         // Draw from the post-measure positions in the same frame. Otherwise
         // an edited row can render at the estimate once, then snap on the
@@ -317,24 +343,25 @@ pub(super) fn render_virtual(
             bottom,
             text_occlusions,
         );
-        title_x += sugarloaf.text_mut().measure(icon, &icon_opts)
-            + 10.0 * font_scale;
+        title_x += sugarloaf.text_mut().measure(icon, &icon_opts) + 10.0 * font_scale;
     }
     let title_draw = pane
         .title_edit
         .as_ref()
         .map(|edit| edit.text.clone())
         .unwrap_or_else(|| title_text.clone());
-    draw_if_visible(
-        sugarloaf,
-        title_x,
-        title_y,
-        &title_draw,
-        &title_opts,
-        y,
-        bottom,
-        text_occlusions,
-    );
+    if show_title {
+        draw_if_visible(
+            sugarloaf,
+            title_x,
+            title_y,
+            &title_draw,
+            &title_opts,
+            y,
+            bottom,
+            text_occlusions,
+        );
+    }
     if let Some((prefix, under)) = pane.title_edit.as_ref().map(|edit| {
         let prefix: String = edit.text.chars().take(edit.caret).collect();
         let under: String = edit.text.chars().skip(edit.caret).take(1).collect();
@@ -346,7 +373,11 @@ pub(super) fn render_virtual(
         // cursor_rect here, before the item loop, also suppresses the
         // body caret while the title is being edited.
         let caret_x = title_x + sugarloaf.text_mut().measure(&prefix, &title_opts);
-        let probe = if under.is_empty() { "M" } else { under.as_str() };
+        let probe = if under.is_empty() {
+            "M"
+        } else {
+            under.as_str()
+        };
         let cell_w = sugarloaf.text_mut().measure(probe, &title_opts).max(3.0);
         set_cursor_rect_clipped(
             pane,
@@ -360,8 +391,8 @@ pub(super) fn render_virtual(
             sugarloaf,
             pane,
             &item,
-            content_x,
-            content_w,
+            body_content_x,
+            body_content_w,
             clip,
             y,
             bottom,
@@ -386,26 +417,90 @@ pub(super) fn render_virtual(
         mouse,
         text_occlusions,
     );
-    draw_drag_drop_preview(sugarloaf, pane, content_x, content_w, theme, clip, font_scale);
+    draw_drag_drop_preview(
+        sugarloaf,
+        pane,
+        body_content_x,
+        body_content_w,
+        theme,
+        clip,
+        font_scale,
+    );
 
-    set_cursor_for_trailing_empty_lines(pane, tail_anchor, content_x, font_scale, clip);
+    set_cursor_for_trailing_empty_lines(
+        pane,
+        tail_anchor,
+        body_content_x,
+        font_scale,
+        clip,
+    );
     set_fallback_cursor_for_empty_virtual_markdown(
         pane,
-        content_x,
+        body_content_x,
         y + pad_top,
-        content_w,
+        body_content_w,
         font_scale,
         clip,
     );
     ensure_virtual_cursor_visible(pane, clip);
     draw_remote_markdown_carets(sugarloaf, pane, theme, clip, font_scale);
     draw_markdown_scrollbar(sugarloaf, pane, rect, total_height, theme, mouse, clip);
+    if let Some(footer) = pane.reader_footer.as_deref() {
+        let opts = DrawOpts {
+            font_size: markdown_font(12.0, font_scale),
+            color: theme.u8_alpha(theme.muted, 0.82),
+            clip_rect: Some(clip),
+            font_id: md_font_id(sugarloaf),
+            ..DrawOpts::default()
+        };
+        let width = sugarloaf.text_mut().measure(footer, &opts);
+        let footer_x = x + ((w - width) * 0.5).max(0.0);
+        // A reader page number belongs to the page, not the viewport chrome.
+        // Keep short pages visually grounded near the page bottom, but give
+        // longer pages room after their final block. Subtracting document
+        // scroll makes the marker move naturally with the page instead of
+        // remaining pinned while the user scrolls.
+        let footer_y = y
+            + reader_footer_page_y(pad_top, content_height, h, font_scale, pane.scroll_y);
+        if footer_y + opts.font_size >= y && footer_y <= bottom {
+            sugarloaf.text_mut().draw(footer_x, footer_y, footer, &opts);
+        }
+    }
     // The "who's here" roster now lives in the top chrome (connected-peer orb
     // cluster), so we no longer draw the duplicate dot column in the md file's
     // top-right corner.
     pane.refresh_value_picker();
     draw_value_picker(sugarloaf, pane, rect, theme, font_scale);
     true
+}
+
+fn reader_footer_page_y(
+    pad_top: f32,
+    content_height: f32,
+    viewport_height: f32,
+    font_scale: f32,
+    scroll_y: f32,
+) -> f32 {
+    (pad_top + content_height + 18.0 * font_scale)
+        .max(viewport_height - 34.0 * font_scale)
+        - scroll_y
+}
+
+#[cfg(test)]
+mod reader_footer_position_tests {
+    use super::reader_footer_page_y;
+
+    #[test]
+    fn reader_footer_is_page_positioned_instead_of_sticky() {
+        let at_top = reader_footer_page_y(40.0, 1200.0, 800.0, 1.0, 0.0);
+        let after_scroll = reader_footer_page_y(40.0, 1200.0, 800.0, 1.0, 250.0);
+        assert_eq!(at_top - after_scroll, 250.0);
+    }
+
+    #[test]
+    fn short_reader_page_footer_is_grounded_near_the_page_bottom() {
+        assert_eq!(reader_footer_page_y(40.0, 120.0, 800.0, 1.0, 0.0), 766.0);
+    }
 }
 
 /// LSP-completion-style popup for `icon:` / `cover:` frontmatter lines:
@@ -648,7 +743,10 @@ fn draw_markdown_outline(
         _ => {}
     }
     let hover_progress = |since: Instant| -> f32 {
-        let t = (Instant::now().saturating_duration_since(since).as_secs_f32() / 0.14)
+        let t = (Instant::now()
+            .saturating_duration_since(since)
+            .as_secs_f32()
+            / 0.14)
             .clamp(0.0, 1.0);
         1.0 - (1.0 - t).powi(3)
     };
@@ -691,7 +789,9 @@ fn draw_markdown_outline(
             .outline_click
             .filter(|(ix, _)| *ix == entry_ix)
         {
-            let t = (Instant::now().saturating_duration_since(since).as_secs_f32()
+            let t = (Instant::now()
+                .saturating_duration_since(since)
+                .as_secs_f32()
                 / 0.35)
                 .clamp(0.0, 1.0);
             if t >= 1.0 {
@@ -871,18 +971,42 @@ fn draw_drag_drop_preview(
     }
 
     // Floating ghost of the dragged block under the pointer.
-    if let Some(source) = pane.lines.get(line_ix) {
+    if let Some(source) = notebook_drag_ghost_label(pane, line_ix)
+        .or_else(|| pane.lines.get(line_ix).cloned())
+    {
         draw_drag_ghost(
             sugarloaf,
             content_x - 18.0,
             pane.drag_mouse_y - 20.0,
             content_w + 36.0,
-            source,
+            &source,
             theme,
             clip,
             font_scale,
         );
     }
+}
+
+fn notebook_drag_ghost_label(pane: &MarkdownPane, line: usize) -> Option<String> {
+    let range = pane.notebook_cell_range_containing(line)?;
+    let anchor = pane.lines.get(range.start)?;
+    if let Some(cell_index) = notebook_markdown_cell_index(anchor) {
+        return Some(format!("Markdown · Cell {}", cell_index + 1));
+    }
+    let cell_index = notebook_fenced_cell_index(anchor)?;
+    let kind = if anchor.contains("neoism_notebook_kind=raw") {
+        "Raw".to_string()
+    } else {
+        let language = anchor
+            .trim_start()
+            .trim_start_matches('`')
+            .split_whitespace()
+            .next()
+            .filter(|language| !language.is_empty())
+            .unwrap_or("Code");
+        format!("{} code", language)
+    };
+    Some(format!("{kind} · Cell {}", cell_index + 1))
 }
 
 fn reveal_virtual_cursor_source(pane: &mut MarkdownPane) {
@@ -977,7 +1101,7 @@ fn cursor_line_is_in_visible_virtual_node(
 fn apply_virtual_surface_scroll_to_pane(pane: &mut MarkdownPane, surface_scroll_y: f32) {
     let surface_max_scroll = (pane.virtual_render.surface.content_height()
         - pane.virtual_render.surface.viewport().height)
-    .max(0.0);
+        .max(0.0);
     let pane_max_scroll = (pane.content_height - pane.scroll_viewport_height).max(0.0);
     let scroll_y = if pane.scroll_y > surface_max_scroll + 0.5
         && (surface_scroll_y - surface_max_scroll).abs() <= 0.5

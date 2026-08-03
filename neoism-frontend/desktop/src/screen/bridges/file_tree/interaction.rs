@@ -381,7 +381,9 @@ impl Screen<'_> {
             neoism_ui::panels::file_tree::SelectionActivation::OpenPath(path) => {
                 self.renderer.file_tree.set_focused(false);
                 self.renderer.modal.close_if_non_blocking();
-                if crate::editor::markdown::state::is_markdown_path(&path) {
+                if crate::screen::bridges::epub::is_epub_path(&path) {
+                    self.open_path_in_epub(path);
+                } else if crate::editor::markdown::state::is_markdown_path(&path) {
                     self.open_path_in_markdown(path);
                 } else if crate::editor::neodraw::is_neodraw_path(&path) {
                     self.open_path_in_draw(path);

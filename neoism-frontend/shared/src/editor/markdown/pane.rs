@@ -50,6 +50,8 @@ impl MarkdownPane {
             source_revision: 1,
             pending_line_edit: None,
             mode: MarkdownMode::Normal,
+            read_only: false,
+            reader_footer: None,
             vim_enabled: true,
             cursor_line: 0,
             cursor_col: 0,
@@ -86,6 +88,7 @@ impl MarkdownPane {
             table_scroll_x: HashMap::new(),
             task_toggle_animations: HashMap::new(),
             yank_flashes: Vec::new(),
+            reader_highlights: Vec::new(),
             enter_continuation_lines: HashSet::new(),
             hovered_line: None,
             dragging_line: None,
@@ -135,6 +138,7 @@ impl MarkdownPane {
         self.source_len_bytes = source.len();
         self.pending_line_edit = None;
         self.enter_continuation_lines.clear();
+        self.reader_highlights.clear();
         self.link_target_cache.borrow_mut().clear();
         self.clear_notebook_image_preview_dimensions();
         if large_markdown_source(source, self.lines.len()) {
@@ -151,6 +155,16 @@ impl MarkdownPane {
         self.clamp_cursor();
         self.saved_baseline = self.lines.clone();
         self.error = None;
+    }
+
+    /// Replace the source for an explicit document/page navigation. Unlike a
+    /// live file update, this must not preserve the old virtual viewport
+    /// anchor: the newly mounted page starts at its own top.
+    pub fn set_source_for_navigation(&mut self, source: &str) {
+        self.virtual_render = MarkdownVirtualRenderState::default();
+        self.pending_reveal_line = None;
+        self.set_source(source);
+        self.restore_scroll_position(0.0);
     }
 
     pub fn set_source_preserving_view(&mut self, source: &str) {
@@ -193,6 +207,8 @@ impl MarkdownPane {
             source_revision: 1,
             pending_line_edit: None,
             mode: MarkdownMode::Normal,
+            read_only: false,
+            reader_footer: None,
             vim_enabled: true,
             cursor_line: 0,
             cursor_col: 0,
@@ -229,6 +245,7 @@ impl MarkdownPane {
             table_scroll_x: HashMap::new(),
             task_toggle_animations: HashMap::new(),
             yank_flashes: Vec::new(),
+            reader_highlights: Vec::new(),
             enter_continuation_lines: HashSet::new(),
             hovered_line: None,
             dragging_line: None,

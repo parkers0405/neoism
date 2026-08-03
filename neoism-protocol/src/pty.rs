@@ -38,6 +38,11 @@ pub enum ClientMessage {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ServerMessage {
+    /// Correlated control acknowledgment. This is carried inside a
+    /// `PtyReply` service envelope; the envelope's request id identifies the
+    /// operation. It keeps successful input/resize requests from lingering in
+    /// a reconnect replay queue without inventing a fake output event.
+    Ack,
     PtyCreated {
         session_id: String,
         /// Absolute daemon workspace root for this PTY. Older daemons
@@ -149,6 +154,11 @@ mod tests {
             session_id: "s-2".into(),
             workspace_root: Some("/work".into()),
         });
+    }
+
+    #[test]
+    fn server_ack_roundtrip() {
+        roundtrip_server(&ServerMessage::Ack);
     }
 
     #[test]

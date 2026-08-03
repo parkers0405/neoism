@@ -1722,22 +1722,46 @@ fn background_job_id_from_message(message: &NeoismAgentMessage) -> Option<String
                 .or_else(|| line.trim().strip_prefix("jobId:"))
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
+                .and_then(|value| value.split_whitespace().next())
                 .map(ToOwned::to_owned)
         })
+}
+
+fn background_job_status_from_message(message: &NeoismAgentMessage) -> Option<&str> {
+    message
+        .detail
+        .lines()
+        .chain(message.text.lines())
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("status:")
+                .map(str::trim)
+                .and_then(|value| value.split_whitespace().next())
+        })
+}
+
+fn background_task_message_is_running(message: &NeoismAgentMessage) -> bool {
+    message.kind == NeoismAgentMessageKind::Tool
+        && message.tool == "background_task"
+        && background_job_status_from_message(message) == Some("running")
 }
 
 fn background_completion_job_id_from_message(
     message: &NeoismAgentMessage,
 ) -> Option<String> {
-    let text = format!("{}\n{}", message.detail, message.text);
+    let text = format!("{}\n{}", message.detail, message.text).to_ascii_lowercase();
     if !text.contains("background shell task has finished")
+        && !text.contains("background shell task finished")
         && !text.contains("background task has finished")
         && message.tool != "background_task_result"
     {
         return None;
     }
-    if !text.contains("status: completed") && message.status != "completed" {
-        return None;
+    match background_job_status_from_message(message) {
+        Some("completed" | "error" | "timed_out") => {}
+        Some(_) => return None,
+        None if message.status == "completed" => {}
+        None => return None,
     }
     background_job_id_from_message(message)
 }
@@ -1752,9 +1776,7 @@ fn running_background_task_count(messages: &[NeoismAgentMessage]) -> usize {
 
     messages
         .iter()
-        .filter(|message| message.kind == NeoismAgentMessageKind::Tool)
-        .filter(|message| message.tool == "background_task")
-        .filter(|message| message.status == "running")
+        .filter(|message| background_task_message_is_running(message))
         .filter_map(background_job_id_from_message)
         .filter(|job_id| !completed.contains(job_id))
         .collect::<BTreeSet<_>>()
@@ -1771,9 +1793,7 @@ fn active_background_task_summaries(messages: &[NeoismAgentMessage]) -> Vec<Stri
 
     messages
         .iter()
-        .filter(|message| message.kind == NeoismAgentMessageKind::Tool)
-        .filter(|message| message.tool == "background_task")
-        .filter(|message| message.status == "running")
+        .filter(|message| background_task_message_is_running(message))
         .filter_map(|message| {
             let job_id = background_job_id_from_message(message)?;
             if completed.contains(&job_id) {
@@ -1781,7 +1801,7 @@ fn active_background_task_summaries(messages: &[NeoismAgentMessage]) -> Vec<Stri
             }
             let command = background_task_command_from_message(message)
                 .unwrap_or_else(|| message.title.as_str().to_string());
-            Some(format!("{} · {} · {}", job_id, message.status, command))
+            Some(format!("{} · running · {}", job_id, command))
         })
         .collect()
 }

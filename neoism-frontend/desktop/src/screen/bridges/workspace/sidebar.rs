@@ -327,6 +327,7 @@ impl Screen<'_> {
         }
         match std::fs::rename(&source, &target) {
             Ok(()) => {
+                self.rebind_current_epub_path(&source, target.clone());
                 // Same index/link-graph refresh the notes rename runs, so
                 // wiki-links and the graph track the moved page/subtree.
                 self.refresh_note_graph_after_rename(&source, &target);
@@ -688,7 +689,9 @@ impl Screen<'_> {
     }
 
     fn open_path_from_notes_sidebar(&mut self, path: PathBuf) {
-        if crate::editor::markdown::state::is_markdown_path(&path) {
+        if crate::screen::bridges::epub::is_epub_path(&path) {
+            self.open_path_in_epub(path);
+        } else if crate::editor::markdown::state::is_markdown_path(&path) {
             self.open_path_in_markdown(path);
         } else {
             self.open_path_in_editor(path);

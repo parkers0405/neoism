@@ -1,8 +1,9 @@
 use super::*;
 use crate::context::factories::{
-    create_code_context, create_draw_context, create_markdown_context,
-    create_neoism_agent_context, create_neoism_extensions_context,
-    create_neoism_tags_context, create_notebook_context, process_open_url,
+    create_code_context, create_draw_context, create_epub_context,
+    create_markdown_context, create_neoism_agent_context,
+    create_neoism_extensions_context, create_neoism_tags_context,
+    create_notebook_context, process_open_url,
 };
 use crate::event::RioEvent;
 use crate::layout::ContextGrid;
@@ -37,8 +38,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .or_else(|| self.config.working_dir.clone());
         if working_dir.is_none()
             && self.config.cwd
-            && self.current().markdown.is_none()
-            && self.current().neoism_agent.is_none()
+            && !self.current().has_non_terminal_surface()
         {
             #[cfg(not(target_os = "windows"))]
             {
@@ -488,6 +488,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                             .filter(|pane| pane.path.as_path() == path)
                             .map(|_| *node)
                     })
+                    .or_else(|| {
+                        context
+                            .epub
+                            .as_ref()
+                            .filter(|pane| pane.book.path.as_path() == path)
+                            .map(|_| *node)
+                    })
             })
         else {
             return false;
@@ -736,6 +743,62 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         }
     }
 
+    pub fn notebook_node_by_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(usize, taffy::NodeId)> {
+        self.contexts.get(self.current_index).and_then(|grid| {
+            grid.contexts().iter().find_map(|(node, item)| {
+                item.context()
+                    .notebook
+                    .as_ref()
+                    .filter(|pane| pane.path.as_path() == path)
+                    .map(|_| (item.context().route_id, *node))
+            })
+        })
+    }
+
+    pub fn add_stacked_epub(
+        &mut self,
+        file: PathBuf,
+        rich_text_id: usize,
+        sugarloaf: &mut Sugarloaf,
+    ) -> bool {
+        let dimension = self.current_grid().grid_dimension();
+        let new_context = create_epub_context(
+            self.event_proxy.clone(),
+            self.window_id,
+            rich_text_id,
+            dimension,
+            file,
+        );
+        let new_route_id = new_context.route_id;
+        if self.contexts[self.current_index]
+            .add_stacked_context(new_context, sugarloaf)
+            .is_some()
+        {
+            self.current_route = new_route_id;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn epub_node_by_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(usize, taffy::NodeId)> {
+        self.contexts.get(self.current_index).and_then(|grid| {
+            grid.contexts().iter().find_map(|(node, item)| {
+                item.context()
+                    .epub
+                    .as_ref()
+                    .filter(|pane| pane.book.path.as_path() == path)
+                    .map(|_| (item.context().route_id, *node))
+            })
+        })
+    }
+
     pub fn add_stacked_neoism_tags(
         &mut self,
         file: PathBuf,
@@ -819,6 +882,60 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             self.contexts[self.current_index].node_by_route_id(parent_route_id)?;
         let dimension = self.current_grid().grid_dimension();
         let new_context = create_markdown_context(
+            self.event_proxy.clone(),
+            self.window_id,
+            rich_text_id,
+            dimension,
+            file,
+        );
+        let new_route_id = new_context.route_id;
+        self.contexts[self.current_index].add_stacked_context_on_parent(
+            new_context,
+            parent,
+            sugarloaf,
+        )?;
+        self.current_route = new_route_id;
+        Some(new_route_id)
+    }
+
+    pub fn add_stacked_notebook_on_route(
+        &mut self,
+        file: PathBuf,
+        parent_route_id: usize,
+        rich_text_id: usize,
+        sugarloaf: &mut Sugarloaf,
+    ) -> Option<usize> {
+        let parent =
+            self.contexts[self.current_index].node_by_route_id(parent_route_id)?;
+        let dimension = self.current_grid().grid_dimension();
+        let new_context = create_notebook_context(
+            self.event_proxy.clone(),
+            self.window_id,
+            rich_text_id,
+            dimension,
+            file,
+        );
+        let new_route_id = new_context.route_id;
+        self.contexts[self.current_index].add_stacked_context_on_parent(
+            new_context,
+            parent,
+            sugarloaf,
+        )?;
+        self.current_route = new_route_id;
+        Some(new_route_id)
+    }
+
+    pub fn add_stacked_epub_on_route(
+        &mut self,
+        file: PathBuf,
+        parent_route_id: usize,
+        rich_text_id: usize,
+        sugarloaf: &mut Sugarloaf,
+    ) -> Option<usize> {
+        let parent =
+            self.contexts[self.current_index].node_by_route_id(parent_route_id)?;
+        let dimension = self.current_grid().grid_dimension();
+        let new_context = create_epub_context(
             self.event_proxy.clone(),
             self.window_id,
             rich_text_id,

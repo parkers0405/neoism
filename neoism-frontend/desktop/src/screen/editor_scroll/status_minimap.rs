@@ -116,7 +116,7 @@ impl Screen<'_> {
         let grid = self.context_manager.current_grid();
         let item = grid.current_item()?;
         let ctx = item.context();
-        if ctx.markdown.is_some()
+        if ctx.active_markdown().is_some()
             || ctx.neoism_agent.is_some()
             || ctx.neoism_tags.is_some()
         {
@@ -206,7 +206,7 @@ impl Screen<'_> {
             .current_item()
             .map(|item| {
                 let ctx = item.context();
-                if ctx.markdown.is_some() {
+                if ctx.active_markdown().is_some() {
                     ScrollbarPaneKind::Markdown
                 } else if ctx.neoism_agent.is_some() {
                     ScrollbarPaneKind::Agent

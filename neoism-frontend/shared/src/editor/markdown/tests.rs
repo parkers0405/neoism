@@ -29,6 +29,8 @@ mod tests {
             source_revision: 1,
             pending_line_edit: None,
             mode: MarkdownMode::Normal,
+            read_only: false,
+            reader_footer: None,
             vim_enabled: true,
             cursor_line: 0,
             cursor_col: 0,
@@ -65,6 +67,7 @@ mod tests {
             table_scroll_x: HashMap::new(),
             task_toggle_animations: HashMap::new(),
             yank_flashes: Vec::new(),
+            reader_highlights: Vec::new(),
             enter_continuation_lines: HashSet::new(),
             hovered_line: None,
             dragging_line: None,
@@ -90,6 +93,59 @@ mod tests {
             saved_baseline: vec![String::new()],
             error: None,
         }
+    }
+
+    #[test]
+    fn read_only_reader_hides_edit_handles_and_source_reveal() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["# Chapter".to_string()];
+        pane.read_only = true;
+        pane.cursor_line = 0;
+        let active = pane.register_block_rect(
+            0,
+            [40.0, 20.0, 300.0, 30.0],
+            [10.0, 20.0, 24.0, 30.0],
+            40.0,
+            20.0,
+            2,
+            8.0,
+            20.0,
+            300.0,
+            Some([50.0, 25.0]),
+        );
+        assert!(!active);
+        assert!(!pane.handle_hovered());
+        assert!(!pane.reveals_source_line(0));
+        assert_eq!(pane.block_rects[0].handle_rect[2], 0.0);
+    }
+
+    #[test]
+    fn read_only_reader_hides_only_decoded_attachment_source() {
+        let mut pane = pane_for_test();
+        pane.set_notebook_image_preview_dimensions([(0, 640, 480)]);
+        assert!(!pane.hides_attachment_source_for_line(0));
+        pane.read_only = true;
+        assert!(pane.hides_attachment_source_for_line(0));
+        assert!(!pane.hides_attachment_source_for_line(1));
+    }
+
+    #[test]
+    fn durable_reader_highlight_projects_across_lines() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["alpha".to_string(), "beta".to_string()];
+        pane.reader_highlights = vec![MarkdownReaderHighlight {
+            start: MarkdownPosition { line: 0, col: 2 },
+            end: MarkdownPosition { line: 1, col: 3 },
+            color: MarkdownReaderHighlightColor::Yellow,
+        }];
+        assert_eq!(
+            pane.reader_highlights_for_line(0),
+            vec![(2, 5, MarkdownReaderHighlightColor::Yellow)]
+        );
+        assert_eq!(
+            pane.reader_highlights_for_line(1),
+            vec![(0, 3, MarkdownReaderHighlightColor::Yellow)]
+        );
     }
 
     fn hit_row(start: usize, stops: &[f32]) -> MarkdownWrapHitRow {
@@ -586,6 +642,20 @@ mod tests {
     }
 
     #[test]
+    fn reader_page_turn_reports_document_boundaries() {
+        let mut pane = pane_for_test();
+        pane.lines = (0..20).map(|line| format!("line {line}")).collect();
+        pane.set_content_height(1200.0, 400.0);
+
+        assert!(pane.turn_reader_page(1, 400.0));
+        pane.scroll_to_bottom(400.0);
+        assert!(!pane.turn_reader_page(1, 400.0));
+        assert!(pane.turn_reader_page(-1, 400.0));
+        pane.scroll_to_top();
+        assert!(!pane.turn_reader_page(-1, 400.0));
+    }
+
+    #[test]
     fn cursor_scroll_injects_inertial_target_motion() {
         let mut pane = pane_for_test();
         pane.lines = (0..80).map(|line| format!("line {line}")).collect();
@@ -821,6 +891,7 @@ mod tests {
     #[test]
     fn notebook_code_block_drag_range_includes_outputs() {
         let mut pane = pane_for_test();
+        pane.path = PathBuf::from("drag.ipynb");
         pane.lines = vec![
             "intro".to_string(),
             "```python neoism_notebook_cell=0 neoism_state=idle neoism_count=1"
@@ -828,11 +899,165 @@ mod tests {
             "print('hi')".to_string(),
             "```".to_string(),
             "%%neoism_notebook_output _ _ hi".to_string(),
+            "%%neoism_notebook_cell 1 markdown".to_string(),
             "after".to_string(),
         ];
 
         assert_eq!(pane.drag_block_range(1), 1..5);
         assert_eq!(pane.drag_block_range(4), 1..5);
+        assert_eq!(pane.drag_block_range(5), 5..7);
+        assert_eq!(pane.drag_block_range(6), 5..7);
+    }
+
+    #[test]
+    fn notebook_code_cell_grip_drag_moves_code_and_outputs_together() {
+        let mut pane = pane_for_test();
+        pane.path = PathBuf::from("drag.ipynb");
+        pane.lines = vec![
+            "```python neoism_notebook_cell=0 neoism_state=idle neoism_count=1"
+                .to_string(),
+            "print('hi')".to_string(),
+            "```".to_string(),
+            "%%neoism_notebook_output _ _ hi".to_string(),
+            "%%neoism_notebook_cell 1 markdown".to_string(),
+            "after".to_string(),
+        ];
+        pane.register_block_rect(
+            0,
+            [0.0, 0.0, 200.0, 80.0],
+            [-30.0, 0.0, 20.0, 24.0],
+            0.0,
+            0.0,
+            0,
+            10.0,
+            20.0,
+            200.0,
+            None,
+        );
+        pane.register_block_rect(
+            4,
+            [0.0, 100.0, 200.0, 50.0],
+            [-30.0, 100.0, 20.0, 24.0],
+            0.0,
+            100.0,
+            0,
+            10.0,
+            20.0,
+            200.0,
+            None,
+        );
+
+        assert!(pane.begin_drag_at(-20.0, 12.0));
+        assert!(pane.is_grab_dragging());
+        assert!(pane.update_drag(-20.0, 180.0));
+        assert!(pane.end_drag());
+
+        assert_eq!(pane.lines[0], "%%neoism_notebook_cell 1 markdown");
+        assert_eq!(pane.lines[1], "after");
+        assert!(pane.lines[2].starts_with("```python neoism_notebook_cell=0"));
+        assert_eq!(pane.lines[5], "%%neoism_notebook_output _ _ hi");
+    }
+
+    #[test]
+    fn notebook_markdown_drag_range_is_the_whole_cell() {
+        let mut pane = pane_for_test();
+        pane.lines = vec![
+            "%%neoism_notebook_cell 0 markdown".to_string(),
+            "# Heading".to_string(),
+            "body one".to_string(),
+            "body two".to_string(),
+            "%%neoism_notebook_cell 1 markdown".to_string(),
+            "next".to_string(),
+        ];
+
+        for line in 0..4 {
+            assert_eq!(pane.drag_block_range(line), 0..4);
+        }
+        assert_eq!(pane.drag_block_range(5), 4..6);
+    }
+
+    #[test]
+    fn notebook_markdown_boundaries_are_not_editable_or_copied() {
+        let mut pane = pane_for_test();
+        pane.path = PathBuf::from("protected.ipynb");
+        pane.lines = vec![
+            "%%neoism_notebook_cell 0 markdown".to_string(),
+            "first".to_string(),
+            "%%neoism_notebook_cell 1 markdown".to_string(),
+            "second".to_string(),
+        ];
+
+        pane.cursor_line = 1;
+        pane.cursor_col = 0;
+        pane.backspace();
+        assert_eq!(pane.lines[0], "%%neoism_notebook_cell 0 markdown");
+
+        pane.cursor_line = 1;
+        pane.cursor_col = pane.lines[1].len();
+        pane.delete_forward();
+        assert_eq!(pane.lines[2], "%%neoism_notebook_cell 1 markdown");
+
+        pane.mode = MarkdownMode::Visual;
+        pane.visual_anchor = Some(MarkdownPosition { line: 1, col: 0 });
+        pane.cursor_line = 3;
+        pane.cursor_col = pane.lines[3].len();
+        let copied = pane.yank_selection().unwrap();
+        assert_eq!(copied, "first\nsecond");
+        assert!(!copied.contains("neoism_notebook"));
+    }
+
+    #[test]
+    fn notebook_fence_anchors_are_not_editable_or_merged_into() {
+        let mut pane = pane_for_test();
+        pane.path = PathBuf::from("protected.ipynb");
+        pane.lines = vec![
+            "```python neoism_notebook_cell=0 neoism_notebook_id=Y29kZQ neoism_state=idle neoism_count=_".to_string(),
+            "print(1)".to_string(),
+            "```".to_string(),
+        ];
+
+        assert!(!pane.is_editable_line(0));
+        assert!(pane.is_editable_line(1));
+        pane.cursor_line = 1;
+        pane.cursor_col = 0;
+        pane.backspace();
+
+        assert!(pane.lines[0].starts_with("```python neoism_notebook_cell=0 "));
+        assert_eq!(pane.lines[1], "print(1)");
+    }
+
+    #[test]
+    fn notebook_command_mode_works_when_markdown_vim_is_disabled() {
+        let mut pane = pane_for_test();
+        pane.vim_enabled = false;
+        pane.enter_insert();
+
+        pane.enter_notebook_command_mode();
+
+        assert_eq!(pane.mode, MarkdownMode::Normal);
+    }
+
+    #[test]
+    fn visual_delete_across_markdown_cells_preserves_boundaries() {
+        let mut pane = pane_for_test();
+        pane.path = PathBuf::from("protected.ipynb");
+        pane.lines = vec![
+            "%%neoism_notebook_cell 0 markdown".to_string(),
+            "first body".to_string(),
+            "%%neoism_notebook_cell 1 markdown".to_string(),
+            "second body".to_string(),
+        ];
+        pane.mode = MarkdownMode::Visual;
+        pane.visual_anchor = Some(MarkdownPosition { line: 1, col: 6 });
+        pane.cursor_line = 3;
+        pane.cursor_col = 5;
+
+        pane.delete_selection().unwrap();
+
+        assert_eq!(pane.lines[0], "%%neoism_notebook_cell 0 markdown");
+        assert_eq!(pane.lines[1], "first ");
+        assert_eq!(pane.lines[2], "%%neoism_notebook_cell 1 markdown");
+        assert_eq!(pane.lines[3], " body");
     }
 
     #[test]
@@ -854,6 +1079,17 @@ mod tests {
         assert_eq!(bare.line, None);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_owned_markdown_link_keeps_numeric_annotation_suffix() {
+        let pane = pane_for_test();
+        let target = "neoism-reader://book-abcd/highlight-1234-0";
+        let link = pane
+            .resolve_markdown_link(&format!("{target}|Open in book"))
+            .unwrap();
+        assert_eq!(link.path, std::path::PathBuf::from(target));
+        assert_eq!(link.line, None);
     }
 
     #[test]
@@ -1330,6 +1566,150 @@ mod tests {
         assert_eq!(pane.mode, MarkdownMode::Visual);
         assert_eq!(pane.selection_for_line(0), Some((0, 4)));
         assert_eq!(pane.yank_selection().as_deref(), Some("hell"));
+    }
+
+    #[test]
+    fn read_only_mouse_drag_includes_the_glyph_under_the_press() {
+        let mut pane = pane_for_test();
+        pane.read_only = true;
+        pane.lines = vec!["Omega".to_string()];
+        pane.register_block_rect(
+            0,
+            [0.0, 0.0, 200.0, 24.0],
+            [-30.0, 0.0, 20.0, 24.0],
+            0.0,
+            0.0,
+            0,
+            10.0,
+            20.0,
+            200.0,
+            None,
+        );
+        let chars = pane.lines[0].chars().count();
+        measured_text_line(&mut pane, 0, chars, 10.0);
+
+        // This maps to the caret boundary after the O. Reader selection
+        // treats the press as grabbing O itself, so it must remain included.
+        assert!(pane.click_at(9.0, 4.0));
+        assert!(pane.update_drag(49.0, 4.0));
+        assert!(pane.end_drag());
+
+        assert_eq!(pane.selection_for_line(0), Some((0, 5)));
+        assert_eq!(pane.yank_selection().as_deref(), Some("Omega"));
+    }
+
+    #[test]
+    fn read_only_drag_on_wrapped_continuation_selects_exact_glyphs() {
+        let mut pane = pane_for_test();
+        pane.read_only = true;
+        pane.lines = vec!["alpha beta gamma".to_string()];
+        pane.register_block_rect(
+            0,
+            [0.0, 0.0, 120.0, 60.0],
+            [-30.0, 0.0, 20.0, 60.0],
+            0.0,
+            0.0,
+            0,
+            10.0,
+            20.0,
+            80.0,
+            None,
+        );
+        pane.register_block_wrap_row_spans(
+            0,
+            vec![
+                MarkdownWrapRow { start: 0, len: 5 },
+                MarkdownWrapRow { start: 6, len: 4 },
+                MarkdownWrapRow { start: 11, len: 5 },
+            ],
+        );
+        // Continuation rows carry the same hanging indent baked into the
+        // measured stops that the renderer uses.
+        pane.register_block_wrap_hit_stops(
+            0,
+            hit_rows(&[
+                (0, &[0.0, 10.0, 20.0, 30.0, 40.0, 50.0]),
+                (6, &[12.0, 22.0, 32.0, 42.0, 52.0]),
+                (11, &[12.0, 22.0, 32.0, 42.0, 52.0, 62.0]),
+            ]),
+        );
+
+        // Grab the first glyph of "beta" and drag through its last glyph.
+        // Neither the consumed wrap-space nor the next word may leak in.
+        assert!(pane.click_at(13.0, 24.0));
+        assert!(pane.update_drag(51.0, 24.0));
+        assert!(pane.end_drag());
+        assert_eq!(pane.selection_for_line(0), Some((6, 10)));
+        assert_eq!(pane.yank_selection().as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn read_only_wrapped_drag_maps_visible_glyphs_through_hidden_markup() {
+        let mut pane = pane_for_test();
+        pane.read_only = true;
+        pane.lines = vec!["alpha **beta** gamma".to_string()];
+        pane.register_block_rect(
+            0,
+            [0.0, 0.0, 120.0, 60.0],
+            [-30.0, 0.0, 20.0, 60.0],
+            0.0,
+            0.0,
+            0,
+            10.0,
+            20.0,
+            80.0,
+            None,
+        );
+        pane.register_block_wrap_row_spans(
+            0,
+            vec![
+                MarkdownWrapRow { start: 0, len: 5 },
+                MarkdownWrapRow { start: 6, len: 4 },
+                MarkdownWrapRow { start: 11, len: 5 },
+            ],
+        );
+        pane.register_block_wrap_hit_stops(
+            0,
+            hit_rows(&[
+                (0, &[0.0, 10.0, 20.0, 30.0, 40.0, 50.0]),
+                (6, &[12.0, 22.0, 32.0, 42.0, 52.0]),
+                (11, &[12.0, 22.0, 32.0, 42.0, 52.0, 62.0]),
+            ]),
+        );
+
+        assert!(pane.click_at(13.0, 24.0));
+        assert!(pane.update_drag(51.0, 24.0));
+        assert!(pane.end_drag());
+        assert_eq!(pane.selection_for_line(0), Some((8, 12)));
+        assert_eq!(pane.yank_selection().as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn mouse_drag_keeps_selecting_across_paragraph_spacing() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["alpha".to_string(), "omega".to_string()];
+        for (line, y) in [(0, 0.0), (1, 48.0)] {
+            pane.register_block_rect(
+                line,
+                [0.0, y, 200.0, 20.0],
+                [-30.0, y, 20.0, 20.0],
+                0.0,
+                y,
+                0,
+                10.0,
+                20.0,
+                200.0,
+                None,
+            );
+            let chars = pane.lines[line].chars().count();
+            measured_text_line(&mut pane, line, chars, 10.0);
+        }
+
+        assert!(pane.click_at(0.0, 4.0));
+        assert!(pane.update_drag(30.0, 40.0));
+        assert_eq!(pane.cursor_line, 1);
+        assert_eq!(pane.mode, MarkdownMode::Visual);
+        assert!(pane.end_drag());
     }
 
     #[test]

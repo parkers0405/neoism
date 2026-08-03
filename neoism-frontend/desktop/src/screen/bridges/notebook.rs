@@ -27,8 +27,7 @@ impl Screen<'_> {
     }
 
     pub(crate) fn activate_notebook_path(&mut self, path: PathBuf) {
-        if let Some((_route_id, node)) =
-            self.context_manager.neoism_tags_node_by_path(&path)
+        if let Some((_route_id, node)) = self.context_manager.notebook_node_by_path(&path)
         {
             let _ = self
                 .context_manager

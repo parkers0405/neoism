@@ -250,6 +250,63 @@ fn markdown_adapter_builds_virtual_nodes_for_common_blocks() {
 }
 
 #[test]
+fn markdown_adapter_preserves_notebook_cell_boundary_nodes() {
+    let mut adapter = VirtualMarkdownAdapter::new("notebook-md");
+    let source = "%%neoism_notebook_cell 0 markdown\n# Title\nbody\n```python neoism_notebook_cell=1 neoism_state=idle neoism_count=_\nprint(1)\n```\n";
+    let batch =
+        adapter.build_replace_batch("notes/test.ipynb", source, VirtualSourceRevision(1));
+    let mut surface = VirtualSurface::default();
+    batch.apply_to(&mut surface).unwrap();
+
+    let boundary = surface
+        .nodes()
+        .iter()
+        .find(|node| node.kind == VirtualNodeKind::Custom("notebook-cell".to_string()))
+        .expect("markdown notebook cell boundary node");
+    assert_eq!(boundary.content.as_ref().unwrap().line_start, 0);
+    assert!(surface
+        .nodes()
+        .iter()
+        .any(|node| node.kind == VirtualNodeKind::Heading));
+    assert!(surface
+        .nodes()
+        .iter()
+        .any(|node| node.kind == VirtualNodeKind::CodeBlock));
+}
+
+#[test]
+fn large_line_adapter_does_not_merge_across_notebook_cells() {
+    let mut adapter = VirtualMarkdownAdapter::new("large-notebook-md");
+    let lines = vec![
+        "%%neoism_notebook_cell 0 markdown".to_string(),
+        "first".to_string(),
+        "%%neoism_notebook_cell 1 markdown".to_string(),
+        "second".to_string(),
+        "```python neoism_notebook_cell=2 neoism_state=idle neoism_count=_".to_string(),
+        "print(1)".to_string(),
+        "```".to_string(),
+    ];
+    let batch = adapter.build_replace_batch_from_lines(
+        "notes/large.ipynb",
+        &lines,
+        VirtualSourceRevision(1),
+    );
+    let mut surface = VirtualSurface::default();
+    batch.apply_to(&mut surface).unwrap();
+
+    let boundaries = surface
+        .nodes()
+        .iter()
+        .filter(|node| node.kind == VirtualNodeKind::Custom("notebook-cell".to_string()))
+        .count();
+    assert_eq!(boundaries, 2);
+    assert!(surface.nodes().iter().all(|node| {
+        let content = node.content.as_ref().expect("source-backed node");
+        content.line_end() <= 4 || content.line_start >= 4
+    }));
+}
+
+#[test]
 fn markdown_adapter_chunks_large_sources_without_line_per_node_parse() {
     let mut adapter = VirtualMarkdownAdapter::new("large-md");
     let source = (0..12_000)

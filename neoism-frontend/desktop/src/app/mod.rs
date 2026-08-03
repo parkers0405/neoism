@@ -313,8 +313,11 @@ impl Application<'_> {
                             }
                         }
                     }
-                    DaemonServerMessage::Pty { message, .. } => {
-                        self.apply_daemon_pty_message(window_id, message);
+                    DaemonServerMessage::Pty {
+                        request_id,
+                        message,
+                    } => {
+                        self.apply_daemon_pty_message(window_id, request_id, message);
                     }
                     DaemonServerMessage::Crdt { message, .. } => {
                         self.apply_daemon_crdt_message(window_id, message);
@@ -1355,6 +1358,7 @@ impl Application<'_> {
     fn apply_daemon_pty_message(
         &mut self,
         window_id: WindowId,
+        request_id: u64,
         message: neoism_protocol::pty::ServerMessage,
     ) {
         if let Some(route) = self.router.routes.get_mut(&window_id) {
@@ -1362,7 +1366,7 @@ impl Application<'_> {
                 .window
                 .screen
                 .context_manager
-                .apply_pty_server_message(message.clone())
+                .apply_pty_server_message(request_id, message.clone())
             {
                 route.request_redraw();
             }

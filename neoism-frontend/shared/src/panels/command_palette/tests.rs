@@ -249,6 +249,23 @@ fn command_visibility_tracks_active_surface() {
     assert!(editor_titles.contains(&"Hover Documentation"));
     assert!(editor_titles.contains(&"Write File"));
     assert!(!editor_titles.contains(&"Clear History"));
+
+    palette.set_surface(PaletteSurface::Epub);
+    let epub_titles: Vec<&str> = palette
+        .filtered_rows()
+        .into_iter()
+        .map(|(_, row)| row.title())
+        .collect();
+    assert!(epub_titles.contains(&"Table of Contents"));
+    assert!(!epub_titles.contains(&"Write File"));
+
+    palette.set_surface(PaletteSurface::Markdown);
+    let markdown_titles: Vec<&str> = palette
+        .filtered_rows()
+        .into_iter()
+        .map(|(_, row)| row.title())
+        .collect();
+    assert!(!markdown_titles.contains(&"Table of Contents"));
 }
 
 #[test]
@@ -267,6 +284,7 @@ fn code_buffer_commands_are_visible_only_on_editor_surface() {
     for surface in [
         PaletteSurface::Terminal,
         PaletteSurface::Markdown,
+        PaletteSurface::Epub,
         PaletteSurface::Notebook,
     ] {
         palette.set_surface(surface);

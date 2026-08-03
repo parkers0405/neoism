@@ -40,6 +40,18 @@ impl MarkdownPane {
         self.clamp_cursor();
     }
 
+    /// Notebook command mode is explicit even when ordinary Markdown uses
+    /// always-insert editing. `Esc` must be able to leave a notebook cell.
+    pub fn enter_notebook_command_mode(&mut self) {
+        self.mode = MarkdownMode::Normal;
+        self.vim.clear_pending();
+        self.vim.visual_linewise = false;
+        self.vim.visual_block = false;
+        self.visual_anchor = None;
+        self.clamp_cursor();
+        self.follow_cursor = true;
+    }
+
     pub fn enter_visual(&mut self) {
         self.mode = MarkdownMode::Visual;
         self.clamp_cursor();

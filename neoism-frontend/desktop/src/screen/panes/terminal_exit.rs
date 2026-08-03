@@ -182,7 +182,7 @@ impl Screen<'_> {
         } else if let Some(next) = new_active {
             match next {
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path) => {
-                    self.activate_markdown_path(path);
+                    self.activate_rich_document_path(path);
                 }
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::NeoismAgent(
                     route_id,

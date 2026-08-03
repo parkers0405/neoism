@@ -64,6 +64,37 @@ pub enum ModalAction {
         command: String,
         value: String,
     },
+    /// Add a durable EPUB highlight carrying the note entered in the modal.
+    EpubAddNote {
+        value: String,
+    },
+    EpubGoTo {
+        href: String,
+    },
+    EpubOpenContents,
+    EpubOpenChapterPages {
+        href: String,
+    },
+    EpubGoToPage {
+        href: String,
+        page: usize,
+    },
+    EpubOpenAnnotation {
+        id: String,
+    },
+    EpubGoToAnnotation {
+        id: String,
+    },
+    EpubEditAnnotation {
+        id: String,
+    },
+    EpubUpdateAnnotation {
+        id: String,
+        value: String,
+    },
+    EpubDeleteAnnotation {
+        id: String,
+    },
     OpenLspLocation {
         uri: String,
         line: u32,
@@ -229,6 +260,10 @@ impl ModalAction {
             ModalAction::RunEditorCommandWithInput { command, .. } => {
                 ModalAction::RunEditorCommandWithInput { command, value }
             }
+            ModalAction::EpubAddNote { .. } => ModalAction::EpubAddNote { value },
+            ModalAction::EpubUpdateAnnotation { id, .. } => {
+                ModalAction::EpubUpdateAnnotation { id, value }
+            }
             action => action,
         }
     }
@@ -236,7 +271,9 @@ impl ModalAction {
     fn is_destructive(&self) -> bool {
         matches!(
             self,
-            ModalAction::FileTreePromptDelete { .. } | ModalAction::FileTreeDelete { .. }
+            ModalAction::FileTreePromptDelete { .. }
+                | ModalAction::FileTreeDelete { .. }
+                | ModalAction::EpubDeleteAnnotation { .. }
         )
     }
 }

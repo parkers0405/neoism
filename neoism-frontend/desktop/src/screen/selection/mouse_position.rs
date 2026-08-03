@@ -65,11 +65,7 @@ impl Screen<'_> {
         let (context_dimension, mut visual_pos) = self.current_visual_mouse_position();
         if let Some(item) = self.context_manager.current_grid().current_item() {
             let ctx = &item.val;
-            if ctx.code.is_none()
-                && ctx.markdown.is_none()
-                && ctx.neoism_agent.is_none()
-                && ctx.neoism_tags.is_none()
-            {
+            if !ctx.has_non_terminal_surface() {
                 let scale = self.sugarloaf.scale_factor();
                 let cell_h_logical =
                     (ctx.dimension.dimension.height.round().max(1.0) / scale).max(1.0);

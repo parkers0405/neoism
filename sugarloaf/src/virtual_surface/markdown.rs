@@ -476,6 +476,24 @@ fn markdown_nodes(
     while let Some(current) = lines.next() {
         stats.lines += 1;
         let current_line = base_line + current.line_index as u64;
+        if is_notebook_cell_marker(current.line) {
+            push_node(
+                &mut nodes,
+                text,
+                base_byte,
+                namespace,
+                source_id,
+                revision,
+                base_index,
+                VirtualNodeKind::Custom("notebook-cell".to_string()),
+                NodeGeometry::fixed(28.0),
+                base_byte + current.start as u64,
+                base_byte + current.end as u64,
+                current_line,
+                1,
+            );
+            continue;
+        }
         if current.line.trim().is_empty() {
             stats.blank_lines += 1;
             push_node(
@@ -645,6 +663,25 @@ fn markdown_large_semantic_nodes(
         let chunk_start = first.start;
         let mut chunk_end = first.end;
         let chunk_line_start = base_line + first.line_index as u64;
+        if is_notebook_cell_marker(first.line) {
+            stats.lines += 1;
+            push_node(
+                &mut nodes,
+                text,
+                base_byte,
+                namespace,
+                source_id,
+                revision,
+                base_index,
+                VirtualNodeKind::Custom("notebook-cell".to_string()),
+                NodeGeometry::fixed(28.0),
+                base_byte + chunk_start as u64,
+                base_byte + chunk_end as u64,
+                chunk_line_start,
+                1,
+            );
+            continue;
+        }
         let mut chunk_lines = 1usize;
         let mut visual_lines = large_markdown_line_visual_height(first.line, &mut stats);
         let first_is_heading = heading_level(first.line).is_some();
@@ -653,6 +690,9 @@ fn markdown_large_semantic_nodes(
             let Some(next) = lines.peek().copied() else {
                 break;
             };
+            if is_notebook_cell_anchor(next.line) {
+                break;
+            }
             if chunk_lines > 1 && heading_level(next.line).is_some() {
                 break;
             }
@@ -734,6 +774,28 @@ fn markdown_large_semantic_nodes_from_lines(
         let chunk_start_line = line_ix;
         let chunk_start_byte = source_cursor;
         let first = lines[line_ix].as_str();
+        if is_notebook_cell_marker(first) {
+            stats.lines += 1;
+            source_cursor = source_cursor
+                .saturating_add(first.len() as u64)
+                .saturating_add(if line_ix + 1 < lines.len() { 1 } else { 0 });
+            line_ix += 1;
+            push_node_from_lines(
+                &mut nodes,
+                lines,
+                namespace,
+                source_id,
+                revision,
+                base_index,
+                VirtualNodeKind::Custom("notebook-cell".to_string()),
+                NodeGeometry::fixed(28.0),
+                chunk_start_byte,
+                source_cursor,
+                base_line + chunk_start_line.saturating_sub(start_line) as u64,
+                1,
+            );
+            continue;
+        }
         let mut chunk_lines = 1usize;
         let mut visual_lines = large_markdown_line_visual_height(first, &mut stats);
         let first_is_heading = heading_level(first).is_some();
@@ -744,6 +806,9 @@ fn markdown_large_semantic_nodes_from_lines(
 
         while chunk_lines < chunk_size && line_ix < end_line {
             let next = lines[line_ix].as_str();
+            if is_notebook_cell_anchor(next) {
+                break;
+            }
             if chunk_lines > 1 && heading_level(next).is_some() {
                 break;
             }
@@ -807,11 +872,29 @@ fn large_markdown_line_visual_height(
 }
 
 fn is_markdown_block_boundary(line: &str) -> bool {
-    line.trim().is_empty()
+    is_notebook_cell_anchor(line)
+        || line.trim().is_empty()
         || heading_level(line).is_some()
         || line.trim_start().starts_with("```")
         || looks_like_table(line)
         || looks_like_list_marker(line)
+}
+
+fn is_notebook_cell_anchor(line: &str) -> bool {
+    is_notebook_cell_marker(line)
+        || (line.trim_start().starts_with("```")
+            && line
+                .split_whitespace()
+                .any(|part| part.starts_with("neoism_notebook_cell=")))
+}
+
+fn is_notebook_cell_marker(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("%%neoism_notebook_cell ") else {
+        return false;
+    };
+    rest.split_whitespace()
+        .next()
+        .is_some_and(|index| index.parse::<usize>().is_ok())
 }
 
 fn looks_like_list_marker(line: &str) -> bool {
@@ -1060,6 +1143,7 @@ fn kind_tag(kind: &VirtualNodeKind) -> u8 {
         VirtualNodeKind::CodeBlock => 2,
         VirtualNodeKind::Table => 3,
         VirtualNodeKind::MarkdownBlock => 4,
+        VirtualNodeKind::Custom(name) if name == "notebook-cell" => 5,
         _ => 255,
     }
 }

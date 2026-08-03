@@ -77,6 +77,13 @@ impl MarkdownPane {
         self.notebook_image_preview_dimensions.get(&line).copied()
     }
 
+    /// Read-only surfaces show the decoded attachment itself, not the
+    /// generated Markdown token that anchors the image overlay. Editable
+    /// Markdown and notebook cells intentionally keep their source visible.
+    pub fn hides_attachment_source_for_line(&self, line: usize) -> bool {
+        self.read_only && self.notebook_image_preview_dimensions.contains_key(&line)
+    }
+
     pub(super) fn notebook_image_preview_extra_h(
         &self,
         line: usize,
@@ -407,7 +414,16 @@ impl MarkdownPane {
         wrap_width: f32,
         mouse: Option<[f32; 2]>,
     ) -> bool {
-        let convert_rect = block_convert_rect(rect);
+        let handle_rect = if self.read_only {
+            [-1_000_000.0, -1_000_000.0, 0.0, 0.0]
+        } else {
+            handle_rect
+        };
+        let convert_rect = if self.read_only {
+            [-1_000_000.0, -1_000_000.0, 0.0, 0.0]
+        } else {
+            block_convert_rect(rect)
+        };
         self.block_rects.push(MarkdownBlockRect {
             line,
             rect,
@@ -428,7 +444,12 @@ impl MarkdownPane {
         if hovered && self.hovered_line.is_none() {
             self.hovered_line = Some(line);
         }
-        hovered || self.dragging_line == Some(line)
+        !self.read_only && (hovered || self.dragging_line == Some(line))
+    }
+
+    #[inline]
+    pub fn reveals_source_line(&self, line: usize) -> bool {
+        !self.read_only && self.cursor_line == line
     }
 
     pub fn block_rect_for_source_line(&self, line: usize) -> Option<MarkdownBlockRect> {

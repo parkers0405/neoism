@@ -579,7 +579,8 @@ impl Screen<'_> {
             search_active: self.search_active(),
             code_active: self.context_manager.current().code.is_some(),
             markdown_active: self.context_manager.current().markdown.is_some()
-                || self.context_manager.current().notebook.is_some(),
+                || self.context_manager.current().notebook.is_some()
+                || self.context_manager.current().epub.is_some(),
             vi_mode: mode.contains(Mode::VI),
         };
         match neoism_ui::selection_input::mid_key_event_dispatch(mid_dispatch_input) {

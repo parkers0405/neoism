@@ -55,3 +55,6 @@ sugarloaf/src/**/*.spv
 /multi_test.md
 /*.ink.neodraw
 /neoism_notebook_test.ipynb
+
+# Personal EPUBs copied into the repository root for manual reader testing.
+/*.epub

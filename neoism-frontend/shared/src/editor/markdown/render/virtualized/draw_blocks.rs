@@ -10,7 +10,10 @@ fn measure_item(
     // wraps differently than the rendered view, so heights must follow it.
     cursor_line: Option<usize>,
 ) -> (f32, u32) {
-    match item.kind {
+    let measured = match item.kind {
+        VirtualNodeKind::Custom(ref name) if name == "notebook-cell" => {
+            (28.0 * font_scale, 1)
+        }
         VirtualNodeKind::Heading => {
             let raw = item.text.trim_end_matches(['\r', '\n']);
             let (level, heading_marker) = heading_node_level_and_marker(raw);
@@ -56,14 +59,18 @@ fn measure_item(
                 if let Some(meta) = parse_notebook_output_meta(
                     first.trim_start().trim_start_matches('`').trim(),
                 ) {
-                    return measure_notebook_output_lines(
-                        sugarloaf,
-                        &local_lines,
-                        &meta,
-                        width,
-                        clip,
-                        theme,
-                        font_scale,
+                    return with_notebook_cell_gap(
+                        pane,
+                        item,
+                        measure_notebook_output_lines(
+                            sugarloaf,
+                            &local_lines,
+                            &meta,
+                            width,
+                            clip,
+                            theme,
+                            font_scale,
+                        ),
                     );
                 }
             }
@@ -84,7 +91,11 @@ fn measure_item(
                             .join("\n");
                         if parse_mermaid_diagram(&source).is_some() {
                             let height = CODE_BLOCK_HEADER_H + 238.0 * font_scale;
-                            return (height.max(190.0 * font_scale), 10);
+                            return with_notebook_cell_gap(
+                                pane,
+                                item,
+                                (height.max(190.0 * font_scale), 10),
+                            );
                         }
                     }
                 }
@@ -201,14 +212,18 @@ fn measure_item(
                     continue;
                 }
                 let line_ix = item.first_line + local_ix;
-                if frontmatter
-                    .as_ref()
-                    .is_some_and(|fm| fm.contains(&line_ix))
+                if frontmatter.as_ref().is_some_and(|fm| fm.contains(&line_ix))
                     && cursor_line != Some(line_ix)
                 {
                     let (row_h, rows) = measure_frontmatter_row(
-                        sugarloaf, text, width, line_height(&opts), &opts, theme,
-                        font_scale, clip,
+                        sugarloaf,
+                        text,
+                        width,
+                        line_height(&opts),
+                        &opts,
+                        theme,
+                        font_scale,
+                        clip,
                     );
                     height += row_h;
                     visual_lines += rows;
@@ -269,7 +284,11 @@ fn measure_item(
                 // marker prefix shown, hanging continuation rows) — measuring
                 // the rendered body instead let the revealed line grow a row
                 // and paint over the block below it.
-                let lines = if cursor_line == Some(item.first_line + local_ix) {
+                let hides_attachment_source =
+                    pane.hides_attachment_source_for_line(line_ix);
+                let lines = if hides_attachment_source {
+                    0
+                } else if cursor_line == Some(line_ix) {
                     let hang = raw_line_hang_px(sugarloaf, text, &opts);
                     inline_wrapped_lines_raw(sugarloaf, text, width, hang, &opts)
                         .len()
@@ -299,7 +318,7 @@ fn measure_item(
                     inline_visual_row_count(&inline_lines)
                 };
                 let preview_h = pane.notebook_image_preview_extra_h(
-                    item.first_line + local_ix,
+                    line_ix,
                     width,
                     font_scale,
                 );
@@ -310,7 +329,28 @@ fn measure_item(
             }
             (height, visual_lines.max(1) as u32)
         }
-    }
+    };
+    with_notebook_cell_gap(pane, item, measured)
+}
+
+fn notebook_cell_bottom_gap(
+    pane: &MarkdownPane,
+    first_line: usize,
+    line_count: usize,
+) -> f32 {
+    pane.notebook_cell_range_containing(first_line)
+        .filter(|range| first_line.saturating_add(line_count) >= range.end)
+        .map(|_| NOTEBOOK_CELL_GAP)
+        .unwrap_or(0.0)
+}
+
+fn with_notebook_cell_gap(
+    pane: &MarkdownPane,
+    item: &VirtualMarkdownDrawItem,
+    mut measured: (f32, u32),
+) -> (f32, u32) {
+    measured.0 += notebook_cell_bottom_gap(pane, item.first_line, item.line_count);
+    measured
 }
 
 fn measure_notebook_output_lines(
@@ -354,7 +394,8 @@ fn measure_notebook_output_lines(
         rows += code_wrap_ranges(&stops, &chars, body_width).len().max(1);
     }
     let rows = rows.max(1);
-    let top_pad = if has_prompt_chrome { 6.0 } else { 2.0 };
+    let top_pad =
+        NOTEBOOK_OUTPUT_TOP_GAP * font_scale + if has_prompt_chrome { 6.0 } else { 2.0 };
     (rows as f32 * line_h + top_pad, rows as u32)
 }
 
@@ -423,7 +464,8 @@ fn measure_notebook_output_text_group(
     } else {
         0.0
     };
-    let top_pad = if has_prompt_chrome { 2.0 } else { 0.0 };
+    let top_pad =
+        NOTEBOOK_OUTPUT_TOP_GAP * font_scale + if has_prompt_chrome { 2.0 } else { 0.0 };
     let bottom_pad = 1.0;
     (
         top_pad + body_h + detail_h + bottom_pad,
@@ -479,7 +521,15 @@ fn draw_item(
     let node_y = item.screen_y;
     let node_h = item.bounds.height.max(1.0);
     let node_rect = [node_x, node_y, content_w, node_h];
-    let handle_rect = block_handle_rect(node_rect);
+    let notebook_cell = pane.notebook_cell_range_containing(item.first_line);
+    let notebook_child = notebook_cell
+        .as_ref()
+        .is_some_and(|range| range.start != item.first_line);
+    let handle_rect = if notebook_child {
+        [-1_000_000.0, -1_000_000.0, 0.0, 0.0]
+    } else {
+        block_handle_rect(node_rect)
+    };
     let metric_opts = DrawOpts {
         font_size: markdown_font(17.0, font_scale),
         color: theme.u8(theme.fg),
@@ -489,7 +539,7 @@ fn draw_item(
     // Obsidian Live Preview: the cursor's own line renders RAW (markup shown),
     // so its click/cursor mapping is identity — drop the marker offset for the
     // block rect on that line so hit-testing matches the revealed source.
-    let marker_len = if pane.cursor_line == item.first_line {
+    let marker_len = if pane.reveals_source_line(item.first_line) {
         0
     } else {
         pane.visible_start_col(item.first_line)
@@ -509,7 +559,7 @@ fn draw_item(
         mouse,
     );
 
-    if active {
+    if active && !notebook_child {
         draw_block_actions(
             sugarloaf,
             node_rect,
@@ -520,6 +570,20 @@ fn draw_item(
     }
 
     match item.kind {
+        VirtualNodeKind::Custom(ref name) if name == "notebook-cell" => {
+            draw_notebook_markdown_cell_boundary(
+                sugarloaf,
+                item,
+                node_x,
+                content_w,
+                clip,
+                clip_top,
+                clip_bottom,
+                theme,
+                text_occlusions,
+                font_scale,
+            )
+        }
         VirtualNodeKind::Heading => draw_heading(
             sugarloaf,
             pane,
@@ -597,7 +661,7 @@ fn draw_heading(
     // Obsidian Live Preview: reveal the `### ` markup on the cursor's own line
     // (still drawn at heading size), so the rendered text equals the buffer and
     // cursor/click/wrap math is identity. Off the line it collapses to styled.
-    let marker_len = if pane.cursor_line == item.first_line {
+    let marker_len = if pane.reveals_source_line(item.first_line) {
         0
     } else {
         heading_marker
@@ -612,7 +676,7 @@ fn draw_heading(
         ..DrawOpts::default()
     };
     let text_y = item.screen_y + 4.0;
-    let heading_lines = if pane.cursor_line == item.first_line {
+    let heading_lines = if pane.reveals_source_line(item.first_line) {
         inline_wrapped_lines(sugarloaf, text, width.max(24.0), &opts)
     } else {
         inline_wrapped_lines_dropcap(sugarloaf, text, width.max(24.0), &opts).0
@@ -735,6 +799,40 @@ fn draw_notebook_output_group(
     font_scale: f32,
     animation_phase: f32,
 ) -> f32 {
+    let output_top_gap = NOTEBOOK_OUTPUT_TOP_GAP * font_scale;
+    let (card_content_h, _) = measure_notebook_output_text_group(
+        sugarloaf, outputs, width, clip, theme, font_scale,
+    );
+    let card_x = x - 6.0;
+    let card_y = y + output_top_gap;
+    let card_w = width + 12.0;
+    let card_h = (card_content_h - output_top_gap).max(1.0);
+    draw_rounded_rect_clipped(
+        sugarloaf,
+        clip,
+        card_x,
+        card_y,
+        card_w,
+        card_h,
+        BLOCK_RADIUS - 1.0,
+        theme.f32_alpha(theme.border, 0.72),
+        DEPTH,
+        ORDER_BG + 2,
+    );
+    if card_w > 2.0 && card_h > 2.0 {
+        draw_rounded_rect_clipped(
+            sugarloaf,
+            clip,
+            card_x + 1.0,
+            card_y + 1.0,
+            card_w - 2.0,
+            card_h - 2.0,
+            BLOCK_RADIUS - 2.0,
+            theme.f32_alpha(theme.surface, 0.38),
+            DEPTH,
+            ORDER_BG + 3,
+        );
+    }
     let has_prompt = outputs.iter().any(|output| !output.prompt.is_empty());
     let has_running = outputs.iter().any(|output| output.running);
     let prompt = outputs
@@ -790,7 +888,7 @@ fn draw_notebook_output_group(
     let connector_gap = 8.0 * font_scale;
     let body_x = connector_x + connector_w + connector_gap;
     let body_w = (width - (body_x - x)).max(36.0);
-    let row_y = y + if has_prompt_chrome { 2.0 } else { 0.0 };
+    let row_y = y + output_top_gap + if has_prompt_chrome { 2.0 } else { 0.0 };
 
     if has_running {
         draw_notebook_running_loader(
@@ -1185,7 +1283,7 @@ fn draw_markdown_line(
             // line (mirrors draw_heading). Without this the marker stays
             // hidden, so a space typed at/inside it vanished into the
             // swallowed prefix and the caret (clamped to marker_len) froze.
-            let reveal = pane.cursor_line == line_ix;
+            let reveal = pane.reveals_source_line(line_ix);
             let (marker_len, heading_text) = if reveal {
                 (0usize, text)
             } else {
@@ -1307,7 +1405,7 @@ fn draw_markdown_line(
             sugarloaf, pane, line_ix, text, x, text_y, width, clip, theme, font_scale,
         );
         let checked_task = task_marker_checked(text);
-        let body_width = if pane.cursor_line == line_ix {
+        let body_width = if pane.reveals_source_line(line_ix) {
             width.max(24.0)
         } else {
             (width - (text_x - x)).max(24.0)
@@ -1344,12 +1442,12 @@ fn draw_markdown_line(
         // literally) so the drawn text equals the buffer and the caret maps 1:1.
         // Its wrapped rows hang at the indent+marker prefix width so the body
         // column holds across wraps like the rendered view.
-        let raw_hang = if pane.cursor_line == line_ix {
+        let raw_hang = if pane.reveals_source_line(line_ix) {
             raw_line_hang_px(sugarloaf, text, &line_opts)
         } else {
             0.0
         };
-        let inline_lines = if pane.cursor_line == line_ix {
+        let inline_lines = if pane.reveals_source_line(line_ix) {
             inline_wrapped_lines_raw(sugarloaf, body, body_width, raw_hang, &line_opts)
         } else {
             inline_wrapped_lines_dropcap(sugarloaf, body, body_width, &line_opts).0
@@ -1389,7 +1487,12 @@ fn draw_markdown_line(
         }
         let attachment_preview_h =
             pane.notebook_image_preview_extra_h(line_ix, body_width, font_scale);
-        let block_h = line_h * visual_lines as f32 + 8.0 + attachment_preview_h;
+        let hides_attachment_source = pane.hides_attachment_source_for_line(line_ix);
+        let block_h = if hides_attachment_source {
+            attachment_preview_h
+        } else {
+            line_h * visual_lines as f32 + 8.0 + attachment_preview_h
+        };
         pane.register_block_wrap_row_spans(line_ix, inline_wrap_rows(&inline_lines));
         pane.register_block_wrap_hit_stops(
             line_ix,
@@ -1407,7 +1510,8 @@ fn draw_markdown_line(
             body_width,
             None,
         );
-        draw_selection_for_line(
+        if !hides_attachment_source {
+            draw_selection_for_line(
             sugarloaf,
             pane,
             line_ix,
@@ -1422,8 +1526,8 @@ fn draw_markdown_line(
             clip,
             clip_top,
             clip_bottom,
-        );
-        draw_search_matches_for_line(
+            );
+            draw_search_matches_for_line(
             sugarloaf,
             pane,
             line_ix,
@@ -1438,8 +1542,8 @@ fn draw_markdown_line(
             clip,
             clip_top,
             clip_bottom,
-        );
-        draw_inline_wrapped_lines(
+            );
+            draw_inline_wrapped_lines(
             sugarloaf,
             pane,
             &inline_lines,
@@ -1452,9 +1556,9 @@ fn draw_markdown_line(
             clip_top,
             clip_bottom,
             text_occlusions,
-        );
-        if checked_task {
-            draw_checked_task_strike(
+            );
+            if checked_task {
+                draw_checked_task_strike(
                 sugarloaf,
                 &inline_lines,
                 text_x,
@@ -1466,13 +1570,18 @@ fn draw_markdown_line(
                 clip,
                 clip_top,
                 clip_bottom,
-            );
+                );
+            }
         }
         set_cursor_for_source_line(
             sugarloaf, pane, item, line_ix, text, text_x, text_y, body_width, marker_len,
             raw_hang, &line_opts,
         );
-        text_y += line_h * visual_lines as f32 + attachment_preview_h;
+        text_y += if hides_attachment_source {
+            attachment_preview_h
+        } else {
+            line_h * visual_lines as f32 + attachment_preview_h
+        };
         if text_y > clip_bottom + line_h * 2.0 {
             break;
         }
@@ -1544,8 +1653,9 @@ fn draw_frontmatter_row(
         }
         return 18.0;
     }
-    let (advance, _rows) =
-        measure_frontmatter_row(sugarloaf, raw, width, line_h, opts, theme, font_scale, clip);
+    let (advance, _rows) = measure_frontmatter_row(
+        sugarloaf, raw, width, line_h, opts, theme, font_scale, clip,
+    );
     let source_lines =
         inline_wrapped_lines_raw(sugarloaf, raw, width.max(24.0), 0.0, opts);
     pane.register_block_wrap_row_spans(line_ix, inline_wrap_rows(&source_lines));
@@ -1573,8 +1683,13 @@ fn draw_frontmatter_row(
             font_id: md_font_id(sugarloaf),
             ..DrawOpts::default()
         };
-        let plain_lines =
-            inline_wrapped_lines_raw(sugarloaf, raw.trim(), width.max(24.0), 0.0, &plain_opts);
+        let plain_lines = inline_wrapped_lines_raw(
+            sugarloaf,
+            raw.trim(),
+            width.max(24.0),
+            0.0,
+            &plain_opts,
+        );
         draw_inline_wrapped_lines(
             sugarloaf,
             pane,
@@ -1808,7 +1923,7 @@ fn draw_line_marker<'a>(
     // don't draw the bullet/checkbox glyph or strip the `- `/`1. `/`[ ] ` marker,
     // so the laid-out text matches the buffer and cursor/click/wrap math is
     // identity. (Full Notion-style hide — marker gone even here — can come later.)
-    if pane.cursor_line == line_ix {
+    if pane.reveals_source_line(line_ix) {
         return (x, raw, 0, 0);
     }
     let Some(marker) = parse_markdown_list_marker(raw) else {

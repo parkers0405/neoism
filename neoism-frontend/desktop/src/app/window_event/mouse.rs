@@ -374,11 +374,7 @@ impl Application<'_> {
 
                     if let MouseButton::Left = button {
                         let current = route.window.screen.context_manager.current();
-                        let pos = if current.markdown.is_none()
-                            && current.neoism_agent.is_none()
-                            && current.neoism_tags.is_none()
-                            && current.neoism_extensions.is_none()
-                        {
+                        let pos = if !current.has_non_terminal_surface() {
                             route
                                 .window
                                 .screen
@@ -973,7 +969,7 @@ impl Application<'_> {
             .screen
             .context_manager
             .current()
-            .markdown
+            .active_markdown()
             .is_some()
         {
             if route.window.screen.handle_markdown_hover() {
@@ -982,6 +978,7 @@ impl Application<'_> {
             route.window.set_cursor(
                 if route.window.screen.markdown_link_hovered()
                     || route.window.screen.markdown_notebook_action_hovered()
+                    || route.window.screen.epub_page_turn_hovered()
                 {
                     CursorIcon::Pointer
                 } else if route.window.screen.markdown_handle_hovered() {
@@ -1304,11 +1301,7 @@ impl Application<'_> {
 
         if is_selecting {
             let current = route.window.screen.context_manager.current();
-            let should_update = if current.markdown.is_none()
-                && current.neoism_agent.is_none()
-                && current.neoism_tags.is_none()
-                && current.neoism_extensions.is_none()
-            {
+            let should_update = if !current.has_non_terminal_surface() {
                 if let Some(point) = route
                     .window
                     .screen

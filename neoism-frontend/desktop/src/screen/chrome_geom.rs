@@ -151,6 +151,7 @@ impl Screen<'_> {
                 current.code.is_some()
                     || current.markdown.is_some()
                     || current.notebook.is_some()
+                    || current.epub.is_some()
                     || current.draw.is_some()
             };
             let top_padding = if reserves_editor_chrome {
@@ -360,6 +361,7 @@ impl Screen<'_> {
                 current.code.is_some()
                     || current.markdown.is_some()
                     || current.notebook.is_some()
+                    || current.epub.is_some()
                     || current.draw.is_some()
             };
             let new_top = if reserves_editor_chrome {
@@ -632,6 +634,7 @@ impl Screen<'_> {
         let reserves_editor_chrome = current.code.is_some()
             || current.markdown.is_some()
             || current.notebook.is_some()
+            || current.epub.is_some()
             || current.draw.is_some();
         let margins = self.workspace_chrome_margins();
 
@@ -660,6 +663,7 @@ impl Screen<'_> {
             let reserves_editor_chrome = current.code.is_some()
                 || current.markdown.is_some()
                 || current.notebook.is_some()
+                || current.epub.is_some()
                 || current.draw.is_some();
             let expected_top = if reserves_editor_chrome {
                 margins.editor_top
@@ -725,6 +729,7 @@ impl Screen<'_> {
                 current.code.is_some()
                     || current.markdown.is_some()
                     || current.notebook.is_some()
+                    || current.epub.is_some()
                     || current.draw.is_some()
             };
             let new_top = if reserves_editor_chrome {

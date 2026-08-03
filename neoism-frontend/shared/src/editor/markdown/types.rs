@@ -245,6 +245,26 @@ pub struct MarkdownPosition {
     pub col: usize,
 }
 
+/// Durable, host-owned highlight projected onto rendered source. Markdown
+/// notes leave this empty; read-only document surfaces populate it from their
+/// annotation store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkdownReaderHighlight {
+    pub start: MarkdownPosition,
+    pub end: MarkdownPosition,
+    pub color: MarkdownReaderHighlightColor,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkdownReaderHighlightColor {
+    #[default]
+    Yellow,
+    Green,
+    Blue,
+    Pink,
+    Purple,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct MarkdownYankFlash {
     pub(super) started_at: Instant,
@@ -496,6 +516,14 @@ pub struct MarkdownPane {
     pub(super) source_revision: u64,
     pub(super) pending_line_edit: Option<MarkdownPendingLineEdit>,
     pub mode: MarkdownMode,
+    /// Read-only rich document surface (for example EPUB). Vim motions,
+    /// selection and links remain active, while Live Preview source reveal
+    /// and block editing affordances stay hidden.
+    pub read_only: bool,
+    /// Optional reader page-end marker (for example "Page 4 of 19"). This is
+    /// not Markdown source, but it is positioned in the document and scrolls
+    /// naturally with the page.
+    pub reader_footer: Option<String>,
     /// Vim modal layer active (`[neoism] vim-mode`, default on). When
     /// false the pane stays in Insert — `enter_normal` redirects to
     /// Insert so Esc never drops into vim Normal.
@@ -553,6 +581,7 @@ pub struct MarkdownPane {
     pub(super) table_scroll_x: HashMap<usize, f32>,
     pub(super) task_toggle_animations: HashMap<usize, Instant>,
     pub(super) yank_flashes: Vec<MarkdownYankFlash>,
+    pub reader_highlights: Vec<MarkdownReaderHighlight>,
     pub(super) enter_continuation_lines: HashSet<usize>,
     pub hovered_line: Option<usize>,
     pub dragging_line: Option<usize>,

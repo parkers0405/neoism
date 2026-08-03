@@ -259,6 +259,8 @@ impl Screen<'_> {
         // it as the Markdown surface so Write File / save shows up.
         if current.notebook.is_some() {
             PaletteSurface::Notebook
+        } else if current.epub.is_some() {
+            PaletteSurface::Epub
         } else if current.markdown.is_some() || current.draw.is_some() {
             PaletteSurface::Markdown
         } else if current.code.is_some() {
@@ -880,7 +882,7 @@ impl Screen<'_> {
                     self.sync_active_markdown_modified();
                     self.renderer.trail_cursor.reset();
                     self.mark_dirty();
-                } else {
+                } else if self.context_manager.current().epub.is_none() {
                     self.paste(&content, true);
                 }
             }
@@ -962,6 +964,9 @@ impl Screen<'_> {
             }
             PaletteAction::OpenNeoismNotes => {
                 self.open_neoism_notes_sidebar();
+            }
+            PaletteAction::OpenEpubTableOfContents => {
+                self.open_epub_table_of_contents_modal();
             }
             PaletteAction::LspHover => {
                 self.execute_lsp_context_action(

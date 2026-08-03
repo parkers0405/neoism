@@ -6,6 +6,7 @@ impl<T: EventListener> Context<T> {
         self.markdown
             .as_ref()
             .or_else(|| self.notebook.as_ref().map(|notebook| &notebook.markdown))
+            .or_else(|| self.epub.as_ref().map(|epub| &epub.markdown))
     }
 
     #[inline]
@@ -13,9 +14,10 @@ impl<T: EventListener> Context<T> {
         if self.markdown.is_some() {
             return self.markdown.as_mut();
         }
-        self.notebook
-            .as_mut()
-            .map(|notebook| &mut notebook.markdown)
+        if let Some(notebook) = self.notebook.as_mut() {
+            return Some(&mut notebook.markdown);
+        }
+        self.epub.as_mut().map(|epub| &mut epub.markdown)
     }
 
     /// True when this pane mounts a non-terminal surface — a code editor,
@@ -32,6 +34,7 @@ impl<T: EventListener> Context<T> {
             || self.code.is_some()
             || self.draw.is_some()
             || self.notebook.is_some()
+            || self.epub.is_some()
             || self.neoism_agent.is_some()
             || self.neoism_tags.is_some()
             || self.neoism_extensions.is_some()

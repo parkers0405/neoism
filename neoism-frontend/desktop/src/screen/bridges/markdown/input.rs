@@ -110,16 +110,14 @@ impl Screen<'_> {
             || self
                 .context_manager
                 .current()
-                .markdown
-                .as_ref()
+                .active_markdown()
                 .is_some_and(|markdown| markdown.is_dragging())
     }
 
     pub fn markdown_grab_drag_active(&self) -> bool {
         self.context_manager
             .current()
-            .markdown
-            .as_ref()
+            .active_markdown()
             .is_some_and(|markdown| markdown.is_grab_dragging())
     }
 
@@ -128,9 +126,7 @@ impl Screen<'_> {
         button: MouseButton,
         clipboard: &mut Clipboard,
     ) -> bool {
-        if self.context_manager.current().markdown.is_none()
-            && self.context_manager.current().notebook.is_none()
-        {
+        if self.context_manager.current().active_markdown().is_none() {
             return false;
         }
         // Draw mode: route left-press to the ink pane (tools/toolbar).
@@ -141,6 +137,10 @@ impl Screen<'_> {
             }
         }
         if button == MouseButton::Right {
+            if self.context_manager.current().epub.is_some() {
+                let [x, y] = self.markdown_mouse_logical();
+                return self.open_epub_annotation_menu_at(x, y, false);
+            }
             return self.open_markdown_spelling_menu();
         }
         if button != MouseButton::Left {
@@ -164,6 +164,42 @@ impl Screen<'_> {
                 neoism_ui::editor::notebook::NotebookCellAction::ClearOutput => {
                     self.clear_notebook_cell_output(cell_index);
                 }
+            }
+            return true;
+        }
+        // Books are immutable reading surfaces. Links and text selection are
+        // interactive, but Markdown's block conversion/task/reorder affordances
+        // must never mutate chapter source.
+        if self.context_manager.current().epub.is_some() {
+            if let Some(target) = self
+                .context_manager
+                .current()
+                .active_markdown()
+                .and_then(|markdown| markdown.link_at(x, y))
+            {
+                self.open_markdown_link_target(target);
+                return true;
+            }
+            if let Some(markdown) =
+                self.context_manager.current_mut().active_markdown_mut()
+            {
+                let handled = markdown.click_at(x, y);
+                // `click_at` seeds the mouse selection anchor in Insert mode;
+                // returning to Normal keeps that anchor so a subsequent drag
+                // still enters Visual mode without making the book editable.
+                markdown.enter_normal();
+                if handled {
+                    self.renderer.trail_cursor.reset();
+                    self.mark_dirty();
+                    return true;
+                }
+            }
+            // Edge turns are a fallback for empty canvas only. Text under the
+            // pointer always wins so dragging from a line near either margin
+            // starts a selection instead of unexpectedly changing pages.
+            if let Some(direction) = self.epub_page_turn_direction_at(x, y) {
+                self.turn_epub_page(direction);
+                return true;
             }
             return true;
         }
@@ -250,10 +286,34 @@ impl Screen<'_> {
                 return true;
             }
         }
+        let epub_active = self.context_manager.current().epub.is_some();
+        let [release_x, release_y] = self.markdown_mouse_logical();
+        let clicked_noted_annotation = self
+            .context_manager
+            .current()
+            .epub
+            .as_ref()
+            .filter(|epub| epub.markdown.visual_selection().is_none())
+            .and_then(|epub| {
+                epub.markdown
+                    .text_position_at_point(release_x, release_y)
+                    .and_then(|position| {
+                        epub.annotation_at_source_position(position.line, position.col)
+                    })
+            })
+            .is_some_and(|annotation| !annotation.note.trim().is_empty());
         let (handled, menu_rect) = if let Some(markdown) =
             self.context_manager.current_mut().active_markdown_mut()
         {
             let handled = markdown.end_drag();
+            if epub_active
+                && matches!(
+                    markdown.mode,
+                    neoism_ui::editor::markdown::MarkdownMode::Insert
+                )
+            {
+                markdown.enter_normal();
+            }
             let menu_rect = markdown.take_pending_block_menu_rect();
             (handled, menu_rect)
         } else {
@@ -265,8 +325,18 @@ impl Screen<'_> {
             self.mark_dirty();
             return true;
         }
-        if handled {
+        if handled && !epub_active {
             self.sync_active_markdown_modified();
+        }
+        if epub_active {
+            if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+                epub.capture_location();
+            }
+            if clicked_noted_annotation
+                && self.open_epub_annotation_menu_at(release_x, release_y, true)
+            {
+                return true;
+            }
         }
         handled
     }
@@ -279,6 +349,11 @@ impl Screen<'_> {
         clipboard: &mut Clipboard,
     ) {
         if key.state == ElementState::Released {
+            return;
+        }
+
+        if self.context_manager.current().epub.is_some() {
+            self.dispatch_epub_reader_key(key, mods, clipboard);
             return;
         }
 
@@ -456,6 +531,78 @@ impl Screen<'_> {
                 }
                 self.mark_dirty();
                 return;
+            }
+        }
+        let notebook_mode = self
+            .context_manager
+            .current()
+            .notebook
+            .as_ref()
+            .map(|notebook| notebook.markdown.mode);
+        if let Some(mode) = notebook_mode {
+            let unmodified = plain && !mods.shift_key();
+            match key.key_without_modifiers().as_ref() {
+                Key::Named(NamedKey::Enter) if plain && mods.shift_key() => {
+                    self.run_current_notebook_cell_and_select_next();
+                    return;
+                }
+                Key::Named(NamedKey::Escape)
+                    if unmodified
+                        && !matches!(
+                            mode,
+                            crate::editor::markdown::state::MarkdownMode::Normal
+                        ) =>
+                {
+                    if let Some(notebook) =
+                        self.context_manager.current_mut().notebook.as_mut()
+                    {
+                        notebook.enter_command_mode();
+                    }
+                    self.renderer.trail_cursor.reset();
+                    self.mark_dirty();
+                    return;
+                }
+                Key::Named(NamedKey::Enter)
+                    if unmodified
+                        && matches!(
+                            mode,
+                            crate::editor::markdown::state::MarkdownMode::Normal
+                        ) =>
+                {
+                    if let Some(notebook) =
+                        self.context_manager.current_mut().notebook.as_mut()
+                    {
+                        notebook.enter_current_cell_edit_mode();
+                    }
+                    self.renderer.trail_cursor.reset();
+                    self.mark_dirty();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)
+                    if unmodified
+                        && matches!(
+                            mode,
+                            crate::editor::markdown::state::MarkdownMode::Normal
+                        ) =>
+                {
+                    let delta = if matches!(
+                        key.key_without_modifiers().as_ref(),
+                        Key::Named(NamedKey::ArrowUp)
+                    ) {
+                        -1
+                    } else {
+                        1
+                    };
+                    if let Some(notebook) =
+                        self.context_manager.current_mut().notebook.as_mut()
+                    {
+                        notebook.select_adjacent_cell(delta);
+                    }
+                    self.renderer.trail_cursor.reset();
+                    self.mark_dirty();
+                    return;
+                }
+                _ => {}
             }
         }
         if ctrl_only
@@ -978,6 +1125,33 @@ impl Screen<'_> {
         self.run_notebook_cell(cell_index)
     }
 
+    fn run_current_notebook_cell_and_select_next(&mut self) -> bool {
+        let Some((cell_index, cell_type)) = self
+            .context_manager
+            .current()
+            .notebook
+            .as_ref()
+            .and_then(|notebook| {
+                Some((
+                    notebook.current_cell_index()?,
+                    notebook.current_cell_type()?,
+                ))
+            })
+        else {
+            return false;
+        };
+        if cell_type == neoism_ui::editor::notebook::NotebookCellType::Code {
+            self.run_notebook_cell(cell_index);
+        }
+        if let Some(notebook) = self.context_manager.current_mut().notebook.as_mut() {
+            notebook.select_adjacent_cell(1);
+            notebook.enter_command_mode();
+        }
+        self.renderer.trail_cursor.reset();
+        self.mark_dirty();
+        true
+    }
+
     /// Apply a resolved vim key feed to the pane, routing register
     /// traffic through the host clipboard (the unnamed register).
     /// Returns `(handled, snap_cursor, yank_message)`.
@@ -1029,6 +1203,274 @@ impl Screen<'_> {
         }
     }
 
+    fn dispatch_epub_reader_key(
+        &mut self,
+        key: &neoism_window::event::KeyEvent,
+        mods: ModifiersState,
+        clipboard: &mut Clipboard,
+    ) {
+        use neoism_ui::editor::markdown::vim::{VimAction, VimKeyFeed, VimOperator};
+
+        let plain = !mods.control_key() && !mods.alt_key() && !mods.super_key();
+        let ctrl_only = mods.control_key() && !mods.alt_key() && !mods.super_key();
+        let viewport = self.markdown_viewport_height();
+
+        let now = std::time::Instant::now();
+        if let Some(started) = self.markdown_leader_pending {
+            if now.duration_since(started).as_millis() > LEADER_TIMEOUT_MS {
+                self.markdown_leader_pending = None;
+            }
+        }
+        if self.markdown_leader_pending.is_some() {
+            self.markdown_leader_pending = None;
+            if plain
+                && matches!(
+                    key.key_without_modifiers().as_ref(),
+                    Key::Character(value) if value.eq_ignore_ascii_case("x")
+                )
+            {
+                if self.close_focused_buffer_tab() {
+                    self.mark_dirty();
+                }
+                return;
+            }
+        }
+        if plain
+            && matches!(
+                key.key_without_modifiers().as_ref(),
+                Key::Character(value) if value == " "
+            )
+        {
+            self.markdown_leader_pending = Some(now);
+            return;
+        }
+
+        if plain {
+            match key.key_without_modifiers().as_ref() {
+                Key::Character(value) if value == "/" || value == "?" => {
+                    let reverse = value == "?";
+                    if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+                        epub.markdown.search_begin(reverse);
+                    }
+                    if reverse {
+                        self.renderer.command_palette.enter_search_mode_backward();
+                    } else {
+                        self.renderer.command_palette.enter_search_mode();
+                    }
+                    self.mark_dirty();
+                    return;
+                }
+                Key::Character(value)
+                    if value == "H"
+                        && self.context_manager.current().epub.as_ref().is_some_and(
+                            |epub| {
+                                matches!(
+                                    epub.markdown.mode,
+                                    neoism_ui::editor::markdown::MarkdownMode::Visual
+                                )
+                            },
+                        ) =>
+                {
+                    let result = self
+                        .context_manager
+                        .current_mut()
+                        .epub
+                        .as_mut()
+                        .map(|epub| epub.add_highlight_from_selection(String::new()));
+                    match result {
+                        Some(Ok(Some(_))) => self.renderer.notifications.push(
+                            "Highlight saved".to_string(),
+                            neoism_ui::panels::notifications::NotificationLevel::Info,
+                        ),
+                        Some(Ok(None)) => self.renderer.notifications.push(
+                            "Select text in Visual mode before highlighting".to_string(),
+                            neoism_ui::panels::notifications::NotificationLevel::Warn,
+                        ),
+                        Some(Err(error)) => self.renderer.notifications.push(
+                            format!("Could not save highlight: {error}"),
+                            neoism_ui::panels::notifications::NotificationLevel::Error,
+                        ),
+                        None => {}
+                    }
+                    self.mark_dirty();
+                    return;
+                }
+                Key::Character(value)
+                    if value == "N"
+                        && self.context_manager.current().epub.as_ref().is_some_and(
+                            |epub| {
+                                matches!(
+                                    epub.markdown.mode,
+                                    neoism_ui::editor::markdown::MarkdownMode::Visual
+                                )
+                            },
+                        ) =>
+                {
+                    self.open_epub_note_prompt();
+                    return;
+                }
+                Key::Character(value) if value == "]" => {
+                    self.epub_next_chapter();
+                    return;
+                }
+                Key::Character(value) if value == "[" => {
+                    self.epub_previous_chapter();
+                    return;
+                }
+                Key::Character(value) if value == "t" => {
+                    self.open_epub_table_of_contents();
+                    return;
+                }
+                Key::Character(value) if value == "a" => {
+                    self.open_epub_annotations();
+                    return;
+                }
+                Key::Character(value) if value == " " => {
+                    self.turn_epub_page(1);
+                    return;
+                }
+                Key::Named(NamedKey::PageDown) => {
+                    self.turn_epub_page(1);
+                    return;
+                }
+                Key::Named(NamedKey::PageUp) => {
+                    self.turn_epub_page(-1);
+                    return;
+                }
+                Key::Named(NamedKey::Escape) => {
+                    if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+                        epub.markdown.enter_normal();
+                        epub.capture_location();
+                    }
+                    self.mark_dirty();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.turn_epub_page(-1);
+                    return;
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.turn_epub_page(1);
+                    return;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    let viewport = self.markdown_viewport_height();
+                    if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+                        epub.markdown.scroll_pixels(58.0, viewport);
+                        epub.capture_location();
+                    }
+                    self.mark_dirty();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    let viewport = self.markdown_viewport_height();
+                    if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+                        epub.markdown.scroll_pixels(-58.0, viewport);
+                        epub.capture_location();
+                    }
+                    self.mark_dirty();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        if ctrl_only {
+            match key.logical_key.as_ref() {
+                Key::Character("d") => {
+                    if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+                        epub.markdown
+                            .scroll_cursor_by_content_pixels(viewport * 0.5, viewport);
+                        epub.capture_location();
+                    }
+                    self.mark_dirty();
+                    return;
+                }
+                Key::Character("u") => {
+                    if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+                        epub.markdown
+                            .scroll_cursor_by_content_pixels(-(viewport * 0.5), viewport);
+                        epub.capture_location();
+                    }
+                    self.mark_dirty();
+                    return;
+                }
+                _ => return,
+            }
+        }
+
+        let Some(ch) = (plain && matches!(key.logical_key.as_ref(), Key::Character(_)))
+            .then(|| match key.logical_key.as_ref() {
+                Key::Character(value) => value.chars().next(),
+                _ => None,
+            })
+            .flatten()
+        else {
+            return;
+        };
+        let mut yank_message = None;
+        let mut handled = false;
+        if let Some(epub) = self.context_manager.current_mut().epub.as_mut() {
+            let visual = matches!(
+                epub.markdown.mode,
+                neoism_ui::editor::markdown::MarkdownMode::Visual
+            );
+            match epub.markdown.vim.feed(ch, visual) {
+                VimKeyFeed::Pending | VimKeyFeed::Cancelled => handled = true,
+                VimKeyFeed::Unhandled => {}
+                VimKeyFeed::Action(action) => {
+                    // Reader whitelist: motions, visual selection, yanks,
+                    // search navigation, marks and jumplist are safe. Every
+                    // editing action is consumed without touching book text.
+                    let reader_safe = matches!(
+                        action,
+                        VimAction::Move { .. }
+                            | VimAction::EnterVisual { .. }
+                            | VimAction::VisualSwapEnds
+                            | VimAction::VisualTextObject { .. }
+                            | VimAction::Search { .. }
+                            | VimAction::SearchWord { .. }
+                            | VimAction::SetMark { .. }
+                            | VimAction::GotoMark { .. }
+                            | VimAction::JumpBack { .. }
+                            | VimAction::JumpForward { .. }
+                            | VimAction::Operate {
+                                op: VimOperator::Yank,
+                                ..
+                            }
+                    );
+                    if reader_safe {
+                        let applied = epub.markdown.apply_vim_action(&action, None);
+                        handled = applied.handled;
+                        if let Some(register) = applied.register {
+                            if applied.sync_clipboard {
+                                clipboard.set(ClipboardType::Clipboard, register.clone());
+                            }
+                            if applied.yank_notification {
+                                yank_message =
+                                    Some(Self::markdown_yank_message(&register));
+                            }
+                        }
+                    } else {
+                        handled = true;
+                        epub.markdown.vim.clear_pending();
+                    }
+                }
+            }
+            epub.capture_location();
+        }
+        if let Some(message) = yank_message {
+            self.renderer.notifications.push(
+                message,
+                neoism_ui::panels::notifications::NotificationLevel::Info,
+            );
+        }
+        if handled {
+            self.renderer.trail_cursor.reset();
+            self.mark_dirty();
+        }
+    }
+
     pub(crate) fn markdown_yank_message(text: &str) -> String {
         let count = if text.is_empty() {
             0
@@ -1059,7 +1501,7 @@ impl Screen<'_> {
                 }
                 self.renderer.buffer_tabs.open_markdown(path.clone());
                 self.renderer.file_tree.set_active_path(Some(path.clone()));
-                self.activate_markdown_path(path.clone());
+                self.activate_rich_document_path(path.clone());
             }
             crate::host::StripRef::Pane(dest_route) => {
                 let target_route = if let Some(route) = markdown_route {
@@ -1158,23 +1600,19 @@ impl Screen<'_> {
     ) -> Option<usize> {
         let grid = self.context_manager.current_grid();
         let node = grid.node_by_route_id(strip_route)?;
-        if grid.contexts().get(&node).is_some_and(|item| {
-            item.context()
-                .markdown
-                .as_ref()
-                .is_some_and(|pane| pane.path.as_path() == path)
-        }) {
+        if grid
+            .contexts()
+            .get(&node)
+            .is_some_and(|item| context_has_rich_document_path(item.context(), path))
+        {
             return Some(strip_route);
         }
         grid.stacked_children_of(node)
             .into_iter()
             .find_map(|child| {
                 grid.contexts().get(&child).and_then(|item| {
-                    item.context()
-                        .markdown
-                        .as_ref()
-                        .filter(|pane| pane.path.as_path() == path)
-                        .map(|_| item.context().route_id)
+                    context_has_rich_document_path(item.context(), path)
+                        .then_some(item.context().route_id)
                 })
             })
     }
@@ -1191,9 +1629,19 @@ impl Screen<'_> {
                 .workspace_route_id()
                 .and_then(|route| self.pane_markdown_route_for_strip(route, path))
                 .or_else(|| {
-                    self.context_manager
-                        .markdown_node_by_path(path)
-                        .map(|(route, _)| route)
+                    if crate::editor::notebook::is_notebook_path(path) {
+                        self.context_manager
+                            .notebook_node_by_path(path)
+                            .map(|(route, _)| route)
+                    } else if crate::screen::bridges::epub::is_epub_path(path) {
+                        self.context_manager
+                            .epub_node_by_path(path)
+                            .map(|(route, _)| route)
+                    } else {
+                        self.context_manager
+                            .markdown_node_by_path(path)
+                            .map(|(route, _)| route)
+                    }
                 }),
             crate::host::StripRef::Pane(route) => {
                 self.pane_markdown_route_for_strip(route, path)
@@ -1223,12 +1671,28 @@ impl Screen<'_> {
         let _ = self.sugarloaf.text(Some(rich_text_id));
         self.sugarloaf
             .set_position(rich_text_id, padding_x, padding_y_top);
-        self.context_manager.add_stacked_markdown_on_route(
-            path.to_path_buf(),
-            strip_route,
-            rich_text_id,
-            &mut self.sugarloaf,
-        )
+        if crate::editor::notebook::is_notebook_path(path) {
+            self.context_manager.add_stacked_notebook_on_route(
+                path.to_path_buf(),
+                strip_route,
+                rich_text_id,
+                &mut self.sugarloaf,
+            )
+        } else if crate::screen::bridges::epub::is_epub_path(path) {
+            self.context_manager.add_stacked_epub_on_route(
+                path.to_path_buf(),
+                strip_route,
+                rich_text_id,
+                &mut self.sugarloaf,
+            )
+        } else {
+            self.context_manager.add_stacked_markdown_on_route(
+                path.to_path_buf(),
+                strip_route,
+                rich_text_id,
+                &mut self.sugarloaf,
+            )
+        }
     }
 
     pub(crate) fn tear_out_markdown_tab_to_pane(
@@ -1242,7 +1706,7 @@ impl Screen<'_> {
         if markdown_route.is_none() {
             markdown_route = match source {
                 crate::host::StripRef::Workspace => {
-                    self.activate_markdown_path(path.clone());
+                    self.activate_rich_document_path(path.clone());
                     self.markdown_route_for_strip(source, &path)
                 }
                 crate::host::StripRef::Pane(route) => {
@@ -1300,4 +1764,22 @@ impl Screen<'_> {
         }
         self.reapply_chrome_layout();
     }
+}
+
+fn context_has_rich_document_path<T: neoism_backend::event::EventListener>(
+    context: &crate::context::Context<T>,
+    path: &Path,
+) -> bool {
+    context
+        .markdown
+        .as_ref()
+        .is_some_and(|pane| pane.path.as_path() == path)
+        || context
+            .notebook
+            .as_ref()
+            .is_some_and(|pane| pane.path.as_path() == path)
+        || context
+            .epub
+            .as_ref()
+            .is_some_and(|pane| pane.book.path.as_path() == path)
 }

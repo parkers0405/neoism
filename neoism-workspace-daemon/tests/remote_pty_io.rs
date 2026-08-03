@@ -32,12 +32,12 @@
 //!
 //! Protocol gotchas worth recording (learned from `src/server.rs`):
 //!
-//!   * PTY frames are **bare** top-level JSON — `ClientMessage` /
-//!     `ServerMessage` from `neoism_protocol::pty`. They are NOT wrapped
-//!     in the `{ "Workspace": { request_id, message } }` service
-//!     envelope that files/git/workspace traffic uses. `handle_socket`
-//!     tries `serde_json::from_str::<pty::ClientMessage>` first, so a
-//!     raw `{ "PtyInput": { ... } }` matches directly.
+//!   * Live PTY output remains **bare** top-level `ServerMessage` JSON so
+//!     every attached client can observe it. Control requests may use the
+//!     correlated `{ "Pty": { request_id, message } }` envelope; their
+//!     direct response is `{ "PtyReply": { request_id, message } }` and is
+//!     sent only to the requester. Bare PTY requests remain supported for
+//!     older clients.
 //!   * Output is correlated to a session id only via the `session_id`
 //!     field carried *inside* each `PtyOutput` / `PtyCreated` /
 //!     `PtyClosed` frame. There is no per-socket multiplexing: every
@@ -134,6 +134,62 @@ async fn send_pty(ws: &mut WsClient, message: &PtyClientMessage) {
     ws.send(Message::Text(payload))
         .await
         .expect("send pty websocket frame");
+}
+
+/// Send a requester-correlated PTY control message. Desktop clients use this
+/// for session creation so two sockets cannot race over an unowned global
+/// `PtyCreated` broadcast.
+async fn send_correlated_pty(
+    ws: &mut WsClient,
+    request_id: u64,
+    message: &PtyClientMessage,
+) {
+    let payload = serde_json::json!({
+        "Pty": {
+            "request_id": request_id,
+            "message": message,
+        }
+    });
+    ws.send(Message::Text(payload.to_string()))
+        .await
+        .expect("send correlated pty websocket frame");
+}
+
+/// Skip unsolicited pushes and live output until the matching correlated PTY
+/// reply arrives.
+async fn recv_correlated_pty_reply(
+    ws: &mut WsClient,
+    expected_request_id: u64,
+    timeout: Duration,
+) -> Option<PtyServerMessage> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            return None;
+        }
+        let frame = tokio::time::timeout(remaining, ws.next()).await.ok()??;
+        let text = match frame {
+            Ok(Message::Text(text)) => text,
+            Ok(Message::Binary(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
+            Ok(Message::Close(_)) | Ok(Message::Frame(_)) | Err(_) => return None,
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(reply) = value.get("PtyReply") else {
+            continue;
+        };
+        if reply.get("request_id").and_then(serde_json::Value::as_u64)
+            != Some(expected_request_id)
+        {
+            continue;
+        }
+        return serde_json::from_value(reply.get("message")?.clone()).ok();
+    }
 }
 
 /// Read the next frame that parses as a bare PTY `ServerMessage`,
@@ -247,7 +303,9 @@ async fn recv_marker_for_session(
                     "SessionCwd must carry the same shared session id as PTY output"
                 );
             }
-            PtyServerMessage::PtyClosed { .. } | PtyServerMessage::Error { .. } => {}
+            PtyServerMessage::Ack
+            | PtyServerMessage::PtyClosed { .. }
+            | PtyServerMessage::Error { .. } => {}
         }
     }
 }
@@ -330,8 +388,90 @@ impl Drop for Daemon {
 }
 
 // ---------------------------------------------------------------------
-// The test
+// The tests
 // ---------------------------------------------------------------------
+
+/// Creating a PTY is a requester-owned transaction. Before request ids were
+/// carried across the wire, `PtyCreated` was broadcast globally and desktop
+/// clients assigned it to whichever pending route happened to be first. Two
+/// simultaneous users could consequently type into each other's shells.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn correlated_create_is_acknowledged_only_to_requester() {
+    let _g = EnvGuard::new(&[
+        ("NEOISM_REQUIRE_AUTH", None),
+        ("NEOISM_DAEMON_TOKEN", None),
+        ("SHELL", Some("/bin/sh")),
+    ]);
+    let daemon = Daemon::spawn().await;
+    let mut client_a = connect_client(daemon.addr).await;
+    let mut client_b = connect_client(daemon.addr).await;
+
+    const REQUEST_ID: u64 = 7_031;
+    send_correlated_pty(
+        &mut client_a,
+        REQUEST_ID,
+        &PtyClientMessage::CreatePty {
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            shell: Some("/bin/sh".into()),
+        },
+    )
+    .await;
+
+    let reply =
+        recv_correlated_pty_reply(&mut client_a, REQUEST_ID, Duration::from_secs(5))
+            .await
+            .expect("requester receives its correlated PTY creation reply");
+    let session_id = match reply {
+        PtyServerMessage::PtyCreated { session_id, .. } => session_id,
+        other => panic!("expected PtyCreated reply, got {other:?}"),
+    };
+
+    const RESIZE_REQUEST_ID: u64 = REQUEST_ID + 1;
+    send_correlated_pty(
+        &mut client_a,
+        RESIZE_REQUEST_ID,
+        &PtyClientMessage::Resize {
+            session_id: session_id.clone(),
+            cols: 96,
+            rows: 30,
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_correlated_pty_reply(
+            &mut client_a,
+            RESIZE_REQUEST_ID,
+            Duration::from_secs(5)
+        )
+        .await,
+        Some(PtyServerMessage::Ack)
+    ));
+
+    // The other already-connected socket may see live shell output, but it
+    // must never receive a creation event it could mistake for its own.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(350);
+    while let Some(remaining) =
+        deadline.checked_duration_since(tokio::time::Instant::now())
+    {
+        if remaining.is_zero() {
+            break;
+        }
+        let Some(message) = recv_pty_timeout(&mut client_b, remaining).await else {
+            break;
+        };
+        assert!(
+            !matches!(message, PtyServerMessage::PtyCreated { .. }),
+            "a PTY creation acknowledgment leaked to a non-requesting client"
+        );
+    }
+
+    send_pty(&mut client_a, &PtyClientMessage::ClosePty { session_id }).await;
+    close(client_a).await;
+    close(client_b).await;
+}
 
 /// Two independent websocket clients, one daemon, one live PTY.
 ///

@@ -399,13 +399,6 @@ impl<A: Copy> BufferTabs<A> {
             } else {
                 theme.u8(theme.muted)
             };
-            let title_opts = DrawOpts {
-                font_size: tab_font_size,
-                color: title_color,
-                clip_rect: Some(strip_clip),
-                ..DrawOpts::default()
-            };
-
             let icon_size = consts::ICON_FONT_SIZE * scale * hover_scale;
             let icon_gap = consts::ICON_GAP * scale;
             let is_terminal = tab.is_terminal();
@@ -489,9 +482,17 @@ impl<A: Copy> BufferTabs<A> {
             } else {
                 close_size + close_gap
             };
-            let title_max_width =
-                (tab_width - tab_pad_x * 2.0 - close_reserved - icon_w - icon_gap)
-                    .max(0.0);
+            // A font's visual glyph bounds can extend a few pixels beyond its
+            // measured advance (Monocraft is a common example). Keep that
+            // overhang out of the close button and trailing + slot.
+            let title_overhang_guard = 5.0 * scale;
+            let title_max_width = (tab_width
+                - tab_pad_x * 2.0
+                - close_reserved
+                - icon_w
+                - icon_gap
+                - title_overhang_guard)
+                .max(0.0);
 
             let attrs = Attributes::default();
             let title = Self::fit_title(&tab.title, title_max_width, |c| {
@@ -500,6 +501,19 @@ impl<A: Copy> BufferTabs<A> {
 
             let text_x = icon_x + icon_w + icon_gap;
             let text_y = y_top + (strip_h - tab_font_size) / 2.0;
+            let title_clip_left = text_x.max(strip_left);
+            let title_clip_right = (text_x + title_max_width).min(strip_right);
+            let title_opts = DrawOpts {
+                font_size: tab_font_size,
+                color: title_color,
+                clip_rect: Some([
+                    title_clip_left,
+                    y_top,
+                    (title_clip_right - title_clip_left).max(0.0),
+                    strip_h,
+                ]),
+                ..DrawOpts::default()
+            };
 
             if agent_for_tab.is_none() {
                 draw_text_with_occlusion(

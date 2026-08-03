@@ -680,6 +680,8 @@ pub(crate) fn session_leaf_spec_for_grid_item<T: EventListener>(
         SessionLeafKind::Custom("markdown".to_string())
     } else if context.notebook.is_some() {
         SessionLeafKind::Custom("notebook".to_string())
+    } else if context.epub.is_some() {
+        SessionLeafKind::Custom("epub".to_string())
     } else if context.draw.is_some() {
         SessionLeafKind::Custom("draw".to_string())
     } else if context.neoism_tags.is_some() {

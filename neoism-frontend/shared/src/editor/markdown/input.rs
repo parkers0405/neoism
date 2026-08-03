@@ -268,6 +268,15 @@ impl MarkdownPane {
         if self.cursor_col == 0 && self.cursor_line == 0 {
             return;
         }
+        if self.cursor_col == 0
+            && self.cursor_line > 0
+            && self
+                .lines
+                .get(self.cursor_line - 1)
+                .is_some_and(|line| is_notebook_cell_anchor_line(line))
+        {
+            return;
+        }
         if self.backspace_table_boundary() {
             return;
         }
@@ -308,6 +317,14 @@ impl MarkdownPane {
         self.clear_vertical_goal();
         self.clamp_cursor();
         if self.delete_table_boundary() {
+            return;
+        }
+        if self.cursor_col >= self.lines[self.cursor_line].len()
+            && self
+                .lines
+                .get(self.cursor_line + 1)
+                .is_some_and(|line| is_notebook_cell_anchor_line(line))
+        {
             return;
         }
         if self.cursor_col >= self.lines[self.cursor_line].len()

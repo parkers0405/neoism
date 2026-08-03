@@ -32,7 +32,7 @@ fn collect_visible_items(pane: &mut MarkdownPane) -> Vec<VirtualMarkdownDrawItem
         let line_count = content
             .map(|content| content.line_count as usize)
             .unwrap_or_else(|| text.lines().count().max(1));
-        items.push(VirtualMarkdownDrawItem {
+        let item = VirtualMarkdownDrawItem {
             node: node.id,
             revision: node.revision,
             kind: node.kind.clone(),
@@ -43,7 +43,15 @@ fn collect_visible_items(pane: &mut MarkdownPane) -> Vec<VirtualMarkdownDrawItem
             line_count,
             text,
             measured_layout,
-        });
+        };
+        items.push(item);
+    }
+    for item in &mut items {
+        if item.measured_layout {
+            item.bounds.height = (item.bounds.height
+                - notebook_cell_bottom_gap(pane, item.first_line, item.line_count))
+            .max(1.0);
+        }
     }
     items
 }

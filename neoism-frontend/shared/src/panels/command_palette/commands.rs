@@ -27,6 +27,8 @@ pub(crate) enum CommandService {
     Code,
     /// Markdown-note commands.
     Markdown,
+    /// Read-only EPUB reader commands.
+    Epub,
     /// Jupyter-compatible notebook commands.
     Notebook,
     /// `.neodraw` sketch commands.
@@ -49,6 +51,7 @@ impl CommandService {
             CommandService::Neoism => "neoism",
             CommandService::Code => "code",
             CommandService::Markdown => "markdown",
+            CommandService::Epub => "epub",
             CommandService::Notebook => "notebook",
             CommandService::Draw => "draw",
             CommandService::Agent => "neoism-agent",
@@ -69,6 +72,7 @@ impl CommandService {
             "neoism" => Some(CommandService::Neoism),
             "code" => Some(CommandService::Code),
             "markdown" => Some(CommandService::Markdown),
+            "epub" => Some(CommandService::Epub),
             "notebook" => Some(CommandService::Notebook),
             "draw" => Some(CommandService::Draw),
             "neoism-agent" => Some(CommandService::Agent),
@@ -87,6 +91,7 @@ impl CommandService {
             CommandService::Neoism => "\u{f0c9}",
             CommandService::Code => "\u{f121}",
             CommandService::Markdown => "\u{f15c}",
+            CommandService::Epub => "\u{f02d}",
             CommandService::Notebook => "\u{f02d}",
             CommandService::Draw => "\u{f303}",
             CommandService::Agent => "\u{f135}",
@@ -103,6 +108,7 @@ impl CommandService {
             CommandService::Neoism => "palette.neoism",
             CommandService::Code => "palette.code",
             CommandService::Markdown => "palette.markdown",
+            CommandService::Epub => "palette.epub",
             CommandService::Notebook => "palette.notebook",
             CommandService::Draw => "palette.draw",
             CommandService::Agent => "palette.neoism-agent",
@@ -474,6 +480,12 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Markdown,
     },
     Command {
+        title: "Table of Contents",
+        shortcut: "book chapters toc",
+        action: PaletteAction::OpenEpubTableOfContents,
+        service: CommandService::Epub,
+    },
+    Command {
         title: "Hover Documentation",
         shortcut: "K",
         action: PaletteAction::LspHover,
@@ -628,6 +640,7 @@ pub(crate) const EX_COMMANDS: &[(&str, &str)] = &[
     ("restartkernel", "notebook"),
     ("Search Files", "<leader>ff"),
     ("Search Words", "<leader>fw"),
+    ("Search Git Changes", "<leader>fg"),
     ("terminal", "open term"),
     ("tree", "file tree"),
     ("claude", "agent"),

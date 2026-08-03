@@ -99,8 +99,8 @@ fn running_background_task_count_tracks_started_and_collected_jobs() {
     let mut pane = NeoismAgentPane::default();
     let mut started = NeoismAgentMessage::tool(
         "Background Task",
-        "job_id: job-1\nstatus: running\ncommand: cargo build",
-        "running",
+        "job_id: job-1 (use this with background_task_result)\nstatus: running\ncommand: cargo build",
+        "completed",
         "background_task",
         NeoismAgentOutputKind::Text,
         "text",
@@ -123,6 +123,25 @@ fn running_background_task_count_tracks_started_and_collected_jobs() {
         pane.active_background_task_summaries(),
         vec!["job-1 · running · cargo build".to_string()]
     );
+    let mut running_result = NeoismAgentMessage::tool(
+        "Background Task Result",
+        "job_id: job-1\nstatus: running",
+        "completed",
+        "background_task_result",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    running_result.detail = running_result.text.clone();
+    pane.messages.push(running_result);
+    pane.ensure_background_task_activity_clock();
+
+    assert_eq!(pane.running_background_task_count(), 1);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::BackgroundTasks
+    );
+
     let mut result = NeoismAgentMessage::tool(
         "Background Task Result",
         "job_id: job-1\nstatus: completed",
@@ -170,7 +189,7 @@ fn runtime_background_finish_notice_clears_running_job() {
     let mut started = NeoismAgentMessage::tool(
         "Background Task",
         "job_id: job-1\nstatus: running\ncommand: cargo build",
-        "running",
+        "completed",
         "background_task",
         NeoismAgentOutputKind::Text,
         "text",

@@ -320,6 +320,7 @@ impl Screen<'_> {
         match result {
             Ok(()) => {
                 self.renderer.modal.close();
+                self.rebind_current_epub_path(&path, target.clone());
                 let label = self.file_tree_display_path(&target);
                 self.refresh_note_graph_after_rename(&path, &target);
                 self.refresh_file_tree_entries();
@@ -379,6 +380,7 @@ impl Screen<'_> {
         }
         match fs::rename(&source, &target) {
             Ok(()) => {
+                self.rebind_current_epub_path(&source, target.clone());
                 let label = self.file_tree_display_path(&target);
                 self.refresh_note_graph_after_rename(&source, &target);
                 self.refresh_file_tree_entries();

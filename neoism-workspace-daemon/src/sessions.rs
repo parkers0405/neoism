@@ -283,10 +283,11 @@ impl SessionRegistry {
             );
         });
 
-        let _ = self.output_tx.send(ServerMessage::PtyCreated {
-            session_id: session_id.clone(),
-            workspace_root: workspace_root.clone(),
-        });
+        // Creation belongs only to the requesting client. Broadcasting this
+        // control reply let another client with a pending terminal consume
+        // the session id and bind its input to the wrong shell. Live output
+        // remains broadcast by `reader_loop`, and late explicit attaches use
+        // `backlog_messages` / `AttachPty`.
         vec![ServerMessage::PtyCreated {
             session_id,
             workspace_root,

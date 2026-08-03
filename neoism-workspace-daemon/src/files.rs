@@ -13,6 +13,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use futures::{stream, StreamExt};
 use neoism_protocol::files::{
     DirEntry, FilesClientMessage, FilesServerMessage, TreeEntry,
 };
@@ -296,25 +297,36 @@ async fn list_dir(root: &Path, rel: String) -> Vec<FilesServerMessage> {
         Err(e) => return err(format!("read_dir {rel}: {e}")),
     };
 
-    let mut entries = Vec::new();
+    let mut raw_entries = Vec::new();
     loop {
         match read_dir.next_entry().await {
-            Ok(Some(entry)) => {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let (is_dir, size) = match entry.metadata().await {
-                    Ok(md) => {
-                        let is_dir = md.is_dir();
-                        let size = if md.is_file() { Some(md.len()) } else { None };
-                        (is_dir, size)
-                    }
-                    Err(_) => (false, None),
-                };
-                entries.push(DirEntry { name, is_dir, size });
-            }
+            Ok(Some(entry)) => raw_entries.push(entry),
             Ok(None) => break,
             Err(e) => return err(format!("read_dir {rel}: {e}")),
         }
     }
+
+    // Metadata used to be awaited serially for every child. A directory with
+    // hundreds of entries therefore multiplied filesystem latency before a
+    // joined client could paint even one row. Keep the wire contract (file
+    // sizes are still populated), but resolve a bounded batch concurrently.
+    const METADATA_CONCURRENCY: usize = 32;
+    let mut entries = stream::iter(raw_entries)
+        .map(|entry| async move {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let (is_dir, size) = match entry.metadata().await {
+                Ok(md) => {
+                    let is_dir = md.is_dir();
+                    let size = md.is_file().then(|| md.len());
+                    (is_dir, size)
+                }
+                Err(_) => (false, None),
+            };
+            DirEntry { name, is_dir, size }
+        })
+        .buffer_unordered(METADATA_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
 
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     vec![FilesServerMessage::DirListing { path: rel, entries }]

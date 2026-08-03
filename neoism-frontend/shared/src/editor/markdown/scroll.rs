@@ -4,6 +4,16 @@ use super::helpers::*;
 use super::types::*;
 
 impl MarkdownPane {
+    pub fn restore_scroll_position(&mut self, scroll_y: f32) {
+        let scroll_y = scroll_y.max(0.0);
+        self.scroll_y = scroll_y;
+        self.target_scroll_y = scroll_y;
+        self.scroll_velocity_px_s = 0.0;
+        self.scroll_velocity_moves_cursor = false;
+        self.scroll_last_tick_at = None;
+        self.follow_cursor = false;
+    }
+
     /// Mouse wheel over the "On this page" outline panel: scroll the
     /// outline list itself instead of the document. Returns true when the
     /// pointer was inside the panel and the wheel was consumed.
@@ -69,6 +79,15 @@ impl MarkdownPane {
             self.scroll_last_tick_at = None;
         }
         self.follow_cursor = false;
+    }
+
+    /// Move a paged, read-only viewport and report whether content moved.
+    /// Readers use the boundary result to roll into the adjacent chapter.
+    pub fn turn_reader_page(&mut self, direction: i8, viewport_height: f32) -> bool {
+        let before = self.target_scroll_y;
+        let amount = viewport_height.max(1.0) * 0.88 * f32::from(direction.signum());
+        self.scroll_cursor_by_content_pixels(amount, viewport_height);
+        (self.target_scroll_y - before).abs() > 0.01
     }
 
     pub fn scroll_by_content_pixels(&mut self, delta_pixels: f32, viewport_height: f32) {

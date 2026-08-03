@@ -23,6 +23,7 @@ fn virtual_markdown_kind_tag(kind: &VirtualNodeKind) -> u8 {
         VirtualNodeKind::CodeBlock => 2,
         VirtualNodeKind::Table => 3,
         VirtualNodeKind::MarkdownBlock => 4,
+        VirtualNodeKind::Custom(name) if name == "notebook-cell" => 5,
         _ => 255,
     }
 }
@@ -136,6 +137,8 @@ mod tests {
             block_wrap_hit_stops: std::collections::HashMap::new(),
             pending_line_edit: None,
             mode: MarkdownMode::Normal,
+            read_only: false,
+            reader_footer: None,
             vim_enabled: true,
             cursor_line: 1,
             cursor_col: 5,
@@ -170,6 +173,7 @@ mod tests {
             table_scroll_x: HashMap::new(),
             task_toggle_animations: HashMap::new(),
             yank_flashes: Vec::new(),
+            reader_highlights: Vec::new(),
             enter_continuation_lines: HashSet::new(),
             hovered_line: None,
             dragging_line: None,

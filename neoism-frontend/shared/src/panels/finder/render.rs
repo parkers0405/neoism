@@ -3,15 +3,15 @@
 // (file load + line-by-line render with the lightweight syntax
 // highlighter), plus the small animation tick helpers.
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 use web_time::Instant;
 
 use super::modes::FinderMode;
 use super::state::{
-    Finder, CARET_BLINK_MS, CARET_WIDTH, COLUMN_DIVIDER_WIDTH, CURSOR_ANIMATION_LENGTH,
-    DEPTH_BG, DEPTH_ELEMENT, FINDER_HEIGHT, FINDER_MARGIN_TOP, FINDER_PADDING,
-    FINDER_RADIUS, INPUT_FONT_SIZE, INPUT_HEIGHT, INPUT_PADDING_X, LEFT_COL_RATIO,
+    CARET_BLINK_MS, CARET_WIDTH, COLUMN_DIVIDER_WIDTH, CURSOR_ANIMATION_LENGTH, DEPTH_BG,
+    DEPTH_ELEMENT, FINDER_HEIGHT, FINDER_MARGIN_TOP, FINDER_PADDING, FINDER_RADIUS,
+    Finder, INPUT_FONT_SIZE, INPUT_HEIGHT, INPUT_PADDING_X, LEFT_COL_RATIO,
     LIST_SCROLL_ANIMATION_LENGTH, OPEN_POP_MS, ORDER, PREVIEW_FONT_SIZE,
     PREVIEW_LINE_HEIGHT, PREVIEW_MAX_LINES, PREVIEW_PADDING,
     PREVIEW_SCROLL_ANIMATION_LENGTH, RESULT_FONT_SIZE, RESULT_ITEM_HEIGHT,
@@ -22,9 +22,9 @@ use crate::animation::{ease_out_back, ease_out_cubic};
 use crate::panels::file_tree::{self, icons::icon_for_file};
 use crate::primitives::geom::snap_to_device_px;
 use crate::primitives::text::truncate_to_fit;
-use crate::primitives::IdeTheme;
+use crate::primitives::{IdeTheme, draw_overlay_icon_centered};
 use crate::services::{FilesService, SearchService};
-use crate::syntax::{highlight_line, syn_color, Lang};
+use crate::syntax::{Lang, highlight_line, syn_color};
 
 #[allow(clippy::too_many_arguments)]
 fn draw_modal_frame_top(
@@ -462,7 +462,7 @@ impl Finder {
                 continue;
             }
             let baseline = item_y + (row_h - row_font) / 2.0;
-            let icon_y = item_y + (row_h - icon_font) / 2.0;
+            let icon_slot = icon_font;
             // Width budget — left column minus the row's left padding.
             // Anything wider than this needs to be truncated with `…`
             // so it doesn't spill into the divider / preview pane.
@@ -490,9 +490,15 @@ impl Finder {
                         ..DrawOpts::default()
                     };
                     let icon_x = inner_x + input_pad_x;
-                    let icon_w = sugarloaf
-                        .overlay_text_mut()
-                        .draw(icon_x, icon_y, icon_glyph, &icon_opts);
+                    draw_overlay_icon_centered(
+                        sugarloaf,
+                        icon_x,
+                        [icon_x, item_y, icon_slot, row_h],
+                        icon_glyph,
+                        &icon_opts,
+                        true,
+                    );
+                    let icon_w = icon_slot;
                     let cursor_x = icon_x + icon_w + icon_gap;
                     let text_w = (available_w - icon_w - icon_gap).max(0.0);
                     let name_w =
@@ -537,9 +543,15 @@ impl Finder {
                         ..DrawOpts::default()
                     };
                     let icon_x = inner_x + input_pad_x;
-                    let icon_w = sugarloaf
-                        .overlay_text_mut()
-                        .draw(icon_x, icon_y, icon_glyph, &icon_opts);
+                    draw_overlay_icon_centered(
+                        sugarloaf,
+                        icon_x,
+                        [icon_x, item_y, icon_slot, row_h],
+                        icon_glyph,
+                        &icon_opts,
+                        true,
+                    );
+                    let icon_w = icon_slot;
                     // file:line  text — header fixed, body fills the rest.
                     let header = format!("{}:{}", short_path(&g.path), g.line);
                     let header_opts = DrawOpts {
@@ -637,9 +649,15 @@ impl Finder {
                         ..DrawOpts::default()
                     };
                     let icon_x = inner_x + input_pad_x;
-                    let icon_w = sugarloaf
-                        .overlay_text_mut()
-                        .draw(icon_x, icon_y, icon_glyph, &icon_opts);
+                    draw_overlay_icon_centered(
+                        sugarloaf,
+                        icon_x,
+                        [icon_x, item_y, icon_slot, row_h],
+                        icon_glyph,
+                        &icon_opts,
+                        true,
+                    );
+                    let icon_w = icon_slot;
                     let cursor_x = icon_x + icon_w + icon_gap;
                     let text_w = (available_w - icon_w - icon_gap).max(0.0);
                     let line_text = format!("  {}", s.line);
@@ -668,9 +686,15 @@ impl Finder {
                         ..DrawOpts::default()
                     };
                     let icon_x = inner_x + input_pad_x;
-                    let icon_w = sugarloaf
-                        .overlay_text_mut()
-                        .draw(icon_x, icon_y, icon_glyph, &icon_opts);
+                    draw_overlay_icon_centered(
+                        sugarloaf,
+                        icon_x,
+                        [icon_x, item_y, icon_slot, row_h],
+                        icon_glyph,
+                        &icon_opts,
+                        true,
+                    );
+                    let icon_w = icon_slot;
                     let marker_opts = DrawOpts {
                         font_size: row_font,
                         color: g.status.color(theme),

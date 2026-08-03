@@ -1,5 +1,35 @@
 use super::*;
 
+/// Return the visual centre of the first rasterized glyph emitted by a
+/// title draw, in logical pixels.
+///
+/// `Text::draw` accepts the top of a nominal font-size box, but the visible
+/// ink starts at `pos.y + bearing_y` and has its own height.  PNG-backed tab
+/// icons have no font baseline, so centering their square against the
+/// nominal box makes them drift when the active font has unusual ascent /
+/// descent metrics.  Agent titles begin with a capital letter; aligning the
+/// logo square with that first glyph gives us a stable cap-height centre and
+/// avoids descenders later in the title (the `g` in "Agent") pulling the
+/// logo down.
+pub(super) fn first_glyph_ink_center_y(
+    instances: &[sugarloaf::text::TextInstance],
+    first_title_instance: usize,
+    scale_factor: f32,
+) -> Option<f32> {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return None;
+    }
+
+    instances
+        .get(first_title_instance..)?
+        .iter()
+        .find(|instance| instance.glyph_size[1] > 0)
+        .map(|instance| {
+            let ink_top = instance.pos[1] + f32::from(instance.bearings[1]);
+            (ink_top + instance.glyph_size[1] as f32 * 0.5) / scale_factor
+        })
+}
+
 impl<A: Copy> BufferTabs<A> {
     /// Draw the strip with the rich `IdeTheme` palette. `x_left` /
     /// `y_top` are the strip's top-left corner — the file tree pushes
@@ -460,7 +490,6 @@ impl<A: Copy> BufferTabs<A> {
             };
 
             let icon_x = tab_x + tab_pad_x;
-            let icon_y = y_top + (strip_h - icon_size) / 2.0;
             // Reserve at least a full `icon_size` glyph box for every
             // icon. Many Nerd Font glyphs (the agent rocket, the Python
             // icon, etc.) have a measured advance narrower than their
@@ -516,15 +545,17 @@ impl<A: Copy> BufferTabs<A> {
             };
 
             if agent_for_tab.is_none() {
-                draw_text_with_occlusion(
+                draw_icon_centered_with_occlusion(
                     sugarloaf,
                     icon_x,
-                    icon_y,
+                    [icon_x, y_top, icon_w, strip_h],
                     icon_glyph,
                     &icon_opts,
                     occlusion_rects,
+                    true,
                 );
             }
+            let first_title_instance = sugarloaf.text_mut().instances().len();
             draw_text_with_occlusion(
                 sugarloaf,
                 text_x,
@@ -534,6 +565,20 @@ impl<A: Copy> BufferTabs<A> {
                 occlusion_rects,
             );
             if let Some(agent) = agent_for_tab {
+                // Unlike Nerd Font glyphs, agent logos are PNG squares and
+                // have no ascent/baseline.  Centre the square on the actual
+                // ink of the title's leading capital instead of the nominal
+                // `font_size` box.  This keeps the logo and label aligned for
+                // fonts whose ascent/descent ratios differ from the default.
+                let text_scale = sugarloaf.scale_factor();
+                let agent_icon_y = first_glyph_ink_center_y(
+                    sugarloaf.text_mut().instances(),
+                    first_title_instance,
+                    text_scale,
+                )
+                .map(|center_y| center_y - icon_size * 0.5)
+                .unwrap_or(y_top + (strip_h - icon_size) * 0.5)
+                .clamp(y_top, (y_top + strip_h - icon_size).max(y_top));
                 let icon_left = icon_x.max(strip_left);
                 let icon_right = (icon_x + icon_size).min(strip_right);
                 if icon_right > icon_left {
@@ -552,14 +597,14 @@ impl<A: Copy> BufferTabs<A> {
                     // occlusion helper — drop them under open modals
                     // so logos don't bleed through the card.
                     let icon_rect =
-                        [icon_left, icon_y, icon_right - icon_left, icon_size];
+                        [icon_left, agent_icon_y, icon_right - icon_left, icon_size];
                     if let Some(provider) = icon_provider {
                         if !rect_occluded(icon_rect, occlusion_rects) {
                             provider.draw_agent_icon(
                                 sugarloaf,
                                 agent,
                                 icon_left,
-                                icon_y,
+                                agent_icon_y,
                                 icon_right - icon_left,
                                 [source_left, 0.0, source_right, 1.0],
                             );
@@ -619,14 +664,14 @@ impl<A: Copy> BufferTabs<A> {
                     ..DrawOpts::default()
                 };
                 let glyph = "×";
-                let w = sugarloaf.text_mut().measure(glyph, &close_opts);
-                draw_text_with_occlusion(
+                draw_icon_centered_with_occlusion(
                     sugarloaf,
-                    close_cx - w / 2.0,
-                    y_top + (strip_h - close_font_size) / 2.0,
+                    close_cx - close_size * 0.5,
+                    [close_cx - close_size * 0.5, y_top, close_size, strip_h],
                     glyph,
                     &close_opts,
                     occlusion_rects,
+                    true,
                 );
             }
         }
@@ -721,14 +766,14 @@ impl<A: Copy> BufferTabs<A> {
                 let new_tab_glyph = crate::primitives::look::icon_override("tab.new")
                     .and_then(|o| o.glyph)
                     .unwrap_or(consts::NEW_TAB_ICON);
-                let gw = sugarloaf.text_mut().measure(new_tab_glyph, &glyph_opts);
-                draw_text_with_occlusion(
+                draw_icon_centered_with_occlusion(
                     sugarloaf,
-                    btn_x + (btn_w - gw) / 2.0,
-                    y_top + (strip_h - glyph_size) / 2.0,
+                    btn_x,
+                    [btn_x, y_top, btn_w, strip_h],
                     new_tab_glyph,
                     &glyph_opts,
                     occlusion_rects,
+                    true,
                 );
             }
 

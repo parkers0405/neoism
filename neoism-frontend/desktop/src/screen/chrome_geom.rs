@@ -11,7 +11,7 @@ fn chrome_layout_repair_required<T: PartialEq>(
 ) -> bool {
     margin_stale || previous.is_some_and(|previous| previous != current)
 }
-use neoism_ui::chrome_policy::{workspace_chrome_margins, WorkspaceChromeMetrics};
+use neoism_ui::chrome_policy::{WorkspaceChromeMetrics, workspace_chrome_margins};
 
 impl Screen<'_> {
     pub fn mark_dirty(&mut self) {
@@ -32,8 +32,39 @@ impl Screen<'_> {
         font_library: &neoism_backend::sugarloaf::font::FontLibrary,
         should_update_font_library: bool,
     ) {
+        let previous_style = self.sugarloaf.style();
+        let grid_text_geometry_changed = should_update_font_library
+            || (previous_style.font_size - config.appearance.fonts.size).abs()
+                > f32::EPSILON
+            || (previous_style.line_height - config.appearance.line_height).abs()
+                > f32::EPSILON;
+
         if should_update_font_library {
             self.sugarloaf.update_font(font_library);
+
+            // Terminal grids own a second font-derived resolver/shaper path
+            // in addition to Sugarloaf's immediate and rich text renderers.
+            self.grid_rasterizer = crate::terminal::grid_emit::GridGlyphRasterizer::new();
+        }
+
+        if grid_text_geometry_changed {
+            // Atlas slots include vertical bearings calculated from cell
+            // height, but the atlas key only includes font and raster size.
+            // Invalidate every panel when family, size, or line-height changes
+            // so old bearings cannot survive under new row geometry.
+            for grid in self.grids.values_mut() {
+                grid.clear_glyph_atlas();
+            }
+            for context_grid in self.context_manager.contexts_mut() {
+                for item in context_grid.contexts_mut().values_mut() {
+                    item.context_mut()
+                        .renderable_content
+                        .pending_update
+                        .set_terminal_damage(
+                            neoism_terminal_core::damage::TerminalDamage::Full,
+                        );
+                }
+            }
         }
         let s = self.sugarloaf.style_mut();
         s.font_size = config.appearance.fonts.size;

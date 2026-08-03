@@ -3,10 +3,10 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::Graphics;
 use crate::font::FontLibrary;
 use crate::layout::{RootStyle, TextLayout};
 use crate::renderer::Renderer;
-use crate::Graphics;
 use crate::{Content, TextDimensions};
 
 pub struct SugarState {
@@ -271,10 +271,11 @@ impl SugarState {
     #[inline]
     pub fn set_fonts(
         &mut self,
-        _font_library: &FontLibrary,
+        font_library: &FontLibrary,
         _advance_brush: &mut Renderer,
     ) {
-        // Simplified - fonts are handled elsewhere in the unified system
+        self.content.set_font_library(font_library);
+        self.compute_dimensions();
     }
 
     #[inline]

@@ -274,26 +274,20 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn execute_apply_config_defaults_command(&mut self) {
-        let Ok(defaults) = fetch_config_defaults(&self.server, self.directory.as_deref())
-        else {
-            return;
-        };
-        if let Some(agent) = defaults.agent {
-            match agent.as_str() {
-                "build" => self.mode = NeoismAgentMode::Build,
-                "plan" => self.mode = NeoismAgentMode::Plan,
-                _ => {}
-            }
-            self.agent = Some(agent);
-        }
-        if let Some(model) = defaults.model {
-            self.model = model;
-        }
-        self.thinking = defaults.thinking;
-        if let Some(visible) = defaults.input_help_visible {
-            self.set_input_help_visible(visible);
-        }
-        self.execute_refresh_model_context_limit_command();
+        let server = self.server.clone();
+        let directory = self.directory.clone();
+        let tx = self.background_tx.clone();
+        std::thread::Builder::new()
+            .name("neoism-agent-config".into())
+            .spawn(move || {
+                if let Ok(defaults) = fetch_config_defaults(&server, directory.as_deref())
+                {
+                    let _ = tx.send(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(
+                        defaults,
+                    ));
+                }
+            })
+            .ok();
     }
 
     pub fn cursor_rect(&self) -> Option<[f32; 4]> {

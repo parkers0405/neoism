@@ -516,6 +516,12 @@ impl NeoismAgentPane {
     pub fn apply_model(&mut self, value: String) {
         self.remember_model_value(&value);
         self.set_model_local(value.clone());
+        if !value.trim().is_empty() {
+            self.push_outbound(OutboundAgentCommand::PersistConfigChoice {
+                model: Some(value.clone()),
+                thinking: None,
+            });
+        }
         if let Some(session_id) = self.session_id.clone() {
             self.push_outbound(OutboundAgentCommand::ApplyModel {
                 session_id,
@@ -586,6 +592,12 @@ impl NeoismAgentPane {
 
     pub fn apply_thinking(&mut self, value: String) {
         let thinking = self.set_thinking_local(value);
+        if thinking.is_some() {
+            self.push_outbound(OutboundAgentCommand::PersistConfigChoice {
+                model: None,
+                thinking: thinking.clone(),
+            });
+        }
         if let Some(session_id) = self.session_id.clone() {
             self.push_outbound(OutboundAgentCommand::ApplyThinking {
                 session_id,

@@ -9,11 +9,11 @@
 use std::cell::RefCell;
 use std::path::Path;
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
 use crate::panels::file_tree::icons::icon_for_file;
-use crate::primitives::{truncate_to_fit, IdeTheme};
+use crate::primitives::{IdeTheme, truncate_to_fit};
 
 // Folder glyph (Devicons U+F07B closed folder) drawn before each
 // non-leaf segment so the breadcrumb reads as "directory ▸ directory ▸
@@ -23,7 +23,6 @@ use crate::primitives::{truncate_to_fit, IdeTheme};
 const FOLDER_GLYPH: &str = "\u{f07b}";
 const ICON_FONT_SIZE: f32 = 12.0;
 const ICON_GAP: f32 = 10.0;
-const ICON_BASELINE_LIFT: f32 = 1.5;
 
 pub const BREADCRUMBS_HEIGHT: f32 = 26.0;
 const FONT_SIZE: f32 = 11.5;
@@ -352,7 +351,7 @@ impl Breadcrumbs {
         let body_y = y_top + (row_h - font_size) / 2.0;
         let icon_size = ICON_FONT_SIZE * self.scale;
         let icon_gap = ICON_GAP * self.scale;
-        let icon_y = y_top + (row_h - icon_size) / 2.0 - ICON_BASELINE_LIFT * self.scale;
+        let icon_y = y_top + (row_h - icon_size) / 2.0;
 
         let mut cursor_x = x_left + padding_x;
         let max_x = x_left + width - padding_x;
@@ -465,7 +464,7 @@ impl Breadcrumbs {
         let button_h = 18.0 * self.scale;
         let button_y = y_top + (row_h - button_h) * 0.5;
         let label_y = y_top + (row_h - font_size) * 0.5;
-        let icon_y = y_top + (row_h - icon_size) * 0.5 - ICON_BASELINE_LIFT * self.scale;
+        let icon_y = y_top + (row_h - icon_size) * 0.5;
         let radius = 4.0 * self.scale;
         let hovered_action = *self.hovered_action.borrow();
         let kernel_hovered = *self.kernel_hovered.borrow();

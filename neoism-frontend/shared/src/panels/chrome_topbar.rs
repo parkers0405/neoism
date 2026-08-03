@@ -26,14 +26,14 @@
 //! `Chrome` state. Chrome drains [`ChromeTopBar::take_action`] each
 //! frame and applies the side effect.
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
 use crate::editor::crdt::PresenceAvatarPeer;
 use crate::event::{PointerButton, UiEvent};
 use crate::layout::{PanelLayout, Rect};
 use crate::panels::{Panel, PanelContext};
-use crate::primitives::IdeTheme;
+use crate::primitives::{IdeTheme, draw_overlay_icon_centered};
 
 pub const CHROME_TOPBAR_HEIGHT: f32 = 30.0;
 
@@ -977,11 +977,15 @@ impl ChromeTopBar {
                 ..DrawOpts::default()
             };
             let glyph = item.icon();
-            let glyph_w = sugarloaf.overlay_text_mut().measure(glyph, &icon_opts);
-            let icon_x = col_x + (MENU_ICON_COL * self.scale - glyph_w) * 0.5;
-            sugarloaf
-                .overlay_text_mut()
-                .draw(icon_x, ty, glyph, &icon_opts);
+            let icon_slot = MENU_ICON_COL * self.scale;
+            draw_overlay_icon_centered(
+                sugarloaf,
+                col_x,
+                [col_x, row.y, icon_slot, row.h],
+                glyph,
+                &icon_opts,
+                true,
+            );
 
             let label_opts = DrawOpts {
                 font_size: font,

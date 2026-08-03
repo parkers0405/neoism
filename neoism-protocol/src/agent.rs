@@ -217,6 +217,16 @@ pub enum AgentClientMessage {
         #[serde(default)]
         directory: Option<String>,
     },
+    /// Persist first-run model/thinking defaults without replacing values the
+    /// user already configured.
+    PersistConfigChoice {
+        #[serde(default)]
+        directory: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        thinking: Option<String>,
+    },
     /// Persist the agent composer's helper-strip preference in the host's
     /// unified JSON config.
     SetInputHelpVisible { visible: bool },

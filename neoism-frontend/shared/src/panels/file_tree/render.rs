@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
 use crate::primitives::IdeTheme;
 pub(super) use crate::primitives::{
-    draw_text_with_occlusion, edge_left_row_radii, edge_row_radii, snap_to_device_px,
+    draw_icon_centered_with_occlusion, draw_text_with_occlusion, edge_left_row_radii,
+    edge_row_radii, snap_to_device_px,
 };
 
 use super::icons::icon_for;
@@ -661,30 +662,31 @@ impl FileTree {
                 + (1.0 - reveal) * 12.0 * self.scale
                 + if is_drop_target { drag_wiggle_dx } else { 0.0 };
             let text_y = row_y + (row_h - font_size) / 2.0;
-            let icon_y = row_y + (row_h - icon_size) / 2.0;
 
             // Layout per row:
             //   [chevron-or-pad] [icon] [icon_gap] [label]
             let mut cursor_x = base_x;
             if let Some(chev) = chevron {
-                draw_text_with_occlusion(
+                draw_icon_centered_with_occlusion(
                     sugarloaf,
                     cursor_x,
-                    text_y,
+                    [cursor_x, row_y, indent_px, row_h],
                     chev,
                     &chevron_opts,
                     text_occlusion_rects,
+                    true,
                 );
             }
             cursor_x += indent_px;
 
-            draw_text_with_occlusion(
+            draw_icon_centered_with_occlusion(
                 sugarloaf,
                 cursor_x,
-                icon_y,
+                [cursor_x, row_y, icon_size, row_h],
                 icon_glyph,
                 &icon_opts,
                 text_occlusion_rects,
+                true,
             );
             cursor_x += icon_size + icon_gap;
 
@@ -849,16 +851,31 @@ impl FileTree {
                 ..DrawOpts::default()
             };
             let mut cx = lx + pad;
-            let icon_y = ly + (lh - icon_size) / 2.0;
             let text_y = ly + (lh - font_size) / 2.0;
             if let Some(chev) = l.chevron {
-                sugarloaf.text_mut().draw(cx, icon_y, chev, &chevron_opts);
-                cx += sugarloaf.text_mut().measure(chev, &chevron_opts) + icon_gap;
+                let width = sugarloaf.text_mut().measure(chev, &chevron_opts);
+                draw_icon_centered_with_occlusion(
+                    sugarloaf,
+                    cx,
+                    [cx, ly, width, lh],
+                    chev,
+                    &chevron_opts,
+                    &[],
+                    true,
+                );
+                cx += width + icon_gap;
             }
-            sugarloaf
-                .text_mut()
-                .draw(cx, icon_y, l.icon_glyph, &icon_opts);
-            cx += sugarloaf.text_mut().measure(l.icon_glyph, &icon_opts) + icon_gap;
+            let width = sugarloaf.text_mut().measure(l.icon_glyph, &icon_opts);
+            draw_icon_centered_with_occlusion(
+                sugarloaf,
+                cx,
+                [cx, ly, width, lh],
+                l.icon_glyph,
+                &icon_opts,
+                &[],
+                true,
+            );
+            cx += width + icon_gap;
             sugarloaf.text_mut().draw(cx, text_y, &l.label, &label_opts);
         }
 

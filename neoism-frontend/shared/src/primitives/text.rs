@@ -1,7 +1,7 @@
 //! Text / wrap / occluded-draw helpers shared across chrome panels.
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
 use super::geom::rects_intersect;
 
@@ -110,5 +110,52 @@ pub fn draw_text_with_occlusion(
         sugarloaf.text_mut().draw(x, y, text, &clipped);
     }
 
+    width
+}
+
+/// Draw an icon glyph and center its rasterized ink vertically inside
+/// `rect`; optionally center it horizontally as well.
+///
+/// Unlike labels, icon fonts should not be aligned by their em box or text
+/// advance: Nerd Font and fallback glyphs often have asymmetric bearings.
+/// Recording the emitted instances and centering their real bitmap bounds
+/// keeps toolbar, tab, and tree icons symmetric for every loaded family.
+pub fn draw_icon_centered_with_occlusion(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    rect: [f32; 4],
+    icon: &str,
+    opts: &DrawOpts,
+    occlusion_rects: &[[f32; 4]],
+    center_x: bool,
+) -> f32 {
+    let first_instance = sugarloaf.text_mut().instances().len();
+    let width =
+        draw_text_with_occlusion(sugarloaf, x, rect[1], icon, opts, occlusion_rects);
+    sugarloaf
+        .text_mut()
+        .center_instances_in_rect(first_instance, rect, center_x, true);
+    width
+}
+
+/// Overlay-pass counterpart to [`draw_icon_centered_with_occlusion`].
+/// Modals and popovers use Sugarloaf's overlay text buffer, so their glyph
+/// instances must be measured and shifted in that same buffer.
+pub fn draw_overlay_icon_centered(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    rect: [f32; 4],
+    icon: &str,
+    opts: &DrawOpts,
+    center_x: bool,
+) -> f32 {
+    let first_instance = sugarloaf.overlay_text_mut().instances().len();
+    let width = sugarloaf.overlay_text_mut().draw(x, rect[1], icon, opts);
+    sugarloaf.overlay_text_mut().center_instances_in_rect(
+        first_instance,
+        rect,
+        center_x,
+        true,
+    );
     width
 }

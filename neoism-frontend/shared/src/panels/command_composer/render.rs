@@ -4,8 +4,8 @@
 
 use web_time::Instant;
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
 use super::classify::{
     draw_opts_for_style, line_for_byte, style_at, styled_spans, wrap_lines,
@@ -13,23 +13,34 @@ use super::classify::{
 use super::shell_badge::{draw_shell_badge, shell_badge_label, shell_badge_width};
 use super::state::CommandComposer;
 use super::types::{
-    ComposerFrame, InputClassification, InputWrapLayout, WrappedLine,
     CARET_BLINK_FALLBACK_MS, CHASSIS_RADIUS, CHIP_GAP, CHIP_PAD_X, CHIP_RADIUS,
-    COMPOSER_MAX_INPUT_LINES, COMPOSER_TOP_OVERHANG, COMPOSER_WRAP_HARD_LIMIT, DEPTH,
-    FAUX_BOLD_OFFSET, FONT_SIZE, HINT_FONT_SIZE, ORDER_CARET, ORDER_CHASSIS_BG,
+    COMPOSER_MAX_INPUT_LINES, COMPOSER_TOP_OVERHANG, COMPOSER_WRAP_HARD_LIMIT,
+    ComposerFrame, DEPTH, FAUX_BOLD_OFFSET, FONT_SIZE, HINT_FONT_SIZE,
+    InputClassification, InputWrapLayout, ORDER_CARET, ORDER_CHASSIS_BG,
     ORDER_CHASSIS_BORDER, ORDER_CHIP_BG, OUTER_PAD_X, PROMPT_BURST_MS, PROMPT_CHEVRONS,
     PROMPT_SCRAMBLE, SHELL_BADGE_FONT_SIZE, SHELL_SCRAMBLE, SHELL_TRANSITION_MS,
-    SHOW_FOOTER_HINT_ROW,
+    SHOW_FOOTER_HINT_ROW, WrappedLine,
 };
 use super::util::{color_u8_to_f32, hsl_to_u8, lerp_color_u8};
 use crate::input::{CompletionFlashState, InputBuffer, TerminalShellKind};
-use crate::primitives::IdeTheme;
+use crate::primitives::{IdeTheme, draw_icon_centered_with_occlusion};
 
-/// status_line.rs measured this empirically for Geist Mono with a
-/// 2.0*s lift on a 13*s font (= 0.654*em). Centering each glyph at
-/// that ratio puts the `>` tip, typed-glyph midline, and caret
-/// midline on the same y.
-const CAP_CENTER_RATIO: f32 = 0.654;
+// Sugarloaf now centers every font's natural metrics inside the nominal
+// font-size box, so row layout centers that shared box directly instead of
+// carrying a Geist-specific cap-height ratio.
+const CAP_CENTER_RATIO: f32 = 0.5;
+
+/// The composer's type is sized independently from the terminal grid font.
+/// A face with unusually compact cell metrics must not shrink the caret or
+/// wrapped-row stride below the line box needed by the composer text.
+fn composer_line_height(cell_h: f32, font_size: f32, scale: f32) -> f32 {
+    let minimum = (font_size + 4.0 * scale).max(1.0);
+    if cell_h.is_finite() && cell_h > 0.0 {
+        cell_h.max(minimum)
+    } else {
+        minimum
+    }
+}
 
 pub(super) fn line_clip(x: f32, y: f32, width: f32, height: f32) -> [f32; 4] {
     [x, y - 3.0, width.max(0.0), height + 6.0]
@@ -183,9 +194,7 @@ impl CommandComposer {
 
         // ── Row geometry ─────────────────────────────────────────────
         // Top row (chip + prompt + send chip) gets the upper ~70%; hint
-        // line sits in the lower ~30%. Optical lift on the body baseline
-        // matches the trick `status_line.rs` uses — Geist Mono + nerd
-        // glyphs land slightly low without it.
+        // line sits in the lower ~30%.
         let font_size = FONT_SIZE * s;
         let hint_size = HINT_FONT_SIZE * s;
         let raw_text = input.text();
@@ -200,16 +209,8 @@ impl CommandComposer {
         if completion_items.is_empty() {
             self.completion_popup_rect = None;
         }
-        let line_step = if cell_h > 0.0 {
-            cell_h.max(font_size + 3.0 * s)
-        } else {
-            font_size + 5.0 * s
-        };
-        let caret_h = if cell_h > 0.0 {
-            cell_h
-        } else {
-            font_size + 4.0 * s
-        };
+        let line_step = composer_line_height(cell_h, font_size, s);
+        let caret_h = line_step;
         let control_font_size = (caret_h - 2.0 * s).max(font_size * 1.18);
         let chevron_font_size = control_font_size * 1.10;
         let estimated_lines =
@@ -224,8 +225,11 @@ impl CommandComposer {
         let row_split = body_rows_h.min(max_body_h).max(line_step);
         let hint_gap = if SHOW_FOOTER_HINT_ROW { 5.5 * s } else { 0.0 };
         let group_h = row_split + footer_reserved_h;
-        let group_top = chassis_y + ((chassis_inner_h - group_h).max(0.0) * 0.50);
-        let control_row_lift = 2.5 * s;
+        // Centre controls inside the entire visible rounded plate. The plate
+        // extends above `chassis_y` by `composer_extra_top`; ignoring that
+        // lip made the caret, chevrons, and Run chip all look bottom-heavy.
+        let visible_composer_h = chassis_inner_h + composer_extra_top;
+        let group_top = composer_top_y + ((visible_composer_h - group_h).max(0.0) * 0.50);
         let hint_y = (group_top + row_split + hint_gap)
             .min(chassis_y + chassis_inner_h - hint_size - 4.0 * s);
 
@@ -246,11 +250,11 @@ impl CommandComposer {
         let _ = cwd_label;
         let cwd_chip_w: f32 = 0.0;
         let chip_h = caret_h.max(control_font_size + 2.0 * s);
-        let chip_y = group_top + (line_step - chip_h) / 2.0 + inset - control_row_lift;
-        // Single row center shared by the chevron tip, caret midline, and
-        // typed-glyph midline. Sugarloaf takes `y` as the top of the
-        // ascent line, so the *visual* cap-height midline of a drawn
-        // glyph sits BELOW the em-box midline.
+        let chip_y = group_top + (line_step - chip_h) / 2.0 + inset;
+        // Single row center shared by the chevron, caret, and typed-text
+        // line boxes. Sugarloaf centers each active font's natural metrics
+        // inside this nominal em box, so family changes do not require a
+        // face-specific vertical correction here.
         let row_center_y = chip_y + chip_h * 0.5;
         let body_y = row_center_y - font_size * CAP_CENTER_RATIO;
         let control_y = row_center_y - control_font_size * CAP_CENTER_RATIO;
@@ -403,11 +407,16 @@ impl CommandComposer {
             icon_color,
             ORDER_CARET,
         );
-        sugarloaf.text_mut().draw(
-            icon_x + send_icon_w + send_icon_gap,
-            control_y,
-            send_label,
-            &send_opts,
+        let send_text_x = icon_x + send_icon_w + send_icon_gap;
+        let first_send_instance = sugarloaf.text_mut().instances().len();
+        sugarloaf
+            .text_mut()
+            .draw(send_text_x, control_y, send_label, &send_opts);
+        sugarloaf.text_mut().center_instances_in_rect(
+            first_send_instance,
+            [send_text_x, chip_y, send_text_w, chip_h],
+            false,
+            true,
         );
 
         // ── `>>>` chevrons (animated rainbow on burst) ──────────────
@@ -420,25 +429,14 @@ impl CommandComposer {
         // position is known.
         let burst = input.prompt_burst_elapsed_ms();
         let prompt_x = inner_left + cwd_chip_w + CHIP_GAP * s;
-        let chevron_y = row_center_y - chevron_font_size * CAP_CENTER_RATIO;
         let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
         let prompt_label_font_size = if pixel_font.is_some() {
             13.0 * s
         } else {
             chevron_font_size
         };
-        // Press Start 2P's painted cap sits much higher inside its em box
-        // than the UI face. Use its visual center instead of the regular
-        // baseline ratio so `SSH` shares the chevrons' centerline.
-        let prompt_label_y = if pixel_font.is_some() {
-            // The visual midpoint measured against the chevrons: the regular
-            // cap ratio placed P2 too high, while em-box centering placed it
-            // too low. This midpoint keeps the SSH pixels on the same row as
-            // the `>>>` strokes at every UI scale.
-            row_center_y - prompt_label_font_size * 0.50
-        } else {
-            row_center_y - prompt_label_font_size * CAP_CENTER_RATIO
-        };
+        // Explicit and fallback faces use the same centered line-box contract.
+        let prompt_label_y = row_center_y - prompt_label_font_size * CAP_CENTER_RATIO;
         let prompt_label_opts = DrawOpts {
             font_size: prompt_label_font_size,
             color: theme.u8(theme.blue),
@@ -541,7 +539,8 @@ impl CommandComposer {
             self.draw_chevrons(
                 sugarloaf,
                 chevron_x,
-                chevron_y,
+                chip_y,
+                chip_h,
                 chevron_font_size,
                 burst,
                 animation_phase,
@@ -969,7 +968,8 @@ impl CommandComposer {
         &self,
         sugarloaf: &mut Sugarloaf,
         x: f32,
-        y: f32,
+        row_y: f32,
+        row_h: f32,
         font_size: f32,
         burst_elapsed_ms: Option<f32>,
         animation_phase: f32,
@@ -1013,14 +1013,37 @@ impl CommandComposer {
             };
             let mut buf = [0u8; 4];
             let glyph = display.encode_utf8(&mut buf);
-            sugarloaf.text_mut().draw(cursor, y, glyph, &opts);
             // Manual fixed advance so all three chevrons land on a
             // monospace grid even when the scramble glyph (e.g. `|`)
             // measures narrower than `>`. Keeps the chevron row from
             // visibly jittering as characters lock in.
             let advance = font_size * 0.62;
+            draw_icon_centered_with_occlusion(
+                sugarloaf,
+                cursor,
+                [cursor, row_y, advance, row_h],
+                glyph,
+                &opts,
+                &[],
+                true,
+            );
             cursor += advance;
         }
         cursor - x + 6.0 * s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::composer_line_height;
+
+    #[test]
+    fn composer_line_height_does_not_shrink_below_its_text_box() {
+        assert_eq!(composer_line_height(9.0, 13.0, 1.0), 17.0);
+    }
+
+    #[test]
+    fn composer_line_height_preserves_a_taller_terminal_cell() {
+        assert_eq!(composer_line_height(24.0, 13.0, 1.0), 24.0);
     }
 }

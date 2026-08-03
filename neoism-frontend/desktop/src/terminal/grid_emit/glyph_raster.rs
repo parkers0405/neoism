@@ -27,7 +27,7 @@ pub(super) fn ensure_glyph_by_id(
     size_bucket: u16,
     size_u16: u16,
     cell_h: f32,
-    ascent_px: i16,
+    baseline_px: i16,
     is_emoji: bool,
     synthetic_italic: bool,
     synthetic_bold: bool,
@@ -57,7 +57,12 @@ pub(super) fn ensure_glyph_by_id(
     let is_color = raw.is_color;
 
     let placement = terminal_glyph_placement(
-        raw.width, raw.height, raw.left, raw.top, cell_h, ascent_px,
+        raw.width,
+        raw.height,
+        raw.left,
+        raw.top,
+        cell_h,
+        baseline_px,
     );
     let raster = RasterizedGlyph {
         width: placement.width,
@@ -127,12 +132,12 @@ fn rasterize_glyph_native(
     synthetic_italic: bool,
 ) -> Option<RawGlyph> {
     use neoism_backend::sugarloaf::swash::{
+        FontRef,
         scale::{
-            image::{Content, Image as GlyphImage},
             Render, Source, StrikeWith,
+            image::{Content, Image as GlyphImage},
         },
         zeno::{Angle, Format, Transform},
-        FontRef,
     };
 
     let font_entry = rasterizer.font_data_cache.get(&font_id)?.clone();

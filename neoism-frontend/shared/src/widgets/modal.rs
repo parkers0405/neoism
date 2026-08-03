@@ -1,12 +1,12 @@
 use web_time::Instant;
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
-use crate::editor::neodraw::{render_scene, Camera, Vec2};
-use crate::primitives::IdeTheme;
-use crate::syntax::{highlight_line, syn_color, Lang};
-use crate::widgets::mermaid::{mermaid_scene, parse_mermaid_diagram, MermaidDiagram};
+use crate::editor::neodraw::{Camera, Vec2, render_scene};
+use crate::primitives::{IdeTheme, draw_icon_centered_with_occlusion};
+use crate::syntax::{Lang, highlight_line, syn_color};
+use crate::widgets::mermaid::{MermaidDiagram, mermaid_scene, parse_mermaid_diagram};
 use crate::widgets::scrollbar;
 
 const MODAL_WIDTH: f32 = 560.0;
@@ -1813,11 +1813,20 @@ impl UniversalModal {
                     clip_rect: Some(clip),
                     ..DrawOpts::default()
                 };
-                let bullet_w = sugarloaf.text_mut().draw(x, y, "•", &bullet_opts);
-                let text_x = x + bullet_w + 8.0 * s;
+                let bullet_slot = BODY_FONT_SIZE * s;
+                draw_icon_centered_with_occlusion(
+                    sugarloaf,
+                    x,
+                    [x, y, bullet_slot, line_h],
+                    "•",
+                    &bullet_opts,
+                    &[],
+                    true,
+                );
+                let text_x = x + bullet_slot + 8.0 * s;
                 let text = truncate_to_fit(
                     &line.text,
-                    (w - bullet_w - 8.0 * s).max(0.0),
+                    (w - bullet_slot - 8.0 * s).max(0.0),
                     sugarloaf,
                     &text_opts,
                 );

@@ -330,13 +330,12 @@ pub(super) fn render_virtual(
             clip_rect: Some(clip),
             ..DrawOpts::default()
         };
-        // Emoji glyphs sit a touch lower than the title face at the
-        // same size — lift the icon slightly so it reads baseline-even
-        // with the text.
+        // Emoji and title runs share Sugarloaf's primary-font baseline, so
+        // the same nominal line-box y keeps them aligned across families.
         draw_if_visible(
             sugarloaf,
             content_x,
-            title_y - 3.0 * font_scale,
+            title_y,
             icon,
             &icon_opts,
             y,
@@ -460,8 +459,13 @@ pub(super) fn render_virtual(
         // longer pages room after their final block. Subtracting document
         // scroll makes the marker move naturally with the page instead of
         // remaining pinned while the user scrolls.
-        let footer_y = y
-            + reader_footer_page_y(pad_top, content_height, h, font_scale, pane.scroll_y);
+        let footer_y = y + reader_footer_page_y(
+            pad_top,
+            content_height,
+            h,
+            font_scale,
+            pane.scroll_y,
+        );
         if footer_y + opts.font_size >= y && footer_y <= bottom {
             sugarloaf.text_mut().draw(footer_x, footer_y, footer, &opts);
         }

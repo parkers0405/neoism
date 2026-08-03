@@ -592,6 +592,18 @@ pub fn write_neoism_preferences(
 fn edit_config_document(
     mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
 ) -> std::io::Result<()> {
+    edit_config_document_if(|root| {
+        mutate(root);
+        true
+    })
+}
+
+/// Edit the active config and write it only when `mutate` returns true.
+/// Insert-if-absent callers use this to leave an existing config document
+/// completely untouched, including its formatting and comments.
+fn edit_config_document_if(
+    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> bool,
+) -> std::io::Result<()> {
     let config_dir = config_dir_path();
     std::fs::create_dir_all(&config_dir)?;
     let path = config_file_path();
@@ -610,7 +622,9 @@ fn edit_config_document(
     if !root.is_object() {
         root = serde_json::Value::Object(serde_json::Map::new());
     }
-    mutate(root.as_object_mut().expect("root forced to object above"));
+    if !mutate(root.as_object_mut().expect("root forced to object above")) {
+        return Ok(());
+    }
     let mut out = serde_json::to_string_pretty(&root).map_err(|err| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
     })?;
@@ -652,6 +666,60 @@ fn set_nested(
 /// object. The fs-watcher then hot-reloads it.
 pub fn write_setting(key: &str, value: serde_json::Value) -> std::io::Result<()> {
     write_settings(&[(key, value)])
+}
+
+/// Persist one setting only when the user has not configured it yet.
+///
+/// The check and write share one document edit, so first-run UI choices
+/// cannot overwrite a preference that was already present. Empty strings
+/// and `null` count as unset; a non-object parent is left untouched.
+pub fn write_setting_if_absent(
+    key: &str,
+    value: serde_json::Value,
+) -> std::io::Result<bool> {
+    let path: Vec<&str> = key.split('.').collect();
+    let mut inserted = false;
+    edit_config_document_if(|root| {
+        inserted = set_nested_if_absent(root, &path, value);
+        inserted
+    })?;
+    Ok(inserted)
+}
+
+fn set_nested_if_absent(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    path: &[&str],
+    value: serde_json::Value,
+) -> bool {
+    match path {
+        [] => false,
+        [leaf] => {
+            let is_absent = map.get(*leaf).is_none_or(|current| {
+                current.is_null()
+                    || current
+                        .as_str()
+                        .is_some_and(|current| current.trim().is_empty())
+            });
+            if is_absent {
+                map.insert((*leaf).to_string(), value);
+            }
+            is_absent
+        }
+        [head, rest @ ..] => match map.get_mut(*head) {
+            Some(serde_json::Value::Object(child)) => {
+                set_nested_if_absent(child, rest, value)
+            }
+            Some(_) => false,
+            None => {
+                let mut child = serde_json::Map::new();
+                let inserted = set_nested_if_absent(&mut child, rest, value);
+                if inserted {
+                    map.insert((*head).to_string(), serde_json::Value::Object(child));
+                }
+                inserted
+            }
+        },
+    }
 }
 
 /// Persist several golden-path settings in a single `config.json` rewrite.
@@ -1186,6 +1254,43 @@ mod tests {
         assert_eq!(value["appearance"]["fonts"]["family"], "Geist Mono");
         assert_eq!(value["appearance"]["fonts"]["size"], 16);
         assert_eq!(value["editor"]["vim-mode"], false);
+    }
+
+    #[test]
+    fn set_nested_if_absent_preserves_existing_agent_defaults() {
+        let mut root = serde_json::json!({
+            "agent": {
+                "model": "anthropic/claude-existing",
+                "variant": "high"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        assert!(!set_nested_if_absent(
+            &mut root,
+            &["agent", "model"],
+            serde_json::json!("openai/gpt-new"),
+        ));
+        assert!(!set_nested_if_absent(
+            &mut root,
+            &["agent", "variant"],
+            serde_json::json!("xhigh"),
+        ));
+        assert_eq!(root["agent"]["model"], "anthropic/claude-existing");
+        assert_eq!(root["agent"]["variant"], "high");
+
+        root.get_mut("agent")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("model");
+        assert!(set_nested_if_absent(
+            &mut root,
+            &["agent", "model"],
+            serde_json::json!("openai/gpt-first"),
+        ));
+        assert_eq!(root["agent"]["model"], "openai/gpt-first");
     }
 
     #[test]

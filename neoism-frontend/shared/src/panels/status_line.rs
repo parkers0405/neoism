@@ -54,8 +54,8 @@ impl std::ops::Sub<Duration> for Instant {
 }
 
 use serde::{Deserialize, Serialize};
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
 use crate::event::UiEvent;
 use crate::layout::PanelLayout;
@@ -104,8 +104,8 @@ const GLYPH_HOME: &str = "\u{f015}"; //  (home — unused after cwd pill switche
 #[allow(dead_code)]
 const GLYPH_GITHUB: &str = "\u{f09b}"; //  (FA github — repo pill on right cluster)
 const GLYPH_LINES: &str = "\u{f0c9}"; //  (line index)
-                                      // Severity + LSP glyphs are shared with the diagnostics/LSP popups —
-                                      // single source in `primitives::icons` so the panels never drift.
+// Severity + LSP glyphs are shared with the diagnostics/LSP popups —
+// single source in `primitives::icons` so the panels never drift.
 const GLYPH_LSP: &str = crate::primitives::icons::GLYPH_LSP;
 const GLYPH_SPLIT: &str = "\u{eb56}"; // codicon split-horizontal
 const GLYPH_ERROR: &str = crate::primitives::icons::GLYPH_ERROR;
@@ -374,25 +374,27 @@ fn draw_thick(
     ui.draw(x + FAUX_BOLD_OFFSET * scale, y, text, opts);
 }
 
-/// Vertical position for icon glyphs. Both the web fallback font and
-/// CoreText's patched-font metrics place Nerd Font / Font Awesome
-/// glyphs a little higher than the surrounding status text. Keep the
-/// correction proportional to the live chrome zoom so Retina and
-/// non-Retina displays share the same logical baseline.
-fn icon_baseline_y(y: f32, font_size: f32) -> f32 {
-    y + font_size
-        * icon_baseline_shift_em(cfg!(target_arch = "wasm32"), cfg!(target_os = "macos"))
+fn centered_text_box_y(pill_y: f32, pill_h: f32, font_size: f32) -> f32 {
+    pill_y + (pill_h - font_size) * 0.5
 }
 
-fn icon_baseline_shift_em(is_web: bool, is_macos: bool) -> f32 {
-    if is_web {
-        0.12
-    } else if is_macos {
-        // 0.96 logical px at the status line's 12 px baseline.
-        0.08
-    } else {
-        0.0
-    }
+/// Draw a faux-bold icon and align its actual rasterized ink to a chip.
+/// Nerd Font advances/em boxes often contain asymmetric whitespace, so
+/// advance-based placement alone cannot visually center an icon.
+fn draw_icon_thick_centered(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    rect: [f32; 4],
+    icon: &str,
+    opts: &DrawOpts,
+    scale: f32,
+    center_x: bool,
+) {
+    let first_instance = sugarloaf.text_mut().instances().len();
+    draw_thick(sugarloaf, x, rect[1], icon, opts, scale);
+    sugarloaf
+        .text_mut()
+        .center_instances_in_rect(first_instance, rect, center_x, true);
 }
 
 fn icon_gap_text_width(
@@ -413,7 +415,9 @@ fn icon_gap_text_width(
 fn draw_gap_text_thick(
     sugarloaf: &mut Sugarloaf,
     x: f32,
-    y: f32,
+    body_y: f32,
+    pill_y: f32,
+    pill_h: f32,
     icon: &str,
     text: &str,
     opts: &DrawOpts,
@@ -421,16 +425,17 @@ fn draw_gap_text_thick(
 ) {
     let icon_w = sugarloaf.text_mut().measure(icon, opts);
     let gap_w = sugarloaf.text_mut().measure("  ", opts);
-    draw_thick(
+    draw_icon_thick_centered(
         sugarloaf,
         x,
-        icon_baseline_y(y, opts.font_size),
+        [x, pill_y, icon_w, pill_h],
         icon,
         opts,
         scale,
+        false,
     );
     if !text.is_empty() {
-        draw_thick(sugarloaf, x + icon_w + gap_w, y, text, opts, scale);
+        draw_thick(sugarloaf, x + icon_w + gap_w, body_y, text, opts, scale);
     }
 }
 
@@ -639,13 +644,14 @@ fn draw_two_tone_pill(
         DEPTH,
         icon_order,
     );
-    draw_thick(
+    draw_icon_thick_centered(
         sugarloaf,
-        x + section_pad,
-        icon_baseline_y(body_y, font_size),
+        x,
+        [x, pill_y, icon_section_w, pill_h],
         spec.icon_glyph,
         &icon_opts,
         scale,
+        true,
     );
     draw_thick(
         sugarloaf,
@@ -962,7 +968,7 @@ impl StatusLine {
         let pill_h = (strip_h - pill_vpad * 2.0).max(2.0);
         let pill_y = y_top + pill_vpad;
         let radius = pill_h / 2.0;
-        let body_y = pill_y + (pill_h - font_size) / 2.0 - 2.0 * s;
+        let body_y = centered_text_box_y(pill_y, pill_h, font_size);
 
         let mode_color = self.effective_mode_color(palette);
 
@@ -1108,13 +1114,19 @@ impl StatusLine {
                 &text_opts,
                 s,
             );
-            draw_thick(
+            draw_icon_thick_centered(
                 sugarloaf,
-                cwd_x + cwd_text_section_w + section_pad,
-                icon_baseline_y(body_y, font_size),
+                cwd_x + cwd_text_section_w,
+                [
+                    cwd_x + cwd_text_section_w,
+                    pill_y,
+                    cwd_icon_section_w,
+                    pill_h,
+                ],
                 glyph_folder,
                 &icon_opts,
                 s,
+                true,
             );
         }
 
@@ -1136,6 +1148,8 @@ impl StatusLine {
                 sugarloaf,
                 primary_x + section_pad + extra_left_pad,
                 body_y,
+                pill_y,
+                pill_h,
                 spec.icon,
                 &spec.label,
                 &spec.opts,
@@ -1166,6 +1180,8 @@ impl StatusLine {
                 sugarloaf,
                 workspace_x + section_pad + extra_left_pad,
                 body_y,
+                pill_y,
+                pill_h,
                 spec.icon,
                 &spec.label,
                 &spec.opts,
@@ -1184,13 +1200,14 @@ impl StatusLine {
             DEPTH,
             ORDER_PILL + 3,
         );
-        draw_thick(
+        draw_icon_thick_centered(
             sugarloaf,
             mode_x + section_pad,
-            icon_baseline_y(body_y, font_size),
+            [mode_x, pill_y, mode_pill_w, pill_h],
             glyph_mode,
             &mode_text_opts,
             s,
+            false,
         );
         let elapsed_ms = self.transition_started.elapsed().as_secs_f32() * 1000.0;
         let t = (elapsed_ms / TRANSITION_MS).clamp(0.0, 1.0);
@@ -1599,14 +1616,15 @@ impl StatusLine {
                 + pills_visible_total;
             let mut rx = x_left + width - visible_total;
 
-            if let Some((opts, icon_w, w)) = split_toggle.as_ref() {
-                draw_thick(
+            if let Some((opts, _icon_w, w)) = split_toggle.as_ref() {
+                draw_icon_thick_centered(
                     sugarloaf,
-                    rx + (*w - *icon_w) / 2.0,
-                    icon_baseline_y(body_y, font_size),
+                    rx,
+                    [rx, pill_y, *w, pill_h],
                     glyph_split,
                     opts,
                     s,
+                    true,
                 );
                 self.split_toggle_rect = PillRect {
                     x: rx,
@@ -1638,6 +1656,8 @@ impl StatusLine {
                     sugarloaf,
                     rx + diag_inner_pad,
                     body_y,
+                    pill_y,
+                    pill_h,
                     spec.glyph,
                     &count,
                     &opts,
@@ -1708,13 +1728,14 @@ impl StatusLine {
                     DEPTH,
                     ORDER_PILL,
                 );
-                draw_thick(
+                draw_icon_thick_centered(
                     sugarloaf,
-                    rx + section_pad,
-                    icon_baseline_y(body_y, font_size),
+                    rx,
+                    [rx, pill_y, meta.icon_section_w, pill_h],
                     glyph_branch,
                     &icon_opts,
                     s,
+                    true,
                 );
                 let mut label_x = rx + meta.icon_section_w + section_pad;
                 draw_thick(
@@ -1938,14 +1959,12 @@ impl Panel for StatusLine {
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_path_label, icon_baseline_shift_em};
+    use super::{centered_text_box_y, compact_path_label};
 
     #[test]
-    fn status_icons_use_platform_font_metric_corrections() {
-        assert_eq!(icon_baseline_shift_em(false, false), 0.0);
-        assert_eq!(icon_baseline_shift_em(false, true), 0.08);
-        assert_eq!(icon_baseline_shift_em(true, false), 0.12);
-        assert_eq!(icon_baseline_shift_em(true, true), 0.12);
+    fn status_text_box_is_geometrically_centered_in_the_pill() {
+        assert_eq!(centered_text_box_y(2.0, 18.0, 12.0), 5.0);
+        assert_eq!(centered_text_box_y(4.0, 36.0, 24.0), 10.0);
     }
 
     #[test]

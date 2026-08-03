@@ -207,6 +207,15 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_get_config_defaults(inner, directory).await;
             });
         }
+        AgentClientMessage::PersistConfigChoice {
+            directory,
+            model,
+            thinking,
+        } => {
+            tokio::spawn(async move {
+                handle_persist_config_choice(inner, directory, model, thinking).await;
+            });
+        }
         AgentClientMessage::SetInputHelpVisible { visible } => {
             tokio::spawn(async move {
                 handle_set_input_help_visible(inner, visible).await;

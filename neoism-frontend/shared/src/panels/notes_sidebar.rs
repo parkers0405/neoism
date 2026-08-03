@@ -3,20 +3,23 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use web_time::Instant;
 
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
 use crate::animation::CriticallyDampedSpring;
 use crate::panels::file_tree::icons::{
-    icon_for_file, FOLDER_CLOSED_ICON, FOLDER_OPEN_ICON,
+    FOLDER_CLOSED_ICON, FOLDER_OPEN_ICON, icon_for_file,
 };
 use crate::panels::file_tree::{
-    truncate_label, FILE_TREE_MAX_WIDTH, FILE_TREE_MIN_WIDTH, FILE_TREE_WIDTH, FONT_SIZE,
-    FRAME_RADIUS, FRAME_STROKE, ICON_FONT_SIZE, ICON_GAP, INDENT_PX, ROW_HEIGHT,
-    ROW_PADDING_X,
+    FILE_TREE_MAX_WIDTH, FILE_TREE_MIN_WIDTH, FILE_TREE_WIDTH, FONT_SIZE, FRAME_RADIUS,
+    FRAME_STROKE, ICON_FONT_SIZE, ICON_GAP, INDENT_PX, ROW_HEIGHT, ROW_PADDING_X,
+    truncate_label,
 };
 use crate::primitives::ide_theme::IdeTheme;
-use crate::primitives::{draw_text_with_occlusion, edge_row_radii, snap_to_device_px};
+use crate::primitives::{
+    draw_icon_centered_with_occlusion, draw_text_with_occlusion, edge_row_radii,
+    snap_to_device_px,
+};
 
 const DEPTH: f32 = 0.0;
 const ORDER: u8 = 7;
@@ -1191,10 +1194,10 @@ impl NotesSidebar {
         // Quick-create actions share the title row: Notes on the left,
         // new note + folder hugging the right edge.
         let create_size = (row_h * 0.86).max(22.0 * self.scale);
-        // Nerd Font glyphs carry more ascent padding than the bundled
-        // pixel face, so geometric centering reads visibly low. Lift the
-        // whole button/hit row to align the glyphs' optical centers.
-        let create_y = header_y + (wordmark_h - create_size) * 0.5 - 4.0 * self.scale;
+        // Sugarloaf normalizes the Nerd Font run to the same centered
+        // primary-font line box as the title, so the button and hit target
+        // can use the row's geometric center without a family-specific lift.
+        let create_y = header_y + (wordmark_h - create_size) * 0.5;
         let create_gap = 4.0 * self.scale;
         let create_right = content_x + content_w - row_pad_x;
         let new_folder_rect = [
@@ -1232,14 +1235,14 @@ impl NotesSidebar {
                     ORDER + 2,
                 );
             }
-            let glyph_w = sugarloaf.text_mut().measure(glyph, &create_opts);
-            draw_text_with_occlusion(
+            draw_icon_centered_with_occlusion(
                 sugarloaf,
-                rect[0] + ((rect[2] - glyph_w) * 0.5).max(0.0),
-                rect[1] + (rect[3] - create_opts.font_size) * 0.5,
+                rect[0],
+                rect,
                 glyph,
                 &create_opts,
                 occlusion,
+                true,
             );
         }
 
@@ -1296,13 +1299,14 @@ impl NotesSidebar {
                 cursor_h,
             ]);
         }
-        draw_text_with_occlusion(
+        draw_icon_centered_with_occlusion(
             sugarloaf,
-            settings_rect[0] + 7.0 * self.scale,
-            footer_y + (row_h - icon_size) / 2.0,
+            settings_rect[0],
+            settings_rect,
             "\u{f013}",
             &action_opts,
             occlusion,
+            true,
         );
         let header_bottom = (header_y + wordmark_h).max(create_y + create_size);
         let list_y = header_bottom + 8.0 * self.scale;
@@ -1519,57 +1523,71 @@ impl NotesSidebar {
             let hover = theme.f32_alpha(theme.hover, 0.5);
             // Pill button: centered, hover-tinted, returns its rect for
             // hit-testing. Shared by both empty-state variants.
-            let draw_btn = |sl: &mut Sugarloaf, label: &str, top: f32| -> [f32; 4] {
-                let opts = DrawOpts {
-                    font_size: btn_font,
-                    color: blue,
-                    clip_rect: Some(panel_clip),
-                    ..DrawOpts::default()
+            let draw_btn =
+                |sl: &mut Sugarloaf, icon: &str, label: &str, top: f32| -> [f32; 4] {
+                    let opts = DrawOpts {
+                        font_size: btn_font,
+                        color: blue,
+                        clip_rect: Some(panel_clip),
+                        ..DrawOpts::default()
+                    };
+                    let label_w = sl.text_mut().measure(label, &opts);
+                    let icon_slot = btn_font;
+                    let icon_gap = 8.0 * scale;
+                    let pad_h = 10.0 * scale;
+                    let btn_w = icon_slot + icon_gap + label_w + pad_h * 2.0;
+                    let btn = [
+                        content_x + ((content_w - btn_w) * 0.5).max(0.0),
+                        top,
+                        btn_w,
+                        row_h * 0.95,
+                    ];
+                    sl.quad(
+                        None,
+                        btn[0],
+                        btn[1],
+                        btn[2],
+                        btn[3],
+                        hover,
+                        [8.0 * scale; 4],
+                        DEPTH,
+                        ORDER + 2,
+                    );
+                    let icon_x = btn[0] + pad_h;
+                    draw_icon_centered_with_occlusion(
+                        sl,
+                        icon_x,
+                        [icon_x, btn[1], icon_slot, btn[3]],
+                        icon,
+                        &opts,
+                        occlusion,
+                        true,
+                    );
+                    draw_text_with_occlusion(
+                        sl,
+                        icon_x + icon_slot + icon_gap,
+                        btn[1] + (btn[3] - btn_font) / 2.0,
+                        label,
+                        &opts,
+                        occlusion,
+                    );
+                    btn
                 };
-                let label_w = sl.text_mut().measure(label, &opts);
-                let pad_h = 10.0 * scale;
-                let btn_w = label_w + pad_h * 2.0;
-                let btn = [
-                    content_x + ((content_w - btn_w) * 0.5).max(0.0),
-                    top,
-                    btn_w,
-                    row_h * 0.95,
-                ];
-                sl.quad(
-                    None,
-                    btn[0],
-                    btn[1],
-                    btn[2],
-                    btn[3],
-                    hover,
-                    [8.0 * scale; 4],
-                    DEPTH,
-                    ORDER + 2,
-                );
-                draw_text_with_occlusion(
-                    sl,
-                    btn[0] + pad_h,
-                    btn[1] + (btn[3] - btn_font) / 2.0,
-                    label,
-                    &opts,
-                    occlusion,
-                );
-                btn
-            };
             let first_top = list_y + 5.0 * self.scale + row_h;
             if self.show_vault_actions {
                 let link_btn =
-                    draw_btn(sugarloaf, "\u{f067}  Create workspace vault", first_top);
+                    draw_btn(sugarloaf, "\u{f067}", "Create workspace vault", first_top);
                 let select_btn = draw_btn(
                     sugarloaf,
-                    "\u{f07b}  Select vault",
+                    "\u{f07b}",
+                    "Select vault",
                     first_top + row_h * 1.15,
                 );
                 self.empty_link_vault_rect = Some(link_btn);
                 self.empty_select_vault_rect = Some(select_btn);
             } else {
                 self.empty_create_rect =
-                    Some(draw_btn(sugarloaf, "\u{f067}  New note", first_top));
+                    Some(draw_btn(sugarloaf, "\u{f067}", "New note", first_top));
             }
         } else {
             // Overscan: while the lag spring is mid-flight the viewport
@@ -1698,16 +1716,16 @@ impl NotesSidebar {
                     + entry.depth as f32 * indent_px
                     + if is_drop_target { drag_wiggle_dx } else { 0.0 };
                 let text_y = row_y + (row_h - font_size) / 2.0;
-                let icon_y = row_y + (row_h - icon_size) / 2.0;
                 let mut cursor_x = base_x;
                 if let Some(chevron) = chevron {
-                    draw_text_with_occlusion(
+                    draw_icon_centered_with_occlusion(
                         sugarloaf,
                         cursor_x,
-                        text_y,
+                        [cursor_x, row_y, indent_px, row_h],
                         chevron,
                         &chevron_opts,
                         occlusion,
+                        true,
                     );
                 }
                 cursor_x += indent_px;
@@ -1730,17 +1748,24 @@ impl NotesSidebar {
                         clip_rect: Some(panel_clip),
                         ..DrawOpts::default()
                     };
-                    draw_text_with_occlusion(
+                    draw_icon_centered_with_occlusion(
                         sugarloaf,
                         cursor_x,
-                        icon_y,
+                        [cursor_x, row_y, icon_size, row_h],
                         custom,
                         &custom_opts,
                         occlusion,
+                        true,
                     );
                 } else {
-                    draw_text_with_occlusion(
-                        sugarloaf, cursor_x, icon_y, icon, &icon_opts, occlusion,
+                    draw_icon_centered_with_occlusion(
+                        sugarloaf,
+                        cursor_x,
+                        [cursor_x, row_y, icon_size, row_h],
+                        icon,
+                        &icon_opts,
+                        occlusion,
+                        true,
                     );
                 }
                 cursor_x += icon_size + icon_gap;
@@ -1821,14 +1846,31 @@ impl NotesSidebar {
                 ..DrawOpts::default()
             };
             let mut cx = lx + pad;
-            let icon_y = ly + (lh - icon_size) / 2.0;
             let text_y = ly + (lh - font_size) / 2.0;
             if let Some(chev) = l.chevron {
-                sugarloaf.text_mut().draw(cx, icon_y, chev, &chevron_opts);
-                cx += sugarloaf.text_mut().measure(chev, &chevron_opts) + icon_gap;
+                let width = sugarloaf.text_mut().measure(chev, &chevron_opts);
+                draw_icon_centered_with_occlusion(
+                    sugarloaf,
+                    cx,
+                    [cx, ly, width, lh],
+                    chev,
+                    &chevron_opts,
+                    &[],
+                    true,
+                );
+                cx += width + icon_gap;
             }
-            sugarloaf.text_mut().draw(cx, icon_y, &l.icon, &icon_opts);
-            cx += sugarloaf.text_mut().measure(&l.icon, &icon_opts) + icon_gap;
+            let width = sugarloaf.text_mut().measure(&l.icon, &icon_opts);
+            draw_icon_centered_with_occlusion(
+                sugarloaf,
+                cx,
+                [cx, ly, width, lh],
+                &l.icon,
+                &icon_opts,
+                &[],
+                true,
+            );
+            cx += width + icon_gap;
             sugarloaf.text_mut().draw(cx, text_y, &l.label, &label_opts);
         }
 
@@ -1889,15 +1931,37 @@ impl NotesSidebar {
             let cursor_y = footer_y + (row_h - cursor_h) / 2.0;
             self.selected_cursor_rect = Some([cursor_x, cursor_y, cursor_w, cursor_h]);
         }
-        // Centre the vault name vertically in the footer row so it sits
-        // on the same line as the graph icon.
+        // Keep the vault label on the shared text baseline, but centre the
+        // dropdown glyph by its visible ink so fallback-font bearings do
+        // not pull it above the label.
+        let footer_x = content_x + row_pad_x;
+        let chevron_slot = muted_opts.font_size;
+        let chevron_gap = 6.0 * self.scale;
+        let name_budget = (workspace_rect[0] + workspace_rect[2]
+            - footer_x
+            - chevron_gap
+            - chevron_slot)
+            .max(0.0);
+        let workspace_name =
+            truncate_label(&self.workspace_name, name_budget, sugarloaf, &muted_opts);
+        let name_w = sugarloaf.text_mut().measure(&workspace_name, &muted_opts);
         draw_text_with_occlusion(
             sugarloaf,
-            content_x + row_pad_x,
+            footer_x,
             footer_y + (row_h - font_size * 0.86) * 0.5,
-            &format!("{}  \u{f078}", self.workspace_name),
+            &workspace_name,
             &muted_opts,
             occlusion,
+        );
+        let chevron_x = footer_x + name_w + chevron_gap;
+        draw_icon_centered_with_occlusion(
+            sugarloaf,
+            chevron_x,
+            [chevron_x, footer_y, chevron_slot, row_h],
+            "\u{f078}",
+            &muted_opts,
+            occlusion,
+            true,
         );
     }
 

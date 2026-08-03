@@ -74,6 +74,14 @@ pub enum OutboundAgentCommand {
     /// from `with_directory(...)`.
     ApplyConfigDefaults,
 
+    /// Persist a first-run model or thinking choice into the unified config.
+    /// Hosts must use insert-if-absent semantics so an existing user default
+    /// always wins, including when the initial config fetch is still in flight.
+    PersistConfigChoice {
+        model: Option<String>,
+        thinking: Option<String>,
+    },
+
     /// Persist the OpenCode-style helper-strip preference in the host's
     /// unified `config.json` (`agent-input-hints`).
     SetInputHelpVisible {
@@ -306,6 +314,10 @@ mod tests {
         let _ = OutboundAgentCommand::AbortSession;
         let _ = OutboundAgentCommand::CompactSession;
         let _ = OutboundAgentCommand::ApplyConfigDefaults;
+        let _ = OutboundAgentCommand::PersistConfigChoice {
+            model: Some("openai/gpt-5".to_string()),
+            thinking: None,
+        };
         let _ = OutboundAgentCommand::SetInputHelpVisible { visible: false };
         let _ = OutboundAgentCommand::RefreshModelContextLimit;
         let _ = OutboundAgentCommand::RefreshSessions { directory: None };

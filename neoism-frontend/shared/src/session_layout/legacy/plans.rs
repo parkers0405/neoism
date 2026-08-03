@@ -31,6 +31,24 @@ pub fn pane_strip_position(input: PaneStripGeomInput) -> (f32, f32, f32) {
     (x, y, w)
 }
 
+/// Clamp a logical-pixel tab strip to a horizontal chrome band.
+///
+/// Pane layout can briefly retain its pre-sidebar origin while a split or
+/// resizable sidebar is transitioning. Keeping the strip's original right
+/// edge while clipping its left edge prevents tab text and hit geometry from
+/// entering the sidebar without making the strip wider on the other side.
+pub fn clamp_pane_strip_horizontal(
+    x: f32,
+    width: f32,
+    left_edge: f32,
+    right_edge: f32,
+) -> (f32, f32) {
+    let strip_right = x + width.max(0.0);
+    let clamped_x = x.max(left_edge);
+    let clamped_right = strip_right.min(right_edge).max(clamped_x);
+    (clamped_x, (clamped_right - clamped_x).max(0.0))
+}
+
 /// Whether a pane rectangle sits on the same visual "top row" as the
 /// smallest-top pane in its grid.
 ///
@@ -72,11 +90,7 @@ pub fn buffer_tabs_scroll_dx(delta: SessionScrollDelta, epsilon: f32) -> f32 {
             }
         }
     };
-    if dx.abs() < epsilon {
-        0.0
-    } else {
-        dx
-    }
+    if dx.abs() < epsilon { 0.0 } else { dx }
 }
 
 /// Returns the tab index reached by keyboard-style previous/next navigation.

@@ -1,7 +1,7 @@
-use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use sugarloaf::text::DrawOpts;
 
-use crate::panels::agent_pane::input_controller::{visual_row_index, InputWrapRow};
+use crate::panels::agent_pane::input_controller::{InputWrapRow, visual_row_index};
 use crate::panels::agent_pane::state::{
     NeoismAgentPane, NeoismAgentPendingPermission, NeoismAgentPermissionChoice,
     NeoismAgentStreamingState,
@@ -1326,7 +1326,7 @@ pub fn render_streaming_status_row(
         clip_rect: Some(text_clip),
         ..DrawOpts::default()
     };
-    let word_y = primary_y + (status_line_h - word_opts.font_size) * 0.5 - 1.0 * s;
+    let word_y = primary_y + (status_line_h - word_opts.font_size) * 0.5;
     let word_motion = live_phase * 3.0;
     let word_drift_x = word_motion.sin() * 1.8 * s;
     let word_drift_y = (word_motion * 0.72).cos() * 0.8 * s;
@@ -1416,9 +1416,12 @@ pub fn render_streaming_status_row(
         ..DrawOpts::default()
     };
     cursor_x += 7.0 * s;
-    // Sit the dots a touch above the letters' baseline. Their larger UI
-    // font otherwise lets the bottom pixels disappear into the row edge.
-    let dot_floor_y = word_y + 3.0 * s;
+    // The dots use a different face/size from the animated word. Align their
+    // actual normalized baselines instead of carrying a pixel-font-specific
+    // vertical nudge.
+    let word_baseline = sugarloaf.text_mut().baseline_offset(&word_opts);
+    let dot_baseline = sugarloaf.text_mut().baseline_offset(&dot_opts);
+    let dot_floor_y = word_y + word_baseline - dot_baseline;
     for ix in 0..3 {
         let phase = live_phase * 4.0 + ix as f32 * 0.95;
         let swell = phase.sin();
@@ -1459,10 +1462,12 @@ pub fn render_streaming_status_row(
         clip_rect: Some(text_clip),
         ..DrawOpts::default()
     };
+    let time_baseline = sugarloaf.text_mut().baseline_offset(&time_opts);
+    let time_y = word_y + word_baseline - time_baseline;
     draw_text_clipped(
         sugarloaf,
         cursor_x,
-        word_y,
+        time_y,
         &time_label,
         &time_opts,
         occlusion_rects,

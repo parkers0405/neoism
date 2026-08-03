@@ -1236,19 +1236,20 @@ impl Application<'_> {
             route.window.set_cursor(CursorIcon::Pointer);
             route.window.screen.context_manager.request_render();
         } else if !is_selecting {
-            // File-link hover: when the cell under the mouse
-            // resolves to a real file/dir, switch to the hand
+            // Direct-link hover: when the cell under the mouse is a web URL
+            // or resolves to a real file/dir, switch to the hand
             // cursor and trigger a redraw so the underline +
             // blue tint paint reliably even when nothing else
             // marks the frame dirty.
-            let over_file_link = {
+            let over_direct_link = {
                 let _span = crate::app::freeze_watchdog::global_span(
                     "cursor_moved.terminal_file_link_at_mouse",
                     format!("window_id={window_id:?}"),
                 );
-                route.window.screen.terminal_file_link_at_mouse().is_some()
+                route.window.screen.terminal_web_link_at_mouse().is_some()
+                    || route.window.screen.terminal_file_link_at_mouse().is_some()
             };
-            let cursor_icon = if over_file_link {
+            let cursor_icon = if over_direct_link {
                 route.window.screen.context_manager.request_render();
                 CursorIcon::Pointer
             } else if !route.window.screen.modifiers.state().shift_key()

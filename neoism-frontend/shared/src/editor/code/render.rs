@@ -8,13 +8,14 @@
 //! full-width cursorline band, `~` markers past EOF, block caret in
 //! Normal/Visual and bar caret in Insert, uniform row height. Soft
 //! wrap is the default (`CodePane::wrap`): long lines continue on
-//! extra VISUAL rows with an empty gutter cell, and all scroll math
+//! extra VISUAL rows with a quiet gutter marker and hanging indent, and all scroll math
 //! (spring, center-lock reveal, wheel snap) runs in visual-row space
 //! via the cached `WrapIndex`. `wrap = false` restores NoWrap plus a
 //! plain horizontal caret-follow (`scroll_x`).
 
 use sugarloaf::{text::DrawOpts, Sugarloaf};
 
+use crate::primitives::draw_icon_centered_with_occlusion;
 use crate::primitives::ide_theme::IdeTheme;
 use crate::syntax::syn_color;
 
@@ -134,10 +135,10 @@ pub fn render(
     // Cursor in visual-row space: segment + column-within-segment come
     // from the same cut math the painter draws with.
     let cursor_line = pane.buffer.cursor_line.min(line_count.saturating_sub(1));
-    let (cursor_seg, cursor_local_col) = wrap_visual_position(
+    let (cursor_seg, cursor_local_col) = wrap.visual_position(
+        cursor_line,
         &pane.buffer.lines[cursor_line],
         pane.buffer.cursor_col,
-        cols,
         TAB_DISPLAY_WIDTH,
     );
     let cursor_vrow = wrap.first_row_of_line(cursor_line) + cursor_seg;
@@ -308,24 +309,26 @@ pub fn render(
         seg_start: usize,
         seg_end: usize,
         base_col: usize,
+        visual_indent: usize,
     }
     let mut visible: Vec<RowView> = Vec::with_capacity(visible_rows.min(256));
     {
         let (mut line_ix, mut seg) = wrap.line_of_row(first_row, line_count);
         let mut vrow = first_row;
         while vrow < last_row && line_ix < line_count {
-            let line = &pane.buffer.lines[line_ix];
-            let starts = wrap_segment_starts(line, cols, TAB_DISPLAY_WIDTH);
-            while seg < starts.len() && vrow < last_row {
-                let (seg_start, base_col) = starts[seg];
-                let seg_end = starts.get(seg + 1).map(|s| s.0).unwrap_or(line.len());
+            let Some(segments) = wrap.segments_of_line(line_ix) else {
+                break;
+            };
+            while seg < segments.len() && vrow < last_row {
+                let segment = segments[seg];
                 visible.push(RowView {
                     vrow,
                     line: line_ix,
                     seg,
-                    seg_start,
-                    seg_end,
-                    base_col,
+                    seg_start: segment.byte_start,
+                    seg_end: segment.byte_end,
+                    base_col: segment.source_col,
+                    visual_indent: segment.visual_indent,
                 });
                 vrow += 1;
                 seg += 1;
@@ -401,10 +404,12 @@ pub fn render(
                 if s >= e {
                     continue;
                 }
-                let start_col = display_col_for_byte(line, s, TAB_DISPLAY_WIDTH)
-                    .saturating_sub(rv.base_col);
-                let end_col = display_col_for_byte(line, e, TAB_DISPLAY_WIDTH)
-                    .saturating_sub(rv.base_col);
+                let start_col = rv.visual_indent
+                    + display_col_for_byte(line, s, TAB_DISPLAY_WIDTH)
+                        .saturating_sub(rv.base_col);
+                let end_col = rv.visual_indent
+                    + display_col_for_byte(line, e, TAB_DISPLAY_WIDTH)
+                        .saturating_sub(rv.base_col);
                 let Some((bx, bw)) = clamp_band(
                     text_x + start_col as f32 * cell_w - scroll_x,
                     (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w,
@@ -435,10 +440,12 @@ pub fn render(
                 if s >= e {
                     continue;
                 }
-                let start_col = display_col_for_byte(line, s, TAB_DISPLAY_WIDTH)
-                    .saturating_sub(rv.base_col);
-                let end_col = display_col_for_byte(line, e, TAB_DISPLAY_WIDTH)
-                    .saturating_sub(rv.base_col);
+                let start_col = rv.visual_indent
+                    + display_col_for_byte(line, s, TAB_DISPLAY_WIDTH)
+                        .saturating_sub(rv.base_col);
+                let end_col = rv.visual_indent
+                    + display_col_for_byte(line, e, TAB_DISPLAY_WIDTH)
+                        .saturating_sub(rv.base_col);
                 if let Some((bx, bw)) = clamp_band(
                     text_x + start_col as f32 * cell_w - scroll_x,
                     (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w,
@@ -486,10 +493,12 @@ pub fn render(
                 if start >= end {
                     continue;
                 }
-                let start_col = display_col_for_byte(line, start, TAB_DISPLAY_WIDTH)
-                    .saturating_sub(rv.base_col);
-                let end_col = display_col_for_byte(line, end, TAB_DISPLAY_WIDTH)
-                    .saturating_sub(rv.base_col);
+                let start_col = rv.visual_indent
+                    + display_col_for_byte(line, start, TAB_DISPLAY_WIDTH)
+                        .saturating_sub(rv.base_col);
+                let end_col = rv.visual_indent
+                    + display_col_for_byte(line, end, TAB_DISPLAY_WIDTH)
+                        .saturating_sub(rv.base_col);
                 let Some((band_x, band_w)) = clamp_band(
                     text_x + start_col as f32 * cell_w - scroll_x,
                     (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w,
@@ -560,10 +569,12 @@ pub fn render(
         let s = sel_start.max(rv.seg_start);
         let e = sel_end.min(rv.seg_end);
         let (band_col, band_w) = if s < e {
-            let start_col = display_col_for_byte(line, s, TAB_DISPLAY_WIDTH)
-                .saturating_sub(rv.base_col);
-            let end_col = display_col_for_byte(line, e, TAB_DISPLAY_WIDTH)
-                .saturating_sub(rv.base_col);
+            let start_col = rv.visual_indent
+                + display_col_for_byte(line, s, TAB_DISPLAY_WIDTH)
+                    .saturating_sub(rv.base_col);
+            let end_col = rv.visual_indent
+                + display_col_for_byte(line, e, TAB_DISPLAY_WIDTH)
+                    .saturating_sub(rv.base_col);
             (
                 start_col,
                 (end_col.saturating_sub(start_col)) as f32 * cell_w,
@@ -575,8 +586,9 @@ pub fn render(
             // Empty tail of a multi-line selection still shows a stub
             // (on the LAST wrapped row, where the line end lives).
             (
-                display_col_for_byte(line, sel_start, TAB_DISPLAY_WIDTH)
-                    .saturating_sub(rv.base_col),
+                rv.visual_indent
+                    + display_col_for_byte(line, sel_start, TAB_DISPLAY_WIDTH)
+                        .saturating_sub(rv.base_col),
                 cell_w * 0.5,
             )
         } else {
@@ -643,8 +655,9 @@ pub fn render(
                 if band_y + row_h <= grid_y || band_y >= grid_y + h_content {
                     continue;
                 }
-                let start_col = display_col_for_byte(line, byte_col, TAB_DISPLAY_WIDTH)
-                    .saturating_sub(rv.base_col);
+                let start_col = rv.visual_indent
+                    + display_col_for_byte(line, byte_col, TAB_DISPLAY_WIDTH)
+                        .saturating_sub(rv.base_col);
                 if let Some((band_x, band_w)) =
                     clamp_band(text_x + start_col as f32 * cell_w - scroll_x, cell_w)
                 {
@@ -728,6 +741,24 @@ pub fn render(
                 &num_opts,
                 text_occlusions,
             );
+        } else {
+            // A quiet continuation marker makes the relationship between
+            // wrapped rows legible without competing with line numbers.
+            let marker = "↳";
+            let marker_opts = DrawOpts {
+                color: theme.u8_alpha(theme.dim, 0.42),
+                ..base_opts
+            };
+            let marker_x = x + gutter_w - GUTTER_PAD_X - cell_w;
+            draw_icon_centered_with_occlusion(
+                sugarloaf,
+                marker_x,
+                [marker_x, ry, cell_w, row_h],
+                marker,
+                &marker_opts,
+                text_occlusions,
+                true,
+            );
         }
 
         let line = &pane.buffer.lines[rv.line];
@@ -758,7 +789,9 @@ pub fn render(
                 continue;
             }
             let start_col = display_col_for_byte(line, sub_start, TAB_DISPLAY_WIDTH);
-            let run_x = text_x + (start_col.saturating_sub(rv.base_col)) as f32 * cell_w
+            let run_x = text_x
+                + (rv.visual_indent + start_col.saturating_sub(rv.base_col)) as f32
+                    * cell_w
                 - scroll_x;
             let display =
                 expand_tabs_from(&line[sub_start..sub_end], start_col, TAB_DISPLAY_WIDTH);
@@ -803,7 +836,8 @@ pub fn render(
             }) {
                 let end_col = display_col_for_byte(line, line.len(), TAB_DISPLAY_WIDTH);
                 let vx = text_x
-                    + (end_col.saturating_sub(rv.base_col) + 2) as f32 * cell_w
+                    + (rv.visual_indent + end_col.saturating_sub(rv.base_col) + 2) as f32
+                        * cell_w
                     - scroll_x;
                 let color = match diag.severity {
                     CodeDiagnosticSeverity::Error => theme.u8_alpha(theme.red, 0.8),
@@ -842,8 +876,8 @@ pub fn render(
     // block repaints the covered glyph in bg for contrast. The caret
     // box is the GLYPH box, not the full row — rows carry line-spacing
     // (ROW_HEIGHT_FACTOR) and a row-tall caret reads as stretched.
-    // Position is visual: the wrap segment's row + the column within
-    // that segment (continuation rows restart at the gutter edge).
+    // Position is visual: the wrap segment's row + its hanging-indent-aware
+    // column. This is the same geometry used by text and pointer hits.
     let cursor_line_text = &pane.buffer.lines[cursor_line];
     let cursor_row_y = row_screen_y(cursor_vrow);
     let caret_x = text_x + cursor_local_col as f32 * cell_w - scroll_x;
@@ -920,7 +954,7 @@ pub fn render(
         };
         let byte_col = byte_col_for_utf16_col(line_text, cursor.col_utf16);
         let (seg, local_col) =
-            wrap_visual_position(line_text, byte_col, cols, TAB_DISPLAY_WIDTH);
+            wrap.visual_position(cursor.line, line_text, byte_col, TAB_DISPLAY_WIDTH);
         let vrow = wrap.first_row_of_line(cursor.line) + seg;
         let ry = row_screen_y(vrow);
         if ry + row_h <= grid_y || ry >= grid_y + h_content {
@@ -1055,11 +1089,12 @@ pub fn render(
                     if ss >= ee {
                         continue;
                     }
-                    let start_col =
-                        display_col_for_byte(line_text, ss, TAB_DISPLAY_WIDTH)
+                    let start_col = rv.visual_indent
+                        + display_col_for_byte(line_text, ss, TAB_DISPLAY_WIDTH)
                             .saturating_sub(rv.base_col);
-                    let end_col = display_col_for_byte(line_text, ee, TAB_DISPLAY_WIDTH)
-                        .saturating_sub(rv.base_col);
+                    let end_col = rv.visual_indent
+                        + display_col_for_byte(line_text, ee, TAB_DISPLAY_WIDTH)
+                            .saturating_sub(rv.base_col);
                     if let Some((bx, bw)) = clamp_band(
                         text_x + start_col as f32 * cell_w - scroll_x,
                         (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w,
@@ -1070,10 +1105,10 @@ pub fn render(
                     }
                 }
             }
-            let (seg, local_col) = wrap_visual_position(
+            let (seg, local_col) = wrap.visual_position(
+                extra.line,
                 line_text,
                 extra.col.min(line_text.len()),
-                cols,
                 TAB_DISPLAY_WIDTH,
             );
             let vrow = wrap.first_row_of_line(extra.line) + seg;

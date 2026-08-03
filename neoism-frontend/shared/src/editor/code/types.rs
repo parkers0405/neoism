@@ -247,9 +247,7 @@ impl CodePaneGeometry {
     /// past the end of a wrapped row parks on that row's last char
     /// (nvim), not on the next visual row.
     pub fn hit_position(&self, lines: &[String], mx: f32, my: f32) -> (usize, usize) {
-        use super::layout::{
-            byte_for_display_col, wrap_segment_starts, TAB_DISPLAY_WIDTH,
-        };
+        use super::layout::{byte_for_display_col, TAB_DISPLAY_WIDTH};
         let y = self.rect[1];
         let vrow = (((my - y + self.scroll_y) / self.row_h.max(1.0)).max(0.0)) as usize;
         let (line_ix, seg) = self.wrap.line_of_row(vrow, lines.len());
@@ -264,16 +262,24 @@ impl CodePaneGeometry {
                 byte_for_display_col(line, cells, TAB_DISPLAY_WIDTH),
             );
         }
-        let starts = wrap_segment_starts(line, cols, TAB_DISPLAY_WIDTH);
-        let seg = seg.min(starts.len().saturating_sub(1));
-        let (seg_start, base_col) = starts[seg];
-        let seg_end = starts.get(seg + 1).map(|s| s.0).unwrap_or(line.len());
-        let mut byte = byte_for_display_col(line, base_col + cells, TAB_DISPLAY_WIDTH);
-        if byte >= seg_end && seg_end < line.len() {
+        let segment = self
+            .wrap
+            .segment(line_ix, seg)
+            .or_else(|| self.wrap.segment(line_ix, 0))
+            .unwrap_or(super::layout::WrapSegment {
+                byte_start: 0,
+                byte_end: line.len(),
+                source_col: 0,
+                source_end_col: super::layout::display_width(line, TAB_DISPLAY_WIDTH),
+                visual_indent: 0,
+            });
+        let source_col = segment.source_col_at_visual(cells);
+        let mut byte = byte_for_display_col(line, source_col, TAB_DISPLAY_WIDTH);
+        if byte >= segment.byte_end && segment.byte_end < line.len() {
             // Clicked into the slack right of a wrapped row: stay on it.
-            byte = super::buffer::floor_char_boundary(line, seg_end - 1);
+            byte = super::buffer::floor_char_boundary(line, segment.byte_end - 1);
         }
-        (line_ix, byte.max(seg_start))
+        (line_ix, byte.max(segment.byte_start))
     }
 
     /// VISUAL rows that fit the viewport (PageUp/PageDown size).
@@ -291,10 +297,7 @@ impl CodePane {
     /// steps land where the previous one did, reset by any other
     /// cursor movement (the stored expectation stops matching).
     pub fn move_cursor_vertical_visual(&mut self, down: bool, extend: bool) -> bool {
-        use super::layout::{
-            byte_for_display_col, display_width, wrap_segment_starts,
-            wrap_visual_position, TAB_DISPLAY_WIDTH,
-        };
+        use super::layout::{byte_for_display_col, TAB_DISPLAY_WIDTH};
         let cols = self.wrap_index.cols();
         if !self.wrap || cols == 0 {
             return false;
@@ -302,10 +305,10 @@ impl CodePane {
         let count = self.buffer.lines.len();
         let total = self.wrap_index.total_rows(count);
         let line = self.buffer.cursor_line.min(count.saturating_sub(1));
-        let (seg, local) = wrap_visual_position(
+        let (seg, local) = self.wrap_index.visual_position(
+            line,
             &self.buffer.lines[line],
             self.buffer.cursor_col,
-            cols,
             TAB_DISPLAY_WIDTH,
         );
         let vrow = self.wrap_index.first_row_of_line(line) + seg;
@@ -325,18 +328,29 @@ impl CodePane {
         let target = if down { vrow + 1 } else { vrow - 1 };
         let (tline, tseg) = self.wrap_index.line_of_row(target, count);
         let tline_text = &self.buffer.lines[tline];
-        let starts = wrap_segment_starts(tline_text, cols, TAB_DISPLAY_WIDTH);
-        let (_, seg_col) = starts.get(tseg).copied().unwrap_or((0, 0));
-        let width = display_width(tline_text, TAB_DISPLAY_WIDTH);
-        let seg_end = starts.get(tseg + 1).map(|(_, col)| *col).unwrap_or(width);
+        let segment =
+            self.wrap_index
+                .segment(tline, tseg)
+                .unwrap_or(super::layout::WrapSegment {
+                    byte_start: 0,
+                    byte_end: tline_text.len(),
+                    source_col: 0,
+                    source_end_col: super::layout::display_width(
+                        tline_text,
+                        TAB_DISPLAY_WIDTH,
+                    ),
+                    visual_indent: 0,
+                });
         // Non-last segments: a caret exactly ON the cut belongs to the
         // NEXT segment — clamp one cell short so it stays on this row.
-        let max_col = if tseg + 1 < starts.len() {
-            seg_end.saturating_sub(1)
+        let max_col = if segment.byte_end < tline_text.len() {
+            segment.source_end_col.saturating_sub(1)
         } else {
-            seg_end
+            segment.source_end_col
         };
-        let target_col = (seg_col + goal).min(max_col.max(seg_col));
+        let target_col = segment
+            .source_col_at_visual(goal)
+            .min(max_col.max(segment.source_col));
         let byte = byte_for_display_col(tline_text, target_col, TAB_DISPLAY_WIDTH);
         self.buffer.set_cursor_position(tline, byte, extend);
         self.buffer.follow_cursor = true;
@@ -364,17 +378,13 @@ impl CodePane {
     /// goal display-column (the tail of the j/k stepper, callable for
     /// long jumps like Ctrl-D).
     fn place_cursor_at_vrow(&mut self, target_vrow: usize, extend: bool) {
-        use super::layout::{
-            byte_for_display_col, display_width, wrap_segment_starts,
-            wrap_visual_position, TAB_DISPLAY_WIDTH,
-        };
-        let cols = self.wrap_index.cols();
+        use super::layout::{byte_for_display_col, TAB_DISPLAY_WIDTH};
         let count = self.buffer.lines.len();
         let line = self.buffer.cursor_line.min(count.saturating_sub(1));
-        let (_, local) = wrap_visual_position(
+        let (_, local) = self.wrap_index.visual_position(
+            line,
             &self.buffer.lines[line],
             self.buffer.cursor_col,
-            cols,
             TAB_DISPLAY_WIDTH,
         );
         let goal = match self.visual_goal {
@@ -387,16 +397,27 @@ impl CodePane {
         };
         let (tline, tseg) = self.wrap_index.line_of_row(target_vrow, count);
         let tline_text = &self.buffer.lines[tline];
-        let starts = wrap_segment_starts(tline_text, cols, TAB_DISPLAY_WIDTH);
-        let (_, seg_col) = starts.get(tseg).copied().unwrap_or((0, 0));
-        let width = display_width(tline_text, TAB_DISPLAY_WIDTH);
-        let seg_end = starts.get(tseg + 1).map(|(_, col)| *col).unwrap_or(width);
-        let max_col = if tseg + 1 < starts.len() {
-            seg_end.saturating_sub(1)
+        let segment =
+            self.wrap_index
+                .segment(tline, tseg)
+                .unwrap_or(super::layout::WrapSegment {
+                    byte_start: 0,
+                    byte_end: tline_text.len(),
+                    source_col: 0,
+                    source_end_col: super::layout::display_width(
+                        tline_text,
+                        TAB_DISPLAY_WIDTH,
+                    ),
+                    visual_indent: 0,
+                });
+        let max_col = if segment.byte_end < tline_text.len() {
+            segment.source_end_col.saturating_sub(1)
         } else {
-            seg_end
+            segment.source_end_col
         };
-        let target_col = (seg_col + goal).min(max_col.max(seg_col));
+        let target_col = segment
+            .source_col_at_visual(goal)
+            .min(max_col.max(segment.source_col));
         let byte = byte_for_display_col(tline_text, target_col, TAB_DISPLAY_WIDTH);
         self.buffer.set_cursor_position(tline, byte, extend);
         self.visual_goal = Some((tline, byte, goal));
@@ -423,12 +444,12 @@ impl CodePane {
         let current_top = (self.target_scroll_y / row_h).round() as i64;
         let new_top = (current_top + if down { half } else { -half }).clamp(0, max_top);
         let cursor_vrow = {
-            use super::layout::{wrap_visual_position, TAB_DISPLAY_WIDTH};
+            use super::layout::TAB_DISPLAY_WIDTH;
             let line = self.buffer.cursor_line.min(line_count.saturating_sub(1));
-            let (seg, _) = wrap_visual_position(
+            let (seg, _) = self.wrap_index.visual_position(
+                line,
                 &self.buffer.lines[line],
                 self.buffer.cursor_col,
-                self.wrap_index.cols(),
                 TAB_DISPLAY_WIDTH,
             );
             (self.wrap_index.first_row_of_line(line) + seg) as i64

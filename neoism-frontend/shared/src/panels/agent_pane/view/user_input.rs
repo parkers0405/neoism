@@ -1,7 +1,7 @@
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
-use crate::panels::agent_pane::input_controller::{InputWrapRow, visual_row_index};
+use crate::panels::agent_pane::input_controller::{visual_row_index, InputWrapRow};
 use crate::panels::agent_pane::state::{
     NeoismAgentPane, NeoismAgentPendingPermission, NeoismAgentPermissionChoice,
     NeoismAgentStreamingState,
@@ -728,6 +728,7 @@ pub fn render_input(
     show_status: bool,
     now_seconds: f32,
     occlusion_rects: &[[f32; 4]],
+    prepared_wrap_rows: Option<&[InputWrapRow]>,
 ) {
     let [x, y, w, h] = rect;
     pane.set_cursor_rect(None);
@@ -854,7 +855,9 @@ pub fn render_input(
         clip_rect: Some([text_x, box_y + 6.0 * s, text_w, box_h - bottom_reserved]),
         ..DrawOpts::default()
     };
-    let wrapped_rows = wrap_agent_prompt_rows(sugarloaf, text, text_w, &opts);
+    let wrapped_rows = prepared_wrap_rows
+        .map(|rows| rows.to_vec())
+        .unwrap_or_else(|| wrap_agent_prompt_rows(sugarloaf, text, text_w, &opts));
     // Register the visual rows (byte spans + per-boundary x offsets)
     // back on the pane so Up/Down arrow movement walks the exact rows
     // drawn below AND matches their proportional-font caret positions
@@ -1756,6 +1759,28 @@ fn wrap_agent_prompt_rows(
         wrap.push_row(end);
     }
     wrap.lines
+}
+
+/// Measure the prompt with the exact wrap core used by paint, caret placement,
+/// and visual Up/Down movement. Composer layout calls this before choosing its
+/// height so a newly-created visual row expands the card in the same frame.
+pub(super) fn measure_prompt_visual_rows(
+    sugarloaf: &mut Sugarloaf,
+    input: &str,
+    input_w: f32,
+    s: f32,
+) -> Vec<InputWrapRow> {
+    let text = if input.is_empty() {
+        "Ask anything"
+    } else {
+        input
+    };
+    let text_w = (input_w - 36.0 * s).max(20.0 * s);
+    let opts = DrawOpts {
+        font_size: 16.0 * s,
+        ..DrawOpts::default()
+    };
+    wrap_agent_prompt_rows(sugarloaf, text, text_w, &opts)
 }
 
 fn push_wrapped_prompt_segment(

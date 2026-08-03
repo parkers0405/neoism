@@ -541,6 +541,78 @@ fn wrap_visual_position_places_caret_on_continuation_rows() {
 }
 
 #[test]
+fn code_wrap_prefers_language_shaped_boundaries() {
+    let chain = "const value = repository.recipient.delivery.status;";
+    let segments = wrap_segments(chain, 24, TAB_DISPLAY_WIDTH);
+    assert!(segments.len() >= 2);
+    // The first row fits exactly through `repository`; a fluent chain
+    // continues with its dot instead of cutting through an identifier.
+    assert_eq!(&chain[segments[0].byte_end..][..10], ".recipient");
+    assert!(segments[1].visual_indent > 0);
+
+    let call = "const result = calculate(first, second, third, fourth);";
+    let segments = wrap_segments(call, 28, TAB_DISPLAY_WIDTH);
+    for segment in segments.iter().take(segments.len().saturating_sub(1)) {
+        let before = call[..segment.byte_end].chars().next_back().unwrap();
+        let after = call[segment.byte_end..].chars().next().unwrap();
+        assert!(
+            before.is_whitespace()
+                || matches!(before, ',' | ';' | ':' | '=' | '(')
+                || matches!(after, '.' | '?' | '+' | '-' | '*' | '/' | '%'),
+            "wrap split an ordinary code token between {before:?} and {after:?}"
+        );
+    }
+}
+
+#[test]
+fn code_wrap_moves_a_long_literal_to_a_hanging_row_before_hard_wrapping_it() {
+    let line = "let reason = \"a very long failure explanation\";";
+    let quote = line.find('"').unwrap();
+    let segments = wrap_segments(line, 20, TAB_DISPLAY_WIDTH);
+    assert_eq!(segments[0].byte_end, quote);
+    assert_eq!(segments[1].byte_start, quote);
+    assert_eq!(segments[1].visual_indent, 4);
+    assert!(segments.iter().all(|segment| {
+        segment.visual_indent + segment.source_end_col.saturating_sub(segment.source_col)
+            <= 20
+    }));
+}
+
+#[test]
+fn hanging_indent_is_part_of_caret_and_hit_test_geometry() {
+    let lines = wrap_lines(&["const value = repository.recipient"]);
+    let index = std::sync::Arc::new(WrapIndex::build(&lines, 24, TAB_DISPLAY_WIDTH));
+    let continuation = index.segment(0, 1).expect("continuation row");
+    assert_eq!(continuation.visual_indent, 4);
+    assert_eq!(
+        index.visual_position(0, &lines[0], continuation.byte_start, TAB_DISPLAY_WIDTH,),
+        (1, 4)
+    );
+
+    let geometry = CodePaneGeometry {
+        rect: [0.0, 0.0, 800.0, 200.0],
+        text_x: 60.0,
+        gutter_w: 52.0,
+        cell_w: 10.0,
+        row_h: 20.0,
+        first_row: 0,
+        scroll_y: 0.0,
+        scroll_x: 0.0,
+        wrap: index,
+    };
+    // Synthetic indent is inert: its full area lands on the first source
+    // byte of the continuation, while text cells map normally after it.
+    assert_eq!(
+        geometry.hit_position(&lines, 70.0, 25.0),
+        (0, continuation.byte_start)
+    );
+    assert_eq!(
+        geometry.hit_position(&lines, 120.0, 25.0),
+        (0, continuation.byte_start + 2)
+    );
+}
+
+#[test]
 fn hit_position_resolves_wrapped_visual_rows() {
     let lines = wrap_lines(&["abcdefghij", "next"]);
     let geometry = CodePaneGeometry {

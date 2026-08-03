@@ -1,4 +1,5 @@
 use super::parse_markdown_link_parts;
+use crate::widgets::markdown::{parse_markdown_link, web_url_target};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlineSourceMap {
@@ -160,6 +161,18 @@ fn build_inline_map(text: &str, base: usize, builder: &mut InlineSourceMapBuilde
             builder.hide_range(base + ix + letter_end, base + ix + source_len);
             ix += source_len;
             continue;
+        }
+        if let Some(link) = parse_markdown_link(rest) {
+            if web_url_target(link.target).is_some() {
+                let label_start = ix + 1;
+                let label_end = label_start + link.label.len();
+                let raw_end = ix + link.consumed;
+                builder.hide_range(base + ix, base + label_start);
+                emit_source_chars(text, label_start, label_end, base, builder);
+                builder.hide_range(base + label_end, base + raw_end);
+                ix = raw_end;
+                continue;
+            }
         }
         if rest.starts_with("[[") {
             let inner_start = ix + 2;
@@ -347,6 +360,14 @@ mod tests {
         assert_eq!(map.visible_range(6, 11), "md:12");
         assert_eq!(map.visible_char(0), Some('G'));
         assert_eq!(map.visible_char(9), Some('1'));
+    }
+
+    #[test]
+    fn maps_standard_web_link_to_its_label() {
+        let text = "See [Search Engineer](https://jobs.example/one) now";
+        let map = InlineSourceMap::new(text);
+        assert_eq!(map.visible_text(), "See Search Engineer now");
+        assert_eq!(map.visible_for_source(text.find('[').unwrap()), 4);
     }
 
     #[test]

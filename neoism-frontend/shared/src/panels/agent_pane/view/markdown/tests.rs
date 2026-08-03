@@ -258,6 +258,54 @@ fn selectable_line_text_is_rendered_not_raw_markdown() {
 }
 
 #[test]
+fn web_links_render_as_clickable_labels_or_blue_bare_urls() {
+    let segments = parsed_markdown_inline_line(
+        "See [Search Engineer](https://jobs.example/one) or https://neoism.dev/docs.",
+    );
+
+    assert!(segments.iter().any(|segment| matches!(
+        segment,
+        MarkdownInlineSegment::MarkdownLink { label, target: Some(target), .. }
+            if label == "Search Engineer" && target == "https://jobs.example/one"
+    )));
+    assert!(segments.iter().any(|segment| matches!(
+        segment,
+        MarkdownInlineSegment::PlainToken { target: Some(target), .. }
+            if target == "https://neoism.dev/docs"
+    )));
+    assert_eq!(
+        rendered_inline_text("[Search Engineer](https://jobs.example/one)"),
+        "Search Engineer"
+    );
+
+    let wrapped = inline_wrap_tokens("https://neoism.dev/a-very-long-path");
+    assert!(wrapped.iter().all(|token| matches!(
+        &token.style,
+        InlineWrapStyle::MarkdownLink(target) if target == "https://neoism.dev/a-very-long-path"
+    )));
+}
+
+#[test]
+fn one_link_bridges_whitespace_between_wrapped_word_fragments() {
+    let segments = parsed_markdown_inline_line(
+        "[Open](https://neoism.dev) [the](https://neoism.dev) [website](https://neoism.dev)",
+    );
+    assert_eq!(
+        bridged_inline_whitespace_target(&segments, 1),
+        Some("https://neoism.dev")
+    );
+    assert_eq!(
+        bridged_inline_whitespace_target(&segments, 3),
+        Some("https://neoism.dev")
+    );
+
+    let different = parsed_markdown_inline_line(
+        "[left](https://one.example) [right](https://two.example)",
+    );
+    assert_eq!(bridged_inline_whitespace_target(&different, 1), None);
+}
+
+#[test]
 fn outer_blank_blocks_never_inflate_a_message_card() {
     let mut blocks = vec![
         AssistantMarkdownBlock::Blank,

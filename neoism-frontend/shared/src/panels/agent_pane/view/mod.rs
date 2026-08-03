@@ -228,10 +228,36 @@ pub fn render_agent_pane_with<P, D, I>(
             }
         };
     let has_conversation = chat::AgentChatPane::has_conversation(pane);
-    let input_rect = if has_conversation {
-        layout::chat_input_rect(pane, main_rect, chrome_scale)
+    // Height must come from the same real glyph measurements used to draw
+    // the prompt. The former char-count estimate could lag one visual row
+    // behind a wide font: caret-follow then showed only the new row until
+    // enough extra text made the estimate catch up.
+    let input_w = if has_conversation {
+        layout::chat_column(main_rect, chrome_scale).1
     } else {
-        layout::home_input_rect(pane, main_rect, chrome_scale)
+        layout::home_input_width(main_rect, chrome_scale)
+    };
+    let prompt_wrap_rows = user_input::measure_prompt_visual_rows(
+        sugarloaf,
+        layout::AgentPaneInput::input(pane),
+        input_w,
+        chrome_scale,
+    );
+    let prompt_visual_rows = prompt_wrap_rows.len();
+    let input_rect = if has_conversation {
+        layout::chat_input_rect_for_visual_rows(
+            pane,
+            main_rect,
+            chrome_scale,
+            prompt_visual_rows,
+        )
+    } else {
+        layout::home_input_rect_for_visual_rows(
+            pane,
+            main_rect,
+            chrome_scale,
+            prompt_visual_rows,
+        )
     };
     // The pre-chat composer sits around the pane midpoint, leaving much
     // less safe vertical room than the bottom-docked chat composer. Give
@@ -305,6 +331,7 @@ pub fn render_agent_pane_with<P, D, I>(
             chrome_scale,
             input_rect,
             &local_occlusions,
+            Some(&prompt_wrap_rows),
         );
     } else {
         home::render_home_with(
@@ -318,6 +345,7 @@ pub fn render_agent_pane_with<P, D, I>(
             chrome_scale,
             input_rect,
             &local_occlusions,
+            Some(&prompt_wrap_rows),
         );
     }
     if let Some(panel_rect) = side_panel_rect {

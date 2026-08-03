@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
+use neoism_ui::widgets::markdown;
+
 /// One detected clickable token in a terminal row. `byte_start`/`byte_end`
 /// are byte offsets into the source row's UTF-8 text and are converted
 /// to display columns by the renderer (display_width).
@@ -30,6 +32,50 @@ impl FileLink {
     pub fn covers(&self, abs_row: usize, col: usize) -> bool {
         self.abs_row == abs_row && col >= self.col_start && col < self.col_end
     }
+}
+
+/// HTTP(S) link detected directly from terminal row text. This complements
+/// OSC-8 hyperlinks: ordinary Markdown and pasted bare URLs remain usable
+/// even when the producing command did not emit terminal hyperlink escapes.
+#[derive(Debug, Clone)]
+pub struct WebLink {
+    pub abs_row: usize,
+    pub col_start: usize,
+    pub col_end: usize,
+    pub url: String,
+}
+
+/// Find a standard Markdown web link or bare HTTP(S) URL at `col`.
+#[cfg(test)]
+pub fn detect_web_at(row_text: &str, col: usize, abs_row: usize) -> Option<WebLink> {
+    detect_web_in_wrapped_row(row_text, col, abs_row, 0, row_text.chars().count())
+}
+
+/// Detect a link in a joined soft-wrapped logical line, returning only the
+/// part that occupies the physical row currently under the pointer.
+pub fn detect_web_in_wrapped_row(
+    row_text: &str,
+    col: usize,
+    abs_row: usize,
+    physical_row_start: usize,
+    physical_row_len: usize,
+) -> Option<WebLink> {
+    let span = markdown::web_link_at(row_text, col)?;
+    let logical_start = row_text[..span.raw_start].chars().count();
+    let logical_end =
+        logical_start + row_text[span.raw_start..span.raw_end].chars().count();
+    let physical_row_end = physical_row_start + physical_row_len;
+    let segment_start = logical_start.max(physical_row_start);
+    let segment_end = logical_end.min(physical_row_end);
+    if segment_start >= segment_end {
+        return None;
+    }
+    Some(WebLink {
+        abs_row,
+        col_start: segment_start - physical_row_start,
+        col_end: segment_end - physical_row_start,
+        url: span.target,
+    })
 }
 
 /// Find a clickable file/dir token at column `col` in `row_text`. Walks
@@ -156,5 +202,36 @@ mod tests {
         assert!(!link.covers(5, 14));
         assert!(!link.covers(5, 9));
         assert!(!link.covers(6, 12));
+    }
+
+    #[test]
+    fn detects_markdown_and_bare_web_links() {
+        let row = "[Search](https://example.com/jobs) or https://neoism.dev/docs.";
+        let markdown = detect_web_at(row, 3, 7).unwrap();
+        assert_eq!(markdown.abs_row, 7);
+        assert_eq!(markdown.url, "https://example.com/jobs");
+        assert_eq!(
+            &row[markdown.col_start..markdown.col_end],
+            "[Search](https://example.com/jobs)"
+        );
+
+        let bare_col = row.find("neoism.dev").unwrap();
+        let bare = detect_web_at(row, bare_col, 7).unwrap();
+        assert_eq!(bare.url, "https://neoism.dev/docs");
+    }
+
+    #[test]
+    fn detects_each_physical_segment_of_a_soft_wrapped_link() {
+        let logical = "[Search](https://example.com/jobs)";
+        let middle = detect_web_in_wrapped_row(logical, 15, 9, 12, 12).unwrap();
+        assert_eq!(middle.abs_row, 9);
+        assert_eq!(middle.col_start, 0);
+        assert_eq!(middle.col_end, 12);
+        assert_eq!(middle.url, "https://example.com/jobs");
+
+        let tail = detect_web_in_wrapped_row(logical, 29, 10, 24, 12).unwrap();
+        assert_eq!(tail.col_start, 0);
+        assert_eq!(tail.col_end, logical.chars().count() - 24);
+        assert_eq!(tail.url, middle.url);
     }
 }

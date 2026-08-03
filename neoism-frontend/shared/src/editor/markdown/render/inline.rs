@@ -11,6 +11,7 @@ use crate::editor::markdown::render::draw::{
     draw_rect_clipped, rects_intersect,
 };
 use crate::primitives::ide_theme::IdeTheme;
+use crate::widgets::markdown::web_link_spans;
 
 // Pure spellcheck primitives live next door in the sibling
 // `spellcheck` module of the lifted state crate. Native callers
@@ -127,7 +128,7 @@ pub(super) fn draw_inline_links_for_line(
     let Some(visible) = line.get(marker_len..) else {
         return;
     };
-    let links = collect_inline_wiki_links(visible);
+    let links = collect_inline_links(visible);
     let tags = collect_inline_tags(visible, &links);
     if links.is_empty() && tags.is_empty() {
         return;
@@ -230,7 +231,7 @@ pub(super) fn draw_inline_links_for_line(
     }
 }
 
-pub(super) fn collect_inline_wiki_links(text: &str) -> Vec<InlineWikiLink> {
+pub(super) fn collect_inline_links(text: &str) -> Vec<InlineWikiLink> {
     let mut links = Vec::new();
     let mut search_from = 0;
     while let Some(start_rel) = text[search_from..].find("[[") {
@@ -252,6 +253,22 @@ pub(super) fn collect_inline_wiki_links(text: &str) -> Vec<InlineWikiLink> {
         }
         search_from = raw_end;
     }
+    let web_links: Vec<_> = web_link_spans(text)
+        .into_iter()
+        .filter(|web| {
+            !links
+                .iter()
+                .any(|wiki| web.raw_start < wiki.raw_end && web.raw_end > wiki.raw_start)
+        })
+        .map(|link| InlineWikiLink {
+            raw_start: link.raw_start,
+            raw_end: link.raw_end,
+            inner: link.target,
+            label: text[link.label_start..link.label_end].to_string(),
+        })
+        .collect();
+    links.extend(web_links);
+    links.sort_by_key(|link| link.raw_start);
     links
 }
 

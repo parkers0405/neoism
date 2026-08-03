@@ -24,7 +24,14 @@ impl Screen<'_> {
         let Some(point) = self.terminal_body_mouse_position(display_offset) else {
             return;
         };
-        let Some(link) = self.terminal_file_link_at(point) else {
+        let Some((link_col_start, link_col_end)) = self
+            .terminal_web_link_at(point)
+            .map(|link| (link.col_start, link.col_end))
+            .or_else(|| {
+                self.terminal_file_link_at(point)
+                    .map(|link| (link.col_start, link.col_end))
+            })
+        else {
             return;
         };
         let current_grid = self.context_manager.current_grid();
@@ -48,8 +55,8 @@ impl Screen<'_> {
         let cell_h_logical = cell_h / scale_factor;
 
         let Some(rect) = terminal_file_link_hover_rect(TerminalFileLinkHoverInput {
-            link_col_start: link.col_start,
-            link_col_end: link.col_end,
+            link_col_start,
+            link_col_end,
             panel_left_logical,
             panel_top_logical,
             terminal_scroll_offset_logical,
@@ -93,6 +100,47 @@ impl Screen<'_> {
         };
         let point = self.terminal_body_mouse_position(display_offset)?;
         self.terminal_file_link_at(point)
+    }
+
+    pub fn terminal_web_link_at_mouse(
+        &self,
+    ) -> Option<crate::terminal::file_link::WebLink> {
+        if !self.contains_point(self.mouse.x, self.mouse.y) {
+            return None;
+        }
+        let display_offset = {
+            let current = self.context_manager.current();
+            if current.has_non_terminal_surface() {
+                return None;
+            }
+            current
+                .terminal
+                .try_lock_unfair()
+                .map(|terminal| terminal.display_offset())?
+        };
+        let point = self.terminal_body_mouse_position(display_offset)?;
+        self.terminal_web_link_at(point)
+    }
+
+    pub(crate) fn terminal_web_link_at(
+        &self,
+        point: Pos,
+    ) -> Option<crate::terminal::file_link::WebLink> {
+        let current = self.context_manager.current();
+        if current.has_non_terminal_surface() {
+            return None;
+        }
+        let probe = {
+            let terminal = current.terminal.try_lock_unfair()?;
+            terminal_wrapped_link_probe(&terminal, point)?
+        };
+        crate::terminal::file_link::detect_web_in_wrapped_row(
+            &probe.row_text,
+            probe.col,
+            probe.abs_row,
+            probe.physical_row_start,
+            probe.physical_row_len,
+        )
     }
 
     pub(crate) fn terminal_file_link_at(
@@ -161,15 +209,20 @@ impl Screen<'_> {
             return;
         };
 
-        // File-link click: a single-click without Shift/Ctrl/Alt over a
-        // resolvable file/dir token in terminal output opens the path
-        // in the editor instead of starting a selection. Drag still
+        // Link click: a single-click without Shift/Ctrl/Alt opens an HTTP(S)
+        // link in the browser or a resolvable file/dir token in the editor.
+        // Drag still
         // works because we only intercept on the first click of a
         // ClickState::Click — drag continuations don't re-enter here.
         let click_kind = Self::selection_click_kind(&self.mouse.click_state);
         let selection_modifiers = self.selection_modifiers();
 
         if should_open_file_link_on_click(click_kind, selection_modifiers) {
+            if let Some(link) = self.terminal_web_link_at(point) {
+                self.open_hyperlink_uri(&link.url);
+                self.mark_dirty();
+                return;
+            }
             if let Some(link) = self.terminal_file_link_at(point) {
                 let path = link.path;
                 match file_link_open_target(

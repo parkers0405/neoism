@@ -55,10 +55,13 @@ impl Screen<'_> {
         // visible_rows cells (set fg = blue, underline) before
         // composition. The link's `abs_row` is the absolute row
         // index; the pane below converts it back to a body index.
-        let hover_link = self.terminal_file_link_at_mouse();
-        let hover_link_key = hover_link
-            .as_ref()
-            .map(|link| (link.abs_row, link.col_start, link.col_end));
+        let hover_link_key = self
+            .terminal_web_link_at_mouse()
+            .map(|link| (link.abs_row, link.col_start, link.col_end))
+            .or_else(|| {
+                self.terminal_file_link_at_mouse()
+                    .map(|link| (link.abs_row, link.col_start, link.col_end))
+            });
         let hover_link_changed = self.terminal_file_link_hover != hover_link_key;
         self.terminal_file_link_hover = hover_link_key;
         // Pre-loop margin snapshot — `context_manager.current_grid()`
@@ -257,16 +260,16 @@ impl Screen<'_> {
                 &mut visible_row_sources,
                 prompt_abs_row,
             );
-            // File-link hover: if the user's mouse is over a
-            // resolvable token in THIS pane's output, mutate the
+            // Direct-link hover: if the user's mouse is over a web URL or a
+            // resolvable file token in THIS pane's output, mutate the
             // matching cells' style ID to a fg=blue + underline
             // style. The mutation runs BEFORE compose so the
             // styled cells flow through into the rendered frame.
             if is_active {
-                if let Some(link) = hover_link.as_ref() {
+                if let Some((abs_row, col_start, col_end)) = hover_link_key {
                     if let Some(idx) = visible_row_sources
                         .iter()
-                        .position(|&abs| abs == link.abs_row)
+                        .position(|&abs| abs == abs_row)
                     {
                         let blue_underline = style_set.intern(
                                 neoism_terminal_core::crosswords::style::Style {
@@ -286,12 +289,10 @@ impl Screen<'_> {
                                     flags:
                                         neoism_terminal_core::crosswords::style::StyleFlags::UNDERLINE,
                                 },
-                            );
+                        );
                         if let Some(row) = visible_rows.get_mut(idx) {
-                            let end = link.col_end.min(row.inner.len());
-                            for cell in
-                                row.inner.iter_mut().take(end).skip(link.col_start)
-                            {
+                            let end = col_end.min(row.inner.len());
+                            for cell in row.inner.iter_mut().take(end).skip(col_start) {
                                 cell.set_style_id(blue_underline);
                             }
                         }

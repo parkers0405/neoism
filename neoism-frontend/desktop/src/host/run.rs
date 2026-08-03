@@ -1171,13 +1171,12 @@ impl Renderer {
                 return None;
             }
             let line_text = code.buffer.lines.get(session.line)?;
-            let (word_segment, word_col) =
-                neoism_ui::editor::code::layout::wrap_visual_position(
-                    line_text,
-                    session.anchor_col,
-                    geometry.wrap.cols(),
-                    neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
-                );
+            let (word_segment, word_col) = geometry.wrap.visual_position(
+                session.line,
+                line_text,
+                session.anchor_col,
+                neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
+            );
             let visual_row = geometry.wrap.first_row_of_line(session.line) + word_segment;
             let anchor_x =
                 geometry.text_x + word_col as f32 * geometry.cell_w - geometry.scroll_x;
@@ -1214,13 +1213,12 @@ impl Renderer {
                 return None;
             }
             let line_text = code.buffer.lines.get(session.line)?;
-            let (col_segment, col_cells) =
-                neoism_ui::editor::code::layout::wrap_visual_position(
-                    line_text,
-                    session.col,
-                    geometry.wrap.cols(),
-                    neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
-                );
+            let (col_segment, col_cells) = geometry.wrap.visual_position(
+                session.line,
+                line_text,
+                session.col,
+                neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
+            );
             let visual_row = geometry.wrap.first_row_of_line(session.line) + col_segment;
             let anchor_x =
                 geometry.text_x + col_cells as f32 * geometry.cell_w - geometry.scroll_x;
@@ -1319,10 +1317,10 @@ impl Renderer {
             // Wrap-aware anchor: the card position maps through the
             // wrap index to a VISUAL row + column-within-segment
             // (identity when wrap is off, honoring scroll_x).
-            let (seg, local_col) = neoism_ui::editor::code::layout::wrap_visual_position(
+            let (seg, local_col) = geometry.wrap.visual_position(
+                card.line,
                 line_text,
                 card.col,
-                geometry.wrap.cols(),
                 neoism_ui::editor::code::layout::TAB_DISPLAY_WIDTH,
             );
             let vrow = geometry.wrap.first_row_of_line(card.line) + seg;

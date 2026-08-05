@@ -4,6 +4,8 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use anyhow::Context;
+use axum::extract::{Path as AxumPath, State};
+use axum::Json;
 use neoism_agent_core::{
     create, event_type, EventPayload, Id, IdDirection, PermissionRule, PromptPart,
     PromptRequest,
@@ -59,6 +61,7 @@ pub(crate) struct BackgroundJob {
 pub(crate) enum BackgroundJobStatus {
     Running,
     Completed,
+    Cancelled,
     Error,
     TimedOut,
 }
@@ -68,6 +71,7 @@ impl BackgroundJobStatus {
         match self {
             Self::Running => "running",
             Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
             Self::Error => "error",
             Self::TimedOut => "timed_out",
         }
@@ -75,7 +79,7 @@ impl BackgroundJobStatus {
 
     fn result_tag(&self) -> &'static str {
         match self {
-            Self::Completed => "background_task_result",
+            Self::Completed | Self::Cancelled => "background_task_result",
             Self::Running | Self::Error | Self::TimedOut => "background_task_error",
         }
     }
@@ -192,7 +196,19 @@ pub(crate) async fn start_background_task_tool(
         .await
         .insert(job_id.clone(), job.clone());
 
-    tokio::spawn(run_background_job(state.clone(), job.clone(), child));
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    state
+        .inner
+        .background_job_cancellations
+        .write()
+        .await
+        .insert(job_id.clone(), cancel_tx);
+    tokio::spawn(run_background_job(
+        state.clone(),
+        job.clone(),
+        child,
+        cancel_rx,
+    ));
 
     Ok(tool::ToolExecutionResult {
         title: description,
@@ -268,12 +284,54 @@ pub(crate) async fn background_task_result_tool(
     })
 }
 
+pub(crate) async fn stop_background_task(
+    State(state): State<AppState>,
+    AxumPath((session_id, job_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let jobs = state.inner.background_jobs.read().await;
+    let job = jobs
+        .get(&job_id)
+        .ok_or_else(|| ApiError::not_found(format!("background job {job_id} not found")))?;
+    if job.session_id != session_id {
+        return Err(ApiError::not_found(format!(
+            "background job {job_id} not found in session {session_id}"
+        )));
+    }
+    if job.status != BackgroundJobStatus::Running {
+        return Err(ApiError::conflict(format!(
+            "background job {job_id} is already {}",
+            job.status.as_str()
+        )));
+    }
+    drop(jobs);
+    let cancel = state
+        .inner
+        .background_job_cancellations
+        .write()
+        .await
+        .remove(&job_id)
+        .ok_or_else(|| {
+            ApiError::conflict(format!("background job {job_id} is already finishing"))
+        })?;
+    cancel.send(()).map_err(|_| {
+        ApiError::conflict(format!("background job {job_id} is already finishing"))
+    })?;
+    Ok(Json(json!({ "jobId": job_id, "status": "stopping" })))
+}
+
 async fn run_background_job(
     state: AppState,
     mut job: BackgroundJob,
     mut child: tokio::process::Child,
+    cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let finish = wait_for_background_job(&mut child, &job).await;
+    let finish = wait_for_background_job(&mut child, &job, cancel_rx).await;
+    state
+        .inner
+        .background_job_cancellations
+        .write()
+        .await
+        .remove(&job.id);
     job.status = finish.status;
     job.finished_at = Some(now_millis());
     job.exit_code = finish.exit_code;
@@ -287,6 +345,7 @@ async fn run_background_job(
 async fn wait_for_background_job(
     child: &mut tokio::process::Child,
     job: &BackgroundJob,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> JobFinish {
     let child_id = child.id();
     let stdout_task =
@@ -297,7 +356,14 @@ async fn wait_for_background_job(
     tokio::pin!(timeout);
 
     let mut timed_out = false;
+    let mut cancelled = false;
     let wait_result: anyhow::Result<ExitStatus> = tokio::select! {
+        biased;
+        _ = &mut cancel_rx => {
+            cancelled = true;
+            process::terminate_child(child, child_id).await;
+            Err(anyhow::anyhow!("background task cancelled"))
+        }
         status = child.wait() => {
             status.with_context(|| format!("failed to wait for shell {}", job.shell))
         }
@@ -329,10 +395,13 @@ async fn wait_for_background_job(
             BackgroundJobStatus::Error
         }
         Err(wait_error) => {
-            error = Some(wait_error.to_string());
-            if timed_out {
+            if cancelled {
+                BackgroundJobStatus::Cancelled
+            } else if timed_out {
+                error = Some(wait_error.to_string());
                 BackgroundJobStatus::TimedOut
             } else {
+                error = Some(wait_error.to_string());
                 BackgroundJobStatus::Error
             }
         }

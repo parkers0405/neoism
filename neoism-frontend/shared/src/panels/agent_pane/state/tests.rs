@@ -1065,6 +1065,96 @@ fn runtime_background_finish_notice_clears_running_job() {
 }
 
 #[test]
+fn delayed_live_user_echo_does_not_move_prompt_after_long_response() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("rare delayed echo").with_id("msg-user-1"),
+        NeoismAgentMessage::assistant("long response\n".repeat(2_000))
+            .with_id("msg-assistant-1"),
+    ];
+    let live_echo =
+        crate::panels::agent_pane::api_mapping::part_block(&serde_json::json!({
+            "id": "part-user-1",
+            "messageID": "msg-user-1",
+            "type": "text",
+            "role": "user",
+            "text": "rare delayed echo"
+        }))
+        .expect("user part");
+
+    pane.upsert_part_message(live_echo);
+
+    assert_eq!(pane.messages.len(), 2);
+    assert_eq!(pane.messages[0].kind, NeoismAgentMessageKind::User);
+    assert_eq!(pane.messages[0].id, "msg-user-1");
+    assert_eq!(pane.messages[1].kind, NeoismAgentMessageKind::Assistant);
+}
+
+#[test]
+fn empty_background_task_snapshot_clears_stale_running_jobs() {
+    let mut pane = NeoismAgentPane::default();
+    let mut started = NeoismAgentMessage::tool(
+        "Background Task",
+        "job_id: job-1\nstatus: running\ncommand: cargo build",
+        "completed",
+        "background_task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    started.detail = started.text.clone();
+    pane.messages.push(started);
+
+    let mut snapshot = NeoismAgentMessage::tool(
+        "Background tasks",
+        "No background tasks exist for this session yet.",
+        "completed",
+        "background_task_result",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    snapshot.detail = snapshot.text.clone();
+    pane.messages.push(snapshot);
+    pane.refresh_background_task_activity_clock();
+
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert!(!pane.has_status_activity());
+    assert!(pane.active_background_task_summaries().is_empty());
+}
+
+#[test]
+fn cancelled_background_task_clears_running_job() {
+    let mut pane = NeoismAgentPane::default();
+    let mut started = NeoismAgentMessage::tool(
+        "Background Task",
+        "job_id: job-1\nstatus: running\ncommand: cargo build",
+        "completed",
+        "background_task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    started.detail = started.text.clone();
+    pane.messages.push(started);
+    let mut cancelled = NeoismAgentMessage::tool(
+        "Background task",
+        "job_id: job-1\nstatus: cancelled",
+        "completed",
+        "background_task_result",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    cancelled.detail = cancelled.text.clone();
+    pane.messages.push(cancelled);
+
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert!(pane.active_background_task_summaries().is_empty());
+}
+
+#[test]
 fn background_status_is_scoped_to_pane_session_messages() {
     let mut pane_with_job = NeoismAgentPane::default();
     pane_with_job.session_id = Some("session-a".to_string());

@@ -860,6 +860,35 @@ mod tests {
         assert_eq!(blocks[0].kind, NeoismAgentMessageKind::Compaction);
         assert_eq!(blocks[0].text, "## Goal\n- Preserve state");
     }
+
+    #[test]
+    fn live_user_part_uses_parent_message_identity() {
+        let message = part_block(&json!({
+            "id": "part-user-1",
+            "messageID": "msg-user-1",
+            "type": "text",
+            "role": "user",
+            "text": "rare delayed echo"
+        }))
+        .expect("user part");
+
+        assert_eq!(message.kind, NeoismAgentMessageKind::User);
+        assert_eq!(message.id, "msg-user-1");
+    }
+
+    #[test]
+    fn live_user_part_ignores_empty_parent_message_identity() {
+        let message = part_block(&json!({
+            "id": "part-user-1",
+            "messageID": "",
+            "type": "text",
+            "role": "user",
+            "text": "fallback identity"
+        }))
+        .expect("user part");
+
+        assert_eq!(message.id, "part-user-1");
+    }
 }
 
 pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
@@ -954,7 +983,21 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
             "live user part received (author=None means the SENDER's client didn't stamp it — usually an older build; a real name means it flowed through)"
         );
     }
-    message.id = id;
+    // History collapses a user turn into one row keyed by the parent message
+    // id. Use that same identity for the live echo; otherwise a delayed
+    // `part.updated` carries the child part id, misses the snapshot row, and
+    // can append the prompt after an already-rendered assistant response.
+    message.id = if message.kind == NeoismAgentMessageKind::User {
+        part.get("messageID")
+            .or_else(|| part.get("messageId"))
+            .or_else(|| part.get("message_id"))
+            .and_then(Value::as_str)
+            .filter(|message_id| !message_id.trim().is_empty())
+            .unwrap_or(&id)
+            .to_string()
+    } else {
+        id
+    };
     Some(message)
 }
 

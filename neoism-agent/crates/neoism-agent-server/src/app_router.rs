@@ -306,6 +306,10 @@ pub fn app(state: AppState) -> Router {
         .route("/session/:session_id/queue/pop", post(session_queue_pop))
         .route("/session/:session_id/prompt_async", post(prompt_async))
         .route("/session/:session_id/abort", post(session_abort))
+        .route(
+            "/session/:session_id/background-task/:job_id",
+            delete(crate::background_job::stop_background_task),
+        )
         .route("/session/:session_id/command", post(session_command))
         .route("/session/:session_id/shell", post(session_shell))
         .route("/session/:session_id/revert", post(session_revert))

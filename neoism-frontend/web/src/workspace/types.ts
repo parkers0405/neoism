@@ -858,6 +858,7 @@ export type AgentClientMessage =
   | { CancelInflight: { session_id: string } }
   | { EnqueuePrompt: { session_id: string; text: string } }
   | { ClearQueue: { session_id: string } }
+  | { StopBackgroundTask: { session_id: string; job_id: string } }
   | { RetryLast: { session_id: string } }
   // -- Tool / permission gating ------------------------------------
   | {

@@ -73,6 +73,7 @@ const ORDER: u8 = 26;
 pub enum ContextMenuAction {
     Palette(PaletteAction),
     Modal(ModalAction),
+    Agent(AgentContextAction),
     Lsp(LspContextAction),
     Workspace(WorkspaceContextAction),
     Notebook(NotebookContextAction),
@@ -85,6 +86,11 @@ pub enum ContextMenuAction {
         end: usize,
         replacement: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentContextAction {
+    StopBackgroundTask { session_id: String, job_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

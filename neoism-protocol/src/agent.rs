@@ -147,6 +147,8 @@ pub enum AgentClientMessage {
     EnqueuePrompt { session_id: String, text: String },
     /// Clear the pending queue without running any of its entries.
     ClearQueue { session_id: String },
+    /// Stop one running background shell task and its process tree.
+    StopBackgroundTask { session_id: String, job_id: String },
     /// Re-run the most recent user turn. Equivalent to clicking
     /// "retry" on the assistant's last reply.
     RetryLast { session_id: String },

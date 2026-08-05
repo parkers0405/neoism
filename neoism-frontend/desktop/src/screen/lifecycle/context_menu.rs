@@ -184,6 +184,23 @@ impl Screen<'_> {
             neoism_ui::panels::context_menu::ContextMenuAction::Modal(action) => {
                 self.execute_modal_action(action.into());
             }
+            neoism_ui::panels::context_menu::ContextMenuAction::Agent(action) => {
+                match action {
+                    neoism_ui::panels::context_menu::AgentContextAction::StopBackgroundTask {
+                        session_id,
+                        job_id,
+                    } => {
+                        if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+                            agent.push_outbound(
+                                neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand::StopBackgroundTask {
+                                    session_id,
+                                    job_id,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
             neoism_ui::panels::context_menu::ContextMenuAction::Lsp(action) => {
                 self.execute_lsp_context_action(action);
             }

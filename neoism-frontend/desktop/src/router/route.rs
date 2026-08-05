@@ -140,6 +140,18 @@ mod tests {
     }
 
     #[test]
+    fn palette_q_targets_only_the_focused_buffer_tab() {
+        assert_eq!(
+            palette_close_plan("q"),
+            Some(GlobalExCommandPlan::CloseFocusedBufferTab)
+        );
+        assert_eq!(
+            palette_close_plan(":q!"),
+            Some(GlobalExCommandPlan::CloseFocusedBufferTab)
+        );
+    }
+
+    #[test]
     fn redraw_request_state_delivery_resets_backoff() {
         let mut state = RedrawRequestState::new();
         let t0 = Instant::now();
@@ -1370,7 +1382,7 @@ impl Route<'_> {
                                     .renderer
                                     .command_palette
                                     .set_enabled(false);
-                                self.window.screen.close_split_or_tab(clipboard);
+                                let _ = self.window.screen.close_focused_buffer_tab();
                             }
                             (
                                 Some(

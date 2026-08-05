@@ -38,7 +38,7 @@ pub(crate) async fn pty_create(
         .into_iter()
         .find(|shell| shell.acceptable)
         .map(|shell| shell.path)
-        .unwrap_or_else(|| "/bin/sh".to_string());
+        .unwrap_or_else(pty::fallback_shell);
     let info = pty::create_pty_info(
         request,
         resolve_directory(query.directory, &headers),

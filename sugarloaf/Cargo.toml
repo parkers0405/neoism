@@ -45,6 +45,7 @@ targets = [
 wgpu = { workspace = true, optional = true }
 naga = { version = "28.0.0", default-features = false, features = [
     "glsl-in",
+    "msl-out",
     "wgsl-in",
     "wgsl-out",
 ] }

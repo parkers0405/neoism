@@ -12,3 +12,5 @@ pub mod core;
 pub mod filters;
 
 pub mod shader_overlay;
+#[cfg(target_os = "macos")]
+pub(crate) mod shader_overlay_metal;

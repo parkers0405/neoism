@@ -6,7 +6,7 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
     vec![
         tool(
             "bash",
-            "Run shell commands",
+            crate::platform_shell::tool_description(),
             object(&[
                 ("command", "string"),
                 ("timeout", "integer"),
@@ -17,7 +17,15 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
         ),
         tool(
             "background_task",
-            "Start a long-running shell command in the background and return a job_id immediately",
+            if cfg!(windows) {
+                match crate::platform_shell::runtime().kind() {
+                    crate::platform_shell::ShellKind::PowerShell => "Start a long-running PowerShell command in the background and return a job_id immediately",
+                    crate::platform_shell::ShellKind::Cmd => "Start a long-running Command Prompt command in the background and return a job_id immediately",
+                    crate::platform_shell::ShellKind::Posix => "Start a long-running shell command in the background and return a job_id immediately",
+                }
+            } else {
+                "Start a long-running shell command in the background and return a job_id immediately"
+            },
             json!({
                 "type": "object",
                 "properties": {

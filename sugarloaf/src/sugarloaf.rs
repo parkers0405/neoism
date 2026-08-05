@@ -746,12 +746,9 @@ impl Sugarloaf<'_> {
                 )?;
             }
             #[cfg(target_os = "macos")]
-            crate::context::ContextType::Metal(_) => {
-                if !config.is_empty() {
-                    return Err(ShaderOverlayError::UnsupportedBackend {
-                        backend: "metal",
-                    });
-                }
+            crate::context::ContextType::Metal(ctx) => {
+                self.renderer
+                    .set_shader_overlay_metal(&ctx.device, config)?;
             }
             #[cfg(not(target_arch = "wasm32"))]
             crate::context::ContextType::Cpu(_) => {

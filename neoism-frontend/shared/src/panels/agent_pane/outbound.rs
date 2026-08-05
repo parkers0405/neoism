@@ -60,6 +60,12 @@ pub enum OutboundAgentCommand {
     /// User asked to abort the in-flight turn for the active session.
     AbortSession,
 
+    /// Stop one running background shell task without aborting the agent turn.
+    StopBackgroundTask {
+        session_id: String,
+        job_id: String,
+    },
+
     /// User asked to compact the active session's context window.
     CompactSession,
 

@@ -695,6 +695,22 @@ impl NeoismAgentPane {
         });
     }
 
+    pub(super) fn execute_stop_background_task_command(
+        &mut self,
+        session_id: String,
+        job_id: String,
+    ) {
+        match api_request_json(
+            &self.server,
+            "DELETE",
+            &format!("/session/{session_id}/background-task/{job_id}"),
+            None,
+        ) {
+            Ok(_) => self.system_message("Background task", format!("Stopping {job_id}")),
+            Err(error) => self.system_message("Background task", error),
+        }
+    }
+
     pub(super) fn execute_handle_queue_command(
         &mut self,
         session_id: String,

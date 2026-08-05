@@ -599,12 +599,11 @@ impl Screen<'_> {
             } else {
                 Vec::new()
             };
-            // In the agent tab the local user is otherwise absent from the
-            // cluster (`avatar_peers()` excludes self, and there may be no
-            // editor peers), so surface the local user's OWN presence orb
-            // there too — matching how the agent messages wear the sender's
-            // orb. Same shared-workspace gate; never a duplicate.
-            if in_shared_workspace && agent_panel_open {
+            // The daemon broadcasts presence to the other sockets, not back to
+            // its publisher. Top chrome is a participant roster rather than a
+            // remote-cursor overlay, so include the real local publisher for
+            // every collaborative workspace (not only while Agent is open).
+            if in_shared_workspace {
                 let (peer_id, display_name) =
                     crate::screen::presence::local_presence_identity(
                         self.presence_display_name_override.as_deref(),

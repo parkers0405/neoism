@@ -1318,26 +1318,31 @@ impl Screen<'_> {
         use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
         use neoism_ui::widgets::modal::ModalAction;
 
-        let lines = self
-            .context_manager
-            .current()
-            .neoism_agent
-            .as_ref()
+        let agent = self.context_manager.current().neoism_agent.as_ref();
+        let lines = agent
             .map(|agent| agent.active_background_task_summaries())
             .unwrap_or_default();
-        if lines.is_empty() {
+        let session_id = agent
+            .and_then(|agent| agent.session_id_str())
+            .unwrap_or_default()
+            .to_string();
+        if lines.is_empty() || session_id.is_empty() {
             return;
         }
         let mut items = lines
             .into_iter()
-            .map(|line| {
-                let mut item = ContextMenuItem::new(
-                    line,
+            .filter_map(|line| {
+                let job_id = line.split(" · ").next()?.trim().to_string();
+                Some(ContextMenuItem::new(
+                    format!("Stop  {line}"),
                     "",
-                    ContextMenuAction::Modal(ModalAction::Close.into()),
-                );
-                item.enabled = false;
-                item
+                    ContextMenuAction::Agent(
+                        neoism_ui::panels::context_menu::AgentContextAction::StopBackgroundTask {
+                            session_id: session_id.clone(),
+                            job_id,
+                        },
+                    ),
+                ))
             })
             .collect::<Vec<_>>();
         items.push(ContextMenuItem::new(

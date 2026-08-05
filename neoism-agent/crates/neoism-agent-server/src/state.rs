@@ -41,6 +41,7 @@ pub(crate) struct InnerState {
     pub(crate) prompt_queue_workers: RwLock<HashSet<String>>,
     pub(crate) background_jobs:
         RwLock<HashMap<String, crate::background_job::BackgroundJob>>,
+    pub(crate) background_job_cancellations: RwLock<HashMap<String, oneshot::Sender<()>>>,
     pub(crate) permissions: RwLock<HashMap<String, PermissionRequestInfo>>,
     pub(crate) permission_waiters: RwLock<HashMap<String, PermissionPending>>,
     pub(crate) permission_approvals: RwLock<HashMap<String, Vec<PermissionRule>>>,
@@ -416,6 +417,7 @@ impl AppState {
                 runs: RwLock::new(HashMap::new()),
                 prompt_queue_workers: RwLock::new(HashSet::new()),
                 background_jobs: RwLock::new(HashMap::new()),
+                background_job_cancellations: RwLock::new(HashMap::new()),
                 permissions: RwLock::new(HashMap::new()),
                 permission_waiters: RwLock::new(HashMap::new()),
                 permission_approvals: RwLock::new(permission_approvals),

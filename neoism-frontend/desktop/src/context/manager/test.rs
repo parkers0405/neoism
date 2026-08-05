@@ -144,6 +144,79 @@ fn adopted_workspace_identity_survives_active_server_cache_reset() {
 }
 
 #[test]
+fn joined_workspace_icon_survives_missing_terminal_title() {
+    use neoism_ui::widgets::island::IslandContexts;
+
+    let window_id: WindowId = WindowId::from(0);
+    let mut context_manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+    let stable = context_manager
+        .current_grid()
+        .workspace_route_id()
+        .expect("test grid has a stable root");
+    context_manager.adopted_workspaces.insert(
+        stable,
+        AdoptedWorkspaceBinding {
+            workspace_id: "peer-workspace".to_string(),
+            endpoint: "ws://peer.example/session".to_string(),
+            is_peer: true,
+        },
+    );
+    context_manager.titles.titles.remove(&0);
+
+    let title = IslandContexts::title(&context_manager, 0)
+        .expect("workspace identity does not depend on a terminal title");
+    assert_eq!(title.content, "~");
+    assert_eq!(title.icon_kind.as_deref(), Some("joined"));
+}
+
+#[test]
+fn self_hosted_adopted_workspace_is_collaborative_on_peer_link() {
+    use neoism_protocol::workspace::{
+        WorkspaceHostKind, WorkspaceSummary, WorkspaceVisibility,
+    };
+
+    let window_id: WindowId = WindowId::from(0);
+    let mut context_manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+    let stable = context_manager
+        .current_grid()
+        .workspace_route_id()
+        .expect("test grid has a stable root");
+    context_manager.adopted_workspaces.insert(
+        stable,
+        AdoptedWorkspaceBinding {
+            workspace_id: "host-workspace".to_string(),
+            endpoint: "ws://127.0.0.1:9877/session".to_string(),
+            is_peer: false,
+        },
+    );
+    context_manager.daemon.link_is_peer = true;
+    context_manager
+        .daemon
+        .cache
+        .daemon_host_workspaces
+        .push(WorkspaceSummary {
+            id: "host-workspace".to_string(),
+            host_id: "local-host".to_string(),
+            title: "Shared".to_string(),
+            host_kind: WorkspaceHostKind::Local,
+            visibility: WorkspaceVisibility::Shared,
+            main_session_id: None,
+            root_dir: None,
+            linked_vault_dir: None,
+            active_tab_id: None,
+            running_on_host_id: None,
+            controlled_by_host_id: None,
+            layout_snapshot: None,
+            last_active: 0,
+        });
+
+    assert!(!context_manager.current_workspace_is_remote_joined());
+    assert!(context_manager.current_workspace_is_collaborative());
+}
+
+#[test]
 fn apply_pane_layout_changed_accepts_snapshot_json() {
     let window_id: WindowId = WindowId::from(0);
     let mut context_manager =

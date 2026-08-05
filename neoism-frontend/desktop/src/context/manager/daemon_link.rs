@@ -232,9 +232,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         if self.current_workspace_is_remote_joined() {
             return true;
         }
+        // A host can adopt its OWN served workspace over a peer-classified
+        // link. That grid is still collaborative; only unrelated local grids
+        // beside it must stay private. The adopted workspace id is the
+        // workspace-scoped distinction the old `link_is_peer` gate lost.
+        if self.current_adopted_workspace_id().is_some() {
+            return !matches!(
+                self.workspace_visibility_for_index(self.current_index),
+                neoism_ui::panels::context_menu::WorkspaceChromeVisibility::Private
+            );
+        }
         if self.daemon.link_is_peer {
-            // The active link may belong to a different adopted grid. A
-            // genuinely local grid beside it remains private.
             return false;
         }
         !matches!(

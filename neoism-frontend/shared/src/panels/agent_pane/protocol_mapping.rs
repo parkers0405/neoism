@@ -91,6 +91,9 @@ pub fn map_outbound_command(
             .map(|session_id| vec![Msg::CancelInflight { session_id }])
             .map(Mapping::Messages)
             .unwrap_or_else(|| Mapping::Messages(vec![Msg::Cancel])),
+        Cmd::StopBackgroundTask { session_id, job_id } => {
+            Mapping::Messages(vec![Msg::StopBackgroundTask { session_id, job_id }])
+        }
         Cmd::CompactSession => context
             .active_session_id
             .clone()

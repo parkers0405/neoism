@@ -307,6 +307,10 @@ impl NeoismAgentPane {
                     self.execute_abort_session_command();
                     changed = true;
                 }
+                OutboundAgentCommand::StopBackgroundTask { session_id, job_id } => {
+                    self.execute_stop_background_task_command(session_id, job_id);
+                    changed = true;
+                }
                 OutboundAgentCommand::SwitchSession { session_id } => {
                     self.execute_switch_session_command(session_id);
                     changed = true;

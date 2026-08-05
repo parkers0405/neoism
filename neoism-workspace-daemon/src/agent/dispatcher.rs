@@ -95,6 +95,18 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_clear_queue(inner, session_id).await;
             });
         }
+        AgentClientMessage::StopBackgroundTask { session_id, job_id } => {
+            tokio::spawn(async move {
+                if let Err(err) = http_delete(
+                    &inner,
+                    &format!("/session/{session_id}/background-task/{job_id}"),
+                )
+                .await
+                {
+                    emit_error(&inner.tx, err);
+                }
+            });
+        }
         AgentClientMessage::RetryLast { session_id } => {
             tokio::spawn(async move {
                 handle_retry_last(inner, session_id).await;

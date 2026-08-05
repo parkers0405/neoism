@@ -1236,12 +1236,23 @@ fn background_completion_job_id_from_message(
         return None;
     }
     match background_job_status_from_message(message) {
-        Some("completed" | "error" | "timed_out") => {}
+        Some("completed" | "cancelled" | "error" | "timed_out") => {}
         Some(_) => return None,
         None if message.status == "completed" => {}
         None => return None,
     }
     background_job_id_from_message(message)
+}
+
+fn background_task_empty_snapshot(message: &NeoismAgentMessage) -> bool {
+    if message.kind != NeoismAgentMessageKind::Tool
+        || message.tool != "background_task_result"
+    {
+        return false;
+    }
+    let text = format!("{}\n{}", message.detail, message.text).to_ascii_lowercase();
+    text.contains("no background tasks exist")
+        || text.contains("no background tasks are running")
 }
 
 fn running_background_task_count(messages: &[NeoismAgentMessage]) -> usize {
@@ -1257,6 +1268,10 @@ fn running_background_task_count(messages: &[NeoismAgentMessage]) -> usize {
         return 0;
     }
 
+    let messages = messages
+        .iter()
+        .rposition(background_task_empty_snapshot)
+        .map_or(messages, |index| &messages[index + 1..]);
     let completed = messages
         .iter()
         .filter_map(background_completion_job_id_from_message)
@@ -1274,6 +1289,10 @@ fn running_background_task_count(messages: &[NeoismAgentMessage]) -> usize {
 fn active_background_task_summaries(messages: &[NeoismAgentMessage]) -> Vec<String> {
     use std::collections::BTreeSet;
 
+    let messages = messages
+        .iter()
+        .rposition(background_task_empty_snapshot)
+        .map_or(messages, |index| &messages[index + 1..]);
     let completed = messages
         .iter()
         .filter_map(background_completion_job_id_from_message)

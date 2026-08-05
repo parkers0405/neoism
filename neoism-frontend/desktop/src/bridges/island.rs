@@ -27,10 +27,16 @@ impl IslandContexts for ContextManager<EventProxy> {
     }
 
     fn title(&self, index: usize) -> Option<IslandTabTitle> {
-        let entry = self.titles.titles.get(&index)?;
+        let entry = self.titles.titles.get(&index);
         Some(IslandTabTitle {
-            content: entry.content.clone(),
-            program: entry.extra.as_ref().map(|e| e.program.clone()),
+            content: entry
+                .map(|entry| entry.content.clone())
+                .unwrap_or_else(|| "~".to_string()),
+            program: entry.and_then(|entry| {
+                entry.extra.as_ref().map(|extra| extra.program.clone())
+            }),
+            // Workspace identity must not disappear while its asynchronous
+            // terminal title is absent during a tab switch.
             icon_kind: self.workspace_icon_kind_for_index(index),
         })
     }

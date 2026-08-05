@@ -656,6 +656,7 @@ pub(crate) fn compile_shadertoy_msl(
         .per_entry_point_map
         .insert("main".to_string(), resources);
     let pipeline_options = naga::back::msl::PipelineOptions {
+        entry_point: None,
         allow_and_force_point_size: false,
         vertex_pulling_transform: false,
         vertex_buffer_mappings: Vec::new(),

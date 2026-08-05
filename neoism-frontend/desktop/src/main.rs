@@ -855,12 +855,25 @@ fn run_windows_update_helper() -> Result<bool, Box<dyn std::error::Error>> {
         "neoism-agent.exe",
     ];
 
+    let helper_pid = std::process::id().to_string();
+    let _ = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "Get-Process -Name neoism -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {helper_pid} }} | Stop-Process -Force"
+            ),
+        ])
+        .status();
+    for bin in ["neoism-workspace-daemon.exe", "neoism-agent.exe"] {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", bin])
+            .status();
+    }
+    std::thread::sleep(Duration::from_millis(500));
+
     for bin in BINS {
-        if bin != "neoism.exe" {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", bin])
-                .status();
-        }
         let src = extracted_dir.join(bin);
         if !src.exists() {
             return Err(format!("`{bin}` missing from staged Windows update").into());
@@ -903,8 +916,7 @@ fn run_windows_update_helper() -> Result<bool, Box<dyn std::error::Error>> {
 /// of leaving stale daemons serving old code. The GUI matches by exact process
 /// NAME; the daemon/agent match by full command line, because their process
 /// names are truncated to 15 chars ("neoism-workspac") so `-x` (and a bare
-/// `pkill neoism`) misses them. The updater always excludes itself; hosted
-/// daemons are relaunched fresh immediately after (see `restart_hosted_daemons`).
+/// `pkill neoism`) misses them. The updater always excludes itself.
 #[cfg(unix)]
 fn terminate_other_neoism_processes() -> usize {
     let current_pid = std::process::id();
@@ -966,49 +978,6 @@ fn is_host_process(pid: u32) -> bool {
     true
 }
 
-/// After the binaries are swapped and the old daemons terminated, relaunch
-/// every locally-hosted server from the saved registry so it comes back on the
-/// NEW `neoism-workspace-daemon` — reusing the identical spawn recipe the app
-/// itself uses (`spawn_hosted_daemon`). The agent server and the embedded
-/// daemon live inside the GUI process, so those relaunch when Neoism is next
-/// opened. Returns the number of hosted servers relaunched.
-#[cfg(unix)]
-fn restart_hosted_daemons() -> usize {
-    let registry = match crate::server_registry::ServerRegistry::load(
-        neoism_backend::config::config_dir_path(),
-    ) {
-        Ok(registry) => registry,
-        Err(_) => return 0,
-    };
-    let mut relaunched = 0;
-    for server in registry.servers() {
-        let Some(spec) = server.hosted.clone() else {
-            continue;
-        };
-        match crate::screen::bridges::palette::spawn_hosted_daemon(
-            &spec,
-            registry.token(&server.id),
-        ) {
-            Ok(()) => {
-                relaunched += 1;
-                println!("  ✓ restarted hosted server on :{}", spec.port);
-            }
-            Err(error) => {
-                eprintln!(
-                    "  ! could not restart hosted server :{} ({error})",
-                    spec.port
-                );
-            }
-        }
-    }
-    relaunched
-}
-
-#[cfg(not(unix))]
-fn restart_hosted_daemons() -> usize {
-    0
-}
-
 fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Public binaries repo (source stays private). Override with NEOISM_REPO.
     let repo =
@@ -1054,9 +1023,39 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
         })
         .ok_or("no release found on GitHub yet")?;
 
+    #[cfg(target_os = "macos")]
+    let macos_app_is_current = [
+        std::path::PathBuf::from("/Applications/Neoism.app"),
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join("Applications/Neoism.app"),
+    ]
+    .into_iter()
+    .filter(|app| app.exists())
+    .all(|app| {
+        std::process::Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", "Print :CFBundleShortVersionString"])
+            .arg(app.join("Contents/Info.plist"))
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .is_some_and(|version| latest.trim_start_matches('v') == version.trim())
+    });
+
     if !force && latest == current {
-        println!("Already up to date ({current}).");
-        return Ok(());
+        #[cfg(target_os = "macos")]
+        if !macos_app_is_current {
+            println!("The Neoism.app bundle is stale; replacing it with {latest}.");
+        } else {
+            println!("Already up to date ({current}).");
+            return Ok(());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("Already up to date ({current}).");
+            return Ok(());
+        }
     }
     println!("Updating {current} → {latest}…");
 
@@ -1117,12 +1116,61 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
             .arg(&extracted)
             .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
             .spawn()?;
-        println!("Neoism {latest} is staged. Close Neoism to finish the Windows update.");
+        println!("Neoism {latest} is staged. Closing Neoism to finish the Windows update.");
         return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    let installed_app = exe
+        .ancestors()
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some("Neoism.app"))
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| {
+            let app = std::path::PathBuf::from("/Applications/Neoism.app");
+            app.exists().then_some(app)
+        })
+        .or_else(|| {
+            dirs::home_dir()
+                .map(|home| home.join("Applications/Neoism.app"))
+                .filter(|app| app.exists())
+        });
+
+    #[cfg(target_os = "macos")]
+    if let Some(app_dst) = installed_app.as_ref() {
+        let app_src = extracted.join("Neoism.app");
+        if !app_src.exists() {
+            return Err(format!("`Neoism.app` missing from {asset}").into());
+        }
+        let parent = app_dst.parent().ok_or("cannot resolve Neoism.app parent")?;
+        let staged_app = parent.join(".Neoism.app.new");
+        let old_app = parent.join(".Neoism.app.old");
+        let _ = std::fs::remove_dir_all(&staged_app);
+        let _ = std::fs::remove_dir_all(&old_app);
+        let copied = std::process::Command::new("ditto")
+            .arg(&app_src)
+            .arg(&staged_app)
+            .status()?;
+        if !copied.success() {
+            return Err(format!("cannot stage {}", app_dst.display()).into());
+        }
+        std::fs::rename(app_dst, &old_app)?;
+        if let Err(err) = std::fs::rename(&staged_app, app_dst) {
+            let _ = std::fs::rename(&old_app, app_dst);
+            return Err(format!("cannot replace {}: {err}", app_dst.display()).into());
+        }
+        let _ = std::fs::remove_dir_all(&old_app);
+        println!("  ✓ {}", app_dst.display());
     }
 
     #[cfg(not(windows))]
     for bin in BINS {
+        #[cfg(target_os = "macos")]
+        if installed_app
+            .as_ref()
+            .is_some_and(|app| dir.starts_with(app))
+        {
+            break;
+        }
         let src = extracted.join(bin);
         if !src.exists() {
             return Err(format!("`{bin}` missing from {asset}").into());
@@ -1148,13 +1196,6 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let stopped = terminate_other_neoism_processes();
     if stopped > 0 {
         println!("  ✓ stopped {stopped} stale Neoism process(es) — GUI, daemon, agent");
-    }
-    // Let the SIGTERM'd daemons release their bound ports before we rehost on
-    // the same ones, or the relaunch races into EADDRINUSE and exits.
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    let restarted = restart_hosted_daemons();
-    if restarted > 0 {
-        println!("  ✓ relaunched {restarted} hosted server(s) on the new binary");
     }
     println!("Updated to {latest}.");
     println!(

@@ -81,14 +81,12 @@ pub(crate) fn retryable_error(error: &anyhow::Error) -> bool {
     }
     error.chain().any(|cause| {
         retryable_message(&cause.to_string())
-            || cause
-                .downcast_ref::<reqwest::Error>()
-                .is_some_and(|error| {
-                    error.is_timeout()
-                        || error.is_connect()
-                        || error.is_request()
-                        || error.is_body()
-                })
+            || cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+                error.is_timeout()
+                    || error.is_connect()
+                    || error.is_request()
+                    || error.is_body()
+            })
     })
 }
 
@@ -187,7 +185,8 @@ mod tests {
     #[test]
     fn retryable_error_inspects_wrapped_transport_causes() {
         let inner = anyhow::anyhow!("connection reset by peer");
-        let error = inner.context("failed to send OpenAI OAuth Responses streaming request");
+        let error =
+            inner.context("failed to send OpenAI OAuth Responses streaming request");
 
         assert!(retryable_error(&error));
     }

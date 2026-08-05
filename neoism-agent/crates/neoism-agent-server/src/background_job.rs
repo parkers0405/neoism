@@ -117,7 +117,12 @@ pub(crate) async fn start_background_task_tool(
     let project_root = Path::new(&parent.directory)
         .canonicalize()
         .map_err(|error| format!("failed to resolve project directory: {error}"))?;
-    let scan = shell_scan::scan(&command, &cwd, &project_root);
+    let scan = shell_scan::scan(
+        &command,
+        &cwd,
+        &project_root,
+        crate::platform_shell::runtime().kind(),
+    );
     for dir in &scan.external_dirs {
         ensure_tool_permission(permissions, "external_directory", dir)?;
     }
@@ -138,11 +143,11 @@ pub(crate) async fn start_background_task_tool(
         .or_else(|| usize_arg(&input, "maxOutputBytes"))
         .unwrap_or(DEFAULT_OUTPUT_LIMIT_BYTES)
         .max(1);
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let runtime = crate::platform_shell::runtime();
+    let shell = runtime.program().to_string_lossy().into_owned();
     let mut command_proc = Command::new(&shell);
+    runtime.apply_command(&mut command_proc, &command, true);
     command_proc
-        .arg("-lc")
-        .arg(&command)
         .current_dir(&cwd)
         .env("TERM", "xterm-256color")
         .env("NEOISM_TERMINAL", "1")

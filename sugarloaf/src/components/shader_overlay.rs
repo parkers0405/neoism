@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu", target_os = "macos"))]
 use web_time::Instant;
 
 #[cfg(feature = "wgpu")]
@@ -59,10 +59,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
 }
 "#;
 
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu", target_os = "macos"))]
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct GlobalsUniform {
+pub(crate) struct GlobalsUniform {
     resolution_time: [f32; 4],
     time_delta_frame_rate_frame: [f32; 4],
     channel_time: [f32; 4],
@@ -72,10 +72,11 @@ struct GlobalsUniform {
     focus: [f32; 4],
 }
 
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu", target_os = "macos"))]
 impl GlobalsUniform {
-    fn new(
-        ctx: &WgpuContext,
+    pub(crate) fn new(
+        width: f32,
+        height: f32,
         frame: u32,
         started_at: Instant,
         last_frame_at: &mut Instant,
@@ -85,8 +86,6 @@ impl GlobalsUniform {
         let delta = now.duration_since(*last_frame_at).as_secs_f32().max(0.0);
         *last_frame_at = now;
 
-        let width = ctx.size.width as f32;
-        let height = ctx.size.height as f32;
         let rate = if delta > 0.0 { 1.0 / delta } else { 0.0 };
 
         Self {
@@ -103,7 +102,7 @@ impl GlobalsUniform {
     }
 }
 
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu", target_os = "macos"))]
 fn shader_date(_now: Instant) -> [f32; 4] {
     // Keep the ABI compatible with Ghostty/Shadertoy. The exact wall-clock date
     // is not currently available without another dependency in Sugarloaf.
@@ -153,6 +152,14 @@ pub enum ShaderOverlayError {
         path: PathBuf,
         message: String,
     },
+    WriteMsl {
+        path: PathBuf,
+        message: String,
+    },
+    CompileMetal {
+        path: PathBuf,
+        message: String,
+    },
     UnsupportedBackend {
         backend: &'static str,
     },
@@ -181,6 +188,20 @@ impl fmt::Display for ShaderOverlayError {
                 write!(
                     f,
                     "failed to validate WGSL for shader {}: {message}",
+                    path.display()
+                )
+            }
+            Self::WriteMsl { path, message } => {
+                write!(
+                    f,
+                    "failed to write MSL for shader {}: {message}",
+                    path.display()
+                )
+            }
+            Self::CompileMetal { path, message } => {
+                write!(
+                    f,
+                    "failed to compile Metal shader {}: {message}",
                     path.display()
                 )
             }
@@ -324,7 +345,8 @@ impl ShaderOverlayBrush {
         self.resize_intermediates(ctx);
         self.frame = self.frame.wrapping_add(1);
         let globals = GlobalsUniform::new(
-            ctx,
+            ctx.size.width as f32,
+            ctx.size.height as f32,
             self.frame,
             self.started_at,
             &mut self.last_frame_at,
@@ -567,6 +589,98 @@ fn compile_shadertoy_glsl(
     Ok(wgsl)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn compile_shadertoy_msl(
+    path: &Path,
+    source: &str,
+) -> Result<(String, String), ShaderOverlayError> {
+    use naga::back::msl::{BindSamplerTarget, BindTarget, EntryPointResources};
+
+    let source = shader_overlay_glsl_source(source);
+    let mut frontend = naga::front::glsl::Frontend::default();
+    let options = naga::front::glsl::Options::from(naga::ShaderStage::Fragment);
+    let module =
+        frontend
+            .parse(&options, &source)
+            .map_err(|err| ShaderOverlayError::Parse {
+                path: path.to_path_buf(),
+                message: err.to_string(),
+            })?;
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    );
+    let info =
+        validator
+            .validate(&module)
+            .map_err(|err| ShaderOverlayError::Validate {
+                path: path.to_path_buf(),
+                message: err.to_string(),
+            })?;
+
+    let mut resources = EntryPointResources::default();
+    resources.resources.insert(
+        naga::ResourceBinding {
+            group: 0,
+            binding: 0,
+        },
+        BindTarget {
+            buffer: Some(0),
+            ..Default::default()
+        },
+    );
+    resources.resources.insert(
+        naga::ResourceBinding {
+            group: 0,
+            binding: 1,
+        },
+        BindTarget {
+            texture: Some(0),
+            ..Default::default()
+        },
+    );
+    resources.resources.insert(
+        naga::ResourceBinding {
+            group: 0,
+            binding: 2,
+        },
+        BindTarget {
+            sampler: Some(BindSamplerTarget::Resource(0)),
+            ..Default::default()
+        },
+    );
+    let mut msl_options = naga::back::msl::Options::default();
+    msl_options.lang_version = (2, 1);
+    msl_options.fake_missing_bindings = false;
+    msl_options
+        .per_entry_point_map
+        .insert("main".to_string(), resources);
+    let pipeline_options = naga::back::msl::PipelineOptions {
+        allow_and_force_point_size: false,
+        vertex_pulling_transform: false,
+        vertex_buffer_mappings: Vec::new(),
+    };
+    let (msl, translation) =
+        naga::back::msl::write_string(&module, &info, &msl_options, &pipeline_options)
+            .map_err(|err| ShaderOverlayError::WriteMsl {
+                path: path.to_path_buf(),
+                message: err.to_string(),
+            })?;
+    let entry_point = translation
+        .entry_point_names
+        .into_iter()
+        .next()
+        .ok_or_else(|| ShaderOverlayError::WriteMsl {
+            path: path.to_path_buf(),
+            message: "shader has no entry point".to_string(),
+        })?
+        .map_err(|err| ShaderOverlayError::WriteMsl {
+            path: path.to_path_buf(),
+            message: err.to_string(),
+        })?;
+    Ok((msl, entry_point))
+}
+
 fn strip_version(source: &str) -> Cow<'_, str> {
     for line in source.lines() {
         let trimmed = line.trim_start();
@@ -612,6 +726,27 @@ mod tests {
 
             assert!(wgsl.contains("@fragment"));
             assert!(wgsl.contains("fn main"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn translates_bundled_shaders_to_msl() {
+        for (path, source) in [
+            (
+                "hypno_crt.glsl",
+                include_str!("../../examples/shaders/hypno_crt.glsl"),
+            ),
+            (
+                "ctv_round.glsl",
+                include_str!("../../examples/shaders/ctv_round.glsl"),
+            ),
+        ] {
+            let (msl, entry_point) = compile_shadertoy_msl(Path::new(path), source)
+                .expect("bundled shader should translate to MSL");
+
+            assert!(msl.contains("fragment"));
+            assert!(!entry_point.is_empty());
         }
     }
 }

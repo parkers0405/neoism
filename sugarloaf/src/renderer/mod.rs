@@ -283,6 +283,7 @@ pub struct MetalRenderer {
     /// finishes. `Arc<Mutex<…>>` so the completion thread can release.
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+    shader_overlay: Option<crate::components::shader_overlay_metal::MetalShaderOverlay>,
 }
 
 #[cfg(target_os = "macos")]
@@ -554,7 +555,20 @@ impl MetalRenderer {
             input_colorspace,
             image_pipeline_state,
             instance_buffer_pool: Arc::new(Mutex::new(InstanceBufferPool::new())),
+            shader_overlay: None,
         }
+    }
+
+    pub(crate) fn set_shader_overlay(
+        &mut self,
+        device: &metal::DeviceRef,
+        config: crate::components::shader_overlay::ShaderOverlayConfig,
+    ) -> Result<(), crate::components::shader_overlay::ShaderOverlayError> {
+        self.shader_overlay =
+            crate::components::shader_overlay_metal::MetalShaderOverlay::load(
+                device, config,
+            )?;
+        Ok(())
     }
 
     /// Encode the text/quad pipeline draws into `render_encoder`,
@@ -1002,6 +1016,18 @@ impl Renderer {
             self.background_image_dirty = None;
             self.background_image_texture = None;
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_shader_overlay_metal(
+        &mut self,
+        device: &metal::DeviceRef,
+        config: crate::components::shader_overlay::ShaderOverlayConfig,
+    ) -> Result<(), crate::components::shader_overlay::ShaderOverlayError> {
+        if let RendererType::Metal(metal) = &mut self.brush_type {
+            metal.set_shader_overlay(device, config)?;
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -2637,7 +2663,12 @@ impl Renderer {
                 .color_attachments()
                 .object_at(0)
                 .unwrap();
-            color_attachment.set_texture(Some(&surface_texture.texture));
+            let overlay_scene = brush.shader_overlay.as_mut().map(|overlay| {
+                overlay.scene_texture(&context.device, &surface_texture.texture)
+            });
+            color_attachment.set_texture(Some(
+                overlay_scene.as_deref().unwrap_or(&surface_texture.texture),
+            ));
             color_attachment.set_store_action(metal::MTLStoreAction::Store);
             color_attachment.set_load_action(metal::MTLLoadAction::Clear);
             color_attachment
@@ -2800,6 +2831,10 @@ impl Renderer {
             }
 
             render_encoder.end_encoding();
+
+            if let Some(overlay) = brush.shader_overlay.as_mut() {
+                overlay.encode(command_buffer, &surface_texture.texture);
+            }
 
             // Completion handler returns the buffer to the pool on GPU
             // finish. The block fires on a Metal-internal thread; we

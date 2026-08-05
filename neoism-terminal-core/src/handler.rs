@@ -1049,14 +1049,13 @@ impl<U: Handler, T: Timeout> copa::Perform for Performer<'_, U, T> {
                 };
                 if let Ok(s) = simd_utf8::from_utf8_fast(raw_path) {
                     if let Ok(url) = url::Url::parse(s) {
-                        let path = url.path();
-
-                        // NB the path coming from Url has a leading slash; must slice that off
-                        // in windows.
                         #[cfg(windows)]
-                        let path = &path[1..];
+                        if let Ok(path) = url.to_file_path() {
+                            self.handler.set_current_directory(path);
+                        }
 
-                        self.handler.set_current_directory(path.into());
+                        #[cfg(not(windows))]
+                        self.handler.set_current_directory(url.path().into());
                     }
                 }
             }

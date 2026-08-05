@@ -449,6 +449,9 @@ pub struct NeoismAgentSidePanel {
     /// shape `fetch_subagent_options` returns. We render the section
     /// only when this list has at least one *non-main* entry.
     subagents: Vec<NeoismAgentSessionEntry>,
+    /// Session whose transcript is currently open in the pane. Completed
+    /// children are not auto-hidden while the user is viewing them.
+    viewed_session_id: Option<String>,
     subagents_loaded: bool,
     last_subagents_refresh: Option<Instant>,
     /// Per-session activity snapshot used to paint the indented
@@ -530,6 +533,7 @@ impl Default for NeoismAgentSidePanel {
             sessions_loading_started: Instant::now(),
             last_sessions_refresh: None,
             subagents: Vec::new(),
+            viewed_session_id: None,
             subagents_loaded: false,
             last_subagents_refresh: None,
             branch_activities: HashMap::new(),
@@ -818,6 +822,10 @@ impl NeoismAgentSidePanel {
         &self.subagents
     }
 
+    pub fn set_viewed_session_id(&mut self, session_id: Option<String>) {
+        self.viewed_session_id = session_id.filter(|id| !id.is_empty());
+    }
+
     /// Whether `entry` (a non-main branch) should be hidden from the
     /// sidebar because it finished more than [`SUBAGENT_HIDE_AFTER`]
     /// ago and isn't currently running again. The main session (index
@@ -825,6 +833,11 @@ impl NeoismAgentSidePanel {
     /// A respawned sub-agent reports `Active`/`WaitingPermission`
     /// (which clears `completed_at`) so it stays visible.
     fn subagent_hidden(&self, entry: &NeoismAgentSessionEntry) -> bool {
+        // Keep the open transcript reachable even after it finishes. Once
+        // the user leaves it, the ordinary completion expiry applies.
+        if self.viewed_session_id.as_deref() == Some(entry.id.as_str()) {
+            return false;
+        }
         // Runtime status reported straight on the entry takes
         // precedence — a live respawn keeps the row regardless of any
         // stale activity snapshot.

@@ -4,8 +4,8 @@
 
 use web_time::Instant;
 
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
 use super::classify::{
     draw_opts_for_style, line_for_byte, style_at, styled_spans, wrap_lines,
@@ -13,17 +13,17 @@ use super::classify::{
 use super::shell_badge::{draw_shell_badge, shell_badge_label, shell_badge_width};
 use super::state::CommandComposer;
 use super::types::{
+    ComposerFrame, InputClassification, InputWrapLayout, WrappedLine,
     CARET_BLINK_FALLBACK_MS, CHASSIS_RADIUS, CHIP_GAP, CHIP_PAD_X, CHIP_RADIUS,
-    COMPOSER_MAX_INPUT_LINES, COMPOSER_TOP_OVERHANG, COMPOSER_WRAP_HARD_LIMIT,
-    ComposerFrame, DEPTH, FAUX_BOLD_OFFSET, FONT_SIZE, HINT_FONT_SIZE,
-    InputClassification, InputWrapLayout, ORDER_CARET, ORDER_CHASSIS_BG,
+    COMPOSER_MAX_INPUT_LINES, COMPOSER_TOP_OVERHANG, COMPOSER_WRAP_HARD_LIMIT, DEPTH,
+    FAUX_BOLD_OFFSET, FONT_SIZE, HINT_FONT_SIZE, ORDER_CARET, ORDER_CHASSIS_BG,
     ORDER_CHASSIS_BORDER, ORDER_CHIP_BG, OUTER_PAD_X, PROMPT_BURST_MS, PROMPT_CHEVRONS,
     PROMPT_SCRAMBLE, SHELL_BADGE_FONT_SIZE, SHELL_SCRAMBLE, SHELL_TRANSITION_MS,
-    SHOW_FOOTER_HINT_ROW, WrappedLine,
+    SHOW_FOOTER_HINT_ROW,
 };
 use super::util::{color_u8_to_f32, hsl_to_u8, lerp_color_u8};
 use crate::input::{CompletionFlashState, InputBuffer, TerminalShellKind};
-use crate::primitives::{IdeTheme, draw_icon_centered_with_occlusion};
+use crate::primitives::{draw_icon_centered_with_occlusion, IdeTheme};
 
 // Sugarloaf now centers every font's natural metrics inside the nominal
 // font-size box, so row layout centers that shared box directly instead of

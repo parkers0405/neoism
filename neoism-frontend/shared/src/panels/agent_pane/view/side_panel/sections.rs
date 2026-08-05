@@ -220,6 +220,9 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     occlusion_rects: &[[f32; 4]],
     inner_radius: f32,
 ) {
+    let viewed_session_id = pane.session_id_str().map(str::to_owned);
+    pane.side_panel_mut()
+        .set_viewed_session_id(viewed_session_id);
     // Hydrate the branch list once when the session changes. Live
     // branch status/tool changes arrive through the session SSE stream.
     pane.maybe_refresh_side_panel_subagents();

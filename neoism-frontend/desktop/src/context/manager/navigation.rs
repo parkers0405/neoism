@@ -8,12 +8,10 @@ use neoism_backend::sugarloaf::{Object, Sugarloaf};
 use neoism_protocol::workspace::{PaneFocusDir, PaneLayoutOp};
 use neoism_ui::session_layout::{
     active_tab_index_after_close, active_tab_move_target, adjacent_tab_index,
-    focused_tab_strip, rebase_tab_index_after_move, rebase_tab_indexed_map_for_move,
-    rebase_tab_indexed_map_for_remove,
-    session_layout_first_secondary_route as session_layout_first_secondary_route_policy,
-    session_layout_focus_adjacent_route, session_layout_focus_edge_route,
+    rebase_tab_index_after_move, rebase_tab_indexed_map_for_move,
+    rebase_tab_indexed_map_for_remove, session_layout_focus_adjacent_route,
+    session_layout_focus_edge_route,
     session_layout_secondary_routes as session_layout_secondary_routes_policy,
-    SessionLayout, SessionTabStripRef,
 };
 use smallvec::SmallVec;
 use std::time::Instant;
@@ -94,46 +92,42 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
 
     #[inline]
     pub fn move_divider_up(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
-        if self.request_pane_layout_op(
-            self.current_route as u64,
-            PaneLayoutOp::ResizeRatio { delta: -amount },
-        ) {
-            return false;
+        let resized =
+            self.contexts[self.current_index].move_divider_up(amount, sugarloaf);
+        if resized {
+            self.sync_daemon_workspaces();
         }
-        self.contexts[self.current_index].move_divider_up(amount, sugarloaf)
+        resized
     }
 
     #[inline]
     pub fn move_divider_down(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
-        if self.request_pane_layout_op(
-            self.current_route as u64,
-            PaneLayoutOp::ResizeRatio { delta: amount },
-        ) {
-            return false;
+        let resized =
+            self.contexts[self.current_index].move_divider_down(amount, sugarloaf);
+        if resized {
+            self.sync_daemon_workspaces();
         }
-        self.contexts[self.current_index].move_divider_down(amount, sugarloaf)
+        resized
     }
 
     #[inline]
     pub fn move_divider_left(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
-        if self.request_pane_layout_op(
-            self.current_route as u64,
-            PaneLayoutOp::ResizeRatio { delta: -amount },
-        ) {
-            return false;
+        let resized =
+            self.contexts[self.current_index].move_divider_left(amount, sugarloaf);
+        if resized {
+            self.sync_daemon_workspaces();
         }
-        self.contexts[self.current_index].move_divider_left(amount, sugarloaf)
+        resized
     }
 
     #[inline]
     pub fn move_divider_right(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
-        if self.request_pane_layout_op(
-            self.current_route as u64,
-            PaneLayoutOp::ResizeRatio { delta: amount },
-        ) {
-            return false;
+        let resized =
+            self.contexts[self.current_index].move_divider_right(amount, sugarloaf);
+        if resized {
+            self.sync_daemon_workspaces();
         }
-        self.contexts[self.current_index].move_divider_right(amount, sugarloaf)
+        resized
     }
 
     #[inline]
@@ -302,11 +296,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     #[inline]
-    pub fn current_grid_splits_hidden(&self) -> bool {
-        self.contexts[self.current_index].splits_hidden()
-    }
-
-    #[inline]
     pub fn current_grid_split_focused(&self) -> bool {
         self.contexts[self.current_index].is_split_focused()
     }
@@ -338,11 +327,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     #[inline]
-    pub fn toggle_current_grid_splits_hidden(
+    pub fn focus_current_grid_vertical_panel(
         &mut self,
+        down: bool,
         sugarloaf: &mut Sugarloaf,
     ) -> bool {
-        let changed = self.contexts[self.current_index].toggle_splits_hidden(sugarloaf);
+        let changed =
+            self.contexts[self.current_index].focus_vertical_panel(down, sugarloaf);
         self.current_route = self.contexts[self.current_index].current().route_id;
         changed
     }
@@ -412,10 +403,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
 
     pub fn current_grid_first_secondary_route(&self) -> Option<usize> {
         let grid = &self.contexts[self.current_index];
-        let layout = session_layout_for_grid(grid)?;
-        let workspace_route = grid.workspace_route_id()? as u64;
-        session_layout_first_secondary_route_policy(&layout, workspace_route)
-            .map(|route| route as usize)
+        let root = grid.root?;
+
+        // Use the renderer-owned live pane tree here.  This action runs in
+        // direct response to Shift+Alt+T, and the daemon/session mirror can
+        // briefly lag a split that was just created.  Treating that lag as
+        // "no secondary pane" tore every successive tab into another split.
+        grid.get_ordered_keys()
+            .into_iter()
+            .find(|node| *node != root)
+            .and_then(|node| grid.contexts().get(&node))
+            .map(|item| item.context().route_id)
     }
 
     pub fn current_grid_secondary_routes(&self) -> Vec<usize> {
@@ -430,20 +428,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             .into_iter()
             .map(|route| route as usize)
             .collect()
-    }
-
-    pub fn current_grid_focused_tab_strip(
-        &self,
-        pane_tab_routes: impl IntoIterator<Item = usize>,
-    ) -> SessionTabStripRef {
-        let grid = &self.contexts[self.current_index];
-        let layout = session_layout_for_grid(grid);
-        let workspace_route = grid.workspace_route_id().map(|route| route as u64);
-        focused_tab_strip(
-            workspace_route,
-            layout.as_ref().and_then(SessionLayout::focused_external_id),
-            pane_tab_routes.into_iter().map(|route| route as u64),
-        )
     }
 
     fn focus_split_via_session_layout(&mut self, previous: bool, wrap: bool) -> bool {

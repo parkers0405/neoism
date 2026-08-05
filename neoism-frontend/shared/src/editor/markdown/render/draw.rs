@@ -1,9 +1,9 @@
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::{
-    MarkdownPane, MarkdownReaderHighlightColor, MarkdownWrapHitRow,
-    source_map::InlineSourceMap,
+    source_map::InlineSourceMap, MarkdownPane, MarkdownReaderHighlightColor,
+    MarkdownWrapHitRow,
 };
 use crate::widgets::markdown as md;
 
@@ -134,19 +134,71 @@ pub(super) fn draw_if_visible(
     occlusions: &[[f32; 4]],
 ) {
     let h = opts.font_size * 1.5;
-    if y + h >= clip_top && y <= clip_bottom {
-        if occlusions.is_empty() {
-            sugarloaf.text_mut().draw(x, y, text, opts);
-            return;
-        }
-        let w = sugarloaf.text_mut().measure(text, opts);
-        if occlusions
-            .iter()
-            .any(|rect| rects_intersect([x, y, w, h], *rect))
-        {
-            return;
-        }
+    if y + h < clip_top || y > clip_bottom {
+        return;
+    }
+    if occlusions.is_empty() {
         sugarloaf.text_mut().draw(x, y, text, opts);
+        return;
+    }
+
+    let w = sugarloaf.text_mut().measure(text, opts);
+    let run_rect = [x, y, w, h];
+    let base_clip = opts.clip_rect.unwrap_or([
+        x,
+        clip_top,
+        w.max(1.0),
+        (clip_bottom - clip_top).max(1.0),
+    ]);
+    let mut fragments = vec![base_clip];
+    for occlusion in occlusions {
+        if !rects_intersect(run_rect, *occlusion) {
+            continue;
+        }
+        fragments = fragments
+            .into_iter()
+            .flat_map(|clip| subtract_rect(clip, *occlusion))
+            .collect();
+        if fragments.is_empty() {
+            return;
+        }
+    }
+    for clip_rect in fragments {
+        if rects_intersect(run_rect, clip_rect) {
+            let mut clipped_opts = opts.clone();
+            clipped_opts.clip_rect = Some(clip_rect);
+            sugarloaf.text_mut().draw(x, y, text, &clipped_opts);
+        }
+    }
+}
+
+fn subtract_rect(rect: [f32; 4], cut: [f32; 4]) -> Vec<[f32; 4]> {
+    let [x, y, w, h] = rect;
+    let [cx, cy, cw, ch] = cut;
+    let right = x + w;
+    let bottom = y + h;
+    let cut_left = cx.max(x).min(right);
+    let cut_top = cy.max(y).min(bottom);
+    let cut_right = (cx + cw).max(x).min(right);
+    let cut_bottom = (cy + ch).max(y).min(bottom);
+    if cut_left >= cut_right || cut_top >= cut_bottom {
+        return vec![rect];
+    }
+
+    let mut out = Vec::with_capacity(4);
+    push_positive_rect(&mut out, [x, y, w, cut_top - y]);
+    push_positive_rect(&mut out, [x, cut_bottom, w, bottom - cut_bottom]);
+    push_positive_rect(&mut out, [x, cut_top, cut_left - x, cut_bottom - cut_top]);
+    push_positive_rect(
+        &mut out,
+        [cut_right, cut_top, right - cut_right, cut_bottom - cut_top],
+    );
+    out
+}
+
+fn push_positive_rect(out: &mut Vec<[f32; 4]>, rect: [f32; 4]) {
+    if rect[2] > 0.0 && rect[3] > 0.0 {
+        out.push(rect);
     }
 }
 
@@ -240,7 +292,7 @@ pub(super) fn draw_task_checkbox(
     theme: &IdeTheme,
     font_scale: f32,
 ) {
-    use crate::primitives::look::{CheckboxLook, markdown_checkbox_look};
+    use crate::primitives::look::{markdown_checkbox_look, CheckboxLook};
     if markdown_checkbox_look() == CheckboxLook::Retro95 {
         draw_task_checkbox_retro95(sugarloaf, clip, x, y, checked, theme, font_scale);
         return;
@@ -1118,4 +1170,31 @@ pub(super) fn visible_markdown_prefix(
     visible_len: usize,
 ) -> String {
     map.visible_prefix(visible_len)
+}
+
+#[cfg(test)]
+mod clipping_tests {
+    use super::subtract_rect;
+
+    #[test]
+    fn subtracting_middle_overlay_keeps_partial_left_and_right_fragments() {
+        assert_eq!(
+            subtract_rect([0.0, 0.0, 100.0, 20.0], [35.0, 0.0, 30.0, 20.0]),
+            vec![[0.0, 0.0, 35.0, 20.0], [65.0, 0.0, 35.0, 20.0]]
+        );
+    }
+
+    #[test]
+    fn subtracting_partial_height_overlay_keeps_top_bottom_and_sides() {
+        let fragments = subtract_rect([0.0, 0.0, 100.0, 40.0], [30.0, 10.0, 40.0, 20.0]);
+        assert_eq!(
+            fragments,
+            vec![
+                [0.0, 0.0, 100.0, 10.0],
+                [0.0, 30.0, 100.0, 10.0],
+                [0.0, 10.0, 30.0, 20.0],
+                [70.0, 10.0, 30.0, 20.0],
+            ]
+        );
+    }
 }

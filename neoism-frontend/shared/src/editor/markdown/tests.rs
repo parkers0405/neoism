@@ -13,6 +13,7 @@ mod tests {
 
     fn pane_for_test() -> MarkdownPane {
         MarkdownPane {
+            embedded: false,
             path: PathBuf::from("test.md"),
             remote_loading_started: None,
             value_picker_suppressed: None,

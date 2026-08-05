@@ -1,4 +1,7 @@
 use super::*;
+use neoism_protocol::workspace::{
+    PaneLayoutSnapshotNode, PaneSplitAxis, PANE_LAYOUT_SNAPSHOT_SCHEMA_VERSION,
+};
 use tempfile::TempDir;
 
 /// Back-compat shim for tests written before the `Hello` arm
@@ -735,6 +738,69 @@ fn pane_layout_op_echoes_when_surface_bound() {
             other => panic!("unexpected reply {other:?}"),
         }
     }
+}
+
+#[test]
+fn published_pane_layout_becomes_canonical_and_echoes_sync() {
+    let td = TempDir::new().unwrap();
+    let mgr = make_manager(&td);
+    let mut conn = ConnectionWorkspace::default();
+    let workspace_id = "workspace-with-nested-layout".to_string();
+    handle(
+        &mgr,
+        &mut conn,
+        WorkspaceClientMessage::CreateHostWorkspace {
+            host_id: "host-a".into(),
+            workspace_id: Some(workspace_id.clone()),
+            title: None,
+            root_dir: None,
+        },
+    );
+
+    let leaf = |id| PaneLayoutSnapshotNode::Leaf {
+        pane_external_id: id,
+        surface_id: format!("surface-{id}"),
+        session_id: format!("session-{id}"),
+        path: None,
+        route_id: Some(id),
+    };
+    let layout = PaneLayoutSnapshot {
+        schema_version: PANE_LAYOUT_SNAPSHOT_SCHEMA_VERSION,
+        workspace_id: workspace_id.clone(),
+        focused_pane_external_id: 3,
+        root: PaneLayoutSnapshotNode::Split {
+            axis: PaneSplitAxis::Horizontal,
+            ratios: vec![0.5],
+            children: vec![
+                PaneLayoutSnapshotNode::Tabs {
+                    active: 1,
+                    children: vec![leaf(1), leaf(2)],
+                },
+                PaneLayoutSnapshotNode::Split {
+                    axis: PaneSplitAxis::Vertical,
+                    ratios: vec![0.5],
+                    children: vec![leaf(3), leaf(4)],
+                },
+            ],
+        },
+    };
+
+    let out = handle(
+        &mgr,
+        &mut conn,
+        WorkspaceClientMessage::PublishPaneLayout {
+            layout: layout.clone(),
+        },
+    );
+    assert!(matches!(
+        out.first(),
+        Some(WorkspaceServerMessage::PaneLayoutChanged {
+            pane_external_id: 3,
+            op: PaneLayoutOp::Sync,
+            new_layout_snapshot: Some(_),
+        })
+    ));
+    assert_eq!(mgr.pane_layout_for_workspace(&workspace_id), Some(layout));
 }
 
 #[test]

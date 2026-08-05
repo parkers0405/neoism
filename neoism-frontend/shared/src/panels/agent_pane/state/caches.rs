@@ -267,7 +267,9 @@ impl NeoismAgentPane {
     }
 
     pub fn cursor_rect(&self) -> Option<[f32; 4]> {
-        self.cursor_rect
+        (!self.is_subagent_session())
+            .then_some(self.cursor_rect)
+            .flatten()
     }
 
     pub fn cursor_byte(&self) -> usize {

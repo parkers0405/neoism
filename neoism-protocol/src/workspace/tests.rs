@@ -232,6 +232,10 @@ fn editor_surface_route_id_defaults_to_none_for_old_daemons() {
 fn client_pane_layout_op_roundtrips() {
     roundtrip_client(&WorkspaceClientMessage::PaneLayoutOp {
         pane_external_id: 7,
+        op: PaneLayoutOp::Sync,
+    });
+    roundtrip_client(&WorkspaceClientMessage::PaneLayoutOp {
+        pane_external_id: 7,
         op: PaneLayoutOp::Split {
             axis: PaneSplitAxis::Vertical,
             placement: PaneSplitPlacement::After,
@@ -254,6 +258,24 @@ fn client_pane_layout_op_roundtrips() {
     roundtrip_client(&WorkspaceClientMessage::PaneLayoutOp {
         pane_external_id: 7,
         op: PaneLayoutOp::MoveTab { from: 0, to: 2 },
+    });
+}
+
+#[test]
+fn client_publish_pane_layout_roundtrips() {
+    roundtrip_client(&WorkspaceClientMessage::PublishPaneLayout {
+        layout: PaneLayoutSnapshot {
+            schema_version: PANE_LAYOUT_SNAPSHOT_SCHEMA_VERSION,
+            workspace_id: "ws-published".into(),
+            focused_pane_external_id: 7,
+            root: PaneLayoutSnapshotNode::Leaf {
+                pane_external_id: 7,
+                surface_id: "surface-7".into(),
+                session_id: "session-7".into(),
+                path: None,
+                route_id: Some(7),
+            },
+        },
     });
 }
 
@@ -435,6 +457,78 @@ fn pane_layout_snapshot_upsert_preserves_geometry() {
         }
         other => panic!("unexpected root {other:?}"),
     }
+}
+
+#[test]
+fn pane_drag_ops_preserve_split_then_tabs_hierarchy() {
+    let surfaces = (1..=3)
+        .map(|id| EditorSurfaceSummary {
+            surface_id: id.to_string(),
+            workspace_id: "ws-drag".into(),
+            session_id: format!("s-{id}"),
+            route_id: Some(id),
+            path: None,
+            last_active: id as i64,
+        })
+        .collect();
+    let mut snapshot =
+        PaneLayoutSnapshot::from_editor_surfaces("ws-drag", 1, surfaces).unwrap();
+
+    assert!(snapshot.apply_op(
+        2,
+        PaneLayoutOp::MovePane {
+            target_pane_external_id: 1,
+            axis: PaneSplitAxis::Horizontal,
+            placement: PaneSplitPlacement::Before,
+        },
+    ));
+    assert_eq!(snapshot.external_ids_in_order(), vec![2, 1, 3]);
+    assert_eq!(snapshot.focused_pane_external_id, 2);
+    match &snapshot.root {
+        PaneLayoutSnapshotNode::Split { axis, children, .. } => {
+            assert_eq!(*axis, PaneSplitAxis::Horizontal);
+            assert!(matches!(
+                children[0],
+                PaneLayoutSnapshotNode::Leaf {
+                    pane_external_id: 2,
+                    ..
+                }
+            ));
+            assert!(matches!(children[1], PaneLayoutSnapshotNode::Tabs { .. }));
+        }
+        other => panic!("expected split containing a tab group, got {other:?}"),
+    }
+
+    assert!(snapshot.apply_op(
+        2,
+        PaneLayoutOp::AdoptPaneAsTab {
+            target_pane_external_id: 3,
+        },
+    ));
+    assert_eq!(snapshot.external_ids_in_order(), vec![1, 3, 2]);
+    assert_eq!(snapshot.focused_pane_external_id, 2);
+    assert!(matches!(
+        &snapshot.root,
+        PaneLayoutSnapshotNode::Tabs { active: 2, children } if children.len() == 3
+    ));
+}
+
+#[test]
+fn pane_drag_ops_roundtrip_on_the_wire() {
+    roundtrip_client(&WorkspaceClientMessage::PaneLayoutOp {
+        pane_external_id: 4,
+        op: PaneLayoutOp::MovePane {
+            target_pane_external_id: 9,
+            axis: PaneSplitAxis::Vertical,
+            placement: PaneSplitPlacement::After,
+        },
+    });
+    roundtrip_client(&WorkspaceClientMessage::PaneLayoutOp {
+        pane_external_id: 4,
+        op: PaneLayoutOp::AdoptPaneAsTab {
+            target_pane_external_id: 9,
+        },
+    });
 }
 
 #[test]

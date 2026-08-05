@@ -132,12 +132,12 @@ fn rasterize_glyph_native(
     synthetic_italic: bool,
 ) -> Option<RawGlyph> {
     use neoism_backend::sugarloaf::swash::{
-        FontRef,
         scale::{
-            Render, Source, StrikeWith,
             image::{Content, Image as GlyphImage},
+            Render, Source, StrikeWith,
         },
         zeno::{Angle, Format, Transform},
+        FontRef,
     };
 
     let font_entry = rasterizer.font_data_cache.get(&font_id)?.clone();

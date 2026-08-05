@@ -3,17 +3,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use web_time::Instant;
 
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
 use crate::animation::CriticallyDampedSpring;
 use crate::panels::file_tree::icons::{
-    FOLDER_CLOSED_ICON, FOLDER_OPEN_ICON, icon_for_file,
+    icon_for_file, FOLDER_CLOSED_ICON, FOLDER_OPEN_ICON,
 };
 use crate::panels::file_tree::{
-    FILE_TREE_MAX_WIDTH, FILE_TREE_MIN_WIDTH, FILE_TREE_WIDTH, FONT_SIZE, FRAME_RADIUS,
-    FRAME_STROKE, ICON_FONT_SIZE, ICON_GAP, INDENT_PX, ROW_HEIGHT, ROW_PADDING_X,
-    truncate_label,
+    truncate_label, FILE_TREE_MAX_WIDTH, FILE_TREE_MIN_WIDTH, FILE_TREE_WIDTH, FONT_SIZE,
+    FRAME_RADIUS, FRAME_STROKE, ICON_FONT_SIZE, ICON_GAP, INDENT_PX, ROW_HEIGHT,
+    ROW_PADDING_X,
 };
 use crate::primitives::ide_theme::IdeTheme;
 use crate::primitives::{

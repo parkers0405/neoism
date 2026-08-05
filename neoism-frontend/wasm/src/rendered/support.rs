@@ -137,6 +137,7 @@ pub(crate) fn palette_action_name(
         A::ToggleGitDiffPanel => "ToggleGitDiffPanel",
         A::CreateNeoismNote => "CreateNeoismNote",
         A::OpenNeoismNotes => "OpenNeoismNotes",
+        A::OpenEpubTableOfContents => "OpenEpubTableOfContents",
         A::LspHover => "LspHover",
         A::LspCodeAction => "LspCodeAction",
         A::LspFormat => "LspFormat",

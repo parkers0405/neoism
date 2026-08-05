@@ -54,13 +54,6 @@ impl Screen<'_> {
     }
 
     pub fn split_right_with_config(&mut self, config: neoism_backend::config::Config) {
-        if self.context_manager.daemon_client_attached() {
-            let _ = self
-                .request_split_pane(PaneSplitAxis::Horizontal, PaneSplitPlacement::After);
-            return;
-        }
-        let _ =
-            self.request_split_pane(PaneSplitAxis::Horizontal, PaneSplitPlacement::After);
         // Create rich text with initial position accounting for island
         let padding_y_top = self.renderer.margin.top
             + self
@@ -84,13 +77,6 @@ impl Screen<'_> {
     }
 
     pub fn split_right(&mut self) {
-        if self.context_manager.daemon_client_attached() {
-            let _ = self
-                .request_split_pane(PaneSplitAxis::Horizontal, PaneSplitPlacement::After);
-            return;
-        }
-        let _ =
-            self.request_split_pane(PaneSplitAxis::Horizontal, PaneSplitPlacement::After);
         // Create rich text with initial position accounting for island
         let current_grid = self.context_manager.current_grid();
         let (_context, margin) = current_grid.current_context_with_computed_dimension();
@@ -116,13 +102,6 @@ impl Screen<'_> {
     }
 
     pub fn split_down(&mut self) {
-        if self.context_manager.daemon_client_attached() {
-            let _ = self
-                .request_split_pane(PaneSplitAxis::Vertical, PaneSplitPlacement::After);
-            return;
-        }
-        let _ =
-            self.request_split_pane(PaneSplitAxis::Vertical, PaneSplitPlacement::After);
         // Create rich text with initial position accounting for island
         let current_grid = self.context_manager.current_grid();
         let (_context, margin) = current_grid.current_context_with_computed_dimension();
@@ -149,60 +128,44 @@ impl Screen<'_> {
 
     pub fn move_divider_up(&mut self) {
         let amount = DIVIDER_KEYBOARD_STEP_VERTICAL;
-        if self.context_manager.daemon_client_attached() {
-            let _ = self.request_resize_pane_step(false);
-            return;
-        }
-        let _ = self.request_resize_pane_step(false);
         if self
             .context_manager
             .move_divider_up(amount, &mut self.sugarloaf)
         {
+            self.reapply_chrome_layout();
             self.mark_dirty();
         }
     }
 
     pub fn move_divider_down(&mut self) {
         let amount = DIVIDER_KEYBOARD_STEP_VERTICAL;
-        if self.context_manager.daemon_client_attached() {
-            let _ = self.request_resize_pane_step(true);
-            return;
-        }
-        let _ = self.request_resize_pane_step(true);
         if self
             .context_manager
             .move_divider_down(amount, &mut self.sugarloaf)
         {
+            self.reapply_chrome_layout();
             self.mark_dirty();
         }
     }
 
     pub fn move_divider_left(&mut self) {
         let amount = DIVIDER_KEYBOARD_STEP_HORIZONTAL;
-        if self.context_manager.daemon_client_attached() {
-            let _ = self.request_resize_pane_step(false);
-            return;
-        }
-        let _ = self.request_resize_pane_step(false);
         if self
             .context_manager
             .move_divider_left(amount, &mut self.sugarloaf)
         {
+            self.reapply_chrome_layout();
             self.mark_dirty();
         }
     }
 
     pub fn move_divider_right(&mut self) {
         let amount = DIVIDER_KEYBOARD_STEP_HORIZONTAL;
-        if self.context_manager.daemon_client_attached() {
-            let _ = self.request_resize_pane_step(true);
-            return;
-        }
-        let _ = self.request_resize_pane_step(true);
         if self
             .context_manager
             .move_divider_right(amount, &mut self.sugarloaf)
         {
+            self.reapply_chrome_layout();
             self.mark_dirty();
         }
     }
@@ -229,6 +192,21 @@ impl Screen<'_> {
         self.reapply_chrome_layout();
         self.mark_dirty();
         Some(route_id)
+    }
+
+    /// Open a terminal tab in the tab strip owned by the focused visual pane.
+    ///
+    /// The workspace-strip `+` intentionally continues to call
+    /// `create_workspace_terminal_tab` directly.  The keyboard shortcut uses
+    /// this focus-aware entry point so repeatedly invoking it from a secondary
+    /// split stacks terminals in that split instead of targeting the primary
+    /// workspace strip.
+    pub fn create_focused_terminal_tab(&mut self) -> Option<usize> {
+        if let Some(pane_route) = self.active_pane_strip_route() {
+            self.create_pane_terminal_tab(pane_route)
+        } else {
+            self.create_workspace_terminal_tab()
+        }
     }
 
     /// Open a fresh terminal as a new tab inside the secondary split pane

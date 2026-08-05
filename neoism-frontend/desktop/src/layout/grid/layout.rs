@@ -38,8 +38,7 @@ impl<T: EventListener> ContextGrid<T> {
 
     /// Populate every panel's `layout_rect` from the shared solver over
     /// the canonical `SessionTree`, honoring panel margins / per-axis
-    /// gaps, then fan the visible slot rect across each stacked-tab group
-    /// and apply the hidden-split override.
+    /// gaps, then fan the visible slot rect across each stacked-tab group.
     pub(crate) fn recompute_rects_from_tree(&mut self) {
         if self.inner.is_empty() {
             return;
@@ -67,14 +66,14 @@ impl<T: EventListener> ContextGrid<T> {
         for pane in &solved.panes {
             if let Some(&node) = self.leaf_to_node.get(&pane.leaf) {
                 if let Some(item) = self.inner.get_mut(&node) {
-                    item.layout_rect =
-                        [pane.rect.x, pane.rect.y, pane.rect.w, pane.rect.h];
+                    let rect = [pane.rect.x, pane.rect.y, pane.rect.w, pane.rect.h];
+                    item.slot_rect = rect;
+                    item.layout_rect = rect;
                     written.push(node);
                 }
             }
         }
         self.propagate_stacked_rects(&written);
-        self.apply_hidden_split_layout_rect();
     }
 
     /// Each stacked-tab group shares one slot rect. `solve` only wrote the
@@ -115,34 +114,17 @@ impl<T: EventListener> ContextGrid<T> {
             let slot_rect = self
                 .inner
                 .get(&slot_node)
-                .map(|item| item.layout_rect)
+                .map(|item| item.slot_rect)
                 .unwrap_or([0.0, 0.0, 0.0, 0.0]);
             for member in members {
                 if member == slot_node {
                     continue;
                 }
                 if let Some(item) = self.inner.get_mut(&member) {
+                    item.slot_rect = slot_rect;
                     item.layout_rect = slot_rect;
                 }
             }
-        }
-    }
-
-    /// In hidden-splits mode only the root panel is visible; it fills the
-    /// whole available content area (no Taffy involved).
-    pub(crate) fn apply_hidden_split_layout_rect(&mut self) {
-        if !self.splits_hidden {
-            return;
-        }
-        let Some(root) = self.root else {
-            return;
-        };
-        let avail_w =
-            (self.width - self.scaled_margin.left - self.scaled_margin.right).max(0.0);
-        let avail_h =
-            (self.height - self.scaled_margin.top - self.scaled_margin.bottom).max(0.0);
-        if let Some(item) = self.inner.get_mut(&root) {
-            item.layout_rect = [0.0, 0.0, avail_w, avail_h];
         }
     }
 
@@ -155,7 +137,7 @@ impl<T: EventListener> ContextGrid<T> {
             if !self.is_context_visible(node_id) {
                 continue;
             }
-            let [left, top, width, height] = item.layout_rect;
+            let [left, top, width, height] = item.slot_rect;
             if adj_x >= left
                 && adj_x < left + width
                 && adj_y >= top
@@ -174,7 +156,7 @@ impl<T: EventListener> ContextGrid<T> {
         self.repair_single_visible_pane_rect();
 
         let scale = sugarloaf.ctx.scale();
-        let is_multi_panel = !self.splits_hidden && self.panel_count() > 1;
+        let is_multi_panel = self.panel_count() > 1;
         let stacked_nodes = self.stacked_nodes.clone();
         let stacked_parents = self.stacked_parents.clone();
         let active_stacked = self
@@ -182,23 +164,11 @@ impl<T: EventListener> ContextGrid<T> {
             .filter(|node| stacked_nodes.contains(node));
         let active_stacked_by_parent = self.active_stacked_by_parent.clone();
         let root = self.root;
-        let splits_hidden = self.splits_hidden;
 
         for (&node, item) in self.inner.iter_mut() {
             let [abs_x, abs_y, width, height] = item.layout_rect;
             let node_is_stacked = stacked_nodes.contains(&node);
-            let visible = if splits_hidden {
-                if node_is_stacked {
-                    match stacked_parents.get(&node).copied() {
-                        Some(parent) if Some(parent) == root => {
-                            Some(node) == active_stacked
-                        }
-                        _ => false,
-                    }
-                } else {
-                    Some(node) == root && active_stacked.is_none()
-                }
-            } else if node_is_stacked {
+            let visible = if node_is_stacked {
                 match stacked_parents.get(&node).copied() {
                     Some(parent) if Some(parent) == root => Some(node) == active_stacked,
                     Some(parent) => {
@@ -279,7 +249,9 @@ impl<T: EventListener> ContextGrid<T> {
         let Some(item) = self.inner.get_mut(&node) else {
             return;
         };
-        item.layout_rect = [0.0, 0.0, available_width, available_height];
+        let rect = [0.0, 0.0, available_width, available_height];
+        item.slot_rect = rect;
+        item.layout_rect = rect;
     }
 
     #[inline]

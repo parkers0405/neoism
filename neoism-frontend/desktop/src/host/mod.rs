@@ -201,6 +201,10 @@ pub struct Renderer {
     /// separate hover highlight so moving a tab into/out of a split is
     /// visually obvious before release.
     pub drag_drop_preview: Option<TabDropPreview>,
+    /// Four-edge/center pane-body target shown while a tab is being dragged.
+    /// Logical window pixels; unlike `drag_drop_preview`, this previews the
+    /// resulting split cell rather than a tab insertion slot.
+    pub pane_split_drop_preview: Option<[f32; 4]>,
     pub breadcrumbs: breadcrumbs::Breadcrumbs,
     pub status_line: status_line::StatusLine,
     /// Warp-style sticky command composer for the active terminal pane.
@@ -425,6 +429,7 @@ impl Renderer {
             pane_breadcrumbs: rustc_hash::FxHashMap::default(),
             drag_source: None,
             drag_drop_preview: None,
+            pane_split_drop_preview: None,
             breadcrumbs: breadcrumbs::Breadcrumbs::new(),
             status_line: status_line::StatusLine::new(),
             command_composer: command_composer::CommandComposer::new(),

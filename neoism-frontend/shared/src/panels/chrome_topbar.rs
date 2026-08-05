@@ -26,14 +26,14 @@
 //! `Chrome` state. Chrome drains [`ChromeTopBar::take_action`] each
 //! frame and applies the side effect.
 
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
 use crate::editor::crdt::PresenceAvatarPeer;
 use crate::event::{PointerButton, UiEvent};
 use crate::layout::{PanelLayout, Rect};
 use crate::panels::{Panel, PanelContext};
-use crate::primitives::{IdeTheme, draw_overlay_icon_centered};
+use crate::primitives::{draw_overlay_icon_centered, IdeTheme};
 
 pub const CHROME_TOPBAR_HEIGHT: f32 = 30.0;
 

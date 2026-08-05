@@ -4,6 +4,7 @@ impl Screen<'_> {
     pub fn handle_buffer_tabs_drag_move(&mut self) -> bool {
         let Some(source) = self.renderer.drag_source else {
             self.renderer.drag_drop_preview = None;
+            self.renderer.pane_split_drop_preview = None;
             return false;
         };
         let scale_factor = self.sugarloaf.scale_factor();
@@ -40,12 +41,16 @@ impl Screen<'_> {
                 (swapped, dragging)
             }
         };
-        let raw_dest = self.strip_at_point(mouse_x, mouse_y);
-        let dest = raw_dest.or_else(|| {
-            (dragging && raw_dest.is_none())
-                .then(|| self.reveal_hidden_split_for_drag(mouse_x, mouse_y))
-                .flatten()
-        });
+        let dest = self.strip_at_point(mouse_x, mouse_y);
+        let pane_target = (dragging && dest.is_none())
+            .then(|| {
+                self.context_manager.current_grid().pane_drop_zone_at(
+                    mouse_x,
+                    mouse_y,
+                    scale_factor,
+                )
+            })
+            .flatten();
         // Shared decision: which strip (if any) should the renderer
         // paint a drop-preview overlay on this frame? Same-strip
         // drags reorder in place and own their own floating tab, so
@@ -68,6 +73,12 @@ impl Screen<'_> {
                 },
                 mouse_x: upd.mouse_x,
             });
+        self.renderer.pane_split_drop_preview = pane_target.and_then(|target| {
+            let center_is_same_strip = target.placement
+                == neoism_ui::session_layout::geometry::DropPlacement::Center
+                && self.strip_for_pane_route(target.tab_owner_route_id) == source;
+            (!center_is_same_strip).then_some(target.highlight)
+        });
         if swapped || dragging {
             self.mark_dirty();
         }
@@ -79,28 +90,37 @@ impl Screen<'_> {
         use neoism_ui::panels::buffer_tabs::DragRelease;
         let Some(source) = self.renderer.drag_source.take() else {
             self.renderer.drag_drop_preview = None;
+            self.renderer.pane_split_drop_preview = None;
             return false;
         };
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
-        let raw_dest = self.strip_at_point(mouse_x, mouse_y);
-        let reveal_hidden_split =
-            raw_dest.is_none() && self.source_drag_is_active(source);
-        let dest = raw_dest.or_else(|| {
-            reveal_hidden_split
-                .then(|| self.reveal_hidden_split_for_drag(mouse_x, mouse_y))
-                .flatten()
-        });
-        let drop_on_other_strip = dest.is_some_and(|dest_strip| dest_strip != source);
+        let dest = self.strip_at_point(mouse_x, mouse_y);
+        let pane_target = (dest.is_none() && self.source_drag_is_active(source))
+            .then(|| {
+                self.context_manager.current_grid().pane_drop_zone_at(
+                    mouse_x,
+                    mouse_y,
+                    self.sugarloaf.scale_factor(),
+                )
+            })
+            .flatten();
+        let drop_on_destination = dest.is_some_and(|dest_strip| dest_strip != source)
+            || pane_target.as_ref().is_some_and(|target| {
+                target.placement
+                    != neoism_ui::session_layout::geometry::DropPlacement::Center
+                    || self.strip_for_pane_route(target.tab_owner_route_id) != source
+            });
         self.renderer.drag_drop_preview = None;
+        self.renderer.pane_split_drop_preview = None;
         let release = match source {
             StripRef::Workspace => {
-                self.renderer.buffer_tabs.end_drag(drop_on_other_strip)
+                self.renderer.buffer_tabs.end_drag(drop_on_destination)
             }
             StripRef::Pane(route) => self
                 .renderer
                 .pane_tabs
                 .get_mut(&route)
-                .map(|tabs| tabs.end_drag(drop_on_other_strip))
+                .map(|tabs| tabs.end_drag(drop_on_destination))
                 .unwrap_or(DragRelease::None),
         };
         match release {
@@ -110,15 +130,14 @@ impl Screen<'_> {
                 true
             }
             DragRelease::MoveOut { tab } => {
+                if let Some(target) = pane_target {
+                    self.drop_tab_on_pane_target(source, tab, target);
+                    self.mark_dirty();
+                    return true;
+                }
                 let Some(dest_strip) = dest.filter(|dest_strip| *dest_strip != source)
                 else {
-                    if let Some(path) = tab.path.clone() {
-                        self.reinsert_tab_into_strip(source, &tab, path);
-                    } else if let Some(route_id) = tab.neoism_agent_route_id {
-                        self.reinsert_neoism_agent_tab(source, route_id);
-                    } else if let Some(agent) = tab.agent_kind {
-                        self.reinsert_agent_tab(source, &tab, agent);
-                    }
+                    self.restore_dragged_tab(source, &tab);
                     self.mark_dirty();
                     return true;
                 };
@@ -150,113 +169,244 @@ impl Screen<'_> {
                     self.mark_dirty();
                     return true;
                 }
+                if let Some(route_id) = tab.terminal_route_id {
+                    if !self
+                        .move_terminal_tab_between_strips(source, dest_strip, route_id)
+                    {
+                        self.reinsert_terminal_tab(source, route_id);
+                    }
+                    self.mark_dirty();
+                    return true;
+                }
                 self.mark_dirty();
                 true
             }
-            DragRelease::TearOut {
-                ix: _,
-                tab,
-                split_down,
-            } => {
-                // Drop landed inside another strip → move the tab
-                // there (cross-strip move). Otherwise it's a real
-                // tear-out into a new pane below/right. File tabs move
-                // between nvim panes; agent tabs move their existing
-                // terminal context so the PTY/session stays alive.
-                if let Some(dest_strip) = dest {
-                    if dest_strip != source && tab.path.is_some() {
-                        self.move_tab_between_strips(source, dest_strip, tab);
-                        self.mark_dirty();
-                        return true;
-                    }
-                    // Neoism-agent tab dropped onto another strip → merge
-                    // it into that strip's tabbed group (same as a file
-                    // tab) rather than no-op'ing.
-                    if dest_strip != source {
-                        if let Some(route_id) = tab.neoism_agent_route_id {
-                            self.move_neoism_agent_tab_between_strips(
-                                source, dest_strip, tab, route_id,
-                            );
-                            self.mark_dirty();
-                            return true;
-                        }
-                    }
-                    if dest_strip != source {
-                        if let Some(agent) = tab.agent_kind {
-                            if self.move_agent_tab_between_strips(
-                                source, dest_strip, &tab, agent,
-                            ) {
-                                self.mark_dirty();
-                                return true;
-                            }
-                        }
-                    }
-                    if let Some(path) = tab.path.clone() {
-                        self.reinsert_tab_into_strip(source, &tab, path);
-                    } else if let Some(route_id) = tab.neoism_agent_route_id {
-                        self.reinsert_neoism_agent_tab(source, route_id);
-                    } else if let Some(agent) = tab.agent_kind {
-                        self.reinsert_agent_tab(source, &tab, agent);
-                    }
-                    self.mark_dirty();
-                    return true;
+            DragRelease::TearOut { ix: _, tab } => {
+                // Crossing the old vertical tear-out threshold without an
+                // actual strip or pane target is not a split command. All
+                // valid cross-strip/edge/center drops return `MoveOut` above.
+                self.restore_dragged_tab(source, &tab);
+                self.mark_dirty();
+                true
+            }
+        }
+    }
+
+    fn strip_for_pane_route(&self, owner_route: usize) -> crate::host::StripRef {
+        if self.context_manager.current_grid().workspace_route_id() == Some(owner_route) {
+            crate::host::StripRef::Workspace
+        } else {
+            crate::host::StripRef::Pane(owner_route)
+        }
+    }
+
+    fn restore_dragged_tab(
+        &mut self,
+        source: crate::host::StripRef,
+        tab: &neoism_ui::panels::buffer_tabs::BufferTab<crate::neoism::icon::AgentKind>,
+    ) {
+        if let Some(path) = tab.path.clone() {
+            self.reinsert_tab_into_strip(source, tab, path);
+        } else if let Some(route_id) = tab.neoism_agent_route_id {
+            self.reinsert_neoism_agent_tab(source, route_id);
+        } else if let Some(agent) = tab.agent_kind {
+            self.reinsert_agent_tab(source, tab, agent);
+        } else if let Some(route_id) = tab.terminal_route_id {
+            self.reinsert_terminal_tab(source, route_id);
+        }
+    }
+
+    /// Commit one Zed-style pane-body drop. Center adopts the tab into the
+    /// pane's own tab strip; an edge creates a split on that exact side of
+    /// that exact pane.
+    fn drop_tab_on_pane_target(
+        &mut self,
+        source: crate::host::StripRef,
+        tab: neoism_ui::panels::buffer_tabs::BufferTab<crate::neoism::icon::AgentKind>,
+        target: crate::layout::grid::dragsplit::PaneDropTarget,
+    ) {
+        use neoism_ui::session_layout::geometry::DropPlacement;
+
+        if target.placement == DropPlacement::Center {
+            let dest = self.strip_for_pane_route(target.tab_owner_route_id);
+            if dest == source {
+                self.restore_dragged_tab(source, &tab);
+            } else if tab.path.is_some() {
+                self.move_tab_between_strips(source, dest, tab);
+            } else if let Some(route_id) = tab.neoism_agent_route_id {
+                self.move_neoism_agent_tab_between_strips(source, dest, tab, route_id);
+            } else if let Some(agent) = tab.agent_kind {
+                if !self.move_agent_tab_between_strips(source, dest, &tab, agent) {
+                    self.reinsert_agent_tab(source, &tab, agent);
                 }
-                // Cross-strip drops were handled above. A bare tear-out
-                // of a Neoism-agent tab carves the native agent surface
-                // out into its own split (the shared `tab_drag_release_kind`
-                // classifier only knows path/agent_kind, so it would
-                // otherwise classify this as `Drop`).
-                if let Some(route_id) = tab.neoism_agent_route_id {
-                    self.tear_out_neoism_agent_tab_to_split(
-                        route_id, &tab, source, split_down,
-                    );
-                    self.mark_dirty();
-                    return true;
+            } else if let Some(route_id) = tab.terminal_route_id {
+                if !self.move_terminal_tab_between_strips(source, dest, route_id) {
+                    self.reinsert_terminal_tab(source, route_id);
                 }
-                // Now: classify the dragged tab into the right tear-out
-                // routine. Shared helper encodes the markdown/file/agent
-                // ordering so the desktop fork and web host agree on
-                // routing.
-                use neoism_ui::panels::buffer_tabs::{
-                    tab_drag_release_kind, TabDragReleaseKind,
-                };
-                let path_opt = tab.path.clone();
-                let markdown = tab.markdown
-                    || path_opt
-                        .as_deref()
-                        .is_some_and(crate::editor::markdown::state::is_markdown_path);
-                let kind = tab_drag_release_kind(
-                    path_opt.is_some(),
-                    markdown,
-                    tab.agent_kind.is_some(),
+            } else {
+                self.restore_dragged_tab(source, &tab);
+            }
+            return;
+        }
+
+        let destination = Some((target.route_id, target.placement));
+        if let Some(route_id) = tab.neoism_agent_route_id {
+            self.tear_out_neoism_agent_tab_to_split_at(
+                route_id,
+                &tab,
+                source,
+                false,
+                destination,
+            );
+            return;
+        }
+        if tab.agent_kind.is_none() {
+            if let Some(route_id) = tab.terminal_route_id {
+                self.tear_out_terminal_tab_to_split_at(
+                    route_id,
+                    source,
+                    target.route_id,
+                    target.placement,
                 );
-                match kind {
-                    TabDragReleaseKind::Markdown => {
-                        if let Some(path) = path_opt {
-                            self.tear_out_markdown_tab_to_pane(
-                                path, &tab, source, split_down,
-                            );
-                        }
-                    }
-                    TabDragReleaseKind::File => {
-                        if let Some(path) = path_opt {
-                            self.tear_out_file_tab_to_pane(
-                                path, &tab, source, split_down,
-                            );
-                        }
-                    }
-                    TabDragReleaseKind::Agent => {
-                        if let Some(agent) = tab.agent_kind {
-                            self.tear_out_agent_tab_to_split(
-                                &tab, agent, source, split_down,
-                            );
-                        }
-                    }
-                    TabDragReleaseKind::Drop => {}
-                }
-                self.mark_dirty();
-                true
+                return;
             }
+        }
+
+        let path = tab.path.clone();
+        let markdown = tab.markdown
+            || path
+                .as_deref()
+                .is_some_and(crate::editor::markdown::state::is_markdown_path);
+        match neoism_ui::panels::buffer_tabs::tab_drag_release_kind(
+            path.is_some(),
+            markdown,
+            tab.agent_kind.is_some(),
+        ) {
+            neoism_ui::panels::buffer_tabs::TabDragReleaseKind::Markdown => {
+                if let Some(path) = path {
+                    self.tear_out_markdown_tab_to_pane_at(
+                        path,
+                        &tab,
+                        source,
+                        false,
+                        destination,
+                    );
+                }
+            }
+            neoism_ui::panels::buffer_tabs::TabDragReleaseKind::File => {
+                if let Some(path) = path {
+                    self.tear_out_file_tab_to_pane_at(
+                        path,
+                        &tab,
+                        source,
+                        false,
+                        destination,
+                    );
+                }
+            }
+            neoism_ui::panels::buffer_tabs::TabDragReleaseKind::Agent => {
+                if let Some(agent) = tab.agent_kind {
+                    self.tear_out_agent_tab_to_split_at(
+                        &tab,
+                        agent,
+                        source,
+                        false,
+                        destination,
+                    );
+                }
+            }
+            neoism_ui::panels::buffer_tabs::TabDragReleaseKind::Drop => {
+                self.restore_dragged_tab(source, &tab);
+            }
+        }
+    }
+
+    fn reinsert_terminal_tab(&mut self, source: crate::host::StripRef, route_id: usize) {
+        match source {
+            crate::host::StripRef::Workspace => {
+                self.renderer.buffer_tabs.open_terminal(route_id);
+            }
+            crate::host::StripRef::Pane(owner) => {
+                let scale = self.renderer.chrome_scale();
+                let tabs = self.renderer.pane_tabs.entry(owner).or_insert_with(|| {
+                    let mut tabs = neoism_ui::panels::buffer_tabs::BufferTabs::<
+                        crate::neoism::icon::AgentKind,
+                    >::new();
+                    tabs.set_scale(scale);
+                    tabs
+                });
+                tabs.open_terminal(route_id);
+            }
+        }
+    }
+
+    fn move_terminal_tab_between_strips(
+        &mut self,
+        source: crate::host::StripRef,
+        dest: crate::host::StripRef,
+        route_id: usize,
+    ) -> bool {
+        let moved = match dest {
+            crate::host::StripRef::Workspace => self
+                .context_manager
+                .stack_existing_route_on_workspace(route_id, &mut self.sugarloaf),
+            crate::host::StripRef::Pane(target) => self
+                .context_manager
+                .stack_existing_route_on_route(route_id, target, &mut self.sugarloaf),
+        };
+        if !moved {
+            return false;
+        }
+        self.activate_remaining_tab_in_strip(source);
+        self.reinsert_terminal_tab(dest, route_id);
+        self.cleanup_empty_pane_strip(source);
+        self.reapply_chrome_layout();
+        true
+    }
+
+    fn tear_out_terminal_tab_to_split_at(
+        &mut self,
+        route_id: usize,
+        source: crate::host::StripRef,
+        target_route: usize,
+        placement: neoism_ui::session_layout::geometry::DropPlacement,
+    ) {
+        self.activate_remaining_tab_in_strip(source);
+        if !self.context_manager.split_existing_route_at(
+            route_id,
+            target_route,
+            placement,
+            &mut self.sugarloaf,
+        ) {
+            self.reinsert_terminal_tab(source, route_id);
+            self.renderer.notifications.push(
+                "Could not move that terminal to the requested split.".to_string(),
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
+            return;
+        }
+        let mut tabs = neoism_ui::panels::buffer_tabs::BufferTabs::<
+            crate::neoism::icon::AgentKind,
+        >::new();
+        tabs.set_scale(self.renderer.chrome_scale());
+        tabs.open_terminal(route_id);
+        self.renderer.pane_tabs.insert(route_id, tabs);
+        self.cleanup_empty_pane_strip(source);
+        self.reapply_chrome_layout();
+    }
+
+    fn cleanup_empty_pane_strip(&mut self, source: crate::host::StripRef) {
+        let crate::host::StripRef::Pane(route) = source else {
+            return;
+        };
+        let empty = self
+            .renderer
+            .pane_tabs
+            .get(&route)
+            .map_or(true, |tabs| tabs.tabs().is_empty());
+        if empty {
+            self.renderer.pane_tabs.remove(&route);
+            self.renderer.pane_breadcrumbs.remove(&route);
         }
     }
 
@@ -305,7 +455,7 @@ impl Screen<'_> {
             if !tabs.is_visible() {
                 continue;
             }
-            let rect = item.layout_rect;
+            let rect = item.slot_rect;
             let (x, y, w) = pane_strip_position(PaneStripGeomInput {
                 rect_left_phys: rect[0],
                 rect_top_phys: rect[1],
@@ -342,29 +492,6 @@ impl Screen<'_> {
 
     pub(crate) fn first_split_panel_route(&self) -> Option<usize> {
         self.context_manager.current_grid_first_secondary_route()
-    }
-
-    pub(crate) fn reveal_hidden_split_for_drag(
-        &mut self,
-        mouse_x: f32,
-        mouse_y: f32,
-    ) -> Option<crate::host::StripRef> {
-        let scale_factor = self.sugarloaf.scale_factor();
-        let logical_width = self.sugarloaf.window_size().width as f32 / scale_factor;
-        let chrome_top = self.island_chrome_top();
-        let route = hidden_split_drag_reveal_route(
-            self.context_manager.current_grid_splits_hidden(),
-            self.context_manager.current_grid_len(),
-            self.first_split_panel_route().map(|route| route as u64),
-            mouse_x,
-            mouse_y,
-            chrome_top,
-            self.renderer.buffer_tabs.height(),
-            logical_width,
-            self.renderer.status_line.split_toggle_at(mouse_x, mouse_y),
-        )? as usize;
-        let _ = self.focus_split_stack();
-        Some(crate::host::StripRef::Pane(route))
     }
 
     pub(crate) fn move_tab_between_strips(
@@ -585,6 +712,17 @@ impl Screen<'_> {
         source: crate::host::StripRef,
         split_down: bool,
     ) {
+        self.tear_out_file_tab_to_pane_at(path, tab, source, split_down, None);
+    }
+
+    pub(crate) fn tear_out_file_tab_to_pane_at(
+        &mut self,
+        path: std::path::PathBuf,
+        tab: &neoism_ui::panels::buffer_tabs::BufferTab<crate::neoism::icon::AgentKind>,
+        source: crate::host::StripRef,
+        split_down: bool,
+        destination: Option<(usize, neoism_ui::session_layout::geometry::DropPlacement)>,
+    ) {
         // Native code panes: split the file's existing code context out
         // into its own pane (creating the context first if the tab was
         // never activated). Mirrors `tear_out_markdown_tab_to_pane`.
@@ -612,11 +750,21 @@ impl Screen<'_> {
             return;
         };
         self.activate_remaining_tab_in_strip(source);
-        if !self.context_manager.split_existing_route(
-            code_route,
-            split_down,
-            &mut self.sugarloaf,
-        ) {
+        let split_ok = if let Some((target_route, placement)) = destination {
+            self.context_manager.split_existing_route_at(
+                code_route,
+                target_route,
+                placement,
+                &mut self.sugarloaf,
+            )
+        } else {
+            self.context_manager.split_existing_route(
+                code_route,
+                split_down,
+                &mut self.sugarloaf,
+            )
+        };
+        if !split_ok {
             self.reinsert_tab_into_strip(source, tab, path);
             self.renderer.notifications.push(
                 format!("Could not tear out `{}` to a split.", tab.title),

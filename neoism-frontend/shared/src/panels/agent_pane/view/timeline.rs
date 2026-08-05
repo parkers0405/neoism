@@ -18,7 +18,7 @@ use super::message_card::{measure_message_height, render_message_card};
 use super::tool_message::{
     cached_edit_diff_sections_for_parts, CachedToolDiffSections, ToolDiffSection,
 };
-use super::user_input::render_streaming_status_row;
+use super::user_input::{render_streaming_status_row, streaming_status_line_count};
 use super::{DEPTH, ORDER_CARET, STREAMING_STATUS_LINE_H};
 use crate::primitives::ide_theme::IdeTheme;
 use crate::widgets::scrollbar;
@@ -137,6 +137,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     /// means the transcript is a reloaded, settled history projection.
     fn timeline_live_trace_start(&self) -> Option<usize>;
     fn queued_prompt_count(&self) -> usize;
+    fn running_background_task_count(&self) -> usize;
     fn set_timeline_metrics(
         &mut self,
         viewport_rect: [f32; 4],
@@ -429,6 +430,10 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
 
             fn queued_prompt_count(&self) -> usize {
                 <$pane>::queued_prompt_count(self)
+            }
+
+            fn running_background_task_count(&self) -> usize {
+                <$pane>::running_background_task_count(self)
             }
 
             fn set_timeline_metrics(

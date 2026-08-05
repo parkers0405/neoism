@@ -11,7 +11,26 @@ fn chrome_layout_repair_required<T: PartialEq>(
 ) -> bool {
     margin_stale || previous.is_some_and(|previous| previous != current)
 }
-use neoism_ui::chrome_policy::{WorkspaceChromeMetrics, workspace_chrome_margins};
+
+#[inline]
+fn pane_content_rect(slot_rect: [f32; 4], chrome_height: f32) -> [f32; 4] {
+    [
+        slot_rect[0],
+        slot_rect[1] + chrome_height,
+        slot_rect[2],
+        (slot_rect[3] - chrome_height).max(0.0),
+    ]
+}
+
+#[inline]
+fn top_aligned_pane_content_rect(
+    slot_rect: [f32; 4],
+    grid_top: f32,
+    pane_local_top: f32,
+) -> [f32; 4] {
+    pane_content_rect(slot_rect, pane_local_top - grid_top)
+}
+use neoism_ui::chrome_policy::{workspace_chrome_margins, WorkspaceChromeMetrics};
 
 impl Screen<'_> {
     pub fn mark_dirty(&mut self) {
@@ -661,16 +680,19 @@ impl Screen<'_> {
     }
 
     fn chrome_layout_signature(&self) -> ChromeLayoutSignature {
-        let current = self.context_manager.current();
-        let reserves_editor_chrome = current.code.is_some()
-            || current.markdown.is_some()
-            || current.notebook.is_some()
-            || current.epub.is_some()
-            || current.draw.is_some();
+        // The grid-wide top margin belongs to the workspace strip, not to
+        // whichever split currently has keyboard focus. Otherwise focusing a
+        // breadcrumb-free agent pane changes the margin for every split and
+        // makes the workspace editor jump underneath its breadcrumb row.
+        let reserves_editor_chrome = self.renderer.buffer_tabs.active_shows_breadcrumbs();
         let margins = self.workspace_chrome_margins();
 
         ChromeLayoutSignature {
-            route_id: current.route_id,
+            route_id: self
+                .context_manager
+                .current_grid()
+                .workspace_route_id()
+                .unwrap_or_else(|| self.context_manager.current_route()),
             reserves_editor_chrome,
             editor_top_bits: margins.editor_top.to_bits(),
             terminal_top_bits: margins.terminal_top.to_bits(),
@@ -689,14 +711,10 @@ impl Screen<'_> {
         let signature = self.chrome_layout_signature();
         let margins = self.workspace_chrome_margins();
         let scale = self.sugarloaf.scale_factor();
+        let workspace_reserves_editor_chrome =
+            self.renderer.buffer_tabs.active_shows_breadcrumbs();
         let margin_stale = self.context_manager.all_grids().iter().any(|grid| {
-            let current = grid.current();
-            let reserves_editor_chrome = current.code.is_some()
-                || current.markdown.is_some()
-                || current.notebook.is_some()
-                || current.epub.is_some()
-                || current.draw.is_some();
-            let expected_top = if reserves_editor_chrome {
+            let expected_top = if workspace_reserves_editor_chrome {
                 margins.editor_top
             } else {
                 margins.terminal_top
@@ -753,17 +771,11 @@ impl Screen<'_> {
         self.renderer.terminal_scroll.reset_all();
 
         let margins = self.workspace_chrome_margins();
+        let workspace_reserves_editor_chrome =
+            self.renderer.buffer_tabs.active_shows_breadcrumbs();
 
         for grid in self.context_manager.contexts_mut() {
-            let reserves_editor_chrome = {
-                let current = grid.current();
-                current.code.is_some()
-                    || current.markdown.is_some()
-                    || current.notebook.is_some()
-                    || current.epub.is_some()
-                    || current.draw.is_some()
-            };
-            let new_top = if reserves_editor_chrome {
+            let new_top = if workspace_reserves_editor_chrome {
                 margins.editor_top
             } else {
                 margins.terminal_top
@@ -840,7 +852,7 @@ impl Screen<'_> {
                 self.context_manager
                     .current_grid()
                     .is_context_visible(*node)
-                    .then_some(item.layout_rect[1])
+                    .then_some(item.slot_rect[1])
             })
             .fold(f32::INFINITY, f32::min)
     }
@@ -851,6 +863,7 @@ impl Screen<'_> {
         }
         let scale = self.sugarloaf.scale_factor();
         let min_top = self.current_grid_min_pane_top();
+        let workspace_margins = self.workspace_chrome_margins();
 
         let routes: Vec<usize> = self.renderer.pane_tabs.keys().copied().collect();
         for route in routes {
@@ -907,7 +920,7 @@ impl Screen<'_> {
                 .current_grid()
                 .contexts()
                 .get(&node)
-                .map(|item| item.layout_rect)
+                .map(|item| item.slot_rect)
             else {
                 continue;
             };
@@ -922,19 +935,29 @@ impl Screen<'_> {
             // px of offset on the topmost pane.
             let is_top_aligned =
                 neoism_ui::session_layout::is_pane_top_aligned(rect[1], min_top);
-            let is_markdown = self
-                .context_manager
-                .current_grid()
-                .contexts()
-                .get(&node)
-                .is_some_and(|item| item.context().markdown.is_some());
-            if is_top_aligned && !is_markdown {
-                continue;
-            }
-            let x_logical = (rect[0] + scaled_margin.left) / scale;
-            let body_top = rect[1] + chrome_h_scaled;
+            let body_rect = if is_top_aligned {
+                // The whole Taffy grid begins below the workspace strip's
+                // chosen chrome height. A top-aligned secondary pane may have
+                // a different active kind: document panes need breadcrumbs,
+                // agent/terminal panes do not. Apply only the *difference*
+                // between the pane-local and workspace-owned top margins so
+                // an agent does not inherit a transparent empty breadcrumb
+                // row and changing focus cannot move either pane by a line.
+                let local_top = if show_crumbs {
+                    workspace_margins.editor_top
+                } else {
+                    workspace_margins.terminal_top
+                } * scale;
+                top_aligned_pane_content_rect(rect, scaled_margin.top, local_top)
+            } else {
+                // Lower panes paint their chrome inside their structural slot,
+                // so reserve their complete local strip + optional crumb row.
+                pane_content_rect(rect, chrome_h_scaled)
+            };
+            let x_logical = (body_rect[0] + scaled_margin.left) / scale;
+            let body_top = body_rect[1];
             let y_logical = (body_top + scaled_margin.top) / scale;
-            let new_height = (rect[3] - chrome_h_scaled).max(0.0);
+            let new_height = body_rect[3];
 
             for (node, visible) in nodes {
                 let Some(item) = self
@@ -957,11 +980,9 @@ impl Screen<'_> {
                     ]),
                 );
 
-                // Keep the canonical pane rectangle aligned with the actual
-                // editor body, not the chrome-inclusive slot. Cursor overlays,
-                // hit testing, clipping, and row fitting all consume this
-                // rectangle; only moving Sugarloaf's text origin left those
-                // consumers one breadcrumbs row above the real grid.
+                // Only the content rectangle moves. The split solver's slot
+                // rectangle remains fixed so the pane tab renderer cannot read
+                // this inset on the same frame and apply it a second time.
                 item.layout_rect[1] = body_top;
                 item.layout_rect[3] = new_height;
                 item.val.dimension.restore_nominal_cell_height();
@@ -1185,7 +1206,9 @@ impl Screen<'_> {
 
 #[cfg(test)]
 mod launch_layout_tests {
-    use super::chrome_layout_repair_required;
+    use super::{
+        chrome_layout_repair_required, pane_content_rect, top_aligned_pane_content_rect,
+    };
 
     #[test]
     fn first_frame_seeds_valid_geometry_without_reflow() {
@@ -1197,5 +1220,32 @@ mod launch_layout_tests {
     fn established_geometry_repairs_only_real_changes() {
         assert!(!chrome_layout_repair_required(Some(&7_u8), &7_u8, false));
         assert!(chrome_layout_repair_required(Some(&7_u8), &8_u8, false));
+    }
+
+    #[test]
+    fn lower_pane_chrome_insets_content_once_without_moving_slot() {
+        let slot = [500.0, 300.0, 500.0, 400.0];
+        let body = pane_content_rect(slot, 52.0);
+
+        assert_eq!(slot, [500.0, 300.0, 500.0, 400.0]);
+        assert_eq!(body, [500.0, 352.0, 500.0, 348.0]);
+    }
+
+    #[test]
+    fn top_agent_pane_drops_workspace_breadcrumb_reservation() {
+        let slot = [500.0, 0.0, 500.0, 400.0];
+        let body = top_aligned_pane_content_rect(slot, 82.0, 56.0);
+
+        // The workspace editor still owns its 26px breadcrumb band, while
+        // this sibling agent starts immediately below its own tab strip.
+        assert_eq!(body, [500.0, -26.0, 500.0, 426.0]);
+    }
+
+    #[test]
+    fn top_document_pane_keeps_matching_workspace_reservation() {
+        let slot = [500.0, 0.0, 500.0, 400.0];
+        let body = top_aligned_pane_content_rect(slot, 82.0, 82.0);
+
+        assert_eq!(body, slot);
     }
 }

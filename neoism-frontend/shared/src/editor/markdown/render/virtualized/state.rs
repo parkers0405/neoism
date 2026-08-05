@@ -119,6 +119,7 @@ mod tests {
     #[test]
     fn tail_inline_append_suffix_detects_bottom_typing_without_join_rebuild() {
         let mut pane = MarkdownPane {
+            embedded: false,
             path: PathBuf::from("tail.md"),
             remote_loading_started: None,
             value_picker_suppressed: None,

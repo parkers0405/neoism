@@ -393,6 +393,7 @@ impl NeoismAgentPane {
     pub fn start_new_conversation(&mut self) {
         self.session_id = None;
         self.parent_session_id = None;
+        self.side_panel.set_viewed_session_id(None);
         self.clear_pending_user_prompts();
         self.messages.clear();
         self.reset_session_runtime_ui();
@@ -408,6 +409,7 @@ impl NeoismAgentPane {
             return;
         }
         self.session_id = Some(trimmed.clone());
+        self.side_panel.set_viewed_session_id(Some(trimmed.clone()));
         self.messages.clear();
         // Any session switch returns the panel to chat view — the "← Back"
         // home-override peek shouldn't linger onto the newly opened session.

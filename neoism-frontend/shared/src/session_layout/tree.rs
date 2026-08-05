@@ -19,10 +19,9 @@
 //! actual renderer / PTY resources; the tree only decides which leaves
 //! survive a close, where focus lands, and what the new ratios are.
 //!
-//! PR1 intentionally leaves this module unused by the desktop frontend —
-//! no `ContextGrid` plumbing yet. Follow-up PRs port the grid to
-//! materialise its panes from a `SessionTree` instead of the current
-//! ad-hoc state.
+//! Desktop materializes `ContextGrid` geometry and structural mutations from
+//! this tree, while protocol snapshots carry the same recursive vocabulary to
+//! the daemon and web frontend.
 
 use serde::{Deserialize, Serialize};
 

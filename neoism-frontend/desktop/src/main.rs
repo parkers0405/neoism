@@ -834,6 +834,68 @@ fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
+#[cfg(windows)]
+fn run_windows_update_helper() -> Result<bool, Box<dyn std::error::Error>> {
+    use std::time::{Duration, Instant};
+
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if args.first().and_then(|arg| arg.to_str()) != Some("--windows-update-helper") {
+        return Ok(false);
+    }
+    if args.len() != 3 {
+        return Err("invalid Windows update helper arguments".into());
+    }
+
+    let install_dir = std::path::PathBuf::from(&args[1]);
+    let extracted_dir = std::path::PathBuf::from(&args[2]);
+    let deadline = Instant::now() + Duration::from_secs(600);
+    const BINS: [&str; 3] = [
+        "neoism.exe",
+        "neoism-workspace-daemon.exe",
+        "neoism-agent.exe",
+    ];
+
+    for bin in BINS {
+        if bin != "neoism.exe" {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/IM", bin])
+                .status();
+        }
+        let src = extracted_dir.join(bin);
+        if !src.exists() {
+            return Err(format!("`{bin}` missing from staged Windows update").into());
+        }
+        let dst = install_dir.join(bin);
+        let old = install_dir.join(format!("{bin}.old"));
+        let new = install_dir.join(format!(".{bin}.new"));
+        loop {
+            let _ = std::fs::remove_file(&new);
+            if std::fs::copy(&src, &new).is_ok() {
+                let _ = std::fs::remove_file(&old);
+                if (!dst.exists() || std::fs::rename(&dst, &old).is_ok())
+                    && std::fs::rename(&new, &dst).is_ok()
+                {
+                    let _ = std::fs::remove_file(&old);
+                    break;
+                }
+            }
+            if old.exists() && !dst.exists() {
+                let _ = std::fs::rename(&old, &dst);
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    format!("timed out waiting to replace {}", dst.display()).into()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    if let Some(temp_dir) = extracted_dir.parent() {
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+    Ok(true)
+}
+
 /// Best-effort handoff after replacing the binaries: every still-running
 /// Neoism process — the GUI, the workspace daemon(s), and the agent — has the
 /// OLD image mapped in memory even though the path on disk now points at the
@@ -952,11 +1014,13 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let repo =
         std::env::var("NEOISM_REPO").unwrap_or_else(|_| "parkers0405/neoism".to_string());
     let repo = repo.as_str();
+    #[cfg(not(windows))]
     const BINS: [&str; 3] = ["neoism", "neoism-workspace-daemon", "neoism-agent"];
 
     let goos = match std::env::consts::OS {
         "linux" => "linux",
         "macos" => "darwin",
+        "windows" => "windows",
         other => {
             return Err(
                 format!("self-update unsupported on {other} — build from source").into(),
@@ -996,30 +1060,41 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("Updating {current} → {latest}…");
 
+    #[cfg(windows)]
+    let asset = format!("neoism-{goos}-{goarch}.zip");
+    #[cfg(not(windows))]
     let asset = format!("neoism-{goos}-{goarch}.tar.gz");
     let url = format!("https://github.com/{repo}/releases/download/{latest}/{asset}");
     let tmp = std::env::temp_dir().join(format!("neoism-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
-    let tarball = tmp.join(&asset);
+    let archive = tmp.join(&asset);
     let dl = std::process::Command::new("curl")
         .args(["-fsSL", "-o"])
-        .arg(&tarball)
+        .arg(&archive)
         .arg(&url)
         .status()?;
     if !dl.success() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(format!("download failed: {url}").into());
     }
-    let untar = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&tarball)
-        .arg("-C")
-        .arg(&tmp)
-        .status()?;
-    if !untar.success() {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return Err("extract failed".into());
+    #[cfg(windows)]
+    {
+        let file = std::fs::File::open(&archive)?;
+        zip::ZipArchive::new(file)?.extract(&tmp)?;
+    }
+    #[cfg(not(windows))]
+    {
+        let untar = std::process::Command::new("tar")
+            .arg("-xzf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&tmp)
+            .status()?;
+        if !untar.success() {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err("extract failed".into());
+        }
     }
 
     // Swap the binaries next to the running exe, atomically (stage in the
@@ -1030,6 +1105,23 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("cannot resolve install directory")?
         .to_path_buf();
     let extracted = tmp.join(format!("neoism-{goos}-{goarch}"));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        std::process::Command::new(extracted.join("neoism.exe"))
+            .arg("--windows-update-helper")
+            .arg(&dir)
+            .arg(&extracted)
+            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+            .spawn()?;
+        println!("Neoism {latest} is staged. Close Neoism to finish the Windows update.");
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
     for bin in BINS {
         let src = extracted.join(bin);
         if !src.exists() {
@@ -1075,6 +1167,11 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    if run_windows_update_helper()? {
+        return Ok(());
+    }
+
     #[cfg(windows)]
     if let Some(exit_code) = background_process::run_background_command() {
         std::process::exit(exit_code);
@@ -1201,6 +1298,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // windows.shell.program = "pwsh"
     // windows.shell.args = ["-l"]
     config.overwrite_based_on_platform();
+
+    #[cfg(windows)]
+    if config.terminal.working_dir.is_none() {
+        if let (Ok(cwd), Ok(exe)) = (std::env::current_dir(), std::env::current_exe()) {
+            let normalized_cwd = dunce::canonicalize(&cwd).unwrap_or(cwd);
+            let executable_dir = exe.parent().map(|path| {
+                dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+            });
+            if executable_dir.as_deref() == Some(normalized_cwd.as_path()) {
+                config.terminal.working_dir = dirs::home_dir()
+                    .and_then(|path| path.into_os_string().into_string().ok());
+            }
+        }
+    }
 
     {
         let log_to_file = args.window_options.terminal_options.enable_log_file

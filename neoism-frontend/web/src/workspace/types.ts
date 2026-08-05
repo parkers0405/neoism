@@ -1275,12 +1275,49 @@ export type PaneSplitPlacement = "Before" | "After";
 
 export type PaneFocusDir = "Left" | "Right" | "Up" | "Down";
 
+export type PaneLayoutSnapshotNode =
+  | {
+      kind: "leaf";
+      pane_external_id: number;
+      surface_id: string;
+      session_id: string;
+      path?: string | null;
+      route_id?: number | null;
+    }
+  | {
+      kind: "split";
+      axis: PaneSplitAxis;
+      ratios: number[];
+      children: PaneLayoutSnapshotNode[];
+    }
+  | {
+      kind: "tabs";
+      active: number;
+      children: PaneLayoutSnapshotNode[];
+    };
+
+export interface PaneLayoutSnapshot {
+  schema_version: number;
+  workspace_id: string;
+  focused_pane_external_id: number;
+  root: PaneLayoutSnapshotNode;
+}
+
 export type PaneLayoutOp =
+  | "Sync"
   | { Split: { axis: PaneSplitAxis; placement: PaneSplitPlacement } }
   | { Focus: { dir: PaneFocusDir } }
   | "Close"
   | { ResizeRatio: { delta: number } }
-  | { MoveTab: { from: number; to: number } };
+  | { MoveTab: { from: number; to: number } }
+  | {
+      MovePane: {
+        target_pane_external_id: number;
+        axis: PaneSplitAxis;
+        placement: PaneSplitPlacement;
+      };
+    }
+  | { AdoptPaneAsTab: { target_pane_external_id: number } };
 
 export type WorkspaceClientMessage =
   | {
@@ -1409,6 +1446,11 @@ export type WorkspaceClientMessage =
       PaneLayoutOp: {
         pane_external_id: number;
         op: PaneLayoutOp;
+      };
+    }
+  | {
+      PublishPaneLayout: {
+        layout: PaneLayoutSnapshot;
       };
     }
   | {

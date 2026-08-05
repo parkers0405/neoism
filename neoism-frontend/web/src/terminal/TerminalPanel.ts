@@ -132,6 +132,22 @@ interface BufferTabPolicyResult {
 
 type WebPaneSplitAxis = "horizontal" | "vertical";
 type WebPaneResizeDirection = "up" | "down" | "left" | "right";
+type WebPaneDropPlacement = "left" | "right" | "top" | "bottom" | "center";
+
+interface WebPaneDropTarget {
+  paneExternalId: number;
+  placement: WebPaneDropPlacement;
+  rect: { x: number; y: number; w: number; h: number };
+}
+
+interface WebBufferTabDrag {
+  pointerId: number;
+  tabIndex: number;
+  startX: number;
+  startY: number;
+  active: boolean;
+  target: WebPaneDropTarget | null;
+}
 type MobileChromeTouchTarget =
   | "buffer-tabs"
   | "file-tree"
@@ -326,6 +342,7 @@ export class TerminalPanel {
   private readonly canvas: HTMLCanvasElement;
   private readonly markdownLayer: HTMLDivElement;
   private readonly paneOverlay: HTMLDivElement;
+  private readonly paneDragPreview: HTMLDivElement;
   // Lazily acquired — calling getContext("2d") on the canvas locks it
   // to a 2D context for its lifetime, which makes sugarloaf's WebGL2
   // getContext return null. We must NOT touch this until we know wasm
@@ -379,7 +396,6 @@ export class TerminalPanel {
   private fallbackFontFamily =
     "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', monospace";
   private activeShaderFilter: string | null = null;
-  private paneOverlaySuppressed = false;
   private rafHandle: number | null = null;
   private readonly keydownHandler: (event: KeyboardEvent) => void;
   private readonly documentKeydownHandler: (event: KeyboardEvent) => void;
@@ -490,6 +506,10 @@ export class TerminalPanel {
     this.paneOverlay = document.createElement("div");
     this.paneOverlay.className = "terminal-pane-layout-overlay";
     this.root.appendChild(this.paneOverlay);
+    this.paneDragPreview = document.createElement("div");
+    this.paneDragPreview.className = "terminal-pane-drag-preview";
+    this.paneDragPreview.hidden = true;
+    this.root.appendChild(this.paneDragPreview);
 
     this.stubTerminal = new WasmTerminalStub(this.cols, this.rows);
     // Try to upgrade to the real wasm engine asynchronously. While this
@@ -2137,6 +2157,7 @@ export class TerminalPanel {
   private paneLayoutPanes: WebPaneRect[] = [];
   private readonly paneTabState = new Map<number, WebPaneState>();
   private nextWebPaneId = 2;
+  private bufferTabDrag: WebBufferTabDrag | null = null;
   private agentInput = "";
   private agentLastAttachAt = 0;
   private terminalInput = "";
@@ -3544,7 +3565,6 @@ export class TerminalPanel {
   private renderPaneLayoutOverlay(): void {
     this.paneOverlay.replaceChildren();
     if (
-      this.paneOverlaySuppressed ||
       this.paneLayoutPanes.length <= 1 ||
       this.activeSurface() !== "editor"
     ) {
@@ -5393,12 +5413,181 @@ export class TerminalPanel {
     };
   }
 
+  private beginBufferTabDrag(event: PointerEvent): void {
+    if (event.button !== 0 || !this.wasmAdapter?.bufferTabHitTest) return;
+    const { x, y } = this.canvasLogicalPoint(event);
+    const tabIndex = this.wasmAdapter.bufferTabHitTest(x, y);
+    if (
+      tabIndex < 0 ||
+      tabIndex >= this.bufferTabs.length ||
+      !this.isEditorLikeTab(this.bufferTabs[tabIndex])
+    ) {
+      return;
+    }
+    this.bufferTabDrag = {
+      pointerId: event.pointerId,
+      tabIndex,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+      target: null,
+    };
+    this.canvas.setPointerCapture?.(event.pointerId);
+  }
+
+  private updateBufferTabDrag(event: PointerEvent): boolean {
+    const drag = this.bufferTabDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return false;
+    if (!drag.active) {
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      if (Math.hypot(dx, dy) < 4) return false;
+      drag.active = true;
+      // A one-pane overlay is normally hidden because it has no useful
+      // chrome. During drag it becomes the drop canvas, so the same five
+      // zones work before and after the first split.
+      this.paneOverlay.hidden = false;
+      this.paneOverlay.classList.add("is-tab-dragging");
+    }
+    drag.target = this.paneDropTargetAt(event.clientX, event.clientY);
+    this.paintWebPaneDropPreview(drag.target);
+    event.preventDefault();
+    return true;
+  }
+
+  private paneDropTargetAt(clientX: number, clientY: number): WebPaneDropTarget | null {
+    const bounds = this.paneOverlay.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return null;
+    const nx = (clientX - bounds.left) / bounds.width;
+    const ny = (clientY - bounds.top) / bounds.height;
+    const pane = this.paneLayoutPanes.find(
+      (candidate) =>
+        nx >= candidate.x &&
+        nx <= candidate.x + candidate.w &&
+        ny >= candidate.y &&
+        ny <= candidate.y + candidate.h,
+    );
+    if (!pane) return null;
+
+    const localX = (nx - pane.x) / Math.max(pane.w, Number.EPSILON);
+    const localY = (ny - pane.y) / Math.max(pane.h, Number.EPSILON);
+    const candidates: Array<{ distance: number; placement: WebPaneDropPlacement }> = [];
+    if (localX <= 0.25) candidates.push({ distance: localX, placement: "left" });
+    if (localX >= 0.75) candidates.push({ distance: 1 - localX, placement: "right" });
+    if (localY <= 0.25) candidates.push({ distance: localY, placement: "top" });
+    if (localY >= 0.75) candidates.push({ distance: 1 - localY, placement: "bottom" });
+    candidates.sort((a, b) => a.distance - b.distance);
+    const placement = candidates[0]?.placement ?? "center";
+
+    let x = pane.x;
+    let y = pane.y;
+    let w = pane.w;
+    let h = pane.h;
+    if (placement === "left" || placement === "right") {
+      w *= 0.5;
+      if (placement === "right") x += w;
+    } else if (placement === "top" || placement === "bottom") {
+      h *= 0.5;
+      if (placement === "bottom") y += h;
+    }
+    return {
+      paneExternalId: pane.external_id,
+      placement,
+      rect: {
+        x: bounds.left + x * bounds.width,
+        y: bounds.top + y * bounds.height,
+        w: w * bounds.width,
+        h: h * bounds.height,
+      },
+    };
+  }
+
+  private paintWebPaneDropPreview(target: WebPaneDropTarget | null): void {
+    if (!target) {
+      this.paneDragPreview.hidden = true;
+      return;
+    }
+    const root = this.root.getBoundingClientRect();
+    this.paneDragPreview.style.left = `${target.rect.x - root.left}px`;
+    this.paneDragPreview.style.top = `${target.rect.y - root.top}px`;
+    this.paneDragPreview.style.width = `${target.rect.w}px`;
+    this.paneDragPreview.style.height = `${target.rect.h}px`;
+    this.paneDragPreview.hidden = false;
+  }
+
+  private endBufferTabDrag(event: PointerEvent): boolean {
+    const drag = this.bufferTabDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return false;
+    this.bufferTabDrag = null;
+    this.canvas.releasePointerCapture?.(event.pointerId);
+    this.paneOverlay.classList.remove("is-tab-dragging");
+    this.paneDragPreview.hidden = true;
+    this.renderPaneLayoutOverlay();
+    if (!drag.active || !drag.target) return false;
+    this.commitWebTabPaneDrop(drag.tabIndex, drag.target);
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }
+
+  private commitWebTabPaneDrop(tabIndex: number, target: WebPaneDropTarget): void {
+    if (!this.isEditorLikeTab(this.bufferTabs[tabIndex])) return;
+    for (const state of this.paneTabState.values()) {
+      state.tabIndices = state.tabIndices.filter((index) => index !== tabIndex);
+      if (state.activeTabIndex === tabIndex) {
+        state.activeTabIndex = state.tabIndices[0] ?? null;
+      }
+    }
+
+    if (target.placement === "center") {
+      this.assignTabToPane(target.paneExternalId, tabIndex);
+      this.focusEditorPaneByExternalId(target.paneExternalId);
+      this.activatePaneExternalId(target.paneExternalId, true);
+      return;
+    }
+
+    // Every edge drop creates a new split cell whose first tab is the
+    // dragged tab. Focus the pointed pane before invoking the shared split
+    // policy so nested layouts land at the correct depth.
+    this.focusEditorPaneByExternalId(target.paneExternalId);
+    const paneId = this.nextWebPaneId++;
+    const horizontal = target.placement === "left" || target.placement === "right";
+    const axis: WebPaneSplitAxis = horizontal ? "horizontal" : "vertical";
+    const before = target.placement === "left" || target.placement === "top";
+    const result = this.applySessionLayoutPolicy(
+      before ? "split_before" : "split",
+      axis,
+      `Editor ${paneId}`,
+      paneId,
+    );
+    if (!result) {
+      this.nextWebPaneId -= 1;
+      this.assignTabToPane(target.paneExternalId, tabIndex);
+      return;
+    }
+    this.assignTabToPane(paneId, tabIndex);
+    this.activatePaneExternalId(paneId, true);
+    this.bindEditorSurfaceForTab(paneId, tabIndex);
+    this.options.client.sendWorkspace({
+      PaneLayoutOp: {
+        pane_external_id: target.paneExternalId,
+        op: {
+          Split: {
+            axis: horizontal ? "Horizontal" : "Vertical",
+            placement: before ? "Before" : "After",
+          },
+        },
+      },
+    });
+  }
+
   private handlePointerMove(event: PointerEvent): void {
     // Touch pointers are owned entirely by the touchstart/move/end
     // handlers; letting the parallel PointerEvent stream through
     // double-fires every action (a folder tap toggled open on
     // pointerdown, then closed again on the synthesized tap).
     if (event.pointerType === "touch") return;
+    if (this.updateBufferTabDrag(event)) return;
     this.updateCustomCursorFromPointer(event, true);
     if (this.wasmAdapter?.splashMouseMove) {
       const { x, y } = this.canvasLogicalPoint(event);
@@ -5410,6 +5599,7 @@ export class TerminalPanel {
 
   private handlePointerDown(event: PointerEvent): void {
     if (event.pointerType === "touch") return;
+    this.beginBufferTabDrag(event);
     this.focusSurface();
     this.updateCustomCursorFromPointer(event, true);
     const islandPoint = this.canvasLogicalPoint(event);
@@ -5502,8 +5692,8 @@ export class TerminalPanel {
         this.toggleGitSidePanel();
         break;
       case "toggle_split":
-        this.paneOverlaySuppressed = !this.paneOverlaySuppressed;
-        this.renderPaneLayoutOverlay();
+        // Legacy status-line intent. Split panes are first-class now and
+        // remain visible; older WASM builds may still emit this value.
         break;
       case "diagnostic_jump":
         // Jump-to-line was an embedded-nvim SendKeys hop; the native
@@ -5519,6 +5709,7 @@ export class TerminalPanel {
 
   private handlePointerUp(event: PointerEvent): void {
     if (event.pointerType === "touch") return;
+    if (this.endBufferTabDrag(event)) return;
     this.updateCustomCursorFromPointer(event, true);
     this.forwardChromeEvent(fromPointerUpEvent(event, this.canvas));
   }

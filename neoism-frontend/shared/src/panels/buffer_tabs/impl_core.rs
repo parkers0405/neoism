@@ -930,7 +930,6 @@ impl<A> BufferTabs<A> {
             grab_offset,
             active: false,
             tear_out_armed: false,
-            tear_out_horizontal: true,
         });
     }
 
@@ -959,11 +958,7 @@ impl<A> BufferTabs<A> {
         let strip_bottom = y_top + strip_h;
         let prev_armed = drag.tear_out_armed;
         drag.tear_out_armed = mouse_y > strip_bottom + TEAR_OUT_DROP_THRESHOLD_PX;
-        let prev_horiz = drag.tear_out_horizontal;
-        let dx = local_x - drag.press_local_x;
-        drag.tear_out_horizontal = dx <= TEAR_OUT_VERTICAL_X_THRESHOLD_PX;
-        let armed_changed =
-            prev_armed != drag.tear_out_armed || prev_horiz != drag.tear_out_horizontal;
+        let armed_changed = prev_armed != drag.tear_out_armed;
         if !drag.active
             && ((local_x - drag.press_local_x).abs() > DRAG_ACTIVATION_THRESHOLD_PX
                 || (mouse_y - drag.press_y).abs() > DRAG_ACTIVATION_THRESHOLD_PX)
@@ -1037,7 +1032,7 @@ impl<A> BufferTabs<A> {
             .get(ix)
             .map(|t| {
                 t.path.is_some()
-                    || (t.agent_kind.is_some() && t.terminal_route_id.is_some())
+                    || t.terminal_route_id.is_some()
                     // Neoism-agent tabs are native Rust surfaces with no
                     // path and no `agent_kind`/PTY route; they are
                     // identified solely by `neoism_agent_route_id`. They
@@ -1077,11 +1072,7 @@ impl<A> BufferTabs<A> {
         if drop_on_other_strip {
             DragRelease::MoveOut { tab }
         } else {
-            DragRelease::TearOut {
-                ix,
-                tab,
-                split_down: d.tear_out_horizontal,
-            }
+            DragRelease::TearOut { ix, tab }
         }
     }
 }

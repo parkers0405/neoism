@@ -1545,12 +1545,12 @@ fn rasterize_swash_glyph(
     synthetic_italic: bool,
     hint: bool,
 ) -> Option<SwashRawGlyph> {
-    use swash::FontRef;
     use swash::scale::{
-        Render, Source, StrikeWith,
         image::{Content, Image as GlyphImage},
+        Render, Source, StrikeWith,
     };
     use swash::zeno::{Angle, Format, Transform};
+    use swash::FontRef;
 
     let font_ref = FontRef {
         data: font_entry.0.as_ref(),
@@ -2409,10 +2409,10 @@ fn cpu_clip_bounds(clip_rect: [f32; 4], buf_w: i32, buf_h: i32) -> (i32, i32, i3
 #[cfg(test)]
 mod tests {
     use super::{
-        DrawOpts, Text, TextInstance, centered_line_box_baseline_px,
-        instances_ink_bounds_px,
+        centered_line_box_baseline_px, instances_ink_bounds_px, DrawOpts, Text,
+        TextInstance,
     };
-    use crate::font::{FontLibrary, fonts::SugarloafFonts};
+    use crate::font::{fonts::SugarloafFonts, FontLibrary};
     use std::sync::Arc;
 
     #[test]

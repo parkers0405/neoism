@@ -1282,7 +1282,7 @@ pub fn render_streaming_status_row(
     let live_phase = elapsed;
     let queued_count = pane.queued_prompt_count();
     let status_line_h = STREAMING_STATUS_LINE_H * s;
-    let primary_y = if queued_count > 0 {
+    let primary_y = if queued_count > 0 || background_count > 0 {
         bar_y
     } else {
         bar_y + (bar_h - status_line_h).max(0.0) * 0.5
@@ -1547,6 +1547,15 @@ pub fn render_streaming_status_row(
     } else {
         pane.clear_background_status_rect();
     }
+}
+
+/// Number of physical lines occupied by the activity row: the animated
+/// primary status plus one line for each optional child branch.
+pub(super) const fn streaming_status_line_count(
+    queued_count: usize,
+    background_count: usize,
+) -> usize {
+    1 + (queued_count > 0) as usize + (background_count > 0) as usize
 }
 
 pub fn render_status_chips(

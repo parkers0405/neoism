@@ -17,13 +17,13 @@
 
 use web_time::Instant;
 
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
 use crate::animation::CriticallyDampedSpring;
 use crate::editor_snapshot::{PopupMenu, PopupMenuItem};
 use crate::panels::status_line::STATUS_LINE_HEIGHT;
-use crate::primitives::{IdeTheme, draw_overlay_icon_centered};
+use crate::primitives::{draw_overlay_icon_centered, IdeTheme};
 
 const FONT_SIZE: f32 = 13.0;
 const ROW_HEIGHT: f32 = 26.0;

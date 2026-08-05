@@ -38,12 +38,11 @@ pub fn render_timeline_with<P, D>(
     let real_content_h = layout.content_height;
     let row_count = layout.rows.len();
     let status_h = if pane.has_status_activity() {
-        let lines = if pane.queued_prompt_count() > 0 {
-            2.0
-        } else {
-            1.0
-        };
-        STREAMING_STATUS_LINE_H * s * lines
+        let lines = streaming_status_line_count(
+            pane.queued_prompt_count(),
+            pane.running_background_task_count(),
+        );
+        STREAMING_STATUS_LINE_H * s * lines as f32
     } else {
         0.0
     };

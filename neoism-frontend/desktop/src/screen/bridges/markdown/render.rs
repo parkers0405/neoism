@@ -186,8 +186,9 @@ impl Screen<'_> {
                         markdown_font_scale,
                         markdown_animation_phase,
                     );
-                    markdown_needs_redraw |=
-                        epub.markdown.scroll_cursor_into_view(rect[1], rect[3]);
+                    markdown_needs_redraw |= epub
+                        .markdown
+                        .scroll_reader_selection_into_view(rect[1], rect[3]);
                     epub.flush_state_if_due();
                     markdown_needs_redraw |= epub.state_save_pending();
                     Self::sync_epub_image_overlays(

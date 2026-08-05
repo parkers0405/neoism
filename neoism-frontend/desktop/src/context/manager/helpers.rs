@@ -2,12 +2,112 @@ use crate::context::tab::Context;
 use crate::layout::ContextGrid;
 use neoism_backend::event::EventListener;
 use neoism_backend::event::WindowId;
-use neoism_protocol::workspace::PaneLayoutSnapshot;
-use neoism_ui::session_layout::{
-    session_layout_close_focused_route_pair, session_leaf_external_id, SessionLayout,
-    SessionLeafId, SessionLeafKind, SessionLeafSpec, SplitAxis, SplitPlacement,
+use neoism_protocol::workspace::{
+    PaneLayoutSnapshot, PaneLayoutSnapshotNode, PaneSplitAxis,
+    PANE_LAYOUT_SNAPSHOT_SCHEMA_VERSION,
 };
+use neoism_ui::session_layout::tree::SessionTreeNode;
+use neoism_ui::session_layout::{
+    session_leaf_external_id, SessionLayout, SessionLeafId, SessionLeafKind,
+    SessionLeafSpec, SplitAxis, SplitPlacement,
+};
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Serialize the desktop's canonical recursive tree into the daemon wire
+/// model. Unlike the legacy `session_layout_mirror_for_grid`, this preserves
+/// arbitrary split nesting and the tab group owned by each pane.
+pub(crate) fn pane_layout_snapshot_for_grid<T: EventListener>(
+    grid: &ContextGrid<T>,
+    workspace_id: String,
+    window_id: WindowId,
+    route_sessions: &HashMap<usize, String>,
+    fallback_root: Option<PathBuf>,
+) -> Option<PaneLayoutSnapshot> {
+    fn node_for_grid<T: EventListener>(
+        node: &SessionTreeNode,
+        grid: &ContextGrid<T>,
+        window_id: WindowId,
+        route_sessions: &HashMap<usize, String>,
+        fallback_root: &Option<PathBuf>,
+    ) -> Option<PaneLayoutSnapshotNode> {
+        match node {
+            SessionTreeNode::Leaf(leaf) => {
+                let route_id = usize::try_from(leaf.external_id?).ok()?;
+                let context = grid
+                    .contexts()
+                    .values()
+                    .find(|item| item.context().route_id == route_id)?
+                    .context();
+                let surface_id = desktop_tab_id(window_id, route_id);
+                let session_id = route_sessions
+                    .get(&route_id)
+                    .cloned()
+                    .unwrap_or_else(|| surface_id.clone());
+                let (_, path) =
+                    context_workspace_tab_kind_and_path(context, fallback_root.clone());
+                Some(PaneLayoutSnapshotNode::Leaf {
+                    pane_external_id: route_id as u64,
+                    surface_id,
+                    session_id,
+                    path,
+                    route_id: Some(route_id as u64),
+                })
+            }
+            SessionTreeNode::Split {
+                axis,
+                children,
+                ratios,
+            } => Some(PaneLayoutSnapshotNode::Split {
+                axis: match axis {
+                    SplitAxis::Horizontal => PaneSplitAxis::Horizontal,
+                    SplitAxis::Vertical => PaneSplitAxis::Vertical,
+                },
+                ratios: ratios.clone(),
+                children: children
+                    .iter()
+                    .map(|child| {
+                        node_for_grid(
+                            child,
+                            grid,
+                            window_id,
+                            route_sessions,
+                            fallback_root,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            }),
+            SessionTreeNode::Tabbed { active, children } => {
+                Some(PaneLayoutSnapshotNode::Tabs {
+                    active: *active,
+                    children: children
+                        .iter()
+                        .map(|child| {
+                            node_for_grid(
+                                child,
+                                grid,
+                                window_id,
+                                route_sessions,
+                                fallback_root,
+                            )
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                })
+            }
+        }
+    }
+
+    let tree = grid.session_tree_snapshot();
+    let focused_pane_external_id = tree.leaf(tree.focus())?.external_id?;
+    let root =
+        node_for_grid(tree.root(), grid, window_id, route_sessions, &fallback_root)?;
+    Some(PaneLayoutSnapshot {
+        schema_version: PANE_LAYOUT_SNAPSHOT_SCHEMA_VERSION,
+        workspace_id,
+        focused_pane_external_id,
+        root,
+    })
+}
 
 pub(crate) fn session_layout_for_grid<T: EventListener>(
     grid: &ContextGrid<T>,
@@ -106,8 +206,14 @@ pub(crate) fn session_layout_mirror_for_grid<T: EventListener>(
 pub(crate) fn session_layout_close_current_grid_route<T: EventListener>(
     grid: &ContextGrid<T>,
 ) -> Option<(usize, usize)> {
-    let layout = session_layout_for_grid(grid)?;
-    let (closing, focus) = session_layout_close_focused_route_pair(&layout)?;
+    // Closing must use the same recursive tree that owns rendering. The old
+    // compatibility mirror flattened every mixed split into one vertical
+    // list, so it chose a surprising focus neighbour after closing a pane in
+    // a nested left/right + up/down layout.
+    let tree = grid.session_tree_snapshot();
+    let closing = tree.leaf(tree.focus())?.external_id?;
+    let outcome = tree.preview_close_focused().ok()?;
+    let focus = tree.leaf(outcome.focus_after)?.external_id?;
     Some((closing as usize, focus as usize))
 }
 

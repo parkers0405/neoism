@@ -9,11 +9,11 @@
 use std::cell::RefCell;
 use std::path::Path;
 
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
 use crate::panels::file_tree::icons::icon_for_file;
-use crate::primitives::{IdeTheme, truncate_to_fit};
+use crate::primitives::{truncate_to_fit, IdeTheme};
 
 // Folder glyph (Devicons U+F07B closed folder) drawn before each
 // non-leaf segment so the breadcrumb reads as "directory ▸ directory ▸

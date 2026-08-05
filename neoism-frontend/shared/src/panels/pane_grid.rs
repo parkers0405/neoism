@@ -2,9 +2,9 @@
 //!
 //! This is the single brain that turns raw pointer/keyboard interactions
 //! into mutations of the canonical [`SessionTree`] and emits host-agnostic
-//! [`PaneGridAction`]s. Both the desktop fork's `ContextGrid` and the web
-//! host drive *this* type, so split behaviour (keyboard splits, divider
-//! resize, drag-to-split, adopt-as-tab) is identical everywhere.
+//! [`PaneGridAction`]s. Desktop and web share its underlying `SessionTree`
+//! operations and geometry policy, so keyboard splits, divider resize,
+//! drag-to-split, and adopt-as-tab use the same semantics.
 //!
 //! Like the other chrome pieces, hosts:
 //!   1. feed geometry via [`PaneGrid::set_content`],
@@ -567,6 +567,83 @@ mod tests {
         // Center of own pane → suppressed.
         assert!(zone.is_none());
         assert!(!g.drop_surface());
+    }
+
+    #[test]
+    fn nested_horizontal_and_vertical_splits_form_four_real_cells() {
+        let mut g = grid();
+
+        g.split_focused(SplitAxis::Horizontal, SessionLeafKind::Editor);
+        let right = match &g.take_actions()[0] {
+            PaneGridAction::OpenPane { leaf, .. } => *leaf,
+            _ => panic!(),
+        };
+        g.bind_external_id(right, 200);
+
+        // Split the right cell down.
+        g.split_focused(SplitAxis::Vertical, SessionLeafKind::Terminal);
+        let bottom_right = match &g.take_actions()[0] {
+            PaneGridAction::OpenPane { leaf, .. } => *leaf,
+            _ => panic!(),
+        };
+        g.bind_external_id(bottom_right, 300);
+
+        // Split the left cell down as well: a genuine 2x2 layout, not a
+        // hidden secondary stack or a flattened one-axis approximation.
+        assert!(g.focus_at(100.0, 100.0));
+        g.take_actions();
+        g.split_focused(SplitAxis::Vertical, SessionLeafKind::Editor);
+        let bottom_left = match &g.take_actions()[0] {
+            PaneGridAction::OpenPane { leaf, .. } => *leaf,
+            _ => panic!(),
+        };
+        g.bind_external_id(bottom_left, 400);
+
+        assert_eq!(g.panes().len(), 4);
+        assert!(g
+            .panes()
+            .iter()
+            .any(|p| p.rect.x < 400.0 && p.rect.y < 300.0));
+        assert!(g
+            .panes()
+            .iter()
+            .any(|p| p.rect.x >= 400.0 && p.rect.y < 300.0));
+        assert!(g
+            .panes()
+            .iter()
+            .any(|p| p.rect.x < 400.0 && p.rect.y >= 300.0));
+        assert!(g
+            .panes()
+            .iter()
+            .any(|p| p.rect.x >= 400.0 && p.rect.y >= 300.0));
+        g.tree().validate().expect("four-way tree remains valid");
+    }
+
+    #[test]
+    fn center_drop_turns_two_splits_into_one_pane_with_two_tabs() {
+        let mut g = grid();
+        g.split_focused(SplitAxis::Horizontal, SessionLeafKind::Editor);
+        let right = match &g.take_actions()[0] {
+            PaneGridAction::OpenPane { leaf, .. } => *leaf,
+            _ => panic!(),
+        };
+        g.bind_external_id(right, 200);
+
+        assert!(g.begin_surface_drag(200));
+        assert_eq!(
+            g.update_surface_drag(200.0, 300.0).map(|z| z.placement),
+            Some(DropPlacement::Center)
+        );
+        assert!(g.drop_surface());
+
+        assert_eq!(g.tree().all_leaves().len(), 2, "both tabs survive");
+        assert_eq!(g.panes().len(), 1, "one active tab is visible per split");
+        assert_eq!(g.focused_external_id(), Some(200));
+        assert!(matches!(
+            g.tree().root(),
+            crate::session_layout::tree::SessionTreeNode::Tabbed { .. }
+        ));
+        g.tree().validate().expect("tab adoption remains valid");
     }
 
     fn approx(a: f32, b: f32, tol: f32) {

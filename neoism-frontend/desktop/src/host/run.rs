@@ -1060,10 +1060,7 @@ impl Renderer {
             let status_y = (logical_height - self.status_line.scaled_height()).max(0.0);
             let status_left = 0.0;
             let status_width = logical_width.max(0.0);
-            self.status_line.set_split_toggle(
-                context_manager.current_grid_len() > 1,
-                context_manager.current_grid_splits_hidden(),
-            );
+            self.status_line.set_split_toggle(false, false);
             self.status_line.render_with_ide_theme(
                 sugarloaf,
                 status_left,

@@ -733,13 +733,24 @@ impl Route<'_> {
                     Key::Named(NamedKey::ArrowUp) if blocking => {
                         // Forms walk fields ↔ buttons; plain modals keep
                         // the button-list selection.
-                        if !self.window.screen.renderer.modal.form_focus_move(false) {
+                        if self.window.screen.renderer.modal.has_markdown_input() {
+                            self.window.screen.renderer.modal.move_input_up();
+                        } else if !self
+                            .window
+                            .screen
+                            .renderer
+                            .modal
+                            .form_focus_move(false)
+                        {
                             self.window.screen.renderer.modal.move_selection_up();
                         }
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::ArrowDown) if blocking => {
-                        if !self.window.screen.renderer.modal.form_focus_move(true) {
+                        if self.window.screen.renderer.modal.has_markdown_input() {
+                            self.window.screen.renderer.modal.move_input_down();
+                        } else if !self.window.screen.renderer.modal.form_focus_move(true)
+                        {
                             self.window.screen.renderer.modal.move_selection_down();
                         }
                         self.request_overlay_redraw();
@@ -753,6 +764,16 @@ impl Route<'_> {
                         self.request_overlay_redraw();
                     }
                     key if blocking && is_enter_key(key) => {
+                        if modal_has_input
+                            && self.window.screen.renderer.modal.has_markdown_input()
+                        {
+                            let mods = self.window.screen.modifiers.state();
+                            if !mods.control_key() && !mods.super_key() {
+                                self.window.screen.renderer.modal.insert_input_newline();
+                                self.request_overlay_redraw();
+                                return true;
+                            }
+                        }
                         let selected =
                             self.window.screen.renderer.modal.selected_action();
                         let action =

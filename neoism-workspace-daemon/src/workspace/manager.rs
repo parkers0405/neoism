@@ -969,6 +969,35 @@ impl WorkspaceManager {
         Ok(layout)
     }
 
+    /// Replace the canonical recursive pane tree for one workspace.
+    /// Native hosts use this after local pointer-driven tab moves so the
+    /// daemon persists the exact split/tab hierarchy rather than trying to
+    /// infer it from the flat workspace-tab inventory.
+    pub(crate) fn publish_pane_layout(
+        &self,
+        mut layout: PaneLayoutSnapshot,
+    ) -> Result<PaneLayoutSnapshot, String> {
+        let mut inner = self.inner.lock();
+        if !inner.host_workspaces.contains_key(&layout.workspace_id)
+            && !inner.workspaces.contains_key(&layout.workspace_id)
+        {
+            return Err(format!("no such workspace: {}", layout.workspace_id));
+        }
+        if !layout
+            .root
+            .contains_external_id(layout.focused_pane_external_id)
+        {
+            return Err("focused pane is absent from published layout".into());
+        }
+        layout.normalize();
+        inner
+            .pane_layouts
+            .insert(layout.workspace_id.clone(), layout.clone());
+        drop(inner);
+        self.mark_dirty();
+        Ok(layout)
+    }
+
     pub(crate) fn list_windows(&self) -> Vec<WorkspaceWindowSummary> {
         let inner = self.inner.lock();
         let mut out: Vec<WorkspaceWindowSummary> =

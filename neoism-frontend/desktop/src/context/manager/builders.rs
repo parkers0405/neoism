@@ -9,7 +9,8 @@ use crate::event::RioEvent;
 use crate::layout::ContextGrid;
 use neoism_backend::event::EventListener;
 use neoism_backend::sugarloaf::Sugarloaf;
-use neoism_protocol::workspace::{PaneLayoutOp, PaneSplitAxis, PaneSplitPlacement};
+use neoism_ui::session_layout::geometry::DropPlacement;
+use neoism_ui::session_layout::SplitPlacement;
 use std::path::PathBuf;
 
 impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManager<T> {
@@ -20,19 +21,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         working_dir_override: Option<PathBuf>,
         sugarloaf: &mut Sugarloaf,
     ) {
-        if self.request_pane_layout_op(
-            self.current_route as u64,
-            PaneLayoutOp::Split {
-                axis: if split_down {
-                    PaneSplitAxis::Vertical
-                } else {
-                    PaneSplitAxis::Horizontal
-                },
-                placement: PaneSplitPlacement::After,
-            },
-        ) {
-            return;
-        }
         let mut working_dir = working_dir_override
             .map(|p| p.to_string_lossy().to_string())
             .or_else(|| self.config.working_dir.clone());
@@ -95,6 +83,16 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 }
 
                 self.current_route = new_route_id;
+                tracing::debug!(
+                    target: "neoism::layout",
+                    new_route_id,
+                    split_down,
+                    "created native terminal split context"
+                );
+                // Native owns the concrete route/context. Publish only after
+                // the terminal exists so the daemon snapshot never contains
+                // a layout-only ghost pane.
+                self.sync_daemon_workspaces();
             }
             Err(..) => {
                 tracing::error!("not able to create a new context");
@@ -108,19 +106,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         split_down: bool,
         sugarloaf: &mut Sugarloaf,
     ) -> bool {
-        if self.request_pane_layout_op(
-            route_id as u64,
-            PaneLayoutOp::Split {
-                axis: if split_down {
-                    PaneSplitAxis::Vertical
-                } else {
-                    PaneSplitAxis::Horizontal
-                },
-                placement: PaneSplitPlacement::After,
-            },
-        ) {
-            return true;
-        }
         let Some(node) = self.contexts[self.current_index].node_by_route_id(route_id)
         else {
             return false;
@@ -131,6 +116,52 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         } else {
             self.contexts[self.current_index].split_existing_right(node, sugarloaf)
         };
+        if moved {
+            self.current_route = route_id;
+            self.sync_daemon_workspaces();
+        }
+        moved
+    }
+
+    /// Move an existing route to an explicit edge of an explicit pane.
+    ///
+    /// This is the tab-drag split path. Keyboard splits keep using
+    /// `split_existing_route`, whose target is the focused pane; pointer
+    /// drags must never rely on focus because the pointer can target any
+    /// leaf in a nested split tree.
+    pub fn split_existing_route_at(
+        &mut self,
+        route_id: usize,
+        target_route_id: usize,
+        placement: DropPlacement,
+        sugarloaf: &mut Sugarloaf,
+    ) -> bool {
+        let (direction, tree_placement) = match placement {
+            DropPlacement::Left => (taffy::FlexDirection::Row, SplitPlacement::Before),
+            DropPlacement::Right => (taffy::FlexDirection::Row, SplitPlacement::After),
+            DropPlacement::Top => (taffy::FlexDirection::Column, SplitPlacement::Before),
+            DropPlacement::Bottom => {
+                (taffy::FlexDirection::Column, SplitPlacement::After)
+            }
+            DropPlacement::Center => return false,
+        };
+        let Some(node) = self.contexts[self.current_index].node_by_route_id(route_id)
+        else {
+            return false;
+        };
+        let Some(target) =
+            self.contexts[self.current_index].node_by_route_id(target_route_id)
+        else {
+            return false;
+        };
+
+        let moved = self.contexts[self.current_index]
+            .split_panel_with_existing_node_at(node, target, direction, tree_placement)
+            .map(|new_current| {
+                self.contexts[self.current_index].current = new_current;
+                self.contexts[self.current_index].apply_taffy_layout(sugarloaf);
+            })
+            .is_ok();
         if moved {
             self.current_route = route_id;
             self.sync_daemon_workspaces();
@@ -187,20 +218,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         config: neoism_backend::config::Config,
         sugarloaf: &mut Sugarloaf,
     ) {
-        if self.request_pane_layout_op(
-            self.current_route as u64,
-            PaneLayoutOp::Split {
-                axis: if split_down {
-                    PaneSplitAxis::Vertical
-                } else {
-                    PaneSplitAxis::Horizontal
-                },
-                placement: PaneSplitPlacement::After,
-            },
-        ) {
-            return;
-        }
-
         let (shell, working_dir) = process_open_url(
             config.terminal.shell.to_owned(),
             config.terminal.working_dir.to_owned(),

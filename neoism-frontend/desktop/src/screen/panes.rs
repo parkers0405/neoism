@@ -3,13 +3,11 @@
 
 use super::*;
 use neoism_backend::clipboard::Clipboard;
-use neoism_protocol::workspace::{PaneSplitAxis, PaneSplitPlacement};
 use neoism_ui::session_layout::{
     active_tab_move_to_split_stack_plan, buffer_tabs_scroll_dx,
-    hidden_split_drag_reveal_route, ordered_secondary_routes_with_orphans,
-    pane_strip_position, PaneStripGeomInput, SessionMovableTabKind, SessionScrollDelta,
-    SessionTabMoveDestination, SessionTabStripRef, DIVIDER_KEYBOARD_STEP_HORIZONTAL,
-    DIVIDER_KEYBOARD_STEP_VERTICAL,
+    ordered_secondary_routes_with_orphans, pane_strip_position, PaneStripGeomInput,
+    SessionMovableTabKind, SessionScrollDelta, SessionTabMoveDestination,
+    SessionTabStripRef, DIVIDER_KEYBOARD_STEP_HORIZONTAL, DIVIDER_KEYBOARD_STEP_VERTICAL,
 };
 use neoism_window::event::ElementState;
 use neoism_window::keyboard::{Key, NamedKey};

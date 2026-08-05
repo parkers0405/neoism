@@ -386,7 +386,7 @@ pub fn should_build_key_sequence(input: KeySequenceShapeInput) -> bool {
 
 /// POD inputs to [`early_key_event_dispatch`].
 ///
-/// Each `Option<bool>` / `bool` field is the resolved predicate the
+/// Each option / bool field is the resolved predicate the
 /// desktop fork already computes from a winit `KeyEvent` +
 /// `ModifiersState` (see `Screen::is_chrome_focus_key` and friends in
 /// `screen/lifecycle.rs`). The web frontend can compute the same
@@ -402,9 +402,8 @@ pub struct EarlyKeyDispatchInput {
     /// `Some(right)` when the chrome-focus predicate matched: `true` to
     /// move chrome focus right, `false` for left.
     pub chrome_focus: Option<bool>,
-    /// `Some(grow)` when the chrome-resize predicate matched: `true` to
-    /// grow the focused chrome/split, `false` to shrink.
-    pub chrome_resize: Option<bool>,
+    /// Direction requested by Ctrl+Alt+Arrow for chrome/split resizing.
+    pub chrome_resize: Option<ChromeResizeDirection>,
     /// `true` when the top-level workspace tab switch predicate matched
     /// (Cmd/Super + digit, etc.).
     pub is_top_level_workspace_tab_switch: bool,
@@ -425,6 +424,14 @@ pub struct EarlyKeyDispatchInput {
     pub split_stack_toggle_unlocked: bool,
     /// `true` when the split-stack auto-tab predicate matched.
     pub is_split_stack_auto_tab: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChromeResizeDirection {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 /// Action returned by [`early_key_event_dispatch`].
@@ -448,8 +455,8 @@ pub enum EarlyKeyDispatchAction {
     ConsumeRelease,
     /// Move horizontal chrome focus; `right=true` to advance forward.
     FocusHorizontalChrome { right: bool },
-    /// Resize the focused chrome/split; `grow=true` to enlarge.
-    ResizeFocusedChromeOrSplit { grow: bool },
+    /// Move the focused chrome/split divider in the requested direction.
+    ResizeFocusedChromeOrSplit { direction: ChromeResizeDirection },
     /// Switch top-level workspace; `shift` selects the direction in the
     /// desktop fork.
     SelectTopLevelWorkspace { shift: bool },
@@ -498,9 +505,9 @@ pub const fn early_key_event_dispatch(
             EarlyKeyDispatchAction::ConsumeRelease
         };
     }
-    if let Some(grow) = input.chrome_resize {
+    if let Some(direction) = input.chrome_resize {
         return if input.is_pressed {
-            EarlyKeyDispatchAction::ResizeFocusedChromeOrSplit { grow }
+            EarlyKeyDispatchAction::ResizeFocusedChromeOrSplit { direction }
         } else {
             EarlyKeyDispatchAction::ConsumeRelease
         };
@@ -1272,10 +1279,12 @@ mod tests {
     #[test]
     fn early_dispatch_chrome_resize_routes_press_and_swallows_release() {
         let mut input = empty_early_input();
-        input.chrome_resize = Some(false);
+        input.chrome_resize = Some(ChromeResizeDirection::Up);
         assert_eq!(
             early_key_event_dispatch(input),
-            EarlyKeyDispatchAction::ResizeFocusedChromeOrSplit { grow: false }
+            EarlyKeyDispatchAction::ResizeFocusedChromeOrSplit {
+                direction: ChromeResizeDirection::Up
+            }
         );
         input.is_pressed = false;
         assert_eq!(
@@ -1358,7 +1367,7 @@ mod tests {
         // branches in process_key_event.
         let mut input = empty_early_input();
         input.chrome_focus = Some(false);
-        input.chrome_resize = Some(true);
+        input.chrome_resize = Some(ChromeResizeDirection::Right);
         assert_eq!(
             early_key_event_dispatch(input),
             EarlyKeyDispatchAction::FocusHorizontalChrome { right: false }

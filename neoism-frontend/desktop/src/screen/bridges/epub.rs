@@ -185,7 +185,7 @@ impl Screen<'_> {
         self.renderer.modal.open(ModalSpec {
             title: "Note on highlighted text".to_string(),
             body: format!("“{preview}”"),
-            meta: "The highlight and note stay attached to this book location."
+            meta: "Markdown note. Enter adds a line; Ctrl+Enter saves. Long lines wrap."
                 .to_string(),
             input: Some(ModalInputSpec {
                 value: String::new(),
@@ -258,6 +258,83 @@ impl Screen<'_> {
         true
     }
 
+    pub(crate) fn open_epub_annotation_collections(
+        &mut self,
+        annotation_id: &str,
+    ) -> bool {
+        use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
+
+        let Some(epub) = self.context_manager.current().epub.as_ref() else {
+            return false;
+        };
+        let mut buttons = epub
+            .annotation_collections(annotation_id)
+            .into_iter()
+            .map(|(collection_id, name, selected)| {
+                ModalButton::new(
+                    format!("{} {name}", if selected { "●" } else { "○" }),
+                    if selected { "included" } else { "add" },
+                    ModalAction::EpubToggleAnnotationCollection {
+                        annotation_id: annotation_id.to_string(),
+                        collection_id,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        buttons.push(ModalButton::new(
+            "Create new collection…",
+            "new .md file",
+            ModalAction::EpubPromptNewAnnotationCollection {
+                annotation_id: annotation_id.to_string(),
+            },
+        ));
+        buttons.push(ModalButton::new("Done", "Esc", ModalAction::Close));
+        self.renderer.modal.open(ModalSpec {
+            title: "Highlight collections".to_string(),
+            body: "A highlight can belong to multiple study collections. Each collection is a Markdown file beside this book's note.".to_string(),
+            meta: "Toggle any collection or create a new one.".to_string(),
+            buttons,
+            input: None,
+            busy: false,
+            blocking: true,
+        });
+        self.mark_dirty();
+        true
+    }
+
+    pub(crate) fn open_epub_new_collection_prompt(
+        &mut self,
+        annotation_id: &str,
+    ) -> bool {
+        use neoism_ui::widgets::modal::{
+            ModalAction, ModalButton, ModalInputSpec, ModalSpec,
+        };
+        self.renderer.modal.open(ModalSpec {
+            title: "New highlight collection".to_string(),
+            body: "Name the topic or study this highlight belongs to.".to_string(),
+            meta: "Creates a Markdown file beside the regular book note.".to_string(),
+            buttons: vec![
+                ModalButton::new(
+                    "Create and add",
+                    "Enter",
+                    ModalAction::EpubCreateAnnotationCollection {
+                        annotation_id: annotation_id.to_string(),
+                        value: String::new(),
+                    },
+                ),
+                ModalButton::new("Cancel", "Esc", ModalAction::Close),
+            ],
+            input: Some(ModalInputSpec {
+                value: String::new(),
+                placeholder: "e.g. Distributed systems".to_string(),
+            }),
+            busy: false,
+            blocking: true,
+        });
+        self.mark_dirty();
+        true
+    }
+
     pub(crate) fn open_epub_annotation_detail(&mut self, id: &str) -> bool {
         use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
 
@@ -298,6 +375,13 @@ impl Screen<'_> {
                     "Edit note",
                     "e",
                     ModalAction::EpubEditAnnotation {
+                        id: annotation.id.clone(),
+                    },
+                ),
+                ModalButton::new(
+                    "Save to collection…",
+                    "c",
+                    ModalAction::EpubOpenAnnotationCollections {
                         id: annotation.id.clone(),
                     },
                 ),
@@ -352,7 +436,7 @@ impl Screen<'_> {
             buttons: vec![
                 ModalButton::new(
                     "Save note",
-                    "Enter",
+                    "Ctrl+Enter",
                     ModalAction::EpubUpdateAnnotation {
                         id: annotation.id,
                         value: String::new(),
@@ -439,6 +523,13 @@ impl Screen<'_> {
             }),
         ));
         if let Some(annotation) = annotation.as_ref() {
+            items.push(ContextMenuItem::new(
+                "Save to collection…",
+                "C",
+                ContextMenuAction::Epub(EpubContextAction::ManageCollections {
+                    annotation_id: annotation.id.clone(),
+                }),
+            ));
             if !annotation.note.trim().is_empty() {
                 items.push(ContextMenuItem::new(
                     "Open in book note",
@@ -534,6 +625,9 @@ impl Screen<'_> {
             }
             EpubContextAction::OpenBookNote { annotation_id } => {
                 self.open_epub_book_note(&annotation_id);
+            }
+            EpubContextAction::ManageCollections { annotation_id } => {
+                self.open_epub_annotation_collections(&annotation_id);
             }
             EpubContextAction::CopyQuote { annotation_id } => {
                 let text = annotation_id

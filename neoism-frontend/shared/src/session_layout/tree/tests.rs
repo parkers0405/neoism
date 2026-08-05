@@ -251,6 +251,42 @@ fn close_focused_collapses_binary_split_back_to_leaf() {
 }
 
 #[test]
+fn close_in_mixed_nested_split_collapses_only_its_parent() {
+    // Layout: left | (top-right / bottom-right). Closing bottom-right
+    // should promote top-right into the right slot without flattening the
+    // outer left/right split or jumping focus to the left pane.
+    let mut tree = SessionTree::new(leaf_with_route(1));
+    let right = tree
+        .split_focused(
+            SplitAxis::Horizontal,
+            SplitPlacement::After,
+            editor_with_route(2),
+        )
+        .expect("right split");
+    let bottom_right = tree
+        .split_focused(
+            SplitAxis::Vertical,
+            SplitPlacement::After,
+            editor_with_route(3),
+        )
+        .expect("bottom-right split");
+
+    let outcome = tree.close_focused().expect("close nested leaf");
+    assert_eq!(outcome.closed, bottom_right.new_leaf);
+    assert_eq!(outcome.focus_after, right.new_leaf);
+    assert_eq!(tree.external_ids(), vec![1, 2]);
+    let SessionTreeNode::Split { axis, children, .. } = tree.root() else {
+        panic!("outer split should survive");
+    };
+    assert_eq!(*axis, SplitAxis::Horizontal);
+    assert_eq!(children.len(), 2);
+    assert!(children
+        .iter()
+        .all(|child| matches!(child, SessionTreeNode::Leaf(_))));
+    tree.validate().expect("mixed close leaves a valid tree");
+}
+
+#[test]
 fn close_focused_in_nary_split_picks_next_visual_neighbour() {
     let mut tree = SessionTree::new(leaf_with_route(1));
     let s2 = tree
@@ -404,6 +440,50 @@ fn move_tab_reorders_children_and_keeps_active_pointer_on_moved_tab() {
         }
         _ => panic!("expected leaves"),
     }
+}
+
+#[test]
+fn self_edge_tab_extraction_keeps_selected_survivor_visible() {
+    let mut tree = SessionTree::new(
+        SessionLeafSpec::new(SessionLeafKind::Terminal).with_external_id(1),
+    );
+    let terminal = tree.focus();
+    let file = tree
+        .wrap_leaf_in_tabbed(
+            terminal,
+            SessionLeafSpec::new(SessionLeafKind::Editor).with_external_id(2),
+        )
+        .unwrap();
+    let dragged = tree
+        .wrap_leaf_in_tabbed(
+            file,
+            SessionLeafSpec::new(SessionLeafKind::Editor).with_external_id(3),
+        )
+        .unwrap();
+
+    // Removing the dragged tab leaves file selected in the source pane.
+    tree.focus_leaf(file).unwrap();
+    let detached = tree.detach_leaf(dragged).unwrap();
+    tree.focus_leaf(file).unwrap();
+    let outcome = tree
+        .split_focused(
+            SplitAxis::Horizontal,
+            SplitPlacement::After,
+            SessionLeafSpec {
+                kind: detached.kind,
+                title: detached.title,
+                external_id: detached.external_id,
+            },
+        )
+        .unwrap();
+    tree.replace_leaf_id(outcome.new_leaf, dragged).unwrap();
+
+    let visible_external_ids: Vec<u64> = tree
+        .visible_leaves()
+        .into_iter()
+        .filter_map(|id| tree.leaf(id).and_then(|leaf| leaf.external_id))
+        .collect();
+    assert_eq!(visible_external_ids, vec![2, 3]);
 }
 
 #[test]
@@ -797,6 +877,67 @@ fn detach_leaf_from_tabbed_collapses_to_remaining_tab() {
     assert_eq!(detached.id, new_tab);
     assert!(matches!(tree.root(), SessionTreeNode::Leaf(_)));
     tree.validate().expect("valid post-collapse");
+}
+
+#[test]
+fn detaching_right_tab_preserves_active_tab_in_left_group() {
+    let mut tree = SessionTree::new(leaf_with_route(1));
+    let left_terminal = tree.focus();
+    let left_file = tree
+        .wrap_leaf_in_tabbed(left_terminal, editor_with_route(2))
+        .expect("left file tab");
+    let SplitOutcome {
+        new_leaf: right_owner,
+        ..
+    } = tree
+        .split_focused(
+            SplitAxis::Horizontal,
+            SplitPlacement::After,
+            editor_with_route(3),
+        )
+        .expect("right split");
+    let right_tab = tree
+        .wrap_leaf_in_tabbed(right_owner, editor_with_route(4))
+        .expect("right tab");
+
+    assert_eq!(tree.focus(), right_tab);
+    assert_eq!(tree.visible_leaves(), vec![left_file, right_tab]);
+
+    tree.detach_leaf(right_tab).expect("close active right tab");
+
+    assert_eq!(tree.focus(), right_owner);
+    assert_eq!(tree.visible_leaves(), vec![left_file, right_owner]);
+    assert_ne!(tree.focus(), left_terminal);
+    tree.validate().expect("valid after isolated right close");
+}
+
+#[test]
+fn closing_right_tab_preserves_active_tab_in_left_group() {
+    let mut tree = SessionTree::new(leaf_with_route(1));
+    let left_terminal = tree.focus();
+    let left_file = tree
+        .wrap_leaf_in_tabbed(left_terminal, editor_with_route(2))
+        .expect("left file tab");
+    let SplitOutcome {
+        new_leaf: right_owner,
+        ..
+    } = tree
+        .split_focused(
+            SplitAxis::Horizontal,
+            SplitPlacement::After,
+            editor_with_route(3),
+        )
+        .expect("right split");
+    let right_tab = tree
+        .wrap_leaf_in_tabbed(right_owner, editor_with_route(4))
+        .expect("right tab");
+
+    assert_eq!(tree.focus(), right_tab);
+    tree.close_focused().expect("close active right tab");
+
+    assert_eq!(tree.focus(), right_owner);
+    assert_eq!(tree.visible_leaves(), vec![left_file, right_owner]);
+    assert_ne!(tree.focus(), left_terminal);
 }
 
 #[test]

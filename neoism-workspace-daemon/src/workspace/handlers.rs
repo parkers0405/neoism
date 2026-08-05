@@ -364,6 +364,37 @@ pub(crate) fn handle_pane_layout_op(
     }]
 }
 
+/// Accept a complete native-host tree, persist it, and fan the same
+/// authoritative snapshot out to every paired client.
+pub(crate) fn handle_publish_pane_layout(
+    manager: &WorkspaceManager,
+    layout: PaneLayoutSnapshot,
+) -> Vec<WorkspaceServerMessage> {
+    let layout = match manager.publish_pane_layout(layout) {
+        Ok(layout) => layout,
+        Err(message) => return vec![err(message)],
+    };
+    let new_layout_snapshot = match serde_json::to_string(&layout) {
+        Ok(json) => json,
+        Err(error) => {
+            return vec![err(format!(
+                "failed to serialize published pane layout: {error}"
+            ))]
+        }
+    };
+    let pane_external_id = layout.focused_pane_external_id;
+    manager.broadcast_pane_layout(
+        pane_external_id,
+        PaneLayoutOp::Sync,
+        Some(new_layout_snapshot.clone()),
+    );
+    vec![WorkspaceServerMessage::PaneLayoutChanged {
+        pane_external_id,
+        op: PaneLayoutOp::Sync,
+        new_layout_snapshot: Some(new_layout_snapshot),
+    }]
+}
+
 pub(crate) fn run_workspace_action(
     manager: &WorkspaceManager,
     conn: &mut ConnectionWorkspace,

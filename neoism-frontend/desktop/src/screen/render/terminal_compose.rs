@@ -267,9 +267,8 @@ impl Screen<'_> {
             // styled cells flow through into the rendered frame.
             if is_active {
                 if let Some((abs_row, col_start, col_end)) = hover_link_key {
-                    if let Some(idx) = visible_row_sources
-                        .iter()
-                        .position(|&abs| abs == abs_row)
+                    if let Some(idx) =
+                        visible_row_sources.iter().position(|&abs| abs == abs_row)
                     {
                         let blue_underline = style_set.intern(
                                 neoism_terminal_core::crosswords::style::Style {

@@ -648,8 +648,7 @@ pub struct DropPreviewUpdate {
 /// Compute the `drag_drop_preview` update for one drag-move frame.
 ///
 /// - `source` is the strip the drag started in.
-/// - `dest` is the strip the pointer currently hovers in (post-resolve,
-///   including any `reveal_hidden_split_for_drag` fallback).
+/// - `dest` is the strip the pointer currently hovers in after host hit-test.
 /// - `mouse_x` is the logical-px X of the pointer at this frame.
 ///
 /// Returns `Some(update)` when the host should paint a preview
@@ -952,18 +951,13 @@ fn tab_hit_index(hit: TabHit) -> usize {
 /// a split.
 pub const TEAR_OUT_DROP_THRESHOLD_PX: f32 = 36.0;
 
-/// Once tear-out is armed, how far the cursor must travel rightward
-/// from the press point before we flip the orientation from a
-/// horizontal split (below) to a vertical split (right).
-const TEAR_OUT_VERTICAL_X_THRESHOLD_PX: f32 = 160.0;
-
 /// Pixel distance the cursor must travel after a press before we
 /// treat it as a drag (vs a plain activation click). Below this we
 /// don't lift the tab visually so simple clicks don't flicker.
 const DRAG_ACTIVATION_THRESHOLD_PX: f32 = 4.0;
 
 /// Live state for an in-progress drag — covers both "reorder
-/// horizontally inside the strip" and "tear out into a split below".
+/// horizontally inside the strip" and "tear out onto a pane body".
 #[derive(Clone, Debug)]
 pub struct DragState {
     /// Index of the dragged tab — updated as we swap with neighbors.
@@ -978,9 +972,6 @@ pub struct DragState {
     /// `true` once the cursor has descended past the strip's bottom
     /// by `TEAR_OUT_DROP_THRESHOLD_PX`.
     pub tear_out_armed: bool,
-    /// Once tear-out is armed, this picks the split orientation:
-    /// `true` → horizontal split, `false` → vertical split.
-    pub tear_out_horizontal: bool,
 }
 
 /// Outcome of a drag release.
@@ -1000,8 +991,6 @@ pub enum DragRelease<A> {
         #[allow(dead_code)]
         ix: usize,
         tab: BufferTab<A>,
-        /// `true` → horizontal split (new pane below the active pane).
-        split_down: bool,
     },
 }
 

@@ -251,7 +251,6 @@ impl<A: Copy> BufferTabs<A> {
                 d.grab_offset,
                 d.current_y,
                 d.tear_out_armed,
-                d.tear_out_horizontal,
             )
         });
         let hover_ix = self.hover.map(tab_hit_index);
@@ -273,10 +272,10 @@ impl<A: Copy> BufferTabs<A> {
         for ix in 0..self.tabs.len() {
             let slot_tab_x = x_left + ix as f32 * tab_width - scroll_x;
             let armed_self = drag_render
-                .map(|(d_ix, _, _, _, armed, _)| d_ix == ix && armed)
+                .map(|(d_ix, _, _, _, armed)| d_ix == ix && armed)
                 .unwrap_or(false);
             let (tab_x, tab_order, accent_order, text_order) =
-                if let Some((dragged_ix, current_local_x, grab_offset, _, _, _)) =
+                if let Some((dragged_ix, current_local_x, grab_offset, _, _)) =
                     drag_render
                 {
                     if ix == dragged_ix {
@@ -782,61 +781,7 @@ impl<A: Copy> BufferTabs<A> {
             self.new_tab_rect = Some([btn_x, y_top, btn_w, strip_h]);
         }
 
-        // ── tear-out chrome ────────────────────────────────────────
-        if let Some((_, _, _, _, true, horizontal)) = drag_render {
-            let band_thickness = (240.0 * scale).min(640.0);
-            if horizontal {
-                let preview_top = y_top + strip_h + 1.0;
-                let preview_w = available_width.max(0.0);
-                sugarloaf.rect(
-                    None,
-                    strip_left,
-                    preview_top,
-                    preview_w,
-                    2.0,
-                    theme.f32(theme.accent),
-                    consts::DEPTH,
-                    consts::ORDER_TEXT + 4,
-                );
-                sugarloaf.rect(
-                    None,
-                    strip_left,
-                    preview_top + 2.0,
-                    preview_w,
-                    band_thickness,
-                    theme.f32_alpha(theme.accent, 0.10),
-                    consts::DEPTH,
-                    consts::ORDER_TEXT + 3,
-                );
-            } else {
-                let band_w = (available_width * 0.5).clamp(120.0, available_width);
-                let band_left = strip_left + (available_width - band_w);
-                let preview_top = y_top;
-                let preview_height = strip_h + (band_thickness * 1.6).max(band_thickness);
-                sugarloaf.rect(
-                    None,
-                    band_left,
-                    preview_top,
-                    2.0,
-                    preview_height,
-                    theme.f32(theme.accent),
-                    consts::DEPTH,
-                    consts::ORDER_TEXT + 4,
-                );
-                sugarloaf.rect(
-                    None,
-                    band_left + 2.0,
-                    preview_top,
-                    (band_w - 2.0).max(0.0),
-                    preview_height,
-                    theme.f32_alpha(theme.accent, 0.10),
-                    consts::DEPTH,
-                    consts::ORDER_TEXT + 3,
-                );
-            }
-        }
-
-        if let Some((dragged_ix, current_local_x, grab_offset, current_y, true, _)) =
+        if let Some((dragged_ix, current_local_x, grab_offset, current_y, true)) =
             drag_render
         {
             if let Some(tab) = self.tabs.get(dragged_ix) {

@@ -187,6 +187,23 @@ fn first_seen_completed_subagent_is_hidden_immediately() {
 }
 
 #[test]
+fn completed_subagent_stays_visible_while_its_transcript_is_open() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_viewed_session_id(Some("done".to_string()));
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("main", "main session", "return"),
+        NeoismAgentSessionEntry::new("done", "done", "explore")
+            .with_runtime_status(Some("completed".to_string())),
+    ]);
+
+    assert!(panel.subagents().iter().any(|entry| entry.id == "done"));
+
+    panel.set_viewed_session_id(Some("main".to_string()));
+    assert!(panel.prune_expired_completed_subagents());
+    assert!(!panel.subagents().iter().any(|entry| entry.id == "done"));
+}
+
+#[test]
 fn live_completion_stamps_the_visibility_window() {
     // A sub-agent the user watched finish (active -> completed) DOES get
     // the 7s window so it lingers briefly before auto-hiding.

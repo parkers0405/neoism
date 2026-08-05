@@ -6,26 +6,27 @@
 //! Palette drawing pipeline: rect primitives, copy icon, and the main
 //! `render` method that walks the filtered row list each frame.
 
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 use web_time::Instant;
 
 use crate::panels::file_tree;
-use crate::primitives::{IdeTheme, draw_overlay_icon_centered};
+use crate::primitives::{draw_overlay_icon_centered, IdeTheme};
 use crate::widgets::scrollbar;
 
-use super::WORKSPACE_ROOT_DETAIL_PREFIX;
 use super::commands::CommandService;
 use super::fuzzy::{ease_out_back, ease_out_cubic, snap_to_device_px, truncate_to_fit};
 use super::modes::{PaletteMode, PaletteRow};
 use super::state::CommandPalette;
+use super::WORKSPACE_ROOT_DETAIL_PREFIX;
 use super::{
     CARET_BLINK_MS, CARET_WIDTH, COPY_ICON_H, COPY_ICON_OFFSET, COPY_ICON_PAGE_H,
     COPY_ICON_PAGE_W, COPY_ICON_RADIUS, COPY_ICON_STROKE, COPY_ICON_W,
     CURSOR_ANIMATION_LENGTH, DEPTH_BG, DEPTH_ELEMENT, INPUT_FONT_SIZE, INPUT_HEIGHT,
     INPUT_PADDING_X, LIST_SCROLL_ANIMATION_LENGTH, MAX_VISIBLE_RESULTS, OPEN_POP_MS,
-    ORDER, PALETTE_CORNER_RADIUS, PALETTE_PADDING, RESULT_FONT_SIZE, RESULT_ITEM_HEIGHT,
-    RESULTS_MARGIN_TOP, RESULTS_PADDING_BOTTOM, SEPARATOR_HEIGHT, SHORTCUT_FONT_SIZE,
+    ORDER, PALETTE_CORNER_RADIUS, PALETTE_PADDING, RESULTS_MARGIN_TOP,
+    RESULTS_PADDING_BOTTOM, RESULT_FONT_SIZE, RESULT_ITEM_HEIGHT, SEPARATOR_HEIGHT,
+    SHORTCUT_FONT_SIZE,
 };
 
 /// Paint a rounded-rect outline by layering two filled rounded rects:

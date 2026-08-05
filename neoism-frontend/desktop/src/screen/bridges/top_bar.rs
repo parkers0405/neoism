@@ -240,35 +240,97 @@ impl Screen<'_> {
             return;
         };
 
+        let dist_index = web_dir.join("dist/index.html");
+        if !dist_index.is_file() {
+            self.renderer.notifications.push(
+                "Neoism web build is missing. Run `npm run build` in neoism-frontend/web first.",
+                neoism_ui::panels::notifications::NotificationLevel::Error,
+            );
+            self.mark_dirty();
+            return;
+        }
+
         let url = "http://127.0.0.1:5173";
         if !web_frontend_port_listening() {
-            match std::process::Command::new("npm")
+            let child = std::process::Command::new("npm")
                 .arg("run")
-                .arg("dev")
+                .arg("preview")
                 .arg("--")
                 .arg("--host")
                 .arg("0.0.0.0")
+                .arg("--port")
+                .arg("5173")
+                .arg("--strictPort")
                 .current_dir(&web_dir)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(_) => self.renderer.notifications.push(
-                    "Starting Neoism web server on 127.0.0.1:5173...",
-                    neoism_ui::panels::notifications::NotificationLevel::Info,
-                ),
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+            let mut child = match child {
+                Ok(child) => child,
                 Err(err) => {
                     self.renderer.notifications.push(
-                        format!("Failed to start web server: {err}"),
+                        format!("Failed to start built web server: {err}"),
                         neoism_ui::panels::notifications::NotificationLevel::Error,
                     );
                     self.mark_dirty();
                     return;
                 }
+            };
+
+            let mut launch_error = None;
+            for _ in 0..60 {
+                if web_frontend_port_listening() {
+                    break;
+                }
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        use std::io::Read;
+                        let mut stderr = String::new();
+                        if let Some(mut pipe) = child.stderr.take() {
+                            let _ = pipe.read_to_string(&mut stderr);
+                        }
+                        let detail = stderr
+                            .lines()
+                            .rev()
+                            .find(|line| !line.trim().is_empty())
+                            .unwrap_or("no error output");
+                        launch_error = Some(format!(
+                            "Built web server exited with {status}: {detail}"
+                        ));
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        launch_error = Some(format!(
+                            "Could not check built web server status: {err}"
+                        ));
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+
+            if launch_error.is_none() && !web_frontend_port_listening() {
+                let _ = child.kill();
+                launch_error = Some(
+                    "Built web server did not become ready on port 5173.".to_string(),
+                );
+            }
+            if let Some(error) = launch_error {
+                self.renderer.notifications.push(
+                    error,
+                    neoism_ui::panels::notifications::NotificationLevel::Error,
+                );
+                self.mark_dirty();
+                return;
             }
         }
 
+        self.renderer.notifications.push(
+            "Neoism web build is ready on http://127.0.0.1:5173.",
+            neoism_ui::panels::notifications::NotificationLevel::Info,
+        );
         open_url_in_browser(url);
         self.mark_dirty();
     }

@@ -266,8 +266,8 @@ impl Screen<'_> {
             }
         }
 
-        // Close-tab keys (not while editing): `q`, or the `Space x`
-        // leader chord.
+        // Modal leader commands (not while editing): `Space x` closes the
+        // tab and `Space h` opens a terminal in a horizontal split.
         if !ctrl && !mods.alt_key() {
             let armed = self
                 .context_manager
@@ -283,6 +283,9 @@ impl Screen<'_> {
                 if matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("x"))
                 {
                     self.close_active_buffer_tab();
+                } else if matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("h"))
+                {
+                    self.split_down();
                 }
                 return true; // leader consumes the follow-up key either way
             }

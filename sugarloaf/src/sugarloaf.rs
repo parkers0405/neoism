@@ -8,16 +8,16 @@ use crate::components::filters::{Filter, FiltersBrush};
 #[cfg(feature = "wgpu")]
 use crate::components::shader_overlay::ShaderOverlayBrush;
 use crate::components::shader_overlay::{ShaderOverlayConfig, ShaderOverlayError};
-use crate::font::{FontLibrary, fonts::SugarloafFont};
-use crate::font_cache::{FontCache, ResolvedGlyph, compute_advance, resolve_with};
+use crate::font::{fonts::SugarloafFont, FontLibrary};
+use crate::font_cache::{compute_advance, resolve_with, FontCache, ResolvedGlyph};
 use crate::layout::{RootStyle, TextLayout};
 use crate::renderer::Renderer;
 use crate::sugarloaf::graphics::{GraphicDataEntry, Graphics};
 use swash::Attributes;
 
+use crate::context::Context;
 use crate::Content;
 use crate::TextDimensions;
-use crate::context::Context;
 use core::fmt::{Debug, Formatter};
 use primitives::ImageProperties;
 use raw_window_handle::{

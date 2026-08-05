@@ -20,24 +20,24 @@ use neoism_terminal_core::crosswords::style::{StyleFlags, StyleSet};
 #[cfg(target_os = "macos")]
 use neoism_ui::terminal_grid_emit::glyph_cell_offsets_utf16;
 use neoism_ui::terminal_grid_emit::{
-    RowSelection, cell_in_row_sel, glyph_cell_offsets_utf8, rounded_terminal_cell_size,
-    shaping_style_flags, terminal_font_size_u16, terminal_size_bucket,
+    cell_in_row_sel, glyph_cell_offsets_utf8, rounded_terminal_cell_size,
+    shaping_style_flags, terminal_font_size_u16, terminal_size_bucket, RowSelection,
 };
 use smallvec::SmallVec;
 
 use crate::host::Renderer;
 use crate::terminal::grid_emit::cell_color::{cell_fg, cell_fg_selected};
 use crate::terminal::grid_emit::decoration::{
-    DecorationStyle, decoration_color, decoration_thickness, ensure_decoration_slot,
-    underline_style_from_flags,
+    decoration_color, decoration_thickness, ensure_decoration_slot,
+    underline_style_from_flags, DecorationStyle,
 };
 use crate::terminal::grid_emit::glyph_raster::ensure_glyph_by_id;
 use crate::terminal::grid_emit::hints::{
-    HintTag, RowHint, cell_fg_hinted, cell_in_hover_underline, cell_in_row_hints,
+    cell_fg_hinted, cell_in_hover_underline, cell_in_row_hints, HintTag, RowHint,
 };
 use crate::terminal::grid_emit::run_shaping::{
-    GridGlyphRasterizer, RunCacheEntry, is_run_breaker, run_cache_get, run_cache_put,
-    run_hash,
+    is_run_breaker, run_cache_get, run_cache_put, run_hash, GridGlyphRasterizer,
+    RunCacheEntry,
 };
 
 #[cfg(target_os = "macos")]

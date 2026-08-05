@@ -90,7 +90,11 @@ pub fn buffer_tabs_scroll_dx(delta: SessionScrollDelta, epsilon: f32) -> f32 {
             }
         }
     };
-    if dx.abs() < epsilon { 0.0 } else { dx }
+    if dx.abs() < epsilon {
+        0.0
+    } else {
+        dx
+    }
 }
 
 /// Returns the tab index reached by keyboard-style previous/next navigation.
@@ -468,37 +472,6 @@ pub fn workspace_tab_click_plan(
     }
 }
 
-/// Selects the route to reveal when a drag hovers over collapsed split panes.
-///
-/// Desktop and web own their actual hit testing and focus changes. The shared
-/// policy is intentionally narrower: only collapsed multi-pane layouts can be
-/// revealed, and the first secondary route is the deterministic target when
-/// the pointer is over either the workspace strip's right-edge reveal zone or
-/// another host-provided reveal affordance.
-pub fn hidden_split_drag_reveal_route(
-    splits_hidden: bool,
-    pane_count: usize,
-    first_secondary_route: Option<u64>,
-    mouse_x: f32,
-    mouse_y: f32,
-    chrome_top: f32,
-    strip_height: f32,
-    logical_width: f32,
-    reveal_affordance_hit: bool,
-) -> Option<u64> {
-    if !splits_hidden || pane_count <= 1 {
-        return None;
-    }
-    let over_hidden_top_edge = mouse_y >= chrome_top
-        && mouse_y < chrome_top + strip_height
-        && mouse_x > logical_width * 0.72;
-    if over_hidden_top_edge || reveal_affordance_hit {
-        first_secondary_route
-    } else {
-        None
-    }
-}
-
 /// Chooses the nearest pane in the requested horizontal direction.
 ///
 /// Desktop supplies Taffy-backed rectangles and web can supply DOM/grid
@@ -535,6 +508,55 @@ pub fn nearest_horizontal_pane<K: Copy + PartialEq>(
                 overlaps_y,
                 edge_distance.max(0.0),
                 (center_y - current_center_y).abs(),
+            ))
+        })
+        .min_by(|a, b| {
+            let overlap_rank_a = if a.1 { 0 } else { 1 };
+            let overlap_rank_b = if b.1 { 0 } else { 1 };
+            overlap_rank_a
+                .cmp(&overlap_rank_b)
+                .then_with(|| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
+        })
+        .map(|(id, _, _, _)| id)
+}
+
+/// Chooses the nearest pane above or below the current pane.
+///
+/// Prefer candidates that overlap the current pane horizontally, then the
+/// shortest edge distance, then the closest horizontal center. This makes
+/// directional focus follow the pane the user can actually see across a
+/// divider in mixed/nested split trees.
+pub fn nearest_vertical_pane<K: Copy + PartialEq>(
+    current: SessionPaneRect<K>,
+    candidates: impl IntoIterator<Item = SessionPaneRect<K>>,
+    down: bool,
+) -> Option<K> {
+    let current_right = current.left + current.width;
+    let current_bottom = current.top + current.height;
+    let current_center_x = current.left + current.width * 0.5;
+
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.id != current.id)
+        .filter_map(|candidate| {
+            let right = candidate.left + candidate.width;
+            let bottom = candidate.top + candidate.height;
+            let edge_distance = if down {
+                candidate.top - current_bottom
+            } else {
+                current.top - bottom
+            };
+            if edge_distance < -1.0 {
+                return None;
+            }
+            let overlaps_x = current.left < right && candidate.left < current_right;
+            let center_x = candidate.left + candidate.width * 0.5;
+            Some((
+                candidate.id,
+                overlaps_x,
+                edge_distance.max(0.0),
+                (center_x - current_center_x).abs(),
             ))
         })
         .min_by(|a, b| {

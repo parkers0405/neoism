@@ -231,7 +231,9 @@ impl SessionTree {
         // Choose the new focus before mutating. Prefer the visible
         // neighbour that follows in document order, then the previous
         // one, then any remaining leaf.
-        let mut focus_after = pick_neighbour(&visible_before, closed)
+        let mut focus_after = self
+            .sibling_focus_for_path(&path)
+            .or_else(|| pick_neighbour(&visible_before, closed))
             .or_else(|| {
                 // Visible neighbour not found — closed leaf might be
                 // alone in its tab. Fall back to any remaining leaf.
@@ -691,6 +693,14 @@ impl SessionTree {
             return Err(SessionTreeError::LastLeaf);
         }
         let (parent_path, leaf_index) = split_path(&path).expect("non-empty path");
+        // If the detached leaf owns focus, choose a survivor from its own
+        // immediate group before mutating the tree. Falling back to the first
+        // leaf globally changes the active child of an unrelated Tabbed group
+        // when `reveal_path` runs (for example: closing a tab in the right
+        // split silently reveals the workspace terminal on the left).
+        let replacement_focus = (self.focus == id)
+            .then(|| self.sibling_focus_for_path(&path))
+            .flatten();
         let parent = self
             .node_at_mut(&parent_path)
             .ok_or_else(|| SessionTreeError::InvalidPath(path.clone()))?;
@@ -740,10 +750,8 @@ impl SessionTree {
         prune_empty_tabbed(&mut self.root);
         // Refocus if needed.
         if self.focus == id {
-            self.focus = self
-                .all_leaves()
-                .first()
-                .copied()
+            self.focus = replacement_focus
+                .or_else(|| self.all_leaves().first().copied())
                 .ok_or(SessionTreeError::LastLeaf)?;
         }
         // Re-resolve focus path (collapse may have changed shape) and
@@ -758,6 +766,23 @@ impl SessionTree {
         let new_path = self.path_to_leaf(self.focus).expect("focus exists");
         reveal_path(&mut self.root, &new_path);
         Ok(leaf)
+    }
+
+    /// Prefer a leaf beside `path` inside its immediate split/tab group.
+    /// Keeping focus local prevents revealing a tab in an unrelated pane.
+    fn sibling_focus_for_path(&self, path: &[usize]) -> Option<SessionTreeLeafId> {
+        let (parent_path, child_index) = split_path(path)?;
+        let children = match self.node_at(&parent_path)? {
+            SessionTreeNode::Split { children, .. }
+            | SessionTreeNode::Tabbed { children, .. } => children,
+            SessionTreeNode::Leaf(_) => return None,
+        };
+        let sibling_index = if child_index + 1 < children.len() {
+            child_index + 1
+        } else {
+            child_index.checked_sub(1)?
+        };
+        first_visible_leaf_in(&children[sibling_index])
     }
 
     /// Wrap the leaf with id `target` in a fresh
@@ -966,5 +991,17 @@ impl SessionTree {
             self.next_leaf_id = replacement.0 + 1;
         }
         Ok(path)
+    }
+}
+
+fn first_visible_leaf_in(node: &SessionTreeNode) -> Option<SessionTreeLeafId> {
+    match node {
+        SessionTreeNode::Leaf(leaf) => Some(leaf.id),
+        SessionTreeNode::Split { children, .. } => {
+            children.iter().find_map(first_visible_leaf_in)
+        }
+        SessionTreeNode::Tabbed { active, children } => children
+            .get((*active).min(children.len().saturating_sub(1)))
+            .and_then(first_visible_leaf_in),
     }
 }

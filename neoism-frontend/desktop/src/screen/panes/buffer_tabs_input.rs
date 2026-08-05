@@ -1,5 +1,24 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusedBufferCloseTarget {
+    Pane(usize),
+    Workspace,
+    IgnoreUnownedSplit,
+}
+
+#[inline]
+fn focused_buffer_close_target(
+    pane_strip_route: Option<usize>,
+    split_is_focused: bool,
+) -> FocusedBufferCloseTarget {
+    match pane_strip_route {
+        Some(route) => FocusedBufferCloseTarget::Pane(route),
+        None if split_is_focused => FocusedBufferCloseTarget::IgnoreUnownedSplit,
+        None => FocusedBufferCloseTarget::Workspace,
+    }
+}
+
 impl Screen<'_> {
     pub fn handle_buffer_tabs_wheel(
         &mut self,
@@ -223,18 +242,36 @@ impl Screen<'_> {
     }
 
     pub(crate) fn close_focused_buffer_tab(&mut self) -> bool {
-        if let Some(route_id) = self.active_pane_strip_route() {
-            let Some(ix) = self
-                .renderer
-                .pane_tabs
-                .get(&route_id)
-                .map(|tabs| tabs.active())
-            else {
+        match focused_buffer_close_target(
+            self.active_pane_strip_route(),
+            self.context_manager.current_grid_split_focused(),
+        ) {
+            FocusedBufferCloseTarget::Pane(route_id) => {
+                let Some(ix) = self
+                    .renderer
+                    .pane_tabs
+                    .get(&route_id)
+                    .map(|tabs| tabs.active())
+                else {
+                    return false;
+                };
+                self.pane_tab_close(route_id, ix);
+                self.mark_dirty();
+                return true;
+            }
+            // Never fall through from an unrecognised secondary pane to the
+            // workspace strip. During a drag/rebuild there can be a brief
+            // stale pane-strip key; treating `None` as Workspace is what made
+            // Space+X on the right close/activate a tab on the left.
+            FocusedBufferCloseTarget::IgnoreUnownedSplit => {
+                tracing::warn!(
+                    target: "neoism::editor_tabs",
+                    focused_route = self.context_manager.current_route(),
+                    "ignored local tab close because the focused split had no owning tab strip"
+                );
                 return false;
-            };
-            self.pane_tab_close(route_id, ix);
-            self.mark_dirty();
-            return true;
+            }
+            FocusedBufferCloseTarget::Workspace => {}
         }
 
         if !self.renderer.buffer_tabs.is_visible() {
@@ -342,7 +379,7 @@ impl Screen<'_> {
             {
                 continue;
             }
-            let rect = item.layout_rect;
+            let rect = item.slot_rect;
             return Some(pane_strip_position(PaneStripGeomInput {
                 rect_left_phys: rect[0],
                 rect_top_phys: rect[1],
@@ -385,7 +422,7 @@ impl Screen<'_> {
             if !tabs.is_visible() {
                 continue;
             }
-            let rect = item.layout_rect;
+            let rect = item.slot_rect;
             let (x, y, w) = pane_strip_position(PaneStripGeomInput {
                 rect_left_phys: rect[0],
                 rect_top_phys: rect[1],
@@ -423,10 +460,9 @@ impl Screen<'_> {
             Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::NeoismAgent(
                 route_id,
             )) => Some(*route_id),
-            Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path)) => self
-                .context_manager
-                .code_node_by_path(path)
-                .map(|(route, _node)| route),
+            Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path)) => {
+                self.pane_code_route_for_strip(route_id, path)
+            }
             _ => None,
         };
         let Some(node) = self
@@ -513,6 +549,8 @@ impl Screen<'_> {
                     tabs.tabs().is_empty()
                 })
                 .unwrap_or(true);
+            let next_context_route =
+                next_ix.and_then(|ix| self.pane_tab_context_route(route_id, ix));
             if now_empty {
                 self.renderer.pane_tabs.remove(&route_id);
                 self.renderer.pane_breadcrumbs.remove(&route_id);
@@ -532,7 +570,9 @@ impl Screen<'_> {
                 self.context_manager.select_route_from_current_grid();
             }
             if let Some(next_ix) = next_ix {
-                self.pane_tab_activate(route_id, next_ix);
+                let owner_route =
+                    self.rekey_promoted_pane_owner(route_id, next_context_route);
+                self.pane_tab_activate(owner_route, next_ix);
             }
             self.reapply_chrome_layout();
             self.mark_dirty();
@@ -569,6 +609,8 @@ impl Screen<'_> {
                 next_ix = Some(tabs.active());
             }
         }
+        let next_context_route =
+            next_ix.and_then(|ix| self.pane_tab_context_route(route_id, ix));
         if let Some(removed) = removed_target {
             match removed {
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path) => {
@@ -597,9 +639,17 @@ impl Screen<'_> {
                         .remove_chrome_page_route(page.route_id, &mut self.sugarloaf);
                 }
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path) => {
-                    let _ = self
-                        .context_manager
-                        .remove_code_by_path(&path, &mut self.sugarloaf);
+                    // Remove the code context owned by this pane's stack.
+                    // A global path lookup can select the same file from a
+                    // sibling/workspace stack and blank the wrong split.
+                    if let Some(code_route) =
+                        self.pane_code_route_for_strip(route_id, &path)
+                    {
+                        let _ = self.context_manager.should_close_context_manager(
+                            code_route,
+                            &mut self.sugarloaf,
+                        );
+                    }
                 }
             }
         }
@@ -613,7 +663,9 @@ impl Screen<'_> {
             self.renderer.pane_breadcrumbs.remove(&route_id);
             self.collapse_empty_split_pane(route_id);
         } else if let Some(next_ix) = next_ix {
-            self.pane_tab_activate(route_id, next_ix);
+            let owner_route =
+                self.rekey_promoted_pane_owner(route_id, next_context_route);
+            self.pane_tab_activate(owner_route, next_ix);
         }
         self.reapply_chrome_layout();
         self.mark_dirty();
@@ -634,5 +686,128 @@ impl Screen<'_> {
             self.context_manager.select_route_from_current_grid();
             self.reapply_chrome_layout();
         }
+    }
+
+    /// Resolve a code tab within one pane-owned stack. Paths alone are not
+    /// pane identities: the same file can temporarily exist in more than one
+    /// strip during drag/reparent transitions, so activation and close must
+    /// stay inside `strip_route`.
+    fn pane_code_route_for_strip(
+        &self,
+        strip_route: usize,
+        path: &std::path::Path,
+    ) -> Option<usize> {
+        let grid = self.context_manager.current_grid();
+        let owner = grid.node_by_route_id(strip_route)?;
+        if grid.contexts().get(&owner).is_some_and(|item| {
+            item.context()
+                .code
+                .as_ref()
+                .is_some_and(|code| code.path.as_path() == path)
+        }) {
+            return Some(strip_route);
+        }
+        grid.stacked_children_of(owner)
+            .into_iter()
+            .find_map(|child| {
+                grid.contexts().get(&child).and_then(|item| {
+                    item.context()
+                        .code
+                        .as_ref()
+                        .filter(|code| code.path.as_path() == path)
+                        .map(|_| item.context().route_id)
+                })
+            })
+    }
+
+    /// Resolve one tab to the context route inside its pane stack while the
+    /// old pane owner still exists. The route is retained across close so the
+    /// rebuilt layout can tell us which surviving context was promoted.
+    fn pane_tab_context_route(&self, strip_route: usize, ix: usize) -> Option<usize> {
+        let tab = self.renderer.pane_tabs.get(&strip_route)?.tabs().get(ix)?;
+        if let Some(route) = tab.terminal_route_id {
+            return Some(route);
+        }
+        match tab.target()? {
+            neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path) => {
+                self.pane_code_route_for_strip(strip_route, &path)
+            }
+            neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(path) => {
+                self.pane_markdown_route_for_strip(strip_route, &path)
+            }
+            neoism_ui::panels::buffer_tabs::BufferTabTarget::NeoismAgent(route) => {
+                Some(route)
+            }
+            neoism_ui::panels::buffer_tabs::BufferTabTarget::ChromePage(page) => {
+                Some(page.route_id)
+            }
+        }
+    }
+
+    /// If closing the pane's original context caused a surviving stacked tab
+    /// to become the new visual owner, move both chrome maps to that promoted
+    /// route before activation/render. Returns the route that now owns the
+    /// strip.
+    fn rekey_promoted_pane_owner(
+        &mut self,
+        old_owner_route: usize,
+        surviving_context_route: Option<usize>,
+    ) -> usize {
+        if self
+            .context_manager
+            .current_grid()
+            .node_by_route_id(old_owner_route)
+            .is_some()
+        {
+            return old_owner_route;
+        }
+        let Some(new_owner_route) = surviving_context_route.and_then(|route| {
+            self.context_manager
+                .current_grid()
+                .panel_route_id_for_route(route)
+        }) else {
+            return old_owner_route;
+        };
+        if new_owner_route == old_owner_route {
+            return old_owner_route;
+        }
+        if let Some(tabs) = self.renderer.pane_tabs.remove(&old_owner_route) {
+            self.renderer.pane_tabs.insert(new_owner_route, tabs);
+        }
+        if let Some(crumbs) = self.renderer.pane_breadcrumbs.remove(&old_owner_route) {
+            self.renderer
+                .pane_breadcrumbs
+                .insert(new_owner_route, crumbs);
+        }
+        new_owner_route
+    }
+}
+
+#[cfg(test)]
+mod close_target_tests {
+    use super::{focused_buffer_close_target, FocusedBufferCloseTarget};
+
+    #[test]
+    fn secondary_split_without_resolved_strip_never_falls_back_to_workspace() {
+        assert_eq!(
+            focused_buffer_close_target(None, true),
+            FocusedBufferCloseTarget::IgnoreUnownedSplit
+        );
+    }
+
+    #[test]
+    fn resolved_secondary_strip_stays_local() {
+        assert_eq!(
+            focused_buffer_close_target(Some(42), true),
+            FocusedBufferCloseTarget::Pane(42)
+        );
+    }
+
+    #[test]
+    fn root_panel_without_local_strip_uses_workspace() {
+        assert_eq!(
+            focused_buffer_close_target(None, false),
+            FocusedBufferCloseTarget::Workspace
+        );
     }
 }

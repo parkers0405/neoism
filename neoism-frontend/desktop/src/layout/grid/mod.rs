@@ -36,16 +36,12 @@ pub struct ContextGrid<T: EventListener> {
     /// editor/terminal buffer tab remains visible in the root area.
     pub(super) active_stacked: Option<NodeId>,
     pub(super) active_stacked_by_parent: FxHashMap<NodeId, NodeId>,
-    pub(super) splits_hidden: bool,
     pub(super) panel_config: neoism_backend::config::layout::Panel,
     pub(super) tree: TaffyTree<()>,
     pub(super) root_node: NodeId,
     pub(super) border_config: BorderConfig,
-    /// Parallel ledger that mirrors the live Taffy split structure as a
-    /// [`SessionTree`]. Taffy remains authoritative during PR2a; this
-    /// tree is rebuilt at the tail of each structural mutation via
-    /// [`Self::sync_session_tree`]. Future PRs flip canonicity so the
-    /// tree drives layout and Taffy becomes a derived view.
+    /// Canonical recursive split/tab structure. Pane geometry is solved from
+    /// this tree; the residual Taffy nodes are only a host resource/id view.
     pub(super) session_tree: SessionTree,
     /// Map from `SessionTree` leaf id to the corresponding Taffy
     /// panel `NodeId`. Rebuilt by [`Self::sync_session_tree`].
@@ -56,6 +52,12 @@ pub struct ContextGrid<T: EventListener> {
 
 pub struct ContextGridItem<T: EventListener> {
     pub val: Context<T>,
+    /// Structural rectangle assigned by the split solver. Pane chrome,
+    /// dividers, drop targets, and directional focus use this rectangle.
+    /// It always includes any pane-local tab/breadcrumb rows.
+    pub slot_rect: [f32; 4],
+    /// Actual content-body rectangle. This starts equal to `slot_rect`, then
+    /// pane-local chrome may inset its top without corrupting split geometry.
     pub layout_rect: [f32; 4],
 }
 
@@ -63,6 +65,7 @@ impl<T: neoism_backend::event::EventListener> ContextGridItem<T> {
     pub fn new(context: Context<T>) -> Self {
         Self {
             val: context,
+            slot_rect: [0.0; 4],
             layout_rect: [0.0; 4],
         }
     }
@@ -177,7 +180,6 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
             stacked_parents: FxHashMap::default(),
             active_stacked: None,
             active_stacked_by_parent: FxHashMap::default(),
-            splits_hidden: false,
             panel_config,
             tree,
             root_node,
@@ -195,10 +197,7 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
     /// [`Self::sync_session_tree`], which runs at the tail of every
     /// structural mutation.
     ///
-    /// PR2a leaves Taffy authoritative; downstream PRs flip canonicity
-    /// onto this snapshot, so the accessor is part of the stable public
-    /// surface even though nothing reads it yet.
-    #[allow(dead_code)]
+    /// Pointer hit-testing and daemon persistence both read this exact tree.
     #[inline]
     pub fn session_tree_snapshot(&self) -> &SessionTree {
         &self.session_tree
@@ -416,7 +415,7 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
     }
 
     pub fn should_draw_borders(&self) -> bool {
-        !self.splits_hidden && self.panel_count() > 1
+        self.panel_count() > 1
     }
 
     pub fn is_stacked_node(&self, node: NodeId) -> bool {
@@ -424,16 +423,6 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
     }
 
     pub fn is_context_visible(&self, node: NodeId) -> bool {
-        if self.splits_hidden {
-            if self.is_stacked_node(node) {
-                let Some(parent) = self.stacked_parents.get(&node).copied() else {
-                    return false;
-                };
-                return Some(parent) == self.root && Some(node) == self.active_stacked;
-            }
-            return Some(node) == self.root && self.active_stacked.is_none();
-        }
-
         if self.is_stacked_node(node) {
             let Some(parent) = self.stacked_parents.get(&node).copied() else {
                 return false;
@@ -463,7 +452,7 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
     }
 
     pub fn is_pane_chrome_visible(&self, node: NodeId) -> bool {
-        if self.splits_hidden || self.is_stacked_node(node) {
+        if self.is_stacked_node(node) {
             return false;
         }
         self.is_context_visible(node) || self.active_stacked_by_parent.contains_key(&node)
@@ -476,10 +465,19 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
             .unwrap_or(self.current)
     }
 
+    /// Resolve any context route (a pane owner or one of its stacked tabs)
+    /// to the stable route that currently owns that visual pane. Removing a
+    /// tab-group's original owner can promote a surviving child, so callers
+    /// must ask the rebuilt grid for the new owner before rekeying pane-local
+    /// chrome.
+    pub fn panel_route_id_for_route(&self, route_id: usize) -> Option<usize> {
+        let node = self.node_by_route_id(route_id)?;
+        let owner = self.stacked_parents.get(&node).copied().unwrap_or(node);
+        self.inner.get(&owner).map(|item| item.val.route_id)
+    }
+
     pub fn is_split_focused(&self) -> bool {
-        !self.splits_hidden
-            && self.panel_count() > 1
-            && Some(self.current_panel_node()) != self.root
+        self.panel_count() > 1 && Some(self.current_panel_node()) != self.root
     }
 
     pub fn workspace_route_id(&self) -> Option<usize> {
@@ -521,10 +519,6 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
                 (*stacked_parent == parent).then_some(*node)
             })
             .collect()
-    }
-
-    pub fn splits_hidden(&self) -> bool {
-        self.splits_hidden
     }
 
     #[inline]

@@ -171,7 +171,7 @@ impl Renderer {
         let Some(item) = context_manager.current_grid().contexts().get(&node) else {
             return (default_left, default_width);
         };
-        let rect = item.layout_rect;
+        let rect = item.slot_rect;
         // taffy's `layout_rect[0]` is relative to the grid root (which
         // sits AFTER `scaled_margin.left`). The pane's actual on-screen
         // x is `rect[0] + scaled_margin.left`. Without adding the
@@ -341,7 +341,7 @@ impl Renderer {
                 context_manager
                     .current_grid()
                     .is_context_visible(*node)
-                    .then_some(item.layout_rect[1])
+                    .then_some(item.slot_rect[1])
             })
             .fold(f32::INFINITY, f32::min);
         for (node, item) in context_manager.current_grid().contexts().iter() {
@@ -356,7 +356,7 @@ impl Renderer {
             if !self.pane_tabs.contains_key(&route) {
                 continue;
             }
-            let rect = item.layout_rect;
+            let rect = item.slot_rect;
             let (pane_x, y, raw_w) = neoism_ui::session_layout::pane_strip_position(
                 neoism_ui::session_layout::PaneStripGeomInput {
                     rect_left_phys: rect[0],
@@ -417,6 +417,21 @@ impl Renderer {
         chrome_top: f32,
         logical_width: f32,
     ) {
+        if let Some([x, y, w, h]) = self.pane_split_drop_preview {
+            let mut fill = self.theme.f32(self.theme.accent);
+            fill[3] = 0.18;
+            sugarloaf.rect(None, x, y, w, h, fill, 3.0, 6);
+
+            // A thin inset accent makes the exact target readable even over
+            // bright editor content while the translucent fill communicates
+            // the future cell size.
+            let stroke = self.theme.f32(self.theme.accent);
+            let line = 2.0;
+            sugarloaf.rect(None, x, y, w, line, stroke, 0.0, 7);
+            sugarloaf.rect(None, x, y + (h - line).max(0.0), w, line, stroke, 0.0, 7);
+            sugarloaf.rect(None, x, y, line, h, stroke, 0.0, 7);
+            sugarloaf.rect(None, x + (w - line).max(0.0), y, line, h, stroke, 0.0, 7);
+        }
         let Some(preview) = self.drag_drop_preview else {
             return;
         };
@@ -449,7 +464,7 @@ impl Renderer {
                         context_manager
                             .current_grid()
                             .is_context_visible(*node)
-                            .then_some(item.layout_rect[1])
+                            .then_some(item.slot_rect[1])
                     })
                     .fold(f32::INFINITY, f32::min);
                 for (node, item) in context_manager.current_grid().contexts().iter() {
@@ -460,7 +475,7 @@ impl Renderer {
                     if ctx.route_id != route {
                         continue;
                     }
-                    let rect = item.layout_rect;
+                    let rect = item.slot_rect;
                     let (x, y, raw_w) = neoism_ui::session_layout::pane_strip_position(
                         neoism_ui::session_layout::PaneStripGeomInput {
                             rect_left_phys: rect[0],

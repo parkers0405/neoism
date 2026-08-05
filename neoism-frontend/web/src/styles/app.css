@@ -812,6 +812,25 @@ body {
   display: none;
 }
 
+.terminal-pane-layout-overlay.is-tab-dragging .terminal-pane-layout-cell {
+  pointer-events: none;
+}
+
+.terminal-pane-drag-preview {
+  position: absolute;
+  z-index: 5;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: 2px solid var(--neoism-accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--neoism-accent) 18%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--neoism-accent) 45%, transparent);
+}
+
+.terminal-pane-drag-preview[hidden] {
+  display: none;
+}
+
 .terminal-pane-layout-cell {
   position: absolute;
   box-sizing: border-box;

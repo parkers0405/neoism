@@ -430,6 +430,8 @@ impl NeoismAgentPane {
             Ok(messages) => {
                 self.clear_pending_user_prompts();
                 self.session_id = Some(session_id.clone());
+                self.side_panel
+                    .set_viewed_session_id(Some(session_id.clone()));
                 self.input.clear();
                 self.close_picker();
                 self.reset_session_runtime_ui();
@@ -465,6 +467,7 @@ impl NeoismAgentPane {
                 }
                 if self.is_subagent_session() {
                     self.clear_composer();
+                    self.set_cursor_rect(None);
                     self.close_picker();
                 }
                 self.messages = messages;
@@ -1175,6 +1178,7 @@ impl NeoismAgentPane {
     pub(super) fn create_new_session(&mut self) {
         self.session_id = None;
         self.parent_session_id = None;
+        self.side_panel.set_viewed_session_id(None);
         self.clear_pending_user_prompts();
         self.messages.clear();
         self.invalidate_timeline_layout();
@@ -1257,6 +1261,7 @@ impl NeoismAgentPane {
             .to_string();
         self.session_id = Some(id.clone());
         self.parent_session_id = None;
+        self.side_panel.set_viewed_session_id(Some(id.clone()));
         Ok(id)
     }
 }

@@ -10,6 +10,10 @@ use super::*;
 // `Eq` is omitted because `ResizeRatio` carries an `f32`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum PaneLayoutOp {
+    /// The authoritative snapshot changed without replaying a structural
+    /// mutation (for example, a native host published its complete tree).
+    /// Receivers should materialize `new_layout_snapshot` as-is.
+    Sync,
     /// Split the targeted pane along `axis`, placing the new pane
     /// according to `placement`.
     Split {
@@ -27,6 +31,15 @@ pub enum PaneLayoutOp {
     ResizeRatio { delta: f32 },
     /// Move a tab inside the targeted pane from index `from` to `to`.
     MoveTab { from: u32, to: u32 },
+    /// Move the targeted pane to an edge of another pane. This is the
+    /// server-owned form of tab drag-to-split; no new surface is created.
+    MovePane {
+        target_pane_external_id: u64,
+        axis: PaneSplitAxis,
+        placement: PaneSplitPlacement,
+    },
+    /// Move the targeted pane into another pane's tab group (center drop).
+    AdoptPaneAsTab { target_pane_external_id: u64 },
 }
 
 /// Axis used by [`PaneLayoutOp::Split`].
@@ -229,6 +242,10 @@ impl PaneLayoutSnapshot {
             return false;
         }
         match op {
+            PaneLayoutOp::Sync => {
+                self.focused_pane_external_id = pane_external_id;
+                self.reveal_focused();
+            }
             PaneLayoutOp::Focus { dir } => {
                 self.focused_pane_external_id =
                     self.root.focused_after_direction(pane_external_id, dir);
@@ -263,6 +280,37 @@ impl PaneLayoutSnapshot {
                 self.focused_pane_external_id = pane_external_id;
                 self.reveal_focused();
             }
+            PaneLayoutOp::MovePane {
+                target_pane_external_id,
+                axis,
+                placement,
+            } => {
+                if pane_external_id != target_pane_external_id
+                    && self.root.contains_external_id(target_pane_external_id)
+                    && self.root.move_pane_as_split(
+                        pane_external_id,
+                        target_pane_external_id,
+                        axis,
+                        placement,
+                    )
+                {
+                    self.focused_pane_external_id = pane_external_id;
+                    self.reveal_focused();
+                }
+            }
+            PaneLayoutOp::AdoptPaneAsTab {
+                target_pane_external_id,
+            } => {
+                if pane_external_id != target_pane_external_id
+                    && self.root.contains_external_id(target_pane_external_id)
+                    && self
+                        .root
+                        .adopt_pane_as_tab(pane_external_id, target_pane_external_id)
+                {
+                    self.focused_pane_external_id = pane_external_id;
+                    self.reveal_focused();
+                }
+            }
         }
         true
     }
@@ -278,6 +326,172 @@ impl PaneLayoutSnapshot {
 }
 
 impl PaneLayoutSnapshotNode {
+    fn move_pane_as_split(
+        &mut self,
+        moving_id: u64,
+        target_id: u64,
+        axis: PaneSplitAxis,
+        placement: PaneSplitPlacement,
+    ) -> bool {
+        if self.count_layout_leaves() <= 1 {
+            return false;
+        }
+        let Some(moving) = self.leaf_clone(moving_id) else {
+            return false;
+        };
+        if !self.remove_leaf_by_external_id(moving_id) {
+            return false;
+        }
+        self.normalize_layout_root();
+        if self.insert_node_as_split_sibling(target_id, moving.clone(), axis, placement) {
+            self.normalize_layout_root();
+            true
+        } else {
+            // Target vanished only for a malformed/self move (guarded by the
+            // caller). Preserve the surface as a tab instead of losing it.
+            self.append_leaf_as_tab(moving);
+            false
+        }
+    }
+
+    fn adopt_pane_as_tab(&mut self, moving_id: u64, target_id: u64) -> bool {
+        if self.count_layout_leaves() <= 1 {
+            return false;
+        }
+        let Some(moving) = self.leaf_clone(moving_id) else {
+            return false;
+        };
+        if !self.remove_leaf_by_external_id(moving_id) {
+            return false;
+        }
+        self.normalize_layout_root();
+        if self.insert_node_as_tab_sibling(target_id, moving.clone()) {
+            self.normalize_layout_root();
+            true
+        } else {
+            self.append_leaf_as_tab(moving);
+            false
+        }
+    }
+
+    fn leaf_clone(&self, pane_external_id: u64) -> Option<Self> {
+        match self {
+            Self::Leaf {
+                pane_external_id: id,
+                ..
+            } if *id == pane_external_id => Some(self.clone()),
+            Self::Leaf { .. } => None,
+            Self::Split { children, .. } | Self::Tabs { children, .. } => children
+                .iter()
+                .find_map(|child| child.leaf_clone(pane_external_id)),
+        }
+    }
+
+    fn insert_node_as_split_sibling(
+        &mut self,
+        target_id: u64,
+        moving: Self,
+        axis: PaneSplitAxis,
+        placement: PaneSplitPlacement,
+    ) -> bool {
+        match self {
+            Self::Leaf {
+                pane_external_id, ..
+            } if *pane_external_id == target_id => {
+                let target = self.clone();
+                let children = match placement {
+                    PaneSplitPlacement::Before => vec![moving, target],
+                    PaneSplitPlacement::After => vec![target, moving],
+                };
+                *self = Self::Split {
+                    axis,
+                    ratios: vec![0.5],
+                    children,
+                };
+                true
+            }
+            Self::Leaf { .. } => false,
+            Self::Tabs { children, .. }
+                if children
+                    .iter()
+                    .any(|child| child.contains_external_id(target_id)) =>
+            {
+                let target_group = self.clone();
+                let children = match placement {
+                    PaneSplitPlacement::Before => vec![moving, target_group],
+                    PaneSplitPlacement::After => vec![target_group, moving],
+                };
+                *self = Self::Split {
+                    axis,
+                    ratios: vec![0.5],
+                    children,
+                };
+                true
+            }
+            Self::Split {
+                axis: split_axis,
+                ratios,
+                children,
+            } => {
+                let Some(index) = children
+                    .iter()
+                    .position(|child| child.contains_external_id(target_id))
+                else {
+                    return false;
+                };
+                let direct_target = matches!(&children[index], Self::Leaf { .. })
+                    || matches!(&children[index], Self::Tabs { .. });
+                if *split_axis == axis && direct_target {
+                    let insert_at = match placement {
+                        PaneSplitPlacement::Before => index,
+                        PaneSplitPlacement::After => index + 1,
+                    };
+                    children.insert(insert_at, moving);
+                    rebalance_snapshot_ratios(ratios, children.len());
+                    true
+                } else {
+                    children[index]
+                        .insert_node_as_split_sibling(target_id, moving, axis, placement)
+                }
+            }
+            Self::Tabs { children, .. } => children
+                .iter_mut()
+                .find(|child| child.contains_external_id(target_id))
+                .is_some_and(|child| {
+                    child.insert_node_as_split_sibling(target_id, moving, axis, placement)
+                }),
+        }
+    }
+
+    fn insert_node_as_tab_sibling(&mut self, target_id: u64, moving: Self) -> bool {
+        match self {
+            Self::Leaf {
+                pane_external_id, ..
+            } if *pane_external_id == target_id => {
+                let target = self.clone();
+                *self = Self::Tabs {
+                    active: 1,
+                    children: vec![target, moving],
+                };
+                true
+            }
+            Self::Leaf { .. } => false,
+            Self::Tabs { active, children }
+                if children
+                    .iter()
+                    .any(|child| child.contains_external_id(target_id)) =>
+            {
+                children.push(moving);
+                *active = children.len() - 1;
+                true
+            }
+            Self::Split { children, .. } | Self::Tabs { children, .. } => children
+                .iter_mut()
+                .find(|child| child.contains_external_id(target_id))
+                .is_some_and(|child| child.insert_node_as_tab_sibling(target_id, moving)),
+        }
+    }
+
     pub fn contains_external_id(&self, pane_external_id: u64) -> bool {
         match self {
             Self::Leaf {

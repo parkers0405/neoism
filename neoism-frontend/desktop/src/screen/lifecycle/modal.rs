@@ -10,6 +10,10 @@ impl Screen<'_> {
         let window_width = self.sugarloaf.window_size().width;
         let scale_factor = self.sugarloaf.scale_factor();
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
+        if self.renderer.modal.click_markdown_input(mouse_x, mouse_y) {
+            self.mark_dirty();
+            return true;
+        }
 
         // Mode slider (today only the server modal's Join ↔ Create):
         // switching reopens the other form, keeping the modal up.
@@ -313,6 +317,62 @@ impl Screen<'_> {
                     ),
                     None => {}
                 }
+            }
+            ModalAction::EpubOpenAnnotationCollections { id } => {
+                self.renderer.modal.close();
+                self.open_epub_annotation_collections(&id);
+            }
+            ModalAction::EpubToggleAnnotationCollection {
+                annotation_id,
+                collection_id,
+            } => {
+                let result =
+                    self.context_manager
+                        .current_mut()
+                        .epub
+                        .as_mut()
+                        .map(|epub| {
+                            epub.toggle_annotation_collection(
+                                &annotation_id,
+                                &collection_id,
+                            )
+                        });
+                if let Some(Err(error)) = result {
+                    self.file_tree_notify(
+                        format!("Could not update collection: {error}"),
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    );
+                }
+                self.open_epub_annotation_collections(&annotation_id);
+            }
+            ModalAction::EpubPromptNewAnnotationCollection { annotation_id } => {
+                self.renderer.modal.close();
+                self.open_epub_new_collection_prompt(&annotation_id);
+            }
+            ModalAction::EpubCreateAnnotationCollection {
+                annotation_id,
+                value,
+            } => {
+                let result =
+                    self.context_manager
+                        .current_mut()
+                        .epub
+                        .as_mut()
+                        .map(|epub| {
+                            let collection_id =
+                                epub.create_annotation_collection(value)?;
+                            epub.add_annotation_to_collection(
+                                &annotation_id,
+                                &collection_id,
+                            )
+                        });
+                if let Some(Err(error)) = result {
+                    self.file_tree_notify(
+                        format!("Could not create collection: {error}"),
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    );
+                }
+                self.open_epub_annotation_collections(&annotation_id);
             }
             ModalAction::OpenLspLocation {
                 uri,

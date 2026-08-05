@@ -109,6 +109,10 @@ impl AgentTimelinePane for NeoismAgentPane {
         NeoismAgentPane::queued_prompt_count(self)
     }
 
+    fn running_background_task_count(&self) -> usize {
+        NeoismAgentPane::running_background_task_count(self)
+    }
+
     fn set_timeline_metrics(
         &mut self,
         viewport_rect: [f32; 4],

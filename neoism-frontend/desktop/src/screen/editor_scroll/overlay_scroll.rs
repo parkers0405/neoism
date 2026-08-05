@@ -119,6 +119,16 @@ impl Screen<'_> {
         let scale_factor = self.sugarloaf.scale_factor();
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
 
+        let modal_pixels = Self::vertical_overlay_scroll_pixels(delta, 19.0);
+        if self
+            .renderer
+            .modal
+            .scroll_markdown_input(mouse_x, mouse_y, modal_pixels)
+        {
+            self.mark_dirty();
+            return true;
+        }
+
         if self
             .renderer
             .lsp_popup
@@ -272,11 +282,6 @@ impl Screen<'_> {
                     self.mark_dirty();
                 }
             }
-        }
-
-        if self.renderer.status_line.split_toggle_at(mouse_x, mouse_y) {
-            self.toggle_split_stack_visibility();
-            return true;
         }
 
         if self.renderer.status_line.git_branch_at(mouse_x, mouse_y) {

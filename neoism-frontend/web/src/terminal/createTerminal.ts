@@ -74,6 +74,7 @@ export interface TerminalAdapter {
     /** Drain pending tab-strip click intents queued by the chrome.
      *  Returns `{ activate: number | null, close: number[] }`. */
     drainBufferTabIntents?(): BufferTabIntents | null;
+    bufferTabHitTest?(x: number, y: number): number;
     /** Drain Rust-owned chrome requests to open/focus the Neoism Agent tab. */
     drainAgentTabOpens?(): number;
     /** Drain pending finder "open this hit" intents queued when the
@@ -790,6 +791,7 @@ interface ChromeBridgeInstance {
     /** True when the file tree currently owns chrome focus. */
     file_tree_focused?(): boolean;
     drain_buffer_tab_intents(): unknown;
+    buffer_tab_hit_test?(x: number, y: number): number;
     drain_top_bar_action?(): string | undefined;
     drain_agent_tab_opens(): number;
     drain_finder_open_intents(): unknown;
@@ -996,7 +998,9 @@ interface ChromeBridgeInstance {
 }
 
 interface RealWasmModule {
-    default(): Promise<unknown>;
+    default(
+        moduleOrPath?: RequestInfo | URL | Response | BufferSource | WebAssembly.Module,
+    ): Promise<unknown>;
     Terminal: new (cols: number, rows: number) => RealTerminalInstance;
     workspace_chrome_actions?: () => unknown;
     workspace_chrome_actions_for_visibility?: (visibility: string) => unknown;
@@ -1447,6 +1451,9 @@ class ChromeAdapter implements TerminalAdapter {
     }
     setBufferTabs(titlesJson: string, active: number) {
         this.inner.set_buffer_tabs(titlesJson, active);
+    }
+    bufferTabHitTest(x: number, y: number): number {
+        return this.inner.buffer_tab_hit_test?.(x, y) ?? -1;
     }
     applyBufferTabPolicy(
         tabsJson: string,
@@ -1986,8 +1993,18 @@ async function loadRealWasm(): Promise<RealWasmModule | null> {
             "../wasm/neoism_terminal_wasm.js",
             import.meta.url,
         ).href;
+        // wasm-bindgen's generated default loader resolves its `.wasm`
+        // relative to the generated JS module. After Vite code-splits that
+        // module into `dist/assets`, the raw relative lookup points at a file
+        // Vite never emitted and the preview server returns index.html. A
+        // literal source URL lets Vite copy/hash the binary and gives the
+        // loader the exact production URL explicitly.
+        const wasmBinaryUrl = new URL(
+            "../wasm/neoism_terminal_wasm_bg.wasm",
+            import.meta.url,
+        );
         const mod = (await import(/* @vite-ignore */ wasmUrl)) as RealWasmModule;
-        await mod.default();
+        await mod.default(wasmBinaryUrl);
         wasmWorkspaceChromeActions = normalizeWorkspaceChromeActions(
             mod.workspace_chrome_actions?.(),
         );

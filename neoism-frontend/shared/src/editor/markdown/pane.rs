@@ -44,6 +44,7 @@ impl MarkdownPane {
         Self {
             path,
             title,
+            embedded: false,
             source_len_bytes: source.len(),
             lines,
             blocks,
@@ -201,6 +202,7 @@ impl MarkdownPane {
         let mut pane = Self {
             path,
             title,
+            embedded: false,
             lines: vec![String::new()],
             blocks: Vec::new(),
             source_len_bytes: 0,

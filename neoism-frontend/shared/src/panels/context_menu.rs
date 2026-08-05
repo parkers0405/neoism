@@ -99,6 +99,9 @@ pub enum EpubContextAction {
     OpenBookNote {
         annotation_id: String,
     },
+    ManageCollections {
+        annotation_id: String,
+    },
     CopyQuote {
         annotation_id: Option<String>,
     },
@@ -958,7 +961,19 @@ impl ContextMenu {
             MENU_MARGIN * 2.0 + MENU_PADDING * 2.0 * s + self.header_height();
         let available = (window_height - vertical_shell).max(row_h);
         let rows_that_fit = (available / row_h).floor().max(1.0) as usize;
-        let max_visible = rows_that_fit.min(MAX_VISIBLE_ITEMS).max(1);
+        // Consecutive color choices are selectable items but render as one
+        // compact swatch row. Give that collapsed row its saved item slots so
+        // ordinary actions are not needlessly pushed below a scrollbar.
+        let swatch_savings = self
+            .source_items
+            .iter()
+            .filter(|item| item.swatch.is_some())
+            .count()
+            .saturating_sub(1);
+        let max_visible = rows_that_fit
+            .saturating_add(swatch_savings)
+            .min(MAX_VISIBLE_ITEMS.saturating_add(swatch_savings))
+            .max(1);
         self.popover.content_mut().set_max_visible(max_visible);
     }
 

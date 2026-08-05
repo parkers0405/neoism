@@ -3,8 +3,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 use web_time::Instant;
 
 use crate::primitives::draw_overlay_icon_centered;

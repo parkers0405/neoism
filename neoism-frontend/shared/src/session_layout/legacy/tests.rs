@@ -137,94 +137,30 @@ fn adjacent_visual_pane_id_requires_current_and_multiple_panes() {
 }
 
 #[test]
-fn hidden_split_drag_reveal_requires_collapsed_multi_pane_layout() {
+fn nearest_vertical_pane_follows_nested_column() {
+    let current = SessionPaneRect::new("top-right", [500.0, 0.0, 500.0, 300.0]);
+    let candidates = [
+        SessionPaneRect::new("left", [0.0, 0.0, 490.0, 700.0]),
+        SessionPaneRect::new("bottom-right", [500.0, 310.0, 500.0, 390.0]),
+    ];
+
     assert_eq!(
-        hidden_split_drag_reveal_route(
-            false,
-            2,
-            Some(42),
-            800.0,
-            12.0,
-            0.0,
-            24.0,
-            1000.0,
-            true,
-        ),
-        None
-    );
-    assert_eq!(
-        hidden_split_drag_reveal_route(
-            true,
-            1,
-            Some(42),
-            800.0,
-            12.0,
-            0.0,
-            24.0,
-            1000.0,
-            true,
-        ),
-        None
+        nearest_vertical_pane(current, candidates, true),
+        Some("bottom-right")
     );
 }
 
 #[test]
-fn hidden_split_drag_reveals_first_secondary_route_from_top_edge_zone() {
-    assert_eq!(
-        hidden_split_drag_reveal_route(
-            true,
-            3,
-            Some(42),
-            721.0,
-            12.0,
-            0.0,
-            24.0,
-            1000.0,
-            false,
-        ),
-        Some(42)
-    );
-    assert_eq!(
-        hidden_split_drag_reveal_route(
-            true,
-            3,
-            Some(42),
-            720.0,
-            12.0,
-            0.0,
-            24.0,
-            1000.0,
-            false,
-        ),
-        None
-    );
-}
+fn nearest_vertical_pane_moves_back_up() {
+    let current = SessionPaneRect::new("bottom-right", [500.0, 310.0, 500.0, 390.0]);
+    let candidates = [
+        SessionPaneRect::new("left", [0.0, 0.0, 490.0, 700.0]),
+        SessionPaneRect::new("top-right", [500.0, 0.0, 500.0, 300.0]),
+    ];
 
-#[test]
-fn hidden_split_drag_reveals_from_host_affordance() {
     assert_eq!(
-        hidden_split_drag_reveal_route(
-            true,
-            2,
-            Some(7),
-            10.0,
-            80.0,
-            0.0,
-            24.0,
-            1000.0,
-            true,
-        ),
-        Some(7)
-    );
-}
-
-#[test]
-fn hidden_split_drag_reveal_has_no_target_without_secondary_route() {
-    assert_eq!(
-        hidden_split_drag_reveal_route(
-            true, 2, None, 900.0, 12.0, 0.0, 24.0, 1000.0, true,
-        ),
-        None
+        nearest_vertical_pane(current, candidates, false),
+        Some("top-right")
     );
 }
 
@@ -618,8 +554,8 @@ fn find_closing_workspace_descriptor_returns_first_owner_in_order() {
 // every frontend ultimately renders.
 
 use neoism_protocol::workspace::{
-    PANE_LAYOUT_SNAPSHOT_SCHEMA_VERSION, PaneLayoutSnapshot, PaneLayoutSnapshotNode,
-    PaneSplitAxis,
+    PaneLayoutSnapshot, PaneLayoutSnapshotNode, PaneSplitAxis,
+    PANE_LAYOUT_SNAPSHOT_SCHEMA_VERSION,
 };
 use std::path::PathBuf;
 

@@ -16,6 +16,7 @@ import type {
   WorkspaceSummary,
   HostSummary,
   PaneFocusDir,
+  PaneLayoutSnapshot,
   PaneSplitAxis,
   PaneSplitPlacement,
   SessionSummary,
@@ -32,6 +33,7 @@ export type {
   WorkspaceSummary,
   HostSummary,
   PaneFocusDir,
+  PaneLayoutSnapshot,
   PaneSplitAxis,
   PaneSplitPlacement,
   SessionSummary,
@@ -519,6 +521,43 @@ export class WorkspaceService {
         op: { MoveTab: { from, to } },
       },
     });
+  }
+
+  /// Move a pane/surface to an explicit edge of another pane.
+  remoteMovePane(
+    paneExternalId: number,
+    targetPaneExternalId: number,
+    axis: PaneSplitAxis,
+    placement: PaneSplitPlacement,
+  ): void {
+    this.send({
+      PaneLayoutOp: {
+        pane_external_id: paneExternalId,
+        op: {
+          MovePane: {
+            target_pane_external_id: targetPaneExternalId,
+            axis,
+            placement,
+          },
+        },
+      },
+    });
+  }
+
+  /// Center-drop a pane/surface into another pane's tab group.
+  remoteAdoptPaneAsTab(paneExternalId: number, targetPaneExternalId: number): void {
+    this.send({
+      PaneLayoutOp: {
+        pane_external_id: paneExternalId,
+        op: { AdoptPaneAsTab: { target_pane_external_id: targetPaneExternalId } },
+      },
+    });
+  }
+
+  /// Publish a host-materialized recursive split/tab tree verbatim. This is
+  /// the exact-tree counterpart to the smaller remote mutation helpers.
+  publishPaneLayout(layout: PaneLayoutSnapshot): void {
+    this.send({ PublishPaneLayout: { layout } });
   }
 
   // ------------------------------------------------------------------

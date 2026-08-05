@@ -54,8 +54,8 @@ impl std::ops::Sub<Duration> for Instant {
 }
 
 use serde::{Deserialize, Serialize};
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
 use crate::event::UiEvent;
 use crate::layout::PanelLayout;
@@ -104,8 +104,8 @@ const GLYPH_HOME: &str = "\u{f015}"; //  (home — unused after cwd pill switche
 #[allow(dead_code)]
 const GLYPH_GITHUB: &str = "\u{f09b}"; //  (FA github — repo pill on right cluster)
 const GLYPH_LINES: &str = "\u{f0c9}"; //  (line index)
-// Severity + LSP glyphs are shared with the diagnostics/LSP popups —
-// single source in `primitives::icons` so the panels never drift.
+                                      // Severity + LSP glyphs are shared with the diagnostics/LSP popups —
+                                      // single source in `primitives::icons` so the panels never drift.
 const GLYPH_LSP: &str = crate::primitives::icons::GLYPH_LSP;
 const GLYPH_SPLIT: &str = "\u{eb56}"; // codicon split-horizontal
 const GLYPH_ERROR: &str = crate::primitives::icons::GLYPH_ERROR;

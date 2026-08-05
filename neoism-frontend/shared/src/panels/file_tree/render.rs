@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
 use crate::primitives::IdeTheme;
 pub(super) use crate::primitives::{

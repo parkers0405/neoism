@@ -849,3 +849,16 @@ fn classify_strip_click_absorbs_new_tab_hit() {
     );
     assert_eq!(outcome, StripClickOutcome::WorkspaceAbsorb);
 }
+
+#[test]
+fn ordinary_terminal_tab_can_drag_to_a_pane_destination() {
+    let mut tabs = BufferTabs::<()>::new();
+    tabs.set_tabs(vec![terminal("Terminal 7", Some(7))], 0);
+    tabs.set_visible(true);
+    tabs.begin_drag(0, 40.0, 10.0, 0.0, 400.0);
+    assert!(tabs.update_drag(80.0, 100.0, 0.0, 0.0, 400.0));
+    match tabs.end_drag(true) {
+        DragRelease::MoveOut { tab } => assert_eq!(tab.terminal_route_id, Some(7)),
+        _ => panic!("a routed terminal tab must be movable"),
+    }
+}

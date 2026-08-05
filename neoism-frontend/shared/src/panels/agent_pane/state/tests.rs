@@ -667,6 +667,17 @@ fn initial_session_skeleton_animates_until_sessions_load() {
 }
 
 #[test]
+fn subagent_session_suppresses_stale_main_composer_cursor() {
+    let mut pane = NeoismAgentPane::default();
+    let rect = [10.0, 20.0, 2.0, 18.0];
+    pane.set_cursor_rect(Some(rect));
+    assert_eq!(pane.cursor_rect(), Some(rect));
+
+    pane.parent_session_id = Some("main".to_string());
+    assert_eq!(pane.cursor_rect(), None);
+}
+
+#[test]
 fn subagent_rehydrate_completes_task_from_explicit_child_status() {
     let mut pane = NeoismAgentPane::default();
     pane.messages = vec![task_tool_message("child-1", "running")];

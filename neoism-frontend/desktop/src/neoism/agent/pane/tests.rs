@@ -84,6 +84,17 @@ fn connected_idle_event_stream_does_not_drive_animation() {
 }
 
 #[test]
+fn subagent_session_suppresses_stale_main_composer_cursor() {
+    let mut pane = NeoismAgentPane::default();
+    let rect = [10.0, 20.0, 2.0, 18.0];
+    pane.set_cursor_rect(Some(rect));
+    assert_eq!(pane.cursor_rect(), Some(rect));
+
+    pane.parent_session_id = Some("main".to_string());
+    assert_eq!(pane.cursor_rect(), None);
+}
+
+#[test]
 fn attached_session_counts_as_conversation_before_messages_load() {
     let mut pane = NeoismAgentPane::default();
 

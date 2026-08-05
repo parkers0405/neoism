@@ -729,6 +729,16 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 tabs,
             });
 
+            if let Some(layout) = pane_layout_snapshot_for_grid(
+                grid,
+                workspace_id.clone(),
+                self.window_id,
+                &self.daemon.cache.route_sessions,
+                root,
+            ) {
+                link.send(WorkspaceClientMessage::PublishPaneLayout { layout });
+            }
+
             if index == self.current_index {
                 link.send(WorkspaceClientMessage::SwitchHostWorkspace {
                     workspace_id: workspace_id.clone(),

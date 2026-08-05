@@ -1,6 +1,23 @@
 use super::*;
 
 impl Screen<'_> {
+    pub(crate) fn initial_process_workspace_root() -> Option<PathBuf> {
+        let cwd = std::env::current_dir().ok()?;
+        #[cfg(windows)]
+        {
+            let normalized_cwd =
+                std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+            let executable_dir = std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+            if executable_dir.as_deref() == Some(normalized_cwd.as_path()) {
+                return dirs::home_dir().or(Some(cwd));
+            }
+        }
+        Some(cwd)
+    }
+
     pub fn ensure_grid(&mut self, route_id: usize, cols: u32, rows: u32) {
         use std::collections::hash_map::Entry;
         // One extra edge row above and below the visible viewport so a
@@ -839,13 +856,18 @@ impl Screen<'_> {
     }
 
     pub(crate) fn active_pane_strip_route(&self) -> Option<usize> {
-        match self
-            .context_manager
-            .current_grid_focused_tab_strip(self.renderer.pane_tabs.keys().copied())
-        {
-            SessionTabStripRef::Pane(route) => Some(route as usize),
-            SessionTabStripRef::Workspace => None,
-        }
+        let grid = self.context_manager.current_grid();
+        let focused_panel_route = grid
+            .contexts()
+            .get(&grid.current_panel_node())
+            .map(|item| item.context().route_id)?;
+
+        // Match by visual-pane ownership, not by the focused stacked child's
+        // route. Also tolerate a strip map that has not yet been rekeyed after
+        // a SessionTree rebuild by asking the grid which panel owns each key.
+        self.renderer.pane_tabs.keys().copied().find(|route| {
+            grid.panel_route_id_for_route(*route) == Some(focused_panel_route)
+        })
     }
 
     pub(crate) fn select_active_buffer_tab(&mut self, previous: bool) -> bool {

@@ -125,6 +125,19 @@ pub struct EpubAnnotation {
     pub page_index: usize,
     pub created_unix_ms: u64,
     pub updated_unix_ms: u64,
+    #[serde(default)]
+    pub collection_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpubAnnotationCollection {
+    pub id: String,
+    pub name: String,
+    pub file_name: String,
+    #[serde(default)]
+    pub created_unix_ms: u64,
+    #[serde(default)]
+    pub updated_unix_ms: u64,
 }
 
 fn default_highlight_color() -> String {
@@ -151,6 +164,8 @@ pub struct EpubReadingState {
     pub scroll_y: f32,
     #[serde(default)]
     pub annotations: Vec<EpubAnnotation>,
+    #[serde(default)]
+    pub collections: Vec<EpubAnnotationCollection>,
 }
 
 fn reader_state_version() -> u32 {
@@ -169,6 +184,7 @@ impl Default for EpubReadingState {
             progress: 0.0,
             scroll_y: 0.0,
             annotations: Vec::new(),
+            collections: Vec::new(),
         }
     }
 }
@@ -929,6 +945,7 @@ impl EpubPane {
             page_index: self.page_index,
             created_unix_ms: now,
             updated_unix_ms: now,
+            collection_ids: Vec::new(),
         });
         self.markdown.enter_normal();
         self.refresh_reader_highlights();
@@ -967,6 +984,7 @@ impl EpubPane {
         } else {
             self.remove_annotation_from_book_note(id)?;
         }
+        self.sync_annotation_collections(id)?;
         Ok(true)
     }
 
@@ -1035,6 +1053,211 @@ impl EpubPane {
             replace_book_note_toc(&next, &book_note_toc_block(&self.state.annotations));
         atomic_write(&path, next.as_bytes())?;
         Ok(path)
+    }
+
+    pub fn annotation_collections(&self, id: &str) -> Vec<(String, String, bool)> {
+        let memberships = self
+            .state
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == id)
+            .map(|annotation| annotation.collection_ids.as_slice())
+            .unwrap_or_default();
+        self.state
+            .collections
+            .iter()
+            .map(|collection| {
+                (
+                    collection.id.clone(),
+                    collection.name.clone(),
+                    memberships.contains(&collection.id),
+                )
+            })
+            .collect()
+    }
+
+    pub fn create_annotation_collection(
+        &mut self,
+        name: String,
+    ) -> std::io::Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "collection name cannot be empty",
+            ));
+        }
+        if let Some(existing) = self
+            .state
+            .collections
+            .iter()
+            .find(|collection| collection.name.eq_ignore_ascii_case(name))
+        {
+            return Ok(existing.id.clone());
+        }
+
+        let now = unix_time_ms();
+        let id = format!("collection-{now}-{}", self.state.collections.len() + 1);
+        let file_name = self.allocate_collection_file_name(name, &id)?;
+        self.state.collections.push(EpubAnnotationCollection {
+            id: id.clone(),
+            name: name.to_string(),
+            file_name,
+            created_unix_ms: now,
+            updated_unix_ms: now,
+        });
+        self.save_state()?;
+        self.sync_collection_note(&id)?;
+        Ok(id)
+    }
+
+    pub fn toggle_annotation_collection(
+        &mut self,
+        annotation_id: &str,
+        collection_id: &str,
+    ) -> std::io::Result<bool> {
+        if !self
+            .state
+            .collections
+            .iter()
+            .any(|collection| collection.id == collection_id)
+        {
+            return Ok(false);
+        }
+        let Some(annotation) = self
+            .state
+            .annotations
+            .iter_mut()
+            .find(|annotation| annotation.id == annotation_id)
+        else {
+            return Ok(false);
+        };
+        if let Some(index) = annotation
+            .collection_ids
+            .iter()
+            .position(|id| id == collection_id)
+        {
+            annotation.collection_ids.remove(index);
+        } else {
+            annotation.collection_ids.push(collection_id.to_string());
+        }
+        annotation.updated_unix_ms = unix_time_ms();
+        self.save_state()?;
+        self.sync_collection_note(collection_id)?;
+        Ok(true)
+    }
+
+    pub fn add_annotation_to_collection(
+        &mut self,
+        annotation_id: &str,
+        collection_id: &str,
+    ) -> std::io::Result<bool> {
+        let Some(annotation) = self
+            .state
+            .annotations
+            .iter_mut()
+            .find(|annotation| annotation.id == annotation_id)
+        else {
+            return Ok(false);
+        };
+        if !annotation
+            .collection_ids
+            .iter()
+            .any(|id| id == collection_id)
+        {
+            annotation.collection_ids.push(collection_id.to_string());
+            annotation.updated_unix_ms = unix_time_ms();
+            self.save_state()?;
+        }
+        self.sync_collection_note(collection_id)?;
+        Ok(true)
+    }
+
+    pub fn sync_collection_note(
+        &mut self,
+        collection_id: &str,
+    ) -> std::io::Result<PathBuf> {
+        let book_note = self.ensure_book_note()?;
+        let Some(collection) = self
+            .state
+            .collections
+            .iter()
+            .find(|collection| collection.id == collection_id)
+            .cloned()
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "annotation collection not found",
+            ));
+        };
+        let path = book_note
+            .parent()
+            .unwrap_or(self.vault_root.as_path())
+            .join(&collection.file_name);
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let source = collection_note_source(
+            &existing,
+            &self.book,
+            &collection,
+            &self.state.annotations,
+        );
+        atomic_write(&path, source.as_bytes())?;
+        Ok(path)
+    }
+
+    fn sync_annotation_collections(
+        &mut self,
+        annotation_id: &str,
+    ) -> std::io::Result<()> {
+        let ids = self
+            .state
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == annotation_id)
+            .map(|annotation| annotation.collection_ids.clone())
+            .unwrap_or_default();
+        for id in ids {
+            self.sync_collection_note(&id)?;
+        }
+        Ok(())
+    }
+
+    fn allocate_collection_file_name(
+        &mut self,
+        name: &str,
+        collection_id: &str,
+    ) -> std::io::Result<String> {
+        let book_note = self.ensure_book_note()?;
+        let parent = book_note.parent().unwrap_or(self.vault_root.as_path());
+        let stem = safe_note_stem(name);
+        let book_name = book_note
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let used = self
+            .state
+            .collections
+            .iter()
+            .map(|collection| collection.file_name.to_ascii_lowercase())
+            .collect::<std::collections::HashSet<_>>();
+        let mut candidate = format!("{stem}.md");
+        if candidate.eq_ignore_ascii_case(book_name)
+            || used.contains(&candidate.to_ascii_lowercase())
+            || parent.join(&candidate).exists()
+        {
+            let suffix = collection_id.trim_start_matches("collection-");
+            let suffix = &suffix[..suffix.len().min(8)];
+            candidate = format!("{stem} {suffix}.md");
+        }
+        let mut index = 2;
+        while candidate.eq_ignore_ascii_case(book_name)
+            || used.contains(&candidate.to_ascii_lowercase())
+            || parent.join(&candidate).exists()
+        {
+            candidate = format!("{stem} {index}.md");
+            index += 1;
+        }
+        Ok(candidate)
     }
 
     pub fn remove_annotation_from_book_note(
@@ -1155,6 +1378,13 @@ impl EpubPane {
     }
 
     pub fn remove_annotation(&mut self, id: &str) -> std::io::Result<bool> {
+        let collection_ids = self
+            .state
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == id)
+            .map(|annotation| annotation.collection_ids.clone())
+            .unwrap_or_default();
         let before = self.state.annotations.len();
         self.state
             .annotations
@@ -1165,6 +1395,9 @@ impl EpubPane {
         let _ = self.remove_annotation_from_book_note(id);
         self.refresh_reader_highlights();
         self.save_state()?;
+        for collection_id in collection_ids {
+            self.sync_collection_note(&collection_id)?;
+        }
         Ok(true)
     }
 
@@ -2716,6 +2949,49 @@ fn annotation_markdown_block(book: &EpubBook, annotation: &EpubAnnotation) -> St
     )
 }
 
+const COLLECTION_CONTENT_START: &str = "<!-- neoism-epub-collection:start -->";
+const COLLECTION_CONTENT_END: &str = "<!-- neoism-epub-collection:end -->";
+
+fn collection_note_source(
+    existing: &str,
+    book: &EpubBook,
+    collection: &EpubAnnotationCollection,
+    annotations: &[EpubAnnotation],
+) -> String {
+    let note_id = format!("epub-collection-{}", collection.id);
+    let header = format!(
+        "---\nneoism_note_id: {}\nepub_book_id: {}\ntype: book-annotation-collection\nepub_collection_id: {}\ncollection_name: {}\n---\n\n# {}\n\n",
+        yaml_string(&note_id),
+        yaml_string(&book.id),
+        yaml_string(&collection.id),
+        yaml_string(&collection.name),
+        collection.name,
+    );
+    let mut managed = format!("{COLLECTION_CONTENT_START}\n");
+    for annotation in annotations.iter().filter(|annotation| {
+        annotation.collection_ids.contains(&collection.id)
+            && !annotation.note.trim().is_empty()
+    }) {
+        managed.push_str(&annotation_markdown_block(book, annotation));
+        managed.push_str("\n\n");
+    }
+    managed.push_str(COLLECTION_CONTENT_END);
+
+    if let (Some(start), Some(end)) = (
+        existing.find(COLLECTION_CONTENT_START),
+        existing.find(COLLECTION_CONTENT_END),
+    ) {
+        let end = end + COLLECTION_CONTENT_END.len();
+        let mut source = existing.to_string();
+        source.replace_range(start..end, &managed);
+        source
+    } else if existing.trim().is_empty() {
+        format!("{header}{managed}\n")
+    } else {
+        format!("{}\n\n{managed}\n", existing.trim_end())
+    }
+}
+
 fn replace_annotation_block(source: &str, id: &str, replacement: Option<&str>) -> String {
     let start_marker = format!("<!-- neoism-epub-annotation:start {id} -->");
     let end_marker = format!("<!-- neoism-epub-annotation:end {id} -->");
@@ -3264,6 +3540,35 @@ mod tests {
         assert!(pane
             .set_annotation_note(&id, "Updated note".to_string())
             .unwrap());
+        let themes = pane
+            .create_annotation_collection("Themes".to_string())
+            .unwrap();
+        let research = pane
+            .create_annotation_collection("Research".to_string())
+            .unwrap();
+        assert!(pane.add_annotation_to_collection(&id, &themes).unwrap());
+        assert!(pane.add_annotation_to_collection(&id, &research).unwrap());
+        let book_dir = pane
+            .book_note_path()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(fs::read_to_string(book_dir.join("Themes.md"))
+            .unwrap()
+            .contains("Updated note"));
+        assert!(fs::read_to_string(book_dir.join("Research.md"))
+            .unwrap()
+            .contains("Updated note"));
+        assert!(pane
+            .set_annotation_note(&id, "Updated in every collection".to_string())
+            .unwrap());
+        assert!(fs::read_to_string(book_dir.join("Themes.md"))
+            .unwrap()
+            .contains("Updated in every collection"));
+        assert!(fs::read_to_string(book_dir.join("Research.md"))
+            .unwrap()
+            .contains("Updated in every collection"));
         let note_path = pane.book_note_path().expect("book note created in vault");
         assert_eq!(
             note_path.strip_prefix(&state_root).unwrap(),
@@ -3282,6 +3587,7 @@ mod tests {
         assert!(pane
             .set_annotation_note(&id, "Found after note move".to_string())
             .unwrap());
+        let moved_book_dir = moved_note.parent().unwrap().to_path_buf();
         assert!(fs::read_to_string(&moved_note)
             .unwrap()
             .contains("Found after note move"));
@@ -3296,6 +3602,12 @@ mod tests {
         assert_eq!(restored.state.annotations[0].id, id);
         assert_eq!(restored.markdown.reader_highlights.len(), 1);
         assert!(restored.remove_annotation(&id).unwrap());
+        assert!(!fs::read_to_string(moved_book_dir.join("Themes.md"))
+            .unwrap()
+            .contains(&id));
+        assert!(!fs::read_to_string(moved_book_dir.join("Research.md"))
+            .unwrap()
+            .contains(&id));
         drop(restored);
 
         let without_annotation = EpubPane::load(path, &state_root);

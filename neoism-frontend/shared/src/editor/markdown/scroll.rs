@@ -100,6 +100,12 @@ impl MarkdownPane {
             (self.target_scroll_y + delta_pixels).clamp(0.0, max_scroll);
     }
 
+    pub fn snap_scroll_to_target(&mut self) {
+        self.scroll_y = self.target_scroll_y;
+        self.scroll_velocity_px_s = 0.0;
+        self.scroll_last_tick_at = None;
+    }
+
     pub fn scroll_to_top(&mut self) {
         self.scroll_velocity_px_s = 0.0;
         self.scroll_velocity_moves_cursor = false;
@@ -197,6 +203,31 @@ impl MarkdownPane {
         viewport_top: f32,
         viewport_height: f32,
     ) -> bool {
+        self.scroll_cursor_into_view_with_margin(viewport_top, viewport_height, None)
+    }
+
+    /// EPUB selection should not inherit the large keyboard-navigation
+    /// scrolloff. Only move the page when the dragged selection reaches the
+    /// viewport edge.
+    pub fn scroll_reader_selection_into_view(
+        &mut self,
+        viewport_top: f32,
+        viewport_height: f32,
+    ) -> bool {
+        let edge_margin = self.mouse_select_anchor.map(|_| 12.0);
+        self.scroll_cursor_into_view_with_margin(
+            viewport_top,
+            viewport_height,
+            edge_margin,
+        )
+    }
+
+    fn scroll_cursor_into_view_with_margin(
+        &mut self,
+        viewport_top: f32,
+        viewport_height: f32,
+        margin: Option<f32>,
+    ) -> bool {
         let Some([_, y, _, h]) = self.cursor_rect else {
             return false;
         };
@@ -222,9 +253,11 @@ impl MarkdownPane {
         // is capped so it never collapses on short viewports. The max-scroll
         // clamp below still lets the caret reach the very bottom on the
         // document's last page (when there's nothing left to scroll).
-        let scrolloff = (viewport_height * 0.38)
-            .min((viewport_height - 64.0) * 0.5)
-            .max(0.0);
+        let scrolloff = margin.unwrap_or_else(|| {
+            (viewport_height * 0.38)
+                .min((viewport_height - 64.0) * 0.5)
+                .max(0.0)
+        });
         let top_limit = viewport_top + scrolloff;
         let bottom_limit = viewport_top + viewport_height - scrolloff;
         if y < top_limit {

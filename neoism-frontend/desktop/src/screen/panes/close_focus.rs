@@ -56,11 +56,16 @@ impl Screen<'_> {
             }
         }
         if self.context_manager.current_grid_len() > 1 {
-            if self.context_manager.daemon_client_attached() {
+            // A daemon connection belonging to some *other* workspace must
+            // not swallow this local close. Only a grid explicitly adopted
+            // from the attached daemon is server-owned.
+            if self
+                .context_manager
+                .current_workspace_uses_attached_daemon()
+            {
                 let _ = self.request_close_pane();
                 return;
             }
-            let _ = self.request_close_pane();
             self.clear_selection();
             let route_id = self.context_manager.current_route();
             self.renderer.pane_tabs.remove(&route_id);
@@ -220,17 +225,6 @@ impl Screen<'_> {
         }
     }
 
-    pub(crate) fn toggle_split_stack_visibility(&mut self) -> bool {
-        let changed = self
-            .context_manager
-            .toggle_current_grid_splits_hidden(&mut self.sugarloaf);
-        if changed {
-            self.reapply_chrome_layout();
-            self.mark_dirty();
-        }
-        changed
-    }
-
     pub(crate) fn toggle_split_stack_focus(&mut self) -> bool {
         if self.context_manager.current_grid_len() <= 1 {
             return false;
@@ -238,7 +232,7 @@ impl Screen<'_> {
         let split_focused = !self.renderer.file_tree.is_focused()
             && self.context_manager.current_grid_split_focused();
         if split_focused {
-            self.toggle_split_stack_visibility()
+            self.focus_main_workspace()
         } else {
             self.focus_split_stack()
         }
@@ -509,6 +503,15 @@ impl Screen<'_> {
                     self.mark_dirty();
                     return true;
                 }
+                // From pane content, Alt+Down means the spatially adjacent
+                // split below. The previous unconditional tab-focus branch
+                // consumed this key before split navigation could see it.
+                if !self.renderer.file_tree.is_focused()
+                    && self.focused_buffer_tabs_strip().is_none()
+                    && self.focus_vertical_split(true)
+                {
+                    return true;
+                }
                 let focused_strip = self.focused_buffer_tabs_strip();
                 if focused_strip.is_some() && self.clear_buffer_tab_focus() {
                     match focused_strip {
@@ -681,6 +684,20 @@ impl Screen<'_> {
         false
     }
 
+    pub(crate) fn focus_vertical_split(&mut self, down: bool) -> bool {
+        let changed = self
+            .context_manager
+            .focus_current_grid_vertical_panel(down, &mut self.sugarloaf);
+        if changed {
+            let _ = self.clear_buffer_tab_focus();
+            self.renderer.file_tree.set_focused(false);
+            self.renderer.notes_sidebar.set_focused(false);
+            self.reapply_chrome_layout();
+            self.mark_dirty();
+        }
+        changed
+    }
+
     pub(crate) fn focus_horizontal_chrome(&mut self, right: bool) -> bool {
         let _ = self.clear_buffer_tab_focus();
         // Right-side panel claims its own slot in the chrome focus
@@ -793,7 +810,11 @@ impl Screen<'_> {
             return false;
         }
 
-        if self.context_manager.current_grid_split_focused() {
+        // Any pane in a multi-pane grid owns a nearest ancestor divider,
+        // including the primary/workspace pane. Restricting this to
+        // `current_grid_split_focused()` made Ctrl+Alt+Arrow work only from
+        // secondary panes and silently fail from the primary tab row.
+        if self.context_manager.current_grid_len() > 1 {
             if self
                 .context_manager
                 .focus_current_grid_horizontal_panel(right, &mut self.sugarloaf)
@@ -804,7 +825,18 @@ impl Screen<'_> {
                 return true;
             }
             if !right {
-                return self.focus_main_workspace();
+                // We are already at the leftmost pane. Continue out through
+                // the left chrome chain instead of re-focusing the workspace
+                // root (which made Alt+Left appear dead whenever splits
+                // existed).
+                if self.renderer.notes_sidebar.is_visible() {
+                    self.renderer.notes_sidebar.set_focused(true);
+                    self.renderer.file_tree.set_focused(false);
+                    self.mark_dirty();
+                } else {
+                    self.open_file_tree_command();
+                }
+                return true;
             }
             return false;
         }
@@ -1042,9 +1074,6 @@ impl Screen<'_> {
     }
 
     pub(crate) fn focus_pane_tab_after_move(&mut self, route_id: usize) {
-        if self.context_manager.current_grid_splits_hidden() {
-            self.toggle_split_stack_visibility();
-        }
         if let Some(ix) = self
             .renderer
             .pane_tabs
@@ -1055,21 +1084,34 @@ impl Screen<'_> {
         }
     }
 
-    pub(crate) fn resize_focused_chrome_or_split(&mut self, grow: bool) -> bool {
+    pub(crate) fn resize_focused_chrome_or_split(
+        &mut self,
+        direction: neoism_ui::selection_input::ChromeResizeDirection,
+    ) -> bool {
+        use neoism_ui::selection_input::ChromeResizeDirection as Direction;
         if self.renderer.file_tree.is_focused() {
+            let delta_sign = match direction {
+                Direction::Left => -1.0,
+                Direction::Right => 1.0,
+                Direction::Up | Direction::Down => return false,
+            };
             let step = crate::editor::file_tree::FILE_TREE_RESIZE_STEP;
-            self.renderer
-                .file_tree
-                .resize(if grow { step } else { -step });
+            self.renderer.file_tree.resize(delta_sign * step);
             self.reapply_chrome_layout();
             self.mark_dirty();
             return true;
         }
-        if self.context_manager.current_grid_split_focused() {
-            if grow {
-                self.move_divider_right();
-            } else {
-                self.move_divider_left();
+        // Every leaf in a multi-pane grid owns a nearest compatible ancestor
+        // divider, including the primary/workspace leaf.  Checking
+        // `current_grid_split_focused()` excluded that primary leaf, so
+        // Ctrl+Alt+Arrow appeared dead whenever focus was in the left/top
+        // member of a split.
+        if self.context_manager.current_grid_len() > 1 {
+            match direction {
+                Direction::Left => self.move_divider_left(),
+                Direction::Right => self.move_divider_right(),
+                Direction::Up => self.move_divider_up(),
+                Direction::Down => self.move_divider_down(),
             }
             return true;
         }

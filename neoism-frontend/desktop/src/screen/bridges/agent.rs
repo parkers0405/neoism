@@ -1727,6 +1727,17 @@ impl Screen<'_> {
         source: crate::host::StripRef,
         split_down: bool,
     ) {
+        self.tear_out_agent_tab_to_split_at(tab, agent, source, split_down, None);
+    }
+
+    pub(crate) fn tear_out_agent_tab_to_split_at(
+        &mut self,
+        tab: &neoism_ui::panels::buffer_tabs::BufferTab<crate::neoism::icon::AgentKind>,
+        agent: crate::neoism::icon::AgentKind,
+        source: crate::host::StripRef,
+        split_down: bool,
+        destination: Option<(usize, neoism_ui::session_layout::geometry::DropPlacement)>,
+    ) {
         if let crate::host::StripRef::Pane(route) = source {
             let empty = self
                 .renderer
@@ -1744,11 +1755,21 @@ impl Screen<'_> {
             return;
         };
         self.activate_remaining_tab_in_strip(source);
-        if !self.context_manager.split_existing_route(
-            route_id,
-            split_down,
-            &mut self.sugarloaf,
-        ) {
+        let split_ok = if let Some((target_route, placement)) = destination {
+            self.context_manager.split_existing_route_at(
+                route_id,
+                target_route,
+                placement,
+                &mut self.sugarloaf,
+            )
+        } else {
+            self.context_manager.split_existing_route(
+                route_id,
+                split_down,
+                &mut self.sugarloaf,
+            )
+        };
+        if !split_ok {
             self.reinsert_agent_tab(source, tab, agent);
             self.renderer.notifications.push(
                 neoism_ui::panels::agent_pane::bridge_policy::agent_tear_out_failure_message(&tab.title),
@@ -1775,15 +1796,38 @@ impl Screen<'_> {
         source: crate::host::StripRef,
         split_down: bool,
     ) -> bool {
+        self.tear_out_neoism_agent_tab_to_split_at(
+            route_id, tab, source, split_down, None,
+        )
+    }
+
+    pub(crate) fn tear_out_neoism_agent_tab_to_split_at(
+        &mut self,
+        route_id: usize,
+        tab: &neoism_ui::panels::buffer_tabs::BufferTab<crate::neoism::icon::AgentKind>,
+        source: crate::host::StripRef,
+        split_down: bool,
+        destination: Option<(usize, neoism_ui::session_layout::geometry::DropPlacement)>,
+    ) -> bool {
         self.activate_remaining_tab_in_strip(source);
-        if !self.context_manager.split_existing_route(
-            route_id,
-            split_down,
-            &mut self.sugarloaf,
-        ) {
+        let split_ok = if let Some((target_route, placement)) = destination {
+            self.context_manager.split_existing_route_at(
+                route_id,
+                target_route,
+                placement,
+                &mut self.sugarloaf,
+            )
+        } else {
+            self.context_manager.split_existing_route(
+                route_id,
+                split_down,
+                &mut self.sugarloaf,
+            )
+        };
+        if !split_ok {
             // Restore the source-strip tab and surface a hint instead of
             // dropping the session.
-            self.renderer.buffer_tabs.open_neoism_agent(route_id);
+            self.reinsert_neoism_agent_tab(source, route_id);
             self.renderer.notifications.push(
                 neoism_ui::panels::agent_pane::bridge_policy::neoism_agent_tear_out_failure_message(),
                 neoism_ui::panels::notifications::NotificationLevel::Warn,

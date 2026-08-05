@@ -6,7 +6,7 @@ use super::*;
 /// Host/workspace/session control messages. `Workspace` means the real
 /// top-level UI container created by Ctrl+Shift+W. Directory/project-root
 /// bindings use `ProjectRoot` names so the model stays unambiguous:
-/// Host -> Workspace -> Tabs/Sessions.
+/// Host -> Workspace -> recursive Splits -> per-pane Tabs/Sessions.
 //
 // `Eq` is intentionally omitted because [`PaneLayoutOp::ResizeRatio`]
 // carries a `f32`; `PartialEq` is enough for the roundtrip tests below.
@@ -186,6 +186,13 @@ pub enum WorkspaceClientMessage {
     PaneLayoutOp {
         pane_external_id: u64,
         op: PaneLayoutOp,
+    },
+    /// Replace one workspace's daemon-owned recursive pane tree with the
+    /// complete snapshot materialized by its native host. This is used for
+    /// drag operations that move an existing tab, where replaying `Split`
+    /// would incorrectly allocate another leaf.
+    PublishPaneLayout {
+        layout: PaneLayoutSnapshot,
     },
     /// Multi-machine pairing handshake. A client SHOULD send this as
     /// its first frame on a fresh websocket so the daemon can

@@ -509,6 +509,9 @@ pub(super) struct MarkdownRosterRect {
 pub struct MarkdownPane {
     pub path: PathBuf,
     pub title: String,
+    /// Embedded surfaces such as note modals render the document body without
+    /// the normal file title/header chrome.
+    pub embedded: bool,
     pub lines: Vec<String>,
     pub remote_cursors: Vec<MarkdownRemoteCursor>,
     pub blocks: Vec<MarkdownBlock>,

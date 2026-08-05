@@ -486,6 +486,9 @@ fn handle_inner(
             pane_external_id,
             op,
         )),
+        WorkspaceClientMessage::PublishPaneLayout { layout } => {
+            DispatchOutcome::just(handle_publish_pane_layout(manager, layout))
+        }
         WorkspaceClientMessage::Hello {
             token,
             client_name,

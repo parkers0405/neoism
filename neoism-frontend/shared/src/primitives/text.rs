@@ -1,7 +1,7 @@
 //! Text / wrap / occluded-draw helpers shared across chrome panels.
 
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
 use super::geom::rects_intersect;
 

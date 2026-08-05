@@ -188,16 +188,23 @@ impl Screen<'_> {
     pub(crate) fn is_chrome_resize_key(
         key: &neoism_window::event::KeyEvent,
         mods: ModifiersState,
-    ) -> Option<bool> {
+    ) -> Option<neoism_ui::selection_input::ChromeResizeDirection> {
+        use neoism_ui::selection_input::ChromeResizeDirection as Direction;
         if !mods.alt_key() || !mods.control_key() || mods.shift_key() || mods.super_key()
         {
             return None;
         }
         if Self::is_arrow_left_key(key) {
-            return Some(false);
+            return Some(Direction::Left);
         }
         if Self::is_arrow_right_key(key) {
-            return Some(true);
+            return Some(Direction::Right);
+        }
+        if Self::is_arrow_up_key(key) {
+            return Some(Direction::Up);
+        }
+        if Self::is_arrow_down_key(key) {
+            return Some(Direction::Down);
         }
         None
     }

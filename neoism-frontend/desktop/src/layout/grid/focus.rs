@@ -3,8 +3,8 @@ use crate::input::mouse::Mouse;
 use neoism_backend::event::EventListener;
 use neoism_backend::sugarloaf::Sugarloaf;
 use neoism_ui::session_layout::{
-    adjacent_visual_pane_id, nearest_horizontal_pane, visual_ordered_pane_ids,
-    SessionPaneRect,
+    adjacent_visual_pane_id, nearest_horizontal_pane, nearest_vertical_pane,
+    visual_ordered_pane_ids, SessionPaneRect,
 };
 use taffy::NodeId;
 
@@ -48,9 +48,6 @@ impl<T: EventListener> ContextGrid<T> {
                 None => return false,
             }
         };
-        if self.splits_hidden && !self.set_splits_hidden(false, sugarloaf) {
-            return false;
-        }
         let Some(target) = self.focus_node_for_panel(target_panel) else {
             return false;
         };
@@ -70,9 +67,6 @@ impl<T: EventListener> ContextGrid<T> {
         else {
             return false;
         };
-        if self.splits_hidden {
-            let _ = self.set_splits_hidden(false, sugarloaf);
-        }
         let Some(target) = self.focus_node_for_panel(target_panel) else {
             return false;
         };
@@ -86,34 +80,51 @@ impl<T: EventListener> ContextGrid<T> {
     ) -> Option<NodeId> {
         let current = SessionPaneRect::new(
             current_panel,
-            self.inner.get(&current_panel)?.layout_rect,
+            self.inner.get(&current_panel)?.slot_rect,
         );
         let candidates = self
             .inner
             .iter()
             .filter(|(node, _)| **node != current_panel && !self.is_stacked_node(**node))
-            .map(|(node, item)| SessionPaneRect::new(*node, item.layout_rect));
+            .map(|(node, item)| SessionPaneRect::new(*node, item.slot_rect));
 
         nearest_horizontal_pane(current, candidates, right)
     }
 
-    pub fn set_splits_hidden(&mut self, hidden: bool, sugarloaf: &mut Sugarloaf) -> bool {
+    pub fn focus_vertical_panel(
+        &mut self,
+        down: bool,
+        sugarloaf: &mut Sugarloaf,
+    ) -> bool {
         if self.panel_count() <= 1 {
-            self.splits_hidden = false;
             return false;
         }
-        self.splits_hidden = hidden;
-        if hidden {
-            if let Some(root_current) = self.active_stacked.or(self.root) {
-                self.current = root_current;
-            }
-        }
-        self.apply_taffy_layout(sugarloaf)
+        let current_panel = self.current_panel_node();
+        let Some(target_panel) = self.nearest_vertical_panel(current_panel, down) else {
+            return false;
+        };
+        let Some(target) = self.focus_node_for_panel(target_panel) else {
+            return false;
+        };
+        self.set_current_node(target, sugarloaf)
     }
 
-    pub fn toggle_splits_hidden(&mut self, sugarloaf: &mut Sugarloaf) -> bool {
-        let hidden = !self.splits_hidden;
-        self.set_splits_hidden(hidden, sugarloaf)
+    pub(crate) fn nearest_vertical_panel(
+        &self,
+        current_panel: NodeId,
+        down: bool,
+    ) -> Option<NodeId> {
+        let current = SessionPaneRect::new(
+            current_panel,
+            self.inner.get(&current_panel)?.slot_rect,
+        );
+        let candidates = self
+            .inner
+            .iter()
+            .filter(|(node, _)| **node != current_panel && !self.is_stacked_node(**node))
+            .map(|(node, item)| SessionPaneRect::new(*node, item.slot_rect));
+
+        nearest_vertical_pane(current, candidates, down)
     }
 
     /// Get contexts ordered by visual position (top-to-bottom, left-to-right)
@@ -122,7 +133,7 @@ impl<T: EventListener> ContextGrid<T> {
             self.inner
                 .iter()
                 .filter(|(id, _)| !self.is_stacked_node(**id))
-                .map(|(&id, item)| SessionPaneRect::new(id, item.layout_rect)),
+                .map(|(&id, item)| SessionPaneRect::new(id, item.slot_rect)),
         )
     }
 
@@ -135,7 +146,7 @@ impl<T: EventListener> ContextGrid<T> {
         if let Some(target) =
             adjacent_visual_pane_id(&self.get_ordered_keys(), self.current, false, true)
         {
-            self.current = target;
+            let _ = self.set_current_node_without_layout(target);
         }
     }
 
@@ -149,8 +160,7 @@ impl<T: EventListener> ContextGrid<T> {
         if let Some(target) =
             adjacent_visual_pane_id(&self.get_ordered_keys(), self.current, false, false)
         {
-            self.current = target;
-            return true;
+            return self.set_current_node_without_layout(target);
         }
         false
     }
@@ -164,7 +174,7 @@ impl<T: EventListener> ContextGrid<T> {
         if let Some(target) =
             adjacent_visual_pane_id(&self.get_ordered_keys(), self.current, true, true)
         {
-            self.current = target;
+            let _ = self.set_current_node_without_layout(target);
         }
     }
 
@@ -178,8 +188,7 @@ impl<T: EventListener> ContextGrid<T> {
         if let Some(target) =
             adjacent_visual_pane_id(&self.get_ordered_keys(), self.current, true, false)
         {
-            self.current = target;
-            return true;
+            return self.set_current_node_without_layout(target);
         }
         false
     }
@@ -198,15 +207,7 @@ impl<T: EventListener> ContextGrid<T> {
         // Use Taffy's find_context_at_position to find the panel
         if let Some(context_id) = self.find_context_at_position(x, y) {
             if context_id != self.current {
-                self.current = context_id;
-                if self.is_stacked_node(context_id) {
-                    if let Some(parent) = self.stacked_parents.get(&context_id).copied() {
-                        self.set_active_stacked_for_parent(parent, context_id);
-                    }
-                } else {
-                    self.clear_active_stacked_for_parent(context_id);
-                }
-                return true;
+                return self.set_current_node_without_layout(context_id);
             }
         }
 
@@ -214,22 +215,23 @@ impl<T: EventListener> ContextGrid<T> {
     }
 
     pub fn set_current_node(&mut self, node: NodeId, sugarloaf: &mut Sugarloaf) -> bool {
-        if !self.inner.contains_key(&node) {
+        if !self.set_current_node_without_layout(node) {
             return false;
-        }
-        self.current = node;
-        if self.is_stacked_node(node) {
-            if let Some(parent) = self.stacked_parents.get(&node).copied() {
-                self.set_active_stacked_for_parent(parent, node);
-            }
-        } else {
-            self.clear_active_stacked_for_parent(node);
         }
         self.apply_taffy_layout(sugarloaf)
     }
 
     pub fn set_current_node_without_layout(&mut self, node: NodeId) -> bool {
         if !self.inner.contains_key(&node) {
+            return false;
+        }
+        let Some(&leaf) = self.node_to_leaf.get(&node) else {
+            return false;
+        };
+        // Selection and visibility are one canonical operation. In
+        // particular, focusing a leaf inside `Tabbed` must update that
+        // node's `active` index before any detach/rebuild mutation.
+        if self.session_tree.focus_leaf(leaf).is_err() {
             return false;
         }
         self.current = node;

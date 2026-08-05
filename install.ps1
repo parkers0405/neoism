@@ -71,8 +71,10 @@ function Set-UserPathRaw([string]$Value) {
 }
 
 function Test-UserPathContains([string]$Dir) {
+    $target = [Environment]::ExpandEnvironmentVariables($Dir).Trim().Trim('"').TrimEnd("\")
     foreach ($entry in ((Get-UserPathRaw) -split ";")) {
-        if ($entry.Trim().TrimEnd("\") -ieq $Dir.TrimEnd("\")) { return $true }
+        $candidate = [Environment]::ExpandEnvironmentVariables($entry).Trim().Trim('"').TrimEnd("\")
+        if ($candidate -ieq $target) { return $true }
     }
     return $false
 }

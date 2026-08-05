@@ -379,10 +379,9 @@ impl Screen<'_> {
             });
         if title_normal {
             let now = std::time::Instant::now();
-            if self
-                .markdown_leader_pending
-                .is_some_and(|started| now.duration_since(started).as_millis() > LEADER_TIMEOUT_MS)
-            {
+            if self.markdown_leader_pending.is_some_and(|started| {
+                now.duration_since(started).as_millis() > LEADER_TIMEOUT_MS
+            }) {
                 self.markdown_leader_pending = None;
             }
             if self.markdown_leader_pending.is_some() {
@@ -395,10 +394,18 @@ impl Screen<'_> {
                     }
                     return;
                 }
+                if plain
+                    && matches!(key.logical_key.as_ref(), Key::Character(ch) if ch.eq_ignore_ascii_case("h"))
+                {
+                    self.split_down();
+                    return;
+                }
             }
 
-            let is_space = matches!(key.logical_key.as_ref(), Key::Named(NamedKey::Space))
-                || matches!(key.logical_key.as_ref(), Key::Character(ch) if ch == " ");
+            let is_space = matches!(
+                key.logical_key.as_ref(),
+                Key::Named(NamedKey::Space)
+            ) || matches!(key.logical_key.as_ref(), Key::Character(ch) if ch == " ");
             if plain && is_space {
                 self.markdown_leader_pending = Some(now);
                 return;
@@ -740,6 +747,12 @@ impl Screen<'_> {
                     if closed {
                         self.mark_dirty();
                     }
+                    return;
+                }
+                if plain
+                    && matches!(key.logical_key.as_ref(), Key::Character(ch) if ch.eq_ignore_ascii_case("h"))
+                {
+                    self.split_down();
                     return;
                 }
                 flushed_markdown_leader = true;
@@ -1298,6 +1311,15 @@ impl Screen<'_> {
                 }
                 return;
             }
+            if plain
+                && matches!(
+                    key.key_without_modifiers().as_ref(),
+                    Key::Character(value) if value.eq_ignore_ascii_case("h")
+                )
+            {
+                self.split_down();
+                return;
+            }
         }
         let reader_leader_key = matches!(
             key.key_without_modifiers().as_ref(),
@@ -1768,6 +1790,17 @@ impl Screen<'_> {
         source: crate::host::StripRef,
         split_down: bool,
     ) {
+        self.tear_out_markdown_tab_to_pane_at(path, tab, source, split_down, None);
+    }
+
+    pub(crate) fn tear_out_markdown_tab_to_pane_at(
+        &mut self,
+        path: std::path::PathBuf,
+        tab: &neoism_ui::panels::buffer_tabs::BufferTab<crate::neoism::icon::AgentKind>,
+        source: crate::host::StripRef,
+        split_down: bool,
+        destination: Option<(usize, neoism_ui::session_layout::geometry::DropPlacement)>,
+    ) {
         let mut markdown_route = self.markdown_route_for_strip(source, &path);
         if markdown_route.is_none() {
             markdown_route = match source {
@@ -1789,11 +1822,21 @@ impl Screen<'_> {
             return;
         };
         self.activate_remaining_tab_in_strip(source);
-        if !self.context_manager.split_existing_route(
-            markdown_route,
-            split_down,
-            &mut self.sugarloaf,
-        ) {
+        let split_ok = if let Some((target_route, placement)) = destination {
+            self.context_manager.split_existing_route_at(
+                markdown_route,
+                target_route,
+                placement,
+                &mut self.sugarloaf,
+            )
+        } else {
+            self.context_manager.split_existing_route(
+                markdown_route,
+                split_down,
+                &mut self.sugarloaf,
+            )
+        };
+        if !split_ok {
             self.reinsert_tab_into_strip(source, tab, path);
             self.renderer.notifications.push(
                 format!("Could not tear out `{}` to a split.", tab.title),

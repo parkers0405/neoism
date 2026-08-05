@@ -1,7 +1,7 @@
 use super::*;
 use neoism_ui::panels::buffer_tabs::{
     apply_buffer_tab_policy as shared_apply_buffer_tab_policy, BufferTabPolicyInput,
-    BufferTabPolicyOperation,
+    BufferTabPolicyOperation, TabHit,
 };
 use neoism_ui::session_layout::{
     SessionLayout, SessionLeafKind, SessionLeafSpec, SessionNode, SplitAxis,
@@ -10,6 +10,22 @@ use neoism_ui::session_layout::{
 
 #[wasm_bindgen]
 impl ChromeBridge {
+    /// Return the tab index under a window-space logical pixel, or -1 when
+    /// the point is outside a tab (including the trailing new-tab button).
+    /// The web host uses this to begin a native-feeling pointer drag while
+    /// the shared BufferTabs remains the hit-test authority.
+    pub fn buffer_tab_hit_test(&self, x: f32, y: f32) -> i32 {
+        let rect = self.chrome.layout().buffer_tabs;
+        match self
+            .chrome
+            .buffer_tabs
+            .hit_test(x, y, rect.x, rect.y, rect.w)
+        {
+            Some(TabHit::Activate(index)) => index as i32,
+            _ => -1,
+        }
+    }
+
     /// Replace the buffer-tab strip with the given titles, marking
     /// `active` as the selected tab. JS uses this after the tree
     /// triggers an open: it appends a new tab to its own bookkeeping
@@ -357,11 +373,15 @@ impl ChromeBridge {
 
         match operation {
             "init" | "init_editor" | "init_terminal" => {}
-            "split" => {
+            "split" | "split_before" => {
                 layout
                     .split_focused(
                         split_axis(axis.as_deref()),
-                        SplitPlacement::After,
+                        if operation == "split_before" {
+                            SplitPlacement::Before
+                        } else {
+                            SplitPlacement::After
+                        },
                         spec_for(Some("editor"), title, external_id),
                     )
                     .map_err(|e| JsValue::from_str(&format!("layout split: {e:?}")))?;

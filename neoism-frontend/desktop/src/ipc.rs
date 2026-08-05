@@ -512,6 +512,8 @@ fn socket_path() -> PathBuf {
 
 #[cfg(windows)]
 fn pipe_name() -> String {
+    use std::os::windows::ffi::OsStrExt;
+
     if let Ok(name) = std::env::var(IPC_SOCKET_ENV) {
         if !name.is_empty() {
             return name;
@@ -524,7 +526,27 @@ fn pipe_name() -> String {
     let user = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "default".to_string());
-    format!(r"\\.\pipe\neoism-command-{}", percent_encode(&user))
+    let domain = std::env::var("USERDOMAIN").unwrap_or_default();
+    let install = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .map(|path| dunce::canonicalize(&path).unwrap_or(path))
+        .unwrap_or_default();
+
+    // FNV-1a is sufficient here: the hash only keeps independent portable,
+    // stable, and development installs from sharing a pipe name.
+    let mut install_hash = 0xcbf29ce484222325u64;
+    for word in install.as_os_str().encode_wide() {
+        for byte in word.to_le_bytes() {
+            install_hash ^= u64::from(byte);
+            install_hash = install_hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!(
+        r"\\.\pipe\neoism-command-{}-{:016x}",
+        percent_encode(&format!("{domain}\\{user}")),
+        install_hash
+    )
 }
 
 #[cfg(unix)]

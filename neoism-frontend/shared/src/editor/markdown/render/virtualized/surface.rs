@@ -18,7 +18,9 @@ pub(super) fn render_virtual(
 
     // Obsidian-style inline title: the frontmatter `title:` when set (edit
     // it right in the metadata rows), otherwise the file name.
-    let title_text: String = if pane.read_only {
+    let title_text: String = if pane.embedded {
+        String::new()
+    } else if pane.read_only {
         pane.title.clone()
     } else {
         pane.frontmatter_title()
@@ -41,7 +43,7 @@ pub(super) fn render_virtual(
         font_id: md_font_id(sugarloaf),
         ..DrawOpts::default()
     };
-    let show_title = !(pane.read_only && title_text.trim().is_empty());
+    let show_title = !pane.embedded && !(pane.read_only && title_text.trim().is_empty());
     let title_h = if show_title {
         line_height(&title_opts) + 16.0
     } else {
@@ -61,8 +63,10 @@ pub(super) fn render_virtual(
     };
     // The icon renders INLINE with the title ("{emoji} Title"), so it
     // reserves no vertical band of its own.
-    let pad_x = 48.0;
-    let pad_top = if show_title {
+    let pad_x = if pane.embedded { 12.0 } else { 48.0 };
+    let pad_top = if pane.embedded {
+        10.0
+    } else if show_title {
         38.0 + title_h + cover_h
     } else {
         22.0 + cover_h
@@ -1021,7 +1025,11 @@ fn reveal_virtual_cursor_source(pane: &mut MarkdownPane) {
     let line = pane
         .cursor_line
         .min(state.line_starts.len().saturating_sub(1));
-    if cursor_line_is_in_visible_virtual_node(state, line) {
+    // A visible virtual node can span many source lines. In a short embedded
+    // editor, repeated newlines may leave the node visible while the exact
+    // caret line is already below the clip. Embedded panes therefore reveal
+    // the cursor's source range precisely instead of accepting node visibility.
+    if !pane.embedded && cursor_line_is_in_visible_virtual_node(state, line) {
         state.pending_measure_anchor = None;
         return;
     }

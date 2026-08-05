@@ -1,12 +1,13 @@
 use web_time::Instant;
 
-use sugarloaf::Sugarloaf;
 use sugarloaf::text::DrawOpts;
+use sugarloaf::Sugarloaf;
 
-use crate::editor::neodraw::{Camera, Vec2, render_scene};
-use crate::primitives::{IdeTheme, draw_icon_centered_with_occlusion};
-use crate::syntax::{Lang, highlight_line, syn_color};
-use crate::widgets::mermaid::{MermaidDiagram, mermaid_scene, parse_mermaid_diagram};
+use crate::editor::markdown::MarkdownPane;
+use crate::editor::neodraw::{render_scene, Camera, Vec2};
+use crate::primitives::{draw_icon_centered_with_occlusion, IdeTheme};
+use crate::syntax::{highlight_line, syn_color, Lang};
+use crate::widgets::mermaid::{mermaid_scene, parse_mermaid_diagram, MermaidDiagram};
 use crate::widgets::scrollbar;
 
 const MODAL_WIDTH: f32 = 560.0;
@@ -19,6 +20,7 @@ const META_FONT_SIZE: f32 = 11.0;
 const ACTION_FONT_SIZE: f32 = 13.0;
 const ACTION_ROW_HEIGHT: f32 = 32.0;
 const INPUT_ROW_HEIGHT: f32 = 34.0;
+const MARKDOWN_INPUT_HEIGHT: f32 = 180.0;
 const INPUT_FONT_SIZE: f32 = 13.0;
 const BODY_LINE_HEIGHT: f32 = 19.0;
 const TITLE_HEIGHT: f32 = 24.0;
@@ -94,6 +96,20 @@ pub enum ModalAction {
     },
     EpubDeleteAnnotation {
         id: String,
+    },
+    EpubOpenAnnotationCollections {
+        id: String,
+    },
+    EpubToggleAnnotationCollection {
+        annotation_id: String,
+        collection_id: String,
+    },
+    EpubPromptNewAnnotationCollection {
+        annotation_id: String,
+    },
+    EpubCreateAnnotationCollection {
+        annotation_id: String,
+        value: String,
     },
     OpenLspLocation {
         uri: String,
@@ -264,6 +280,12 @@ impl ModalAction {
             ModalAction::EpubUpdateAnnotation { id, .. } => {
                 ModalAction::EpubUpdateAnnotation { id, value }
             }
+            ModalAction::EpubCreateAnnotationCollection { annotation_id, .. } => {
+                ModalAction::EpubCreateAnnotationCollection {
+                    annotation_id,
+                    value,
+                }
+            }
             action => action,
         }
     }
@@ -382,6 +404,9 @@ pub struct UniversalModal {
     /// Caret position in CHARS within the focused input (single input or
     /// focused form field). Reset to end-of-value on open and focus change.
     input_caret: usize,
+    markdown_input: bool,
+    markdown_pane: Option<MarkdownPane>,
+    markdown_input_rect: Option<[f32; 4]>,
     submitted_form: Option<Vec<(String, String)>>,
     selected_index: usize,
     scroll_offset: usize,
@@ -408,6 +433,9 @@ impl Default for UniversalModal {
             form_active_tab: 0,
             form_tab_rects: Vec::new(),
             input_caret: 0,
+            markdown_input: false,
+            markdown_pane: None,
+            markdown_input_rect: None,
             submitted_form: None,
             selected_index: 0,
             scroll_offset: 0,
@@ -438,6 +466,9 @@ impl UniversalModal {
         self.active = false;
         self.buttons.clear();
         self.input = None;
+        self.markdown_input = false;
+        self.markdown_pane = None;
+        self.markdown_input_rect = None;
         self.form = None;
         self.form_tabs.clear();
         self.form_tab_rects.clear();
@@ -463,6 +494,29 @@ impl UniversalModal {
         } else {
             spec.buttons
         };
+        self.markdown_input = matches!(
+            self.buttons.first().map(|button| &button.action),
+            Some(
+                ModalAction::EpubUpdateAnnotation { .. }
+                    | ModalAction::EpubAddNote { .. }
+            )
+        );
+        self.markdown_pane = if self.markdown_input {
+            let source = self
+                .input
+                .as_ref()
+                .map(|input| input.value.as_str())
+                .unwrap_or_default();
+            let mut pane = MarkdownPane::from_source(std::path::PathBuf::new(), source);
+            pane.embedded = true;
+            pane.enter_insert();
+            pane.cursor_line = pane.lines.len().saturating_sub(1);
+            pane.cursor_col = pane.lines.last().map(String::len).unwrap_or(0);
+            Some(pane)
+        } else {
+            None
+        };
+        self.markdown_input_rect = None;
         self.busy = spec.busy;
         self.blocking = spec.blocking;
         self.opened_at = Instant::now();
@@ -544,6 +598,131 @@ impl UniversalModal {
         self.active && (self.input.is_some() || self.form.is_some())
     }
 
+    pub fn has_markdown_input(&self) -> bool {
+        self.active && self.markdown_input && self.input.is_some()
+    }
+
+    pub fn markdown_input_source(&self) -> Option<String> {
+        self.markdown_pane
+            .as_ref()
+            .map(|pane| pane.lines.join("\n"))
+    }
+
+    pub fn click_markdown_input(&mut self, x: f32, y: f32) -> bool {
+        let Some([rx, ry, rw, rh]) = self.markdown_input_rect else {
+            return false;
+        };
+        if x < rx || x > rx + rw || y < ry || y > ry + rh {
+            return false;
+        }
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            let _ = pane.click_at(x, y);
+            pane.enter_insert();
+        }
+        true
+    }
+
+    pub fn scroll_markdown_input(&mut self, x: f32, y: f32, delta_pixels: f32) -> bool {
+        let Some([rx, ry, rw, rh]) = self.markdown_input_rect else {
+            return false;
+        };
+        if x < rx || x > rx + rw || y < ry || y > ry + rh {
+            return false;
+        }
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.scroll_by_content_pixels(-delta_pixels, rh);
+            // Modal wheel handling is event-driven rather than part of the
+            // workspace's continuous Markdown scroll tick, so apply the
+            // target immediately. The virtual surface consumes it next draw.
+            pane.snap_scroll_to_target();
+        }
+        true
+    }
+
+    pub fn insert_input_newline(&mut self) {
+        if !self.has_markdown_input() {
+            return;
+        }
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.insert_newline();
+            return;
+        }
+        let caret = self.input_caret.min(self.focused_input_chars());
+        let Some(value) = self.focused_input_value_mut() else {
+            return;
+        };
+        let byte = Self::byte_index_at(value, caret);
+        value.insert(byte, '\n');
+        self.input_caret = caret + 1;
+    }
+
+    pub fn move_input_up(&mut self) {
+        if !self.has_markdown_input() {
+            return;
+        }
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.move_up();
+            return;
+        }
+        let caret = self.input_caret.min(self.focused_input_chars());
+        let Some(value) = self.focused_input_value() else {
+            return;
+        };
+        let before: String = value.chars().take(caret).collect();
+        let column = before
+            .rsplit('\n')
+            .next()
+            .map(str::chars)
+            .map(Iterator::count)
+            .unwrap_or(0);
+        let current_start = before.chars().count() - column;
+        if current_start == 0 {
+            return;
+        }
+        let previous_end = current_start - 1;
+        let previous_start = value
+            .chars()
+            .take(previous_end)
+            .collect::<String>()
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.input_caret = previous_start + column.min(previous_end - previous_start);
+    }
+
+    pub fn move_input_down(&mut self) {
+        if !self.has_markdown_input() {
+            return;
+        }
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.move_down();
+            return;
+        }
+        let caret = self.input_caret.min(self.focused_input_chars());
+        let Some(value) = self.focused_input_value() else {
+            return;
+        };
+        let chars = value.chars().collect::<Vec<_>>();
+        let current_start = chars[..caret]
+            .iter()
+            .rposition(|ch| *ch == '\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let column = caret - current_start;
+        let Some(next_start) = chars[caret..]
+            .iter()
+            .position(|ch| *ch == '\n')
+            .map(|offset| caret + offset + 1)
+        else {
+            return;
+        };
+        let next_len = chars[next_start..]
+            .iter()
+            .position(|ch| *ch == '\n')
+            .unwrap_or(chars.len() - next_start);
+        self.input_caret = next_start + column.min(next_len);
+    }
+
     fn focused_input_value(&self) -> Option<&str> {
         if let Some(form) = self.form.as_ref() {
             return form
@@ -583,6 +762,10 @@ impl UniversalModal {
     }
 
     pub fn push_input(&mut self, text: &str) {
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.insert_text(text);
+            return;
+        }
         let caret = self.input_caret.min(self.focused_input_chars());
         let inserted = text.chars().count();
         let Some(value) = self.focused_input_value_mut() else {
@@ -594,6 +777,10 @@ impl UniversalModal {
     }
 
     pub fn pop_input(&mut self) {
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.backspace();
+            return;
+        }
         let caret = self.input_caret.min(self.focused_input_chars());
         if caret == 0 {
             return;
@@ -608,6 +795,10 @@ impl UniversalModal {
     }
 
     pub fn delete_input(&mut self) {
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.delete_forward();
+            return;
+        }
         let caret = self.input_caret.min(self.focused_input_chars());
         let Some(value) = self.focused_input_value_mut() else {
             return;
@@ -621,19 +812,35 @@ impl UniversalModal {
     }
 
     pub fn move_input_caret_left(&mut self) {
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.move_left();
+            return;
+        }
         let caret = self.input_caret.min(self.focused_input_chars());
         self.input_caret = caret.saturating_sub(1);
     }
 
     pub fn move_input_caret_right(&mut self) {
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.move_right();
+            return;
+        }
         self.input_caret = (self.input_caret + 1).min(self.focused_input_chars());
     }
 
     pub fn input_caret_to_start(&mut self) {
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.move_line_start();
+            return;
+        }
         self.input_caret = 0;
     }
 
     pub fn input_caret_to_end(&mut self) {
+        if let Some(pane) = self.markdown_pane.as_mut() {
+            pane.move_line_end();
+            return;
+        }
         self.input_caret = self.focused_input_chars();
     }
 
@@ -816,7 +1023,9 @@ impl UniversalModal {
     }
 
     fn apply_input(&self, action: ModalAction) -> ModalAction {
-        if let Some(input) = self.input.as_ref() {
+        if let Some(pane) = self.markdown_pane.as_ref() {
+            action.with_input(pane.lines.join("\n"))
+        } else if let Some(input) = self.input.as_ref() {
             action.with_input(input.value.clone())
         } else {
             action
@@ -1069,7 +1278,11 @@ impl UniversalModal {
             0.0
         };
         let input_h = if self.input.is_some() {
-            INPUT_ROW_HEIGHT * s + 12.0 * s
+            if self.markdown_input {
+                MARKDOWN_INPUT_HEIGHT * s + 12.0 * s
+            } else {
+                INPUT_ROW_HEIGHT * s + 12.0 * s
+            }
         } else {
             0.0
         };
@@ -1114,7 +1327,11 @@ impl UniversalModal {
             0.0
         };
         let input_h = if self.input.is_some() {
-            INPUT_ROW_HEIGHT * s + 12.0 * s
+            if self.markdown_input {
+                MARKDOWN_INPUT_HEIGHT * s + 12.0 * s
+            } else {
+                INPUT_ROW_HEIGHT * s + 12.0 * s
+            }
         } else {
             0.0
         };
@@ -1165,7 +1382,11 @@ impl UniversalModal {
                     continue;
                 }
                 field_y += 20.0 * self.scale;
-                let input_h = INPUT_ROW_HEIGHT * self.scale;
+                let input_h = if self.markdown_input {
+                    MARKDOWN_INPUT_HEIGHT * self.scale
+                } else {
+                    INPUT_ROW_HEIGHT * self.scale
+                };
                 let field_x = x + MODAL_PADDING * self.scale;
                 let field_w = w - MODAL_PADDING * self.scale * 2.0;
                 if mouse_x >= field_x
@@ -1445,7 +1666,11 @@ impl UniversalModal {
 
         if let Some(input) = self.input.as_ref() {
             let input_y = text_y + 6.0 * s;
-            let input_h = INPUT_ROW_HEIGHT * s;
+            let input_h = if self.markdown_input {
+                MARKDOWN_INPUT_HEIGHT * s
+            } else {
+                INPUT_ROW_HEIGHT * s
+            };
             sugarloaf.rounded_rect(
                 None,
                 text_x,
@@ -1469,11 +1694,16 @@ impl UniversalModal {
                 ORDER + 1,
             );
 
-            let is_placeholder = input.value.is_empty();
+            let markdown_source = self
+                .markdown_pane
+                .as_ref()
+                .map(|pane| pane.lines.join("\n"));
+            let raw_input = markdown_source.as_deref().unwrap_or(input.value.as_str());
+            let is_placeholder = raw_input.is_empty();
             let input_text = if is_placeholder {
                 input.placeholder.as_str()
             } else {
-                input.value.as_str()
+                raw_input
             };
             let input_opts = DrawOpts {
                 font_size: INPUT_FONT_SIZE * s,
@@ -1490,27 +1720,41 @@ impl UniversalModal {
                 ]),
                 ..DrawOpts::default()
             };
-            let input_fit = truncate_to_fit(
-                input_text,
-                (w - pad * 2.0 - 24.0 * s).max(0.0),
-                sugarloaf,
-                &input_opts,
-            );
+            let available = (w - pad * 2.0 - 24.0 * s).max(0.0);
+            let input_fit =
+                truncate_to_fit(input_text, available, sugarloaf, &input_opts);
             let input_text_x = text_x + 12.0 * s;
-            let input_text_y = input_y + (input_h - INPUT_FONT_SIZE * s) / 2.0;
-            sugarloaf.text_mut().draw(
-                input_text_x,
-                input_text_y,
-                input_fit.as_str(),
-                &input_opts,
-            );
-            let caret_offset = if is_placeholder {
+            let input_text_y = if self.markdown_input {
+                input_y + 10.0 * s
+            } else {
+                input_y + (input_h - INPUT_FONT_SIZE * s) / 2.0
+            };
+            if !self.markdown_input {
+                sugarloaf.text_mut().draw(
+                    input_text_x,
+                    input_text_y,
+                    input_fit.as_str(),
+                    &input_opts,
+                );
+            }
+            let caret_offset = if self.markdown_input || is_placeholder {
                 0.0
             } else {
                 // Measure only up to the caret within the fitted text so
                 // arrow-key movement is visible mid-string.
-                let caret_prefix =
-                    input_fit.chars().take(self.input_caret).collect::<String>();
+                let caret_prefix = if self.markdown_input {
+                    input_text
+                        .chars()
+                        .take(self.input_caret)
+                        .collect::<String>()
+                        .rsplit_once('\n')
+                        .map(|(_, tail)| tail.to_string())
+                        .unwrap_or_else(|| {
+                            input_text.chars().take(self.input_caret).collect()
+                        })
+                } else {
+                    input_fit.chars().take(self.input_caret).collect::<String>()
+                };
                 sugarloaf
                     .text_mut()
                     .measure(caret_prefix.as_str(), &input_opts)
@@ -1518,16 +1762,49 @@ impl UniversalModal {
             // Same thick translucent block as the form fields / editor
             // cursor — one caret silhouette across the app.
             let caret_h = (INPUT_FONT_SIZE * s + 6.0 * s).min(input_h - 6.0 * s);
-            sugarloaf.rect(
-                None,
-                input_text_x + caret_offset,
-                input_y + (input_h - caret_h) / 2.0,
-                INPUT_FONT_SIZE * 0.55 * s,
-                caret_h,
-                theme.f32_alpha(theme.accent, 0.55),
-                DEPTH_ELEMENT + 0.02,
-                ORDER + 2,
-            );
+            if !self.markdown_input {
+                sugarloaf.rect(
+                    None,
+                    input_text_x + caret_offset,
+                    input_y + (input_h - caret_h) / 2.0,
+                    INPUT_FONT_SIZE * 0.55 * s,
+                    caret_h,
+                    theme.f32_alpha(theme.accent, 0.55),
+                    DEPTH_ELEMENT + 0.02,
+                    ORDER + 2,
+                );
+            }
+            if let Some(pane) = self.markdown_pane.as_mut() {
+                let editor_rect = [
+                    text_x + 2.0 * s,
+                    input_y + 2.0 * s,
+                    w - pad * 2.0 - 4.0 * s,
+                    input_h - 4.0 * s,
+                ];
+                self.markdown_input_rect = Some(editor_rect);
+                crate::editor::markdown::render::render(
+                    sugarloaf,
+                    pane,
+                    editor_rect,
+                    theme,
+                    None,
+                    &[],
+                    s,
+                    0.0,
+                );
+                if let Some([caret_x, caret_y, _, caret_h]) = pane.cursor_rect {
+                    sugarloaf.rect(
+                        None,
+                        caret_x,
+                        caret_y,
+                        (1.6 * s).max(1.0),
+                        caret_h.max(16.0 * s),
+                        theme.f32(theme.accent),
+                        DEPTH_ELEMENT + 0.03,
+                        ORDER + 3,
+                    );
+                }
+            }
         }
 
         if let Some(form) = self.form.as_ref() {
@@ -1968,6 +2245,107 @@ fn lang_from_fence(label: &str) -> Lang {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn epub_note_modal_uses_markdown_pane_and_serializes_newlines() {
+        let mut modal = UniversalModal::new();
+        modal.open(ModalSpec {
+            title: "Note".into(),
+            body: String::new(),
+            meta: String::new(),
+            input: Some(ModalInputSpec {
+                value: "# Heading".into(),
+                placeholder: String::new(),
+            }),
+            buttons: vec![ModalButton::new(
+                "Save",
+                "Enter",
+                ModalAction::EpubUpdateAnnotation {
+                    id: "annotation-1".into(),
+                    value: String::new(),
+                },
+            )],
+            busy: false,
+            blocking: true,
+        });
+
+        assert!(modal.has_markdown_input());
+        modal.insert_input_newline();
+        modal.push_input("- item");
+        assert_eq!(
+            modal.markdown_input_source().as_deref(),
+            Some("# Heading\n- item")
+        );
+        assert!(matches!(
+            modal.selected_action(),
+            Some(ModalAction::EpubUpdateAnnotation { value, .. }) if value == "# Heading\n- item"
+        ));
+    }
+
+    #[test]
+    fn epub_note_modal_scrolls_long_markdown_inside_editor_rect() {
+        let mut modal = UniversalModal::new();
+        modal.open(ModalSpec {
+            title: "Note".into(),
+            body: String::new(),
+            meta: String::new(),
+            input: Some(ModalInputSpec {
+                value: (0..40)
+                    .map(|line| format!("line {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                placeholder: String::new(),
+            }),
+            buttons: vec![ModalButton::new(
+                "Save",
+                "Ctrl+Enter",
+                ModalAction::EpubUpdateAnnotation {
+                    id: "annotation-1".into(),
+                    value: String::new(),
+                },
+            )],
+            busy: false,
+            blocking: true,
+        });
+        modal.markdown_input_rect = Some([10.0, 10.0, 400.0, 180.0]);
+        let pane = modal.markdown_pane.as_mut().unwrap();
+        pane.set_content_height(900.0, 180.0);
+
+        assert!(modal.scroll_markdown_input(20.0, 20.0, -120.0));
+        assert!(modal.markdown_pane.as_ref().unwrap().scroll_y > 0.0);
+        assert!(!modal.scroll_markdown_input(500.0, 500.0, -120.0));
+    }
+
+    #[test]
+    fn repeated_newlines_keep_embedded_markdown_in_follow_cursor_mode() {
+        let mut modal = UniversalModal::new();
+        modal.open(ModalSpec {
+            title: "Note".into(),
+            body: String::new(),
+            meta: String::new(),
+            input: Some(ModalInputSpec {
+                value: String::new(),
+                placeholder: String::new(),
+            }),
+            buttons: vec![ModalButton::new(
+                "Save",
+                "Ctrl+Enter",
+                ModalAction::EpubUpdateAnnotation {
+                    id: "annotation-1".into(),
+                    value: String::new(),
+                },
+            )],
+            busy: false,
+            blocking: true,
+        });
+
+        for _ in 0..30 {
+            modal.insert_input_newline();
+        }
+        let pane = modal.markdown_pane.as_ref().unwrap();
+        assert_eq!(pane.cursor_line, 30);
+        assert_eq!(pane.lines.len(), 31);
+    }
 
     #[test]
     fn server_form_skips_hidden_id_and_submits_structured_values() {

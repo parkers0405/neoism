@@ -41,6 +41,7 @@ fn modal_action_policy_tag(
         A::RunEditorCommandWithInput { .. } => Tag::RunEditorCommandWithInput,
         A::EpubAddNote { .. } => Tag::RunEditorCommandWithInput,
         A::EpubUpdateAnnotation { .. } => Tag::RunEditorCommandWithInput,
+        A::EpubCreateAnnotationCollection { .. } => Tag::RunEditorCommandWithInput,
         A::EpubGoTo { .. }
         | A::EpubOpenContents
         | A::EpubOpenChapterPages { .. }
@@ -48,6 +49,9 @@ fn modal_action_policy_tag(
         | A::EpubOpenAnnotation { .. }
         | A::EpubGoToAnnotation { .. }
         | A::EpubEditAnnotation { .. }
+        | A::EpubOpenAnnotationCollections { .. }
+        | A::EpubToggleAnnotationCollection { .. }
+        | A::EpubPromptNewAnnotationCollection { .. }
         | A::EpubDeleteAnnotation { .. } => Tag::RunEditorCommand,
         A::OpenLspLocation { .. } => Tag::OpenLspLocation,
         A::ApplyLspCodeAction { .. } => Tag::ApplyLspCodeAction,

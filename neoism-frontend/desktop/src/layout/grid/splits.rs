@@ -9,6 +9,43 @@ use neoism_ui::session_layout::{
 use rustc_hash::FxHashMap;
 use taffy::{geometry, style_helpers::length, NodeId, TaffyError};
 
+fn existing_split_target(
+    moving: NodeId,
+    pointer_target: NodeId,
+    selected: NodeId,
+    stacked_parents: &FxHashMap<NodeId, NodeId>,
+) -> Option<NodeId> {
+    if pointer_target != moving {
+        return Some(pointer_target);
+    }
+    let host = stacked_parents.get(&moving).copied()?;
+    let selected_is_sibling = selected != moving
+        && (selected == host || stacked_parents.get(&selected).copied() == Some(host));
+    Some(if selected_is_sibling { selected } else { host })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use taffy::Style;
+
+    #[test]
+    fn self_edge_split_targets_selected_surviving_tab_not_terminal_host() {
+        let mut tree = taffy::TaffyTree::<()>::new();
+        let host = tree.new_leaf(Style::default()).unwrap();
+        let selected_file = tree.new_leaf(Style::default()).unwrap();
+        let dragged_file = tree.new_leaf(Style::default()).unwrap();
+        let mut parents = FxHashMap::default();
+        parents.insert(selected_file, host);
+        parents.insert(dragged_file, host);
+
+        assert_eq!(
+            existing_split_target(dragged_file, dragged_file, selected_file, &parents,),
+            Some(selected_file)
+        );
+    }
+}
+
 impl<T: EventListener> ContextGrid<T> {
     pub(crate) fn clear_stack_metadata(&mut self, node: NodeId) {
         let old_parent = self.stacked_parents.remove(&node);
@@ -152,24 +189,53 @@ impl<T: EventListener> ContextGrid<T> {
         node: NodeId,
         direction: taffy::FlexDirection,
     ) -> Result<NodeId, TaffyError> {
-        if !self.inner.contains_key(&node) || !self.is_stacked_node(node) {
+        let previous_current = self.current;
+        self.split_panel_with_existing_node_at(
+            node,
+            previous_current,
+            direction,
+            SplitPlacement::After,
+        )
+    }
+
+    /// Move an existing tab leaf into a split at an explicit pane and side.
+    ///
+    /// Unlike the old tear-out path, this never infers the destination from
+    /// whichever pane happens to have focus. Drag/drop supplies the pane under
+    /// the pointer and one of its four edge placements, which makes nested and
+    /// four-way layouts deterministic.
+    pub(crate) fn split_panel_with_existing_node_at(
+        &mut self,
+        node: NodeId,
+        target: NodeId,
+        direction: taffy::FlexDirection,
+        placement: SplitPlacement,
+    ) -> Result<NodeId, TaffyError> {
+        if !self.inner.contains_key(&node) || self.inner.len() <= 1 {
             return Err(TaffyError::InvalidInputNode(node));
         }
-        let previous_current = self.current;
-        if !self.inner.contains_key(&previous_current) || previous_current == node {
-            return Err(TaffyError::InvalidInputNode(previous_current));
+        if !self.inner.contains_key(&target) {
+            return Err(TaffyError::InvalidInputNode(target));
+        }
+        // Dragging the active tab to an edge of its own pane means "pull this
+        // tab out beside the rest of its tab group". BufferTabs has already
+        // selected a surviving source tab. Target that selected sibling, not
+        // the group's first/host leaf: choosing the host is what made an empty
+        // terminal appear while the strip still showed a file as selected.
+        let target = if target == node {
+            existing_split_target(node, target, self.current, &self.stacked_parents)
+                .ok_or(TaffyError::InvalidInputNode(target))?
+        } else {
+            target
+        };
+        if !self.inner.contains_key(&self.current) {
+            return Err(TaffyError::InvalidInputNode(self.current));
         }
 
-        // Look up the leaf ids for both nodes so we can mutate the
-        // canonical SessionTree.
-        let host_target = if self.is_stacked_node(previous_current) {
-            self.stacked_parents
-                .get(&previous_current)
-                .copied()
-                .unwrap_or_else(|| self.root.unwrap_or(previous_current))
-        } else {
-            previous_current
-        };
+        // Target the exact visible leaf under the pointer. If it belongs to a
+        // Tabbed group, SessionTree::split_focused deliberately wraps that
+        // whole group, preserving "split -> tabs" ownership.
+        let host_target = target;
         let host_leaf = *self
             .node_to_leaf
             .get(&host_target)
@@ -214,7 +280,7 @@ impl<T: EventListener> ContextGrid<T> {
         };
         let outcome = self
             .session_tree
-            .split_focused(axis, SplitPlacement::After, carried_spec)
+            .split_focused(axis, placement, carried_spec)
             .map_err(|_| TaffyError::InvalidInputNode(host_target))?;
 
         // Replace the placeholder leaf id with the moving leaf's id.
@@ -397,87 +463,55 @@ impl<T: EventListener> ContextGrid<T> {
             return;
         }
 
-        // Get rich text ID before removing
-        let rich_text_id = self.inner.get(&to_remove).map(|item| item.val.rich_text_id);
-
-        let next_current = if to_remove == self.current {
-            // Select next panel before removing (use visual ordering)
-            let ordered_keys = self.get_ordered_keys();
-            let current_pos = ordered_keys.iter().position(|&k| k == to_remove);
-            if let Some(pos) = current_pos {
-                // Try next panel, or previous if we're at the end
-                if pos + 1 < ordered_keys.len() {
-                    ordered_keys[pos + 1]
-                } else if pos > 0 {
-                    ordered_keys[pos - 1]
-                } else {
-                    // Fallback to any other panel
-                    *ordered_keys
-                        .iter()
-                        .find(|&&k| k != to_remove)
-                        .unwrap_or(&to_remove)
-                }
-            } else {
-                // Fallback to first panel
-                *self
-                    .inner
-                    .keys()
-                    .find(|&&k| k != to_remove)
-                    .unwrap_or(&to_remove)
-            }
-        } else {
-            self.current
-        };
-
-        // Remove from Taffy - to_remove IS the NodeId
-        let _ = self.tree.remove(to_remove);
-
-        // Remove from inner map
-        self.inner.remove(&to_remove);
-        self.clear_stack_metadata(to_remove);
-
-        // Cleanup rich text from sugarloaf
-        if let Some(id) = rich_text_id {
-            sugarloaf.remove_content(id);
+        if let Some(item) = self.detach_node_from_layout(to_remove, sugarloaf) {
+            sugarloaf.remove_content(item.val.rich_text_id);
         }
+    }
 
-        // Update root if necessary
-        if Some(to_remove) == self.root {
-            self.root = self.inner.keys().next().copied();
+    /// Remove one leaf from the canonical recursive tree, then rebuild the
+    /// host tree around the surviving mixed/nested split structure. Closing
+    /// via the old Taffy-first path could flatten a nested horizontal/vertical
+    /// subtree and then regenerate a different SessionTree.
+    fn detach_node_from_layout(
+        &mut self,
+        to_remove: NodeId,
+        sugarloaf: &mut Sugarloaf,
+    ) -> Option<ContextGridItem<T>> {
+        if self.inner.len() <= 1 {
+            return None;
         }
+        let leaf = *self.node_to_leaf.get(&to_remove)?;
+        let prev_node_to_leaf = self.node_to_leaf.clone();
 
-        // Set new current
-        self.current = if next_current == self.root.unwrap_or(next_current) {
-            self.active_stacked.unwrap_or(next_current)
-        } else {
-            next_current
-        };
-        if self.is_stacked_node(self.current) {
-            if let Some(parent) = self.stacked_parents.get(&self.current).copied() {
-                self.set_active_stacked_for_parent(parent, self.current);
-            }
-        } else {
-            self.clear_active_stacked_for_parent(self.current);
+        // Make the canonical focus match the live host before choosing the
+        // surviving neighbour. `detach_leaf` preserves focus when an
+        // unfocused pane closes and chooses a valid neighbour otherwise.
+        if let Some(current_leaf) = self.node_to_leaf.get(&self.current).copied() {
+            let _ = self.session_tree.focus_leaf(current_leaf);
         }
+        self.session_tree.detach_leaf(leaf).ok()?;
+        let focus_after = self.session_tree.focus();
+        let removed = self.inner.remove(&to_remove)?;
 
-        // Collapse single-child containers left behind by removal
-        self.collapse_single_child_containers();
-
-        // Re-derive the canonical SessionTree from the now-updated Taffy
-        // structure BEFORE laying out — geometry reads the SessionTree, so
-        // syncing afterwards (as before) left the remaining pane sized as
-        // if the closed one still existed (the "close a split tab but the
-        // pane stays" bug).
-        self.sync_session_tree();
-
-        // Recompute layout
-        if self.panel_count() > 0 {
-            // When back to a single panel, reset to flexible so it fills the window
-            if self.panel_count() == 1 {
-                self.reset_panel_styles_to_flexible();
-            }
-            self.apply_taffy_layout(sugarloaf);
-        }
+        let available_width =
+            self.width - self.scaled_margin.left - self.scaled_margin.right;
+        let available_height =
+            self.height - self.scaled_margin.top - self.scaled_margin.bottom;
+        let rebuilt = rebuild_taffy_from_tree(
+            &self.session_tree,
+            &self.panel_config,
+            self.scale,
+            available_width,
+            available_height,
+        );
+        self.splice_rebuild(
+            rebuilt,
+            &prev_node_to_leaf,
+            focus_after,
+            FxHashMap::default(),
+        );
+        self.apply_taffy_layout(sugarloaf);
+        Some(removed)
     }
 
     /// Extract the context at `route_id` from this grid and return it
@@ -510,51 +544,8 @@ impl<T: EventListener> ContextGrid<T> {
             return None;
         }
 
-        let next_current = if to_remove == self.current {
-            let ordered_keys = self.get_ordered_keys();
-            match ordered_keys.iter().position(|&k| k == to_remove) {
-                Some(pos) if pos + 1 < ordered_keys.len() => ordered_keys[pos + 1],
-                Some(pos) if pos > 0 => ordered_keys[pos - 1],
-                _ => *ordered_keys
-                    .iter()
-                    .find(|&&k| k != to_remove)
-                    .unwrap_or(&to_remove),
-            }
-        } else {
-            self.current
-        };
-
-        let _ = self.tree.remove(to_remove);
-        let item = self.inner.remove(&to_remove)?;
-        self.clear_stack_metadata(to_remove);
-
-        if Some(to_remove) == self.root {
-            self.root = self.inner.keys().next().copied();
-        }
-        self.current = if next_current == self.root.unwrap_or(next_current) {
-            self.active_stacked.unwrap_or(next_current)
-        } else {
-            next_current
-        };
-        if self.is_stacked_node(self.current) {
-            if let Some(parent) = self.stacked_parents.get(&self.current).copied() {
-                self.set_active_stacked_for_parent(parent, self.current);
-            }
-        } else {
-            self.clear_active_stacked_for_parent(self.current);
-        }
-
-        self.collapse_single_child_containers();
-        // Sync the canonical SessionTree from Taffy BEFORE layout — the
-        // geometry solver reads the SessionTree (see remove_node).
-        self.sync_session_tree();
-        if self.panel_count() > 0 {
-            if self.panel_count() == 1 {
-                self.reset_panel_styles_to_flexible();
-            }
-            self.apply_taffy_layout(sugarloaf);
-        }
-        Some(item.val)
+        self.detach_node_from_layout(to_remove, sugarloaf)
+            .map(|item| item.val)
     }
 
     pub fn split_right(&mut self, context: Context<T>, sugarloaf: &mut Sugarloaf) {

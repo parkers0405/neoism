@@ -583,7 +583,7 @@ impl Screen<'_> {
                 self.mark_dirty();
                 return;
             }
-            Key::Named(NamedKey::Space) if plain => {
+            Key::Named(NamedKey::Space) | Key::Character(" ") if plain => {
                 // Space is the leader in Normal mode (`<Space>x` closes
                 // the buffer); Visual keeps it as a motion char.
                 if let Some(code) = self.context_manager.current_mut().code.as_mut() {
@@ -600,16 +600,10 @@ impl Screen<'_> {
             _ => {}
         }
 
-        if !plain {
-            return;
-        }
-        let mut chars = text.chars();
-        let (Some(ch), None) = (chars.next(), chars.next()) else {
-            return;
-        };
-
         // Leader chord: `<Space>` armed — the next key selects the
-        // action; unknown keys just disarm.
+        // action; unknown keys just disarm. Read the logical key instead
+        // of `KeyEvent::text`, which is optional on some desktop input
+        // backends even for an ordinary character key.
         let leader_armed = self
             .context_manager
             .current()
@@ -620,19 +614,46 @@ impl Screen<'_> {
             if let Some(code) = self.context_manager.current_mut().code.as_mut() {
                 code.leader_pending = false;
             }
-            match ch {
-                'x' => {
-                    let _ = self.close_focused_buffer_tab();
+            if plain {
+                let leader_key = match key.logical_key.as_ref() {
+                    Key::Character(value) => {
+                        let mut chars = value.chars();
+                        match (chars.next(), chars.next()) {
+                            (Some(ch), None) => Some(ch.to_ascii_lowercase()),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                tracing::debug!(
+                    target: "neoism::input",
+                    ?leader_key,
+                    "dispatching code leader follow-up"
+                );
+                match leader_key {
+                    Some('x') => {
+                        let _ = self.close_focused_buffer_tab();
+                    }
+                    // <Space>h: open a terminal in a horizontal (top/bottom) split.
+                    Some('h') => self.split_down(),
+                    // <Space>a: LSP code actions / quick-fix at the cursor.
+                    Some('a') => self.request_code_actions(),
+                    // <Space>r: LSP rename symbol (modal prompt).
+                    Some('r') => self.open_code_rename_prompt(),
+                    _ => {}
                 }
-                // <Space>a: LSP code actions / quick-fix at the cursor.
-                'a' => self.request_code_actions(),
-                // <Space>r: LSP rename symbol (modal prompt).
-                'r' => self.open_code_rename_prompt(),
-                _ => {}
             }
             self.mark_dirty();
             return;
         }
+
+        if !plain {
+            return;
+        }
+        let mut chars = text.chars();
+        let (Some(ch), None) = (chars.next(), chars.next()) else {
+            return;
+        };
 
         // `/` opens in-buffer incremental search (nvim incsearch);
         // `?` is the same surface scanning backward.

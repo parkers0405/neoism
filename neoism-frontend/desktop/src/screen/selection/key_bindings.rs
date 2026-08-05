@@ -572,7 +572,7 @@ impl Screen<'_> {
                         self.create_tab(clipboard);
                     }
                     Act::WorkspaceTerminalTabCreateNew => {
-                        self.create_workspace_terminal_tab();
+                        self.create_focused_terminal_tab();
                         self.cancel_search(clipboard);
                     }
                     Act::TabCloseCurrent => {

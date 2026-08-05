@@ -83,9 +83,9 @@ impl Screen<'_> {
                     return;
                 }
                 neoism_ui::selection_input::EarlyKeyDispatchAction::ResizeFocusedChromeOrSplit {
-                    grow,
+                    direction,
                 } => {
-                    self.resize_focused_chrome_or_split(grow);
+                    self.resize_focused_chrome_or_split(direction);
                     return;
                 }
                 // Other variants cannot be reached here — only the

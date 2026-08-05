@@ -3,6 +3,13 @@
 // drains + search-hint refresh. Pure code-move.
 use super::*;
 
+#[inline]
+fn workspace_breadcrumbs_active<A>(
+    workspace_tabs: &neoism_ui::panels::buffer_tabs::BufferTabs<A>,
+) -> bool {
+    workspace_tabs.active_shows_breadcrumbs()
+}
+
 impl Screen<'_> {
     pub(crate) fn sync_status_and_chrome(&mut self, _ctx: &FrameCtx) {
         if self.sync_workspace_root_from_active_pane() {
@@ -55,10 +62,13 @@ impl Screen<'_> {
             }
 
             let current = self.context_manager.current();
-            let document_chrome_active = current.code.is_some()
-                || current.markdown.is_some()
-                || current.notebook.is_some()
-                || current.epub.is_some();
+            // The workspace tab strip owns the workspace breadcrumb row.
+            // Do not derive this from `current`: that is the *focused pane*,
+            // which may be an agent/terminal in a separate split. Focusing
+            // that split must not clear chrome belonging to the workspace
+            // strip's still-active document.
+            let workspace_document_chrome_active =
+                workspace_breadcrumbs_active(&self.renderer.buffer_tabs);
             let (status_mode, primary, primary_kind, branch, active_path, active_cwd) =
                 if let Some(code) = current.code.as_ref() {
                     let active_path = Some(code.path.clone());
@@ -409,77 +419,101 @@ impl Screen<'_> {
                 },
             );
 
-            // Breadcrumbs follow the active document tab. The buffer
-            // tabs are the source of truth, so prefer the active Rust
-            // tab when present. Always hide when the active pane is a
-            // terminal — chrome tied to editor state shouldn't sit
-            // above shell prompts.
-            if document_chrome_active {
-                let active_tab = self
+            // Breadcrumbs follow the active *workspace-strip* document tab.
+            // Each secondary pane has its own `pane_breadcrumbs` entry, so
+            // its focused state must never participate in this decision.
+            if workspace_document_chrome_active {
+                let active_target = self
                     .renderer
                     .buffer_tabs
                     .tabs()
-                    .get(self.renderer.buffer_tabs.active());
-                let crumb_path = match active_tab.and_then(|tab| tab.target()) {
-                    Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path)) => {
-                        Some(path)
-                    }
-                    Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(
+                    .get(self.renderer.buffer_tabs.active())
+                    .and_then(|tab| tab.target());
+                let active_tab_exists = active_target.is_some();
+                let crumb_path = match active_target {
+                    Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path))
+                    | Some(neoism_ui::panels::buffer_tabs::BufferTabTarget::Markdown(
                         path,
                     )) => Some(path),
                     Some(
-                        neoism_ui::panels::buffer_tabs::BufferTabTarget::NeoismAgent(_),
-                    ) => {
-                        // Agent pane has its own bottom status surface;
-                        // suppress the global breadcrumb strip so a stale
-                        // file path from a prior tab doesn't paint a black
-                        // bar at the top.
-                        self.renderer.breadcrumbs.set_segments(Vec::new());
-                        self.renderer.breadcrumbs.clear_tail();
-                        None
-                    }
-                    Some(
-                        neoism_ui::panels::buffer_tabs::BufferTabTarget::ChromePage(_),
-                    ) => {
-                        // Chrome helper pages (Extensions, etc.) paint
-                        // their own header so the global breadcrumb is
-                        // suppressed — same treatment as the agent.
-                        self.renderer.breadcrumbs.set_segments(Vec::new());
-                        self.renderer.breadcrumbs.clear_tail();
-                        None
-                    }
-                    None => active_path.clone(),
+                        neoism_ui::panels::buffer_tabs::BufferTabTarget::NeoismAgent(_)
+                        | neoism_ui::panels::buffer_tabs::BufferTabTarget::ChromePage(_),
+                    ) => None,
+                    None => None,
                 };
-                if let Some(epub) = current.epub.as_ref() {
-                    let title = if epub.book.metadata.title.trim().is_empty() {
-                        epub.book
-                            .path
-                            .file_stem()
-                            .map(|value| value.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "Book".to_string())
-                    } else {
-                        epub.book.metadata.title.clone()
-                    };
-                    let section = if epub.showing_contents {
-                        "Contents".to_string()
-                    } else {
-                        epub.book
-                            .chapters
-                            .get(epub.chapter_index)
-                            .map(|chapter| chapter.title.clone())
-                            .unwrap_or_else(|| "Book".to_string())
-                    };
-                    let segments = if title.trim().eq_ignore_ascii_case(section.trim()) {
-                        vec![title]
-                    } else {
-                        vec![title, section]
-                    };
+
+                // Resolve rich-document chrome and the code symbol trail by
+                // the workspace tab's path, not by whichever split currently
+                // owns keyboard focus. This keeps the row fully stable while
+                // the user works in a neighboring agent pane.
+                let mut epub_segments = None;
+                let mut notebook_kernel = None;
+                let mut code_tail = None;
+                if let Some(path) = crumb_path.as_deref() {
+                    for item in self.context_manager.current_grid().contexts().values() {
+                        let context = item.context();
+                        if let Some(epub) = context
+                            .epub
+                            .as_ref()
+                            .filter(|epub| epub.book.path.as_path() == path)
+                        {
+                            let title = if epub.book.metadata.title.trim().is_empty() {
+                                epub.book
+                                    .path
+                                    .file_stem()
+                                    .map(|value| value.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "Book".to_string())
+                            } else {
+                                epub.book.metadata.title.clone()
+                            };
+                            let section = if epub.showing_contents {
+                                "Contents".to_string()
+                            } else {
+                                epub.book
+                                    .chapters
+                                    .get(epub.chapter_index)
+                                    .map(|chapter| chapter.title.clone())
+                                    .unwrap_or_else(|| "Book".to_string())
+                            };
+                            epub_segments = Some(
+                                if title.trim().eq_ignore_ascii_case(section.trim()) {
+                                    vec![title]
+                                } else {
+                                    vec![title, section]
+                                },
+                            );
+                        }
+                        if let Some(notebook) = context
+                            .notebook
+                            .as_ref()
+                            .filter(|notebook| notebook.path.as_path() == path)
+                        {
+                            notebook_kernel = Some(notebook.kernel_display_label());
+                        }
+                        if let Some(code) = context
+                            .code
+                            .as_ref()
+                            .filter(|code| code.path.as_path() == path)
+                            .filter(|code| !code.symbol_trail.is_empty())
+                        {
+                            code_tail = Some(
+                                code.symbol_trail
+                                    .iter()
+                                    .map(|symbol| symbol.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" › "),
+                            );
+                        }
+                    }
+                }
+
+                if let Some(segments) = epub_segments {
                     self.renderer.breadcrumbs.set_segments(segments);
                     self.renderer.breadcrumbs.clear_tail();
                     self.renderer
                         .file_tree
                         .set_active_path(crumb_path.clone().or(active_path.clone()));
-                } else if let Some(notebook) = current.notebook.as_ref() {
+                } else if let Some(kernel_label) = notebook_kernel {
                     use neoism_ui::panels::breadcrumbs::{
                         BreadcrumbAction, BreadcrumbActionItem,
                     };
@@ -502,7 +536,7 @@ impl Screen<'_> {
                         ),
                     ]);
                     self.renderer.breadcrumbs.set_notebook_kernel(
-                        Some(notebook.kernel_display_label()),
+                        Some(kernel_label),
                         self.renderer.context_menu.is_notebook_kernel(),
                     );
                     self.renderer.breadcrumbs.clear_tail();
@@ -515,20 +549,8 @@ impl Screen<'_> {
                         .set_from_path(&p, active_cwd.as_deref());
                     // Code panes append the tree-sitter symbol trail
                     // (`mod net › impl Client › fn connect`).
-                    match current.code.as_ref().filter(|c| !c.symbol_trail.is_empty()) {
-                        Some(code) => {
-                            let symbol = code
-                                .symbol_trail
-                                .iter()
-                                .map(|s| s.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(" › ");
-                            self.renderer.breadcrumbs.set_tail(
-                                code.buffer.cursor_line as u64 + 1,
-                                code.buffer.cursor_col as u64 + 1,
-                                &symbol,
-                            );
-                        }
+                    match code_tail {
+                        Some(symbol) => self.renderer.breadcrumbs.set_tail(0, 0, &symbol),
                         None => self.renderer.breadcrumbs.clear_tail(),
                     }
                     // Mirror the active buffer to the file-tree accent so
@@ -536,7 +558,7 @@ impl Screen<'_> {
                     // when the user navigated there via finder/Tab and
                     // never clicked the tree row.
                     self.renderer.file_tree.set_active_path(crumb_path);
-                } else if active_tab.is_none() {
+                } else if !active_tab_exists {
                     self.renderer.breadcrumbs.set_segments(Vec::new());
                     self.renderer.breadcrumbs.clear_tail();
                     self.renderer.file_tree.set_active_path(None);
@@ -604,5 +626,27 @@ impl Screen<'_> {
                     );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workspace_breadcrumbs_active;
+    use neoism_ui::panels::buffer_tabs::BufferTabs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn focused_agent_split_does_not_hide_workspace_file_breadcrumbs() {
+        let mut workspace_tabs = BufferTabs::<()>::new();
+        workspace_tabs.open_path(PathBuf::from("/workspace/src/main.rs"));
+
+        // This is the independently focused secondary strip. Its active
+        // agent correctly has no breadcrumbs, but it has no authority over
+        // the workspace strip's breadcrumb row.
+        let mut focused_pane_tabs = BufferTabs::<()>::new();
+        focused_pane_tabs.open_neoism_agent(41);
+
+        assert!(!focused_pane_tabs.active_shows_breadcrumbs());
+        assert!(workspace_breadcrumbs_active(&workspace_tabs));
     }
 }

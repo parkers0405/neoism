@@ -1732,7 +1732,7 @@ impl Screen<'_> {
                 .working_dir
                 .clone()
                 .map(PathBuf::from)
-                .or_else(|| std::env::current_dir().ok())
+                .or_else(Self::initial_process_workspace_root)
                 .map(Self::normalize_workspace_root),
             pending_peer_workspace_join: None,
             pending_daemon_go_home: false,

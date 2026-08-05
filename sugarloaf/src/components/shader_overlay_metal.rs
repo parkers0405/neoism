@@ -109,8 +109,8 @@ impl MetalShaderOverlay {
         let sampler_descriptor = SamplerDescriptor::new();
         sampler_descriptor.set_min_filter(MTLSamplerMinMagFilter::Linear);
         sampler_descriptor.set_mag_filter(MTLSamplerMinMagFilter::Linear);
-        sampler_descriptor.set_s_address_mode(MTLSamplerAddressMode::ClampToEdge);
-        sampler_descriptor.set_t_address_mode(MTLSamplerAddressMode::ClampToEdge);
+        sampler_descriptor.set_address_mode_s(MTLSamplerAddressMode::ClampToEdge);
+        sampler_descriptor.set_address_mode_t(MTLSamplerAddressMode::ClampToEdge);
         let now = Instant::now();
         Ok(Some(Self {
             passes,

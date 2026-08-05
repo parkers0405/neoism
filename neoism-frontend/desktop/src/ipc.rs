@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::Path;
 #[cfg(any(unix, windows))]
 use std::path::PathBuf;

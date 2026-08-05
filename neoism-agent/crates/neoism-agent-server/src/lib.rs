@@ -48,6 +48,7 @@ mod openapi;
 mod perf;
 mod permission;
 mod permission_runtime;
+mod platform_shell;
 mod plugin;
 mod project;
 mod project_routes;

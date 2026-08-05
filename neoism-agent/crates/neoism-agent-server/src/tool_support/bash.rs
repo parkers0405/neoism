@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
@@ -5,6 +6,7 @@ use std::time::Duration;
 use anyhow::Context;
 use serde_json::{json, Value};
 use tokio::process::Command;
+#[cfg(not(windows))]
 use tokio::sync::OnceCell;
 
 use super::args::{optional_string, required_string, usize_arg};
@@ -19,14 +21,17 @@ use super::{process, shell_scan, truncate, ToolContext, ToolExecutionResult};
 /// the resulting environment, and run each command in a NON-login `-c`
 /// shell that inherits it: same PATH/tooling, none of the per-command
 /// re-sourcing tax.
+#[cfg(not(windows))]
 static LOGIN_ENV: OnceCell<HashMap<String, String>> = OnceCell::const_new();
 
+#[cfg(not(windows))]
 async fn login_shell_env(shell: &str) -> &'static HashMap<String, String> {
     LOGIN_ENV
         .get_or_init(|| capture_login_env(shell.to_string()))
         .await
 }
 
+#[cfg(not(windows))]
 async fn capture_login_env(shell: String) -> HashMap<String, String> {
     let captured = Command::new(&shell)
         .arg("-lc")
@@ -51,6 +56,7 @@ async fn capture_login_env(shell: String) -> HashMap<String, String> {
     env
 }
 
+#[cfg(not(windows))]
 fn parse_env(text: &str) -> HashMap<String, String> {
     let mut env = HashMap::new();
     let mut last_key: Option<String> = None;
@@ -75,6 +81,7 @@ fn parse_env(text: &str) -> HashMap<String, String> {
     env
 }
 
+#[cfg(not(windows))]
 fn is_env_name(candidate: &str) -> bool {
     let mut bytes = candidate.bytes();
     match bytes.next() {
@@ -100,7 +107,12 @@ pub(super) async fn bash_tool(
             context.cwd.display()
         )
     })?;
-    let scan = shell_scan::scan(&command, &cwd, &project_root);
+    let scan = shell_scan::scan(
+        &command,
+        &cwd,
+        &project_root,
+        crate::platform_shell::runtime().kind(),
+    );
     for dir in &scan.external_dirs {
         context.ensure_explicit_allowed("external_directory", dir)?;
     }
@@ -111,16 +123,16 @@ pub(super) async fn bash_tool(
     let timeout_ms = usize_arg(&arguments, "timeout").unwrap_or(120_000).max(1) as u64;
     let description =
         optional_string(&arguments, "description").unwrap_or_else(|| command.clone());
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let runtime = crate::platform_shell::runtime();
+    let shell = runtime.program().to_string_lossy().into_owned();
     // Non-login `-c` + the once-captured login env (see `LOGIN_ENV`): the
     // profile is already resolved, so we skip re-sourcing it per command.
+    #[cfg(not(windows))]
     let login_env = login_shell_env(&shell).await;
     let mut process = Command::new(&shell);
+    runtime.apply_command(&mut process, &command, false);
     process
-        .arg("-c")
-        .arg(&command)
         .current_dir(&cwd)
-        .envs(login_env.iter())
         .env("TERM", "xterm-256color")
         .env("NEOISM_TERMINAL", "1")
         .envs(context.env.clone())
@@ -128,6 +140,8 @@ pub(super) async fn bash_tool(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(not(windows))]
+    process.envs(login_env.iter());
     process::set_new_process_group(&mut process);
     let mut child = process
         .spawn()
@@ -143,11 +157,11 @@ pub(super) async fn bash_tool(
         }
         _ = &mut timeout => {
             process::terminate_child(&mut child, child_id).await;
-            Err(anyhow::anyhow!("bash command timed out after {timeout_ms}ms"))
+            Err(anyhow::anyhow!("{} command timed out after {timeout_ms}ms", runtime.display_name()))
         }
         _ = process::wait_for_cancel(context.cancel.clone()) => {
             process::terminate_child(&mut child, child_id).await;
-            Err(anyhow::anyhow!("bash command aborted"))
+            Err(anyhow::anyhow!("{} command aborted", runtime.display_name()))
         }
     };
 

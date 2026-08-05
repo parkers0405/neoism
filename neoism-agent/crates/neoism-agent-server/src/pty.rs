@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+#[cfg(any(not(windows), test))]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::Path;
 
 use neoism_agent_core::{Id, IdKind, PtyInfo, ShellItem};
@@ -138,12 +140,33 @@ impl ConnectTokens {
 }
 
 pub(crate) fn discover_shells() -> Vec<ShellItem> {
+    #[cfg(windows)]
+    {
+        let mut shells = ["pwsh.exe", "powershell.exe", "cmd.exe"]
+            .into_iter()
+            .filter_map(crate::platform_shell::resolve_windows_command)
+            .map(|path| {
+                let path = path.to_string_lossy().into_owned();
+                ShellItem {
+                    name: shell_name(&path),
+                    path,
+                    acceptable: true,
+                }
+            })
+            .collect::<Vec<_>>();
+        shells.sort_by(|left, right| left.name.cmp(&right.name));
+        return shells;
+    }
+
+    #[cfg(not(windows))]
     let shell = std::env::var("SHELL").ok();
+    #[cfg(not(windows))]
     discover_shells_with(shell.as_deref(), default_shell_candidates(), |path| {
         Path::new(path).exists()
     })
 }
 
+#[cfg(any(not(windows), test))]
 pub(crate) fn discover_shells_with<I>(
     env_shell: Option<&str>,
     candidates: I,
@@ -163,11 +186,15 @@ where
     }
 
     if shells.is_empty() {
+        #[cfg(windows)]
+        let fallback = crate::platform_shell::program();
+        #[cfg(not(windows))]
+        let fallback = "/bin/sh".to_string();
         shells.insert(
-            "/bin/sh".to_string(),
+            fallback.clone(),
             ShellItem {
-                name: "sh".to_string(),
-                path: "/bin/sh".to_string(),
+                name: shell_name(&fallback),
+                path: fallback,
                 acceptable: true,
             },
         );
@@ -176,6 +203,7 @@ where
     shells.into_values().collect()
 }
 
+#[cfg(any(not(windows), test))]
 fn insert_shell(
     shells: &mut BTreeMap<String, ShellItem>,
     path: &str,
@@ -262,8 +290,13 @@ pub(crate) fn apply_pty_update(info: &mut PtyInfo, request: PtyUpdateRequest) {
     }
     let _ = request.size;
 }
+#[cfg(not(windows))]
 fn default_shell_candidates() -> impl IntoIterator<Item = &'static str> {
     ["/bin/zsh", "/bin/bash", "/bin/sh", "/usr/bin/fish"]
+}
+
+pub(crate) fn fallback_shell() -> String {
+    crate::platform_shell::program()
 }
 
 fn login_shell_command(shell: &str) -> Vec<String> {

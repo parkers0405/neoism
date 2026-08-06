@@ -37,7 +37,7 @@ pub(crate) fn run_background_command() -> Option<i32> {
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateProcessW, GetExitCodeProcess, WaitForSingleObject, CREATE_NEW_CONSOLE,
+        CreateProcessW, GetExitCodeProcess, WaitForSingleObject, CREATE_NO_WINDOW,
         CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTF_USESHOWWINDOW,
         STARTF_USESTDHANDLES, STARTUPINFOW,
     };
@@ -71,7 +71,7 @@ pub(crate) fn run_background_command() -> Option<i32> {
             std::ptr::null(),
             std::ptr::null(),
             1,
-            CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT,
+            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
             std::ptr::null(),
             std::ptr::null(),
             &startup,

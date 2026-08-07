@@ -10,8 +10,8 @@ use web_time::Instant;
 use super::modes::FinderMode;
 use super::state::{
     Finder, CARET_BLINK_MS, CARET_WIDTH, COLUMN_DIVIDER_WIDTH, CURSOR_ANIMATION_LENGTH,
-    DEPTH_BG, DEPTH_ELEMENT, FINDER_HEIGHT, FINDER_MARGIN_TOP, FINDER_PADDING,
-    FINDER_RADIUS, INPUT_FONT_SIZE, INPUT_HEIGHT, INPUT_PADDING_X, LEFT_COL_RATIO,
+    DEPTH_BG, DEPTH_ELEMENT, FINDER_HEIGHT, FINDER_PADDING, FINDER_RADIUS,
+    INPUT_FONT_SIZE, INPUT_HEIGHT, INPUT_PADDING_X, LEFT_COL_RATIO,
     LIST_SCROLL_ANIMATION_LENGTH, OPEN_POP_MS, ORDER, PREVIEW_FONT_SIZE,
     PREVIEW_LINE_HEIGHT, PREVIEW_MAX_LINES, PREVIEW_PADDING,
     PREVIEW_SCROLL_ANIMATION_LENGTH, RESULT_FONT_SIZE, RESULT_ITEM_HEIGHT,
@@ -194,7 +194,7 @@ impl Finder {
         let base_width = (self.overlay_width() * scale).min(logical_w - 32.0);
         let mut width = base_width;
         let final_x = (logical_w - width) / 2.0;
-        let final_y = FINDER_MARGIN_TOP * scale;
+        let final_y = self.top_anchor;
         let (pop_scale, pop_offset_y) = self.open_pop_transform(scale);
         width *= pop_scale;
         height *= pop_scale;

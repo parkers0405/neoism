@@ -926,6 +926,7 @@ impl Screen<'_> {
         true
     }
 
+    #[allow(dead_code)]
     pub(crate) fn end_code_scrollbar_drag(&mut self) {
         if let Some(code) = self.context_manager.current_mut().code.as_mut() {
             code.scrollbar_drag = None;

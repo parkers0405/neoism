@@ -11,13 +11,24 @@ const WORKSPACE_FILE_LEGACY: &str = "workspace.toml";
 pub const CURRENT_WORKSPACE_CONFIG_VERSION: u32 = 5;
 pub const DEFAULT_NOTES_WORKSPACE: &str = "Default";
 pub const DEFAULT_NOTES_VAULTS_DIR: &str = "Neoism/Vaults";
-pub const DEFAULT_NOTES_INDEX: &str = "Getting Started.md";
+pub const DEFAULT_NOTES_INDEX: &str = "Start Here.md";
 pub const WELCOME_DIR: &str = "Welcome";
 pub const PROJECT_METADATA_FILE: &str = "project.json";
 /// Pre-JSON vault metadata file, read once to upgrade in place.
 const PROJECT_METADATA_FILE_LEGACY: &str = "project.toml";
 const DEFAULT_NOTES_WORKSPACE_ID: &str = "neoism-notes-default-v1";
-const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v3";
+const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v4";
+
+const REPLACED_WELCOME_PATHS: &[&str] = &[
+    "Getting Started.md",
+    "The Terminal.md",
+    "The Neoism Agent.md",
+    "Notes and Drawings.md",
+    "Multiplayer.md",
+    "Keybindings.md",
+    "Editor",
+    "Configuration",
+];
 
 #[derive(Debug, Clone)]
 pub struct NeoismWorkspace {
@@ -438,48 +449,6 @@ fn ensure_note_root_dirs(workspace: &NeoismWorkspace) -> std::io::Result<()> {
 /// vault so users have a built-in guide (the start-screen "Notes" button and
 /// Alt+N open onto this folder). Pages are real Markdown files under
 /// `src/welcome/`.
-const WELCOME_PAGES: &[(&str, &str)] = &[
-    (
-        "Getting Started.md",
-        include_str!("welcome/Getting Started.md"),
-    ),
-    ("The Terminal.md", include_str!("welcome/The Terminal.md")),
-    (
-        "The Neoism Agent.md",
-        include_str!("welcome/The Neoism Agent.md"),
-    ),
-    (
-        "Notes and Drawings.md",
-        include_str!("welcome/Notes and Drawings.md"),
-    ),
-    ("Multiplayer.md", include_str!("welcome/Multiplayer.md")),
-    ("Keybindings.md", include_str!("welcome/Keybindings.md")),
-    (
-        "Editor/The Editor.md",
-        include_str!("welcome/Editor/The Editor.md"),
-    ),
-    (
-        "Editor/Languages and LSP.md",
-        include_str!("welcome/Editor/Languages and LSP.md"),
-    ),
-    (
-        "Configuration/Configuration.md",
-        include_str!("welcome/Configuration/Configuration.md"),
-    ),
-    (
-        "Configuration/Themes, Cursor and Fonts.md",
-        include_str!("welcome/Configuration/Themes, Cursor and Fonts.md"),
-    ),
-    (
-        "Configuration/Shaders.md",
-        include_str!("welcome/Configuration/Shaders.md"),
-    ),
-    (
-        "Configuration/Mash Up Packs.md",
-        include_str!("welcome/Configuration/Mash Up Packs.md"),
-    ),
-];
-
 /// Seed the `Welcome/` getting-started folder into the vault once. A marker
 /// records that the initial bundle was installed so later user edits and
 /// deletions remain authoritative.
@@ -500,29 +469,26 @@ fn seed_welcome_docs(default_vault: &Path) -> std::io::Result<()> {
     }
 
     let welcome = default_vault.join(WELCOME_DIR);
-    // A Welcome directory that already has content is an established vault:
-    // it was seeded by an earlier marker version. Bumping the marker means
-    // the shipped docs changed, so REFRESH each canonical page that is still
-    // present — but never resurrect one the user deleted (deletions stay
-    // deliberate), and never touch notes the user created themselves.
-    // A fresh (empty) vault gets the full set seeded.
-    let established = welcome
-        .read_dir()
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false);
-    for (name, body) in WELCOME_PAGES {
-        let page = welcome.join(name);
+    // v4 replaces the old flat handbook. Remove only paths Neoism shipped;
+    // unrelated notes in Welcome remain user-owned.
+    for replaced in REPLACED_WELCOME_PATHS {
+        let path = welcome.join(replaced);
+        if path.is_dir() {
+            let _ = fs::remove_dir_all(path);
+        } else {
+            let _ = fs::remove_file(path);
+        }
+    }
+    // A marker bump is a one-time managed-doc migration: replaced paths are
+    // removed, every current bundled page is installed/refreshed, and unrelated
+    // user notes remain untouched. Once the v4 marker exists this function
+    // returns early, so later user edits and deletions are honored.
+    for doc in crate::docs::BUNDLED_DOCS {
+        let page = welcome.join(doc.path);
         if let Some(parent) = page.parent() {
             fs::create_dir_all(parent)?;
         }
-        if established {
-            // Refresh canonical pages in place; honor deletions.
-            if page.exists() {
-                fs::write(page, body)?;
-            }
-        } else if !page.exists() {
-            fs::write(page, body)?;
-        }
+        fs::write(page, doc.body)?;
     }
 
     fs::create_dir_all(default_vault)?;
@@ -718,21 +684,24 @@ mod tests {
         let root = temp_root("welcome-refresh");
         let welcome = root.join(WELCOME_DIR);
         fs::create_dir_all(&welcome).unwrap();
-        // Established vault seeded by an OLDER marker version: a shipped page
-        // holds stale content, and a user note the app never shipped.
-        let shipped = welcome.join("Configuration").join("Configuration.md");
+        // A previous handbook marker exists: one current managed page holds
+        // stale content, an old shipped path remains, and a user note exists.
+        let shipped = welcome.join(DEFAULT_NOTES_INDEX);
         fs::create_dir_all(shipped.parent().unwrap()).unwrap();
-        fs::write(&shipped, "STALE OLD DOC").unwrap();
+        fs::write(&shipped, "STALE DOC").unwrap();
+        let replaced = welcome.join("Getting Started.md");
+        fs::write(&replaced, "REPLACED DOC").unwrap();
         fs::write(root.join(".neoism-welcome-seeded-v2"), b"seeded\n").unwrap();
         let user_note = welcome.join("My Note.md");
         fs::write(&user_note, "keep me").unwrap();
 
         seed_welcome_docs(&root).unwrap();
 
-        // Shipped page refreshed to current content; stale marker cleaned up;
+        // Managed page refreshed; replaced path and previous marker removed;
         // the current marker written; the user's own note left untouched.
         let refreshed = fs::read_to_string(&shipped).unwrap();
-        assert!(refreshed.contains("Settings are grouped by domain"));
+        assert!(refreshed.contains("# Welcome to Neoism"));
+        assert!(!replaced.exists());
         assert!(!root.join(".neoism-welcome-seeded-v2").exists());
         assert!(root.join(WELCOME_SEEDED_MARKER).is_file());
         assert_eq!(fs::read_to_string(&user_note).unwrap(), "keep me");

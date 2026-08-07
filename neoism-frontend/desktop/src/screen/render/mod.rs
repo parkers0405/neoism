@@ -211,35 +211,6 @@ impl Screen<'_> {
         }
     }
 
-    fn draw_agent_input_trail_cursor_rect(
-        &mut self,
-        [x, y, w, h]: [f32; 4],
-        scale_factor: f32,
-        _animation_dt_secs: f32,
-        cursor_blink_visible: bool,
-    ) {
-        self.renderer
-            .trail_cursor
-            .set_cursor_shape(neoism_terminal_core::ansi::CursorShape::Block);
-        self.renderer.trail_cursor.set_destination(
-            x * scale_factor,
-            y * scale_factor,
-            w * scale_factor,
-            h * scale_factor,
-        );
-        self.renderer
-            .trail_cursor
-            .snap_to_destination(w * scale_factor, h * scale_factor);
-        if self.renderer.trail_cursor.is_animating() || cursor_blink_visible {
-            let cursor_color = self.renderer.live_cursor_color();
-            self.renderer.trail_cursor.draw_always(
-                &mut self.sugarloaf,
-                scale_factor,
-                cursor_color,
-            );
-        }
-    }
-
     fn chrome_trail_cursor_rect(
         &self,
         target: TrailCursorOverlayTarget,

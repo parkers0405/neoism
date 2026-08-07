@@ -523,6 +523,15 @@ impl Screen<'_> {
                 // rows in the grouped Workspaces tree.
                 self.renderer.command_palette.select_clicked(index);
 
+                if let Some(command) =
+                    self.renderer.command_palette.get_selected_ex_command()
+                {
+                    self.renderer.command_palette.set_enabled(false);
+                    let _ = self.try_intercept_ex_command(command.trim());
+                    self.mark_dirty();
+                    return true;
+                }
+
                 if self.renderer.command_palette.is_ex_mode() {
                     if let Some(command) =
                         self.renderer.command_palette.get_selected_ex_command()

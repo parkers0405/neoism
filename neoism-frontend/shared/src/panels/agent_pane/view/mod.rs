@@ -282,37 +282,10 @@ pub fn render_agent_pane_with<P, D, I>(
             5,
         )
     };
-    let mut local_occlusions = occlusion_rects.to_vec();
-    if let Some(picker_rect) = pane.picker_options_len().and_then(|len| {
-        crate::widgets::inline_picker::layout_limited(
-            len,
-            picker_input_rect,
-            chrome_scale,
-            picker_has_footer,
-            picker_max_rows,
-            picker_min_y,
-        )
-    }) {
-        local_occlusions.push(picker_rect);
-    }
-    // Island corner notches: the timeline clips at the island's
-    // straight top edge, but the rounded border curves away BELOW
-    // that line at the corners — sliced glyphs would hover over the
-    // bare notch with no border under them. Occlude a corner-radius
-    // square at each top corner, hung 2px ABOVE the line downward:
-    // only rows whose boxes actually cross the clip line (i.e. rows
-    // being sliced) intersect it, so intact rows resting above the
-    // island — like the streaming status row's square activity mark — keep
-    // their corner-column glyphs.
-    let corner = user_input::ISLAND_CORNER * chrome_scale;
-    for corner_x in [input_rect[0], input_rect[0] + input_rect[2] - corner] {
-        local_occlusions.push([
-            corner_x,
-            input_rect[1] - 2.0 * chrome_scale,
-            corner,
-            corner,
-        ]);
-    }
+    // The inline picker is a real late Sugarloaf overlay. Do not reserve its
+    // predicted column in the normal text pass: doing so erases timeline text
+    // above and outside the actual rounded menu surface.
+    let local_occlusions = occlusion_rects.to_vec();
     clear_overlays(sugarloaf);
     sugarloaf.rect(None, x, y, w, h, theme.f32(theme.bg), DEPTH, ORDER_BG);
     // The "NEOISM" home page and the chat timeline render immediately —
@@ -356,14 +329,12 @@ pub fn render_agent_pane_with<P, D, I>(
             theme,
             chrome_scale,
             now_seconds,
+            mouse,
             &local_occlusions,
         );
     }
-    // Side-panel toggle button used to live here — moved to the chrome
-    // top bar's right edge. Hosts set
-    // `chrome.top_bar.set_right_button_visible(true)` while an agent
-    // pane is active and route the resulting `ToggleRightPanel`
-    // action through `agent.side_panel().set_user_hidden(!visible)`.
+    // Side-panel visibility is controlled by its in-pane affordance and
+    // `/sidebar`; the top-bar Agent icon opens a new Agent tab.
     // Pending permission / model question takes the picker slot — the
     // prompt pops out of the input island exactly like the "/" menu.
     // The regular picker is suppressed while a prompt is pending (the

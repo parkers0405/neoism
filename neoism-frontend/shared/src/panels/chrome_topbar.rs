@@ -41,17 +41,15 @@ pub const CHROME_TOPBAR_HEIGHT: f32 = 30.0;
 /// collapse into a "+N" count.
 const CHROME_PEER_CAP: usize = 4;
 
-const PANEL_BTN_GLYPH: &str = "\u{eb56}"; // codicon split-horizontal — same as status-line split pill
 const HAMBURGER_GLYPH: &str = "\u{f0c9}"; // FA bars
 const SEARCH_GLYPH: &str = "\u{f002}"; // FA magnifying-glass — opens the finder
+const NOTES_GLYPH: &str = "\u{f15c}"; // Same glyph as Markdown files in the tree
+const NEOISM_AGENT_GLYPH: &str = "n"; // Same mark used by Agent buffer tabs.
 
-/// Which half of the split-pane toggle glyph paints in the accent
-/// color while its panel is open — the left half for the left (file
-/// tree) button, the right half for the right (agent panel) button.
+/// Which half of an icon paints in the accent color while active.
 #[derive(Clone, Copy)]
 enum ActiveHalf {
     Left,
-    Right,
 }
 
 const ICON_FONT_SIZE: f32 = 13.0;
@@ -85,10 +83,11 @@ const ORDER_MENU_BORDER: u8 = 33;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopBarAction {
     TogglePanel,
-    /// Right-side button — toggles the agent side panel. Only fires
+    /// Right-side button — opens or creates an Agent tab. Only fires
     /// when the host has enabled the right button via
     /// `set_right_button_visible(true)`.
-    ToggleRightPanel,
+    OpenAgent,
+    OpenNotes,
     OpenServers,
     OpenSettings,
     OpenWorkspaces,
@@ -187,18 +186,21 @@ pub struct ChromeTopBar {
     /// a glance which panels are open. Hosts push these every frame.
     panel_open: bool,
     right_panel_open: bool,
+    agent_icon_overlay: bool,
     left_safe_inset: f32,
     /// Last hit rects (in window-global coords) refreshed every paint.
     /// Hit-testing reads these, so layout drift between frames can't
     /// activate the wrong region.
     panel_btn_rect: Rect,
     menu_btn_rect: Rect,
+    notes_btn_rect: Rect,
     search_btn_rect: Rect,
     server_btn_rect: Rect,
     right_btn_rect: Rect,
     menu_rect: Rect,
     hover_panel_btn: bool,
     hover_menu_btn: bool,
+    hover_notes_btn: bool,
     hover_search_btn: bool,
     hover_server_btn: bool,
     hover_right_btn: bool,
@@ -225,15 +227,18 @@ impl ChromeTopBar {
             right_button_visible: false,
             panel_open: false,
             right_panel_open: false,
+            agent_icon_overlay: false,
             left_safe_inset: 0.0,
             panel_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            notes_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             search_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             server_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             right_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             hover_panel_btn: false,
             hover_menu_btn: false,
+            hover_notes_btn: false,
             hover_search_btn: false,
             hover_server_btn: false,
             hover_right_btn: false,
@@ -257,6 +262,21 @@ impl ChromeTopBar {
 
     pub fn is_right_button_visible(&self) -> bool {
         self.right_button_visible
+    }
+
+    /// Suppress the glyph fallback when the host paints the same PNG-backed
+    /// Neoism Agent icon used by buffer tabs over this button.
+    pub fn set_agent_icon_overlay(&mut self, enabled: bool) {
+        self.agent_icon_overlay = enabled;
+    }
+
+    pub fn right_button_rect(&self) -> [f32; 4] {
+        [
+            self.right_btn_rect.x,
+            self.right_btn_rect.y,
+            self.right_btn_rect.w,
+            self.right_btn_rect.h,
+        ]
     }
 
     /// Push the open/closed state of the left panel-toggle target (the
@@ -374,9 +394,10 @@ impl ChromeTopBar {
         let gap = BTN_GAP * scale;
         let cy = strip.y + (strip.h - btn) * 0.5;
         let left_x = strip.x + edge + self.left_safe_inset * scale;
-        self.panel_btn_rect = Rect::new(left_x, cy, btn, btn);
-        self.menu_btn_rect = Rect::new(left_x + btn + gap, cy, btn, btn);
-        self.search_btn_rect = Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn);
+        self.menu_btn_rect = Rect::new(left_x, cy, btn, btn);
+        self.panel_btn_rect = Rect::new(left_x + btn + gap, cy, btn, btn);
+        self.notes_btn_rect = Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn);
+        self.search_btn_rect = Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn);
         self.server_btn_rect = Rect::new(strip.x + strip.w - edge - btn, cy, btn, btn);
         self.right_btn_rect = if self.right_button_visible {
             Rect::new(self.server_btn_rect.x - gap - btn, cy, btn, btn)
@@ -438,6 +459,7 @@ impl ChromeTopBar {
         let inside_strip = self.panel_btn_rect.contains(x, y)
             || self.menu_btn_rect.contains(x, y)
             || self.search_btn_rect.contains(x, y)
+            || self.notes_btn_rect.contains(x, y)
             || self.server_btn_rect.contains(x, y)
             || (self.right_button_visible && self.right_btn_rect.contains(x, y))
             || self
@@ -451,6 +473,7 @@ impl ChromeTopBar {
         self.hover_panel_btn = self.panel_btn_rect.contains(x, y);
         self.hover_menu_btn = self.menu_btn_rect.contains(x, y);
         self.hover_search_btn = self.search_btn_rect.contains(x, y);
+        self.hover_notes_btn = self.notes_btn_rect.contains(x, y);
         self.hover_server_btn = self.server_btn_rect.contains(x, y);
         self.hover_right_btn =
             self.right_button_visible && self.right_btn_rect.contains(x, y);
@@ -479,13 +502,18 @@ impl ChromeTopBar {
             self.menu_open = false;
             return true;
         }
+        if self.notes_btn_rect.contains(x, y) {
+            self.pending_action = Some(TopBarAction::OpenNotes);
+            self.menu_open = false;
+            return true;
+        }
         if self.server_btn_rect.contains(x, y) {
             self.pending_action = Some(TopBarAction::OpenServers);
             self.menu_open = false;
             return true;
         }
         if self.right_button_visible && self.right_btn_rect.contains(x, y) {
-            self.pending_action = Some(TopBarAction::ToggleRightPanel);
+            self.pending_action = Some(TopBarAction::OpenAgent);
             self.menu_open = false;
             return true;
         }
@@ -548,21 +576,29 @@ impl ChromeTopBar {
         );
 
         // Panel-toggle button (left) — its left pane fills with the
-        // accent color while the file tree is open.
-        self.draw_icon_button(
-            sugarloaf,
-            self.panel_btn_rect,
-            PANEL_BTN_GLYPH,
-            self.hover_panel_btn,
-            self.panel_open.then_some(ActiveHalf::Left),
-            theme,
-        );
-        // Hamburger remains immediately beside the left panel toggle.
+        // The hamburger is the far-left chrome action.
         self.draw_icon_button(
             sugarloaf,
             self.menu_btn_rect,
             HAMBURGER_GLYPH,
             self.hover_menu_btn || self.menu_open,
+            None,
+            theme,
+        );
+        // Explorer sits immediately beside it and keeps its open-state accent.
+        self.draw_icon_button(
+            sugarloaf,
+            self.panel_btn_rect,
+            crate::panels::file_tree::icons::workspace_tab_icon().0,
+            self.hover_panel_btn,
+            self.panel_open.then_some(ActiveHalf::Left),
+            theme,
+        );
+        self.draw_icon_button(
+            sugarloaf,
+            self.notes_btn_rect,
+            NOTES_GLYPH,
+            self.hover_notes_btn,
             None,
             theme,
         );
@@ -578,18 +614,12 @@ impl ChromeTopBar {
         // Standalone server selector at the far-right edge.
         self.draw_server_button(sugarloaf, theme);
 
-        // Agent panel toggle sits immediately left of the server selector.
-        // toggle so the user reads "open / close a side panel" without
-        // a second symbol. Only rendered when the host has flagged an
-        // agent side panel as present; its right pane fills with the
-        // accent color while that panel is open.
-        if self.right_button_visible {
-            self.draw_icon_button(
+        // Bare Agent mark sits immediately left of the server selector.
+        if self.right_button_visible && !self.agent_icon_overlay {
+            self.draw_bare_agent_button(
                 sugarloaf,
                 self.right_btn_rect,
-                PANEL_BTN_GLYPH,
                 self.hover_right_btn,
-                self.right_panel_open.then_some(ActiveHalf::Right),
                 theme,
             );
         }
@@ -757,7 +787,7 @@ impl ChromeTopBar {
         // glyph itself in the accent color (clipped down the vertical
         // centre) — the icon's own left/right pane fills in, no extra
         // chrome behind it.
-        if let Some(half) = active_half {
+        if let Some(ActiveHalf::Left) = active_half {
             // Split at the glyph's horizontal centre, then extend the accent
             // clip all the way to the button edge on the active side. Using a
             // fixed `half_w`-wide window (half the *measured advance*) left the
@@ -767,10 +797,8 @@ impl ChromeTopBar {
             // edge fills the entire right (or left) pane regardless of the
             // ink-vs-advance mismatch.
             let center = gx + glyph_w * 0.5;
-            let (clip_x, clip_w) = match half {
-                ActiveHalf::Left => (rect.x, center - rect.x),
-                ActiveHalf::Right => (center, rect.x + rect.w - center),
-            };
+            let clip_x = rect.x;
+            let clip_w = center - rect.x;
             let accent_opts = DrawOpts {
                 font_size: icon_size,
                 color: theme.u8(theme.accent),
@@ -780,6 +808,32 @@ impl ChromeTopBar {
             sugarloaf.text_mut().draw(gx, gy, glyph, &accent_opts);
         }
         let _ = ORDER_ICON;
+    }
+
+    fn draw_bare_agent_button(
+        &self,
+        sugarloaf: &mut Sugarloaf,
+        rect: Rect,
+        hovered: bool,
+        theme: &IdeTheme,
+    ) {
+        let icon_size = ICON_FONT_SIZE * self.scale;
+        let opts = DrawOpts {
+            font_size: icon_size,
+            color: if hovered {
+                theme.u8(theme.fg)
+            } else {
+                theme.u8(theme.accent)
+            },
+            ..DrawOpts::default()
+        };
+        let glyph_w = sugarloaf.text_mut().measure(NEOISM_AGENT_GLYPH, &opts);
+        sugarloaf.text_mut().draw(
+            rect.x + (rect.w - glyph_w) * 0.5,
+            rect.y + (rect.h - icon_size) * 0.5,
+            NEOISM_AGENT_GLYPH,
+            &opts,
+        );
     }
 
     fn draw_server_button(&self, sugarloaf: &mut Sugarloaf, theme: &IdeTheme) {
@@ -798,10 +852,10 @@ impl ChromeTopBar {
         }
 
         let scale = self.scale;
-        let rack_w = 12.0 * scale;
+        let rack_w = 10.0 * scale;
         let rack_x = rect.x + (rect.w - rack_w) * 0.5;
-        let rack_y = rect.y + (rect.h - 14.0 * scale) * 0.5;
-        let stroke = scale.max(1.0);
+        let rack_y = rect.y + (rect.h - 12.0 * scale) * 0.5;
+        let stroke = (0.85 * scale).max(1.0);
         let color = if self.hover_server_btn {
             theme.f32(theme.fg)
         } else {
@@ -1069,16 +1123,30 @@ mod tests {
     }
 
     #[test]
+    fn notes_button_sits_left_of_search_and_queues_open() {
+        let mut bar = ChromeTopBar::new();
+        let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
+        paint_strip(&mut bar, strip);
+        assert_eq!(
+            bar.notes_btn_rect.x + bar.notes_btn_rect.w + BTN_GAP,
+            bar.search_btn_rect.x
+        );
+        let btn = bar.notes_btn_rect;
+        bar.handle_pointer_down(btn.x + btn.w * 0.5, btn.y + btn.h * 0.5);
+        assert_eq!(bar.take_action(), Some(TopBarAction::OpenNotes));
+    }
+
+    #[test]
     fn left_safe_inset_offsets_left_icons_only() {
         let mut bar = ChromeTopBar::new();
         bar.set_left_safe_inset(76.0);
         let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
         paint_strip(&mut bar, strip);
 
-        assert_eq!(bar.panel_btn_rect.x, EDGE_PAD_X + 76.0);
+        assert_eq!(bar.menu_btn_rect.x, EDGE_PAD_X + 76.0);
         assert_eq!(
-            bar.menu_btn_rect.x,
-            bar.panel_btn_rect.x + bar.panel_btn_rect.w + BTN_GAP
+            bar.panel_btn_rect.x,
+            bar.menu_btn_rect.x + bar.menu_btn_rect.w + BTN_GAP
         );
         assert_eq!(
             bar.server_btn_rect.x,
@@ -1087,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn server_is_far_right_and_agent_toggle_precedes_it() {
+    fn server_is_far_right_and_agent_button_precedes_it() {
         let mut bar = ChromeTopBar::new();
         bar.set_right_button_visible(true);
         let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
@@ -1105,6 +1173,10 @@ mod tests {
         let server = bar.server_btn_rect;
         bar.handle_pointer_down(server.x + server.w * 0.5, server.y + server.h * 0.5);
         assert_eq!(bar.take_action(), Some(TopBarAction::OpenServers));
+
+        let agent = bar.right_btn_rect;
+        bar.handle_pointer_down(agent.x + agent.w * 0.5, agent.y + agent.h * 0.5);
+        assert_eq!(bar.take_action(), Some(TopBarAction::OpenAgent));
     }
 
     #[test]

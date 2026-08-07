@@ -184,8 +184,10 @@ fn test_filtered_commands_case_insensitive() {
     let mut palette = CommandPalette::new();
     palette.query = "QUIT".to_string();
     let filtered = palette.filtered_rows();
-    assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].1.title(), "Quit");
+    assert!(filtered
+        .iter()
+        .any(|(_, row)| matches!(row, PaletteRow::Ex { name: "quit!", .. })));
 }
 
 #[test]
@@ -394,6 +396,22 @@ fn test_get_selected_action_with_filter() {
     palette.set_query("quit".to_string());
     let action = palette.get_selected_action();
     assert_eq!(action, Some(PaletteAction::Quit));
+}
+
+#[test]
+fn plain_command_search_includes_ex_command_hints() {
+    let mut palette = CommandPalette::new();
+    palette.set_query("qall".to_string());
+    let rows = palette.filtered_rows();
+    assert!(rows
+        .iter()
+        .any(|(_, row)| matches!(row, PaletteRow::Ex { name: "qall!", .. })));
+    let (_, row) = rows
+        .iter()
+        .find(|(_, row)| matches!(row, PaletteRow::Ex { name: "qall!", .. }))
+        .unwrap();
+    assert_eq!(row.display_title(), "neoism: qall!");
+    assert_eq!(row.shortcut(), "discard+quit workspace");
 }
 
 #[test]

@@ -94,7 +94,7 @@ impl NeoismAgentPane {
         // For a fresh run, show activity immediately. During an active run,
         // keep the current state and show the queued-message line instead.
         if !was_streaming {
-            self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+            self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
         let send_result = self.send_prompt(&prompt, !was_streaming);
         self.input_attachments.clear();
@@ -127,7 +127,7 @@ impl NeoismAgentPane {
         if !was_streaming {
             self.messages.push(NeoismAgentMessage::user(prompt.clone()));
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
-            self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+            self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
         self.abort_requested_at = None;
         match self.send_prompt(&prompt, !was_streaming) {

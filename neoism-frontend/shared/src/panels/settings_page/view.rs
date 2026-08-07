@@ -91,6 +91,7 @@ pub(crate) fn render(
         color: theme.u8(theme.fg),
         bold: false,
         italic: false,
+        extrude: false,
         font_id: None,
         clip_rect: Some(pane.panel_rect),
     };

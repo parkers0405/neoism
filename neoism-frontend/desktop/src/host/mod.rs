@@ -141,6 +141,7 @@ pub struct Renderer {
     pub vim_mode: bool,
     pub fps_counter: fps::FpsCounter,
     pub terminal_block_prompt_animating: bool,
+    pub terminal_splash_animating: bool,
     pub notebook_animating: bool,
     /// True while an animated shader overlay is applied. The overlay
     /// samples the wall clock per drawn frame, so it needs the loop to
@@ -415,6 +416,7 @@ impl Renderer {
             vim_mode: config.editor.vim_mode,
             fps_counter: fps::FpsCounter::default(),
             terminal_block_prompt_animating: false,
+            terminal_splash_animating: false,
             notebook_animating: false,
             shader_overlay_active: false,
             editor_scroll: editor_scroll::EditorScroll::new(),

@@ -1505,6 +1505,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                         font_size,
                         color: theme.u8(body_color),
                         bold: true,
+                        extrude: *level <= 3,
                         ..DrawOpts::default()
                     },
                     viewport_clip,

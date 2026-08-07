@@ -1158,6 +1158,39 @@ async fn edit_tool_rejects_patch_text_payloads() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn v4a_patch_does_not_partially_apply_when_later_file_fails() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-atomic-v4a-{}",
+        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("first.txt"), "before\n").unwrap();
+    std::fs::write(root.join("second.txt"), "current\n").unwrap();
+
+    let error = execute(
+        "apply_patch",
+        allow_context(&root),
+        json!({
+            "patchText": "*** Begin Patch\n*** Update File: first.txt\n@@\n-before\n+after\n*** Update File: second.txt\n@@\n-stale\n+changed\n*** End Patch"
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("patch context not found:\nstale"));
+    assert_eq!(
+        std::fs::read_to_string(root.join("first.txt")).unwrap(),
+        "before\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("second.txt")).unwrap(),
+        "current\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn advertised_tools_use_opencode_patch_contract() {
     let tools = list();

@@ -231,6 +231,7 @@ impl DaemonClientHandle {
             .map_err(|_| DaemonClientError::ChannelClosed)
     }
 
+    #[allow(dead_code)]
     pub async fn send_editor(&self, message: EditorClientMessage) -> Result<u64> {
         self.send_editor_with_workspace_root(message, None).await
     }
@@ -359,6 +360,7 @@ pub struct DaemonClient {
 }
 
 impl DaemonClient {
+    #[allow(dead_code)]
     pub async fn connect(endpoint: impl AsRef<str>) -> Result<Self> {
         let endpoint = DaemonEndpoint::parse(endpoint)?;
         Self::connect_with_options(DaemonClientOptions::new(endpoint)).await

@@ -36,6 +36,17 @@ pub fn rounded_rect_clipped(
     if fully_visible {
         let [x, y, w, h] = rect;
         sugarloaf.rounded_rect(id, x, y, w, h, color, depth, radius, order);
+    } else if (visible[0] - rect[0]).abs() < tolerance
+        && (visible[1] - rect[1]).abs() < tolerance
+        && (visible[2] - rect[2]).abs() < tolerance
+    {
+        // Only the bottom is clipped. Preserve the visible top corners by
+        // drawing a rounded visible slice and square-filling its clipped
+        // bottom radius. This is the common card-behind-composer case.
+        let [x, y, w, h] = visible;
+        sugarloaf.rounded_rect(id, x, y, w, h, color, depth, radius, order);
+        let fill_h = radius.min(h);
+        sugarloaf.rect(None, x, y + h - fill_h, w, fill_h, color, depth, order + 1);
     } else {
         let [x, y, w, h] = visible;
         sugarloaf.rect(id, x, y, w, h, color, depth, order);

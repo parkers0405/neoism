@@ -1578,6 +1578,7 @@ impl Screen<'_> {
         path: PathBuf,
     ) {
         let markdown_route = self.markdown_route_for_strip(source, &path);
+        let mut moved_focus = None;
         self.activate_remaining_tab_in_strip(source);
 
         match dest {
@@ -1647,6 +1648,7 @@ impl Screen<'_> {
                         .current_grid_mut()
                         .set_current_node(node, &mut self.sugarloaf);
                     self.context_manager.select_route_from_current_grid();
+                    moved_focus = Some((dest_route, target_route));
                 }
             }
         }
@@ -1678,6 +1680,32 @@ impl Screen<'_> {
                     }
                 }
             }
+        }
+        // Empty-source cleanup temporarily focuses the source node before
+        // removing it. Restore the moved Markdown route so the destination
+        // split's breadcrumbs are active on the first frame, not only after a
+        // later focus round-trip.
+        if let Some((dest_route, target_route)) = moved_focus {
+            if let Some(node) = self
+                .context_manager
+                .current_grid()
+                .node_by_route_id(target_route)
+            {
+                let _ = self
+                    .context_manager
+                    .current_grid_mut()
+                    .set_current_node(node, &mut self.sugarloaf);
+                self.context_manager.select_route_from_current_grid();
+            }
+            if let Some(active) = self
+                .renderer
+                .pane_tabs
+                .get(&dest_route)
+                .map(|tabs| tabs.active())
+            {
+                self.pane_tab_activate(dest_route, active);
+            }
+            self.reapply_chrome_layout();
         }
     }
 

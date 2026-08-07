@@ -194,12 +194,37 @@ impl Screen<'_> {
                     TrailCursorOverlayTarget::AgentInput,
                     tab_cursor_rect,
                 ) {
-                    self.draw_agent_input_trail_cursor_rect(
-                        rect,
-                        scale_factor,
-                        animation_dt_secs,
-                        cursor_blink_visible,
+                    let [x, y, w, h] = rect;
+                    self.renderer
+                        .trail_cursor
+                        .set_cursor_shape(neoism_terminal_core::ansi::CursorShape::Block);
+                    self.renderer.trail_cursor.set_destination(
+                        x * scale_factor,
+                        y * scale_factor,
+                        w * scale_factor,
+                        h * scale_factor,
                     );
+                    if self.renderer.trail_cursor_enabled {
+                        self.renderer.trail_cursor.animate(
+                            w * scale_factor,
+                            h * scale_factor,
+                            animation_dt_secs,
+                        );
+                    } else {
+                        self.renderer
+                            .trail_cursor
+                            .snap_to_destination(w * scale_factor, h * scale_factor);
+                    }
+                    if self.renderer.trail_cursor.is_animating() || cursor_blink_visible {
+                        let cursor_color = self.renderer.live_cursor_color();
+                        self.sugarloaf.set_late_overlay_mode(true);
+                        self.renderer.trail_cursor.draw_always(
+                            &mut self.sugarloaf,
+                            scale_factor,
+                            cursor_color,
+                        );
+                        self.sugarloaf.set_late_overlay_mode(false);
+                    }
                 }
             }
             Some(TrailCursorOverlayTarget::Code) => {

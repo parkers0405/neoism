@@ -18,7 +18,10 @@ use super::message_card::{measure_message_height, render_message_card};
 use super::tool_message::{
     cached_edit_diff_sections_for_parts, CachedToolDiffSections, ToolDiffSection,
 };
-use super::user_input::{render_streaming_status_row, streaming_status_line_count};
+use super::user_input::{
+    render_streaming_status_row, streaming_status_line_count,
+    streaming_status_primary_line_count,
+};
 use super::{DEPTH, ORDER_CARET, STREAMING_STATUS_LINE_H};
 use crate::primitives::ide_theme::IdeTheme;
 use crate::widgets::scrollbar;
@@ -117,12 +120,21 @@ pub trait AgentTimelineMessage: Clone {
     ) -> Self;
 }
 
-/// Whether viewport-only (lazy) timeline measurement is enabled, read once.
-/// Absent on wasm (where `var_os` returns `None`), so the web pane stays eager.
+/// Whether viewport-only timeline measurement is enabled, read once.
+/// Native panes default to lazy measurement so entering a long conversation
+/// never synchronously lays out the entire transcript. Set
+/// `NEOISM_AGENT_EAGER_TIMELINE=1` only for diagnostics/comparison.
 pub fn lazy_timeline_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("NEOISM_AGENT_LAZY_TIMELINE").is_some())
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::sync::OnceLock;
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("NEOISM_AGENT_EAGER_TIMELINE").is_none())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
 }
 
 pub trait AgentTimelinePane: AgentMarkdownPane {
@@ -133,6 +145,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     fn timeline_scroll_offset(&self) -> f32;
     fn has_active_selection(&self) -> bool;
     fn has_status_activity(&self) -> bool;
+    fn streaming_label(&self) -> String;
     /// First source row observed live during this visit to the session. `None`
     /// means the transcript is a reloaded, settled history projection.
     fn timeline_live_trace_start(&self) -> Option<usize>;
@@ -163,14 +176,10 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     fn uses_virtual_timeline(&self) -> bool {
         false
     }
-    /// Opt-in (env `NEOISM_AGENT_LAZY_TIMELINE`) viewport-only layout: on a full
-    /// rebuild, measure exactly only the rows from just above the viewport down
-    /// to the end, and cheaply *estimate* the off-screen prefix above. Keeps the
-    /// occasional full rebuild / huge-transcript load proportional to the
-    /// viewport instead of the whole history. Default off (and always off on
-    /// wasm, where the env var is absent) so the low-count scroll feel is
-    /// untouched. Streaming (dirty-tail patch) and pagination (prepend) still
-    /// run exact — only the full rebuild goes windowed.
+    /// Native viewport-only layout: on a full rebuild, measure exactly only
+    /// the rows from just above the viewport down to the end, and cheaply
+    /// estimate the off-screen prefix above. Streaming (dirty-tail patch) and
+    /// pagination (prepend) remain exact.
     fn timeline_lazy_measurement(&self) -> bool {
         lazy_timeline_enabled()
     }
@@ -422,6 +431,10 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
 
             fn has_status_activity(&self) -> bool {
                 <$pane>::has_status_activity(self)
+            }
+
+            fn streaming_label(&self) -> String {
+                <$pane>::streaming_label(self)
             }
 
             fn timeline_live_trace_start(&self) -> Option<usize> {

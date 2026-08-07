@@ -495,6 +495,11 @@ pub struct NeoismAgentSidePanel {
     /// the click handler can hit-test it and the focus model knows it is
     /// present. `None` when no Back button was drawn (genuine home view).
     back_button_rect: Option<[f32; 4]>,
+    hovered_session: Option<usize>,
+    session_hover_target: bool,
+    session_hover_scale: f32,
+    last_hover_frame: Instant,
+    back_scramble_started: Option<Instant>,
 }
 
 impl Default for NeoismAgentSidePanel {
@@ -546,6 +551,11 @@ impl Default for NeoismAgentSidePanel {
             show_home_override: false,
             back_focused: false,
             back_button_rect: None,
+            hovered_session: None,
+            session_hover_target: false,
+            session_hover_scale: 0.0,
+            last_hover_frame: Instant::now(),
+            back_scramble_started: None,
         }
     }
 }
@@ -605,6 +615,54 @@ impl NeoismAgentSidePanel {
         x >= bx && x <= bx + bw && y >= by && y <= by + bh
     }
 
+    pub fn tick_pointer_animations(&mut self, hovered_session: Option<usize>) {
+        let now = Instant::now();
+        let dt = now
+            .saturating_duration_since(self.last_hover_frame)
+            .as_secs_f32()
+            .min(0.05);
+        self.last_hover_frame = now;
+
+        if let Some(hovered) = hovered_session {
+            if Some(hovered) != self.hovered_session {
+                self.hovered_session = Some(hovered);
+                self.session_hover_scale = 0.0;
+            }
+        }
+        self.session_hover_target = hovered_session.is_some();
+        if self.hovered_session.is_none() {
+            self.session_hover_scale = 0.0;
+        }
+        let target = if self.session_hover_target { 1.0 } else { 0.0 };
+        let blend = 1.0 - (-dt * 18.0).exp();
+        self.session_hover_scale += (target - self.session_hover_scale) * blend;
+        if (self.session_hover_scale - target).abs() < 0.002 {
+            self.session_hover_scale = target;
+            if target == 0.0 {
+                self.hovered_session = None;
+            }
+        }
+    }
+
+    /// Start the Back-label scramble after an actual activation. Hovering and
+    /// view-label changes deliberately do not trigger this effect.
+    pub fn trigger_back_scramble(&mut self) {
+        self.back_scramble_started = Some(Instant::now());
+    }
+
+    pub fn hovered_session(&self) -> Option<usize> {
+        self.hovered_session
+    }
+
+    pub fn session_hover_scale(&self) -> f32 {
+        self.session_hover_scale
+    }
+
+    pub fn back_scramble_elapsed_ms(&self) -> Option<f32> {
+        let elapsed = self.back_scramble_started?.elapsed().as_secs_f32() * 1000.0;
+        (elapsed < 320.0).then_some(elapsed)
+    }
+
     /// Whether the selection cursor is on the "← Back" affordance. Only
     /// meaningful while a Back button is actually being drawn.
     pub fn back_focused(&self) -> bool {
@@ -635,6 +693,14 @@ impl NeoismAgentSidePanel {
 
     pub fn user_hidden(&self) -> bool {
         self.user_hidden
+    }
+
+    pub fn set_user_hidden(&mut self, hidden: bool) {
+        self.user_hidden = hidden;
+        if hidden {
+            self.focused = false;
+            self.selected_cursor_rect = None;
+        }
     }
 
     /// Toggle the panel's visibility. When hiding, also drops keyboard
@@ -1897,15 +1963,20 @@ impl NeoismAgentSidePanel {
     pub fn is_animating(&self) -> bool {
         self.scroll.is_animating()
                 || self.cursor_spring.position != 0.0
-                // The initial sessions skeleton uses the file-tree shimmer.
-                || (!self.sessions_loaded && !self.user_hidden)
-                // The semantic-search skeleton shimmers in the empty state.
-                || self.semantic_searching
+                // Loading states may remain visible during a slow/failed
+                // request, but their shimmer only owns frames briefly.
+                || (!self.sessions_loaded
+                    && !self.user_hidden
+                    && self.sessions_loading_elapsed() < 1.5)
+                || (self.semantic_searching && self.semantic_search_elapsed() < 1.5)
                 // A running sub-agent paints the rainbow loader spinner (and
                 // the blinking status dot), both of which need the host to
                 // keep redrawing — otherwise the spinner freezes on whatever
                 // frame the last event happened to land on.
                 || self.has_active_subagents()
+                || (self.session_hover_target && self.session_hover_scale < 0.998)
+                || (!self.session_hover_target && self.session_hover_scale > 0.002)
+                || self.back_scramble_elapsed_ms().is_some()
     }
 
     /// Map a window-space click to a row index. Returns `None` when

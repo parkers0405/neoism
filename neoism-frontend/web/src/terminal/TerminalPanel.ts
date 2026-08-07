@@ -2189,6 +2189,9 @@ export class TerminalPanel {
       if (!action) break;
       acted = true;
       switch (action) {
+        case "open_agent":
+          this.openNeoismAgentTab();
+          break;
         case "open_servers":
           // Web connection ownership lives above TerminalPanel; use the
           // existing host-provided workplace/server surface there.

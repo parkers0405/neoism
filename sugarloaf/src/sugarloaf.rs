@@ -70,6 +70,7 @@ pub struct Sugarloaf<'a> {
     /// Immediate-mode text recorder for labels that must render above
     /// late overlay quads, such as popover/menu items.
     overlay_text: crate::text::Text,
+    late_overlay_mode: bool,
     last_frame_presented: bool,
     /// Owned context (device + swapchain + queue). Last so the device
     /// outlives every Vulkan-handle-owning field above. See note at
@@ -354,6 +355,7 @@ impl Sugarloaf<'_> {
             text,
             image_overlays: rustc_hash::FxHashMap::default(),
             overlay_text,
+            late_overlay_mode: false,
             last_frame_presented: true,
         };
 
@@ -415,6 +417,7 @@ impl Sugarloaf<'_> {
             text,
             image_overlays: rustc_hash::FxHashMap::default(),
             overlay_text,
+            late_overlay_mode: false,
             last_frame_presented: true,
         })
     }
@@ -980,6 +983,10 @@ impl Sugarloaf<'_> {
         depth: f32,
         order: u8,
     ) {
+        if self.late_overlay_mode && id.is_none() {
+            self.overlay_rect(x, y, width, height, color, depth, order);
+            return;
+        }
         let scaled_x = x * self.state.style.scale_factor;
         let scaled_y = y * self.state.style.scale_factor;
         let scaled_width = width * self.state.style.scale_factor;
@@ -1026,6 +1033,19 @@ impl Sugarloaf<'_> {
         border_radius: f32,
         order: u8,
     ) {
+        if self.late_overlay_mode && id.is_none() {
+            self.overlay_rounded_rect(
+                x,
+                y,
+                width,
+                height,
+                color,
+                depth,
+                border_radius,
+                order,
+            );
+            return;
+        }
         let scaled_x = x * self.state.style.scale_factor;
         let scaled_y = y * self.state.style.scale_factor;
         let scaled_width = width * self.state.style.scale_factor;
@@ -1074,6 +1094,19 @@ impl Sugarloaf<'_> {
         depth: f32,
         order: u8,
     ) {
+        if self.late_overlay_mode {
+            self.overlay_quad(
+                x,
+                y,
+                width,
+                height,
+                background_color,
+                corner_radii,
+                depth,
+                order,
+            );
+            return;
+        }
         let scale = self.state.style.scale_factor;
         let scaled_x = x * scale;
         let scaled_y = y * scale;
@@ -1202,6 +1235,20 @@ impl Sugarloaf<'_> {
         order: u8,
     ) {
         let s = self.state.style.scale_factor;
+        if self.late_overlay_mode {
+            self.renderer.overlay_triangle_ordered(
+                x1 * s,
+                y1 * s,
+                x2 * s,
+                y2 * s,
+                x3 * s,
+                y3 * s,
+                depth,
+                color,
+                u8::MAX,
+            );
+            return;
+        }
         self.renderer.triangle_ordered(
             x1 * s,
             y1 * s,
@@ -1311,7 +1358,16 @@ impl Sugarloaf<'_> {
     /// time (Phase 1c; currently a no-op).
     #[inline]
     pub fn text_mut(&mut self) -> &mut crate::text::Text {
-        &mut self.text
+        if self.late_overlay_mode {
+            &mut self.overlay_text
+        } else {
+            &mut self.text
+        }
+    }
+
+    /// Route immediate-mode UI shapes and text into the late overlay pass.
+    pub fn set_late_overlay_mode(&mut self, enabled: bool) {
+        self.late_overlay_mode = enabled;
     }
 
     /// Immediate-mode text recorder for labels that should render

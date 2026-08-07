@@ -188,6 +188,7 @@ impl Screen<'_> {
                         // Enter on "← Back" flips the home-override view
                         // without touching the live conversation; keep the
                         // cursor on the affordance so it's reversible.
+                        agent.side_panel_mut().trigger_back_scramble();
                         agent.side_panel_mut().toggle_home_override();
                         agent.side_panel_mut().focus_back();
                     } else {
@@ -1088,6 +1089,7 @@ impl Screen<'_> {
                 if agent.side_panel().back_button_contains(mx, my) {
                     // "← Back" flips the home-override view; the live
                     // conversation stays open underneath.
+                    agent.side_panel_mut().trigger_back_scramble();
                     agent.side_panel_mut().toggle_home_override();
                     agent.side_panel_mut().focus_back();
                 } else if let Some(rect) = agent.side_panel().last_panel_rect() {

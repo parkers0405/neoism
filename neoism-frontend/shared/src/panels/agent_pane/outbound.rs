@@ -94,6 +94,11 @@ pub enum OutboundAgentCommand {
         visible: bool,
     },
 
+    /// Persist whether new Agent panes show their conversation sidebar.
+    SetSidebarVisible {
+        visible: bool,
+    },
+
     /// Pull the context-window cap for the currently-selected model.
     /// Hosts return the resolved value through pane setters; the
     /// command itself just signals the request.

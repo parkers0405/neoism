@@ -122,8 +122,8 @@ fn hints_command_toggles_row_and_reclaims_chat_space() {
     assert!(!pane.input_help_visible());
     assert_eq!(
         hidden_rect[1] - visible_rect[1],
-        28.0,
-        "hiding the row must move the composer into its reserved space"
+        22.0,
+        "hiding the compact footer must move the composer into its reserved space"
     );
     assert_eq!(
         pane.drain_pending_outbound(),
@@ -135,6 +135,20 @@ fn hints_command_toggles_row_and_reclaims_chat_space() {
     assert_eq!(
         pane.drain_pending_outbound(),
         vec![OutboundAgentCommand::SetInputHelpVisible { visible: true }]
+    );
+}
+
+#[test]
+fn sidebar_command_toggles_visibility_and_persists_default() {
+    let mut pane = NeoismAgentPane::default();
+    assert!(!pane.side_panel().user_hidden());
+
+    pane.execute_slash_text("/sidebar");
+
+    assert!(pane.side_panel().user_hidden());
+    assert_eq!(
+        pane.drain_pending_outbound(),
+        vec![OutboundAgentCommand::SetSidebarVisible { visible: false }]
     );
 }
 
@@ -1010,6 +1024,27 @@ fn running_background_task_count_tracks_started_and_collected_jobs() {
     assert_eq!(pane.running_background_task_count(), 0);
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
     assert!(!pane.background_task_details_expanded());
+}
+
+#[test]
+fn historical_unmatched_background_task_is_not_live_activity() {
+    let mut pane = NeoismAgentPane::default();
+    let mut started = NeoismAgentMessage::tool(
+        "Background Task",
+        "job_id: stale-job\nstatus: running\ncommand: cargo build",
+        "completed",
+        "background_task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    started.detail = started.text.clone();
+    pane.messages.push(started);
+
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert!(!pane.has_status_activity());
+    assert_eq!(pane.animation_reason(), None);
 }
 
 #[test]

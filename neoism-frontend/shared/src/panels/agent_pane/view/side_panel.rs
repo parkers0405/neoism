@@ -32,7 +32,9 @@ use crate::render_policy::{
 };
 use crate::widgets::frame::{draw_frame, FrameConfig, FrameCorners};
 
-use super::draw::{draw_text_clipped, push_image_overlay_clipped, wrap_text};
+use super::draw::{
+    draw_status_dot_text, draw_text_clipped, push_image_overlay_clipped, wrap_text,
+};
 use super::tool_message::{draw_checkbox, TodoVisualState, TODO_ROW_HEIGHT};
 /// Cap on tasks rendered inside the side panel — anything past this
 /// shows as a "+N more" footer rather than overflowing the panel.
@@ -293,11 +295,8 @@ pub fn carve_panel_rect<P: AgentSidePanelPane>(
     Some((main, panel))
 }
 
-// The side-panel open/close icon used to live here, painted into a
-// reserved bottom strip and / or a floating fallback at the bottom-
-// right of the pane. Both have been removed — the toggle is now in
-// the chrome top bar's right edge (see
-// `panels::chrome_topbar::TopBarAction::ToggleRightPanel`).
+// The side-panel open/close control remains pane-local; the top-bar Agent
+// icon is reserved for opening a new Agent tab.
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_side_panel<P: AgentSidePanelPane>(
@@ -307,6 +306,7 @@ pub fn render_side_panel<P: AgentSidePanelPane>(
     theme: &IdeTheme,
     s: f32,
     now_seconds: f32,
+    mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
 ) {
     render_side_panel_with_icons::<P, SharedAgentSidePanelIcons>(
@@ -316,6 +316,7 @@ pub fn render_side_panel<P: AgentSidePanelPane>(
         theme,
         s,
         now_seconds,
+        mouse,
         occlusion_rects,
     );
 }
@@ -328,6 +329,7 @@ pub fn render_side_panel_with_icons<P, I>(
     theme: &IdeTheme,
     s: f32,
     now_seconds: f32,
+    mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
 ) where
     P: AgentSidePanelPane,
@@ -342,8 +344,8 @@ pub fn render_side_panel_with_icons<P, I>(
     let frame_stroke = (FRAME_STROKE * s).max(2.0);
     let frame_radius = FRAME_RADIUS * s;
     // The bottom strip used to host the open/close toggle icon, but
-    // that icon now lives on the chrome top bar's right edge — so the
-    // frame takes the full panel height and there's no footer band.
+    // The sidebar uses the full panel height; its open/close controls are
+    // handled by the pane and `/sidebar`, not by a reserved footer strip.
     let frame_h = ph;
 
     draw_frame(
@@ -361,8 +363,7 @@ pub fn render_side_panel_with_icons<P, I>(
         ORDER_PANEL + 1,
     );
 
-    // Toggle hit rect is cleared so the old footer-click logic stops
-    // firing now that the icon has moved to the chrome top bar.
+    // No footer toggle is painted; clear its legacy hit rectangle.
     pane.side_panel_mut().clear_toggle_button_rect();
     let _ = occlusion_rects;
 
@@ -375,13 +376,21 @@ pub fn render_side_panel_with_icons<P, I>(
     // yet OR the user tapped "← Back" to peek at recent chats while keeping
     // the live one open (`show_home_override`). Chat mode (session info) is
     // shown otherwise.
-    let show_home = !pane.has_conversation() || pane.side_panel().show_home_override();
+    let conversation_exists = pane.has_conversation();
+    let show_home = !conversation_exists || pane.side_panel().show_home_override();
     let mode = if show_home {
         crate::panels::agent_pane::state::side_panel::SidePanelMode::Sessions
     } else {
         crate::panels::agent_pane::state::side_panel::SidePanelMode::Subagents
     };
     pane.side_panel_mut().set_mode(mode);
+    let hovered_session = mouse.and_then(|(mx, my)| {
+        show_home
+            .then(|| pane.side_panel().hit_test_row(mx, my, panel_rect))
+            .flatten()
+    });
+    pane.side_panel_mut()
+        .tick_pointer_animations(hovered_session);
 
     if show_home {
         render_sessions_list(
@@ -390,6 +399,7 @@ pub fn render_side_panel_with_icons<P, I>(
             [content_x, content_y, content_w, content_h],
             theme,
             s,
+            mouse,
             occlusion_rects,
             frame_radius - frame_stroke,
         );
@@ -401,6 +411,7 @@ pub fn render_side_panel_with_icons<P, I>(
             theme,
             s,
             now_seconds,
+            mouse,
             occlusion_rects,
             frame_radius - frame_stroke,
         );

@@ -20,6 +20,7 @@ pub struct ConfigDefaults {
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub input_help_visible: Option<bool>,
+    pub sidebar_visible: Option<bool>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -195,11 +196,17 @@ pub fn config_defaults_from_json(value: &Value) -> ConfigDefaults {
         .or_else(|| value.get("agentInputHints"))
         .or_else(|| value.get("agent_input_hints"))
         .and_then(Value::as_bool);
+    let sidebar_visible = value
+        .get("sidebar")
+        .or_else(|| value.get("sidebar-visible"))
+        .or_else(|| value.get("sidebarVisible"))
+        .and_then(Value::as_bool);
     ConfigDefaults {
         agent,
         model,
         thinking,
         input_help_visible,
+        sidebar_visible,
     }
 }
 

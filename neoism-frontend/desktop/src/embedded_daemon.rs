@@ -521,6 +521,7 @@ impl EmbeddedDaemonHandle {
     /// Path to the unix socket the embedded daemon is listening on.
     /// The (future) `DaemonClient` connects here.
     #[cfg(unix)]
+    #[allow(dead_code)]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }

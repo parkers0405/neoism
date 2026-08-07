@@ -47,6 +47,7 @@ mod tests {
 }
 
 impl<T: EventListener> ContextGrid<T> {
+    #[allow(dead_code)]
     pub(crate) fn clear_stack_metadata(&mut self, node: NodeId) {
         let old_parent = self.stacked_parents.remove(&node);
         self.stacked_nodes.retain(|stacked| *stacked != node);
@@ -372,6 +373,7 @@ impl<T: EventListener> ContextGrid<T> {
 
     /// Remove containers that have only one child by promoting the child
     /// to the container's parent. Repeats until no single-child containers remain.
+    #[allow(dead_code)]
     pub(crate) fn collapse_single_child_containers(&mut self) {
         loop {
             let mut collapsed = false;

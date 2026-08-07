@@ -1,3 +1,5 @@
+#![allow(dead_code)] // EPUB support is staged but not routed into the desktop shell yet.
+
 //! Native EPUB book model.
 //!
 //! EPUB is a ZIP container whose package document defines metadata, a

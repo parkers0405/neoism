@@ -2550,7 +2550,7 @@ mod tests {
     }
 
     #[test]
-    fn click_end_of_padded_single_line_heading_still_moves_to_source_end() {
+    fn normal_mode_click_moves_cursor_without_entering_insert() {
         let mut pane = pane_for_test();
         pane.lines = vec!["## short heading".to_string()];
         pane.register_block_rect(
@@ -2568,8 +2568,44 @@ mod tests {
 
         assert!(pane.click_at(128.0, 22.0));
 
-        assert_eq!(pane.mode, MarkdownMode::Insert);
+        assert_eq!(pane.mode, MarkdownMode::Normal);
         assert_eq!(pane.cursor_col, pane.lines[0].len());
+    }
+
+    #[test]
+    fn non_vim_click_keeps_direct_insert_editing() {
+        let mut pane = pane_for_test();
+        pane.vim_enabled = false;
+        pane.lines = vec!["plain text".to_string()];
+        pane.register_block_rect(
+            0,
+            [0.0, 0.0, 260.0, 44.0],
+            [-30.0, 0.0, 20.0, 44.0],
+            0.0,
+            18.0,
+            0,
+            10.0,
+            20.0,
+            220.0,
+            None,
+        );
+
+        assert!(pane.click_at(40.0, 22.0));
+        assert_eq!(pane.mode, MarkdownMode::Insert);
+    }
+
+    #[test]
+    fn vim_normal_mode_does_not_reveal_cursor_source_line() {
+        let mut pane = pane_for_test();
+        pane.cursor_line = 0;
+        pane.mode = MarkdownMode::Normal;
+        assert!(!pane.reveals_source_line(0));
+
+        pane.mode = MarkdownMode::Insert;
+        assert!(pane.reveals_source_line(0));
+
+        pane.vim_enabled = false;
+        assert!(pane.reveals_source_line(0));
     }
 
     #[test]

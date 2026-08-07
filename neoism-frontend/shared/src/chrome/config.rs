@@ -122,10 +122,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.show_file_tree();
                 }
             }
-            TopBarAction::ToggleRightPanel => {
-                if let Some(pane) = self.agent_pane.as_mut() {
-                    pane.side_panel_mut().toggle_visibility();
-                }
+            TopBarAction::OpenAgent => {
+                self.pending_top_bar_action = Some(TopBarAction::OpenAgent);
             }
             TopBarAction::OpenThemes => {
                 // Open the SAME theme picker the user gets from Cmd+P →
@@ -145,6 +143,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             }
             TopBarAction::OpenServers => {
                 self.pending_top_bar_action = Some(TopBarAction::OpenServers);
+            }
+            TopBarAction::OpenNotes => {
+                if !self.notes_sidebar.is_visible() {
+                    self.toggle_notes_sidebar();
+                }
+                self.pending_notes_refresh = true;
             }
             other => {
                 // No shared-hosted surface yet — store for the bridge to

@@ -814,7 +814,6 @@ impl NeoismAgentPane {
         &mut self,
         index: usize,
     ) {
-        self.refresh_background_task_activity_clock();
         self.timeline_dirty_message_indices.insert(index);
         self.timeline_content_revision = self.timeline_content_revision.wrapping_add(1);
     }
@@ -823,7 +822,6 @@ impl NeoismAgentPane {
         &mut self,
         index: usize,
     ) {
-        self.refresh_background_task_activity_clock();
         self.timeline_dirty_message_indices.insert(index);
         self.timeline_dirty_message_indices
             .insert(index.saturating_add(1));

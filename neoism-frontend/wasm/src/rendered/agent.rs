@@ -385,6 +385,7 @@ impl ChromeBridge {
                     if pane.side_panel().back_focused() {
                         // Enter on "← Back" flips the home-override view
                         // without touching the live conversation.
+                        pane.side_panel_mut().trigger_back_scramble();
                         pane.side_panel_mut().toggle_home_override();
                         pane.side_panel_mut().focus_back();
                     } else {
@@ -980,6 +981,7 @@ impl ChromeBridge {
                 if pane.side_panel().back_button_contains(x, y) {
                     // "← Back" flips the home-override view; the live
                     // conversation stays open underneath.
+                    pane.side_panel_mut().trigger_back_scramble();
                     pane.side_panel_mut().toggle_home_override();
                     pane.side_panel_mut().focus_back();
                 } else if let Some(rect) = pane.side_panel().last_panel_rect() {

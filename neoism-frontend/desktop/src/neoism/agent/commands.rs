@@ -67,6 +67,11 @@ impl NeoismAgentPane {
             SlashCommandAction::ToggleInputHelp => {
                 self.toggle_input_help();
             }
+            SlashCommandAction::ToggleSidebar => {
+                self.side_panel_mut().toggle_visibility();
+                let visible = !self.side_panel().user_hidden();
+                self.push_outbound(OutboundAgentCommand::SetSidebarVisible { visible });
+            }
             SlashCommandAction::PissOnScreen => self.start_fx_easter_egg(
                 neoism_ui::panels::agent_pane::view::fx::AgentFxKind::Piss,
             ),

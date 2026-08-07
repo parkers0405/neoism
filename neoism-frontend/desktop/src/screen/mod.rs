@@ -830,13 +830,10 @@ pub struct Screen<'screen> {
     file_tree_git_refresh_inflight: bool,
     file_tree_git_refresh_pending: bool,
     file_tree_git_self_event_suppressed_until: Option<Instant>,
-    /// A file row opened on mouse-PRESS (instant, matching keyboard
-    /// Enter) so the drag-release `Click` outcome must not re-open it.
-    /// Folders still toggle on release, so their drag doesn't toggle.
+    /// A file-tree row activated on mouse press, so drag-release `Click`
+    /// must not activate it a second time.
     file_tree_opened_on_press: bool,
-    /// The notes-sidebar counterpart of `file_tree_opened_on_press`: a
-    /// note opened on press so its drag-release `Click` doesn't re-open
-    /// it (folders still toggle on release).
+    /// Notes-sidebar counterpart of `file_tree_opened_on_press`.
     notes_sidebar_opened_on_press: bool,
     #[cfg(not(target_arch = "wasm32"))]
     acp_events_tx: std_mpsc::Sender<crate::neoism::acp::AcpUiEvent>,

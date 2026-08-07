@@ -150,7 +150,12 @@ impl Screen<'_> {
     fn load_bundled_extension_entries(&mut self) -> Vec<ExtensionEntry> {
         let notes_manifest = neoism_notes_mcp_manifest();
         let memory_manifest = neoism_memory_mcp_manifest();
-        let builtins = vec![notes_manifest.clone(), memory_manifest.clone()];
+        let docs_manifest = neoism_docs_mcp_manifest();
+        let builtins = vec![
+            notes_manifest.clone(),
+            memory_manifest.clone(),
+            docs_manifest.clone(),
+        ];
         let mut installed = ensure_builtin_mcp_installed(&builtins);
 
         // MCP entries: tag each with the literal "MCP Server" category
@@ -178,6 +183,7 @@ impl Screen<'_> {
         manifests.insert(0, python_kernel_manifest);
         manifests.insert(0, memory_manifest);
         manifests.insert(0, notes_manifest);
+        manifests.insert(0, docs_manifest);
 
         match neoism_extensions::reconcile_managed_installs(&manifests) {
             Ok(report) => {

@@ -449,7 +449,9 @@ impl MarkdownPane {
 
     #[inline]
     pub fn reveals_source_line(&self, line: usize) -> bool {
-        !self.read_only && self.cursor_line == line
+        !self.read_only
+            && self.cursor_line == line
+            && (!self.vim_enabled || self.mode == MarkdownMode::Insert)
     }
 
     pub fn block_rect_for_source_line(&self, line: usize) -> Option<MarkdownBlockRect> {

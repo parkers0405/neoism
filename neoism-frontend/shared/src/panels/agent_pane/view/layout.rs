@@ -123,11 +123,11 @@ pub fn chat_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
     // visible. `/hints` removes both the paint and this reservation so the
     // timeline/composer reclaim the full row.
     let help_h = if pane.input_help_visible() {
-        INPUT_HELP_STRIP_H
+        INPUT_HELP_STRIP_H - 6.0
     } else {
         0.0
     };
-    let bottom_pad = (14.0 + help_h) * s;
+    let bottom_pad = help_h * s;
     let input_h = pane.input_visual_row_count().map_or_else(
         || {
             input_height_for_width(
@@ -159,11 +159,11 @@ pub fn chat_input_rect_for_visual_rows(
     let [_x, y, _w, h] = rect;
     let (input_x, input_w) = chat_column(rect, s);
     let help_h = if pane.input_help_visible() {
-        INPUT_HELP_STRIP_H
+        INPUT_HELP_STRIP_H - 6.0
     } else {
         0.0
     };
-    let bottom_pad = (14.0 + help_h) * s;
+    let bottom_pad = help_h * s;
     let input_h = input_height_for_visual_rows(
         visual_rows,
         s,

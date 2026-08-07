@@ -416,6 +416,7 @@ pub struct UniversalModal {
     busy: bool,
     blocking: bool,
     opened_at: Instant,
+    top_anchor: f32,
 }
 
 impl Default for UniversalModal {
@@ -445,6 +446,7 @@ impl Default for UniversalModal {
             busy: false,
             blocking: true,
             opened_at: Instant::now(),
+            top_anchor: MODAL_MARGIN_TOP,
         }
     }
 }
@@ -460,6 +462,10 @@ impl UniversalModal {
 
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.clamp(0.5, 3.0);
+    }
+
+    pub fn set_top_anchor(&mut self, top: f32) {
+        self.top_anchor = top.max(0.0);
     }
 
     pub fn close(&mut self) {
@@ -1313,7 +1319,7 @@ impl UniversalModal {
             + actions_h
             + MODAL_PADDING * s;
         let x = (window_width / scale_factor - width) / 2.0;
-        let y = MODAL_MARGIN_TOP * s;
+        let y = self.top_anchor;
         (x, y, width, height)
     }
 

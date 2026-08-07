@@ -507,7 +507,18 @@ fn socket_path() -> PathBuf {
         .unwrap_or_else(|| {
             std::env::temp_dir().join(format!("neoism-{}", current_uid()))
         });
-    base.join("neoism").join("command.sock")
+    let install = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
+        .unwrap_or_default();
+    let mut install_hash = 0xcbf29ce484222325u64;
+    for byte in install.as_os_str().as_encoded_bytes() {
+        install_hash ^= u64::from(*byte);
+        install_hash = install_hash.wrapping_mul(0x100000001b3);
+    }
+    base.join("neoism")
+        .join(format!("command-{install_hash:016x}.sock"))
 }
 
 #[cfg(windows)]

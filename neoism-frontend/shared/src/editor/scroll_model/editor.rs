@@ -447,14 +447,17 @@ pub enum GlobalExCommandPlan {
     SplitRight,
     OpenEmptyBufferTab,
     OpenPathInEditor(String),
-    /// `:q` / `:quit` / `:close` — close the focused buffer tab.
-    CloseFocusedBufferTab,
+    /// `:q[!]` / `:quit[!]` / `:close[!]` — close the focused buffer tab.
+    CloseFocusedBufferTab {
+        discard: bool,
+    },
     /// `:wq` / `:x` / `:exit` — write the preferred editor route then
     /// close the focused buffer tab.
     WriteAndCloseFocusedBuffer,
-    /// `:qa` / `:qall` — close every file tab in the focused pane (or
-    /// workspace-wide if no split is focused).
-    CloseAllBuffersInFocusedPaneOrWorkspace,
+    /// `:qa[!]` / `:qall[!]` — close only the active workspace.
+    CloseActiveWorkspace {
+        discard: bool,
+    },
     /// `:wqa` / `:xa` — write all buffers (`wall`) then close every
     /// file tab.
     WriteAllAndCloseAllBuffers,
@@ -538,13 +541,15 @@ impl GlobalExCommandPlan {
                     Self::OpenPathInEditor(tail.to_string())
                 }
             }
-            "q" | "q!" | "quit" | "quit!" | "quite" | "quite!" | "close" | "close!" => {
-                Self::CloseFocusedBufferTab
+            "q" | "quit" | "quite" | "close" => {
+                Self::CloseFocusedBufferTab { discard: false }
+            }
+            "q!" | "quit!" | "quite!" | "close!" => {
+                Self::CloseFocusedBufferTab { discard: true }
             }
             "wq" | "wq!" | "x" | "x!" | "exit" => Self::WriteAndCloseFocusedBuffer,
-            "qa" | "qa!" | "quitall" | "quitall!" | "qall" | "qall!" => {
-                Self::CloseAllBuffersInFocusedPaneOrWorkspace
-            }
+            "qa" | "quitall" | "qall" => Self::CloseActiveWorkspace { discard: false },
+            "qa!" | "quitall!" | "qall!" => Self::CloseActiveWorkspace { discard: true },
             "wqa" | "wqa!" | "wqall" | "wqall!" | "xa" | "xa!" | "xall" => {
                 Self::WriteAllAndCloseAllBuffers
             }

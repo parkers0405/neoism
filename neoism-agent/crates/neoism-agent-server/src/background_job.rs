@@ -289,9 +289,9 @@ pub(crate) async fn stop_background_task(
     AxumPath((session_id, job_id)): AxumPath<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let jobs = state.inner.background_jobs.read().await;
-    let job = jobs
-        .get(&job_id)
-        .ok_or_else(|| ApiError::not_found(format!("background job {job_id} not found")))?;
+    let job = jobs.get(&job_id).ok_or_else(|| {
+        ApiError::not_found(format!("background job {job_id} not found"))
+    })?;
     if job.session_id != session_id {
         return Err(ApiError::not_found(format!(
             "background job {job_id} not found in session {session_id}"

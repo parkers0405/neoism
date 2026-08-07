@@ -31,6 +31,7 @@ fn measure_item(
                 ),
                 color: theme.u8(theme.fg),
                 bold: true,
+                extrude: level <= 3,
                 clip_rect: Some(clip),
                 font_id: md_font_id(sugarloaf),
                 ..DrawOpts::default()
@@ -317,11 +318,8 @@ fn measure_item(
                             .0;
                     inline_visual_row_count(&inline_lines)
                 };
-                let preview_h = pane.notebook_image_preview_extra_h(
-                    line_ix,
-                    width,
-                    font_scale,
-                );
+                let preview_h =
+                    pane.notebook_image_preview_extra_h(line_ix, width, font_scale);
                 height += lines as f32 * line_height(&opts) + preview_h;
                 visual_lines +=
                     lines + (preview_h / line_height(&opts)).ceil().max(0.0) as usize;
@@ -1512,64 +1510,64 @@ fn draw_markdown_line(
         );
         if !hides_attachment_source {
             draw_selection_for_line(
-            sugarloaf,
-            pane,
-            line_ix,
-            text,
-            text_x,
-            text_y,
-            marker_len,
-            line_h,
-            body_width,
-            &line_opts,
-            theme,
-            clip,
-            clip_top,
-            clip_bottom,
-            );
-            draw_search_matches_for_line(
-            sugarloaf,
-            pane,
-            line_ix,
-            text,
-            text_x,
-            text_y,
-            marker_len,
-            line_h,
-            body_width,
-            &line_opts,
-            theme,
-            clip,
-            clip_top,
-            clip_bottom,
-            );
-            draw_inline_wrapped_lines(
-            sugarloaf,
-            pane,
-            &inline_lines,
-            text_x,
-            text_y,
-            raw_hang,
-            &line_opts,
-            theme,
-            clip,
-            clip_top,
-            clip_bottom,
-            text_occlusions,
-            );
-            if checked_task {
-                draw_checked_task_strike(
                 sugarloaf,
-                &inline_lines,
+                pane,
+                line_ix,
+                text,
                 text_x,
                 text_y,
-                raw_hang,
+                marker_len,
                 line_h,
+                body_width,
                 &line_opts,
                 theme,
                 clip,
                 clip_top,
                 clip_bottom,
+            );
+            draw_search_matches_for_line(
+                sugarloaf,
+                pane,
+                line_ix,
+                text,
+                text_x,
+                text_y,
+                marker_len,
+                line_h,
+                body_width,
+                &line_opts,
+                theme,
+                clip,
+                clip_top,
+                clip_bottom,
+            );
+            draw_inline_wrapped_lines(
+                sugarloaf,
+                pane,
+                &inline_lines,
+                text_x,
+                text_y,
+                raw_hang,
+                &line_opts,
+                theme,
+                clip,
+                clip_top,
+                clip_bottom,
+                text_occlusions,
+            );
+            if checked_task {
+                draw_checked_task_strike(
+                    sugarloaf,
+                    &inline_lines,
+                    text_x,
+                    text_y,
+                    raw_hang,
+                    line_h,
+                    &line_opts,
+                    theme,
+                    clip,
+                    clip_top,
+                    clip_bottom,
                 );
             }
         }

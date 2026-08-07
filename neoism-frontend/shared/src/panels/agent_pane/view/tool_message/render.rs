@@ -13,57 +13,6 @@ fn tool_message_accent(status: &str, theme: &IdeTheme) -> u32 {
     }
 }
 
-/// Fit a tool title to `avail_w`, middle-truncating with an ellipsis when it
-/// would overflow. A tool call like `McpNeoismMemoryMemoryRead(a/very/long/
-/// path.md)  completed` is one whitespace-free token, so it can't soft-wrap —
-/// left unbounded it runs off the pane, through the scrollbar and into the
-/// usage sidebar. Keeping the head (tool name) and tail (arg end + status)
-/// while eliding the middle preserves the useful parts on one line.
-fn fit_tool_title(
-    sugarloaf: &mut Sugarloaf,
-    title: &str,
-    avail_w: f32,
-    opts: &DrawOpts,
-) -> String {
-    if avail_w <= 0.0 {
-        return String::new();
-    }
-    if sugarloaf.text_mut().measure(title, opts) <= avail_w {
-        return title.to_string();
-    }
-    let chars: Vec<char> = title.chars().collect();
-    let n = chars.len();
-    if n <= 3 {
-        return title.to_string();
-    }
-    // `keep` = total chars retained across head+tail (~55% head so the tool
-    // name stays readable, ~45% tail so the file extension and status show).
-    let build = |keep: usize| -> String {
-        let head_len = (keep * 11 / 20).max(1);
-        let tail_len = keep.saturating_sub(head_len);
-        let head: String = chars[..head_len.min(n)].iter().collect();
-        let tail: String = chars[n.saturating_sub(tail_len)..].iter().collect();
-        format!("{head}…{tail}")
-    };
-    // Binary-search the largest `keep` whose elided form still fits.
-    let mut lo = 1usize;
-    let mut hi = n.saturating_sub(1);
-    let mut best = String::from("…");
-    while lo <= hi {
-        let mid = (lo + hi) / 2;
-        let candidate = build(mid);
-        if sugarloaf.text_mut().measure(&candidate, opts) <= avail_w {
-            best = candidate;
-            lo = mid + 1;
-        } else if mid == 0 {
-            break;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    best
-}
-
 /// Height of an archived, unexpanded tool card: just the header row (status
 /// dot + title). The body only exists after a click.
 fn minimal_tool_header_height(s: f32) -> f32 {
@@ -80,7 +29,26 @@ pub fn measure_tool_message_height(
     selected_group_child: Option<&str>,
 ) -> Option<f32> {
     if message.is_todos_output() {
-        return None;
+        let opts = DrawOpts {
+            font_size: 14.0 * s,
+            ..DrawOpts::default()
+        };
+        let rows = message
+            .todos()
+            .iter()
+            .take(12)
+            .map(|todo| {
+                wrap_todo_text(
+                    sugarloaf,
+                    todo.content(),
+                    (width - 86.0 * s).max(40.0 * s),
+                    &opts,
+                )
+                .len()
+            })
+            .sum::<usize>()
+            .max(1);
+        return Some(42.0 * s + rows as f32 * TODO_ROW_HEIGHT * s);
     }
     // Settled turns keep tool/edit cards folded to their header line — the
     // transcript shows what ran without replaying every byte. A click
@@ -107,8 +75,24 @@ pub fn measure_tool_message_height(
         return Some(height.max(58.0 * s));
     }
 
+    let title_opts = DrawOpts {
+        font_size: 15.5 * s,
+        bold: true,
+        ..DrawOpts::default()
+    };
+    let title_extra = wrap_text(
+        sugarloaf,
+        &message.title_text(),
+        (width - 46.0 * s).max(40.0 * s),
+        &title_opts,
+        4,
+    )
+    .len()
+    .saturating_sub(1) as f32
+        * 20.0
+        * s;
     if minimal {
-        return Some(minimal_tool_header_height(s));
+        return Some(minimal_tool_header_height(s) + title_extra);
     }
 
     if message.tool() == "tool_group" {
@@ -144,7 +128,9 @@ pub fn measure_tool_message_height(
         .saturating_sub(max_lines);
     let has_hint = extra > 0 || (!message.detail().trim().is_empty() && !expanded);
     Some(
-        (28.0 * s + (rows.len() + has_hint as usize).max(1) as f32 * 20.0 * s)
+        (28.0 * s
+            + title_extra
+            + (rows.len() + has_hint as usize).max(1) as f32 * 20.0 * s)
             .max(58.0 * s),
     )
 }
@@ -218,18 +204,16 @@ pub fn render_tool_message(
         pane.register_tool_hit_rect(message.id().to_string(), [x, y, w, h]);
     }
     let accent = tool_message_accent(message.status(), theme);
-    // Tighter status bullet — a 7px dot reads as a neat bullet next to
-    // the tool title instead of a big circle. Vertically centered on the
-    // title's optical middle (title is drawn at y+2 with a 15.5px font,
-    // whose center sits ~y+10.75) so the dot lines up with the text
-    // instead of sinking to the bottom of the row.
-    draw_rounded_rect_clipped(
+    draw_status_dot_text(
         sugarloaf,
-        [x + 3.5 * s, y + 7.0 * s, 7.0 * s, 7.0 * s],
-        theme.f32(accent),
-        3.5 * s,
-        ORDER_TEXT,
+        x + 3.5 * s,
+        y + 7.0 * s,
+        7.0 * s,
+        theme.u8(accent),
+        (message.status() == "completed").then_some((theme.u8(accent), 0.35)),
         message_clip,
+        occlusion_rects,
+        s,
     );
     let Some(title_opts) = opts_with_clip(
         DrawOpts {
@@ -246,13 +230,13 @@ pub fn render_tool_message(
     // spans [x+58s, x+w-24s]); the title starts at x+22s. Without this a long
     // tool title runs off the pane, over the scrollbar and into the sidebar.
     let title_avail_w = (w - 46.0 * s).max(40.0 * s);
-    let title_text =
-        fit_tool_title(sugarloaf, &message.title_text(), title_avail_w, &title_opts);
+    let title_text = message.title_text();
+    let title_lines = wrap_text(sugarloaf, &title_text, title_avail_w, &title_opts, 4);
     if !suppress_interactions {
-        let title_w = sugarloaf
-            .text_mut()
-            .measure(&title_text, &title_opts)
-            .max(12.0);
+        let title_w = title_lines
+            .iter()
+            .map(|line| sugarloaf.text_mut().measure(line, &title_opts))
+            .fold(12.0_f32, f32::max);
         let title_sel = pane.register_selectable_line(
             &title_text,
             [
@@ -278,21 +262,24 @@ pub fn render_tool_message(
             );
         }
     }
-    draw_tool_title(
-        sugarloaf,
-        x + 22.0 * s,
-        y + 2.0 * s,
-        &title_text,
-        &title_opts,
-        theme,
-        occlusion_rects,
-    );
+    for (line_index, line) in title_lines.iter().enumerate() {
+        draw_tool_title(
+            sugarloaf,
+            x + 22.0 * s,
+            y + 2.0 * s + line_index as f32 * 20.0 * s,
+            line,
+            &title_opts,
+            theme,
+            occlusion_rects,
+        );
+    }
+    let title_offset = title_lines.len().saturating_sub(1) as f32 * 20.0 * s;
 
     if message.is_todos_output() {
         render_tool_todos(
             sugarloaf,
             x + 30.0 * s,
-            y + 28.0 * s,
+            y + 28.0 * s + title_offset,
             w - 40.0 * s,
             message.todos(),
             theme,
@@ -334,7 +321,7 @@ pub fn render_tool_message(
             pane,
             message,
             x,
-            y + 30.0 * s,
+            y + 30.0 * s + title_offset,
             w,
             sections,
             theme,
@@ -367,7 +354,7 @@ pub fn render_tool_message(
     ) else {
         return h;
     };
-    let mut line_y = y + 26.0 * s;
+    let mut line_y = y + 26.0 * s + title_offset;
     // Connector glyph "╰─" is ~24*s wide at font_size 14 — start
     // it at x+28*s, leave a small gap, then place text at x+58*s so the
     // glyph and the row label never overlap.
@@ -913,13 +900,27 @@ pub fn render_tool_todos<Todo: AgentToolTodo>(
     let mut muted = opts;
     muted.color = theme.u8(theme.muted);
     let mut line_y = y;
+    let todo_rows = todos
+        .iter()
+        .take(12)
+        .map(|todo| {
+            wrap_todo_text(
+                sugarloaf,
+                todo.content(),
+                (w - 46.0 * s).max(40.0 * s),
+                &opts,
+            )
+            .len()
+        })
+        .sum::<usize>()
+        .max(1);
     draw_rect_clipped(
         sugarloaf,
         [
             x,
             y - 4.0 * s,
             1.0 * s,
-            (todos.len().max(1) as f32 * TODO_ROW_HEIGHT * s).max(0.0),
+            todo_rows as f32 * TODO_ROW_HEIGHT * s,
         ],
         theme.f32(theme.border),
         ORDER_TEXT,
@@ -950,14 +951,21 @@ pub fn render_tool_todos<Todo: AgentToolTodo>(
         let mut text_opts = opts;
         text_opts.color = state.text_color(theme);
         text_opts.bold = state.text_bold();
-        draw_text_clipped(
+        for line in wrap_todo_text(
             sugarloaf,
-            x + 46.0 * s,
-            line_y,
-            &truncate_chars(todo.content(), ((w / (8.0 * s)).floor().max(12.0)) as usize),
+            todo.content(),
+            (w - 46.0 * s).max(40.0 * s),
             &text_opts,
-            occlusion_rects,
-        );
-        line_y += TODO_ROW_HEIGHT * s;
+        ) {
+            draw_text_clipped(
+                sugarloaf,
+                x + 46.0 * s,
+                line_y,
+                &line,
+                &text_opts,
+                occlusion_rects,
+            );
+            line_y += TODO_ROW_HEIGHT * s;
+        }
     }
 }

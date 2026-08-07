@@ -233,6 +233,11 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_set_input_help_visible(inner, visible).await;
             });
         }
+        AgentClientMessage::SetSidebarVisible { visible } => {
+            tokio::spawn(async move {
+                handle_set_sidebar_visible(inner, visible).await;
+            });
+        }
         AgentClientMessage::ListAgents { directory } => {
             tokio::spawn(async move {
                 handle_list_agents(inner, directory).await;

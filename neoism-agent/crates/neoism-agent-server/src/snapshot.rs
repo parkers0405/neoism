@@ -495,7 +495,7 @@ fn snapshot_path(root: &Path, snapshot: &FileSnapshot) -> PathBuf {
     }
 }
 
-fn write_state(path: &Path, state: &FileState) -> anyhow::Result<()> {
+pub(crate) fn write_state(path: &Path, state: &FileState) -> anyhow::Result<()> {
     match state.bytes()? {
         Some(bytes) => {
             if let Some(parent) = path.parent() {

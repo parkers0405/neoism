@@ -34,6 +34,11 @@ const DESKTOP_MIME_TYPES: &str = "text/markdown;application/json;\
     text/html;text/css;text/plain;application/x-ipynb+json;";
 
 pub fn spawn() {
+    // Development binaries must not rewrite the installed desktop launcher,
+    // icon cache, or PATH integration while being tested alongside release.
+    if cfg!(debug_assertions) {
+        return;
+    }
     #[cfg(windows)]
     let windows_exe = install_windows_stack();
     std::thread::Builder::new()

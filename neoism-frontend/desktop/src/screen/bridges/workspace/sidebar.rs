@@ -172,23 +172,22 @@ impl Screen<'_> {
                 }
             }
             NotesSidebarHit::Note(index) => {
-                // Select the row now, but ARM a Finder-style drag and
-                // DEFER the folder toggle to release: a plain click
-                // toggles/opens, a press+drag MOVES. Mirrors the file
-                // tree. A NOTE opens on press (instant, like Enter);
-                // FOLDERS toggle on release so a folder drag doesn't flip
-                // them open/closed mid-grab.
+                // Arm a Finder-style drag first, then activate immediately.
+                // The drag stores the source path, so toggling a folder and
+                // rebuilding rows does not lose a later threshold-crossing drag.
                 self.renderer.notes_sidebar.set_selected(index);
                 let (mx, my) = self.mouse_logical_for_hit_test();
                 self.notes_sidebar_opened_on_press = false;
                 if self.renderer.notes_sidebar.begin_notes_drag(index, mx, my) {
-                    if !self.renderer.notes_sidebar.note_is_dir(index) {
+                    if self.renderer.notes_sidebar.note_is_dir(index) {
+                        self.renderer.notes_sidebar.toggle_selected_dir();
+                    } else {
                         self.renderer.notes_sidebar.set_focused(false);
                         if let Some(path) = self.renderer.notes_sidebar.note_path(index) {
                             self.open_path_from_notes_sidebar(path);
                         }
-                        self.notes_sidebar_opened_on_press = true;
                     }
+                    self.notes_sidebar_opened_on_press = true;
                 } else if self.renderer.notes_sidebar.note_is_dir(index) {
                     // Path-less row (shouldn't happen): activate as before.
                     self.renderer.notes_sidebar.toggle_selected_dir();
@@ -243,8 +242,7 @@ impl Screen<'_> {
         }
         let opened_on_press = std::mem::take(&mut self.notes_sidebar_opened_on_press);
         match self.renderer.notes_sidebar.end_notes_drag() {
-            // A note already opened on press; only a folder (deferred)
-            // still needs its toggle here.
+            // The row already activated on press.
             NotesDropOutcome::Click if opened_on_press => {}
             NotesDropOutcome::Click => {
                 let index = self.renderer.notes_sidebar.selected_index();

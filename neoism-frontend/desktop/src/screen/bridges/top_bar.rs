@@ -25,20 +25,8 @@ impl Screen<'_> {
                 self.toggle_file_tree();
                 true
             }
-            Some(TopBarAction::ToggleRightPanel) => {
-                if self.context_manager.current().neoism_agent.is_some() {
-                    // On an agent tab: toggle its recent-chats side rail.
-                    if let Some(agent) =
-                        self.context_manager.current_mut().neoism_agent.as_mut()
-                    {
-                        agent.side_panel_mut().toggle_visibility();
-                    }
-                } else {
-                    // Elsewhere: open (or focus an existing) agent tab —
-                    // the always-present icon's primary job, mirroring how
-                    // the tree toggle opens the tree from anywhere.
-                    self.open_neoism_agent_tab();
-                }
+            Some(TopBarAction::OpenAgent) => {
+                self.open_neoism_agent_tab();
                 self.mark_dirty();
                 true
             }
@@ -72,6 +60,10 @@ impl Screen<'_> {
             }
             Some(TopBarAction::OpenSearch) => {
                 self.open_finder_files();
+                true
+            }
+            Some(TopBarAction::OpenNotes) => {
+                self.open_neoism_notes_sidebar();
                 true
             }
             Some(TopBarAction::OpenAbout) => {
@@ -160,6 +152,7 @@ impl Screen<'_> {
     }
 
     /// Hover router for the settings panel.
+    #[allow(dead_code)]
     pub fn handle_settings_hover(&mut self) -> bool {
         if !self.renderer.settings.is_active() {
             return false;

@@ -49,6 +49,7 @@ impl Renderer {
         focused_match: &Option<RangeInclusive<Pos>>,
     ) -> (Option<crate::context::renderable::WindowUpdate>, bool) {
         let mut any_panel_dirty = false;
+        self.terminal_splash_animating = false;
         let grid = context_manager.current_grid_mut();
         let active_key = grid.current;
         let visible_nodes: Vec<_> = grid
@@ -669,6 +670,7 @@ impl Renderer {
             let needs_render = injection.is_some()
                 && (wants_visible || self.splash_overlay.is_dismissing());
             if needs_render {
+                self.terminal_splash_animating = true;
                 let injection = injection.unwrap();
                 let dim = grid_context.val.dimension;
                 let cell_w = dim.dimension.width.round().max(1.0) / scale_factor;
@@ -799,6 +801,13 @@ impl Renderer {
         // space above the strips.
         let num_tabs = context_manager.len();
         let chrome_top = self.chrome_top(num_tabs);
+        let overlay_top =
+            (chrome_top + self.buffer_tabs.height() + 8.0 * self.chrome_scale())
+                * scale_factor;
+        self.command_palette.set_top_anchor(overlay_top);
+        self.finder.set_top_anchor(overlay_top);
+        self.search.set_top_anchor(overlay_top);
+        self.modal.set_top_anchor(overlay_top);
         let logical_height = window_size.height as f32 / scale_factor;
         // Window-top chrome strip moved to the very end of `run`
         // (search "TOP BAR LAST PASS") so its dropdown's block-glyph

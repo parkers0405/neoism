@@ -544,8 +544,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.trail_cursor
                         .set_cursor_shape(neoism_terminal_core::ansi::CursorShape::Block);
                     self.trail_cursor.set_destination(x, y, w, h);
-                    self.trail_cursor.snap_to_destination(w, h);
+                    sugarloaf.set_late_overlay_mode(true);
                     self.trail_cursor.draw_always(sugarloaf, 1.0, cursor_color);
+                    sugarloaf.set_late_overlay_mode(false);
                 }
             }
             Some(TrailCursorOverlayTarget::Markdown) => {

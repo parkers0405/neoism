@@ -15,6 +15,11 @@ struct PatchMutation {
     before_states: BTreeMap<std::path::PathBuf, crate::snapshot::FileState>,
 }
 
+enum PlannedFile {
+    Write(String),
+    Delete,
+}
+
 pub(super) async fn apply_patch_tool(
     context: ToolContext,
     arguments: Value,
@@ -188,6 +193,9 @@ fn apply_v4a_patch_locked(
     let mut before_states = BTreeMap::new();
     let mut touched: Vec<String> = Vec::new();
     let mut diagnostic_paths = Vec::new();
+    let mut virtual_files: BTreeMap<std::path::PathBuf, Option<String>> = BTreeMap::new();
+    let mut planned_files: BTreeMap<std::path::PathBuf, PlannedFile> = BTreeMap::new();
+
     for hunk in &hunks {
         let path_str = match hunk {
             patch::V4AHunk::Add { path, .. }
@@ -195,42 +203,37 @@ fn apply_v4a_patch_locked(
             | patch::V4AHunk::Update { path, .. } => path.clone(),
         };
         let target = project_path_for_write(&context, &path_str)?;
-        before_states.insert(
-            target.clone(),
-            crate::snapshot::FileState::from_path(&target)?,
-        );
+        before_states
+            .entry(target.clone())
+            .or_insert(crate::snapshot::FileState::from_path(&target)?);
         if let patch::V4AHunk::Update {
             move_path: Some(new_path),
             ..
         } = hunk
         {
             let new_target = project_path_for_write(&context, new_path)?;
-            before_states.insert(
-                new_target.clone(),
-                crate::snapshot::FileState::from_path(&new_target)?,
-            );
+            before_states
+                .entry(new_target.clone())
+                .or_insert(crate::snapshot::FileState::from_path(&new_target)?);
         }
         match hunk {
             patch::V4AHunk::Add { path, contents } => {
-                if target.exists() {
+                let current = virtual_file(&mut virtual_files, &target)?;
+                if current.is_some() {
                     anyhow::bail!("cannot add {path}: file already exists");
                 }
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).with_context(|| {
-                        format!("failed to create parent directory for {path}")
-                    })?;
-                }
-                std::fs::write(&target, contents.as_bytes())
-                    .with_context(|| format!("failed to add file {path}"))?;
+                virtual_files.insert(target.clone(), Some(contents.clone()));
+                planned_files
+                    .insert(target.clone(), PlannedFile::Write(contents.clone()));
                 diagnostic_paths.push(target.clone());
                 touched.push(path.clone());
             }
             patch::V4AHunk::Delete { path } => {
-                if !target.is_file() {
+                if virtual_file(&mut virtual_files, &target)?.is_none() {
                     anyhow::bail!("cannot delete {path}: file does not exist");
                 }
-                std::fs::remove_file(&target)
-                    .with_context(|| format!("failed to delete file {path}"))?;
+                virtual_files.insert(target.clone(), None);
+                planned_files.insert(target.clone(), PlannedFile::Delete);
                 touched.push(path.clone());
             }
             patch::V4AHunk::Update {
@@ -238,13 +241,14 @@ fn apply_v4a_patch_locked(
                 move_path,
                 chunks,
             } => {
-                if !target.is_file() {
-                    anyhow::bail!("cannot update {path}: file does not exist");
-                }
-                let original = std::fs::read_to_string(&target)
-                    .with_context(|| format!("failed to read {path}"))?;
-                let patched = patch::apply_chunks(&original, chunks)
-                    .with_context(|| format!("failed to apply V4A chunks to {path}"))?;
+                let original =
+                    virtual_file(&mut virtual_files, &target)?.ok_or_else(|| {
+                        anyhow::anyhow!("cannot update {path}: file does not exist")
+                    })?;
+                let patched =
+                    patch::apply_chunks(&original, chunks).map_err(|error| {
+                        anyhow::anyhow!("failed to apply V4A chunks to {path}: {error:#}")
+                    })?;
                 let current = patch::join_bom(&patched.text, patched.bom);
                 if let Some(new_path) = move_path {
                     let new_target = project_path_for_write(&context, new_path)?;
@@ -252,31 +256,75 @@ fn apply_v4a_patch_locked(
                         "edit",
                         &display_path(&context.cwd, &new_target),
                     )?;
-                    if new_target.exists() {
+                    if virtual_file(&mut virtual_files, &new_target)?.is_some() {
                         anyhow::bail!(
                             "cannot move {path} to {new_path}: target already exists"
                         );
                     }
-                    if let Some(parent) = new_target.parent() {
-                        std::fs::create_dir_all(parent).with_context(|| {
-                            format!("failed to create parent directory for {new_path}")
-                        })?;
-                    }
-                    std::fs::write(&new_target, current.as_bytes())
-                        .with_context(|| format!("failed to write {new_path}"))?;
-                    std::fs::remove_file(&target)
-                        .with_context(|| format!("failed to remove old path {path}"))?;
+                    virtual_files.insert(target.clone(), None);
+                    virtual_files.insert(new_target.clone(), Some(current.clone()));
+                    planned_files.insert(target.clone(), PlannedFile::Delete);
+                    planned_files.insert(new_target.clone(), PlannedFile::Write(current));
                     diagnostic_paths.push(new_target.clone());
                     touched.push(format!("{path} -> {new_path}"));
                 } else {
-                    std::fs::write(&target, current.as_bytes())
-                        .with_context(|| format!("failed to write {path}"))?;
+                    virtual_files.insert(target.clone(), Some(current.clone()));
+                    planned_files.insert(target.clone(), PlannedFile::Write(current));
                     diagnostic_paths.push(target.clone());
                     touched.push(path.clone());
                 }
             }
         }
     }
+
+    // Do not touch disk until every chunk in every file has resolved. A stale
+    // hunk therefore cannot leave an earlier file partially patched.
+    let write_result: anyhow::Result<()> = (|| {
+        for (target, planned) in planned_files {
+            match planned {
+                PlannedFile::Write(contents) => {
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent).with_context(|| {
+                            format!(
+                                "failed to create parent directory for {}",
+                                target.display()
+                            )
+                        })?;
+                    }
+                    std::fs::write(&target, contents.as_bytes()).with_context(|| {
+                        format!("failed to write {}", target.display())
+                    })?;
+                }
+                PlannedFile::Delete => {
+                    if target.exists() {
+                        std::fs::remove_file(&target).with_context(|| {
+                            format!("failed to delete {}", target.display())
+                        })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let rollback_errors = before_states
+            .iter()
+            .filter_map(|(path, state)| {
+                crate::snapshot::write_state(path, state)
+                    .err()
+                    .map(|rollback| format!("{}: {rollback:#}", path.display()))
+            })
+            .collect::<Vec<_>>();
+        if rollback_errors.is_empty() {
+            return Err(error)
+                .context("patch commit failed; all touched files were restored");
+        }
+        anyhow::bail!(
+            "patch commit failed: {error:#}; rollback also failed for: {}",
+            rollback_errors.join("; ")
+        );
+    }
+
     Ok(PatchMutation {
         touched,
         diagnostic_paths,
@@ -323,4 +371,23 @@ fn apply_v4a_patch_metadata(
         output,
         metadata: Some(metadata),
     })
+}
+
+fn virtual_file(
+    files: &mut BTreeMap<std::path::PathBuf, Option<String>>,
+    path: &std::path::Path,
+) -> anyhow::Result<Option<String>> {
+    if let Some(contents) = files.get(path) {
+        return Ok(contents.clone());
+    }
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {}", path.display()))
+        }
+    };
+    files.insert(path.to_path_buf(), contents.clone());
+    Ok(contents)
 }

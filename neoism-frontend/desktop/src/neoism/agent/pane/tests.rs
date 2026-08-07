@@ -195,6 +195,27 @@ fn completed_background_task_tool_is_not_counted_as_running() {
 }
 
 #[test]
+fn historical_unmatched_background_task_is_not_live_activity() {
+    let mut pane = NeoismAgentPane::default();
+    let mut started = NeoismAgentMessage::tool(
+        "Background Task",
+        "job_id: stale-job\nstatus: running\ncommand: cargo build",
+        "completed",
+        "background_task",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    started.detail = started.text.clone();
+    pane.messages.push(started);
+
+    assert_eq!(pane.running_background_task_count(), 0);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert!(!pane.has_status_activity());
+    assert_eq!(pane.animation_reason(), None);
+}
+
+#[test]
 fn runtime_background_finish_notice_clears_running_job() {
     let mut pane = NeoismAgentPane::default();
     let mut started = NeoismAgentMessage::tool(

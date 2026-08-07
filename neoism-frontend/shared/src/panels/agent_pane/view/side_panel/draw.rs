@@ -1,57 +1,46 @@
 use super::sections::{render_directory_section, render_section_header};
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_status_dot_text(
+const SCRAMBLE_MS: f32 = 320.0;
+const SCRAMBLE_GLYPHS: &[char] = &['#', '@', '%', '&', '*', '+', '?', '/', '~', '='];
+
+fn render_scramble_text(
     sugarloaf: &mut Sugarloaf,
     x: f32,
     y: f32,
-    diameter: f32,
-    color: [u8; 4],
-    halo: Option<([u8; 4], f32)>,
-    clip: [f32; 4],
-    occlusion_rects: &[[f32; 4]],
-    s: f32,
+    text: &str,
+    opts: &DrawOpts,
+    elapsed_ms: f32,
 ) {
-    let dot = "●";
-    let font_size = (diameter * 1.55).max(10.0 * s);
-    if let Some((mut halo_color, halo_alpha)) = halo {
-        halo_color[3] = ((halo_color[3] as f32) * halo_alpha.clamp(0.0, 1.0)) as u8;
-        let halo_size = font_size * 1.65;
-        let halo_opts = DrawOpts {
-            font_size: halo_size,
-            color: halo_color,
-            bold: true,
-            clip_rect: Some(clip),
-            ..DrawOpts::default()
+    let colors = [
+        [255, 82, 82, 255],
+        [255, 184, 77, 255],
+        [255, 235, 59, 255],
+        [105, 240, 174, 255],
+        [77, 208, 225, 255],
+        [100, 149, 237, 255],
+        [186, 104, 200, 255],
+    ];
+    let progress = (elapsed_ms / SCRAMBLE_MS).clamp(0.0, 1.0);
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut draw_x = x;
+    for (index, target) in chars.iter().copied().enumerate() {
+        let settle_at = 0.35 + 0.65 * (index as f32 + 1.0) / chars.len().max(1) as f32;
+        let settled = progress >= settle_at || target.is_whitespace();
+        let tick = (elapsed_ms / 34.0).floor() as usize;
+        let glyph = if settled {
+            target
+        } else {
+            SCRAMBLE_GLYPHS[(tick + index * 3) % SCRAMBLE_GLYPHS.len()]
         };
-        let halo_w = sugarloaf.text_mut().measure(dot, &halo_opts);
-        draw_text_with_occlusion(
-            sugarloaf,
-            x + (diameter - halo_w) * 0.5,
-            y + (diameter - halo_size) * 0.5 - 0.5 * s,
-            dot,
-            &halo_opts,
-            occlusion_rects,
-        );
+        let mut glyph_opts = *opts;
+        if !settled {
+            glyph_opts.color = colors[(tick + index) % colors.len()];
+        }
+        let glyph = glyph.to_string();
+        sugarloaf.text_mut().draw(draw_x, y, &glyph, &glyph_opts);
+        draw_x += sugarloaf.text_mut().measure(&target.to_string(), opts);
     }
-
-    let dot_opts = DrawOpts {
-        font_size,
-        color,
-        bold: true,
-        clip_rect: Some(clip),
-        ..DrawOpts::default()
-    };
-    let dot_w = sugarloaf.text_mut().measure(dot, &dot_opts);
-    draw_text_with_occlusion(
-        sugarloaf,
-        x + (diameter - dot_w) * 0.5,
-        y + (diameter - font_size) * 0.5 - 0.5 * s,
-        dot,
-        &dot_opts,
-        occlusion_rects,
-    );
 }
 
 /// Paint the running-sub-agent spinner: a square orbit of pastel dots
@@ -239,6 +228,7 @@ pub(crate) fn render_back_button(
     content_rect: [f32; 4],
     theme: &IdeTheme,
     s: f32,
+    _mouse: Option<(f32, f32)>,
     clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
     inner_radius: f32,
@@ -251,7 +241,6 @@ pub(crate) fn render_back_button(
     let row_top = cy + 6.0 * s;
     let row_rect = [cx, row_top, cw, row_h];
     pane.side_panel_mut().set_back_button_rect(row_rect);
-
     let focused = pane.side_panel().is_focused() && pane.side_panel().back_focused();
     if focused {
         sugarloaf.quad(
@@ -267,41 +256,32 @@ pub(crate) fn render_back_button(
         );
     }
 
-    // Arrow glyph in the accent as a subtle affordance cue, label in fg —
-    // both in the default UI face like the panel's other row text.
+    // The arrow and label scramble as one string, matching the status-line
+    // mode transition instead of leaving a static arrow beside animated text.
     let text_y = row_top + (row_h - FONT_SIZE * s) / 2.0;
-    let arrow_opts = DrawOpts {
-        font_size: FONT_SIZE * s,
-        color: theme.u8(theme.accent),
-        bold: true,
-        clip_rect: Some(clip),
-        ..DrawOpts::default()
-    };
     let label_opts = DrawOpts {
         font_size: FONT_SIZE * s,
         color: theme.u8(theme.fg),
         clip_rect: Some(clip),
         ..DrawOpts::default()
     };
-    let arrow = "\u{2190}"; // ←
-    draw_text_with_occlusion(
-        sugarloaf,
-        text_x,
-        text_y,
-        arrow,
-        &arrow_opts,
-        occlusion_rects,
-    );
-    let arrow_w = sugarloaf.text_mut().measure(arrow, &arrow_opts);
-    let label = if to_chat { "Back to chat" } else { "Back" };
-    draw_text_with_occlusion(
-        sugarloaf,
-        text_x + arrow_w + 8.0 * s,
-        text_y,
-        label,
-        &label_opts,
-        occlusion_rects,
-    );
+    let label = if to_chat {
+        "\u{2190} Back to chat"
+    } else {
+        "\u{2190} Back"
+    };
+    if let Some(elapsed) = pane.side_panel().back_scramble_elapsed_ms() {
+        render_scramble_text(sugarloaf, text_x, text_y, label, &label_opts, elapsed);
+    } else {
+        draw_text_with_occlusion(
+            sugarloaf,
+            text_x,
+            text_y,
+            label,
+            &label_opts,
+            occlusion_rects,
+        );
+    }
 
     // Divider under the affordance, mirroring the home search-row rule.
     sugarloaf.rect(
@@ -345,6 +325,7 @@ pub(crate) fn render_sessions_list(
     content_rect: [f32; 4],
     theme: &IdeTheme,
     s: f32,
+    mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
     inner_radius: f32,
 ) {
@@ -370,6 +351,7 @@ pub(crate) fn render_sessions_list(
             content_rect,
             theme,
             s,
+            mouse,
             clip,
             occlusion_rects,
             inner_radius,
@@ -660,6 +642,7 @@ pub(crate) fn render_sessions_list(
         font_size: FONT_SIZE * s * 0.92,
         color: theme.u8(theme.readable_accent(theme.cyan)),
         bold: true,
+        extrude: true,
         font_id: pixel_font,
         clip_rect: Some(list_rect),
         ..DrawOpts::default()
@@ -704,19 +687,41 @@ pub(crate) fn render_sessions_list(
 
         let is_current = current_id.as_deref() == Some(entry.id.as_str());
         let running = session_entry_is_running(entry);
+        let hover = if pane.side_panel().hovered_session() == Some(absolute_ix) {
+            pane.side_panel().session_hover_scale()
+        } else {
+            0.0
+        };
+        let hover_scale = 1.0 + 0.045 * hover;
+        let hover_inset_x = 5.0 * s * hover;
+        let hover_inset_y = 2.0 * s * hover;
+        if hover > 0.002 {
+            sugarloaf.quad(
+                None,
+                list_rect[0] - hover_inset_x,
+                row_y - hover_inset_y,
+                list_rect[2] + hover_inset_x * 2.0,
+                row_h + hover_inset_y * 2.0,
+                theme.f32_alpha(theme.surface, 0.28 * hover),
+                [5.0 * s; 4],
+                DEPTH,
+                ORDER_PANEL + 1,
+            );
+        }
 
         // Green status dot in the left gutter: an actively-running session
         // (green + a brighter halo to read as "live") or the session
         // currently open (green, softer halo). Both are clear live-status
         // signals; running takes the stronger halo.
         if running || is_current {
-            let dot_y = row_y + (row_h - dot_diameter) / 2.0;
+            let scaled_dot = dot_diameter * hover_scale;
+            let dot_y = row_y + (row_h - scaled_dot) / 2.0;
             let halo_alpha = if running { 0.5 } else { 0.35 };
             draw_status_dot_text(
                 sugarloaf,
-                text_x,
+                text_x - (scaled_dot - dot_diameter) * 0.5,
                 dot_y,
-                dot_diameter,
+                scaled_dot,
                 theme.u8(theme.green),
                 Some((theme.u8(theme.green), halo_alpha)),
                 list_rect,
@@ -728,30 +733,34 @@ pub(crate) fn render_sessions_list(
         // Pinned marker — a small cyan dot in the row's right padding.
         let pin_reserve = if entry.pinned { pin_d + 8.0 * s } else { 0.0 };
         if entry.pinned {
-            let pin_x = text_x + text_w - pin_d;
-            let pin_y = row_y + (row_h - pin_d) / 2.0;
+            let scaled_pin = pin_d * hover_scale;
+            let pin_x = text_x + text_w - scaled_pin;
+            let pin_y = row_y + (row_h - scaled_pin) / 2.0;
             sugarloaf.rounded_rect(
                 None,
                 pin_x,
                 pin_y,
-                pin_d,
-                pin_d,
+                scaled_pin,
+                scaled_pin,
                 theme.f32(theme.cyan),
                 DEPTH,
-                pin_d / 2.0,
+                scaled_pin / 2.0,
                 ORDER_PANEL + 3,
             );
         }
 
         let title_budget = (text_w - dot_gutter - pin_reserve).max(0.0);
+        let mut hovered_title_opts = title_opts;
+        hovered_title_opts.font_size *= hover_scale;
         let title_text =
-            truncate_to_fit(&entry.title, title_budget, sugarloaf, &title_opts);
+            truncate_to_fit(&entry.title, title_budget, sugarloaf, &hovered_title_opts);
+        let scaled_text_y = row_y + (row_h - FONT_SIZE * s * hover_scale) / 2.0;
         draw_text_with_occlusion(
             sugarloaf,
-            title_x,
-            text_y,
+            title_x - 1.5 * s * hover,
+            scaled_text_y,
             &title_text,
-            &title_opts,
+            &hovered_title_opts,
             occlusion_rects,
         );
     }

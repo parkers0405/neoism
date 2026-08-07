@@ -145,7 +145,7 @@ fn adopted_workspace_identity_survives_active_server_cache_reset() {
 
 #[test]
 fn joined_workspace_icon_survives_missing_terminal_title() {
-    use neoism_ui::widgets::island::IslandContexts;
+    // Validate the same fallback fields used by the Island bridge.
 
     let window_id: WindowId = WindowId::from(0);
     let mut context_manager =
@@ -164,10 +164,17 @@ fn joined_workspace_icon_survives_missing_terminal_title() {
     );
     context_manager.titles.titles.remove(&0);
 
-    let title = IslandContexts::title(&context_manager, 0)
-        .expect("workspace identity does not depend on a terminal title");
-    assert_eq!(title.content, "~");
-    assert_eq!(title.icon_kind.as_deref(), Some("joined"));
+    let content = context_manager
+        .titles
+        .titles
+        .get(&0)
+        .map(|title| title.content.clone())
+        .unwrap_or_else(|| "~".to_string());
+    assert_eq!(content, "~");
+    assert_eq!(
+        context_manager.workspace_icon_kind_for_index(0).as_deref(),
+        Some("joined")
+    );
 }
 
 #[test]

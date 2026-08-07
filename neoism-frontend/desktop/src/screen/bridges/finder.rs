@@ -678,6 +678,7 @@ impl Screen<'_> {
     /// query starts with `@`, flip the open finder into Symbols mode
     /// live, keeping whatever followed the `@` as the effective
     /// query. No-op in every other state.
+    #[allow(dead_code)]
     pub(crate) fn finder_symbols_switch_from_prefix(&mut self) {
         if !self.renderer.finder.is_enabled()
             || self.renderer.finder.mode() != FinderMode::Files
@@ -706,6 +707,7 @@ impl Screen<'_> {
     /// returns to Files mode — the inverse of the prefix switch.
     /// Restores the pre-open cursor (arrow previews may have moved
     /// it). Returns true when the switch happened.
+    #[allow(dead_code)]
     pub(crate) fn finder_symbols_backspace_to_files(&mut self) -> bool {
         if !self.renderer.finder.is_enabled()
             || self.renderer.finder.mode() != FinderMode::Symbols
@@ -728,6 +730,7 @@ impl Screen<'_> {
     /// Symbols selection moved (arrows): live-preview by jumping the
     /// pane to the selected symbol's line, like the BufferLines
     /// preview. No-op in other finder modes.
+    #[allow(dead_code)]
     pub(crate) fn finder_symbols_preview_selected(&mut self) {
         if self.renderer.finder.mode() != FinderMode::Symbols {
             return;

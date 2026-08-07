@@ -193,6 +193,14 @@ impl NeoismAgentPane {
         self.pending_timeline_prepend_count.take()
     }
 
+    pub(crate) fn set_measured_timeline_prepend(
+        &mut self,
+        _content_height: f32,
+        prepend_height: f32,
+    ) {
+        self.pending_timeline_prepend_delta_px = Some(prepend_height);
+    }
+
     /// Record that `count` messages were prepended at the front of the
     /// transcript. The renderer folds them into the existing layout
     /// incrementally rather than rebuilding every row. Accumulates if several
@@ -613,11 +621,13 @@ impl NeoismAgentPane {
     }
 
     pub fn tool_expand_animating(&self, id: &str) -> bool {
-        !id.is_empty()
-            && self
-                .tool_expand_anims
-                .get(id)
-                .is_some_and(|anim| anim.is_active())
+        if id.is_empty() {
+            return false;
+        }
+        let child_prefix = format!("{id}:");
+        self.tool_expand_anims.iter().any(|(key, animation)| {
+            (key == id || key.starts_with(&child_prefix)) && animation.is_active()
+        })
     }
 
     pub(crate) fn any_tool_expand_animating(&self) -> bool {
@@ -630,16 +640,6 @@ impl NeoismAgentPane {
         else {
             return false;
         };
-        let anchor_screen_y = self
-            .timeline_viewport_rect
-            .map(|[_, vy, _, vh]| rect[1].clamp(vy, vy + vh))
-            .unwrap_or(rect[1]);
-        self.pending_timeline_anchor = Some(TimelineAnchor {
-            content_y: self.content_y_for_screen_y(anchor_screen_y),
-            screen_y: anchor_screen_y,
-        });
-        self.timeline_velocity_px_s = 0.0;
-        self.timeline_last_tick_at = None;
 
         if let Some((group_id, child_id)) = id.split_once("::child::") {
             let next = (group_id.to_string(), child_id.to_string());
@@ -652,13 +652,50 @@ impl NeoismAgentPane {
             return true;
         }
 
+        let is_diff_file = id
+            .rsplit_once(':')
+            .is_some_and(|(_, section)| section.parse::<usize>().is_ok());
+        if is_diff_file {
+            if !self.expanded_tool_ids.insert(id.clone()) {
+                self.expanded_tool_ids.remove(&id);
+            }
+            self.tool_expand_anims.remove(&id);
+            return true;
+        }
+
+        let anchor_screen_y = self
+            .timeline_viewport_rect
+            .map(|[_, vy, _, vh]| rect[1].clamp(vy, vy + vh))
+            .unwrap_or(rect[1]);
+        self.pending_timeline_anchor = Some(TimelineAnchor {
+            content_y: self.content_y_for_screen_y(anchor_screen_y),
+            screen_y: anchor_screen_y,
+        });
+        self.timeline_velocity_px_s = 0.0;
+        self.timeline_last_tick_at = None;
+
         let expanding = !self.expanded_tool_ids.contains(&id);
         if expanding {
             self.expanded_tool_ids.insert(id.clone());
         } else {
             self.expanded_tool_ids.remove(&id);
         }
-        if let Some(index) = self.messages.iter().position(|message| message.id == id) {
+        self.timeline_measure_cache.borrow_mut().clear();
+        let parent_id = id
+            .rsplit_once(':')
+            .filter(|(_, section)| section.parse::<usize>().is_ok())
+            .map_or(id.as_str(), |(parent, _)| parent);
+        if let Some(viewport) = self.timeline_viewport_rect {
+            self.timeline_view_anchor = Some(TimelineViewAnchor {
+                message_id: parent_id.to_string(),
+                screen_offset: rect[1] - viewport[1],
+            });
+        }
+        if let Some(index) = self
+            .messages
+            .iter()
+            .position(|message| message.id == parent_id)
+        {
             self.mark_timeline_message_and_next_dirty_at(index);
         } else {
             self.invalidate_timeline_layout();

@@ -8,7 +8,8 @@ impl NeoismAgentPane {
     ) {
         const LOAD_OLDER_LIMIT: usize = 128;
         let threshold = (viewport_h * 0.75).max(720.0);
-        if scroll_top > threshold
+        if self.timeline_follow_bottom
+            || scroll_top > threshold
             || !self.timeline_history.has_older
             || self.timeline_history.loading_older
         {

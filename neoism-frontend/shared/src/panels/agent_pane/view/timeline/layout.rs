@@ -201,11 +201,9 @@ where
     // added rather than to total loaded history — without it, every page load
     // re-measured and re-keyed every row already on screen, so pagination got
     // progressively slower with each page.
-    // When lazy, still consume the prepend flag but skip the incremental fold:
-    // the newly-prepended (older) messages belong in the estimated prefix, and
-    // a full lazy rebuild that re-estimates them is cheap, so we let it fall
-    // through rather than measure the whole new page exactly.
-    if let Some(delta) = pane.take_timeline_prepend().filter(|_| !lazy) {
+    // Measure the new prefix exactly even in lazy mode. Re-estimating a page
+    // changes the prefix height under the reader and makes pagination jump.
+    if let Some(delta) = pane.take_timeline_prepend() {
         // Always pull the cache out: after a prepend every existing row's
         // source index has shifted, so the normal append-patch path below
         // would mis-target. Either we fold incrementally here, or we drop the
@@ -222,17 +220,24 @@ where
                 && cache.width_bucket == width_bucket
                 && cache.scale_bucket == scale_bucket
                 && cache.gap_bucket == gap_bucket
-                && cache.source_len + delta == source_len
+                && cache.source_len + delta <= source_len
                 && !cache.rows.is_empty()
         });
         if let Some(mut cache) = reusable {
+            let previous_content_height = cache.content_height;
             if prepend_timeline_layout::<P, D>(
                 sugarloaf, pane, &mut cache, delta, width, theme, s, gap,
             ) {
+                let prepend_height =
+                    (cache.content_height - previous_content_height).max(0.0);
+                let appended_live_tail = source_len.saturating_sub(cache.source_len);
                 // The prepend shifted every existing row by `delta`; shift the
                 // pending dirty indices to match, then re-lay just that region.
-                if !dirty.ids.is_empty() || !dirty.indices.is_empty() {
-                    let shifted = TimelineDirtyMarks {
+                if appended_live_tail > 0
+                    || !dirty.ids.is_empty()
+                    || !dirty.indices.is_empty()
+                {
+                    let mut shifted = TimelineDirtyMarks {
                         ids: dirty.ids,
                         indices: dirty
                             .indices
@@ -240,10 +245,14 @@ where
                             .map(|index| index + delta)
                             .collect(),
                     };
+                    if appended_live_tail > 0 {
+                        shifted.indices.insert(cache.source_len.saturating_sub(1));
+                    }
                     patch_timeline_layout::<P, D>(
                         sugarloaf, pane, &mut cache, shifted, width, theme, s, gap,
                     );
                 }
+                pane.set_measured_timeline_prepend(cache.content_height, prepend_height);
                 return (cache, true);
             }
         }

@@ -1126,11 +1126,13 @@ impl Renderer {
         let context_menu_height =
             ((logical_height - self.status_line.scaled_height()).max(0.0) * scale_factor)
                 .round();
+        sugarloaf.set_late_overlay_mode(true);
         self.context_menu.render(
             sugarloaf,
             (window_size.width, context_menu_height, scale_factor),
             &self.theme,
         );
+        sugarloaf.set_late_overlay_mode(false);
 
         // The shared completion_menu panel reads geometry from a POD
         // `EditorAnchor` and an optional `PopupMenu` snapshot — the

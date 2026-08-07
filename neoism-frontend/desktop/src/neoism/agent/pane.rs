@@ -204,6 +204,12 @@ pub(crate) struct TimelineAnchor {
     screen_y: f32,
 }
 
+#[derive(Clone, Debug)]
+struct TimelineViewAnchor {
+    message_id: String,
+    screen_offset: f32,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ToolExpandAnimation {
     started_at: Instant,
@@ -412,6 +418,8 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         messages: Vec<NeoismAgentMessage>,
         raw_count: usize,
         requested_limit: usize,
+        oldest_cursor: Option<String>,
+        reached_start: bool,
     },
     /// The older-history fetch failed; carries the session it was for so a
     /// stale failure that raced a session switch is ignored.
@@ -596,11 +604,14 @@ pub struct NeoismAgentPane {
     selection_anchor: Option<SelectionPoint>,
     selection_focus: Option<SelectionPoint>,
     timeline_scroll_px: f32,
+    timeline_follow_bottom: bool,
     timeline_content_height_px: f32,
     timeline_viewport_height_px: f32,
     timeline_viewport_rect: Option<[f32; 4]>,
     pending_timeline_anchor: Option<TimelineAnchor>,
+    timeline_view_anchor: Option<TimelineViewAnchor>,
     pub(super) pending_timeline_prepend_height_px: Option<f32>,
+    pub(super) pending_timeline_prepend_delta_px: Option<f32>,
     /// Count of messages just prepended by history pagination, awaiting an
     /// incremental layout fold (consumed by `take_timeline_prepend`).
     pub(super) pending_timeline_prepend_count: Option<usize>,
@@ -648,6 +659,7 @@ pub struct NeoismAgentPane {
     streaming_tool_label: Option<String>,
     subagent_waiting_started_at: Option<Instant>,
     background_tasks_started_at: Option<Instant>,
+    running_background_task_count: usize,
     active_subagent_ids: BTreeSet<String>,
     active_subagent_started_at: HashMap<String, u64>,
     pending_permission: Option<NeoismAgentPendingPermission>,
@@ -669,6 +681,7 @@ pub struct NeoismAgentPane {
     /// fallback author for user messages with no explicit `author`, so
     /// the local user's own messages render their own presence orb.
     local_presence_name: Option<String>,
+    visible_user_orb: bool,
 }
 
 #[derive(Default)]
@@ -807,11 +820,14 @@ impl Default for NeoismAgentPane {
             selection_anchor: None,
             selection_focus: None,
             timeline_scroll_px: 0.0,
+            timeline_follow_bottom: true,
             timeline_content_height_px: 0.0,
             timeline_viewport_height_px: 0.0,
             timeline_viewport_rect: None,
             pending_timeline_anchor: None,
+            timeline_view_anchor: None,
             pending_timeline_prepend_height_px: None,
+            pending_timeline_prepend_delta_px: None,
             pending_timeline_prepend_count: None,
             timeline_last_older_request_at: None,
             timeline_last_scroll_at: None,
@@ -838,6 +854,7 @@ impl Default for NeoismAgentPane {
             streaming_tool_label: None,
             subagent_waiting_started_at: None,
             background_tasks_started_at: None,
+            running_background_task_count: 0,
             active_subagent_ids: BTreeSet::new(),
             active_subagent_started_at: HashMap::new(),
             pending_permission: None,
@@ -851,6 +868,7 @@ impl Default for NeoismAgentPane {
             side_panel: NeoismAgentSidePanel::default(),
             perf_frame: AgentPanePerfFrame::default(),
             local_presence_name: None,
+            visible_user_orb: false,
         }
     }
 }

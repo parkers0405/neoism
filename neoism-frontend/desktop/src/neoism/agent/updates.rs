@@ -13,7 +13,7 @@ use neoism_ui::panels::agent_pane::stream_events::{
 };
 
 use super::api::{
-    fetch_session_messages, open_event_stream, part_block, EventStreamConnection,
+    fetch_session_messages_page, open_event_stream, part_block, EventStreamConnection,
 };
 use super::pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentPendingPermission,
@@ -24,7 +24,10 @@ const CONNECT_HEADER_TIMEOUT: Duration = Duration::from_secs(3);
 const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 pub(super) enum AgentSessionUpdate {
-    Messages(Vec<NeoismAgentMessage>),
+    Messages {
+        messages: Vec<NeoismAgentMessage>,
+        oldest_cursor: Option<String>,
+    },
     SessionIdle,
     PartDelta {
         message_id: Option<String>,
@@ -195,9 +198,15 @@ fn run_event_stream(
                 if connected_once {
                     // The stream is subscribed before the snapshot is fetched, so live
                     // events cannot slip between reconnect and reconciliation.
-                    match fetch_session_messages(&server, &session_id) {
-                        Ok(messages) => {
-                            if tx.send(AgentSessionUpdate::Messages(messages)).is_err() {
+                    match fetch_session_messages_page(&server, &session_id, None, 80) {
+                        Ok(page) => {
+                            if tx
+                                .send(AgentSessionUpdate::Messages {
+                                    messages: page.blocks,
+                                    oldest_cursor: page.oldest_cursor,
+                                })
+                                .is_err()
+                            {
                                 return;
                             }
                         }
@@ -345,8 +354,13 @@ fn send_event_updates(
         match update {
             SessionEventUpdate::SessionIdle { refresh_messages } => {
                 if refresh_messages {
-                    if let Ok(messages) = fetch_session_messages(server, session_id) {
-                        tx.send(AgentSessionUpdate::Messages(messages))?;
+                    if let Ok(page) =
+                        fetch_session_messages_page(server, session_id, None, 80)
+                    {
+                        tx.send(AgentSessionUpdate::Messages {
+                            messages: page.blocks,
+                            oldest_cursor: page.oldest_cursor,
+                        })?;
                         state.mark_idle_messages_refreshed();
                     }
                 }
@@ -382,13 +396,18 @@ fn send_event_updates(
                 kind,
                 usage,
             } => {
-                if let Ok(messages) = fetch_session_messages(server, session_id) {
+                if let Ok(page) =
+                    fetch_session_messages_page(server, session_id, None, 80)
+                {
                     let messages = if let Some(usage) = usage {
-                        with_compaction_usage(messages, usage.into())
+                        with_compaction_usage(page.blocks, usage.into())
                     } else {
-                        messages
+                        page.blocks
                     };
-                    tx.send(AgentSessionUpdate::Messages(messages))?;
+                    tx.send(AgentSessionUpdate::Messages {
+                        messages,
+                        oldest_cursor: page.oldest_cursor,
+                    })?;
                     state.mark_idle_messages_refreshed();
                 }
                 tx.send(AgentSessionUpdate::CompactionEnded { summary, kind })?;

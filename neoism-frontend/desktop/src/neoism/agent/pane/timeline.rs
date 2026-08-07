@@ -1,6 +1,32 @@
 use super::*;
 
 impl NeoismAgentPane {
+    pub fn timeline_view_anchor(&self) -> Option<(String, f32)> {
+        self.timeline_view_anchor
+            .as_ref()
+            .map(|anchor| (anchor.message_id.clone(), anchor.screen_offset))
+    }
+
+    pub fn restore_timeline_view_anchor(&mut self, content_y: f32, screen_offset: f32) {
+        if self.timeline_follow_bottom {
+            return;
+        }
+        let max_scroll = self.max_timeline_scroll();
+        let scroll_top = (content_y - screen_offset).clamp(0.0, max_scroll);
+        self.timeline_scroll_px = max_scroll - scroll_top;
+    }
+
+    pub fn set_timeline_view_anchor(
+        &mut self,
+        message_id: Option<String>,
+        screen_offset: f32,
+    ) {
+        self.timeline_view_anchor = message_id.map(|message_id| TimelineViewAnchor {
+            message_id,
+            screen_offset,
+        });
+    }
+
     pub fn drain_ui_events(&mut self) -> Vec<NeoismAgentUiEvent> {
         std::mem::take(&mut self.ui_events)
     }
@@ -33,7 +59,8 @@ impl NeoismAgentPane {
             (self.timeline_content_height_px - self.timeline_viewport_height_px).max(0.0);
         let old_scroll_top =
             (old_max_scroll - self.timeline_scroll_px).clamp(0.0, old_max_scroll);
-        let was_following_bottom = self.timeline_scroll_px <= 1.0;
+        let was_following_bottom =
+            self.timeline_follow_bottom && self.timeline_scroll_px <= 1.0;
         self.timeline_viewport_rect = Some(viewport_rect);
         self.timeline_content_height_px = content_height_px.max(0.0);
         self.timeline_viewport_height_px = viewport_height_px.max(0.0);
@@ -43,6 +70,13 @@ impl NeoismAgentPane {
             if !keep_anchor {
                 self.pending_timeline_anchor = None;
             }
+        } else if let Some(prepend_delta) = self.pending_timeline_prepend_delta_px.take()
+        {
+            let max_scroll = self.max_timeline_scroll();
+            let keep_scroll_top = old_scroll_top + prepend_delta;
+            self.timeline_scroll_px =
+                (max_scroll - keep_scroll_top).clamp(0.0, max_scroll);
+            self.pending_timeline_prepend_height_px = None;
         } else if let Some(previous_height) = self.pending_timeline_prepend_height_px {
             let max_scroll = self.max_timeline_scroll();
             let inserted_height =
@@ -127,6 +161,9 @@ impl NeoismAgentPane {
         if delta_pixels.abs() < f32::EPSILON {
             return false;
         }
+        if delta_pixels > 0.0 {
+            self.timeline_follow_bottom = false;
+        }
         let max_scroll = self.max_timeline_scroll();
         if max_scroll <= 0.0 {
             self.timeline_velocity_px_s = 0.0;
@@ -150,6 +187,9 @@ impl NeoismAgentPane {
         let before = self.timeline_scroll_px;
         self.timeline_scroll_px =
             (self.timeline_scroll_px + immediate).clamp(0.0, max_scroll);
+        if delta_pixels < 0.0 && self.timeline_scroll_px <= 1.0 {
+            self.timeline_follow_bottom = true;
+        }
         self.pending_timeline_anchor = None;
         // If the user was holding the edge, don't keep building velocity —
         // they can't move further that way and the inertia would feel sticky.
@@ -217,6 +257,9 @@ impl NeoismAgentPane {
             return false;
         }
         self.timeline_scroll_px = next;
+        if self.timeline_velocity_px_s < 0.0 && self.timeline_scroll_px <= 1.0 {
+            self.timeline_follow_bottom = true;
+        }
         self.timeline_last_scroll_at = Some(now);
         true
     }
@@ -380,6 +423,7 @@ impl NeoismAgentPane {
             return false;
         }
         self.timeline_scroll_px = next;
+        self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0;
         self.pending_timeline_anchor = None;
         self.timeline_last_scroll_at = Some(Instant::now());
         true
@@ -406,6 +450,7 @@ impl NeoismAgentPane {
         // Higher y → further down the visible content → less `timeline_scroll_px`.
         let scroll_top = progress * max_scroll;
         self.timeline_scroll_px = (max_scroll - scroll_top).clamp(0.0, max_scroll);
+        self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0;
         self.pending_timeline_anchor = None;
         self.timeline_last_scroll_at = Some(Instant::now());
     }

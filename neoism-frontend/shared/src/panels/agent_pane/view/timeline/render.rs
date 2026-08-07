@@ -57,6 +57,21 @@ pub fn render_timeline_with<P, D>(
         content_h += status_h;
     }
     pane.set_timeline_metrics(rect, content_h, viewport_h);
+    if did_layout_work {
+        if let Some((message_id, screen_offset)) = pane.timeline_view_anchor() {
+            if let Some(row) = layout.rows.iter().find(|row| {
+                (row.source_index..row.source_end_index.max(row.source_index + 1)).any(
+                    |source_index| {
+                        pane.messages()
+                            .get(source_index)
+                            .is_some_and(|message| message.id() == message_id)
+                    },
+                )
+            }) {
+                pane.restore_timeline_view_anchor(row.top, screen_offset);
+            }
+        }
+    }
     let set_metrics_done = web_time::Instant::now();
     pane.clear_tool_hit_rects();
     let metrics_done = web_time::Instant::now();
@@ -157,6 +172,17 @@ pub fn render_timeline_with<P, D>(
     }
     if row_range.is_empty() && !visible_range.is_empty() {
         row_range = visible_range.clone();
+    }
+    let anchor_range =
+        visible_timeline_row_range(&layout.rows, scroll_top, scroll_top + viewport_h);
+    if let Some(row) = layout.rows.get(anchor_range.start) {
+        let message_id = pane
+            .messages()
+            .get(row.source_index)
+            .map(|message| message.id().to_string());
+        pane.set_timeline_view_anchor(message_id, row.top - scroll_top);
+    } else {
+        pane.set_timeline_view_anchor(None, 0.0);
     }
     if !layout.rows.is_empty()
         && row_range.is_empty()

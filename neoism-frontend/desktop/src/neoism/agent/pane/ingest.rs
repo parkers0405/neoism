@@ -15,10 +15,35 @@ impl NeoismAgentPane {
         for update in event_stream.drain() {
             drained_updates += 1;
             match update {
-                AgentSessionUpdate::Messages(messages) => {
+                AgentSessionUpdate::Messages {
+                    messages,
+                    oldest_cursor,
+                } => {
                     let messages = self.compact_inbound_user_texts(messages);
                     let messages = self.merge_pending_user_prompts(messages);
-                    let messages = self.preserve_streamed_response_text(messages);
+                    let mut messages = self.preserve_streamed_response_text(messages);
+                    if self.timeline_history.oldest_loaded_cursor.is_some() {
+                        let overlap = messages.iter().position(|incoming| {
+                            !incoming.id.is_empty()
+                                && self
+                                    .messages
+                                    .iter()
+                                    .any(|existing| existing.id == incoming.id)
+                        });
+                        if let Some(overlap) = overlap {
+                            let first_overlap_id = messages[overlap].id.clone();
+                            if let Some(existing_overlap) = self
+                                .messages
+                                .iter()
+                                .position(|message| message.id == first_overlap_id)
+                            {
+                                let mut merged =
+                                    self.messages[..existing_overlap].to_vec();
+                                merged.extend(messages);
+                                messages = merged;
+                            }
+                        }
+                    }
                     // These full-transcript snapshots arrive repeatedly around
                     // each turn. `invalidate_timeline_layout()` here dropped the
                     // WHOLE layout cache, so the next frame re-measured and
@@ -29,7 +54,14 @@ impl NeoismAgentPane {
                     // mark only the rows that actually differ dirty so the layout
                     // patches just those; fall back to a full invalidation only
                     // on a structural change (count differs / reorder).
-                    let structural = self.messages.len() != messages.len();
+                    let previous_len = self.messages.len();
+                    let structural = previous_len != messages.len();
+                    let stable_prefix = previous_len <= messages.len()
+                        && self
+                            .messages
+                            .iter()
+                            .zip(messages.iter())
+                            .all(|(existing, incoming)| existing.id == incoming.id);
                     let dirty_indices: Vec<usize> = if structural {
                         Vec::new()
                     } else {
@@ -44,9 +76,16 @@ impl NeoismAgentPane {
                     if structural || !dirty_indices.is_empty() {
                         self.messages = messages;
                         self.rebase_current_turn_trace();
-                        if structural {
+                        if structural
+                            && !stable_prefix
+                            && self.pending_timeline_prepend_count.is_none()
+                        {
                             self.invalidate_timeline_layout();
                         } else {
+                            if structural {
+                                self.timeline_dirty_message_indices
+                                    .insert(previous_len.saturating_sub(1));
+                            }
                             for index in dirty_indices {
                                 self.mark_timeline_message_dirty_at(index);
                             }
@@ -56,6 +95,9 @@ impl NeoismAgentPane {
                     }
                     if self.is_streaming() || self.background_tasks_started_at.is_some() {
                         self.ensure_background_task_activity_clock();
+                    }
+                    if self.timeline_history.oldest_loaded_cursor.is_none() {
+                        self.timeline_history.oldest_loaded_cursor = oldest_cursor;
                     }
                     // Do not clear the streaming status from a message
                     // refresh alone. The event stream sends a separate
@@ -763,12 +805,16 @@ impl NeoismAgentPane {
                     messages,
                     raw_count,
                     requested_limit,
+                    oldest_cursor,
+                    reached_start,
                 }) => {
                     self.apply_older_timeline_page(
                         session_id,
                         messages,
                         raw_count,
                         requested_limit,
+                        oldest_cursor,
+                        reached_start,
                     );
                     changed = true;
                 }
@@ -895,6 +941,8 @@ impl NeoismAgentPane {
         // A full invalidation rebuilds every row, so any pending incremental
         // prepend fold is moot — drop it so it can't mis-target the new cache.
         self.pending_timeline_prepend_count = None;
+        self.pending_timeline_prepend_height_px = None;
+        self.pending_timeline_prepend_delta_px = None;
         *self.timeline_layout_cache.borrow_mut() = None;
     }
 

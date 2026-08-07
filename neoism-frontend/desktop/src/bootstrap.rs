@@ -12,7 +12,7 @@
 //! best-effort: failures are logged and never block or fail the launch.
 
 use std::fs;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::path::PathBuf;
 

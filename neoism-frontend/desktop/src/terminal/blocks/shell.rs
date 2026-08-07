@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub use neoism_ui::terminal_blocks::shell::*;
 pub use neoism_ui::TerminalShellKind;
 
+#[cfg(not(target_os = "macos"))]
 pub use super::shell_detect::detect_foreground_shell;
 
 pub fn default_terminal_history_path() -> Option<PathBuf> {

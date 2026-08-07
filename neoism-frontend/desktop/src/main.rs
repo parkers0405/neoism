@@ -970,14 +970,25 @@ fn run_macos_update_helper() -> Result<bool, Box<dyn std::error::Error>> {
 /// names are truncated to 15 chars ("neoism-workspac") so `-x` (and a bare
 /// `pkill neoism`) misses them. The updater always excludes itself.
 #[cfg(unix)]
+fn process_ids_by_name(name: &str) -> Vec<u32> {
+    std::process::Command::new("pgrep")
+        .args(["-x", name])
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
 fn terminate_other_neoism_processes() -> usize {
     let current_pid = std::process::id();
     let mut pids: Vec<u32> = Vec::new();
-    for args in [
-        ["-x", "neoism"],
-        ["-f", "neoism-workspace-daemon"],
-        ["-f", "neoism-agent"],
-    ] {
+    pids.extend(process_ids_by_name("neoism"));
+    for args in [["-f", "neoism-workspace-daemon"], ["-f", "neoism-agent"]] {
         if let Ok(output) = std::process::Command::new("pgrep").args(args).output() {
             pids.extend(
                 String::from_utf8_lossy(&output.stdout)

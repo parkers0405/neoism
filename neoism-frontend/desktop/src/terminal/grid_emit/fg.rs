@@ -19,9 +19,11 @@ use neoism_terminal_core::crosswords::square::Square;
 use neoism_terminal_core::crosswords::style::{StyleFlags, StyleSet};
 #[cfg(target_os = "macos")]
 use neoism_ui::terminal_grid_emit::glyph_cell_offsets_utf16;
+#[cfg(not(target_os = "macos"))]
+use neoism_ui::terminal_grid_emit::glyph_cell_offsets_utf8;
 use neoism_ui::terminal_grid_emit::{
-    cell_in_row_sel, glyph_cell_offsets_utf8, rounded_terminal_cell_size,
-    shaping_style_flags, terminal_font_size_u16, terminal_size_bucket, RowSelection,
+    cell_in_row_sel, rounded_terminal_cell_size, shaping_style_flags,
+    terminal_font_size_u16, terminal_size_bucket, RowSelection,
 };
 use smallvec::SmallVec;
 

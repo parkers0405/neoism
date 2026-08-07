@@ -2,6 +2,7 @@
 // the constructor/core methods. This file is part of the impl Screen<'_> block.
 
 use super::*;
+#[cfg(not(target_os = "macos"))]
 use crate::terminal::blocks::input::TerminalInputBufferHostExt;
 use neoism_backend::clipboard::Clipboard;
 use neoism_terminal_core::crosswords::pos::{Direction, Line};

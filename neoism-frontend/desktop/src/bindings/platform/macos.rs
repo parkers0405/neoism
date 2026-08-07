@@ -1,7 +1,9 @@
 // macOS-specific default key bindings.
 
+#[cfg(test)]
+use crate::bindings::action::Binding;
 use crate::bindings::action::{
-    Action, Binding, BindingKey, BindingMode, KeyBinding, SearchAction,
+    Action, BindingKey, BindingMode, KeyBinding, SearchAction,
 };
 use crate::bindings::macros::{bindings, trigger};
 use neoism_backend::config::keyboard::Keyboard as ConfigKeyboard;

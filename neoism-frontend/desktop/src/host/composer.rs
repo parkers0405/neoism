@@ -1,5 +1,6 @@
 use super::path_exec::{build_path_executables, display_cwd, SHELL_BUILTINS};
 use super::*;
+#[cfg(not(target_os = "macos"))]
 use crate::terminal::blocks::input::TerminalInputBufferHostExt;
 
 pub(super) fn composer_style(

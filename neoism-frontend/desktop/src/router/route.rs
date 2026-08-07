@@ -143,11 +143,11 @@ mod tests {
     fn palette_q_targets_only_the_focused_buffer_tab() {
         assert_eq!(
             palette_close_plan("q"),
-            Some(GlobalExCommandPlan::CloseFocusedBufferTab)
+            Some(GlobalExCommandPlan::CloseFocusedBufferTab { discard: false })
         );
         assert_eq!(
             palette_close_plan(":q!"),
-            Some(GlobalExCommandPlan::CloseFocusedBufferTab)
+            Some(GlobalExCommandPlan::CloseFocusedBufferTab { discard: true })
         );
     }
 
@@ -190,8 +190,8 @@ fn palette_close_plan(query: &str) -> Option<GlobalExCommandPlan> {
     let cmd = query.trim().trim_start_matches(':').trim();
     let (head, tail) = parse_ex_command(cmd)?;
     match GlobalExCommandPlan::classify(&head, &tail) {
-        plan @ (GlobalExCommandPlan::CloseFocusedBufferTab
-        | GlobalExCommandPlan::CloseAllBuffersInFocusedPaneOrWorkspace) => Some(plan),
+        plan @ (GlobalExCommandPlan::CloseFocusedBufferTab { .. }
+        | GlobalExCommandPlan::CloseActiveWorkspace { .. }) => Some(plan),
         _ => None,
     }
 }
@@ -1084,6 +1084,26 @@ impl Route<'_> {
                         let ex = self.window.screen.renderer.command_palette.is_ex_mode();
                         let search =
                             self.window.screen.renderer.command_palette.is_search_mode();
+                        let selected_plain_ex = if !ex && !search {
+                            self.window
+                                .screen
+                                .renderer
+                                .command_palette
+                                .get_selected_ex_command()
+                        } else {
+                            None
+                        };
+                        if let Some(command) = selected_plain_ex {
+                            self.window
+                                .screen
+                                .renderer
+                                .command_palette
+                                .set_enabled(false);
+                            let _ = self.window.screen.try_intercept_ex_command(&command);
+                            self.window.screen.mark_dirty();
+                            self.request_overlay_redraw();
+                            return true;
+                        }
                         if ex || search {
                             // Search-mode: if the user has typed a
                             // query AND the selected row is a buffer
@@ -1374,7 +1394,9 @@ impl Route<'_> {
 
                         match (close_plan, selected_action) {
                             (
-                                Some(GlobalExCommandPlan::CloseFocusedBufferTab),
+                                Some(GlobalExCommandPlan::CloseFocusedBufferTab {
+                                    discard,
+                                }),
                                 _,
                             ) => {
                                 self.window
@@ -1382,12 +1404,15 @@ impl Route<'_> {
                                     .renderer
                                     .command_palette
                                     .set_enabled(false);
-                                let _ = self.window.screen.close_focused_buffer_tab();
+                                let _ = self
+                                    .window
+                                    .screen
+                                    .close_focused_buffer_tab_with_discard(discard);
                             }
                             (
-                                Some(
-                                    GlobalExCommandPlan::CloseAllBuffersInFocusedPaneOrWorkspace,
-                                ),
+                                Some(GlobalExCommandPlan::CloseActiveWorkspace {
+                                    discard,
+                                }),
                                 _,
                             ) => {
                                 self.window
@@ -1395,7 +1420,9 @@ impl Route<'_> {
                                     .renderer
                                     .command_palette
                                     .set_enabled(false);
-                                let _ = self.window.screen.try_intercept_ex_command("qall");
+                                self.window
+                                    .screen
+                                    .close_active_workspace(discard, clipboard);
                             }
                             // `ListFonts` stays inside the palette —
                             // swap the palette's contents from the

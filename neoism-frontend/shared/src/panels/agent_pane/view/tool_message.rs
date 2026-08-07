@@ -18,8 +18,8 @@ use crate::widgets::scrollbar;
 
 use super::code_block::truncate_chars;
 use super::draw::{
-    draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped, intersect_rect,
-    opts_with_clip, wrap_text,
+    draw_rect_clipped, draw_rounded_rect_clipped, draw_status_dot_text,
+    draw_text_clipped, intersect_rect, opts_with_clip, wrap_text,
 };
 use super::{ORDER_PANEL, ORDER_TEXT};
 use crate::primitives::ide_theme::IdeTheme;
@@ -32,6 +32,15 @@ const TOOL_WRAP_CACHE_LIMIT: usize = 2048;
 const TOOL_DIFF_CARD_VIEW_CACHE_LIMIT: usize = 2048;
 
 pub const TODO_ROW_HEIGHT: f32 = 28.0;
+
+pub(super) fn wrap_todo_text(
+    sugarloaf: &mut Sugarloaf,
+    content: &str,
+    width: f32,
+    opts: &DrawOpts,
+) -> Vec<String> {
+    wrap_text(sugarloaf, content, width.max(40.0), opts, 24)
+}
 
 thread_local! {
     static TOOL_WRAP_CACHE: RefCell<ToolWrapCache> = RefCell::new(ToolWrapCache::new());
@@ -533,7 +542,10 @@ struct ToolWrappedRow {
 
 fn tool_body_wrap_width(width: f32, expanded: bool, s: f32) -> f32 {
     let left = if expanded { 76.0 } else { 58.0 } * s;
-    (width - left - 24.0 * s).max(80.0 * s)
+    // `width` is the timeline allocation, while tool text starts inside the
+    // card. Reserve the card's right inset as well as the connector/text inset
+    // so long paths wrap before the viewport clip rather than being clipped.
+    (width - left - 120.0 * s).max(80.0 * s)
 }
 
 fn tool_wrapped_rows(

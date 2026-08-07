@@ -135,6 +135,7 @@ pub fn render_chat_with<P, D>(
     );
 
     if composer_visible {
+        sugarloaf.set_late_overlay_mode(true);
         user_input::render_input(
             sugarloaf,
             pane,
@@ -147,5 +148,6 @@ pub fn render_chat_with<P, D>(
             occlusion_rects,
             prepared_input_rows,
         );
+        sugarloaf.set_late_overlay_mode(false);
     }
 }

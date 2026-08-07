@@ -465,10 +465,14 @@ pub(crate) fn apply_agent_event_to_pane(
             model,
             thinking,
             input_help_visible,
+            sidebar_visible,
         } => {
             pane.apply_provider_state(None, model, agent, thinking, None);
             if let Some(visible) = input_help_visible {
                 pane.set_input_help_visible(visible);
+            }
+            if let Some(visible) = sidebar_visible {
+                pane.side_panel_mut().set_user_hidden(!visible);
             }
         }
         AgentServerMessage::AgentCatalog { agents } => {

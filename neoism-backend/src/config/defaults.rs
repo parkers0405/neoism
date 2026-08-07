@@ -236,7 +236,7 @@ pub fn default_config_file_content() -> String {
 // One file, shared by the terminal and the agent. Settings are grouped by
 // domain: uncomment a block and edit the keys you want; anything omitted
 // uses its default. Full reference:
-// press Alt+N → Default vault → "Getting Started" → Configuration.
+// press Alt+N → Default vault → Welcome → Getting Started → Configure Neoism.
 {
     // ── [appearance] — theming + typography ───────────────────────
     // "appearance": {

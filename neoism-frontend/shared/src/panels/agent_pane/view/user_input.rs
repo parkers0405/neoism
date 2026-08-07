@@ -24,15 +24,6 @@ use crate::render_policy::opencode_scanner_frame;
 /// thinking ˅) rendered below the input box, inside the outer shell.
 pub(super) const CHIPS_BAND_H: f32 = 26.0;
 
-/// Radius of the input island's rounded top corners in chat mode, and
-/// the width of the corner-notch text occluders. The streaming status
-/// row insets its activity indicator past this so it isn't
-/// clipped by the notch occluders. `ISLAND_CORNER + a gap` — kept as
-/// one source of truth so the occluder (mod.rs) and status inset can't
-/// drift apart.
-pub(super) const ISLAND_CORNER: f32 = 18.0;
-pub(super) const STATUS_ROW_CORNER_INSET: f32 = ISLAND_CORNER + 6.0;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentPermissionChoice {
     Once,
@@ -283,6 +274,7 @@ macro_rules! neoism_ui_impl_agent_user_input {
             fn session_id_str(&self) -> Option<&str> {
                 <$pane>::session_id_str(self)
             }
+
 
             fn register_permission_choice_rect(
                 &mut self,
@@ -609,7 +601,8 @@ pub fn render_user_message(
     // `presence_orb_now_seconds()` clock (a small wrapped value), NOT the
     // render's raw epoch `now_seconds`: at ~1.75e9 an f32 can't resolve a
     // 16ms frame step, so the plasma would animate then stall. The
-    // `presence_orb` animation_reason keeps the pane redrawing.
+    // It advances on normal pane invalidations without forcing idle chats to
+    // repaint continuously.
     let orb = USER_ORB_SIZE * s;
     let pad_x = 14.0 * s;
     let orb_x = bubble_x + pad_x;
@@ -796,7 +789,7 @@ pub fn render_input(
         box_y + border_w,
         (box_w - 2.0 * border_w).max(0.0),
         (box_h - 2.0 * border_w).max(0.0),
-        theme.f32_alpha(theme.surface, 0.96),
+        theme.f32(theme.surface),
         DEPTH,
         (corner_radius - border_w).max(0.0),
         ORDER_PANEL + 1,
@@ -1030,9 +1023,9 @@ pub fn render_input(
             pane,
             [
                 x + 8.0 * s,
-                y + h + 4.0 * s,
+                y + h + 1.0 * s,
                 (w - 16.0 * s).max(0.0),
-                (INPUT_HELP_STRIP_H - 4.0) * s,
+                (INPUT_HELP_STRIP_H - 7.0) * s,
             ],
             theme,
             s,
@@ -1083,7 +1076,6 @@ fn render_input_help_strip(
             x,
             baseline_y,
             12.5 * s,
-            theme.accent,
             scanner_seconds,
             clip,
             occlusion_rects,
@@ -1184,14 +1176,13 @@ fn draw_opencode_activity_scanner(
     x: f32,
     y: f32,
     font_size: f32,
-    accent: u32,
     now_seconds: f32,
     clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    let base = theme_color_components(accent);
     let base_opts = DrawOpts {
         font_size,
+        color: [255, 255, 255, 255],
         clip_rect: Some(clip),
         ..DrawOpts::default()
     };
@@ -1201,31 +1192,46 @@ fn draw_opencode_activity_scanner(
     let frame = opencode_scanner_frame(now_seconds);
 
     for (index, cell) in frame.into_iter().enumerate() {
+        let brightness = if cell.active { 1.0 } else { cell.brightness };
         let mut opts = base_opts;
+        let value = (255.0 * brightness).round() as u8;
         opts.color = [
-            (base[0] * cell.brightness).min(255.0) as u8,
-            (base[1] * cell.brightness).min(255.0) as u8,
-            (base[2] * cell.brightness).min(255.0) as u8,
+            value,
+            value,
+            value,
             (cell.alpha.clamp(0.0, 1.0) * 255.0) as u8,
         ];
-        draw_text_clipped(
+        let glyph = if cell.active { "■" } else { "⬝" };
+        let mut far_depth_opts = opts;
+        far_depth_opts.color = [12, 12, 16, opts.color[3].saturating_mul(2) / 3];
+        crate::primitives::draw_text_with_occlusion(
+            sugarloaf,
+            x + index as f32 * cell_w + 3.0,
+            y + 3.0,
+            glyph,
+            &far_depth_opts,
+            occlusion_rects,
+        );
+        let mut near_depth_opts = opts;
+        near_depth_opts.color = [58, 58, 66, opts.color[3].saturating_mul(7) / 8];
+        crate::primitives::draw_text_with_occlusion(
+            sugarloaf,
+            x + index as f32 * cell_w + 1.5,
+            y + 1.5,
+            glyph,
+            &near_depth_opts,
+            occlusion_rects,
+        );
+        crate::primitives::draw_text_with_occlusion(
             sugarloaf,
             x + index as f32 * cell_w,
             y,
-            if cell.active { "■" } else { "⬝" },
+            glyph,
             &opts,
             occlusion_rects,
         );
     }
     cell_w * frame.len() as f32
-}
-
-fn theme_color_components(color: u32) -> [f32; 3] {
-    [
-        ((color >> 16) & 0xff) as f32,
-        ((color >> 8) & 0xff) as f32,
-        (color & 0xff) as f32,
-    ]
 }
 
 /// Streaming status row rendered as the last entry of the timeline — it
@@ -1242,16 +1248,6 @@ pub fn render_streaming_status_row(
     occlusion_rects: &[[f32; 4]],
 ) {
     let [bar_x, bar_y, bar_w, bar_h] = rect;
-    // Inset the activity indicator past the island's rounded
-    // top-corner. This row is the bottom-most timeline element during
-    // streaming, so it rests directly on the island's top edge; the
-    // corner-notch occluders (see `render_agent_pane_with`) span the
-    // island radius from the left edge, and the connector at the
-    // former +8s sat inside them — losing its left half. Starting the
-    // content past the corner clears the occluder AND aligns the
-    // mark under the message-card text above it.
-    let bar_x = bar_x + STATUS_ROW_CORNER_INSET * s;
-    let bar_w = (bar_w - STATUS_ROW_CORNER_INSET * s).max(0.0);
     if bar_w <= 0.0 || bar_h <= 0.0 {
         pane.clear_background_status_rect();
         return;
@@ -1287,8 +1283,11 @@ pub fn render_streaming_status_row(
     } else {
         bar_y + (bar_h - status_line_h).max(0.0) * 0.5
     };
-    let clip_x = bar_x.max(viewport_clip[0]);
-    let clip_y = (bar_y - 10.0 * s).max(viewport_clip[1]);
+    // Match the input scanner's raw left edge. The animated word is allowed
+    // to sway left of that origin, so clipping starts at the viewport rather
+    // than at the status row itself.
+    let clip_x = viewport_clip[0];
+    let clip_y = viewport_clip[1];
     let clip_right = (bar_x + bar_w).min(viewport_clip[0] + viewport_clip[2]);
     let clip_bottom = (bar_y + bar_h + 14.0 * s).min(viewport_clip[1] + viewport_clip[3]);
     if clip_right <= clip_x || clip_bottom <= clip_y {
@@ -1329,84 +1328,114 @@ pub fn render_streaming_status_row(
         clip_rect: Some(text_clip),
         ..DrawOpts::default()
     };
+    let label_lines =
+        wrap_streaming_status_label(sugarloaf, &display_label, bar_w, s, &word_opts);
+    // The status row sits immediately above the composer. Anchor the final
+    // wrapped line here and grow earlier lines upward through the timeline's
+    // reserved status rows; growing downward puts line two behind the island.
     let word_y = primary_y + (status_line_h - word_opts.font_size) * 0.5;
     let word_motion = live_phase * 3.0;
     let word_drift_x = word_motion.sin() * 1.8 * s;
     let word_drift_y = (word_motion * 0.72).cos() * 0.8 * s;
-    // The status word owns the row from its leading edge; there is no
-    // reserved activity-glyph column beside Crafting/Thinking/etc. Keep a
-    // tiny bearing guard so the first pixel glyph and its horizontal wave
-    // never spill back across the row's left inset.
-    let mut cursor_x = bar_x + 4.0 * s + word_drift_x;
+    // The word drifts up to 1.8px and each glyph sways another 1.5px left.
+    // Reserve exactly that excursion so the animation remains aligned with
+    // the scanner at rest but can never disappear under the pane edge.
+    let word_x = bar_x + 3.3 * s;
+    let mut cursor_x = word_x + word_drift_x;
     let mut trailing_color = theme.u8(accent);
-    for (ix, target_ch) in chars.iter().enumerate() {
-        let lock_threshold = (ix as f32 + 1.0) * lock_per_char;
-        let locked = transition >= lock_threshold;
-        let mut opts = word_opts;
-        let display = if locked {
-            *target_ch
-        } else {
-            let scramble_ix = (frame + ix * 5) % SCRAMBLE.len();
-            SCRAMBLE[scramble_ix] as char
-        };
-        // Rainbow during scramble; locked letters get a slow wave that
-        // shifts a few shades around the accent so the word still feels
-        // alive after it settles. `Generating` ("Crafting") spreads
-        // hues across every letter at once so the whole word reads as
-        // a slow-moving rainbow instead of a single accent shade.
-        let color = if locked {
-            let wave = ((live_phase * 3.4) + ix as f32 * 0.62).sin() * 0.5 + 0.5;
-            let pulse = ((live_phase * 6.2) + ix as f32 * 0.9).sin() * 0.5 + 0.5;
-            let lightness = 0.52 + wave * 0.16 + pulse * 0.08;
-            if matches!(state, AgentStreamingStatus::Generating) {
-                let hue = (live_phase * 70.0 + ix as f32 * 42.0).rem_euclid(360.0);
-                hsl_to_u8_simple(hue, 0.8, lightness)
+    let mut ix = 0usize;
+    for (line_ix, line) in label_lines.iter().enumerate() {
+        cursor_x = word_x + word_drift_x;
+        let lines_above = label_lines.len().saturating_sub(1 + line_ix);
+        let line_y = word_y - lines_above as f32 * status_line_h;
+        for target_ch in line.chars() {
+            let lock_threshold = (ix as f32 + 1.0) * lock_per_char;
+            let locked = transition >= lock_threshold;
+            let mut opts = word_opts;
+            let display = if locked {
+                target_ch
             } else {
-                let base_hue = match state {
-                    AgentStreamingStatus::Thinking => 300.0,
-                    AgentStreamingStatus::Working => 52.0,
-                    AgentStreamingStatus::Compacting => 158.0,
-                    AgentStreamingStatus::WaitingSubagents => 48.0,
-                    AgentStreamingStatus::BackgroundTasks => 0.0,
-                    AgentStreamingStatus::Retrying => 30.0,
-                    _ => 0.0,
-                };
-                let hue = (base_hue + wave * 18.0 - 9.0).rem_euclid(360.0);
-                hsl_to_u8_simple(hue, 0.65, lightness)
-            }
-        } else {
-            // Rainbow scramble — wider hue sweep + brighter saturation.
-            let speed = 320.0 + (1.0 - (transition / SCRAMBLE_TOTAL).min(1.0)) * 220.0;
-            let hue = (now_seconds * speed + ix as f32 * 48.0).rem_euclid(360.0);
-            hsl_to_u8_simple(hue, 1.0, 0.62)
-        };
-        trailing_color = color;
-        opts.color = color;
-        // Locked letters ride a travelling wave. Scrambling letters get
-        // a smaller shake so the word feels active before it resolves.
-        let wave_phase = live_phase * 5.6 + ix as f32 * 0.82;
-        let (sway_x, lift_y) = if locked {
-            (
-                wave_phase.cos() * 1.5 * s,
-                wave_phase.sin() * 2.4 * s + word_drift_y,
-            )
-        } else {
-            (
-                (wave_phase * 1.7).sin() * 0.8 * s,
-                (wave_phase * 1.9).cos() * 0.9 * s,
-            )
-        };
-        let mut buf = [0u8; 4];
-        let glyph = display.encode_utf8(&mut buf);
-        draw_text_clipped(
-            sugarloaf,
-            cursor_x + sway_x,
-            word_y - lift_y,
-            glyph,
-            &opts,
-            occlusion_rects,
-        );
-        cursor_x += sugarloaf.text_mut().measure(glyph, &opts);
+                let scramble_ix = (frame + ix * 5) % SCRAMBLE.len();
+                SCRAMBLE[scramble_ix] as char
+            };
+            // Crafting samples the local profile's animated pixel-plasma field
+            // even after every letter locks. Other states retain their semantic
+            // color family; the transition into them uses the same profile field.
+            let color = if locked {
+                let wave = ((live_phase * 3.4) + ix as f32 * 0.62).sin() * 0.5 + 0.5;
+                let pulse = ((live_phase * 6.2) + ix as f32 * 0.9).sin() * 0.5 + 0.5;
+                let lightness = 0.52 + wave * 0.16 + pulse * 0.08;
+                if matches!(state, AgentStreamingStatus::Generating) {
+                    [255, 255, 255, 255]
+                } else {
+                    let base_hue = match state {
+                        AgentStreamingStatus::Thinking => 300.0,
+                        AgentStreamingStatus::Working => 52.0,
+                        AgentStreamingStatus::Compacting => 158.0,
+                        AgentStreamingStatus::WaitingSubagents => 48.0,
+                        AgentStreamingStatus::BackgroundTasks => 0.0,
+                        AgentStreamingStatus::Retrying => 30.0,
+                        _ => 0.0,
+                    };
+                    let hue = (base_hue + wave * 18.0 - 9.0).rem_euclid(360.0);
+                    hsl_to_u8_simple(hue, 0.65, lightness)
+                }
+            } else {
+                crate::cursor_style::rainbow_color_u8(
+                    crate::cursor_style::rainbow_now_seconds() + ix as f32 * 0.16,
+                )
+            };
+            trailing_color = color;
+            opts.color = color;
+            // Locked letters ride a travelling wave. Scrambling letters get
+            // a smaller shake so the word feels active before it resolves.
+            let wave_phase = live_phase * 5.6 + ix as f32 * 0.82;
+            let (sway_x, lift_y) = if locked {
+                (
+                    wave_phase.cos() * 1.5 * s,
+                    wave_phase.sin() * 2.4 * s + word_drift_y,
+                )
+            } else {
+                (
+                    (wave_phase * 1.7).sin() * 0.8 * s,
+                    (wave_phase * 1.9).cos() * 0.9 * s,
+                )
+            };
+            let mut buf = [0u8; 4];
+            let glyph = display.encode_utf8(&mut buf);
+            let glyph_x = cursor_x + sway_x;
+            let glyph_y = line_y - lift_y;
+            let mut far_depth_opts = opts;
+            far_depth_opts.color = [10, 10, 14, 210];
+            crate::primitives::draw_text_with_occlusion(
+                sugarloaf,
+                glyph_x + 3.5 * s,
+                glyph_y + 3.5 * s,
+                glyph,
+                &far_depth_opts,
+                occlusion_rects,
+            );
+            let mut near_depth_opts = opts;
+            near_depth_opts.color = [62, 62, 72, 240];
+            crate::primitives::draw_text_with_occlusion(
+                sugarloaf,
+                glyph_x + 1.75 * s,
+                glyph_y + 1.75 * s,
+                glyph,
+                &near_depth_opts,
+                occlusion_rects,
+            );
+            let glyph_w = crate::primitives::draw_text_with_occlusion(
+                sugarloaf,
+                glyph_x,
+                glyph_y,
+                glyph,
+                &opts,
+                occlusion_rects,
+            );
+            cursor_x += glyph_w;
+            ix += 1;
+        }
     }
 
     // Animated `...` after the word — anchored down by the letters' feet
@@ -1424,7 +1453,8 @@ pub fn render_streaming_status_row(
     // vertical nudge.
     let word_baseline = sugarloaf.text_mut().baseline_offset(&word_opts);
     let dot_baseline = sugarloaf.text_mut().baseline_offset(&dot_opts);
-    let dot_floor_y = word_y + word_baseline - dot_baseline;
+    let last_line_y = word_y;
+    let dot_floor_y = last_line_y + word_baseline - dot_baseline;
     for ix in 0..3 {
         let phase = live_phase * 4.0 + ix as f32 * 0.95;
         let swell = phase.sin();
@@ -1435,15 +1465,28 @@ pub fn render_streaming_status_row(
         let mut opts = dot_opts;
         opts.color = trailing_color;
         opts.color[3] = (alpha * 255.0).round() as u8;
-        draw_text_clipped(
-            sugarloaf,
-            cursor_x + drift,
-            dot_floor_y - lift,
+        let dot_w = sugarloaf.text_mut().measure(".", &opts);
+        let mut far_depth_opts = opts;
+        far_depth_opts.color = [10, 10, 14, opts.color[3].saturating_mul(5) / 6];
+        let _ = sugarloaf.text_mut().draw(
+            cursor_x + drift + 3.0 * s,
+            dot_floor_y - lift + 3.0 * s,
             ".",
-            &opts,
-            occlusion_rects,
+            &far_depth_opts,
         );
-        cursor_x += sugarloaf.text_mut().measure(".", &opts) + 2.0 * s;
+        let mut near_depth_opts = opts;
+        near_depth_opts.color = [62, 62, 72, opts.color[3]];
+        let _ = sugarloaf.text_mut().draw(
+            cursor_x + drift + 1.5 * s,
+            dot_floor_y - lift + 1.5 * s,
+            ".",
+            &near_depth_opts,
+        );
+        let _ =
+            sugarloaf
+                .text_mut()
+                .draw(cursor_x + drift, dot_floor_y - lift, ".", &opts);
+        cursor_x += dot_w + 2.0 * s;
     }
 
     cursor_x += 8.0 * s;
@@ -1466,7 +1509,7 @@ pub fn render_streaming_status_row(
         ..DrawOpts::default()
     };
     let time_baseline = sugarloaf.text_mut().baseline_offset(&time_opts);
-    let time_y = word_y + word_baseline - time_baseline;
+    let time_y = last_line_y + word_baseline - time_baseline;
     draw_text_clipped(
         sugarloaf,
         cursor_x,
@@ -1499,9 +1542,10 @@ pub fn render_streaming_status_row(
             clip_rect: Some(text_clip),
             ..DrawOpts::default()
         };
-        let queue_y =
-            primary_y + status_line_h + (status_line_h - queue_opts.font_size) * 0.5
-                - 1.0 * s;
+        let queue_y = primary_y
+            + status_line_h * label_lines.len() as f32
+            + (status_line_h - queue_opts.font_size) * 0.5
+            - 1.0 * s;
         draw_text_clipped(
             sugarloaf,
             bar_x + 34.0 * s,
@@ -1526,7 +1570,7 @@ pub fn render_streaming_status_row(
             ..DrawOpts::default()
         };
         let bg_y = primary_y
-            + status_line_h
+            + status_line_h * label_lines.len() as f32
             + if queued_count > 0 { status_line_h } else { 0.0 }
             + (status_line_h - bg_opts.font_size) * 0.5
             - 1.0 * s;
@@ -1552,10 +1596,42 @@ pub fn render_streaming_status_row(
 /// Number of physical lines occupied by the activity row: the animated
 /// primary status plus one line for each optional child branch.
 pub(super) const fn streaming_status_line_count(
+    primary_count: usize,
     queued_count: usize,
     background_count: usize,
 ) -> usize {
-    1 + (queued_count > 0) as usize + (background_count > 0) as usize
+    let primary_count = if primary_count == 0 { 1 } else { primary_count };
+    primary_count + (queued_count > 0) as usize + (background_count > 0) as usize
+}
+
+pub(super) fn streaming_status_primary_line_count(
+    sugarloaf: &mut Sugarloaf,
+    label: &str,
+    width: f32,
+    s: f32,
+) -> usize {
+    let opts = DrawOpts {
+        font_size: 12.0 * s,
+        bold: true,
+        font_id: crate::primitives::pixel_font_id(sugarloaf),
+        ..DrawOpts::default()
+    };
+    wrap_streaming_status_label(sugarloaf, label, width, s, &opts)
+        .len()
+        .max(1)
+}
+
+fn wrap_streaming_status_label(
+    sugarloaf: &mut Sugarloaf,
+    label: &str,
+    width: f32,
+    s: f32,
+    opts: &DrawOpts,
+) -> Vec<String> {
+    // Reserve room for the animated ellipsis, elapsed time, and detail on
+    // every line. A stable right edge reads better than a wide continuation.
+    let available = (width - 190.0 * s).max(72.0 * s);
+    super::draw::wrap_input_text(sugarloaf, label, available, opts)
 }
 
 pub fn render_status_chips(
@@ -1594,6 +1670,7 @@ pub fn render_status_chips(
             font_size,
             color: theme.u8(theme.readable_accent(color)),
             bold: true,
+            extrude: true,
             ..DrawOpts::default()
         };
         let label_w = sugarloaf.text_mut().measure(&label, &opts);
@@ -1759,11 +1836,21 @@ fn wrap_agent_prompt_rows(
         opts,
         &mut wrap,
     );
+    // Once the last glyph exactly fills a row, the insertion point belongs at
+    // column zero of the next visual row. Reserve that empty row immediately
+    // instead of waiting for the next typed character to make the caret jump.
+    let trailing_wrap_boundary = wrap.end > wrap.start && wrap.width >= max_w;
+    if trailing_wrap_boundary {
+        let end = wrap.end;
+        wrap.push_row(end);
+    }
     // A trailing hard newline creates a real empty visual row. Without
     // preserving it, Shift+Enter updates `cursor_byte` past the last
     // registered row and the renderer falls back to painting the caret
     // on the first/top row.
-    if wrap.end > wrap.start || wrap.lines.is_empty() || text.ends_with('\n') {
+    if !trailing_wrap_boundary
+        && (wrap.end > wrap.start || wrap.lines.is_empty() || text.ends_with('\n'))
+    {
         let end = wrap.end;
         wrap.push_row(end);
     }

@@ -75,6 +75,7 @@ impl NeoismAgentPane {
         }
     }
 
+    #[allow(dead_code)]
     pub fn skip_permissions_enabled(&self) -> bool {
         self.skip_permissions
     }

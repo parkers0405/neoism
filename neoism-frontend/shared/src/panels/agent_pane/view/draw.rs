@@ -4,6 +4,7 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::{GraphicOverlay, Sugarloaf};
 
 use super::DEPTH;
+use crate::primitives::draw_text_with_occlusion;
 
 const TEXT_MEASURE_CACHE_LIMIT: usize = 8192;
 
@@ -79,6 +80,59 @@ pub fn opts_with_clip(mut opts: DrawOpts, clip: [f32; 4]) -> Option<DrawOpts> {
         None => Some(clip),
     };
     opts.clip_rect.map(|_| opts)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_status_dot_text(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    diameter: f32,
+    color: [u8; 4],
+    halo: Option<([u8; 4], f32)>,
+    clip: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+    s: f32,
+) {
+    let dot = "●";
+    let font_size = (diameter * 1.55).max(10.0 * s);
+    if let Some((mut halo_color, halo_alpha)) = halo {
+        halo_color[3] = ((halo_color[3] as f32) * halo_alpha.clamp(0.0, 1.0)) as u8;
+        let halo_size = font_size * 1.65;
+        let halo_opts = DrawOpts {
+            font_size: halo_size,
+            color: halo_color,
+            bold: true,
+            clip_rect: Some(clip),
+            ..DrawOpts::default()
+        };
+        let halo_w = sugarloaf.text_mut().measure(dot, &halo_opts);
+        draw_text_with_occlusion(
+            sugarloaf,
+            x + (diameter - halo_w) * 0.5,
+            y + (diameter - halo_size) * 0.5 - 0.5 * s,
+            dot,
+            &halo_opts,
+            occlusion_rects,
+        );
+    }
+
+    let dot_opts = DrawOpts {
+        font_size,
+        color,
+        bold: true,
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    let dot_w = sugarloaf.text_mut().measure(dot, &dot_opts);
+    draw_text_with_occlusion(
+        sugarloaf,
+        x + (diameter - dot_w) * 0.5,
+        y + (diameter - font_size) * 0.5 - 0.5 * s,
+        dot,
+        &dot_opts,
+        occlusion_rects,
+    );
 }
 
 pub fn draw_rect_clipped(

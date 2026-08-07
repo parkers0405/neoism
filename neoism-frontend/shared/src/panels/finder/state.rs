@@ -110,6 +110,7 @@ pub struct Finder {
     pub(super) wheel_accumulator: f32,
     pub(super) open_pop_started: Instant,
     pub(super) pop_on_open: bool,
+    pub(super) top_anchor: f32,
 }
 
 impl Default for Finder {
@@ -151,6 +152,7 @@ impl Default for Finder {
             wheel_accumulator: 0.0,
             open_pop_started: Instant::now(),
             pop_on_open: false,
+            top_anchor: super::FINDER_MARGIN_TOP,
         }
     }
 }
@@ -175,6 +177,10 @@ impl Finder {
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.clamp(0.5, 3.0);
         self.reset_motion();
+    }
+
+    pub fn set_top_anchor(&mut self, top: f32) {
+        self.top_anchor = top.max(0.0);
     }
 
     pub(super) fn reset_motion(&mut self) {

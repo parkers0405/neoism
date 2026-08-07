@@ -1,0 +1,84 @@
+# Tools and Background Tasks
+
+Tools let a model inspect or act on the workspace. Neoism validates tool input, checks permissions, executes the operation, stores its result as a message part, and broadcasts progress to every client attached to the session.
+
+## Native tool groups
+
+Neoism's built-in inventory includes:
+
+| Group | Examples |
+|---|---|
+| Shell | `bash`, `background_task`, `background_task_result` |
+| Files | `read`, `read_many`, `read_around`, `write`, `edit`, `apply_patch`, `list`, `glob` |
+| Search | `grep`, `ffgrep`, `fff_multi_grep`, `fffind` |
+| Web | `webfetch`, `webfetch_batch`, `websearch`, `websearch_batch` |
+| Code intelligence | `lsp` |
+| Knowledge | `notes`, `skill`, built-in Memory/Docs MCP tools |
+| Workflow | `question`, `plan_enter`, `todowrite` |
+| Delegation | `task`, `task_result`, `stop_task` |
+| Runtime | `complete_goal`, background-task cancellation routes |
+
+MCP servers can add more tools. The effective tool list is filtered by global and per-agent `tools` maps.
+
+```jsonc
+{
+  "agent": {
+    "tools": {
+      "websearch": false,
+      "webfetch": false
+    }
+  }
+}
+```
+
+## Foreground shell
+
+`bash` runs a command and waits for completion or timeout. It uses the session project as the default working directory, but a tool call can request another directory subject to `external_directory` permission.
+
+Neoism scans shell text into permission targets instead of treating every command as one opaque string. A compound command can therefore require multiple `bash` decisions and an external-directory decision.
+
+## Background shell tasks
+
+`background_task` starts a long-running shell command and returns a `job_id` immediately. Defaults are:
+
+- Timeout: 30 minutes.
+- Retained output: 256 KiB.
+- Working directory: session project directory.
+
+The process runs in a new process group. Neoism retains status, output, exit code, signal, truncation, command patterns, and working directory in the live agent server.
+
+Use `background_task_result` with a job ID to inspect one task, or omit the ID to list tasks for the current session.
+
+## Stop a background task
+
+Use the task's **Stop** action. Cancellation is delivered to the runner that owns the live child process; that runner terminates its process tree and reports `cancelled`. Neoism does not later kill an arbitrary reused PID.
+
+Background task state is in-memory and retained only for the current agent-server lifetime. Restarting the server loses the inventory even if an independently detached external process survived.
+
+## Tool output
+
+Large outputs are bounded. Some tool results are spilled to a reference rather than replayed in full to every later model request. The timeline can show a preview while the provider context uses a compact reference.
+
+## File editing
+
+`write`, `edit`, and `apply_patch` are separate tools:
+
+- `write` creates/replaces complete content where enabled.
+- `edit` replaces a targeted exact string.
+- `apply_patch` performs structured multi-region add/update/delete patches.
+
+All map to the `edit` permission. Agents are instructed not to overwrite unrelated concurrent work.
+
+## Tool loops and limits
+
+An agent can set `max-steps`. When the limit is reached, Neoism disables further tools for that turn and requires a text summary. Repeated behavior can trigger the `doom_loop` permission.
+
+## Permissions and side effects
+
+Tool availability is not a safety guarantee. A shell command, browser action, API integration, or MCP tool can create irreversible external effects. See [[Permissions]].
+
+## Subagents are not shell jobs
+
+Delegated agents are child sessions managed through `task`, `task_result`, and `stop_task`. Shell background tasks are OS processes managed through `background_task`. They have different lifecycle and persistence semantics.
+
+See [[Agents and Subagents]] and [[Sessions and Sharing]].

@@ -102,6 +102,7 @@ pub struct CommandPalette {
     pub(super) wheel_accumulator: f32,
     pub(super) open_pop_started: Instant,
     pub(super) pop_on_open: bool,
+    pub(super) top_anchor: f32,
     pub(super) surface: PaletteSurface,
     pub(super) workspace_visibility:
         crate::panels::context_menu::WorkspaceChromeVisibility,
@@ -166,6 +167,7 @@ impl Default for CommandPalette {
             wheel_accumulator: 0.0,
             open_pop_started: Instant::now(),
             pop_on_open: false,
+            top_anchor: super::PALETTE_MARGIN_TOP,
             surface: PaletteSurface::Terminal,
             workspace_visibility:
                 crate::panels::context_menu::WorkspaceChromeVisibility::Private,
@@ -195,6 +197,10 @@ impl CommandPalette {
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.clamp(0.5, 3.0);
         self.reset_motion();
+    }
+
+    pub fn set_top_anchor(&mut self, top: f32) {
+        self.top_anchor = top.max(0.0);
     }
 
     pub fn set_surface(&mut self, surface: PaletteSurface) {

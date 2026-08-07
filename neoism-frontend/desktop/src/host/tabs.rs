@@ -193,22 +193,12 @@ impl Renderer {
         window_height: f32,
         scale_factor: f32,
     ) -> Vec<[f32; 4]> {
-        let mut rects = Vec::with_capacity(7);
-        if let Some(rect) =
-            self.finder
-                .active_rect((window_width, window_height, scale_factor))
-        {
-            rects.push(rect);
-        }
-        if let Some(rect) = self.search.active_rect(window_width, scale_factor) {
-            rects.push(rect);
-        }
-        if let Some(rect) = self.command_palette.active_rect(window_width, scale_factor) {
-            rects.push(rect);
-        }
-        if let Some(rect) = self.modal.active_rect(window_width, scale_factor) {
-            rects.push(rect);
-        }
+        let mut rects = Vec::with_capacity(4);
+        // The command palette, Finder, and search panel are composited entirely
+        // through Sugarloaf's late overlay pass. Do not punch their bounds out
+        // of normal text first: that exposes the renderer clear color around
+        // rounded and animated edges.
+
         if let Some(rect) =
             self.settings
                 .active_rect(window_width, window_height, scale_factor)
@@ -283,8 +273,20 @@ impl Renderer {
         let _ = num_tabs;
         let bar_top = 0.0;
         let theme = self.theme;
+        self.top_bar.set_agent_icon_overlay(true);
         self.top_bar
             .render(sugarloaf, content_x, bar_top, content_w, &theme);
+        let [x, y, w, h] = self.top_bar.right_button_rect();
+        let size = (w.min(h) * 0.72).max(1.0);
+        crate::neoism::icon::push_cropped_icon_overlay(
+            sugarloaf,
+            crate::neoism::icon::AgentKind::Neoism,
+            x + (w - size) * 0.5,
+            y + (h - size) * 0.5,
+            size,
+            size,
+            [0.0, 0.0, 1.0, 1.0],
+        );
     }
 
     pub fn notifications_top_offset(

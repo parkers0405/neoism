@@ -5,6 +5,66 @@ use sugarloaf::Sugarloaf;
 
 use super::geom::rects_intersect;
 
+/// Draw a hard two-step text extrusion followed by the original foreground.
+/// The caller's clip rectangle and alpha are preserved for every layer.
+pub fn draw_text_extruded(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    text: &str,
+    opts: &DrawOpts,
+    scale: f32,
+) -> f32 {
+    let mut far = *opts;
+    far.color = [10, 10, 14, opts.color[3].saturating_mul(5) / 6];
+    sugarloaf
+        .text_mut()
+        .draw(x + 3.0 * scale, y + 3.0 * scale, text, &far);
+
+    let mut near = *opts;
+    near.color = [62, 62, 72, opts.color[3]];
+    sugarloaf
+        .text_mut()
+        .draw(x + 1.5 * scale, y + 1.5 * scale, text, &near);
+
+    sugarloaf.text_mut().draw(x, y, text, opts)
+}
+
+/// Occlusion-aware form of [`draw_text_extruded`].
+pub fn draw_text_extruded_with_occlusion(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    text: &str,
+    opts: &DrawOpts,
+    scale: f32,
+    occlusion_rects: &[[f32; 4]],
+) -> f32 {
+    let mut far = *opts;
+    far.color = [10, 10, 14, opts.color[3].saturating_mul(5) / 6];
+    draw_text_with_occlusion(
+        sugarloaf,
+        x + 3.0 * scale,
+        y + 3.0 * scale,
+        text,
+        &far,
+        occlusion_rects,
+    );
+
+    let mut near = *opts;
+    near.color = [62, 62, 72, opts.color[3]];
+    draw_text_with_occlusion(
+        sugarloaf,
+        x + 1.5 * scale,
+        y + 1.5 * scale,
+        text,
+        &near,
+        occlusion_rects,
+    );
+
+    draw_text_with_occlusion(sugarloaf, x, y, text, opts, occlusion_rects)
+}
+
 /// Truncate `text` so its shaped width fits inside `available_w` pixels,
 /// adding an ellipsis when we cut. Uses Sugarloaf's actual shaping so
 /// long single words and fallback-font glyphs don't spill past the
@@ -69,44 +129,51 @@ pub fn draw_text_with_occlusion(
     };
     let text_h = (opts.font_size * 1.8).max(opts.font_size + 8.0);
     let text_rect = [x, y - 4.0, width, text_h];
-    let mut intervals = vec![(base_clip[0], base_clip[0] + base_clip[2])];
+    let mut visible = vec![base_clip];
 
-    for rect in occlusion_rects {
-        if !rects_intersect(text_rect, *rect) {
+    for cut in occlusion_rects {
+        if !rects_intersect(text_rect, *cut) {
             continue;
         }
-        let cut_start = rect[0].max(base_clip[0]);
-        let cut_end = (rect[0] + rect[2]).min(base_clip[0] + base_clip[2]);
-        if cut_end <= cut_start {
-            continue;
-        }
-
-        let mut next = Vec::with_capacity(intervals.len() + 1);
-        for (start, end) in intervals {
-            if cut_end <= start || cut_start >= end {
-                next.push((start, end));
+        let mut next = Vec::with_capacity(visible.len() + 3);
+        for rect in visible {
+            if !rects_intersect(rect, *cut) {
+                next.push(rect);
                 continue;
             }
-            if cut_start > start {
-                next.push((start, cut_start));
+            let left = rect[0];
+            let top = rect[1];
+            let right = left + rect[2];
+            let bottom = top + rect[3];
+            let cut_left = cut[0].max(left);
+            let cut_top = cut[1].max(top);
+            let cut_right = (cut[0] + cut[2]).min(right);
+            let cut_bottom = (cut[1] + cut[3]).min(bottom);
+            if cut_top > top {
+                next.push([left, top, rect[2], cut_top - top]);
             }
-            if cut_end < end {
-                next.push((cut_end, end));
+            if cut_bottom < bottom {
+                next.push([left, cut_bottom, rect[2], bottom - cut_bottom]);
+            }
+            if cut_left > left && cut_bottom > cut_top {
+                next.push([left, cut_top, cut_left - left, cut_bottom - cut_top]);
+            }
+            if cut_right < right && cut_bottom > cut_top {
+                next.push([cut_right, cut_top, right - cut_right, cut_bottom - cut_top]);
             }
         }
-        intervals = next;
-        if intervals.is_empty() {
+        visible = next;
+        if visible.is_empty() {
             return width;
         }
     }
 
-    for (start, end) in intervals {
-        let clip_w = end - start;
-        if clip_w <= 0.0 {
+    for rect in visible {
+        if rect[2] <= 0.0 || rect[3] <= 0.0 {
             continue;
         }
         let mut clipped = *opts;
-        clipped.clip_rect = Some([start, base_clip[1], clip_w, base_clip[3]]);
+        clipped.clip_rect = Some(rect);
         sugarloaf.text_mut().draw(x, y, text, &clipped);
     }
 

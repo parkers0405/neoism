@@ -96,7 +96,7 @@ fn truncate_to_pixel_width(
     opts: &DrawOpts,
     max_w: f32,
 ) -> String {
-    if sugarloaf.text_mut().measure(text, opts) <= max_w {
+    if sugarloaf.overlay_text_mut().measure(text, opts) <= max_w {
         return text.to_string();
     }
     let ellipsis = "…";
@@ -104,7 +104,7 @@ fn truncate_to_pixel_width(
     while !buf.is_empty() {
         buf.pop();
         let candidate: String = buf.iter().collect::<String>() + ellipsis;
-        if sugarloaf.text_mut().measure(&candidate, opts) <= max_w {
+        if sugarloaf.overlay_text_mut().measure(&candidate, opts) <= max_w {
             return candidate;
         }
     }
@@ -217,19 +217,17 @@ pub fn render_limited(
     // the four corner triangles the rounded rects leave empty, showing as
     // black square corners poking past the rounded ones on themes where
     // `black != bg`. The rounded fills below are the whole container.
-    sugarloaf.rounded_rect(
-        None,
+    sugarloaf.overlay_rounded_rect(
         x,
         y,
         width,
         height,
-        theme.f32(theme.panel_bg()),
+        theme.f32(theme.bg),
         DEPTH,
         RADIUS * s,
         ORDER,
     );
-    sugarloaf.rounded_rect(
-        None,
+    sugarloaf.overlay_rounded_rect(
         x,
         y,
         width,
@@ -239,8 +237,7 @@ pub fn render_limited(
         RADIUS * s,
         ORDER + 1,
     );
-    sugarloaf.rounded_rect(
-        None,
+    sugarloaf.overlay_rounded_rect(
         x + s,
         y + s,
         (width - 2.0 * s).max(0.0),
@@ -254,7 +251,7 @@ pub fn render_limited(
     // Header band: modal title (left) + `esc` hint (right), then a search
     // row below showing the live query or a muted "Search" placeholder.
     // Type-to-filter is always on; this just gives it a visible input.
-    sugarloaf.text_mut().draw(
+    sugarloaf.overlay_text_mut().draw(
         x + 14.0 * s,
         y + 9.0 * s,
         view.title,
@@ -272,8 +269,8 @@ pub fn render_limited(
         clip_rect: Some(header_clip),
         ..DrawOpts::default()
     };
-    let esc_w = sugarloaf.text_mut().measure("esc", &esc_opts);
-    sugarloaf.text_mut().draw(
+    let esc_w = sugarloaf.overlay_text_mut().measure("esc", &esc_opts);
+    sugarloaf.overlay_text_mut().draw(
         x + width - 14.0 * s - esc_w,
         y + 9.0 * s,
         "esc",
@@ -289,12 +286,17 @@ pub fn render_limited(
             clip_rect: Some(header_clip),
             ..DrawOpts::default()
         };
-        sugarloaf
-            .text_mut()
-            .draw(x + 14.0 * s, y + 31.0 * s, "Rename ›", &label_opts);
-        let label_w = sugarloaf.text_mut().measure("Rename › ", &label_opts);
+        sugarloaf.overlay_text_mut().draw(
+            x + 14.0 * s,
+            y + 31.0 * s,
+            "Rename ›",
+            &label_opts,
+        );
+        let label_w = sugarloaf
+            .overlay_text_mut()
+            .measure("Rename › ", &label_opts);
         let buffer = format!("{rename}▏");
-        sugarloaf.text_mut().draw(
+        sugarloaf.overlay_text_mut().draw(
             x + 14.0 * s + label_w,
             y + 31.0 * s,
             &buffer,
@@ -315,7 +317,7 @@ pub fn render_limited(
         // Caret sits after the typed query, or at the field start (with the
         // muted placeholder pushed right) when empty — reads as a live input.
         let caret_x = if view.query.is_empty() {
-            sugarloaf.text_mut().draw(
+            sugarloaf.overlay_text_mut().draw(
                 x + 14.0 * s + 5.0 * s,
                 y + 31.0 * s,
                 view.search_placeholder,
@@ -326,13 +328,16 @@ pub fn render_limited(
             );
             x + 14.0 * s
         } else {
-            sugarloaf.text_mut().draw(
+            sugarloaf.overlay_text_mut().draw(
                 x + 14.0 * s,
                 y + 31.0 * s,
                 view.query,
                 &search_opts,
             );
-            x + 14.0 * s + sugarloaf.text_mut().measure(view.query, &search_opts)
+            x + 14.0 * s
+                + sugarloaf
+                    .overlay_text_mut()
+                    .measure(view.query, &search_opts)
         };
         if view.show_search_caret {
             // Caret sits ON the search line (same Y as the query/placeholder
@@ -340,8 +345,7 @@ pub fn render_limited(
             // tall bar floating up into the title row. `caret_x` already
             // tracks the measured query width, so it advances as you type.
             let caret_w = (1.5 * s).max(1.0);
-            sugarloaf.rounded_rect(
-                None,
+            sugarloaf.overlay_rounded_rect(
                 caret_x + 1.0 * s,
                 y + 31.0 * s,
                 caret_w,
@@ -419,7 +423,7 @@ pub fn render_limited(
                 &header_opts,
                 width - 44.0 * s,
             );
-            sugarloaf.text_mut().draw(
+            sugarloaf.overlay_text_mut().draw(
                 title_x,
                 row_y + 16.0 * s,
                 &title_text,
@@ -431,8 +435,7 @@ pub fn render_limited(
             let selected_y = row_y + cursor_offset_snapped;
             let visible_y = selected_y.max(list_y);
             let visible_h = (selected_y + row_h).min(list_bottom) - visible_y;
-            sugarloaf.rounded_rect(
-                None,
+            sugarloaf.overlay_rounded_rect(
                 x + 6.0 * s,
                 visible_y + 3.0 * s,
                 width - 12.0 * s,
@@ -442,8 +445,7 @@ pub fn render_limited(
                 9.0 * s,
                 ORDER + 3,
             );
-            sugarloaf.rounded_rect(
-                None,
+            sugarloaf.overlay_rounded_rect(
                 x + 10.0 * s,
                 visible_y + 9.0 * s,
                 3.0 * s,
@@ -470,8 +472,7 @@ pub fn render_limited(
             let dot_x = x + 7.0 * s;
             let dot_y = row_y + (row_h - dot_d) / 2.0;
             if dot_y >= list_y && dot_y + dot_d <= list_bottom {
-                sugarloaf.rounded_rect(
-                    None,
+                sugarloaf.overlay_rounded_rect(
                     dot_x,
                     dot_y,
                     dot_d,
@@ -487,7 +488,10 @@ pub fn render_limited(
         let footer_w = if row.footer.is_empty() {
             0.0
         } else {
-            sugarloaf.text_mut().measure(row.footer, &footer_opts) + 22.0 * s
+            sugarloaf
+                .overlay_text_mut()
+                .measure(row.footer, &footer_opts)
+                + 22.0 * s
         };
         let footer_x = x + width - footer_w;
         // Reserve a gap before the footer so long titles don't smear
@@ -503,7 +507,7 @@ pub fn render_limited(
             row_y + 5.0 * s
         };
         sugarloaf
-            .text_mut()
+            .overlay_text_mut()
             .draw(title_x, title_y, &title_text, &title_opts);
         if !row.description.is_empty() {
             let desc_max_w = (footer_x - title_x - 12.0 * s).max(48.0);
@@ -513,12 +517,15 @@ pub fn render_limited(
                 &desc_opts,
                 desc_max_w,
             );
-            sugarloaf
-                .text_mut()
-                .draw(title_x, row_y + 25.0 * s, &desc_text, &desc_opts);
+            sugarloaf.overlay_text_mut().draw(
+                title_x,
+                row_y + 25.0 * s,
+                &desc_text,
+                &desc_opts,
+            );
         }
         if !row.footer.is_empty() {
-            sugarloaf.text_mut().draw(
+            sugarloaf.overlay_text_mut().draw(
                 footer_x,
                 row_y + 15.0 * s,
                 row.footer,
@@ -533,8 +540,7 @@ pub fn render_limited(
             let dot_x = x + width - dot_d - 8.0 * s;
             let dot_y = row_y + (row_h - dot_d) / 2.0;
             if dot_y >= list_y && dot_y + dot_d <= list_bottom {
-                sugarloaf.rounded_rect(
-                    None,
+                sugarloaf.overlay_rounded_rect(
                     dot_x,
                     dot_y,
                     dot_d,
@@ -567,8 +573,7 @@ pub fn render_limited(
                 let alpha = (0.16 + 0.08 * wave).max(0.04) * fade_in;
                 let (title_frac, desc_frac) = SKELETON_WIDTHS[i];
                 let avail = (width - 44.0 * s).max(0.0);
-                sugarloaf.rounded_rect(
-                    None,
+                sugarloaf.overlay_rounded_rect(
                     x + 22.0 * s,
                     row_y + 8.0 * s,
                     avail * title_frac,
@@ -578,8 +583,7 @@ pub fn render_limited(
                     6.0 * s,
                     ORDER + 2,
                 );
-                sugarloaf.rounded_rect(
-                    None,
+                sugarloaf.overlay_rounded_rect(
                     x + 22.0 * s,
                     row_y + 26.0 * s,
                     avail * desc_frac,
@@ -591,7 +595,7 @@ pub fn render_limited(
                 );
             }
         } else {
-            sugarloaf.text_mut().draw(
+            sugarloaf.overlay_text_mut().draw(
                 x + 22.0 * s,
                 list_y + (row_h - 14.0 * s) / 2.0 + 7.0 * s,
                 "No results",
@@ -611,8 +615,7 @@ pub fn render_limited(
         // Opaque band with rounded bottom corners matching the card, drawn
         // ABOVE the row highlights (ORDER+3..5) so the selected-row accent
         // can't phase through the legend. Reuses the per-corner-radii quad.
-        sugarloaf.quad(
-            None,
+        sugarloaf.overlay_quad(
             x + s,
             band_y,
             (width - 2.0 * s).max(0.0),
@@ -622,8 +625,7 @@ pub fn render_limited(
             DEPTH,
             ORDER + 6,
         );
-        sugarloaf.rect(
-            None,
+        sugarloaf.overlay_rect(
             x + s,
             band_y,
             (width - 2.0 * s).max(0.0),
@@ -638,7 +640,7 @@ pub fn render_limited(
             clip_rect: Some([x, band_y, width, footer_h]),
             ..DrawOpts::default()
         };
-        sugarloaf.text_mut().draw(
+        sugarloaf.overlay_text_mut().draw(
             x + 14.0 * s,
             band_y + (footer_h - 11.0 * s) / 2.0,
             hint,

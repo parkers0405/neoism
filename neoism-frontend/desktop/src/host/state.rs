@@ -190,6 +190,9 @@ impl Renderer {
         if self.terminal_block_prompt_animating {
             return Some("terminal_block_prompt");
         }
+        if self.terminal_splash_animating {
+            return Some("terminal_splash");
+        }
         // Notebook execution redraws are event-driven by output/result
         // messages, with a bounded status tick scheduled by the app.
         // Treating every running cell as a vblank animation makes Run All

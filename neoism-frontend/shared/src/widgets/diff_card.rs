@@ -48,6 +48,12 @@ struct DiffWrapKey {
     max_chars: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WrappedFragment {
+    text: String,
+    indent_cols: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct DiffHighlightKey {
     text_hash: u64,
@@ -56,7 +62,7 @@ struct DiffHighlightKey {
 }
 
 struct DiffWrapCache {
-    values: HashMap<DiffWrapKey, Rc<Vec<String>>>,
+    values: HashMap<DiffWrapKey, Rc<Vec<WrappedFragment>>>,
     order: VecDeque<DiffWrapKey>,
 }
 
@@ -68,11 +74,11 @@ impl DiffWrapCache {
         }
     }
 
-    fn get(&self, key: &DiffWrapKey) -> Option<Rc<Vec<String>>> {
+    fn get(&self, key: &DiffWrapKey) -> Option<Rc<Vec<WrappedFragment>>> {
         self.values.get(key).cloned()
     }
 
-    fn insert(&mut self, key: DiffWrapKey, value: Rc<Vec<String>>) {
+    fn insert(&mut self, key: DiffWrapKey, value: Rc<Vec<WrappedFragment>>) {
         if self.values.contains_key(&key) {
             self.values.insert(key, value);
             return;
@@ -223,7 +229,7 @@ pub fn warm_render_cache(
             continue;
         }
         for fragment in fragments.iter() {
-            highlighted_diff_line(fragment, lang);
+            highlighted_diff_line(&fragment.text, lang);
         }
     }
     offsets
@@ -601,6 +607,20 @@ pub fn render(
             // add + context rows get syntax highlighting so the code reads
             // like a buffer rather than a wall of monochrome diff text.
             let text_y = snap_text_y(row_y + (line_h - FONT_SIZE * scale) / 2.0);
+            let fragment_x =
+                body_inner_x + fragment.indent_cols as f32 * FONT_SIZE * scale * 0.58;
+            if fragment_ix > 0 {
+                sugarloaf.rect(
+                    None,
+                    body_inner_x + 1.5 * scale,
+                    row_y + 3.0 * scale,
+                    (1.0 * scale).max(1.0),
+                    line_h - 6.0 * scale,
+                    theme.f32(theme.muted),
+                    depth,
+                    base_order.saturating_add(4),
+                );
+            }
             match line.kind {
                 DiffLineKind::Hunk => {
                     let opts = DrawOpts {
@@ -610,10 +630,11 @@ pub fn render(
                         clip_rect: Some(body_clip),
                         ..DrawOpts::default()
                     };
-                    let body_budget = (body_inner_right - body_inner_x).max(0.0);
-                    let fit = truncate_to_fit(fragment, body_budget, sugarloaf, &opts);
+                    let body_budget = (body_inner_right - fragment_x).max(0.0);
+                    let fit =
+                        truncate_to_fit(&fragment.text, body_budget, sugarloaf, &opts);
                     let _ = sugarloaf.text_mut().draw(
-                        body_inner_x,
+                        fragment_x,
                         text_y,
                         fit.as_str(),
                         &opts,
@@ -622,9 +643,9 @@ pub fn render(
                 DiffLineKind::Remove => {
                     draw_syntax_line(
                         sugarloaf,
-                        body_inner_x,
+                        fragment_x,
                         text_y,
-                        fragment,
+                        &fragment.text,
                         spec.lang,
                         theme,
                         body_clip,
@@ -636,9 +657,9 @@ pub fn render(
                 DiffLineKind::Add | DiffLineKind::Context => {
                     draw_syntax_line(
                         sugarloaf,
-                        body_inner_x,
+                        fragment_x,
                         text_y,
-                        fragment,
+                        &fragment.text,
                         spec.lang,
                         theme,
                         body_clip,
@@ -709,7 +730,7 @@ fn wrap_chars_for_width(width: f32, scale: f32) -> usize {
     (width / approx_char_w).floor().max(1.0) as usize
 }
 
-fn wrapped_fragments(text: &str, max_chars: usize) -> Rc<Vec<String>> {
+fn wrapped_fragments(text: &str, max_chars: usize) -> Rc<Vec<WrappedFragment>> {
     let max_chars = max_chars.max(1);
     let key = DiffWrapKey {
         text_hash: hash_text(text),
@@ -726,25 +747,123 @@ fn wrapped_fragments(text: &str, max_chars: usize) -> Rc<Vec<String>> {
     fragments
 }
 
-fn wrap_fragments_uncached(text: &str, max_chars: usize) -> Vec<String> {
+fn wrap_fragments_uncached(text: &str, max_chars: usize) -> Vec<WrappedFragment> {
     let max_chars = max_chars.max(1);
     if text.is_empty() {
-        return vec![String::new()];
+        return vec![WrappedFragment {
+            text: String::new(),
+            indent_cols: 0,
+        }];
+    }
+    if display_columns(text) <= max_chars {
+        return vec![WrappedFragment {
+            text: text.to_string(),
+            indent_cols: 0,
+        }];
     }
 
+    let continuation_indent = continuation_indent_cols(text, max_chars);
     let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut count = 0usize;
-    for (ix, _) in text.char_indices() {
-        if count == max_chars {
-            out.push(text[start..ix].to_string());
-            start = ix;
-            count = 0;
+    let mut remaining = text;
+    let mut first = true;
+    while !remaining.is_empty() {
+        let indent_cols = if first { 0 } else { continuation_indent };
+        let budget = max_chars.saturating_sub(indent_cols).max(4);
+        if display_columns(remaining) <= budget {
+            out.push(WrappedFragment {
+                text: remaining.to_string(),
+                indent_cols,
+            });
+            break;
         }
-        count += 1;
+
+        let split = preferred_code_break(remaining, budget);
+        let (head, tail) = remaining.split_at(split);
+        out.push(WrappedFragment {
+            text: head.trim_end_matches([' ', '\t']).to_string(),
+            indent_cols,
+        });
+        remaining = tail.trim_start_matches([' ', '\t']);
+        first = false;
     }
-    out.push(text[start..].to_string());
     out
+}
+
+fn display_columns(text: &str) -> usize {
+    text.chars().fold(0, |cols, ch| {
+        if ch == '\t' {
+            (cols + 4) & !3
+        } else {
+            cols + 1
+        }
+    })
+}
+
+fn preferred_code_break(text: &str, budget: usize) -> usize {
+    let mut cols = 0usize;
+    let mut hard = text.len();
+    let mut whitespace = None;
+    let mut punctuation = None;
+    let mut operator = None;
+    let mut previous_end = 0usize;
+
+    for (ix, ch) in text.char_indices() {
+        let next_cols = if ch == '\t' {
+            (cols + 4) & !3
+        } else {
+            cols + 1
+        };
+        if next_cols > budget {
+            hard = ix.max(previous_end);
+            break;
+        }
+        let end = ix + ch.len_utf8();
+        match ch {
+            ' ' | '\t' => whitespace = Some(end),
+            ',' | ';' | '(' | '[' | '{' => punctuation = Some(end),
+            '.' if ix > 0 => operator = Some(ix),
+            '=' | '+' | '-' | '*' | '/' | '%' | '&' | '|' | '?' | ':' | '>' | '<' => {
+                operator = Some(end);
+            }
+            _ => {}
+        }
+        cols = next_cols;
+        previous_end = end;
+    }
+
+    let minimum_pretty_break = budget / 2;
+    [whitespace, punctuation, operator]
+        .into_iter()
+        .flatten()
+        .find(|candidate| display_columns(&text[..*candidate]) >= minimum_pretty_break)
+        .unwrap_or_else(|| hard.max(text.chars().next().map_or(0, char::len_utf8)))
+}
+
+fn continuation_indent_cols(text: &str, max_chars: usize) -> usize {
+    let leading = text.chars().take_while(|ch| matches!(ch, ' ' | '\t')).fold(
+        0usize,
+        |cols, ch| {
+            if ch == '\t' {
+                (cols + 4) & !3
+            } else {
+                cols + 1
+            }
+        },
+    );
+    let cap = (max_chars / 3).clamp(2, 12);
+    let mut hanging = leading.saturating_add(4).min(cap);
+    let mut cols = 0usize;
+    for ch in text.chars().take(max_chars) {
+        cols = if ch == '\t' {
+            (cols + 4) & !3
+        } else {
+            cols + 1
+        };
+        if matches!(ch, '(' | '[' | '{') && cols <= cap {
+            hanging = cols;
+        }
+    }
+    hanging.max(2)
 }
 
 fn highlighted_diff_line(text: &str, lang: Lang) -> Rc<Vec<(SynTok, String)>> {
@@ -822,6 +941,40 @@ fn clip_to_viewport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_wrap_prefers_breakpoints_and_hanging_indent() {
+        let wrapped = wrap_fragments_uncached(
+            "let result = some_function(first_argument, second_argument);",
+            30,
+        );
+
+        assert!(wrapped.len() >= 2);
+        assert!(wrapped[0].text.ends_with('(') || wrapped[0].text.ends_with(','));
+        assert!(wrapped[1].indent_cols >= 2);
+        assert!(wrapped.iter().all(|row| !row.text.starts_with(' ')));
+    }
+
+    #[test]
+    fn code_wrap_counts_tabs_as_tab_stops() {
+        let wrapped = wrap_fragments_uncached("\t\tlong_call(alpha, beta, gamma)", 20);
+
+        assert!(wrapped.len() >= 2);
+        assert!(wrapped[1].indent_cols >= 4);
+    }
+
+    #[test]
+    fn code_wrap_hard_wraps_unbroken_tokens_without_losing_text() {
+        let text = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let wrapped = wrap_fragments_uncached(text, 12);
+        let joined = wrapped
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect::<String>();
+
+        assert!(wrapped.len() >= 3);
+        assert_eq!(joined, text);
+    }
 
     #[test]
     fn warm_render_cache_offsets_match_visual_row_count() {

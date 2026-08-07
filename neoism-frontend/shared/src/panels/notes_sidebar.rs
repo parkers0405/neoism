@@ -990,19 +990,9 @@ impl NotesSidebar {
     /// this to keep requesting redraws so the eased motion plays out
     /// instead of snapping on the next unrelated frame.
     pub fn is_animating(&self) -> bool {
-        let wordmark_settling = self
-            .wordmark
-            .hover
-            .iter()
-            .any(|hover| *hover > 0.005 && *hover < 0.995);
-        let vault_press_animating = self
-            .vault_press_started_at
-            .is_some_and(|started| started.elapsed() < Duration::from_millis(360));
+        // The visible wordmark has a wall-clock idle shimmer, so the panel
+        // must own redraws even after its springs and hover settle.
         self.visible
-            && (self.scroll.position != 0.0
-                || self.cursor_spring.position != 0.0
-                || wordmark_settling
-                || vault_press_animating)
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NotesSidebarHit> {
@@ -1150,6 +1140,7 @@ impl NotesSidebar {
             let letter_opts = DrawOpts {
                 font_size: splash_size,
                 color: theme.u8(theme.fg),
+                extrude: true,
                 font_id: pixel_font,
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()

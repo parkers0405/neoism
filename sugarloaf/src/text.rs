@@ -54,6 +54,8 @@ pub struct DrawOpts {
     pub color: [u8; 4],
     pub bold: bool,
     pub italic: bool,
+    /// Emit a two-step hard extrusion behind each monochrome glyph.
+    pub extrude: bool,
     /// `None` → primary font.
     pub font_id: Option<usize>,
     /// Optional logical-pixel clip rect for this draw call. Converted to
@@ -69,6 +71,7 @@ impl Default for DrawOpts {
             color: [255, 255, 255, 255],
             bold: false,
             italic: false,
+            extrude: false,
             font_id: None,
             clip_rect: None,
         }
@@ -775,7 +778,7 @@ impl Text {
                 color
             };
 
-            self.instances.push(TextInstance {
+            let foreground = TextInstance {
                 pos: [pen_x + glyph.x, py + glyph.y.max(0.0)],
                 glyph_pos: [slot_x as u32, slot_y as u32],
                 glyph_size: [slot_w as u32, slot_h as u32],
@@ -784,7 +787,21 @@ impl Text {
                 atlas: atlas_tag,
                 _pad: [0; 3],
                 clip_rect,
-            });
+            };
+            if opts.extrude && !is_color {
+                let mut far = foreground;
+                far.pos[0] += snap_px(3.0 * scale);
+                far.pos[1] += snap_px(3.0 * scale);
+                far.color = [10, 10, 14, color[3].saturating_mul(5) / 6];
+                self.instances.push(far);
+
+                let mut near = foreground;
+                near.pos[0] += snap_px(1.5 * scale);
+                near.pos[1] += snap_px(1.5 * scale);
+                near.color = [62, 62, 72, color[3]];
+                self.instances.push(near);
+            }
+            self.instances.push(foreground);
 
             pen_x += glyph.advance;
         }

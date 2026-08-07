@@ -468,7 +468,7 @@ impl CommandPalette {
                 let has_adaptive = self.has_adaptive_theme;
                 let surface = self.surface;
                 let workspace_visibility = self.workspace_visibility;
-                COMMANDS
+                let mut rows: Vec<(i32, PaletteRow<'_>)> = COMMANDS
                     .iter()
                     .filter(|cmd| {
                         if cmd.action == PaletteAction::ToggleAppearanceTheme {
@@ -526,7 +526,14 @@ impl CommandPalette {
                             },
                         ))
                     })
-                    .collect()
+                    .collect();
+                if !self.query.trim().is_empty() {
+                    rows.extend(EX_COMMANDS.iter().filter_map(|(name, hint)| {
+                        let score = fuzzy_score(&self.query, name)?;
+                        Some((score - 100, PaletteRow::Ex { name, hint }))
+                    }));
+                }
+                rows
             }
             PaletteMode::Fonts(fonts) => fonts
                 .iter()
@@ -797,7 +804,7 @@ impl CommandPalette {
         let frame_stroke = (file_tree::FRAME_STROKE * s).max(2.0);
         let results_padding_bottom = RESULTS_PADDING_BOTTOM * s;
         let px = ((logical_w - width) / 2.0).max(8.0 * s);
-        let py = super::PALETTE_MARGIN_TOP * s;
+        let py = self.top_anchor;
         let visible = self.visible_row_count();
         let body_h = if visible == 0 {
             0.0

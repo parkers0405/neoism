@@ -80,6 +80,10 @@ pub(super) enum AgentSessionUpdate {
         title: Option<String>,
         agent: Option<String>,
     },
+    BackgroundTaskCompleted {
+        job_id: String,
+        status: String,
+    },
     PermissionAsked(NeoismAgentPendingPermission),
     PermissionReplied {
         request_id: String,
@@ -431,6 +435,9 @@ fn send_event_updates(
                 current_tool,
                 started_at,
             })?,
+            SessionEventUpdate::BackgroundTaskCompleted { job_id, status } => {
+                tx.send(AgentSessionUpdate::BackgroundTaskCompleted { job_id, status })?
+            }
             SessionEventUpdate::SubagentCompleted {
                 task_id,
                 status,

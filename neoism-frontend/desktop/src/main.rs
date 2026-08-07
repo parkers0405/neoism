@@ -909,6 +909,58 @@ fn run_windows_update_helper() -> Result<bool, Box<dyn std::error::Error>> {
     Ok(true)
 }
 
+#[cfg(target_os = "macos")]
+fn run_macos_update_helper() -> Result<bool, Box<dyn std::error::Error>> {
+    use std::time::{Duration, Instant};
+
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if args.first().and_then(|arg| arg.to_str()) != Some("--macos-update-helper") {
+        return Ok(false);
+    }
+    if args.len() != 3 {
+        return Err("invalid macOS update helper arguments".into());
+    }
+    let app_dst = std::path::PathBuf::from(&args[1]);
+    let app_src = std::path::PathBuf::from(&args[2]);
+    let parent = app_dst.parent().ok_or("cannot resolve Neoism.app parent")?;
+    let staged_app = parent.join(".Neoism.app.new");
+    let old_app = parent.join(".Neoism.app.old");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let helper_pid = std::process::id();
+
+    let _ = terminate_other_neoism_processes();
+    while process_ids_by_name("neoism")
+        .into_iter()
+        .any(|pid| pid != helper_pid && is_host_process(pid))
+    {
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for Neoism windows to close".into());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let _ = std::fs::remove_dir_all(&staged_app);
+    let _ = std::fs::remove_dir_all(&old_app);
+    let copied = std::process::Command::new("ditto")
+        .arg(&app_src)
+        .arg(&staged_app)
+        .status()?;
+    if !copied.success() {
+        return Err(format!("cannot stage {}", app_dst.display()).into());
+    }
+    if app_dst.exists() {
+        std::fs::rename(&app_dst, &old_app)?;
+    }
+    if let Err(err) = std::fs::rename(&staged_app, &app_dst) {
+        let _ = std::fs::rename(&old_app, &app_dst);
+        return Err(format!("cannot replace {}: {err}", app_dst.display()).into());
+    }
+    let _ = std::fs::remove_dir_all(&old_app);
+    if let Some(temp_dir) = app_src.parent() {
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+    Ok(true)
+}
+
 /// Best-effort handoff after replacing the binaries: every still-running
 /// Neoism process — the GUI, the workspace daemon(s), and the agent — has the
 /// OLD image mapped in memory even though the path on disk now points at the
@@ -1116,14 +1168,18 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
             .arg(&extracted)
             .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
             .spawn()?;
-        println!("Neoism {latest} is staged. Closing Neoism to finish the Windows update.");
+        println!(
+            "Neoism {latest} is staged. Closing Neoism to finish the Windows update."
+        );
         return Ok(());
     }
 
     #[cfg(target_os = "macos")]
     let installed_app = exe
         .ancestors()
-        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some("Neoism.app"))
+        .find(|path| {
+            path.file_name().and_then(|name| name.to_str()) == Some("Neoism.app")
+        })
         .map(std::path::Path::to_path_buf)
         .or_else(|| {
             let app = std::path::PathBuf::from("/Applications/Neoism.app");
@@ -1137,29 +1193,28 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(target_os = "macos")]
     if let Some(app_dst) = installed_app.as_ref() {
-        let app_src = extracted.join("Neoism.app");
+        let retained = std::env::temp_dir().join(format!(
+            "neoism-update-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis()
+        ));
+        std::fs::rename(&extracted, &retained)?;
+        let app_src = retained.join("Neoism.app");
         if !app_src.exists() {
             return Err(format!("`Neoism.app` missing from {asset}").into());
         }
-        let parent = app_dst.parent().ok_or("cannot resolve Neoism.app parent")?;
-        let staged_app = parent.join(".Neoism.app.new");
-        let old_app = parent.join(".Neoism.app.old");
-        let _ = std::fs::remove_dir_all(&staged_app);
-        let _ = std::fs::remove_dir_all(&old_app);
-        let copied = std::process::Command::new("ditto")
+        std::process::Command::new(app_src.join("Contents/MacOS/neoism"))
+            .arg("--macos-update-helper")
+            .arg(app_dst)
             .arg(&app_src)
-            .arg(&staged_app)
-            .status()?;
-        if !copied.success() {
-            return Err(format!("cannot stage {}", app_dst.display()).into());
-        }
-        std::fs::rename(app_dst, &old_app)?;
-        if let Err(err) = std::fs::rename(&staged_app, app_dst) {
-            let _ = std::fs::rename(&old_app, app_dst);
-            return Err(format!("cannot replace {}: {err}", app_dst.display()).into());
-        }
-        let _ = std::fs::remove_dir_all(&old_app);
-        println!("  ✓ {}", app_dst.display());
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        println!("Neoism {latest} is staged. Closing Neoism to finish the macOS update.");
+        return Ok(());
     }
 
     #[cfg(not(windows))]
@@ -1210,6 +1265,11 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     if run_windows_update_helper()? {
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    if run_macos_update_helper()? {
         return Ok(());
     }
 

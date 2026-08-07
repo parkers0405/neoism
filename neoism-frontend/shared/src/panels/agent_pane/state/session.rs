@@ -74,7 +74,7 @@ impl NeoismAgentPane {
         // For a fresh run, show activity immediately. During an active run,
         // keep the current state and show the queued-message line instead.
         if !was_streaming {
-            self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+            self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
         let send_result = self.send_prompt_with_echo(&prompt, &text, !was_streaming);
         self.input_attachments.clear();
@@ -447,6 +447,11 @@ impl NeoismAgentPane {
             "/new" => self.start_new_conversation(),
             "/hints" | "/helper" | "/help-strip" | "/footer" => {
                 self.toggle_input_help();
+            }
+            "/sidebar" => {
+                self.side_panel.toggle_visibility();
+                let visible = !self.side_panel.user_hidden();
+                self.push_outbound(OutboundAgentCommand::SetSidebarVisible { visible });
             }
 
             // -- picker openers / arg-setters --------------------------

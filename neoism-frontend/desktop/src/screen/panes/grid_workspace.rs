@@ -438,11 +438,12 @@ impl Screen<'_> {
         // entries, open dirs, selection, scroll, remote wiring) and
         // restore the incoming one — switching between local and
         // joined workspaces keeps each tree exactly as it was left.
-        // Panel visibility is a window-level toggle and transfers.
+        // Visibility and focus belong to the workspace too. Each OS window
+        // owns its own Screen/maps, so restoring the whole panel gives every
+        // workspace in every window independent open/closed state.
         if self.file_tree_workspace.as_ref() != Some(&id) {
-            let visible = self.renderer.file_tree.is_visible();
-            let focused = self.renderer.file_tree.is_focused();
             let width = self.renderer.file_tree.width();
+            let had_workspace = self.file_tree_workspace.is_some();
             if let Some(old_id) = self.file_tree_workspace.take() {
                 let outgoing = std::mem::take(&mut self.renderer.file_tree);
                 // Stash the ssh-follow root WITH the outgoing tree — it is
@@ -463,9 +464,14 @@ impl Screen<'_> {
             // was actively following an ssh session when we left it) so its
             // freeze guard matches its stashed remote/local tree.
             self.ssh_pre_local_root = self.workspace_ssh_pre_local_roots.remove(&id);
-            let mut incoming = self.workspace_file_trees.remove(&id).unwrap_or_default();
-            incoming.set_visible(visible);
-            incoming.set_focused(focused);
+            let mut incoming =
+                self.workspace_file_trees.remove(&id).unwrap_or_else(|| {
+                    if had_workspace {
+                        Default::default()
+                    } else {
+                        std::mem::take(&mut self.renderer.file_tree)
+                    }
+                });
             // Scale and width are WINDOW chrome, not per-workspace
             // state: a fresh `unwrap_or_default()` tree (and any tree
             // stashed before a font-size change) would otherwise come
@@ -482,23 +488,26 @@ impl Screen<'_> {
         }
         // NOTES PANEL SWAP: per-workspace state exactly like the tree —
         // a joined workspace must never show this machine's personal
-        // vault. Visibility/focus/width/scale are window chrome and
-        // transfer; the vault, entries, open dirs and selection stay
-        // with their workspace.
+        // vault. Visibility, focus, vault, entries, open dirs, and selection
+        // stay with their workspace. Width and scale remain window chrome so
+        // the side-band geometry stays stable.
         if self.notes_sidebar_workspace.as_ref() != Some(&id) {
-            let visible = self.renderer.notes_sidebar.is_visible();
-            let focused = self.renderer.notes_sidebar.is_focused();
             let notes_width = self.renderer.notes_sidebar.width();
+            let had_workspace = self.notes_sidebar_workspace.is_some();
             if let Some(old_id) = self.notes_sidebar_workspace.take() {
                 let outgoing = std::mem::take(&mut self.renderer.notes_sidebar);
                 self.workspace_notes_sidebars.insert(old_id, outgoing);
             }
-            let mut incoming = self
-                .workspace_notes_sidebars
-                .remove(&id)
-                .unwrap_or_default();
-            incoming.set_visible(visible);
-            incoming.set_focused(focused);
+            let mut incoming =
+                self.workspace_notes_sidebars
+                    .remove(&id)
+                    .unwrap_or_else(|| {
+                        if had_workspace {
+                            Default::default()
+                        } else {
+                            std::mem::take(&mut self.renderer.notes_sidebar)
+                        }
+                    });
             incoming.set_width(notes_width);
             incoming.set_scale(self.renderer.chrome_scale());
             self.renderer.notes_sidebar = incoming;
@@ -508,7 +517,9 @@ impl Screen<'_> {
             // self-hosting host) points at the HOST's ONE linked vault
             // (or the no-linked-vault empty state) and asks the daemon
             // for the listing.
-            if visible && self.renderer.notes_sidebar.workspace_path().is_none() {
+            if self.renderer.notes_sidebar.is_visible()
+                && self.renderer.notes_sidebar.workspace_path().is_none()
+            {
                 if !self.point_notes_sidebar_at_served_vault() {
                     self.assign_local_vault_to_notes_sidebar();
                 }
@@ -643,7 +654,6 @@ impl Screen<'_> {
     }
 
     pub(crate) fn activate_workspace_buffer_tab(&mut self, ix: usize) -> bool {
-        let started_at = std::time::Instant::now();
         if ix >= self.renderer.buffer_tabs.tabs().len() {
             return false;
         }
@@ -714,24 +724,6 @@ impl Screen<'_> {
                 return true;
             }
         }
-
-        let sent_at = std::time::Instant::now();
-        self.sync_current_workspace_buffer_files();
-        let layout_at = std::time::Instant::now();
-        self.renderer.trail_cursor.reset();
-        self.mark_dirty();
-        let total_ms = started_at.elapsed().as_millis();
-        if total_ms >= 50 {
-            tracing::warn!(
-                target: "neoism::activation_timing",
-                tab_index = ix,
-                send_ms = sent_at.duration_since(started_at).as_millis(),
-                layout_ms = layout_at.duration_since(sent_at).as_millis(),
-                total_ms,
-                "slow workspace buffer tab activation"
-            );
-        }
-        true
     }
 
     pub(crate) fn workspace_buffer_picker_entries(

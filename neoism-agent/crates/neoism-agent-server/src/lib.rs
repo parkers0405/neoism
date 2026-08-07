@@ -38,6 +38,7 @@ mod lsp_routes;
 mod managed_lsp_path;
 mod mcp;
 mod mcp_auth;
+mod mcp_docs;
 mod mcp_memory;
 mod mcp_notes;
 mod mcp_routes;

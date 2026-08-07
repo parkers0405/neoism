@@ -27,6 +27,7 @@ use web_time::Instant;
 const DEPTH: f32 = 0.0;
 const ORDER_BG: u8 = 3;
 const ORDER_TEXT: u8 = 8;
+
 const CODE_FONT_SIZE: f32 = 14.0;
 const ROW_HEIGHT_FACTOR: f32 = 1.5;
 const GUTTER_PAD_X: f32 = 10.0;
@@ -337,6 +338,7 @@ pub fn render(
             seg = 0;
         }
     }
+
     // Buffer text draws clip at the gutter edge so NoWrap horizontal
     // scroll never slides glyphs over the line numbers.
     let text_clip = [text_x, grid_y, (x + w - text_x).max(0.0), h_content];

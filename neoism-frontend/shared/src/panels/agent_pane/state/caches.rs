@@ -238,7 +238,8 @@ impl NeoismAgentPane {
     }
 
     pub fn running_background_task_count(&self) -> usize {
-        running_background_task_count(&self.messages)
+        self.background_tasks_started_at
+            .map_or(0, |_| running_background_task_count(&self.messages))
     }
 
     pub(in crate::panels::agent_pane::state) fn running_background_task_started_at(
@@ -247,10 +248,11 @@ impl NeoismAgentPane {
         self.background_tasks_started_at
     }
 
+    #[allow(dead_code)]
     pub(in crate::panels::agent_pane::state) fn refresh_background_task_activity_clock(
         &mut self,
     ) {
-        if self.running_background_task_count() > 0 {
+        if running_background_task_count(&self.messages) > 0 {
             if self.background_tasks_started_at.is_none() {
                 self.background_tasks_started_at = Some(Instant::now());
             }

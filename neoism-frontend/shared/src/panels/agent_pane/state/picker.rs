@@ -378,8 +378,9 @@ impl NeoismAgentPicker {
     pub fn is_animating(&self) -> bool {
         self.list_scroll.is_animating()
                 || self.cursor_spring.position != 0.0
-                // The loading skeleton shimmers — keep frames coming.
-                || self.loading
+                // Loading may outlive a failed request, but shimmer does not
+                // own frames indefinitely.
+                || (self.loading && self.loading_elapsed() < 1.5)
     }
 
     /// Largest committed pixel scroll that still leaves the last row flush

@@ -1923,6 +1923,25 @@ impl Renderer {
         );
     }
 
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn overlay_triangle_ordered(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        x3: f32,
+        y3: f32,
+        depth: f32,
+        color: [f32; 4],
+        order: u8,
+    ) {
+        self.overlay_comp
+            .batches
+            .add_triangle_ordered(x1, y1, x2, y2, x3, y3, depth, color, order);
+    }
+
     /// Add a quad with per-corner radii
     #[inline]
     #[allow(clippy::too_many_arguments)]

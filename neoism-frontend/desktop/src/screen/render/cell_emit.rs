@@ -571,12 +571,7 @@ impl Screen<'_> {
         {
             let scale = self.sugarloaf.scale_factor();
             let logical_width = self.sugarloaf.window_size().width as f32 / scale;
-            // Agent toggle is ALWAYS present, mirroring the left tree
-            // toggle: on an agent tab it toggles the recent-chats rail; on
-            // any other tab a click opens/focuses the agent tab (handled in
-            // `TopBarAction::ToggleRightPanel`). Gating it on the active tab
-            // being an agent made it vanish exactly when you'd click it to
-            // open the agent.
+            // The Agent icon is always present and opens a new Agent tab.
             self.renderer.top_bar.set_right_button_visible(true);
             // Reflect which panels are open so the toggle buttons
             // paint in their active accent style.

@@ -1596,6 +1596,7 @@ fn commit_visible_measurements(
             continue;
         }
         let cursor_inside = reveal_active
+            && pane.reveals_source_line(pane.cursor_line)
             && pane.cursor_line >= item.first_line
             && pane.cursor_line < item.first_line + item.line_count;
         let key = MarkdownVirtualMeasureKey {

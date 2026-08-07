@@ -360,15 +360,13 @@ impl NeoismAgentPane {
         if self.timeline_is_inertial() {
             return Some("timeline_inertia");
         }
-        if self.is_streaming() {
+        // The derived display state includes background tasks. Those update
+        // through events and must not own the continuous redraw loop.
+        if self.streaming_state != NeoismAgentStreamingState::Idle {
             return Some("streaming");
         }
-        if self.active_subagent_count() > 0 {
-            return Some("subagents");
-        }
-        if self.running_background_task_count() > 0 {
-            return Some("background_tasks");
-        }
+        // Background task start/completion events invalidate the pane; elapsed
+        // seconds alone must not keep the renderer spinning continuously.
         // Only an on-screen side panel drives the render loop. A pane
         // that has never been laid out (fresh/backgrounded) must not
         // spin redraws off its still-unloaded sessions skeleton — the
@@ -376,15 +374,6 @@ impl NeoismAgentPane {
         // painted (`last_panel_rect` is stamped during render).
         if self.side_panel.last_panel_rect().is_some() && self.side_panel.is_animating() {
             return Some("side_panel");
-        }
-        // Animated presence orbs on user-message bubbles breathe off the
-        // wall clock, so keep the (visible) agent pane redrawing while a
-        // conversation with its user bubbles is on screen — the same deal as
-        // the caret / top-chrome presence orbs, which own a redraw while
-        // visible. The aggregator upstream only samples RENDERED panes, so a
-        // backgrounded chat never spins the loop.
-        if self.has_conversation() {
-            return Some("presence_orb");
         }
         None
     }

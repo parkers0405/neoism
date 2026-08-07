@@ -1433,11 +1433,11 @@ fn global_ex_command_routes_splits_and_new_buffers() {
 fn global_ex_command_routes_quit_close_variants() {
     assert_eq!(
         GlobalExCommandPlan::classify("q", ""),
-        GlobalExCommandPlan::CloseFocusedBufferTab
+        GlobalExCommandPlan::CloseFocusedBufferTab { discard: false }
     );
     assert_eq!(
         GlobalExCommandPlan::classify("close!", ""),
-        GlobalExCommandPlan::CloseFocusedBufferTab
+        GlobalExCommandPlan::CloseFocusedBufferTab { discard: true }
     );
     assert_eq!(
         GlobalExCommandPlan::classify("wq", ""),
@@ -1445,7 +1445,7 @@ fn global_ex_command_routes_quit_close_variants() {
     );
     assert_eq!(
         GlobalExCommandPlan::classify("qa", ""),
-        GlobalExCommandPlan::CloseAllBuffersInFocusedPaneOrWorkspace
+        GlobalExCommandPlan::CloseActiveWorkspace { discard: false }
     );
     assert_eq!(
         GlobalExCommandPlan::classify("wqa", ""),
@@ -1541,21 +1541,30 @@ fn global_ex_command_routes_quit_and_close_synonyms_uniformly() {
     // close-tab call. Locking the plan output here means a typo
     // like `quite!` keeps mapping to the same branch instead of
     // silently passing through to nvim and quitting the editor.
-    for head in [
-        "q", "q!", "quit", "quit!", "quite", "quite!", "close", "close!",
-    ] {
+    for head in ["q", "quit", "quite", "close"] {
         assert_eq!(
             GlobalExCommandPlan::classify(head, ""),
-            GlobalExCommandPlan::CloseFocusedBufferTab,
+            GlobalExCommandPlan::CloseFocusedBufferTab { discard: false },
             "head `{head}` should classify as CloseFocusedBufferTab",
         );
     }
-
-    for head in ["qa", "qa!", "quitall", "quitall!", "qall", "qall!"] {
+    for head in ["q!", "quit!", "quite!", "close!"] {
         assert_eq!(
             GlobalExCommandPlan::classify(head, ""),
-            GlobalExCommandPlan::CloseAllBuffersInFocusedPaneOrWorkspace,
-            "head `{head}` should classify as CloseAllBuffersInFocusedPaneOrWorkspace",
+            GlobalExCommandPlan::CloseFocusedBufferTab { discard: true },
+        );
+    }
+
+    for head in ["qa", "quitall", "qall"] {
+        assert_eq!(
+            GlobalExCommandPlan::classify(head, ""),
+            GlobalExCommandPlan::CloseActiveWorkspace { discard: false },
+        );
+    }
+    for head in ["qa!", "quitall!", "qall!"] {
+        assert_eq!(
+            GlobalExCommandPlan::classify(head, ""),
+            GlobalExCommandPlan::CloseActiveWorkspace { discard: true },
         );
     }
 }

@@ -65,6 +65,7 @@ pub struct SearchOverlay {
     active_search: Option<String>,
     caret_blink_start: Instant,
     hovered_button: Option<SearchOverlayAction>,
+    top_anchor: f32,
 }
 
 impl Default for SearchOverlay {
@@ -73,6 +74,7 @@ impl Default for SearchOverlay {
             active_search: None,
             caret_blink_start: Instant::now(),
             hovered_button: None,
+            top_anchor: OVERLAY_MARGIN_TOP,
         }
     }
 }
@@ -92,11 +94,15 @@ impl SearchOverlay {
         }
     }
 
+    pub fn set_top_anchor(&mut self, top: f32) {
+        self.top_anchor = top.max(0.0);
+    }
+
     /// Returns (overlay_x, overlay_y, overlay_width, overlay_height) in logical coords.
     fn overlay_rect(&self, window_width: f32, scale_factor: f32) -> (f32, f32, f32, f32) {
         let logical_width = window_width / scale_factor;
         let x = logical_width - OVERLAY_WIDTH - OVERLAY_MARGIN_RIGHT;
-        let y = OVERLAY_MARGIN_TOP;
+        let y = self.top_anchor;
         (x, y, OVERLAY_WIDTH, OVERLAY_HEIGHT)
     }
 

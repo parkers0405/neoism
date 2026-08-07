@@ -104,11 +104,9 @@ impl Screen<'_> {
 
         // Press always promotes to focused — the user wants their next
         // j/k/Enter to go to the tree, even if the previous click had
-        // landed in the editor pane. Select the row now, but ARM a
-        // potential Finder-style drag and DEFER activation (open file /
-        // toggle folder) to release: a plain click opens, a press+drag
-        // moves. Virtual/path-less rows aren't draggable, so they
-        // activate immediately as before.
+        // landed in the editor pane. Arm a potential Finder-style drag first,
+        // then activate immediately. Drag state is path-based, so a folder
+        // rebuild does not lose the source when movement crosses the threshold.
         self.renderer.file_tree.set_focused(true);
         self.renderer.file_tree.set_selected(row);
         let (mx, my) = self.mouse_logical_for_hit_test();
@@ -117,22 +115,10 @@ impl Screen<'_> {
             // Virtual / path-less row (not draggable): activates as before.
             self.activate_file_tree_selection();
         } else {
-            // Real row: open a FILE on press so it feels as instant as
-            // pressing Enter (the old defer-to-release cost a perceptible
-            // click→release lag). Folders keep toggling on release, so a
-            // folder drag doesn't flip it open/closed mid-grab.
-            let action = neoism_ui::panels::file_tree::activation_for_selection(
-                self.renderer.file_tree.selected(),
-                self.renderer.file_tree.selected_index(),
-            );
-            if matches!(
-                action,
-                neoism_ui::panels::file_tree::SelectionActivation::OpenPath(_)
-                    | neoism_ui::panels::file_tree::SelectionActivation::OpenVirtual(_)
-            ) {
-                self.activate_file_tree_selection();
-                self.file_tree_opened_on_press = true;
-            }
+            // Real rows activate on press just like keyboard Enter. Mouse-up
+            // only resolves the already-armed click/drag gesture.
+            self.activate_file_tree_selection();
+            self.file_tree_opened_on_press = true;
         }
         self.mark_dirty();
         true
@@ -171,8 +157,7 @@ impl Screen<'_> {
         }
         let opened_on_press = std::mem::take(&mut self.file_tree_opened_on_press);
         match self.renderer.file_tree.end_file_drag() {
-            // A file already opened on press; only a folder (deferred)
-            // still needs its toggle here.
+            // The row already activated on press.
             FileDropOutcome::Click if opened_on_press => {}
             FileDropOutcome::Click => self.activate_file_tree_selection(),
             FileDropOutcome::Move { source, dest_dir } => {

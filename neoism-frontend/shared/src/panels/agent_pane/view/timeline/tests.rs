@@ -9,10 +9,11 @@ use super::*;
 
 #[test]
 fn streaming_status_reserves_every_visible_child_line() {
-    assert_eq!(streaming_status_line_count(0, 0), 1);
-    assert_eq!(streaming_status_line_count(1, 0), 2);
-    assert_eq!(streaming_status_line_count(0, 1), 2);
-    assert_eq!(streaming_status_line_count(1, 1), 3);
+    assert_eq!(streaming_status_line_count(1, 0, 0), 1);
+    assert_eq!(streaming_status_line_count(2, 0, 0), 2);
+    assert_eq!(streaming_status_line_count(1, 1, 0), 2);
+    assert_eq!(streaming_status_line_count(1, 0, 1), 2);
+    assert_eq!(streaming_status_line_count(2, 1, 1), 4);
 }
 
 fn tool_message(id: &str, tool: &str, title: &str, status: &str) -> NeoismAgentMessage {

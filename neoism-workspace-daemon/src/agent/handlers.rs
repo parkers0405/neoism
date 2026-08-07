@@ -797,6 +797,7 @@ pub(crate) async fn handle_get_config_defaults(
                     .or_else(|| value.get("agentInputHints"))
                     .or_else(|| value.get("agent_input_hints"))
                     .and_then(Value::as_bool),
+                sidebar_visible: value.get("sidebar").and_then(Value::as_bool),
             });
         }
         Err(message) => emit_error(&inner.tx, message),
@@ -810,6 +811,17 @@ pub(crate) async fn handle_set_input_help_visible(inner: Arc<AgentInner>, visibl
         emit_error(
             &inner.tx,
             format!("failed to persist agent input hints: {error}"),
+        );
+    }
+}
+
+pub(crate) async fn handle_set_sidebar_visible(inner: Arc<AgentInner>, visible: bool) {
+    if let Err(error) =
+        neoism_backend::config::write_setting("agent.sidebar", Value::Bool(visible))
+    {
+        emit_error(
+            &inner.tx,
+            format!("failed to persist agent sidebar preference: {error}"),
         );
     }
 }

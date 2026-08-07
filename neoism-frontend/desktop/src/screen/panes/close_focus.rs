@@ -1,6 +1,24 @@
 use super::*;
 
 impl Screen<'_> {
+    pub fn close_active_workspace(&mut self, discard: bool, clipboard: &mut Clipboard) {
+        let active_dirty = self.renderer.buffer_tabs.has_modified_server_tabs()
+            || self
+                .renderer
+                .pane_tabs
+                .values()
+                .any(|tabs| tabs.has_modified_server_tabs());
+        if !discard && active_dirty {
+            self.renderer.notifications.push(
+                "Unsaved changes. Use :qall! to discard this workspace",
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
+            self.mark_dirty();
+            return;
+        }
+        self.close_tab(clipboard);
+    }
+
     pub fn close_split_or_tab(&mut self, clipboard: &mut Clipboard) {
         // If the keyboard caret is parked on the workspace (Island) strip
         // (moved there via Alt+Up), close the workspace the caret sits on

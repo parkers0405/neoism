@@ -215,6 +215,7 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
     /// Unlike PR2a's lossy flatten, this derive walks the real Taffy
     /// structure preserving axis info and stacked-tab nesting so the
     /// SessionTree round-trips faithfully across both directions.
+    #[allow(dead_code)]
     pub(crate) fn sync_session_tree(&mut self) {
         let Some((tree, leaf_to_node, node_to_leaf)) = self.derive_session_tree() else {
             // Empty grid (e.g. mid-teardown) — leave the previous snapshot
@@ -231,6 +232,7 @@ impl<T: neoism_backend::event::EventListener> ContextGrid<T> {
     /// [`SessionTree`] mirror, preserving axis info from the
     /// `flex_direction` at each container and wrapping panels that have
     /// stacked tab children as [`SessionTreeNode::Tabbed`] groups.
+    #[allow(dead_code)]
     fn derive_session_tree(
         &self,
     ) -> Option<(
@@ -696,6 +698,7 @@ pub(crate) fn session_leaf_spec_for_grid_item<T: EventListener>(
 ///
 /// Stacked tabs (children of `panel` in `stacked_parents`) are folded
 /// into a [`SessionTreeNode::Tabbed`] group around the panel leaf.
+#[allow(dead_code)]
 fn build_session_tree_node<T: EventListener>(
     grid: &ContextGrid<T>,
     node: NodeId,

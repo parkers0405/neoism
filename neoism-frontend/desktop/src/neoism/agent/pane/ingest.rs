@@ -54,6 +54,9 @@ impl NeoismAgentPane {
                         self.clamp_timeline_scroll();
                         changed = true;
                     }
+                    if self.is_streaming() || self.background_tasks_started_at.is_some() {
+                        self.ensure_background_task_activity_clock();
+                    }
                     // Do not clear the streaming status from a message
                     // refresh alone. The event stream sends a separate
                     // SessionIdle update after the final idle status, which
@@ -174,6 +177,24 @@ impl NeoismAgentPane {
                         self.set_task_message_status(&session_id, "running");
                     }
                     self.sync_subagent_waiting_clock();
+                    changed = true;
+                }
+                AgentSessionUpdate::BackgroundTaskCompleted { job_id, status } => {
+                    let text = format!(
+                        "job_id: {job_id}\nstatus: {status}\nbackground shell task finished"
+                    );
+                    let message = NeoismAgentMessage::tool(
+                        "background_task_result",
+                        text,
+                        status,
+                        "background_task_result",
+                        NeoismAgentOutputKind::Text,
+                        "text",
+                        Vec::new(),
+                    )
+                    .with_id(format!("background-task-{job_id}"));
+                    self.upsert_part_message(message);
+                    self.ensure_background_task_activity_clock();
                     changed = true;
                 }
                 AgentSessionUpdate::SubagentCompleted {
@@ -414,6 +435,19 @@ impl NeoismAgentPane {
                             target: "neoism::config",
                             %error,
                             "agent input hints preference write failed"
+                        );
+                    }
+                    changed = true;
+                }
+                OutboundAgentCommand::SetSidebarVisible { visible } => {
+                    if let Err(error) = neoism_backend::config::write_setting(
+                        "agent.sidebar",
+                        Value::Bool(visible),
+                    ) {
+                        tracing::warn!(
+                            target: "neoism::config",
+                            %error,
+                            "agent sidebar preference write failed"
                         );
                     }
                     changed = true;
@@ -661,6 +695,9 @@ impl NeoismAgentPane {
                     }
                     if let Some(visible) = defaults.input_help_visible {
                         self.set_input_help_visible(visible);
+                    }
+                    if let Some(visible) = defaults.sidebar_visible {
+                        self.side_panel.set_user_hidden(!visible);
                     }
                     self.execute_refresh_model_context_limit_command();
                     changed = true;
@@ -918,12 +955,10 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn mark_timeline_message_dirty_at(&mut self, index: usize) {
-        self.ensure_background_task_activity_clock();
         self.timeline_dirty_message_indices.insert(index);
     }
 
     pub(crate) fn mark_timeline_message_and_next_dirty_at(&mut self, index: usize) {
-        self.ensure_background_task_activity_clock();
         self.timeline_dirty_message_indices.insert(index);
         self.timeline_dirty_message_indices
             .insert(index.saturating_add(1));

@@ -19,7 +19,7 @@ mod mcp_runtime;
 mod mcp_transport;
 #[path = "mcp_wire.rs"]
 mod mcp_wire;
-use crate::{mcp_memory, mcp_notes};
+use crate::{mcp_docs, mcp_memory, mcp_notes};
 #[cfg(test)]
 use mcp_oauth::origin;
 pub(crate) use mcp_oauth::{auth_callback, auth_start, authenticate_status};
@@ -279,6 +279,9 @@ pub(crate) async fn tools_with_state(
     if name == mcp_memory::MEMORY_MCP_ID {
         return Ok(mcp_memory::tools());
     }
+    if name == mcp_docs::DOCS_MCP_ID {
+        return Ok(mcp_docs::tools());
+    }
     ensure_connected_with_state(directory, name, auth_store, state).await?;
     runtime_manager()
         .tools(directory, name)
@@ -306,6 +309,9 @@ pub(crate) async fn resources_with_state(
     if name == mcp_memory::MEMORY_MCP_ID {
         return Ok(Vec::new());
     }
+    if name == mcp_docs::DOCS_MCP_ID {
+        return Ok(Vec::new());
+    }
     ensure_connected_with_state(directory, name, auth_store, state).await?;
     runtime_manager()
         .resources(directory, name)
@@ -331,6 +337,9 @@ pub(crate) async fn prompts_with_state(
         return Ok(Vec::new());
     }
     if name == mcp_memory::MEMORY_MCP_ID {
+        return Ok(Vec::new());
+    }
+    if name == mcp_docs::DOCS_MCP_ID {
         return Ok(Vec::new());
     }
     ensure_connected_with_state(directory, name, auth_store, state).await?;
@@ -369,6 +378,9 @@ pub(crate) async fn call_tool_with_state(
             arguments,
         )
         .await;
+    }
+    if client == mcp_docs::DOCS_MCP_ID {
+        return mcp_docs::call_tool(tool, arguments);
     }
     ensure_connected_with_state(directory, client, auth_store, state).await?;
     let result = runtime_manager()

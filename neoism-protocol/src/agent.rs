@@ -232,6 +232,8 @@ pub enum AgentClientMessage {
     /// Persist the agent composer's helper-strip preference in the host's
     /// unified JSON config.
     SetInputHelpVisible { visible: bool },
+    /// Persist whether new Agent panes show their conversation sidebar.
+    SetSidebarVisible { visible: bool },
 
     // -- Local context (skills / agents / sub-agents) ------------------
     /// Request the agent catalog for a workspace. Reply:
@@ -559,6 +561,8 @@ pub enum AgentServerMessage {
         thinking: Option<String>,
         #[serde(default)]
         input_help_visible: Option<bool>,
+        #[serde(default)]
+        sidebar_visible: Option<bool>,
     },
     /// Reply to [`AgentClientMessage::ListAgents`].
     AgentCatalog { agents: Vec<AgentInfo> },

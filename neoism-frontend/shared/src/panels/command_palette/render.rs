@@ -580,7 +580,8 @@ impl CommandPalette {
             let is_host_header = matches!(row, PaletteRow::WorkspaceHost { .. });
             // Command rows get the Alt+K command-sheet treatment: a
             // per-service icon, a bold label, and a green keybind chip.
-            let is_command = matches!(row, PaletteRow::Command { .. });
+            let is_command =
+                matches!(row, PaletteRow::Command { .. } | PaletteRow::Ex { .. });
             let row_indent = match row {
                 PaletteRow::Workspace { .. } => file_tree::INDENT_PX * s,
                 _ => 0.0,
@@ -599,6 +600,14 @@ impl CommandPalette {
                         theme.u8(theme.dim)
                     };
                     (icon, color)
+                }
+                PaletteRow::Ex { .. } => {
+                    let color = if is_selected {
+                        theme.u8(theme.fg)
+                    } else {
+                        theme.u8(theme.dim)
+                    };
+                    (Some(CommandService::Neoism.icon_themed()), color)
                 }
                 PaletteRow::Buffer { entry } => {
                     if entry.detail.starts_with(WORKSPACE_ROOT_DETAIL_PREFIX) {
@@ -907,8 +916,7 @@ impl CommandPalette {
                 for (x, w, label) in
                     [(edit_x, edit_w, "Edit"), (remove_x, remove_w, "Remove")]
                 {
-                    sugarloaf.rounded_rect(
-                        None,
+                    sugarloaf.overlay_rounded_rect(
                         x,
                         chip_y,
                         w,

@@ -319,7 +319,7 @@ impl Screen<'_> {
             // never what an IDE user wants. We translate it into the
             // same close-tab path that the buffer-tabs `×` button and
             // `<leader>x` use. `:wq` writes first.
-            GlobalExCommandPlan::CloseFocusedBufferTab => {
+            GlobalExCommandPlan::CloseFocusedBufferTab { discard } => {
                 tracing::info!(
                     target: "neoism::editor_tabs",
                     command = %trimmed,
@@ -329,7 +329,7 @@ impl Screen<'_> {
                 // close *its* active tab instead of the workspace
                 // tab. `pane_tab_close` auto-closes the pane when
                 // its last tab leaves.
-                let _ = self.close_focused_buffer_tab();
+                let _ = self.close_focused_buffer_tab_with_discard(discard);
                 true
             }
             GlobalExCommandPlan::WriteAndCloseFocusedBuffer => {
@@ -342,19 +342,11 @@ impl Screen<'_> {
                 let _ = self.close_focused_buffer_tab();
                 true
             }
-            // `:qa` / `:qa!` → close ALL buffer tabs. We loop
-            // close_active_buffer_tab so the strip empties out one at
-            // a time and the editor pane self-hides when the last tab
-            // closes.
-            GlobalExCommandPlan::CloseAllBuffersInFocusedPaneOrWorkspace => {
-                // In a focused split, `:qa` closes every tab in
-                // *that* pane (which cascades into closing the
-                // pane itself once its last tab leaves). Falls
-                // through to the workspace-wide loop only when no
-                // split is focused.
-                if !self.try_close_focused_pane_all() {
-                    self.close_all_workspace_file_tabs();
-                }
+            // `:qa` / `:qa!` closes only this workspace, matching the
+            // workspace-tab context menu rather than quitting the window.
+            GlobalExCommandPlan::CloseActiveWorkspace { discard } => {
+                let mut clipboard = Clipboard::new_nop();
+                self.close_active_workspace(discard, &mut clipboard);
                 true
             }
             GlobalExCommandPlan::WriteAllAndCloseAllBuffers => {

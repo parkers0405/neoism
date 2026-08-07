@@ -285,6 +285,7 @@ fn illuminated_draw_opts(
         color: illuminated_color(color, base),
         bold: false,
         italic: false,
+        extrude: false,
         font_id,
         clip_rect: base.clip_rect,
     }

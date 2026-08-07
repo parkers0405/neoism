@@ -242,6 +242,13 @@ impl Screen<'_> {
     }
 
     pub(crate) fn close_focused_buffer_tab(&mut self) -> bool {
+        self.close_focused_buffer_tab_with_discard(false)
+    }
+
+    pub(crate) fn close_focused_buffer_tab_with_discard(
+        &mut self,
+        discard: bool,
+    ) -> bool {
         match focused_buffer_close_target(
             self.active_pane_strip_route(),
             self.context_manager.current_grid_split_focused(),
@@ -255,6 +262,21 @@ impl Screen<'_> {
                 else {
                     return false;
                 };
+                if !discard
+                    && self
+                        .renderer
+                        .pane_tabs
+                        .get(&route_id)
+                        .and_then(|tabs| tabs.tabs().get(ix))
+                        .is_some_and(|tab| tab.modified)
+                {
+                    self.renderer.notifications.push(
+                        "Unsaved changes. Use :q! to discard this buffer",
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    );
+                    self.mark_dirty();
+                    return false;
+                }
                 self.pane_tab_close(route_id, ix);
                 self.mark_dirty();
                 return true;
@@ -278,6 +300,21 @@ impl Screen<'_> {
             return false;
         }
         let ix = self.renderer.buffer_tabs.active();
+        if !discard
+            && self
+                .renderer
+                .buffer_tabs
+                .tabs()
+                .get(ix)
+                .is_some_and(|tab| tab.modified)
+        {
+            self.renderer.notifications.push(
+                "Unsaved changes. Use :q! to discard this buffer",
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
+            self.mark_dirty();
+            return false;
+        }
         self.close_workspace_buffer_tab_at(ix)
     }
 

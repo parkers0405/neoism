@@ -203,6 +203,10 @@ pub enum SessionEventUpdate {
         title: Option<String>,
         agent: Option<String>,
     },
+    BackgroundTaskCompleted {
+        job_id: String,
+        status: String,
+    },
     PermissionAsked(NeoismAgentPendingPermission),
     PermissionReplied {
         request_id: String,
@@ -386,6 +390,23 @@ pub fn classify_session_event(
             event_part_id(properties)
                 .map(|part_id| vec![SessionEventUpdate::PartRemoved(part_id.to_string())])
                 .unwrap_or_default()
+        }
+        "session.background_task.completed" => {
+            let job_id = properties
+                .get("jobId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let status = properties
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("completed")
+                .to_string();
+            if job_id.is_empty() {
+                Vec::new()
+            } else {
+                vec![SessionEventUpdate::BackgroundTaskCompleted { job_id, status }]
+            }
         }
         "session.next.compaction.started" => {
             vec![SessionEventUpdate::CompactionStarted {

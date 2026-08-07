@@ -10,8 +10,7 @@ use super::assistant::{
     render_assistant_text_with, render_reasoning_message_with, ASSISTANT_TEXT_PAD_LEFT,
 };
 use super::code_block::{
-    render_code_block, truncate_chars, warm_code_block_render_cache, AgentCodeMessage,
-    AgentCodePane,
+    render_code_block, warm_code_block_render_cache, AgentCodeMessage, AgentCodePane,
 };
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped, opts_with_clip,
@@ -22,8 +21,9 @@ use super::markdown::{
     AssistantMarkdownBlock,
 };
 use super::tool_message::{
-    draw_checkbox, measure_tool_message_height, render_tool_message, AgentToolMessage,
-    AgentToolPane, AgentToolTodo, TodoVisualState, ToolDiffSection, TODO_ROW_HEIGHT,
+    draw_checkbox, measure_tool_message_height, render_tool_message, wrap_todo_text,
+    AgentToolMessage, AgentToolPane, AgentToolTodo, TodoVisualState, ToolDiffSection,
+    TODO_ROW_HEIGHT,
 };
 use super::user_input::{render_user_message, user_message_orb_identity};
 use super::{ORDER_PANEL, ORDER_TEXT};
@@ -841,7 +841,21 @@ where
         AgentMessageCardKind::Tool
             if message.output_kind() == AgentMessageCardOutputKind::Todos =>
         {
-            42.0 * s + message.card_todos().len().max(1) as f32 * TODO_ROW_HEIGHT * s
+            let opts = DrawOpts {
+                font_size: 14.0 * s,
+                ..DrawOpts::default()
+            };
+            let text_w = todo_text_width(width, s);
+            let rows = message
+                .card_todos()
+                .iter()
+                .take(10)
+                .map(|todo| {
+                    wrap_todo_text(sugarloaf, todo.content(), text_w, &opts).len()
+                })
+                .sum::<usize>()
+                .max(1);
+            42.0 * s + rows as f32 * TODO_ROW_HEIGHT * s
         }
         AgentMessageCardKind::Tool
             if message.output_kind() == AgentMessageCardOutputKind::Code =>
@@ -1124,18 +1138,30 @@ fn render_todos_with<T>(
         let mut text_opts = opts;
         text_opts.color = state.text_color(theme);
         text_opts.bold = state.text_bold();
-        let text = truncate_chars(todo.content(), 160);
-        draw_text_clipped(
+        let lines = wrap_todo_text(
             sugarloaf,
-            x + 46.0 * s,
-            line_y,
-            &text,
+            todo.content(),
+            (w - 46.0 * s).max(40.0 * s),
             &text_opts,
-            occlusion_rects,
         );
-        line_y += TODO_ROW_HEIGHT * s;
+        for line in lines {
+            draw_text_clipped(
+                sugarloaf,
+                x + 46.0 * s,
+                line_y,
+                &line,
+                &text_opts,
+                occlusion_rects,
+            );
+            line_y += TODO_ROW_HEIGHT * s;
+        }
         if x + w <= x {
             break;
         }
     }
+}
+
+fn todo_text_width(card_width: f32, s: f32) -> f32 {
+    // Card body inset (48), checkbox/text inset (46), and right breathing room.
+    (card_width - 112.0 * s).max(40.0 * s)
 }

@@ -369,9 +369,11 @@ fn draw_thick(
     opts: &DrawOpts,
     scale: f32,
 ) {
+    let mut opts = *opts;
+    opts.extrude = true;
     let ui = sugarloaf.text_mut();
-    ui.draw(x, y, text, opts);
-    ui.draw(x + FAUX_BOLD_OFFSET * scale, y, text, opts);
+    ui.draw(x, y, text, &opts);
+    ui.draw(x + FAUX_BOLD_OFFSET * scale, y, text, &opts);
 }
 
 fn centered_text_box_y(pill_y: f32, pill_h: f32, font_size: f32) -> f32 {

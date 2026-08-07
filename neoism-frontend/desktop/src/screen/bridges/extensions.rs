@@ -19,6 +19,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 const NEOISM_NOTES_MCP_ID: &str = "neoism-notes";
 const NEOISM_MEMORY_MCP_ID: &str = "neoism-memory";
+const NEOISM_DOCS_MCP_ID: &str = "neoism-docs";
 const NEOISM_PYTHON_KERNEL_ID: &str = "neoism-python-kernel";
 const EVCXR_JUPYTER_KERNEL_ID: &str = "evcxr-jupyter-kernel";
 const KERNEL_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -609,6 +610,35 @@ fn neoism_memory_mcp_manifest() -> ExtensionManifest {
     }
 }
 
+fn neoism_docs_mcp_manifest() -> ExtensionManifest {
+    use neoism_extensions::{InstallKind, RunSpec};
+    use std::collections::BTreeMap;
+
+    ExtensionManifest {
+        id: NEOISM_DOCS_MCP_ID.to_string(),
+        name: "Neoism Docs".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        description: "Read-only access to Neoism's bundled product documentation, even when the editable Welcome notes are deleted.".to_string(),
+        author: "Neoism".to_string(),
+        downloads: None,
+        categories: vec!["MCP Server".to_string(), "Built-in".to_string(), "Documentation".to_string()],
+        languages: Vec::new(),
+        repository_url: None,
+        homepage: None,
+        executables: vec!["neoism-agent".to_string()],
+        install: InstallKind::Cargo {
+            crate_name: "neoism-agent-server".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            features: Vec::new(),
+        },
+        run: Some(RunSpec {
+            command: vec!["neoism-agent".to_string(), "mcp".to_string(), "docs".to_string()],
+            env: BTreeMap::new(),
+        }),
+        env_keys: Vec::new(),
+    }
+}
+
 fn neoism_python_kernel_manifest() -> ExtensionManifest {
     use neoism_extensions::{InstallKind, RunSpec};
 
@@ -670,7 +700,10 @@ fn evcxr_jupyter_kernel_manifest() -> ExtensionManifest {
 }
 
 fn is_builtin_extension_id(id: &str) -> bool {
-    matches!(id, NEOISM_NOTES_MCP_ID | NEOISM_MEMORY_MCP_ID)
+    matches!(
+        id,
+        NEOISM_NOTES_MCP_ID | NEOISM_MEMORY_MCP_ID | NEOISM_DOCS_MCP_ID
+    )
 }
 
 fn ensure_builtin_mcp_installed(manifests: &[ExtensionManifest]) -> InstalledIndex {

@@ -89,10 +89,11 @@ pub(crate) enum PaletteRow<'a> {
     ServerAdd,
     /// "+ Create server" — host the machine's own daemon for a chosen
     /// folder and auto-join it (the flip side of ServerAdd's join-by-URL).
+    #[allow(dead_code)]
     ServerCreate,
-    /// Vim ex command suggestion — a pure visual aid backed by the
-    /// curated `EX_COMMANDS` list. Has no action: Enter always
-    /// dispatches the literal query, Tab fills the query with `name`.
+    /// Vim Ex command backed by the curated `EX_COMMANDS` list. In the
+    /// regular command search it uses the same namespaced command-sheet
+    /// presentation as Neoism commands; `:` mode keeps the same row model.
     Ex {
         name: &'a str,
         hint: &'a str,
@@ -143,6 +144,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Command { service, title, .. } => {
                 format!("{service}: {title}")
             }
+            PaletteRow::Ex { name, .. } => format!("neoism: {name}"),
             _ => self.title().to_owned(),
         }
     }

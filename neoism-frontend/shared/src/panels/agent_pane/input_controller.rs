@@ -514,6 +514,11 @@ pub fn cursor_line_col(value: &str, byte: usize) -> (usize, usize) {
 /// it never relies on this attributing a shared boundary to the row it
 /// just moved INTO — that mismatch was the Up/Down sticking bug.
 pub fn visual_row_index(rows: &[InputWrapRow], cursor: usize) -> Option<usize> {
+    if let Some((ix, row)) = rows.iter().enumerate().next_back() {
+        if row.start == cursor && row.end == cursor {
+            return Some(ix);
+        }
+    }
     rows.iter()
         .position(|row| cursor >= row.start && cursor <= row.end)
 }
@@ -900,6 +905,24 @@ mod tests {
             Some(0),
             "Up from the boundary retreats one row"
         );
+    }
+
+    #[test]
+    fn trailing_empty_wrap_row_owns_end_caret() {
+        let rows = vec![
+            InputWrapRow {
+                start: 0,
+                end: 3,
+                offsets: vec![0.0, 1.0, 2.0, 3.0],
+            },
+            InputWrapRow {
+                start: 3,
+                end: 3,
+                offsets: vec![0.0],
+            },
+        ];
+
+        assert_eq!(visual_row_index(&rows, 3), Some(1));
     }
 
     #[test]

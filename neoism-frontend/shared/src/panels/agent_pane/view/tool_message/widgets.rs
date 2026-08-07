@@ -66,20 +66,18 @@ pub fn draw_checkbox(
             );
         }
         TodoVisualState::InProgress => {
-            // Smaller in-progress bullet (6px). The box's right/bottom
-            // borders sit at +size while the left/top sit at the edge, so
-            // the bordered box's visual center is +0.5px from the `size`
-            // square center — add that so the dot sits dead-center instead
-            // of a touch up-and-left.
             let dot = size - 9.0 * s;
             let dot_pos = (size - dot) * 0.5 + 0.5 * s;
-            draw_rounded_rect_clipped(
+            draw_status_dot_text(
                 sugarloaf,
-                [x + dot_pos, y + dot_pos, dot, dot],
-                theme.f32(theme.yellow),
-                dot * 0.5,
-                ORDER_TEXT + 1,
+                x + dot_pos,
+                y + dot_pos,
+                dot,
+                theme.u8(theme.yellow),
+                Some((theme.u8(theme.yellow), 0.35)),
                 viewport_clip,
+                &[],
+                s,
             );
         }
         TodoVisualState::Pending => {}

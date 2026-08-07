@@ -1,6 +1,6 @@
 use super::draw::{
-    draw_status_dot_text, draw_subagent_spinner, intersect_rect,
-    push_provider_icon_clipped, render_back_button, set_back_cursor_if_focused,
+    draw_subagent_spinner, intersect_rect, push_provider_icon_clipped,
+    render_back_button, set_back_cursor_if_focused,
 };
 use super::*;
 
@@ -45,6 +45,7 @@ pub(crate) fn render_section_header(
         font_size: drawn_size,
         color: theme.u8(theme.fg),
         bold: true,
+        extrude: true,
         font_id: pixel_font,
         clip_rect: Some(clip),
         ..DrawOpts::default()
@@ -67,6 +68,7 @@ pub(crate) fn render_section_header(
             color: theme.u8(theme.fg),
             bold: false,
             italic: false,
+            extrude: true,
             font_id: cap_font,
             clip_rect: Some(clip),
         };
@@ -217,6 +219,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     theme: &IdeTheme,
     s: f32,
     now_seconds: f32,
+    mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
     inner_radius: f32,
 ) {
@@ -248,6 +251,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
         content_rect,
         theme,
         s,
+        mouse,
         full_clip,
         occlusion_rects,
         inner_radius,

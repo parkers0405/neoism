@@ -8,8 +8,8 @@ use super::git::{collect_git_changes, git_repo_root};
 use super::modes::FinderMode;
 use super::search::scrolloff_for;
 use super::state::{
-    Finder, FINDER_HEIGHT, FINDER_MARGIN_TOP, FINDER_PADDING, INPUT_HEIGHT,
-    LEFT_COL_RATIO, RESULT_ITEM_HEIGHT, SEPARATOR_HEIGHT,
+    Finder, FINDER_HEIGHT, FINDER_PADDING, INPUT_HEIGHT, LEFT_COL_RATIO,
+    RESULT_ITEM_HEIGHT, SEPARATOR_HEIGHT,
 };
 use super::types::{FileResult, GitChangeStatus, GitResult, GrepResult, Result_};
 use crate::services::{SearchGitStatus, SearchService};
@@ -553,7 +553,7 @@ impl Finder {
             .min(logical_h - 96.0);
         let width = (self.overlay_width() * scale).min(logical_w - 32.0);
         let x = (logical_w - width) / 2.0;
-        let y = FINDER_MARGIN_TOP * scale;
+        let y = self.top_anchor;
         Some([x, y, width, height])
     }
 

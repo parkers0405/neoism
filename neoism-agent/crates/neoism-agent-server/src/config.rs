@@ -481,6 +481,18 @@ fn normalize_config(info: &mut NeoismConfig) {
             enabled: Some(true),
             timeout: None,
         });
+    info.mcp
+        .entry(crate::mcp_docs::DOCS_MCP_ID.to_string())
+        .or_insert_with(|| McpConfig::Local {
+            command: vec![
+                "builtin".to_string(),
+                crate::mcp_docs::DOCS_MCP_ID.to_string(),
+            ],
+            args: None,
+            environment: None,
+            enabled: Some(true),
+            timeout: None,
+        });
 
     for (name, mut config) in std::mem::take(&mut info.mode) {
         config.mode = Some("primary".to_string());

@@ -307,7 +307,9 @@ impl MarkdownPane {
             } else {
                 self.cursor_col_from_table_cell_point(cell, x, y)
             };
-            self.mode = MarkdownMode::Insert;
+            if !self.vim_enabled {
+                self.mode = MarkdownMode::Insert;
+            }
             self.clamp_cursor();
             self.visual_anchor = None;
             self.mouse_select_anchor = Some(self.cursor_position());
@@ -334,7 +336,9 @@ impl MarkdownPane {
         } else {
             self.cursor_col_from_point(block, x, y)
         };
-        self.mode = MarkdownMode::Insert;
+        if !self.vim_enabled {
+            self.mode = MarkdownMode::Insert;
+        }
         self.clamp_cursor();
         self.visual_anchor = None;
         self.mouse_select_anchor = Some(self.cursor_position());

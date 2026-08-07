@@ -49,6 +49,8 @@ pub enum SlashCommandAction {
     RedoSession,
     /// Toggle the OpenCode-style keyboard/help strip below the composer.
     ToggleInputHelp,
+    /// Toggle the Agent conversation sidebar and persist its default.
+    ToggleSidebar,
     /// `/yolo` (`/dangerously-skip-permissions`) — toggle skipping ALL
     /// permission prompts for this pane: every request auto-answers
     /// "Yes" the moment it arrives. The config-level equivalent is
@@ -126,6 +128,7 @@ pub fn plan_slash_command(text: &str) -> SlashCommandAction {
         "/hints" | "/helper" | "/help-strip" | "/footer" => {
             SlashCommandAction::ToggleInputHelp
         }
+        "/sidebar" => SlashCommandAction::ToggleSidebar,
         "/piss" => SlashCommandAction::PissOnScreen,
         "/cuss" | "/swear" => SlashCommandAction::CussOnScreen,
         "/glitch" => SlashCommandAction::GlitchOnScreen,
@@ -257,6 +260,12 @@ fn slash_option_specs() -> &'static [SlashOptionSpec] {
             description: "Toggle the helper row below the input",
             footer: "ui",
             value: "/hints",
+        },
+        SlashOptionSpec {
+            title: "/sidebar",
+            description: "Toggle the Agent sidebar and its default",
+            footer: "ui",
+            value: "/sidebar",
         },
         SlashOptionSpec {
             title: "/piss",
@@ -457,6 +466,17 @@ mod tests {
         assert!(slash_options()
             .iter()
             .any(|option| option.value == "/hints"));
+    }
+
+    #[test]
+    fn plans_sidebar_toggle() {
+        assert_eq!(
+            plan_slash_command("/sidebar"),
+            SlashCommandAction::ToggleSidebar
+        );
+        assert!(slash_options()
+            .iter()
+            .any(|option| option.value == "/sidebar"));
     }
 
     #[test]

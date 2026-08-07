@@ -38,7 +38,10 @@ pub fn render_timeline_with<P, D>(
     let real_content_h = layout.content_height;
     let row_count = layout.rows.len();
     let status_h = if pane.has_status_activity() {
+        let primary_lines =
+            streaming_status_primary_line_count(sugarloaf, &pane.streaming_label(), w, s);
         let lines = streaming_status_line_count(
+            primary_lines,
             pane.queued_prompt_count(),
             pane.running_background_task_count(),
         );
@@ -302,9 +305,9 @@ pub fn render_timeline_with<P, D>(
 
     let mut content_y = real_content_h;
 
-    // Streaming status row lives at the end of the timeline content so it
-    // scrolls with the conversation, attached visually to the latest
-    // streamed message — not pinned above the input bar.
+    // Streaming status is timeline content, attached to the latest message.
+    // It therefore scrolls with the conversation instead of following the
+    // input bar while the user browses older messages.
     if status_h > 0.0 {
         if content_y > 0.0 {
             content_y += gap;

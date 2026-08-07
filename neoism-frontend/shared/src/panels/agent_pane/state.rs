@@ -282,6 +282,12 @@ struct TimelineAnchor {
     screen_y: f32,
 }
 
+#[derive(Clone, Debug)]
+struct TimelineViewAnchor {
+    message_id: String,
+    screen_offset: f32,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ToolExpandAnimation {
     started_at: Instant,
@@ -578,11 +584,14 @@ pub struct NeoismAgentPane {
     selection_anchor: Option<SelectionPoint>,
     selection_focus: Option<SelectionPoint>,
     timeline_scroll_px: f32,
+    timeline_follow_bottom: bool,
     timeline_content_height_px: f32,
     timeline_viewport_height_px: f32,
     timeline_viewport_rect: Option<[f32; 4]>,
     pending_timeline_anchor: Option<TimelineAnchor>,
+    timeline_view_anchor: Option<TimelineViewAnchor>,
     pending_timeline_prepend_height_px: Option<f32>,
+    pending_timeline_prepend_delta_px: Option<f32>,
     timeline_last_scroll_at: Option<Instant>,
     timeline_velocity_px_s: f32,
     timeline_last_tick_at: Option<Instant>,
@@ -628,6 +637,7 @@ pub struct NeoismAgentPane {
     streaming_tool_label: Option<String>,
     subagent_waiting_started_at: Option<Instant>,
     background_tasks_started_at: Option<Instant>,
+    running_background_task_count: usize,
     active_subagent_ids: BTreeSet<String>,
     active_subagent_started_at: HashMap<String, u64>,
     pending_permission: Option<NeoismAgentPendingPermission>,
@@ -658,6 +668,7 @@ pub struct NeoismAgentPane {
     /// user sent renders their own presence orb + a "You" tooltip. `None`
     /// on hosts that don't publish presence (falls back to a generic orb).
     local_presence_name: Option<String>,
+    visible_user_orb: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -901,11 +912,14 @@ impl Default for NeoismAgentPane {
             selection_anchor: None,
             selection_focus: None,
             timeline_scroll_px: 0.0,
+            timeline_follow_bottom: true,
             timeline_content_height_px: 0.0,
             timeline_viewport_height_px: 0.0,
             timeline_viewport_rect: None,
             pending_timeline_anchor: None,
+            timeline_view_anchor: None,
             pending_timeline_prepend_height_px: None,
+            pending_timeline_prepend_delta_px: None,
             timeline_last_scroll_at: None,
             timeline_velocity_px_s: 0.0,
             timeline_last_tick_at: None,
@@ -932,6 +946,7 @@ impl Default for NeoismAgentPane {
             streaming_tool_label: None,
             subagent_waiting_started_at: None,
             background_tasks_started_at: None,
+            running_background_task_count: 0,
             active_subagent_ids: BTreeSet::new(),
             active_subagent_started_at: HashMap::new(),
             pending_permission: None,
@@ -950,6 +965,7 @@ impl Default for NeoismAgentPane {
             wordmark: NeoismWordmarkState::default(),
             side_panel: NeoismAgentSidePanel::default(),
             local_presence_name: None,
+            visible_user_orb: false,
         }
     }
 }

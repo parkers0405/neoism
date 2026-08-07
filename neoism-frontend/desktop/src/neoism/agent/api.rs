@@ -539,6 +539,8 @@ pub(super) fn fetch_session_messages(
 pub(super) struct SessionMessagePage {
     pub blocks: Vec<NeoismAgentMessage>,
     pub raw_count: usize,
+    pub oldest_cursor: Option<String>,
+    pub oldest_role: Option<String>,
 }
 
 pub(super) fn fetch_session_messages_page(
@@ -568,6 +570,22 @@ pub(super) fn fetch_session_messages_page(
         .as_array()
         .ok_or_else(|| "Neoism Agent returned malformed messages".to_string())?;
     let raw_messages = messages.len();
+    let oldest_cursor = messages.last().and_then(|message| {
+        message
+            .get("info")
+            .and_then(Value::as_object)
+            .and_then(|info| info.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let oldest_role = messages.last().and_then(|message| {
+        message
+            .get("info")
+            .and_then(Value::as_object)
+            .and_then(|info| info.get("role"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
     let raw_bytes = value.to_string().len();
     let blocks = message_blocks_from_response(messages, true);
     if super::perf::enabled() {
@@ -596,6 +614,8 @@ pub(super) fn fetch_session_messages_page(
     Ok(SessionMessagePage {
         blocks,
         raw_count: raw_messages,
+        oldest_cursor,
+        oldest_role,
     })
 }
 

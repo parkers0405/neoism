@@ -1612,19 +1612,38 @@ fn history_refresh_keeps_live_trace_anchored_to_its_turn() {
 }
 
 #[test]
-fn tool_expand_preserves_clicked_card_top_when_content_height_changes() {
+fn diff_file_toggle_does_not_move_or_reanchor_the_timeline() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
     pane.timeline_scroll_px = 200.0;
-    pane.register_tool_hit_rect("tool-1".to_string(), [20.0, 150.0, 300.0, 60.0]);
+    pane.timeline_velocity_px_s = 75.0;
+    pane.register_tool_hit_rect("tool-1:0".to_string(), [20.0, 150.0, 300.0, 60.0]);
+    let scroll_before = pane.timeline_scroll_px;
+    let velocity_before = pane.timeline_velocity_px_s;
 
     assert!(pane.toggle_tool_at(30.0, 160.0));
-    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
 
-    let max_scroll = pane.max_timeline_scroll();
-    let scroll_top = max_scroll - pane.timeline_scroll_offset();
-    assert_eq!(scroll_top, 400.0);
-    assert!(pane.tool_expanded("tool-1"));
+    assert!(pane.tool_expanded("tool-1:0"));
+    assert_eq!(pane.timeline_scroll_px, scroll_before);
+    assert_eq!(pane.timeline_velocity_px_s, velocity_before);
+    assert!(pane.pending_timeline_anchor.is_none());
+    assert!(pane.timeline_view_anchor.is_none());
+    assert!(!pane.tool_expand_animating("tool-1"));
+}
+
+#[test]
+fn older_timeline_request_requires_leaving_bottom_follow() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("session-1".to_string());
+
+    pane.maybe_request_older_timeline_page(0.0, 500.0);
+    assert!(!pane.timeline_history.loading_older);
+    assert!(pane.drain_pending_outbound().is_empty());
+
+    pane.timeline_follow_bottom = false;
+    pane.maybe_request_older_timeline_page(0.0, 500.0);
+    assert!(pane.timeline_history.loading_older);
+    assert_eq!(pane.drain_pending_outbound().len(), 1);
 }
 
 #[test]
@@ -1647,6 +1666,29 @@ fn timeline_growth_keeps_following_stream_at_bottom() {
     pane.timeline_scroll_px = 0.0;
 
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
+
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+}
+
+#[test]
+fn timeline_growth_respects_upward_scroll_intent_near_bottom() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+
+    assert!(pane.scroll_timeline_pixels(1.0));
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1000.0, 300.0);
+
+    assert!((pane.timeline_scroll_offset() - 101.0).abs() < 0.01);
+}
+
+#[test]
+fn returning_to_timeline_bottom_restores_following() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+
+    assert!(pane.scroll_timeline_pixels(100.0));
+    assert!(pane.scroll_timeline_pixels(-100.0));
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1000.0, 300.0);
 
     assert_eq!(pane.timeline_scroll_offset(), 0.0);
 }

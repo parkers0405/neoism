@@ -202,6 +202,23 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     fn take_timeline_prepend(&mut self) -> Option<usize> {
         None
     }
+
+    fn set_measured_timeline_prepend(
+        &mut self,
+        _content_height: f32,
+        _prepend_height: f32,
+    ) {
+    }
+    fn timeline_view_anchor(&self) -> Option<(String, f32)> {
+        None
+    }
+    fn restore_timeline_view_anchor(&mut self, _content_y: f32, _screen_offset: f32) {}
+    fn set_timeline_view_anchor(
+        &mut self,
+        _message_id: Option<String>,
+        _screen_offset: f32,
+    ) {
+    }
     fn virtual_timeline_visible_source_range(&self) -> Option<(usize, usize)> {
         None
     }
@@ -510,6 +527,30 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
 
             fn take_timeline_prepend(&mut self) -> Option<usize> {
                 <$pane>::take_timeline_prepend(self)
+            }
+
+            fn set_measured_timeline_prepend(
+                &mut self,
+                content_height: f32,
+                prepend_height: f32,
+            ) {
+                <$pane>::set_measured_timeline_prepend(self, content_height, prepend_height)
+            }
+
+            fn timeline_view_anchor(&self) -> Option<(String, f32)> {
+                <$pane>::timeline_view_anchor(self)
+            }
+
+            fn restore_timeline_view_anchor(&mut self, content_y: f32, screen_offset: f32) {
+                <$pane>::restore_timeline_view_anchor(self, content_y, screen_offset)
+            }
+
+            fn set_timeline_view_anchor(
+                &mut self,
+                message_id: Option<String>,
+                screen_offset: f32,
+            ) {
+                <$pane>::set_timeline_view_anchor(self, message_id, screen_offset)
             }
 
             fn any_tool_expand_animating(&self) -> bool {

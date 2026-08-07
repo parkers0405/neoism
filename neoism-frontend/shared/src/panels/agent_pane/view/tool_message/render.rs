@@ -19,8 +19,13 @@ fn minimal_tool_header_height(s: f32) -> f32 {
     30.0 * s
 }
 
+fn fixed_diff_viewport_height(preview_rows: usize, s: f32) -> f32 {
+    diff_body_height(preview_rows, s)
+}
+
 pub fn measure_tool_message_height(
     sugarloaf: &mut Sugarloaf,
+    pane: &impl AgentToolPane,
     message: &impl AgentToolMessage,
     width: f32,
     s: f32,
@@ -57,12 +62,14 @@ pub fn measure_tool_message_height(
     if let Some(sections) = cached_edit_diff_sections(message) {
         let card_w = tool_diff_card_width(width, s);
         let mut height = 30.0 * s;
-        for section in sections.iter() {
+        for (section_index, section) in sections.iter().enumerate() {
+            let card_key = format!("{}:{section_index}", message.id());
+            let card_expanded = !minimal && pane.tool_expanded(&card_key);
             let body_h = if minimal {
                 0.0
             } else {
-                let view = cached_diff_card_view(section, card_w, s, false);
-                diff_body_height(view.preview_visual_rows, s)
+                let view = cached_diff_card_view(section, card_w, s, card_expanded);
+                fixed_diff_viewport_height(view.preview_visual_rows, s)
             };
             height += diff_card::HEADER_HEIGHT * s
                 + body_h
@@ -660,15 +667,13 @@ fn render_tool_diff_cards(
         // shared the message id, so clicking one expanded (and made scrollable)
         // every card in the patch.
         let card_key = format!("{}:{section_index}", message.id());
-        let card_expanded = !minimal
-            && (pane.tool_expanded(&card_key)
-                || pane.tool_expand_progress(&card_key) > 0.01);
+        let card_expanded = !minimal && pane.tool_expanded(&card_key);
         let view = cached_diff_card_view(section, card_w, s, card_expanded);
         let full_body_h = diff_body_height(view.visual_rows, s);
         let body_h = if minimal {
             0.0
         } else {
-            diff_body_height(view.preview_visual_rows, s)
+            fixed_diff_viewport_height(view.preview_visual_rows, s)
         };
         let scroll_key = card_key.clone();
         let body_scroll = if card_expanded {
@@ -758,6 +763,28 @@ fn render_tool_diff_cards(
             viewport_clip,
         );
         card_y += 10.0 * s;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{diff_body_height, fixed_diff_viewport_height};
+
+    #[test]
+    fn expanded_diff_keeps_the_collapsed_viewport_height() {
+        let preview_rows = 6;
+        let collapsed_height = fixed_diff_viewport_height(preview_rows, 1.0);
+
+        for full_rows in [6, 20, 100, 1_000] {
+            let expanded_height = fixed_diff_viewport_height(preview_rows, 1.0);
+            let overflow = (diff_body_height(full_rows, 1.0) - expanded_height).max(0.0);
+
+            assert_eq!(expanded_height, collapsed_height);
+            assert_eq!(
+                overflow,
+                (diff_body_height(full_rows, 1.0) - collapsed_height).max(0.0)
+            );
+        }
     }
 }
 

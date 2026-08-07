@@ -80,7 +80,7 @@ fn connected_idle_event_stream_does_not_drive_animation() {
     let mut pane = NeoismAgentPane::default();
     pane.event_stream = Some(AgentSessionEventStream::connected_for_test("sess-1"));
 
-    assert_eq!(pane.animation_reason(), None);
+    assert_eq!(pane.animation_reason(), Some("agent_home_wordmark"));
 }
 
 #[test]
@@ -1344,19 +1344,35 @@ fn updated_final_part_does_not_reorder_past_later_tool() {
 }
 
 #[test]
-fn tool_expand_preserves_clicked_card_top_when_content_height_changes() {
+fn diff_file_toggle_does_not_move_or_reanchor_the_timeline() {
     let mut pane = NeoismAgentPane::default();
+    pane.messages.push(
+        NeoismAgentMessage::tool(
+            "ApplyPatch",
+            "patch",
+            "completed",
+            "apply_patch",
+            NeoismAgentOutputKind::Text,
+            "diff",
+            Vec::new(),
+        )
+        .with_id("tool-1"),
+    );
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
     pane.timeline_scroll_px = 200.0;
-    pane.register_tool_hit_rect("tool-1".to_string(), [20.0, 150.0, 300.0, 60.0]);
+    pane.timeline_velocity_px_s = 75.0;
+    pane.register_tool_hit_rect("tool-1:0".to_string(), [20.0, 150.0, 300.0, 60.0]);
+    let scroll_before = pane.timeline_scroll_px;
+    let velocity_before = pane.timeline_velocity_px_s;
 
     assert!(pane.toggle_tool_at(30.0, 160.0));
-    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
 
-    let max_scroll = pane.max_timeline_scroll();
-    let scroll_top = max_scroll - pane.timeline_scroll_offset();
-    assert_eq!(scroll_top, 400.0);
-    assert!(pane.tool_expanded("tool-1"));
+    assert!(pane.tool_expanded("tool-1:0"));
+    assert_eq!(pane.timeline_scroll_px, scroll_before);
+    assert_eq!(pane.timeline_velocity_px_s, velocity_before);
+    assert!(pane.pending_timeline_anchor.is_none());
+    assert!(pane.timeline_view_anchor.is_none());
+    assert!(!pane.tool_expand_animating("tool-1"));
 }
 
 #[test]
@@ -1387,6 +1403,22 @@ fn timeline_prepend_preserves_reader_position_when_scrolled_up() {
 }
 
 #[test]
+fn measured_prepend_ignores_simultaneous_live_tail_growth() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+    pane.timeline_scroll_px = 200.0;
+    pane.pending_timeline_prepend_height_px = Some(900.0);
+    pane.pending_timeline_prepend_delta_px = Some(200.0);
+
+    // 200px was inserted above; the other 100px grew below in the live turn.
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1200.0, 300.0);
+
+    let max_scroll = pane.max_timeline_scroll();
+    let scroll_top = max_scroll - pane.timeline_scroll_offset();
+    assert_eq!(scroll_top, 600.0);
+}
+
+#[test]
 fn timeline_prepend_anchor_survives_until_content_height_grows() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
@@ -1404,40 +1436,44 @@ fn timeline_prepend_anchor_survives_until_content_height_grows() {
 }
 
 #[test]
+fn older_timeline_request_skipped_while_following_bottom() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("session-1".to_string());
+
+    pane.maybe_request_older_timeline_page(0.0, 500.0);
+
+    assert!(!pane.timeline_history.loading_older);
+    assert!(pane.drain_pending_outbound().is_empty());
+}
+
+#[test]
 fn older_timeline_request_gate_reopens_after_success() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("session-1".to_string());
-    // Pagination only fires while the reader is scrolling toward the top.
-    pane.timeline_last_scroll_at = Some(Instant::now());
-
+    pane.timeline_follow_bottom = false;
     pane.maybe_request_older_timeline_page(0.0, 500.0);
     assert!(pane.timeline_history.loading_older);
     assert_eq!(pane.drain_pending_outbound().len(), 1);
 
-    // A second request is blocked by the rate-limit cooldown even after the
-    // in-flight gate clears — preventing a back-to-back load cascade.
-    pane.timeline_history.loading_older = false;
-    pane.timeline_history.last_requested_session_id = None;
+    // The in-flight gate blocks duplicates.
     pane.maybe_request_older_timeline_page(0.0, 500.0);
     assert_eq!(pane.drain_pending_outbound().len(), 0);
 
-    // Past the cooldown, scrolling toward the top loads the next page.
-    pane.timeline_last_older_request_at =
-        Some(Instant::now() - Duration::from_millis(500));
-    pane.timeline_last_scroll_at = Some(Instant::now());
+    // Once the response clears the gate, remaining near the boundary loads
+    // the next page without requiring another wheel event.
+    pane.timeline_history.loading_older = false;
+    pane.timeline_history.last_requested_session_id = None;
     pane.maybe_request_older_timeline_page(0.0, 500.0);
     assert_eq!(pane.drain_pending_outbound().len(), 1);
 }
 
 #[test]
-fn older_timeline_request_skipped_when_not_scrolling() {
+fn older_timeline_request_skipped_below_boundary() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("session-1".to_string());
-    // No recent scroll and not inertial → parked at the top, so we must
-    // not auto-pull pages (this is what caused the load cascade).
-    pane.timeline_last_scroll_at = None;
+    pane.timeline_follow_bottom = false;
 
-    pane.maybe_request_older_timeline_page(0.0, 500.0);
+    pane.maybe_request_older_timeline_page(800.0, 500.0);
     assert!(!pane.timeline_history.loading_older);
     assert_eq!(pane.drain_pending_outbound().len(), 0);
 }
@@ -1455,15 +1491,23 @@ fn apply_older_page_prepends_and_keeps_loading_when_full() {
     let mut older = NeoismAgentMessage::user("older");
     older.id = "m-older".to_string();
     // A full page (raw_count == requested limit) means more may remain.
-    pane.apply_older_timeline_page("session-1".to_string(), vec![older], 1, 1);
+    pane.apply_older_timeline_page(
+        "session-1".to_string(),
+        vec![older],
+        1,
+        1,
+        Some("raw-oldest".to_string()),
+        false,
+    );
 
     assert_eq!(pane.messages.len(), 2);
     assert_eq!(pane.messages[0].id, "m-older");
     assert!(pane.timeline_history.has_older);
     assert!(!pane.timeline_history.loading_older);
+    assert_eq!(pane.timeline_last_older_request_at, None);
     assert_eq!(
         pane.timeline_history.oldest_loaded_cursor.as_deref(),
-        Some("m-older")
+        Some("raw-oldest")
     );
     // The prepend is folded incrementally, not via a full relayout.
     assert_eq!(pane.pending_timeline_prepend_count, Some(1));
@@ -1500,7 +1544,14 @@ fn apply_older_page_stops_at_start_on_short_page() {
     let mut older = NeoismAgentMessage::user("older");
     older.id = "m-older".to_string();
     // Server returned fewer messages than requested → reached the start.
-    pane.apply_older_timeline_page("session-1".to_string(), vec![older], 1, 128);
+    pane.apply_older_timeline_page(
+        "session-1".to_string(),
+        vec![older],
+        1,
+        128,
+        Some("raw-oldest".to_string()),
+        true,
+    );
 
     assert_eq!(pane.messages.len(), 2);
     assert!(!pane.timeline_history.has_older);
@@ -1514,7 +1565,14 @@ fn apply_older_page_ignored_after_session_switch() {
 
     let mut older = NeoismAgentMessage::user("older");
     older.id = "m-older".to_string();
-    pane.apply_older_timeline_page("session-1".to_string(), vec![older], 1, 1);
+    pane.apply_older_timeline_page(
+        "session-1".to_string(),
+        vec![older],
+        1,
+        1,
+        Some("raw-oldest".to_string()),
+        false,
+    );
 
     assert!(pane.messages.is_empty());
     assert!(!pane.timeline_history.loading_older);
@@ -1527,6 +1585,29 @@ fn timeline_growth_keeps_following_stream_at_bottom() {
     pane.timeline_scroll_px = 0.0;
 
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
+
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+}
+
+#[test]
+fn timeline_growth_respects_upward_scroll_intent_near_bottom() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+
+    assert!(pane.scroll_timeline_pixels(1.0));
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1000.0, 300.0);
+
+    assert!((pane.timeline_scroll_offset() - 101.0).abs() < 0.01);
+}
+
+#[test]
+fn returning_to_timeline_bottom_restores_following() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+
+    assert!(pane.scroll_timeline_pixels(100.0));
+    assert!(pane.scroll_timeline_pixels(-100.0));
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1000.0, 300.0);
 
     assert_eq!(pane.timeline_scroll_offset(), 0.0);
 }

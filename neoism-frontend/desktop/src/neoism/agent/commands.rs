@@ -431,8 +431,9 @@ impl NeoismAgentPane {
         let state_ok = state.is_some();
         let state_us = super::perf::elapsed_us(state_started);
         let messages_started = super::perf::now();
-        match fetch_session_messages(&self.server, &session_id) {
-            Ok(messages) => {
+        match fetch_session_messages_page(&self.server, &session_id, None, 80) {
+            Ok(page) => {
+                let messages = page.blocks;
                 self.clear_pending_user_prompts();
                 self.session_id = Some(session_id.clone());
                 self.side_panel
@@ -445,6 +446,7 @@ impl NeoismAgentPane {
                 // older" entirely or fed the server a foreign message id,
                 // which resolves to the newest page and dedupes to nothing.
                 self.timeline_history = Default::default();
+                self.timeline_history.oldest_loaded_cursor = page.oldest_cursor;
                 // Any session switch returns the panel to chat view — the
                 // "← Back" home-override peek shouldn't linger onto the
                 // newly opened session.
@@ -1113,23 +1115,44 @@ impl NeoismAgentPane {
         if let Err(error) = thread::Builder::new()
             .name(format!("neoism-agent-history-{session_id}"))
             .spawn(move || {
-                let update = match fetch_session_messages_page(
-                    &server,
-                    &session_id,
-                    cursor.as_deref(),
-                    limit,
-                ) {
-                    Ok(page) => {
-                        let raw_count = page.raw_count;
-                        let mut older = page.blocks;
-                        // Server returns newest-first; flip to oldest-first
-                        // so it prepends in reading order.
-                        older.reverse();
+                let update = match (|| {
+                    let mut before = cursor;
+                    let mut pages = Vec::new();
+                    let mut raw_count = 0usize;
+                    let (oldest_cursor, reached_start) = loop {
+                        let page = fetch_session_messages_page(
+                            &server,
+                            &session_id,
+                            before.as_deref(),
+                            limit,
+                        )?;
+                        raw_count += page.raw_count;
+                        let reached_start = page.raw_count < limit;
+                        let oldest_cursor = page.oldest_cursor.clone();
+                        let turn_complete = page.oldest_role.as_deref() == Some("user");
+                        pages.push(page.blocks);
+                        if reached_start || turn_complete || oldest_cursor.is_none() {
+                            break (oldest_cursor, reached_start);
+                        }
+                        if oldest_cursor == before {
+                            return Err("history cursor did not advance".to_string());
+                        }
+                        before = oldest_cursor.clone();
+                    };
+                    let mut older = Vec::new();
+                    for blocks in pages.into_iter().rev() {
+                        older.extend(blocks);
+                    }
+                    Ok::<_, String>((older, raw_count, oldest_cursor, reached_start))
+                })() {
+                    Ok((older, raw_count, oldest_cursor, reached_start)) => {
                         NeoismAgentBackgroundUpdate::OlderTimelineLoaded {
                             session_id,
                             messages: older,
                             raw_count,
                             requested_limit: limit,
+                            oldest_cursor,
+                            reached_start,
                         }
                     }
                     Err(error) => NeoismAgentBackgroundUpdate::OlderTimelineFailed {
@@ -1159,6 +1182,8 @@ impl NeoismAgentPane {
         mut older: Vec<NeoismAgentMessage>,
         raw_count: usize,
         requested_limit: usize,
+        oldest_cursor: Option<String>,
+        reached_start: bool,
     ) {
         self.timeline_history.loading_older = false;
         self.timeline_history.last_requested_session_id = None;
@@ -1170,7 +1195,7 @@ impl NeoismAgentPane {
         // may remain; a short page means we hit the start. Comparing block
         // count here would falsely cap pagination, because one message yields
         // several blocks (and some yield none).
-        let reached_start = raw_count < requested_limit;
+        let reached_start = reached_start || raw_count < requested_limit;
         let existing = self
             .messages
             .iter()
@@ -1181,14 +1206,16 @@ impl NeoismAgentPane {
         });
         if older.is_empty() {
             self.timeline_history.has_older = !reached_start;
+            self.timeline_history.oldest_loaded_cursor = oldest_cursor;
+            self.timeline_last_older_request_at = None;
             return;
         }
         self.mark_timeline_prepend_pending_at_current_height();
-        self.timeline_history.oldest_loaded_cursor =
-            older.first().map(|message| message.id.clone());
+        self.timeline_history.oldest_loaded_cursor = oldest_cursor;
         let prepended = older.len();
         self.messages.splice(0..0, older);
         self.timeline_history.has_older = !reached_start;
+        self.timeline_last_older_request_at = None;
         // Incremental fold instead of a full relayout: keep the existing cache
         // and tell the renderer how many messages landed at the front. Without
         // this every page rerendered all prior rows, so pagination slowed down

@@ -36,6 +36,12 @@ impl NeoismAgentPane {
         if self.wordmark_click_is_animating() {
             return Some("wordmark");
         }
+        if !self.has_conversation() {
+            return Some("agent_home_wordmark");
+        }
+        if self.visible_user_orb {
+            return Some("visible_user_orb");
+        }
         if self.fx_active() {
             return Some("easter_fx");
         }
@@ -68,6 +74,14 @@ impl NeoismAgentPane {
         None
     }
 
+    pub(crate) fn begin_visible_animation_frame(&mut self) {
+        self.visible_user_orb = false;
+    }
+
+    pub(crate) fn mark_visible_user_orb(&mut self) {
+        self.visible_user_orb = true;
+    }
+
     pub(crate) fn wordmark_click_is_animating(&self) -> bool {
         self.wordmark.click_started.is_some_and(|started| {
             Instant::now().saturating_duration_since(started) <= WORDMARK_CLICK_ANIMATION
@@ -92,32 +106,11 @@ impl NeoismAgentPane {
         viewport_h: f32,
     ) {
         const LOAD_OLDER_LIMIT: usize = 128;
-        // Minimum spacing between page requests. Without it, a page that adds
-        // little height (collapsed tool groups keep you near the top) re-arms
-        // the trigger every round-trip and drags the whole transcript in at
-        // once — each fold/measure piling on, so it "gets more slow".
-        const LOAD_OLDER_COOLDOWN: Duration = Duration::from_millis(180);
         let threshold = (viewport_h * 0.75).max(720.0);
-        if scroll_top > threshold
+        if self.timeline_follow_bottom
+            || scroll_top > threshold
             || !self.timeline_history.has_older
             || self.timeline_history.loading_older
-        {
-            return;
-        }
-        // Only paginate while the reader is actually moving toward the top
-        // (manual scroll or inertial glide). Parked at the top we do nothing,
-        // so reaching the top pulls exactly one page per scroll gesture.
-        let now = Instant::now();
-        let recently_scrolled = self
-            .timeline_last_scroll_at
-            .is_some_and(|at| now.duration_since(at) < Duration::from_millis(250))
-            || self.timeline_is_inertial();
-        if !recently_scrolled {
-            return;
-        }
-        if self
-            .timeline_last_older_request_at
-            .is_some_and(|at| now.duration_since(at) < LOAD_OLDER_COOLDOWN)
         {
             return;
         }
@@ -129,7 +122,7 @@ impl NeoismAgentPane {
         {
             return;
         }
-        self.timeline_last_older_request_at = Some(now);
+        self.timeline_last_older_request_at = Some(Instant::now());
         self.timeline_history.loading_older = true;
         self.timeline_history.last_requested_session_id = Some(session_id.clone());
         self.push_outbound(OutboundAgentCommand::LoadOlderTimeline {
@@ -414,12 +407,13 @@ impl NeoismAgentPane {
     }
 
     pub fn running_background_task_count(&self) -> usize {
-        self.background_tasks_started_at
-            .map_or(0, |_| running_background_task_count(&self.messages))
+        self.running_background_task_count
     }
 
     pub(crate) fn ensure_background_task_activity_clock(&mut self) {
-        if running_background_task_count(&self.messages) > 0 {
+        self.running_background_task_count =
+            running_background_task_count(&self.messages);
+        if self.running_background_task_count > 0 {
             if self.background_tasks_started_at.is_none() {
                 self.background_tasks_started_at = Some(Instant::now());
             }

@@ -306,7 +306,9 @@ impl MarkdownDocBinding {
     /// common per-frame case: a cheap line-vector comparison).
     pub fn flush_local(&mut self, pane: &MarkdownPane) -> Option<CrdtTextUpdate> {
         let update = self.flush_local_inner(pane);
-        self.synced_revision = Some(pane.source_revision);
+        if self.seeded && self.shadow == pane.lines {
+            self.synced_revision = Some(pane.source_revision);
+        }
         update
     }
 

@@ -355,11 +355,13 @@ impl Application<'_> {
                         message,
                     } => {
                         if let Some(route) = self.router.routes.get_mut(&window_id) {
-                            if route
+                            let chrome_changed =
+                                route.window.screen.apply_daemon_git_chrome(&message);
+                            let tree_changed = route
                                 .window
                                 .screen
-                                .apply_daemon_git_message(request_id, &message)
-                            {
+                                .apply_daemon_git_message(request_id, &message);
+                            if chrome_changed || tree_changed {
                                 route.request_redraw();
                             }
                         }

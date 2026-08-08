@@ -574,9 +574,7 @@ impl Screen<'_> {
             let repo_root = cwd
                 .as_deref()
                 .and_then(neoism_ui::panels::git_branch::repo_root_for);
-            let branch = cwd
-                .as_deref()
-                .and_then(neoism_ui::panels::git_branch::branch_for);
+            let branch = self.status_git_branch(cwd.as_deref());
             self.renderer.git_diff_panel.open(repo_root, branch);
         }
         if !self.renderer.buffer_tabs.tabs().is_empty() {

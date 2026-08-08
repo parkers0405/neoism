@@ -120,7 +120,9 @@ impl CodeDocBinding {
     /// replace. `None` when nothing changed (cheap per-frame compare).
     pub fn flush_local(&mut self, buffer: &CodeBuffer) -> Option<CrdtTextUpdate> {
         let update = self.flush_local_inner(buffer);
-        self.synced_revision = Some(buffer.revision);
+        if self.seeded && self.shadow == buffer.lines {
+            self.synced_revision = Some(buffer.revision);
+        }
         update
     }
 

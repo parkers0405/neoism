@@ -296,7 +296,7 @@ fn drain_code_pane_crdt(
                 }
                 pane_changed |= result.changed;
             }
-            if let Some(update) = binding.flush_local(&code.buffer) {
+            if let Some(update) = binding.flush_local_if_changed(&code.buffer) {
                 state.outbound.push(make_apply_sync(&buffer_id, update));
             }
         }

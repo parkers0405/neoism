@@ -228,6 +228,7 @@ pub struct MarkdownDocBinding {
     replica: CrdtTextBuffer,
     shadow: Vec<String>,
     seeded: bool,
+    synced_revision: Option<u64>,
 }
 
 impl MarkdownDocBinding {
@@ -243,6 +244,7 @@ impl MarkdownDocBinding {
             replica,
             shadow: Vec::new(),
             seeded: false,
+            synced_revision: None,
         }
     }
 
@@ -288,6 +290,7 @@ impl MarkdownDocBinding {
         }
         self.shadow = pane.lines.clone();
         self.seeded = true;
+        self.synced_revision = Some(pane.source_revision);
         // A freshly-seeded pane reflects the daemon's on-disk text, so it
         // must not read as modified — otherwise a trailing-newline
         // normalization at seed time made the tab show unsaved on the next
@@ -302,6 +305,24 @@ impl MarkdownDocBinding {
     /// client's origin id). Returns `None` when nothing changed (the
     /// common per-frame case: a cheap line-vector comparison).
     pub fn flush_local(&mut self, pane: &MarkdownPane) -> Option<CrdtTextUpdate> {
+        let update = self.flush_local_inner(pane);
+        self.synced_revision = Some(pane.source_revision);
+        update
+    }
+
+    /// Desktop drain fast path: source revisions move only when text moves,
+    /// so cursor, scroll, redraw, and daemon-pump events need no line scan.
+    pub fn flush_local_if_changed(
+        &mut self,
+        pane: &MarkdownPane,
+    ) -> Option<CrdtTextUpdate> {
+        if self.synced_revision == Some(pane.source_revision) {
+            return None;
+        }
+        self.flush_local(pane)
+    }
+
+    fn flush_local_inner(&mut self, pane: &MarkdownPane) -> Option<CrdtTextUpdate> {
         if !self.seeded || self.shadow == pane.lines {
             return None;
         }
@@ -387,6 +408,7 @@ impl MarkdownDocBinding {
             flash_inbound_delta(pane, &delta);
         }
         apply_delta_to_lines(&mut self.shadow, &delta);
+        self.synced_revision = Some(pane.source_revision);
         debug_assert_eq!(lines_to_text(&self.shadow), self.replica.text());
         Ok(MarkdownRemoteApply {
             flushed_local,
@@ -463,6 +485,7 @@ impl MarkdownDocBinding {
             pane.vim.clear_pending();
             pane.follow_cursor = true;
             apply_delta_to_lines(&mut self.shadow, &delta);
+            self.synced_revision = Some(pane.source_revision);
             debug_assert_eq!(lines_to_text(&self.shadow), self.replica.text());
             changed = true;
         }
@@ -1140,5 +1163,26 @@ mod tests {
         let result = binding.apply_remote(999, &bytes, &mut p).unwrap();
         assert!(!result.changed);
         assert_eq!(lines_to_text(&p.lines), "!text");
+    }
+
+    #[test]
+    fn markdown_revision_aware_flush_skips_unchanged_and_remote_revisions() {
+        let (mut a, mut pane_a, mut b, mut pane_b) = seeded_pair("alpha");
+
+        assert!(a.flush_local_if_changed(&pane_a).is_none());
+        pane_a.cursor_col = 5;
+        pane_a.insert_text("!");
+        assert!(a.flush_local_if_changed(&pane_a).is_some());
+        assert!(a.flush_local_if_changed(&pane_a).is_none());
+
+        pane_b.cursor_col = 5;
+        pane_b.insert_text("?");
+        let update = b.flush_local(&pane_b).unwrap();
+        assert!(
+            a.apply_remote(update.origin_client_id, &update.update_v1, &mut pane_a)
+                .unwrap()
+                .changed
+        );
+        assert!(a.flush_local_if_changed(&pane_a).is_none());
     }
 }

@@ -46,6 +46,7 @@ pub struct CodeDocBinding {
     replica: CrdtTextBuffer,
     shadow: Vec<String>,
     seeded: bool,
+    synced_revision: Option<u64>,
 }
 
 impl CodeDocBinding {
@@ -60,6 +61,7 @@ impl CodeDocBinding {
             replica,
             shadow: Vec::new(),
             seeded: false,
+            synced_revision: None,
         }
     }
 
@@ -102,6 +104,7 @@ impl CodeDocBinding {
         }
         self.shadow = buffer.lines.clone();
         self.seeded = true;
+        self.synced_revision = Some(buffer.revision);
         // The seed reflects the daemon's on-disk text, so a freshly-seeded
         // buffer must not read as modified. Without this, a trailing-newline
         // normalization between the local load and the daemon's file text
@@ -116,6 +119,24 @@ impl CodeDocBinding {
     /// and fold the difference into the replica as ONE minimal UTF-16
     /// replace. `None` when nothing changed (cheap per-frame compare).
     pub fn flush_local(&mut self, buffer: &CodeBuffer) -> Option<CrdtTextUpdate> {
+        let update = self.flush_local_inner(buffer);
+        self.synced_revision = Some(buffer.revision);
+        update
+    }
+
+    /// Desktop drain fast path: content revisions move only when text moves,
+    /// so cursor, scroll, redraw, and daemon-pump events need no line scan.
+    pub fn flush_local_if_changed(
+        &mut self,
+        buffer: &CodeBuffer,
+    ) -> Option<CrdtTextUpdate> {
+        if self.synced_revision == Some(buffer.revision) {
+            return None;
+        }
+        self.flush_local(buffer)
+    }
+
+    fn flush_local_inner(&mut self, buffer: &CodeBuffer) -> Option<CrdtTextUpdate> {
         if !self.seeded || self.shadow == buffer.lines {
             return None;
         }
@@ -191,6 +212,7 @@ impl CodeDocBinding {
             flash_inbound_delta(buffer, &delta);
         }
         apply_delta_to_lines(&mut self.shadow, &delta);
+        self.synced_revision = Some(buffer.revision);
         debug_assert_eq!(lines_to_text(&self.shadow), self.replica.text());
         Ok(CodeRemoteApply {
             flushed_local,
@@ -324,6 +346,7 @@ impl CodeDocBinding {
             buffer.vim.clear_pending();
             buffer.follow_cursor = true;
             apply_delta_to_lines(&mut self.shadow, &delta);
+            self.synced_revision = Some(buffer.revision);
             changed = true;
         }
         debug_assert_eq!(lines_to_text(&self.shadow), self.replica.text());
@@ -485,5 +508,34 @@ mod tests {
             buffer.external_edit_flash.is_none(),
             "opening an unrelated file must not show the model-edit animation"
         );
+    }
+
+    #[test]
+    fn revision_aware_flush_skips_unchanged_and_remote_revisions() {
+        let authority = CrdtTextBuffer::with_text(999, "hello");
+        let mut binding = CodeDocBinding::new(7, "file:///work/live.rs");
+        let mut buffer = CodeBuffer::from_text("hello");
+        binding
+            .seed_from_snapshot(&authority.encode_full_update_v1(), &mut buffer)
+            .unwrap();
+
+        assert!(binding.flush_local_if_changed(&buffer).is_none());
+        buffer.insert_char('!');
+        assert!(binding.flush_local_if_changed(&buffer).is_some());
+        assert!(binding.flush_local_if_changed(&buffer).is_none());
+
+        let update = authority
+            .apply_local_edit(CrdtTextEdit::Insert {
+                index: 5,
+                content: "?".to_string(),
+            })
+            .unwrap();
+        assert!(
+            binding
+                .apply_remote(update.origin_client_id, &update.update_v1, &mut buffer)
+                .unwrap()
+                .changed
+        );
+        assert!(binding.flush_local_if_changed(&buffer).is_none());
     }
 }

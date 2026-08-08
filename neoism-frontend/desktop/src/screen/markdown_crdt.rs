@@ -482,7 +482,7 @@ fn drain_markdown_pane_crdt(
                 }
                 pane_changed |= result.changed;
             }
-            if let Some(update) = binding.flush_local(pane) {
+            if let Some(update) = binding.flush_local_if_changed(pane) {
                 state.outbound.push(make_apply_sync(&buffer_id, update));
             }
         }

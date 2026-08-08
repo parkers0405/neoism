@@ -56,7 +56,9 @@ impl Screen<'_> {
     /// root"), which left the guest's file tree permanently empty.
     fn normalize_workspace_dir_for_current(&self, path: PathBuf) -> Option<PathBuf> {
         if self.context_manager.current_workspace_is_remote_joined() {
-            Some(Self::normalize_workspace_root(path))
+            // This path belongs to the host. Canonicalizing it on the guest is
+            // both meaningless and expensive when this runs from render sync.
+            Some(path)
         } else {
             Self::normalize_workspace_dir(path)
         }
@@ -71,6 +73,14 @@ impl Screen<'_> {
         let current = self.context_manager.current();
         if current.has_non_terminal_surface() {
             return None;
+        }
+        if self.context_manager.current_workspace_is_remote_joined() {
+            let cache = self.context_manager.daemon_cache();
+            let cwd = cache
+                .route_sessions
+                .get(&current.route_id)
+                .and_then(|session| cache.remote_session_cwds.get(session))?;
+            return Some(PathBuf::from(cwd));
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -131,7 +141,7 @@ impl Screen<'_> {
                     .map(PathBuf::from)
             })
             .or_else(|| std::env::current_dir().ok())
-            .and_then(Self::normalize_workspace_dir)
+            .and_then(|path| self.normalize_workspace_dir_for_current(path))
     }
 
     pub(crate) fn active_pane_workspace_root(&self) -> Option<PathBuf> {

@@ -23,6 +23,7 @@ use crate::editor::markdown::source_map::InlineSourceMap;
 use crate::primitives::ide_theme::IdeTheme;
 use crate::syntax::{highlight_line, syn_color, Lang};
 use crate::widgets::diff_card;
+use crate::widgets::markdown::MarkdownCalloutKind;
 
 use draw::{
     caret_height, cursor_cell_width, cursor_position_for_text_prefix,
@@ -1007,11 +1008,100 @@ pub fn render(
                 }
                 cursor_y += block_h;
             }
-            RenderLineKind::Quote => {
+            RenderLineKind::Callout { kind } => {
+                let accent = callout_accent(kind, theme);
                 opts = DrawOpts {
                     font_size: markdown_font(16.0, font_scale),
-                    color: theme.u8(theme.muted),
-                    italic: true,
+                    color: theme.u8(accent),
+                    bold: true,
+                    clip_rect: Some(clip),
+                    ..DrawOpts::default()
+                };
+                text_x = content_x + 28.0;
+                text_y = cursor_y + 4.0;
+                cursor_wrap_width = content_w - 28.0;
+                line_h = line_height(&opts);
+                let wrapped = wrap_lines_cached(
+                    sugarloaf,
+                    pane,
+                    parsed.text,
+                    cursor_wrap_width,
+                    &opts,
+                );
+                let block_h = line_h * wrapped.len().max(1) as f32 + 16.0;
+                let block_rect =
+                    [content_x - 18.0, cursor_y - 6.0, content_w + 36.0, block_h];
+                let handle_rect =
+                    [block_rect[0] - 36.0, block_rect[1], 34.0, block_rect[3]];
+                let dragging = pane.dragging_line == Some(line_ix);
+                let active = pane.register_block_rect(
+                    line_ix,
+                    block_rect,
+                    handle_rect,
+                    text_x,
+                    text_y,
+                    cursor_marker_len,
+                    cursor_cell_width(&opts),
+                    line_h,
+                    cursor_wrap_width,
+                    mouse,
+                );
+                draw_block_chrome(
+                    sugarloaf,
+                    block_rect[0],
+                    block_rect[1],
+                    block_rect[2],
+                    block_rect[3],
+                    theme,
+                    clip,
+                    y,
+                    bottom,
+                    active,
+                    active || is_cursor_line,
+                    dragging,
+                );
+                draw_rect_clipped(
+                    sugarloaf,
+                    clip,
+                    content_x + 10.0,
+                    cursor_y + 2.0,
+                    3.0,
+                    block_h - 12.0,
+                    theme.f32(accent),
+                    DEPTH,
+                    ORDER_BG + 1,
+                );
+                let mut line_y = text_y;
+                for rendered in wrapped {
+                    draw_if_visible(
+                        sugarloaf,
+                        text_x,
+                        line_y,
+                        &rendered,
+                        &opts,
+                        y,
+                        bottom,
+                        text_occlusions,
+                    );
+                    line_y += line_h;
+                }
+                cursor_y += block_h + 4.0;
+            }
+            RenderLineKind::Quote => {
+                let callout_kind = crate::widgets::markdown::callout_kind_for_quote_line(
+                    &lines, line_ix,
+                );
+                let accent = callout_kind
+                    .map(|kind| callout_accent(kind, theme))
+                    .unwrap_or(theme.accent);
+                opts = DrawOpts {
+                    font_size: markdown_font(16.0, font_scale),
+                    color: if callout_kind.is_some() {
+                        theme.u8_alpha(theme.fg, 0.94)
+                    } else {
+                        theme.u8(theme.muted)
+                    },
+                    italic: callout_kind.is_none(),
                     clip_rect: Some(clip),
                     ..DrawOpts::default()
                 };
@@ -1065,7 +1155,7 @@ pub fn render(
                     cursor_y + 2.0,
                     3.0,
                     block_h - 16.0,
-                    theme.f32(theme.accent),
+                    theme.f32(accent),
                     DEPTH,
                     ORDER_BG + 1,
                 );
@@ -1386,6 +1476,23 @@ pub fn render(
     draw_markdown_scrollbar(sugarloaf, pane, rect, content_height, theme, mouse, clip);
 }
 
+fn callout_accent(kind: MarkdownCalloutKind, theme: &IdeTheme) -> u32 {
+    match kind {
+        MarkdownCalloutKind::Note
+        | MarkdownCalloutKind::Abstract
+        | MarkdownCalloutKind::Info
+        | MarkdownCalloutKind::Todo => theme.blue,
+        MarkdownCalloutKind::Tip | MarkdownCalloutKind::Important => theme.cyan,
+        MarkdownCalloutKind::Success => theme.green,
+        MarkdownCalloutKind::Question | MarkdownCalloutKind::Warning => theme.yellow,
+        MarkdownCalloutKind::Failure
+        | MarkdownCalloutKind::Danger
+        | MarkdownCalloutKind::Bug => theme.red,
+        MarkdownCalloutKind::Example => theme.magenta,
+        MarkdownCalloutKind::Quote => theme.accent,
+    }
+}
+
 fn code_block_start(
     lines: &[types::ParsedRenderLine<'_>],
     line_ix: usize,
@@ -1523,6 +1630,8 @@ mod tests {
     use super::inline::{normalized_spellcheck_word, spellcheck_words};
     use super::lines::{heading_section_tasks_complete, parse_render_line};
     use super::table::parse_table_row;
+    use super::types::RenderLineKind;
+    use crate::widgets::markdown::MarkdownCalloutKind;
 
     #[test]
     fn active_wiki_link_stays_rendered_while_typing() {
@@ -1547,6 +1656,19 @@ mod tests {
             ),
             "Ship it  now"
         );
+    }
+
+    #[test]
+    fn important_callout_header_replaces_obsidian_marker_with_title() {
+        let parsed = parse_render_line("> [!IMPORTANT]", false);
+        assert!(matches!(
+            parsed.kind,
+            RenderLineKind::Callout {
+                kind: MarkdownCalloutKind::Important
+            }
+        ));
+        assert_eq!(parsed.text, "IMPORTANT");
+        assert_eq!(parsed.marker_len, "> [!IMPORTANT]".len());
     }
 
     #[test]

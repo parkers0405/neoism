@@ -153,6 +153,7 @@ impl NeoismAgentPane {
         }
         self.timeline_scroll_px = next;
         self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0;
+        self.timeline_view_anchor = None;
         self.timeline_last_scroll_at = Some(Instant::now());
         true
     }

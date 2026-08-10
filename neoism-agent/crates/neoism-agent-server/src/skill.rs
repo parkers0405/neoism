@@ -122,7 +122,12 @@ async fn skill_tool_inner(
     context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let name = string_arg_either_many(&arguments, &["name", "skill", "id"])
+    let name = arguments
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
         .ok_or_else(|| anyhow::anyhow!("tool argument name is required"))?;
     context.ensure_allowed("skill", &name)?;
     let skills = load_async(&context.cwd.to_string_lossy()).await?;
@@ -467,14 +472,6 @@ fn split_frontmatter(raw: &str) -> anyhow::Result<(SkillFrontmatter, String)> {
         serde_yaml::from_str(yaml).context("failed to parse skill frontmatter")?;
     let content_start = 4 + end + "\n---\n".len();
     Ok((frontmatter, normalized[content_start..].to_string()))
-}
-
-fn string_arg_either_many(arguments: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| arguments.get(*key).and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]

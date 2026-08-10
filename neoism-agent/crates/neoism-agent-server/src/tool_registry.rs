@@ -1,19 +1,29 @@
 use serde_json::{json, Value};
 
-use super::{BuiltinTool, ToolExecutor};
+use super::{
+    apply_patch_handler, artifact_read_handler, artifact_search_handler, bash_handler,
+    edit_handler, glob_handler, grep_handler, lsp_handler, notes_handler, read_handler,
+    skill_handler, stateful_handler, webfetch_handler, websearch_handler, write_handler,
+    BuiltinTool, ToolHandler,
+};
 
-pub(super) fn definitions() -> Vec<BuiltinTool> {
-    vec![
+pub(super) fn definitions() -> &'static [BuiltinTool] {
+    static DEFINITIONS: std::sync::OnceLock<Vec<BuiltinTool>> =
+        std::sync::OnceLock::new();
+    DEFINITIONS.get_or_init(|| vec![
         tool(
             "bash",
             crate::platform_shell::tool_description(),
-            object(&[
-                ("command", "string"),
-                ("timeout", "integer"),
-                ("workdir", "string"),
-                ("description", "string"),
-            ]),
-            ToolExecutor::Bash,
+            object_required(
+                &[
+                    ("command", "string"),
+                    ("timeout", "integer"),
+                    ("workdir", "string"),
+                    ("description", "string"),
+                ],
+                &["command"],
+            ),
+            bash_handler,
         ),
         tool(
             "background_task",
@@ -41,10 +51,6 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                         "type": "string",
                         "description": "Optional working directory. Relative paths resolve from the session project directory."
                     },
-                    "workdir": {
-                        "type": "string",
-                        "description": "Alias for cwd."
-                    },
                     "timeout": {
                         "type": "integer",
                         "description": "Optional timeout in milliseconds before the process is terminated. Defaults to 1800000."
@@ -56,7 +62,7 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                 },
                 "required": ["description", "command"]
             }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
         tool(
             "background_task_result",
@@ -68,98 +74,35 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                         "type": "string",
                         "description": "The job_id returned by background_task. Omit to list background tasks for the current session."
                     },
-                    "jobId": {
-                        "type": "string",
-                        "description": "Alias for job_id."
-                    }
                 }
             }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
         tool(
             "read",
-            "Read files or directories from the current project. Use `paths`/`filePaths` to batch multiple known reads in one call; default limit is 2000 lines, output is capped, and offset is 1-indexed. Use ffgrep/grep before reading large files when looking for specific content.",
+            "Read one file or directory. filePath is required; offset is 1-indexed, the default limit is 2000 lines, and output stops at 50 KB. Call multiple read tools in parallel for independent files. Use grep before reading a large file when you need specific content.",
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
-                    "filePath": { "type": "string" },
-                    "paths": { "type": "array", "items": { "type": "string" } },
-                    "filePaths": { "type": "array", "items": { "type": "string" } },
-                    "offset": { "type": "integer" },
-                    "limit": { "type": "integer" }
-                }
-            }),
-            ToolExecutor::Read,
-        ),
-        tool(
-            "read_many",
-            "Read multiple files or per-file line ranges in one call. Use this when different files need different offsets/limits.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "files": {
-                        "type": "array",
-                        "items": {
-                            "oneOf": [
-                                { "type": "string" },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "path": { "type": "string" },
-                                        "filePath": { "type": "string" },
-                                        "offset": { "type": "integer" },
-                                        "limit": { "type": "integer" },
-                                        "ranges": {
-                                            "type": "array",
-                                            "items": {
-                                                "type": "object",
-                                                "properties": {
-                                                    "offset": { "type": "integer" },
-                                                    "line": { "type": "integer" },
-                                                    "limit": { "type": "integer" }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    }
+                    "filePath": {
+                        "type": "string",
+                        "description": "Absolute path, or a path relative to the workspace."
+                    },
+                    "offset": { "type": "integer", "minimum": 1 },
+                    "limit": { "type": "integer", "minimum": 1 }
                 },
-                "required": ["files"]
+                "required": ["filePath"]
             }),
-            ToolExecutor::ReadMany,
-        ),
-        tool(
-            "read_around",
-            "Read a window around a line, pattern, or symbol in a file. Best for large files after search finds a relevant line or identifier.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "filePath": { "type": "string" },
-                    "line": { "type": "integer" },
-                    "pattern": { "type": "string" },
-                    "symbol": { "type": "string" },
-                    "before": { "type": "integer" },
-                    "after": { "type": "integer" }
-                }
-            }),
-            ToolExecutor::ReadAround,
+            read_handler,
         ),
         tool(
             "write",
             "Create or overwrite files",
             object_required(
-                &[
-                ("path", "string"),
-                ("filePath", "string"),
-                ("content", "string"),
-                ],
+                &[("filePath", "string"), ("content", "string")],
                 &["filePath", "content"],
             ),
-            ToolExecutor::Write,
+            write_handler,
         ),
         tool(
             "edit",
@@ -173,174 +116,82 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                 ],
                 &["filePath", "oldString", "newString"],
             ),
-            ToolExecutor::Edit,
-        ),
-        tool(
-            "ffgrep",
-            "Fast FFF content search. Prefer this over grep for codebase search; use bare identifiers, path/glob constraints, or fff_multi_grep for variants. For broad research, search first and batch-read only the best files.",
-            object(&[
-                ("pattern", "string"),
-                ("query", "string"),
-                ("path", "string"),
-                ("include", "string"),
-                ("exclude", "string"),
-                ("limit", "integer"),
-                ("context", "integer"),
-                ("caseSensitive", "boolean"),
-                ("mode", "string"),
-                ("timeout", "integer"),
-            ]),
-            ToolExecutor::FfGrep,
-        ),
-        tool(
-            "fffind",
-            "Fast FFF fuzzy path and filename search. Prefer this over glob when exploring files or modules by topic/name. Query may be empty to list a directory page; keep fuzzy queries short and use path to scope searches.",
-            object(&[
-                ("query", "string"),
-                ("pattern", "string"),
-                ("path", "string"),
-                ("limit", "integer"),
-                ("offset", "integer"),
-                ("timeout", "integer"),
-            ]),
-            ToolExecutor::FfFind,
-        ),
-        tool(
-            "fff_multi_grep",
-            "Fast FFF multi-pattern content search. Use this instead of repeated grep/ffgrep calls for case variants or related identifiers; provide constraints to avoid repo-wide noise.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "patterns": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    },
-                    "constraints": { "type": "string" },
-                    "path": { "type": "string" },
-                    "exclude": { "type": "string" },
-                    "limit": { "type": "integer" },
-                    "context": { "type": "integer" },
-                    "timeout": { "type": "integer" }
-                },
-                "required": ["patterns"]
-            }),
-            ToolExecutor::FffMultiGrep,
+            edit_handler,
         ),
         tool(
             "grep",
-            "Search file contents. Prefer ffgrep for most code search; keep grep for exact fallback compatibility.",
-            object(&[
-                ("pattern", "string"),
-                ("path", "string"),
-                ("include", "string"),
-                ("exclude", "string"),
-                ("limit", "integer"),
-            ]),
-            ToolExecutor::Grep,
+            "Search file contents with FFF. pattern accepts one string or an array of literal alternatives. mode may be auto, plain, regex, or fuzzy. Results are bounded and include file paths and line numbers. Use several independent grep calls in parallel when their results do not depend on each other.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "oneOf": [
+                            { "type": "string" },
+                            {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "minItems": 1
+                            }
+                        ]
+                    },
+                    "path": { "type": "string" },
+                    "include": { "type": "string" },
+                    "exclude": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "context": { "type": "integer", "minimum": 0 },
+                    "caseSensitive": { "type": "boolean" },
+                    "mode": { "type": "string", "enum": ["auto", "plain", "regex", "fuzzy"] },
+                    "timeout": { "type": "integer", "minimum": 1000 }
+                },
+                "required": ["pattern"]
+            }),
+            grep_handler,
         ),
         tool(
             "glob",
-            "Find files by glob pattern",
-            object(&[
-                ("pattern", "string"),
-                ("path", "string"),
-                ("exclude", "string"),
-                ("limit", "integer"),
-            ]),
-            ToolExecutor::Glob,
-        ),
-        tool(
-            "list",
-            "List directory entries",
-            object(&[("path", "string")]),
-            ToolExecutor::List,
+            "Find files with FFF fuzzy path search and query constraints. pattern is a filename, path fragment, or glob expression. Keep broad queries short and scope with path when possible.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string" },
+                    "path": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "offset": { "type": "integer", "minimum": 0 },
+                    "timeout": { "type": "integer", "minimum": 1000 }
+                },
+                "required": ["pattern"]
+            }),
+            glob_handler,
         ),
         tool(
             "apply_patch",
             "Use the apply_patch tool to edit files. patchText must be a V4A envelope patch with *** Begin Patch, one or more *** Add File / *** Delete File / *** Update File headers, and *** End Patch.",
-            object_required(
-                &[("patchText", "string")],
-                &["patchText"],
-            ),
-            ToolExecutor::ApplyPatch,
+            object_required(&[("patchText", "string")], &["patchText"]),
+            apply_patch_handler,
         ),
         tool(
             "webfetch",
             "Fetch and read a web page",
-            object(&[("url", "string")]),
-            ToolExecutor::WebFetch,
-        ),
-        tool(
-            "webfetch_batch",
-            "Fetch multiple web pages with bounded concurrency, retries, per-item truncation, and partial failure reporting",
             json!({
                 "type": "object",
                 "properties": {
-                    "urls": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "HTTP/HTTPS URLs to fetch. Limited to 20 entries."
-                    },
-                    "url": {
-                        "type": "string",
-                        "description": "Single URL fallback. Prefer urls for batches."
-                    },
-                    "concurrency": {
-                        "type": "integer",
-                        "description": "Maximum parallel requests. Defaults to 4, capped at 8."
-                    },
-                    "retries": {
-                        "type": "integer",
-                        "description": "Retry count per URL. Defaults to 1, capped at 3."
-                    },
-                    "perItemLimit": {
-                        "type": "integer",
-                        "description": "Maximum output characters per item. Defaults to 12000, capped at 50000."
-                    }
-                }
+                    "url": { "type": "string" },
+                    "format": { "type": "string", "enum": ["text", "markdown", "html"] },
+                    "timeout": { "type": "integer", "minimum": 1, "maximum": 120 }
+                },
+                "required": ["url"]
             }),
-            ToolExecutor::WebFetchBatch,
+            webfetch_handler,
         ),
         tool(
             "websearch",
             "Search the web",
-            object(&[("query", "string")]),
-            ToolExecutor::WebSearch,
-        ),
-        tool(
-            "websearch_batch",
-            "Run multiple web searches with bounded concurrency, retries, per-query truncation, and partial failure reporting",
-            json!({
-                "type": "object",
-                "properties": {
-                    "queries": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Queries to search. Limited to 20 entries."
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Single query fallback. Prefer queries for batches."
-                    },
-                    "concurrency": {
-                        "type": "integer",
-                        "description": "Maximum parallel searches. Defaults to 4, capped at 8."
-                    },
-                    "retries": {
-                        "type": "integer",
-                        "description": "Retry count per query. Defaults to 1, capped at 3."
-                    },
-                    "perItemLimit": {
-                        "type": "integer",
-                        "description": "Maximum output characters per query. Defaults to 12000, capped at 50000."
-                    }
-                }
-            }),
-            ToolExecutor::WebSearchBatch,
+            object_required(&[("query", "string")], &["query"]),
+            websearch_handler,
         ),
         tool(
             "notes",
-            "Neoism Markdown notes operations: init, list, read, write, search, tags, backlinks, headings, tasks, graph, or reindex.",
+            "Neoism Markdown note-file operations: init, create, list, read, write, search, tasks, or taskToggle. Project-linked vaults are resolved automatically; graph indexing is disabled.",
             object(&[
                 ("operation", "string"),
                 ("path", "string"),
@@ -348,17 +199,17 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                 ("query", "string"),
                 ("tag", "string"),
                 ("limit", "integer"),
+                ("line", "integer"),
+                ("checked", "boolean"),
+                ("title", "string"),
             ]),
-            ToolExecutor::Notes,
+            notes_handler,
         ),
         tool(
             "skill",
             "Load a configured SKILL.md instruction by name",
-            object_required(
-                &[("name", "string"), ("skill", "string"), ("id", "string")],
-                &["name"],
-            ),
-            ToolExecutor::Skill,
+            object_required(&[("name", "string")], &["name"]),
+            skill_handler,
         ),
         tool(
             "lsp",
@@ -383,7 +234,6 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                         ]
                     },
                     "query": { "type": "string" },
-                    "file": { "type": "string" },
                     "filePath": { "type": "string" },
                     "line": {
                         "type": "integer",
@@ -394,16 +244,11 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                         "type": "integer",
                         "minimum": 0,
                         "description": "Zero-based UTF-8 byte column (not a Unicode scalar or UTF-16 offset)"
-                    },
-                    "column": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": "Alias for character; zero-based UTF-8 byte column"
                     }
                 },
                 "required": ["operation"]
             }),
-            ToolExecutor::Lsp,
+            lsp_handler,
         ),
         tool(
             "artifact_read",
@@ -412,12 +257,11 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                 "type": "object",
                 "properties": {
                     "artifact": { "type": "string" },
-                    "artifactId": { "type": "string" },
                     "offset": { "type": "integer" },
                     "limit": { "type": "integer" }
                 }
             }),
-            ToolExecutor::ArtifactRead,
+            artifact_read_handler,
         ),
         tool(
             "artifact_search",
@@ -426,13 +270,11 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                 "type": "object",
                 "properties": {
                     "artifact": { "type": "string" },
-                    "artifactId": { "type": "string" },
                     "query": { "type": "string" },
-                    "pattern": { "type": "string" },
                     "limit": { "type": "integer" }
                 }
             }),
-            ToolExecutor::ArtifactSearch,
+            artifact_search_handler,
         ),
         tool(
             "session_search",
@@ -455,7 +297,7 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                 },
                 "required": ["query"]
             }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
         tool(
             "todowrite",
@@ -476,7 +318,7 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                     }
                 }
             }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
         tool(
             "task",
@@ -496,10 +338,6 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                         "type": "string",
                         "description": "Configured subagent name. Use \"general\" for broad research or multi-step work, \"explore\" for fast read-only codebase discovery, and \"opencode\", \"codex\", or \"claude\" only when the user explicitly asks to delegate to that external ACP-backed agent. Do not invent names like \"research\" unless the user configured that agent."
                     },
-                    "agent": {
-                        "type": "string",
-                        "description": "Alias for subagent_type."
-                    },
                     "task_id": {
                         "type": "string",
                         "description": "Only set this to resume a previous task_id in the same child session."
@@ -515,7 +353,7 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                 },
                 "required": ["description", "prompt", "subagent_type"]
             }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
         tool(
             "task_result",
@@ -529,7 +367,7 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                     }
                 }
             }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
         tool(
             "stop_task",
@@ -543,7 +381,7 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                     }
                 }
             }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
         tool(
             "question",
@@ -557,7 +395,7 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                     }
                 }
             }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
         tool(
             "complete_goal",
@@ -577,34 +415,40 @@ pub(super) fn definitions() -> Vec<BuiltinTool> {
                 },
                 "required": ["summary"]
             }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
         tool(
             "plan_enter",
             "Enter planning mode",
             json!({ "type": "object", "properties": {} }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
         tool(
             "plan_exit",
             "Exit planning mode",
             json!({ "type": "object", "properties": {} }),
-            ToolExecutor::Unsupported,
+            stateful_handler,
         ),
-    ]
+    ]).as_slice()
 }
 
 fn tool(
     id: &'static str,
     description: &'static str,
-    parameters: Value,
-    executor: ToolExecutor,
+    mut parameters: Value,
+    handler: ToolHandler,
 ) -> BuiltinTool {
+    if let Some(schema) = parameters.as_object_mut() {
+        schema
+            .entry("additionalProperties")
+            .or_insert_with(|| Value::Bool(false));
+    }
     BuiltinTool {
         id,
         description,
         parameters,
-        executor,
+        output_schema: super::standard_output_schema(),
+        handler,
     }
 }
 

@@ -674,6 +674,7 @@ mod tests {
                 id: "read".to_string(),
                 description: "Read a file".to_string(),
                 parameters: json!({ "type": "object" }),
+                output_schema: None,
             }],
             options: BTreeMap::new(),
             headers: BTreeMap::new(),

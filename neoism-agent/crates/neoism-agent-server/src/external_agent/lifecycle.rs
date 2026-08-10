@@ -215,7 +215,9 @@ async fn run_external_subtask_prompt_with_cancel(
         .get_session(child_id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("session {child_id} not found")))?;
-    let run = start_session_run(state, &child.id).await;
+    let run = start_session_run(state, &child.id)
+        .await
+        .map_err(|_| ApiError::conflict("Session is already running"))?;
     let cancellation = cancel.unwrap_or_else(|| run.cancel.clone());
     let model = external_model(runtime);
     let user_message =

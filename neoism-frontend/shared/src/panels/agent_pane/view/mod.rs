@@ -99,8 +99,6 @@ pub trait AgentPaneView:
         _active: bool,
         _ticked_scroll: bool,
         _occlusion_count: usize,
-        _panel_bottom_override: Option<f32>,
-        _panel_top_override: Option<f32>,
     ) {
     }
 }
@@ -135,15 +133,6 @@ pub fn render(
     now_seconds: f32,
     mouse: Option<(f32, f32)>,
     chrome_scale: f32,
-    // `panel_bottom_override` lets the active pane's side panel run
-    // all the way to the window bottom, matching the file tree's
-    // full-height column. `None` keeps the panel inside the pane rect.
-    panel_bottom_override: Option<f32>,
-    // `panel_top_override` lets the side panel extend ABOVE the pane
-    // rect so it reaches the very top of the window (under the chrome
-    // top bar), again matching the file tree's full-height column.
-    // `None` anchors the panel at the pane rect's top.
-    panel_top_override: Option<f32>,
     occlusion_rects: &[[f32; 4]],
 ) {
     render_agent_pane_with::<
@@ -159,8 +148,6 @@ pub fn render(
         now_seconds,
         mouse,
         chrome_scale,
-        panel_bottom_override,
-        panel_top_override,
         occlusion_rects,
     );
 }
@@ -175,8 +162,6 @@ pub fn render_agent_pane_with<P, D, I>(
     now_seconds: f32,
     mouse: Option<(f32, f32)>,
     chrome_scale: f32,
-    panel_bottom_override: Option<f32>,
-    panel_top_override: Option<f32>,
     occlusion_rects: &[[f32; 4]],
 ) where
     P: AgentPaneView,
@@ -200,30 +185,9 @@ pub fn render_agent_pane_with<P, D, I>(
     // so the chat column never paints under the panel frame.
     let (main_rect, side_panel_rect) =
         match side_panel::carve_panel_rect(pane, rect, chrome_scale) {
-            Some((main, mut panel)) => {
-                // Stretch the side-panel column up to the chrome top
-                // (under the top bar) when the caller asked us to.
-                // Mirrors `panel_bottom_override` on the bottom side
-                // — the chrome already insets the buffer-tabs strip
-                // horizontally so it doesn't paint behind the panel.
-                if let Some(extended_top) = panel_top_override {
-                    let new_top = extended_top.min(panel[1]);
-                    let delta = panel[1] - new_top;
-                    if delta > 0.0 {
-                        panel[1] = new_top;
-                        panel[3] += delta;
-                    }
-                }
-                // Stretch the side-panel column down to the window
-                // bottom when the caller asked us to (active pane);
-                // status bar already shrinks past the panel so nothing
-                // else paints in this strip.
-                if let Some(extended_bottom) = panel_bottom_override {
-                    let new_h = (extended_bottom - panel[1]).max(panel[3]);
-                    panel[3] = new_h;
-                }
-                (main, Some(panel))
-            }
+            // The panel is pane-owned: its geometry may carve the Agent
+            // content, but may never escape into window-level chrome.
+            Some((main, panel)) => (main, Some(panel)),
             None => {
                 // Pane is too narrow to host the panel — drop the cached
                 // hit-test rect so click/wheel/Alt+arrow don't treat a
@@ -389,7 +353,5 @@ pub fn render_agent_pane_with<P, D, I>(
         active,
         ticked_scroll,
         local_occlusions.len(),
-        panel_bottom_override,
-        panel_top_override,
     );
 }

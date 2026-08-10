@@ -61,8 +61,6 @@ impl AgentPaneView for NeoismAgentPane {
         active: bool,
         ticked_scroll: bool,
         occlusion_count: usize,
-        panel_bottom_override: Option<f32>,
-        panel_top_override: Option<f32>,
     ) {
         NeoismAgentPane::log_render_perf(
             self,
@@ -72,8 +70,6 @@ impl AgentPaneView for NeoismAgentPane {
             active,
             ticked_scroll,
             occlusion_count,
-            panel_bottom_override,
-            panel_top_override,
         );
     }
 }
@@ -92,8 +88,6 @@ pub fn render(
     now_seconds: f32,
     mouse: Option<(f32, f32)>,
     chrome_scale: f32,
-    panel_bottom_override: Option<f32>,
-    panel_top_override: Option<f32>,
     occlusion_rects: &[[f32; 4]],
 ) {
     render_agent_pane_with::<
@@ -109,8 +103,6 @@ pub fn render(
         now_seconds,
         mouse,
         chrome_scale,
-        panel_bottom_override,
-        panel_top_override,
         occlusion_rects,
     );
 }

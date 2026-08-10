@@ -64,7 +64,7 @@ fn tool_part_mutation_helpers_track_call_lifecycle() {
         metadata: None,
     })];
 
-    append_tool_input_delta(&mut parts, part_id.as_str(), r#"{"path":"src/lib.rs"}"#)
+    append_tool_input_delta(&mut parts, part_id.as_str(), r#"{"filePath":"src/lib.rs"}"#)
         .unwrap();
     let running = set_tool_running(
         &mut parts,
@@ -73,7 +73,7 @@ fn tool_part_mutation_helpers_track_call_lifecycle() {
         &message_id,
         "call_1".to_string(),
         "read".to_string(),
-        json!({ "path": "src/lib.rs" }),
+        json!({ "filePath": "src/lib.rs" }),
     );
     let Part::Tool(running) = running else {
         panic!("expected running tool part")
@@ -85,7 +85,7 @@ fn tool_part_mutation_helpers_track_call_lifecycle() {
         part_id.as_str(),
         "file contents".to_string(),
         "Read file".to_string(),
-        json!({ "path": "src/lib.rs" }),
+        json!({ "filePath": "src/lib.rs" }),
     )
     .unwrap();
     let Part::Tool(completed) = completed else {
@@ -110,7 +110,7 @@ fn interrupted_tool_parts_preserve_input_and_set_metadata() {
     let session_id = Id::ascending(IdKind::Session);
     let message_id = Id::ascending(IdKind::Message);
     let part_id = Id::ascending(IdKind::Part);
-    let input = json!({ "path": "src/lib.rs" });
+    let input = json!({ "filePath": "src/lib.rs" });
     let mut parts = vec![Part::Tool(ToolPart {
         id: part_id.clone(),
         session_id,
@@ -168,7 +168,7 @@ async fn streamed_tool_call_executes_builtin_and_completes_part() {
         &message_id,
         "call_1".to_string(),
         "read".to_string(),
-        json!({ "path": "input.txt" }),
+        json!({ "filePath": "input.txt" }),
     );
 
     let result = execute_tool_call(
@@ -179,7 +179,7 @@ async fn streamed_tool_call_executes_builtin_and_completes_part() {
             action: neoism_agent_core::PermissionAction::Allow,
         }],
         "read",
-        json!({ "path": "input.txt" }),
+        json!({ "filePath": "input.txt" }),
     )
     .await
     .unwrap();
@@ -222,7 +222,7 @@ async fn streamed_tool_call_respects_wildcard_deny_permission() {
             action: neoism_agent_core::PermissionAction::Deny,
         }],
         "read",
-        json!({ "path": "input.txt" }),
+        json!({ "filePath": "input.txt" }),
     )
     .await
     .unwrap_err();

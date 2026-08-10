@@ -222,9 +222,7 @@ pub(crate) async fn background_task_result_tool(
     session_id: &Id,
     input: Value,
 ) -> Result<tool::ToolExecutionResult, String> {
-    if let Some(job_id) =
-        string_arg(&input, "job_id").or_else(|| string_arg(&input, "jobId"))
-    {
+    if let Some(job_id) = string_arg(&input, "job_id") {
         let job = state
             .inner
             .background_jobs
@@ -717,7 +715,7 @@ fn external_directory_pattern(path: &Path) -> String {
 }
 
 fn optional_cwd(input: &Value) -> Option<String> {
-    string_arg(input, "cwd").or_else(|| string_arg(input, "workdir"))
+    string_arg(input, "cwd")
 }
 
 fn string_arg(input: &Value, key: &str) -> Option<String> {

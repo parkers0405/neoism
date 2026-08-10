@@ -561,7 +561,7 @@ fn permissions_from_tools(tools: &BTreeMap<String, bool>) -> BTreeMap<String, Va
     tools
         .iter()
         .map(|(tool, enabled)| {
-            let key = if matches!(tool.as_str(), "write" | "edit" | "patch") {
+            let key = if matches!(tool.as_str(), "write" | "edit") {
                 "edit".to_string()
             } else {
                 tool.clone()

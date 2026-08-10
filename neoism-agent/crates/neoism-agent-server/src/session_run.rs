@@ -18,13 +18,21 @@ pub(crate) fn busy_status(queue_count: usize, preview: Option<String>) -> Sessio
     }
 }
 
-pub(crate) async fn start_session_run(state: &AppState, session_id: &Id) -> SessionRun {
+pub(crate) async fn start_session_run(
+    state: &AppState,
+    session_id: &Id,
+) -> Result<SessionRun, SessionRun> {
     let run = SessionRun {
         id: Id::ascending(IdKind::Event).to_string(),
         started_at: crate::now_millis(),
         cancel: Arc::new(AtomicBool::new(false)),
     };
     let session_key = session_id.to_string();
+    state
+        .inner
+        .session_coordinator
+        .try_start_run(&session_key, run.clone())
+        .await?;
     let _ = state.inner.store.start_run(&run.id, &session_key).await;
     let queue_count = queued_prompt_count(state, &session_key).await;
     let status = busy_status(
@@ -44,7 +52,7 @@ pub(crate) async fn start_session_run(state: &AppState, session_id: &Id) -> Sess
         .await
         .insert(session_key.clone(), run.clone());
     publish_session_status(state, session_id.as_str(), &status).await;
-    run
+    Ok(run)
 }
 
 pub(crate) async fn finish_session_run(state: &AppState, session_id: &str, run_id: &str) {
@@ -63,6 +71,11 @@ pub(crate) async fn finish_session_run(state: &AppState, session_id: &str, run_i
     if !removed {
         return;
     }
+    state
+        .inner
+        .session_coordinator
+        .finish_run(session_id, run_id)
+        .await;
     let _ = state
         .inner
         .store
@@ -78,10 +91,9 @@ pub(crate) async fn publish_idle_if_no_run(state: &AppState, session_id: &str) {
     let queue_count = queued_prompt_count(state, session_id).await;
     let has_worker = state
         .inner
-        .prompt_queue_workers
-        .read()
-        .await
-        .contains(session_id);
+        .session_coordinator
+        .worker_active(session_id)
+        .await;
     if has_worker || queue_count > 0 {
         let status =
             busy_status(queue_count, queued_prompt_preview(state, session_id).await);

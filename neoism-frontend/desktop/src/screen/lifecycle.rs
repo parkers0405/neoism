@@ -30,9 +30,6 @@ fn modal_action_policy_tag(
     use neoism_ui::widgets::modal::ModalAction as A;
     match action {
         A::Close => Tag::Close,
-        // Footer settings menu one-shots — plain UI opens, same class
-        // as Close (no fs mutation, no prompt).
-        A::NotesOpenGraph | A::NotesOpenCreateMenu => Tag::Close,
         A::InstallLsp { .. } => Tag::InstallLsp,
         A::InstallPythonKernel => Tag::InstallPythonKernel,
         A::ApplyTheme { .. } => Tag::ApplyTheme,

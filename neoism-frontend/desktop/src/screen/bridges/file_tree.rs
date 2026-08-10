@@ -19,48 +19,6 @@ fn first_vault_note_root(root: &Path) -> Option<PathBuf> {
     workspace.note_roots().into_iter().next()
 }
 
-fn vault_note_roots(
-    workspace: &crate::workspace::config::NeoismWorkspace,
-) -> Vec<PathBuf> {
-    workspace.note_roots()
-}
-
-fn intersects_note_roots(path: &Path, note_roots: &[PathBuf]) -> bool {
-    note_roots
-        .iter()
-        .any(|root| path.starts_with(root) || root.starts_with(path))
-}
-
-fn collect_markdown_note_paths(
-    path: &Path,
-    note_roots: &[PathBuf],
-    out: &mut Vec<PathBuf>,
-) {
-    if path.is_file() {
-        if crate::editor::markdown::state::is_markdown_path(path)
-            && note_roots.iter().any(|root| path.starts_with(root))
-        {
-            out.push(path.to_path_buf());
-        }
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let child = entry.path();
-        if child.is_dir() {
-            if intersects_note_roots(&child, note_roots) {
-                collect_markdown_note_paths(&child, note_roots, out);
-            }
-        } else if crate::editor::markdown::state::is_markdown_path(&child)
-            && note_roots.iter().any(|root| child.starts_with(root))
-        {
-            out.push(child);
-        }
-    }
-}
-
 /// Handle held in `Screen` while the fs watcher thread is alive. Drop
 /// closes the shutdown channel which signals the worker to exit; the
 /// worker drops its `notify::RecommendedWatcher`, deregistering the OS

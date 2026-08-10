@@ -64,6 +64,7 @@ impl CustomTool {
             parameters: self.definition.parameters.clone().unwrap_or_else(
                 || json!({ "type": "object", "additionalProperties": true }),
             ),
+            output_schema: Some(crate::tool::standard_output_schema()),
         }
     }
 }
@@ -109,12 +110,27 @@ pub(crate) async fn execute(
         .envs(argument_env(&arguments))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let child = process.spawn().map_err(|error| {
+    crate::tool::process::set_new_process_group(&mut process);
+    let mut child = process.spawn().map_err(|error| {
         anyhow::anyhow!("failed to spawn custom tool {tool_id}: {error}")
     })?;
-    let output = child.wait_with_output().await?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let child_id = child.id();
+    let stdout_task =
+        crate::tool::process::read_child_output(child.stdout.take(), 1024 * 1024);
+    let stderr_task =
+        crate::tool::process::read_child_output(child.stderr.take(), 1024 * 1024);
+    let status = tokio::select! {
+        status = child.wait() => status?,
+        _ = crate::tool::process::wait_for_cancel(cancel.clone()) => {
+            crate::tool::process::terminate_child(&mut child, child_id).await;
+            anyhow::bail!("custom tool {tool_id} aborted");
+        }
+    };
+    let stdout = stdout_task.await??;
+    let stderr = stderr_task.await??;
+    let capture_truncated = stdout.truncated || stderr.truncated;
+    let stdout = String::from_utf8_lossy(&stdout.bytes);
+    let stderr = String::from_utf8_lossy(&stderr.bytes);
     let combined = if stderr.trim().is_empty() {
         stdout.to_string()
     } else if stdout.trim().is_empty() {
@@ -122,11 +138,12 @@ pub(crate) async fn execute(
     } else {
         format!("{stdout}\n{stderr}")
     };
-    if !output.status.success() {
+    if !status.success() {
+        let bounded = crate::tool::truncate::truncate_output(&combined)?;
         anyhow::bail!(
             "custom tool {tool_id} exited with status {}:\n{}",
-            output.status,
-            crate::tool::truncate::truncate_output(&combined).output
+            status,
+            bounded.output
         );
     }
     Ok(Some(ToolExecutionResult {
@@ -137,7 +154,8 @@ pub(crate) async fn execute(
             "id": tool_id,
             "path": tool.path.display().to_string(),
             "command": command,
-            "status": output.status.code(),
+            "status": status.code(),
+            "captureTruncated": capture_truncated,
         })),
     }))
 }

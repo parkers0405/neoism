@@ -6,6 +6,65 @@ use neoism_agent_core::{
 };
 use serde_json::{json, Value};
 
+const PERMISSION_REQUIRED_PREFIX: &str = "NEOISM_PERMISSION_REQUIRED:";
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PermissionChallenge {
+    pub(crate) permission: String,
+    pub(crate) target: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PermissionCheckError {
+    Required(PermissionChallenge),
+    Denied(PermissionChallenge),
+}
+
+impl std::fmt::Display for PermissionCheckError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Required(challenge) => write!(
+                formatter,
+                "{PERMISSION_REQUIRED_PREFIX}{}",
+                serde_json::to_string(challenge).unwrap_or_else(|_| "{}".to_string())
+            ),
+            Self::Denied(challenge) => write!(
+                formatter,
+                "tool permission {} for {} is denied",
+                challenge.permission, challenge.target
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PermissionCheckError {}
+
+impl From<PermissionCheckError> for String {
+    fn from(error: PermissionCheckError) -> Self {
+        error.to_string()
+    }
+}
+
+pub(crate) fn permission_required(
+    permission: impl Into<String>,
+    target: impl Into<String>,
+) -> PermissionCheckError {
+    PermissionCheckError::Required(PermissionChallenge {
+        permission: permission.into(),
+        target: target.into(),
+    })
+}
+
+pub(crate) fn permission_denied(
+    permission: impl Into<String>,
+    target: impl Into<String>,
+) -> PermissionCheckError {
+    PermissionCheckError::Denied(PermissionChallenge {
+        permission: permission.into(),
+        target: target.into(),
+    })
+}
+
 use crate::interaction::PermissionReplyRequest;
 use crate::permission;
 use crate::state::{AppState, PermissionPending};
@@ -20,10 +79,10 @@ pub(crate) async fn session_permission_respond(
 }
 
 pub(crate) fn parse_permission_required_error(error: &str) -> Option<(String, String)> {
-    let rest = error.strip_prefix("tool permission ")?;
-    let (permission, rest) = rest.split_once(" for ")?;
-    let target = rest.strip_suffix(" requires approval")?;
-    Some((permission.to_string(), target.to_string()))
+    let marker = error.find(PERMISSION_REQUIRED_PREFIX)?;
+    let payload = &error[marker + PERMISSION_REQUIRED_PREFIX.len()..];
+    let challenge: PermissionChallenge = serde_json::from_str(payload).ok()?;
+    Some((challenge.permission, challenge.target))
 }
 
 pub(crate) async fn ask_permission_for_tool(

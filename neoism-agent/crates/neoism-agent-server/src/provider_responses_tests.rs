@@ -27,6 +27,7 @@ fn builds_streaming_responses_request_body() {
                     "path": { "type": "string" }
                 }
             }),
+            output_schema: None,
         }],
     );
 
@@ -51,6 +52,39 @@ fn builds_streaming_responses_request_body() {
     assert_eq!(body["tools"][0]["name"], "read");
     assert_eq!(body["reasoning"]["effort"], "high");
     assert_eq!(body["reasoning"]["summary"], "auto");
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+}
+
+#[test]
+fn responses_request_replays_encrypted_reasoning_with_store_false() {
+    let mut assistant = ProviderMessage::assistant_tool_call("", Vec::new());
+    assistant
+        .reasoning
+        .push(neoism_agent_core::ProviderReasoning {
+            summary: vec![json!({
+                "type": "summary_text",
+                "text": "Inspected the relevant files"
+            })],
+            encrypted_content: "encrypted-state".to_string(),
+        });
+
+    let body = responses_request_body(
+        "gpt-5.5",
+        None,
+        &[
+            ProviderMessage::text(ProviderRole::User, "Fix it"),
+            assistant,
+        ],
+        &[],
+    );
+
+    assert_eq!(body["store"], false);
+    assert_eq!(body["input"][1]["type"], "reasoning");
+    assert_eq!(body["input"][1]["encrypted_content"], "encrypted-state");
+    assert_eq!(
+        body["input"][1]["summary"][0]["text"],
+        "Inspected the relevant files"
+    );
 }
 
 #[test]
@@ -268,12 +302,20 @@ fn parses_reasoning_summary_events_like_opencode() {
 
     let done = parser
             .push_line(
-                r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"checking files"}]}}"#,
+                r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"checking files"}],"encrypted_content":"ciphertext"}}"#,
             )
             .unwrap();
 
-    assert_eq!(done.len(), 1);
+    assert_eq!(done.len(), 2);
     match &done[0] {
+        ProviderStreamEvent::ReasoningMetadata { id, metadata } => {
+            assert_eq!(id, "rs_1:0");
+            assert_eq!(metadata["openai"]["encryptedContent"], "ciphertext");
+            assert_eq!(metadata["openai"]["summary"][0]["text"], "checking files");
+        }
+        other => panic!("expected reasoning metadata, got {other:?}"),
+    }
+    match &done[1] {
         ProviderStreamEvent::ReasoningEnd { id } => assert_eq!(id, "rs_1:0"),
         other => panic!("expected reasoning end, got {other:?}"),
     }
@@ -390,6 +432,7 @@ fn responses_request_body_ultra_injects_delegation_instructions() {
         id: "task".to_string(),
         description: "spawn a sub-agent".to_string(),
         parameters: serde_json::json!({"type": "object", "properties": {}}),
+        output_schema: None,
     };
     let body =
         responses_request_body("gpt-5.6-sol", Some("ultra"), &[], &[task_tool.clone()]);

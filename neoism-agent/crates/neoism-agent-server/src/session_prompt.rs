@@ -36,7 +36,7 @@ use crate::session_context::{
 use crate::session_retry;
 use crate::session_run::{finish_session_run, start_session_run};
 use crate::state::AppState;
-use crate::tool_selection::provider_tool_id_set;
+use crate::tool_selection::provider_tool_map;
 use crate::{permission, plugin, provider_tools_for_agent};
 
 const MAX_STEPS_REMINDER: &str = "CRITICAL - MAXIMUM STEPS REACHED\n\nThe maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.\n\nSTRICT REQUIREMENTS:\n1. Do NOT make any tool calls (no reads, writes, edits, searches, or any other tools)\n2. MUST provide a text response summarizing work done so far\n3. This constraint overrides ALL other instructions, including any user requests for edits or tool use\n\nResponse must include:\n- Statement that maximum steps for this agent have been reached\n- Summary of what has been accomplished so far\n- List of any remaining tasks that were not completed\n- Recommendations for what should be done next\n\nAny attempt to use tools is a critical violation. Respond with text ONLY.";
@@ -67,17 +67,17 @@ pub(crate) async fn append_prompt(
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
     let now = now_millis();
     info.time.updated = now;
-    if info.extra.remove("revert").is_some() {
-        state.inner.store.update_session(&info).await?;
-        state.publish(EventPayload::new(
-            event_type::SESSION_UPDATED,
-            json!({ "sessionID": session_id, "info": info }),
-        ));
-    }
+    info.extra.remove("revert");
+    crate::context_epoch::reconcile(state, &mut info).await?;
 
     let session_id = Id::parse(IdKind::Session, session_id.to_string())
         .map_err(|_| ApiError::not_found("Session not found"))?;
     let session_id_text = session_id.to_string();
+    let workspace = state
+        .inner
+        .workspace_runtimes
+        .acquire(&info.directory, &state.inner.plugins)
+        .await;
     if create_stub_reply && state.inner.runs.read().await.contains_key(&session_id_text) {
         return Err(ApiError::conflict("Session is already running"));
     }
@@ -205,24 +205,60 @@ pub(crate) async fn append_prompt(
     } else {
         None
     };
-    state.inner.store.update_session(&info).await?;
-    state.publish(EventPayload::new(
-        event_type::SESSION_UPDATED,
-        json!({ "sessionID": session_id, "info": info }),
-    ));
+    state
+        .update_session_with_event(
+            &info,
+            EventPayload::new(
+                event_type::SESSION_UPDATED,
+                json!({ "sessionID": session_id, "info": info }),
+            ),
+        )
+        .await?;
     let user_message = MessageWithParts {
         info: MessageInfo::User(user),
         parts,
     };
-    state
+    if let Some(existing) = state
         .inner
         .store
-        .append_message(&session_id_text, &user_message)
-        .await?;
-    state.publish(EventPayload::new(
+        .get_message(&session_id_text, &message_id.to_string())
+        .await?
+    {
+        if same_user_prompt(&existing, &user_message) {
+            return Ok(existing);
+        }
+        return Err(ApiError::conflict(format!(
+            "message {} already exists with different prompt content",
+            message_id
+        )));
+    }
+    let message_event = EventPayload::new(
         event_type::MESSAGE_UPDATED,
         json!({ "sessionID": session_id, "info": user_message.info }),
-    ));
+    );
+    if let Err(error) = state
+        .append_message_with_event(&session_id_text, &user_message, message_event)
+        .await
+    {
+        // Close the race between the lookup above and the unique message-id
+        // insert. An exact concurrent retry succeeds idempotently; a reused id
+        // with different content is a conflict.
+        if let Some(existing) = state
+            .inner
+            .store
+            .get_message(&session_id_text, &message_id.to_string())
+            .await?
+        {
+            if same_user_prompt(&existing, &user_message) {
+                return Ok(existing);
+            }
+            return Err(ApiError::conflict(format!(
+                "message {} already exists with different prompt content",
+                message_id
+            )));
+        }
+        return Err(error.into());
+    }
     // Broadcast the user parts too so OTHER attached clients (a second
     // browser / desktop on the same session) see the prompt live.
     // `message.updated` only carries the info envelope — without the
@@ -273,7 +309,9 @@ pub(crate) async fn append_prompt(
         return Ok(user_message);
     }
 
-    let run = start_session_run(state, &session_id).await;
+    let run = start_session_run(state, &session_id)
+        .await
+        .map_err(|_| ApiError::conflict("Session is already running"))?;
     let run_id = run.id.clone();
     let cancellation = run.cancel.clone();
 
@@ -299,12 +337,6 @@ pub(crate) async fn append_prompt(
         .await?;
     }
 
-    if let Ok(loaded) = crate::config::load(&info.directory) {
-        state
-            .inner
-            .plugins
-            .register_configured_plugins(&loaded.info, &info.directory);
-    }
     let chat_hook_ctx = plugin::ChatHookContext {
         session_id: session_id.to_string(),
         agent: agent_info.name.clone(),
@@ -378,8 +410,7 @@ pub(crate) async fn append_prompt(
             MAX_STEPS_REMINDER,
         ));
     }
-    state
-        .inner
+    workspace
         .plugins
         .chat_messages_transform(&chat_hook_ctx, &mut provider_messages)
         .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -415,7 +446,7 @@ pub(crate) async fn append_prompt(
         &reply_model.model_id,
     )
     .await?;
-    let provider_tool_ids = provider_tool_id_set(&provider_tools);
+    let provider_tool_map = provider_tool_map(&provider_tools);
     let mut final_assistant_message = run_provider_stream_step_with_retry(
         &ProviderStreamEventContext {
             state,
@@ -428,7 +459,7 @@ pub(crate) async fn append_prompt(
             directory: &info.directory,
             model: &reply_model,
             model_id: &reply_model.model_id,
-            provider_tool_ids: &provider_tool_ids,
+            provider_tools: &provider_tool_map,
             tool_permissions: &tool_permissions,
             max_steps_reached,
         },
@@ -437,6 +468,7 @@ pub(crate) async fn append_prompt(
             &reply_model,
             provider_messages,
             provider_tools,
+            Some(&info.directory),
             Some(&chat_hook_ctx),
         )
         .await,
@@ -451,6 +483,12 @@ pub(crate) async fn append_prompt(
     )
     .await?;
     loop {
+        let steered =
+            Box::pin(crate::session_queue::drain_queued_prompts_into_active_run(
+                state,
+                &session_id_text,
+            ))
+            .await;
         // The step that just finished may have called `complete_goal` (or the
         // user may have paused/cleared the goal), which mutates the goal in the
         // store — not this in-flight `info`. Pull the latest goal back in before
@@ -459,7 +497,9 @@ pub(crate) async fn append_prompt(
         // on a goal it already resolved.
         refresh_persisted_goal(state, &session_id_text, &mut info).await;
         let Some(followup) =
-            followup_reason(&info, &final_assistant_message, step_number, step_limit)
+            (steered > 0).then_some(FollowupReason::Steer).or_else(|| {
+                followup_reason(&info, &final_assistant_message, step_number, step_limit)
+            })
         else {
             break;
         };
@@ -467,11 +507,6 @@ pub(crate) async fn append_prompt(
             break;
         }
         step_number += 1;
-        Box::pin(crate::session_queue::drain_queued_prompts_into_active_run(
-            state,
-            &session_id_text,
-        ))
-        .await;
         let history = state.inner.store.list_messages(&session_id_text).await?;
         let mut provider_messages = provider_messages_for_session(
             &info,
@@ -523,8 +558,7 @@ pub(crate) async fn append_prompt(
                 }
             }
         }
-        state
-            .inner
+        workspace
             .plugins
             .chat_messages_transform(&chat_hook_ctx, &mut provider_messages)
             .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -556,6 +590,23 @@ pub(crate) async fn append_prompt(
     Ok(final_assistant_message)
 }
 
+fn same_user_prompt(existing: &MessageWithParts, proposed: &MessageWithParts) -> bool {
+    fn canonical(message: &MessageWithParts) -> Option<serde_json::Value> {
+        let mut value = serde_json::to_value(message).ok()?;
+        let object = value.as_object_mut()?;
+        object.get_mut("info")?.as_object_mut()?.remove("time");
+        for part in object.get_mut("parts")?.as_array_mut()? {
+            let part = part.as_object_mut()?;
+            part.remove("id");
+            part.remove("sessionId");
+            part.remove("messageId");
+        }
+        Some(value)
+    }
+    matches!(existing.info, MessageInfo::User(_))
+        && canonical(existing) == canonical(proposed)
+}
+
 fn run_system_for_request(
     agent_prompt: Option<&str>,
     request_system: Option<&str>,
@@ -574,6 +625,7 @@ fn run_system_for_request(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FollowupReason {
     Tool,
+    Steer,
     TextContinuation,
     ActiveGoal,
 }
@@ -703,14 +755,15 @@ async fn run_parent_subtasks(
             input,
         );
         state
-            .inner
-            .store
-            .append_message(session_id_text, &assistant_message)
+            .append_message_with_event(
+                session_id_text,
+                &assistant_message,
+                EventPayload::new(
+                    event_type::MESSAGE_UPDATED,
+                    json!({ "sessionID": session_id, "info": assistant_message.info }),
+                ),
+            )
             .await?;
-        state.publish(EventPayload::new(
-            event_type::MESSAGE_UPDATED,
-            json!({ "sessionID": session_id, "info": assistant_message.info }),
-        ));
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
             json!({ "sessionID": session_id, "part": running_part, "time": now_millis() }),
@@ -1326,11 +1379,15 @@ async fn generate_model_title(
     source: String,
     fallback_title: String,
 ) {
-    if let Ok(Some(info)) = state.inner.store.get_session(&session_id).await {
-        if info.title != fallback_title && !is_default_session_title(&info.title) {
-            return;
-        }
-    }
+    let directory =
+        if let Ok(Some(info)) = state.inner.store.get_session(&session_id).await {
+            if info.title != fallback_title && !is_default_session_title(&info.title) {
+                return;
+            }
+            Some(info.directory)
+        } else {
+            None
+        };
     let request = build_provider_generation_request(
         &state,
         &model,
@@ -1342,6 +1399,7 @@ async fn generate_model_title(
             ProviderMessage::text(ProviderRole::User, source),
         ],
         Vec::new(),
+        directory.as_deref(),
         None,
     )
     .await;
@@ -1837,7 +1895,7 @@ async fn run_followup_assistant_step(
         &reply_model.model_id,
     )
     .await?;
-    let provider_tool_ids = provider_tool_id_set(&provider_tools);
+    let provider_tool_map = provider_tool_map(&provider_tools);
     let chat_hook_ctx = plugin::ChatHookContext {
         session_id: session_id.to_string(),
         agent: agent_info.name.clone(),
@@ -1856,7 +1914,7 @@ async fn run_followup_assistant_step(
             directory: &info.directory,
             model: reply_model,
             model_id: &reply_model.model_id,
-            provider_tool_ids: &provider_tool_ids,
+            provider_tools: &provider_tool_map,
             tool_permissions: &tool_permissions,
             max_steps_reached,
         },
@@ -1865,6 +1923,7 @@ async fn run_followup_assistant_step(
             reply_model,
             provider_messages,
             provider_tools,
+            Some(&info.directory),
             Some(&chat_hook_ctx),
         )
         .await,
@@ -1878,19 +1937,35 @@ async fn build_provider_generation_request(
     model: &UserModel,
     messages: Vec<ProviderMessage>,
     tools: Vec<ToolListItem>,
+    directory: Option<&str>,
     hook_ctx: Option<&plugin::ChatHookContext>,
 ) -> ProviderGenerationRequest {
     let metadata = provider_generation_metadata(state, model).await;
     let mut options = metadata.options;
     let mut headers = metadata.headers;
     if let Some(hook_ctx) = hook_ctx {
-        let _ = state.inner.plugins.chat_options(hook_ctx, &mut options);
-        let _ = state.inner.plugins.chat_headers(hook_ctx, &mut headers);
+        let workspace = if let Some(directory) = directory {
+            Some(
+                state
+                    .inner
+                    .workspace_runtimes
+                    .acquire(directory, &state.inner.plugins)
+                    .await,
+            )
+        } else {
+            None
+        };
+        let plugins = workspace
+            .as_ref()
+            .map(|runtime| &runtime.plugins)
+            .unwrap_or(&state.inner.plugins);
+        let _ = plugins.chat_options(hook_ctx, &mut options);
+        let _ = plugins.chat_headers(hook_ctx, &mut headers);
     }
     ProviderGenerationRequest {
         provider_id: model.provider_id.clone(),
         model_id: model.model_id.clone(),
-        session_id: None,
+        session_id: hook_ctx.map(|ctx| ctx.session_id.clone()),
         variant: model.variant.clone(),
         api: metadata.api,
         auth_env: metadata.auth_env,

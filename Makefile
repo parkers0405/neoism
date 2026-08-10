@@ -17,7 +17,6 @@ APP_VERSION = $(shell cargo pkgid -p neoism 2>/dev/null | sed 's/.*[@\#]//')
 APP_BINARY = $(TARGET_DIR)/$(TARGET)
 APP_BINARY_DIR = $(TARGET_DIR_OSX)/$(APP_NAME)/Contents/MacOS
 APP_EXTRAS_DIR = $(TARGET_DIR_OSX)/$(APP_NAME)/Contents/Resources
-TERMINFO = $(BUILD_MISC_DIR)/rio.terminfo
 
 all: install run
 
@@ -89,9 +88,6 @@ $(APP_NAME)-%: $(TARGET)-%
 	@cp -fp $(APP_BINARY) $(APP_BINARY_DIR)
 	@touch -r "$(APP_BINARY)" "$(TARGET_DIR_OSX)/$(APP_NAME)"
 
-install-terminfo:
-	@tic -xe xterm-rio,rio -o $(APP_EXTRAS_DIR) $(TERMINFO)
-
 release-macos: app-universal
 	@codesign --remove-signature "$(TARGET_DIR_OSX)/$(APP_NAME)"
 	@codesign --force --deep --sign - "$(TARGET_DIR_OSX)/$(APP_NAME)"
@@ -105,7 +101,6 @@ release-macos-signed:
 	$(if $(strip $(VERSION)),make release-macos-signed-app, make version-not-found)
 
 release-macos-signed-app:
-	@make install-terminfo
 	@make app-universal
 	@echo "Releasing Neoism v$(version)"
 	@codesign --force --deep --options runtime --sign "Developer ID Application: TODO_APPLE_DEVELOPER_ID" "$(TARGET_DIR_OSX)/$(APP_NAME)"

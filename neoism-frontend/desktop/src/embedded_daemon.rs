@@ -35,9 +35,7 @@ use std::io::{self, Write};
 use std::net::IpAddr;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-#[cfg(unix)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hyper::body::Incoming;
@@ -59,12 +57,6 @@ const EMBEDDED_DAEMON_SOCKET_ENV: &str = "NEOISM_DAEMON_SOCKET";
 pub struct EmbeddedDaemonHandle {
     #[cfg(unix)]
     socket_path: PathBuf,
-    /// Loopback TCP port that got bound, when the loopback bind succeeded.
-    /// On Windows this is the primary (and only guaranteed) listener, so
-    /// it is always `Some` for a live handle there. On unix the client
-    /// dials the socket instead, so the field is never read.
-    #[cfg_attr(unix, allow(dead_code))]
-    local_tcp_port: Option<u16>,
     shutdown: Arc<Notify>,
     // We keep the runtime alive on a dedicated worker thread; dropping
     // the JoinHandle here is fine. When the shutdown notify fires the
@@ -503,10 +495,9 @@ impl EmbeddedDaemonHandle {
         // caller could probe before the socket exists and decide to
         // spawn a *second* embedded daemon, racing into EADDRINUSE.
         match ready_rx.recv() {
-            Ok(Ok(local_tcp_port)) => Ok(Self {
+            Ok(Ok(_local_tcp_port)) => Ok(Self {
                 #[cfg(unix)]
                 socket_path,
-                local_tcp_port,
                 shutdown,
                 runtime_thread: Some(runtime_thread),
             }),
@@ -524,20 +515,6 @@ impl EmbeddedDaemonHandle {
     #[allow(dead_code)]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
-    }
-
-    /// Endpoint URL the local `DaemonClient` should dial: the unix
-    /// socket where one exists, the loopback TCP websocket otherwise.
-    pub fn client_url(&self) -> String {
-        #[cfg(unix)]
-        {
-            format!("unix://{}", self.socket_path.display())
-        }
-        #[cfg(not(unix))]
-        {
-            let port = self.local_tcp_port.unwrap_or_else(default_tcp_port);
-            format!("ws://127.0.0.1:{port}/session")
-        }
     }
 }
 
@@ -613,6 +590,16 @@ pub(crate) fn ensure_embedded_daemon_token() {
 
 fn load_or_create_embedded_daemon_token() -> io::Result<String> {
     let path = embedded_daemon_token_path();
+    load_or_create_daemon_token_at(&path)
+}
+
+pub(crate) fn install_daemon_token_from_file(path: &Path) -> io::Result<()> {
+    let token = load_or_create_daemon_token_at(path)?;
+    std::env::set_var(EMBEDDED_DAEMON_TOKEN_ENV, token);
+    Ok(())
+}
+
+fn load_or_create_daemon_token_at(path: &Path) -> io::Result<String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
         // On Windows the token lives under the per-user %TEMP%, whose

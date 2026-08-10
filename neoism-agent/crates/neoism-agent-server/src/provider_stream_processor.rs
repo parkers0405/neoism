@@ -6,7 +6,7 @@ use futures::future::join_all;
 use neoism_agent_core::{
     event_type, EventPayload, Id, IdKind, MessageWithParts, Part, PartTime,
     PermissionRule, ProviderGenerationResponse, ProviderStreamEvent, ReasoningPart,
-    ToolPart, ToolState, UserModel,
+    ToolListItem, ToolPart, ToolState, UserModel,
 };
 use serde_json::json;
 
@@ -35,7 +35,11 @@ pub(crate) struct ProviderStreamStepState {
     pub reasoning_parts: HashMap<String, Id>,
     pub tool_parts: HashMap<String, Id>,
     pub executed_tool_calls: HashSet<String>,
-    pending_tool_calls: VecDeque<QueuedToolCall>,
+    tool_tasks: VecDeque<(
+        QueuedToolCall,
+        tokio::task::JoinHandle<Result<crate::tool::ToolExecutionResult, String>>,
+    )>,
+    tool_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl ProviderStreamStepState {
@@ -56,7 +60,10 @@ impl ProviderStreamStepState {
             reasoning_parts: HashMap::new(),
             tool_parts: HashMap::new(),
             executed_tool_calls: HashSet::new(),
-            pending_tool_calls: VecDeque::new(),
+            tool_tasks: VecDeque::new(),
+            tool_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                TOOL_EXECUTION_CONCURRENCY,
+            )),
         }
     }
 }
@@ -80,7 +87,7 @@ pub(crate) struct ProviderStreamEventContext<'a> {
     pub directory: &'a str,
     pub model: &'a UserModel,
     pub model_id: &'a str,
-    pub provider_tool_ids: &'a HashSet<String>,
+    pub provider_tools: &'a HashMap<String, ToolListItem>,
     pub tool_permissions: &'a [PermissionRule],
     pub max_steps_reached: bool,
 }
@@ -361,6 +368,7 @@ fn event_is_progress(event: &ProviderStreamEvent) -> bool {
         ProviderStreamEvent::TextStart { .. }
         | ProviderStreamEvent::TextEnd { .. }
         | ProviderStreamEvent::ReasoningStart { .. }
+        | ProviderStreamEvent::ReasoningMetadata { .. }
         | ProviderStreamEvent::ReasoningEnd { .. }
         | ProviderStreamEvent::ToolInputStart { .. }
         | ProviderStreamEvent::ToolInputEnd { .. }
@@ -491,6 +499,33 @@ pub(crate) async fn process_provider_stream_event(
                 ));
             }
         }
+        ProviderStreamEvent::ReasoningMetadata { id, metadata } => {
+            let Some(part_id) = stream.reasoning_parts.get(&id).cloned() else {
+                return Ok(());
+            };
+            let part = {
+                let mut message = ctx.live_message.lock().await;
+                let part = message.parts.iter_mut().find_map(|part| match part {
+                    Part::Reasoning(reasoning) if reasoning.id == part_id => {
+                        reasoning.metadata = Some(metadata.clone());
+                        Some(Part::Reasoning(reasoning.clone()))
+                    }
+                    _ => None,
+                });
+                ctx.state
+                    .inner
+                    .store
+                    .update_message(ctx.session_id_text, &message)
+                    .await?;
+                part
+            };
+            if let Some(part) = part {
+                ctx.state.publish(EventPayload::new(
+                    event_type::MESSAGE_PART_UPDATED,
+                    json!({ "sessionID": ctx.session_id, "part": part, "time": now_millis() }),
+                ));
+            }
+        }
         ProviderStreamEvent::ToolInputStart { id, name } => {
             let part_id = stream
                 .tool_parts
@@ -551,7 +586,7 @@ pub(crate) async fn process_provider_stream_event(
                 return Ok(());
             }
             let Some(normalized_name) =
-                normalize_provider_tool_name(&name, &input, ctx.provider_tool_ids)
+                normalize_provider_tool_name(&name, &input, ctx.provider_tools)
             else {
                 let part_id = stream
                     .tool_parts
@@ -592,6 +627,49 @@ pub(crate) async fn process_provider_stream_event(
                 }
                 return Ok(());
             };
+            let definition = ctx
+                .provider_tools
+                .get(&normalized_name)
+                .expect("normalized provider tool must have a captured definition");
+            if let Err(error) =
+                crate::tool::validate_schema(&definition.parameters, &input, "$input")
+            {
+                let part_id = stream
+                    .tool_parts
+                    .entry(id.clone())
+                    .or_insert_with(|| Id::ascending(IdKind::Part))
+                    .clone();
+                let part = {
+                    let mut message = ctx.live_message.lock().await;
+                    set_tool_running(
+                        &mut message.parts,
+                        part_id.clone(),
+                        ctx.session_id,
+                        ctx.assistant_id,
+                        id,
+                        normalized_name,
+                        input,
+                    );
+                    let part = set_tool_error(
+                        &mut message.parts,
+                        part_id.as_str(),
+                        format!("invalid tool input: {error}"),
+                    );
+                    ctx.state
+                        .inner
+                        .store
+                        .update_message(ctx.session_id_text, &message)
+                        .await?;
+                    part
+                };
+                if let Some(part) = part {
+                    ctx.state.publish(EventPayload::new(
+                        event_type::MESSAGE_PART_UPDATED,
+                        json!({ "sessionID": ctx.session_id, "part": part, "time": now_millis() }),
+                    ));
+                }
+                return Ok(());
+            }
             let part_id = stream
                 .tool_parts
                 .entry(id.clone())
@@ -646,18 +724,21 @@ pub(crate) async fn process_provider_stream_event(
                 }
                 return Ok(());
             }
-            stream.pending_tool_calls.push_back(QueuedToolCall {
+            let call = QueuedToolCall {
                 id,
                 part_id,
                 name: tool_name,
                 input: tool_input,
-            });
+            };
+            let task = spawn_tool_call(ctx, &call, stream.tool_semaphore.clone());
+            stream.tool_tasks.push_back((call, task));
         }
         ProviderStreamEvent::ToolResult { id, output } => {
             let Some(part_id) = stream.tool_parts.get(&id).cloned() else {
                 return Ok(());
             };
-            let truncated = crate::tool::truncate::truncate_output(&output);
+            let truncated = crate::tool::truncate::truncate_output(&output)
+                .map_err(|error| ApiError::internal(error.to_string()))?;
             let mut metadata = json!({ "truncated": truncated.truncated });
             if let Some(path) = truncated.output_path {
                 metadata["outputPath"] = json!(path.to_string_lossy().to_string());
@@ -772,27 +853,19 @@ async fn flush_pending_tool_calls(
     ctx: &ProviderStreamEventContext<'_>,
     stream: &mut ProviderStreamStepState,
 ) -> Result<(), ApiError> {
-    if stream.pending_tool_calls.is_empty() {
+    if stream.tool_tasks.is_empty() {
         return Ok(());
     }
-    while !stream.pending_tool_calls.is_empty() {
-        let mut batch = Vec::new();
-        while batch.len() < TOOL_EXECUTION_CONCURRENCY {
-            let Some(call) = stream.pending_tool_calls.pop_front() else {
-                break;
-            };
-            batch.push(call);
-        }
-
-        let results = join_all(
-            batch
-                .into_iter()
-                .map(|call| execute_queued_tool_call(ctx, call)),
-        )
-        .await;
-        for result in results {
-            publish_queued_tool_result(ctx, result).await?;
-        }
+    let tasks = stream.tool_tasks.drain(..).collect::<Vec<_>>();
+    let results = join_all(tasks.into_iter().map(|(call, task)| async move {
+        let result = task
+            .await
+            .unwrap_or_else(|error| Err(format!("tool execution task failed: {error}")));
+        QueuedToolResult { call, result }
+    }))
+    .await;
+    for result in results {
+        publish_queued_tool_result(ctx, result).await?;
     }
     Ok(())
 }
@@ -802,22 +875,36 @@ struct QueuedToolResult {
     result: Result<crate::tool::ToolExecutionResult, String>,
 }
 
-async fn execute_queued_tool_call(
+fn spawn_tool_call(
     ctx: &ProviderStreamEventContext<'_>,
-    call: QueuedToolCall,
-) -> QueuedToolResult {
-    let result = execute_tool_call_with_permission_wait(
-        ctx.state,
-        ctx.session_id,
-        ctx.assistant_id,
-        ctx.directory,
-        ctx.tool_permissions.to_vec(),
-        &call.id,
-        &call.name,
-        call.input.clone(),
-    )
-    .await;
-    QueuedToolResult { call, result }
+    call: &QueuedToolCall,
+    semaphore: Arc<tokio::sync::Semaphore>,
+) -> tokio::task::JoinHandle<Result<crate::tool::ToolExecutionResult, String>> {
+    let state = ctx.state.clone();
+    let session_id = ctx.session_id.clone();
+    let assistant_id = ctx.assistant_id.clone();
+    let directory = ctx.directory.to_string();
+    let permissions = ctx.tool_permissions.to_vec();
+    let call_id = call.id.clone();
+    let name = call.name.clone();
+    let input = call.input.clone();
+    tokio::spawn(async move {
+        let _permit = semaphore
+            .acquire_owned()
+            .await
+            .map_err(|_| "tool execution concurrency gate closed".to_string())?;
+        execute_tool_call_with_permission_wait(
+            &state,
+            &session_id,
+            &assistant_id,
+            &directory,
+            permissions,
+            &call_id,
+            &name,
+            input,
+        )
+        .await
+    })
 }
 
 async fn publish_queued_tool_result(

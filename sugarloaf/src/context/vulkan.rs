@@ -1597,6 +1597,13 @@ mod tests {
         assert_eq!(desired_swapchain_image_count_from(Some("1"), &caps), 2);
         assert_eq!(desired_swapchain_image_count_from(Some("4"), &caps), 4);
     }
+
+    #[test]
+    fn native_renderer_enables_every_vulkan13_feature_it_uses() {
+        let features = required_vulkan13_features();
+        assert_eq!(features.dynamic_rendering, vk::TRUE);
+        assert_eq!(features.synchronization2, vk::TRUE);
+    }
 }
 
 fn requested_present_mode(
@@ -1804,11 +1811,7 @@ fn create_device(
 
     let device_extensions = [khr::swapchain::NAME.as_ptr()];
 
-    // Enable dynamic rendering up front — it's Vulkan 1.3 core. We're
-    // not using it yet in the clear-only path, but enabling it here
-    // avoids having to recreate the device when pipelines land.
-    let mut vk13_features =
-        vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
+    let mut vk13_features = required_vulkan13_features();
 
     let queue_infos = [queue_info];
     let create_info = vk::DeviceCreateInfo::default()
@@ -1818,6 +1821,21 @@ fn create_device(
 
     unsafe { instance.create_device(physical_device, &create_info, None) }
         .expect("vkCreateDevice")
+}
+
+/// Vulkan 1.3 features used unconditionally by the native renderer.
+///
+/// `dynamic_rendering` is required by `vkCmdBeginRendering`.  Equally
+/// importantly, `synchronization2` is required by every
+/// `vkCmdPipelineBarrier2` call used to transition swapchain and atlas
+/// images.  Merely requesting a Vulkan 1.3 instance does not enable either
+/// device feature.  Mesa happened to tolerate the missing synchronization2
+/// enable, while NVIDIA could leave the image transitions ineffective and
+/// present an all-black frame.
+fn required_vulkan13_features() -> vk::PhysicalDeviceVulkan13Features<'static> {
+    vk::PhysicalDeviceVulkan13Features::default()
+        .dynamic_rendering(true)
+        .synchronization2(true)
 }
 
 /// Build a swapchain and its image views. `old` is passed as

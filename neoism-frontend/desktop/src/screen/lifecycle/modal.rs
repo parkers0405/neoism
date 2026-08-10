@@ -124,14 +124,14 @@ impl Screen<'_> {
                     .map(|epub| epub.add_highlight_from_selection(value));
                 match result {
                     Some(Ok(Some(_))) => {
-                        if let Some(path) = self
+                        if self
                             .context_manager
                             .current()
                             .epub
                             .as_ref()
                             .and_then(|epub| epub.book_note_path())
+                            .is_some()
                         {
-                            self.invalidate_note_index_for_path(&path);
                             self.renderer.notes_sidebar.refresh_notes();
                         }
                         self.renderer.notifications.push(
@@ -268,14 +268,14 @@ impl Screen<'_> {
                     .map(|epub| epub.set_annotation_note(&id, value));
                 match result {
                     Some(Ok(true)) => {
-                        if let Some(path) = self
+                        if self
                             .context_manager
                             .current()
                             .epub
                             .as_ref()
                             .and_then(|epub| epub.book_note_path())
+                            .is_some()
                         {
-                            self.invalidate_note_index_for_path(&path);
                             self.renderer.notes_sidebar.refresh_notes();
                         }
                         self.renderer.notifications.push(
@@ -440,12 +440,6 @@ impl Screen<'_> {
             }
             ModalAction::NotesPromptNewFile { dir } => {
                 self.open_notes_new_file_prompt(PathBuf::from(dir));
-            }
-            ModalAction::NotesOpenGraph => {
-                self.open_neoism_graph_view();
-            }
-            ModalAction::NotesOpenCreateMenu => {
-                self.open_notes_create_menu_at_button();
             }
             ModalAction::FileTreePromptNewFolder { dir } => {
                 self.open_file_tree_new_folder_prompt(PathBuf::from(dir));

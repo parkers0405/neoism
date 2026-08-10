@@ -24,13 +24,25 @@ impl Screen<'_> {
     }
 
     pub fn select_current_based_on_mouse(&mut self) -> bool {
+        // Chrome click handlers get first refusal before this method. Reaching
+        // here therefore means the click landed in workspace content, so a
+        // focused side panel must release keyboard/cursor ownership even when
+        // the click stays inside the already-current editor pane.
+        let released_side_panel_focus = self.renderer.file_tree.is_focused()
+            || self.renderer.notes_sidebar.is_focused();
+        if released_side_panel_focus {
+            self.renderer.file_tree.set_focused(false);
+            self.renderer.notes_sidebar.set_focused(false);
+            self.renderer.trail_cursor.reset();
+            self.mark_dirty();
+        }
+
         if self
             .context_manager
             .current_grid_mut()
             .select_current_based_on_mouse(&self.mouse)
         {
             self.context_manager.select_route_from_current_grid();
-            self.renderer.file_tree.set_focused(false);
             self.renderer.trail_cursor.reset();
             self.reapply_chrome_layout();
             self.mark_dirty();

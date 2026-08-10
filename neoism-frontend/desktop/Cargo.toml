@@ -171,11 +171,6 @@ assets = [
         "644",
     ],
     [
-        "../../misc/rio.terminfo",
-        "usr/share/info/",
-        "644",
-    ],
-    [
         "../../misc/logo.svg",
         "usr/share/icons/hicolor/scalable/apps/neoism.svg",
         "644",

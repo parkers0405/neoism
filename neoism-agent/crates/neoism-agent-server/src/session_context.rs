@@ -92,21 +92,31 @@ async fn compact_session_context_inner(
     // agent loop (auto-compaction) a run already exists — reuse its cancel flag
     // so aborting the run also stops the summary. Otherwise (manual `/compact`)
     // register a transient run we own and tear down when done.
-    let (cancel, owned_run_id) = {
-        let mut runs = state.inner.runs.write().await;
-        match runs.get(session_id) {
-            Some(run) => (run.cancel.clone(), None),
-            None => {
-                let run = SessionRun {
-                    id: Id::ascending(IdKind::Event).to_string(),
-                    started_at: started,
-                    cancel: Arc::new(AtomicBool::new(false)),
-                };
-                let cancel = run.cancel.clone();
-                let run_id = run.id.clone();
-                runs.insert(session_id.to_string(), run);
-                (cancel, Some(run_id))
+    let existing = state.inner.runs.read().await.get(session_id).cloned();
+    let (cancel, owned_run_id) = if let Some(run) = existing {
+        (run.cancel, None)
+    } else {
+        let run = SessionRun {
+            id: Id::ascending(IdKind::Event).to_string(),
+            started_at: started,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        match state
+            .inner
+            .session_coordinator
+            .try_start_run(session_id, run.clone())
+            .await
+        {
+            Ok(()) => {
+                state
+                    .inner
+                    .runs
+                    .write()
+                    .await
+                    .insert(session_id.to_string(), run.clone());
+                (run.cancel, Some(run.id))
             }
+            Err(active) => (active.cancel, None),
         }
     };
     // Always release the transient run afterwards — even if the body returns
@@ -330,6 +340,12 @@ async fn release_owned_compaction_run(
     let mut runs = state.inner.runs.write().await;
     if runs.get(session_id).is_some_and(|run| run.id == run_id) {
         runs.remove(session_id);
+        drop(runs);
+        state
+            .inner
+            .session_coordinator
+            .finish_run(session_id, &run_id)
+            .await;
     }
 }
 
@@ -1128,6 +1144,9 @@ pub(crate) fn provider_messages_for_session(
 ) -> Vec<ProviderMessage> {
     let mut provider_messages = Vec::new();
     provider_messages.push(workspace_system_message(info, model_id));
+    if let Some(update) = context_epoch_update_message(info) {
+        provider_messages.push(update);
+    }
     if let Some(goal) = goal_system_message(info) {
         provider_messages.push(goal);
     }
@@ -1138,8 +1157,46 @@ pub(crate) fn provider_messages_for_session(
         provider_messages.push(summary);
     }
     let conversation = compaction_messages_to_summarize(messages);
-    provider_messages.extend(message_model::provider_messages(&conversation));
+    let current_provider = info
+        .model
+        .as_ref()
+        .filter(|model| model.id == model_id)
+        .map(|model| model.provider_id.as_str());
+    if let Some(provider_id) = current_provider {
+        provider_messages.extend(message_model::provider_messages_for_model(
+            &conversation,
+            provider_id,
+            model_id,
+        ));
+    } else {
+        provider_messages.extend(message_model::provider_messages(&conversation));
+    }
     provider_messages
+}
+
+fn context_epoch_update_message(info: &SessionInfo) -> Option<ProviderMessage> {
+    let epoch = crate::context_epoch::from_session(info)?;
+    if epoch.generation <= 1 || epoch.baseline == epoch.snapshot {
+        return None;
+    }
+    let changed = epoch
+        .snapshot
+        .sources
+        .iter()
+        .filter(|(key, value)| epoch.baseline.sources.get(*key) != Some(*value))
+        .map(|(key, value)| format!("{key}: {value}"))
+        .collect::<Vec<_>>();
+    (!changed.is_empty()).then(|| {
+        ProviderMessage::text(
+            ProviderRole::System,
+            format!(
+                "Durable system-context epoch {} (baseline message sequence {}). The following context sources changed since this session began:\n{}",
+                epoch.generation,
+                epoch.baseline_seq,
+                changed.join("\n")
+            ),
+        )
+    })
 }
 
 fn run_system_message(run_system: Option<&str>) -> Option<ProviderMessage> {
@@ -1162,14 +1219,14 @@ fn message_id(message: &MessageWithParts) -> String {
 
 fn workspace_system_message(info: &SessionInfo, model_id: &str) -> ProviderMessage {
     let editing_tools = if use_apply_patch_for_model(model_id) {
-        "Use edit for targeted replacements and apply_patch with a patchText V4A envelope for multi-region patches or file adds/deletes. Do not call write for file mutations with this model."
+        "Use apply_patch with a patchText V4A envelope for every file mutation."
     } else {
-        "Use edit for targeted replacements, apply_patch for multi-region patches or file adds/deletes, and write only for brand-new files or full replacements."
+        "Use edit for targeted replacements and write only for brand-new files or intentional full replacements."
     };
     let mut content = format!(
         "You are Neoism, an interactive coding agent running in a real workspace.\n\
          Workspace directory: {}\n\
-         You can inspect and modify this workspace with tools. Prefer ffgrep/fffind/fff_multi_grep for code search, path exploration, and multi-pattern searches; keep grep/glob as exact fallback tools. Use notes for Neoism Markdown note graph operations. Use list and read before saying you cannot see the project. \
+         You can inspect and modify this workspace with tools. grep and glob use the FFF engine for content and fuzzy path search. Search before reading large files, and issue independent searches or reads together so they execute in parallel. read also lists directories. Use notes for Neoism Markdown note graph operations. \
          {editing_tools} Use bash for project commands, and ask before risky or unclear actions. \
          Keep CLI responses concise and directly useful.",
         info.directory

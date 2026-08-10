@@ -32,7 +32,7 @@ use sugarloaf::Sugarloaf;
 /// Coarse markdown block kind. Both renderers share this enum but each one
 /// derives per-block sizing/chrome on its own — the widget only commits to
 /// the *parse*, not to any particular pixel layout.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownBlockKind {
     Empty,
     Heading(u8),
@@ -42,8 +42,47 @@ pub enum MarkdownBlockKind {
     Ordered { depth: usize },
     CodeFence,
     Code,
+    Callout { kind: MarkdownCalloutKind },
     Quote,
     Divider,
+}
+
+/// Obsidian-compatible callout families. Aliases such as `summary`, `hint`,
+/// and `error` collapse onto the same visual family while the source label is
+/// preserved by [`MarkdownCallout`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkdownCalloutKind {
+    Note,
+    Abstract,
+    Info,
+    Todo,
+    Tip,
+    Important,
+    Success,
+    Question,
+    Warning,
+    Failure,
+    Danger,
+    Bug,
+    Example,
+    Quote,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkdownCallout<'a> {
+    pub kind: MarkdownCalloutKind,
+    /// The source callout name, without `[!]` (for example `IMPORTANT`).
+    pub label: &'a str,
+    /// An optional custom title following the marker.
+    pub custom_title: Option<&'a str>,
+    /// Bytes hidden before the rendered title.
+    pub marker_len: usize,
+}
+
+impl<'a> MarkdownCallout<'a> {
+    pub fn title(&self) -> &'a str {
+        self.custom_title.unwrap_or(self.label)
+    }
 }
 
 /// One parsed line of source markdown. `text` is a borrow of the input; the
@@ -138,6 +177,15 @@ pub fn parse_line(line: &str, in_code: bool) -> ParsedLine<'_> {
         };
     }
 
+    if let Some(callout) = parse_callout_line(line) {
+        return ParsedLine {
+            kind: MarkdownBlockKind::Callout { kind: callout.kind },
+            text: callout.title(),
+            marker_len: callout.marker_len,
+            list_marker: None,
+        };
+    }
+
     if let Some(rest) = trimmed_start.strip_prefix('>') {
         let spaces = rest.len() - rest.trim_start().len();
         return ParsedLine {
@@ -154,6 +202,96 @@ pub fn parse_line(line: &str, in_code: bool) -> ParsedLine<'_> {
         marker_len: line.len() - line.trim_start().len(),
         list_marker: None,
     }
+}
+
+/// Parse an Obsidian callout header such as `> [!IMPORTANT]` or
+/// `> [!WARNING]- Custom title`. Ordinary blockquotes return `None`.
+pub fn parse_callout_line(line: &str) -> Option<MarkdownCallout<'_>> {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let after_quote = trimmed.strip_prefix('>')?;
+    let quote_space = after_quote.len() - after_quote.trim_start().len();
+    let marker = after_quote.trim_start().strip_prefix("[!")?;
+    let close = marker.find(']')?;
+    let label = marker[..close].trim();
+    if label.is_empty()
+        || !label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+    {
+        return None;
+    }
+    let kind = match label.to_ascii_lowercase().as_str() {
+        "note" => MarkdownCalloutKind::Note,
+        "abstract" | "summary" | "tldr" => MarkdownCalloutKind::Abstract,
+        "info" => MarkdownCalloutKind::Info,
+        "todo" => MarkdownCalloutKind::Todo,
+        "tip" | "hint" => MarkdownCalloutKind::Tip,
+        "important" => MarkdownCalloutKind::Important,
+        "success" | "check" | "done" => MarkdownCalloutKind::Success,
+        "question" | "help" | "faq" => MarkdownCalloutKind::Question,
+        "warning" | "caution" | "attention" => MarkdownCalloutKind::Warning,
+        "failure" | "fail" | "missing" => MarkdownCalloutKind::Failure,
+        "danger" | "error" => MarkdownCalloutKind::Danger,
+        "bug" => MarkdownCalloutKind::Bug,
+        "example" => MarkdownCalloutKind::Example,
+        "quote" | "cite" => MarkdownCalloutKind::Quote,
+        _ => MarkdownCalloutKind::Note,
+    };
+    let after_marker = &marker[close + 1..];
+    let after_fold = after_marker
+        .strip_prefix(['+', '-'])
+        .unwrap_or(after_marker);
+    let title_space = after_fold.len() - after_fold.trim_start().len();
+    let custom_title = (!after_fold.trim().is_empty()).then(|| after_fold.trim());
+    let marker_len = indent
+        + 1
+        + quote_space
+        + 2
+        + close
+        + 1
+        + (after_marker.len() - after_fold.len())
+        + title_space;
+    Some(MarkdownCallout {
+        kind,
+        label,
+        custom_title,
+        marker_len,
+    })
+}
+
+/// Resolve the callout family for any line in one contiguous quoted callout
+/// block. This lets continuation `> body` lines inherit the header's accent
+/// and upright body style without carrying parser state into editor models.
+pub fn callout_kind_for_quote_line(
+    lines: &[String],
+    line_ix: usize,
+) -> Option<MarkdownCalloutKind> {
+    if quote_prefix_len(lines.get(line_ix)?).is_none() {
+        return None;
+    }
+    for line in lines[..=line_ix].iter().rev() {
+        if let Some(callout) = parse_callout_line(line) {
+            return Some(callout.kind);
+        }
+        if quote_prefix_len(line).is_none() {
+            break;
+        }
+    }
+    None
+}
+
+fn quote_prefix_len(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let rest = trimmed.strip_prefix('>')?;
+    let space = rest
+        .chars()
+        .next()
+        .filter(|ch| ch.is_whitespace())
+        .map(char::len_utf8)
+        .unwrap_or(0);
+    Some(indent + 1 + space)
 }
 
 pub fn parse_heading_line(line: &str) -> Option<(u8, usize, &str)> {
@@ -530,6 +668,34 @@ pub fn web_url_target(value: &str) -> Option<&str> {
     (end > scheme_len && !target.chars().any(char::is_whitespace)).then_some(target)
 }
 
+/// Validate a local `file://` URI without decoding it. Decoding belongs at
+/// the filesystem boundary; keeping the encoded target here preserves exact
+/// link round-tripping and makes spaces (`%20`) safe during inline parsing.
+pub fn file_uri_target(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let path = value.strip_prefix("file://")?;
+    (!path.is_empty() && !value.chars().any(char::is_whitespace)).then_some(value)
+}
+
+/// Target accepted by rendered Markdown links. This deliberately remains
+/// conservative for bare prose tokens while allowing explicit Markdown links
+/// to point at web URLs, `file://` URIs, or recognizable local paths.
+pub fn rendered_link_target(value: &str) -> Option<&str> {
+    web_url_target(value)
+        .or_else(|| file_uri_target(value))
+        .or_else(|| looks_like_file_ref(value).then_some(value))
+}
+
+/// CommonMark backslash escape at byte zero. ASCII punctuation is the exact
+/// escapable class, so `\*` becomes a literal `*` while `\n` remains `\n`.
+pub fn backslash_escape_at_start(value: &str) -> Option<(char, usize)> {
+    let rest = value.strip_prefix('\\')?;
+    let escaped = rest.chars().next()?;
+    escaped
+        .is_ascii_punctuation()
+        .then_some((escaped, 1 + escaped.len_utf8()))
+}
+
 /// Parse a web link beginning at byte zero. Standard Markdown links expose
 /// only their label as visible text, while bare URLs use the URL itself.
 pub fn web_link_at_start(text: &str) -> Option<WebLinkSpan> {
@@ -603,7 +769,7 @@ pub fn web_link_at(text: &str, char_col: usize) -> Option<WebLinkSpan> {
 
 /// Find the next inline marker (`**`, `~~`, `` ` ``, `[`) in `value`.
 pub fn next_inline_marker(value: &str) -> Option<usize> {
-    ["**", "~~", "`", "["]
+    ["**", "~~", "`", "[", "\\"]
         .into_iter()
         .filter_map(|needle| value.find(needle))
         .min()
@@ -701,6 +867,9 @@ pub fn looks_like_file_ref(value: &str) -> bool {
     let value = clean_link_target(value);
     if value.is_empty() || value.chars().any(char::is_whitespace) {
         return false;
+    }
+    if file_uri_target(value).is_some() {
+        return true;
     }
     let base = value.split(':').next().unwrap_or(value);
     if base.is_empty() {
@@ -981,9 +1150,41 @@ mod tests {
     fn looks_like_file_ref_accepts_extensions_and_anchored_paths() {
         assert!(looks_like_file_ref("src/foo.rs"));
         assert!(looks_like_file_ref("./pkg/main"));
+        assert!(looks_like_file_ref("file:///tmp/Patriot%20Report.md"));
         assert!(!looks_like_file_ref("Yes/No"));
         assert!(!looks_like_file_ref("and/or"));
         assert!(looks_like_file_ref("/etc/hosts"));
+    }
+
+    #[test]
+    fn obsidian_callouts_parse_common_kinds_and_custom_titles() {
+        let important = parse_callout_line("> [!IMPORTANT]").unwrap();
+        assert_eq!(important.kind, MarkdownCalloutKind::Important);
+        assert_eq!(important.title(), "IMPORTANT");
+        assert_eq!(important.marker_len, "> [!IMPORTANT]".len());
+
+        let warning = parse_callout_line("  > [!WARNING]- Read this first").unwrap();
+        assert_eq!(warning.kind, MarkdownCalloutKind::Warning);
+        assert_eq!(warning.title(), "Read this first");
+        assert_eq!(warning.marker_len, "  > [!WARNING]- ".len());
+
+        let lines = vec![
+            "> [!IMPORTANT]".to_string(),
+            "> First body line".to_string(),
+            "> Second body line".to_string(),
+            "ordinary paragraph".to_string(),
+        ];
+        assert_eq!(
+            callout_kind_for_quote_line(&lines, 2),
+            Some(MarkdownCalloutKind::Important)
+        );
+        assert_eq!(callout_kind_for_quote_line(&lines, 3), None);
+    }
+
+    #[test]
+    fn commonmark_backslash_escape_only_accepts_ascii_punctuation() {
+        assert_eq!(backslash_escape_at_start(r"\* footnote"), Some(('*', 2)));
+        assert_eq!(backslash_escape_at_start(r"\n"), None);
     }
 
     #[test]

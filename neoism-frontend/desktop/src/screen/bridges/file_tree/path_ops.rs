@@ -170,7 +170,6 @@ impl Screen<'_> {
             self.refresh_file_tree_entries();
             return;
         }
-        let deleted_note_paths = self.deleted_workspace_note_paths(&path);
         let label = self.file_tree_display_path(&path);
         let result = if path.is_dir() {
             fs::remove_dir_all(&path)
@@ -186,7 +185,6 @@ impl Screen<'_> {
                 // stale context isn't reused if the name is recreated
                 // (the markdown/draw pane caches its loaded content).
                 self.close_buffer_tabs_under_path(&path);
-                self.remove_deleted_workspace_notes(&deleted_note_paths);
                 self.refresh_file_tree_entries();
                 self.file_tree_notify(
                     format!("Deleted `{label}`"),
@@ -221,55 +219,5 @@ impl Screen<'_> {
                 None => break,
             }
         }
-    }
-
-    fn deleted_workspace_note_paths(&self, path: &Path) -> Vec<PathBuf> {
-        let Some(workspace) = self.file_tree_workspace() else {
-            return Vec::new();
-        };
-        if !workspace.config.notes.enabled {
-            return Vec::new();
-        }
-        let note_roots = vault_note_roots(&workspace);
-        if !intersects_note_roots(path, &note_roots) {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        collect_markdown_note_paths(path, &note_roots, &mut out);
-        out
-    }
-
-    fn remove_deleted_workspace_notes(&mut self, paths: &[PathBuf]) {
-        if paths.is_empty() {
-            return;
-        }
-        let Some(workspace) = self.file_tree_workspace() else {
-            return;
-        };
-        for path in paths {
-            if let Err(err) = crate::workspace::remove_note_graph_file(&workspace, path) {
-                tracing::warn!(
-                    target: "neoism::workspace",
-                    path = %path.display(),
-                    error = %err,
-                    "failed to remove deleted note from graph"
-                );
-            }
-        }
-        self.workspace_note_indexes.remove(&workspace.root);
-        self.mark_neoism_tags_views_stale(&workspace.root);
-    }
-
-    pub(crate) fn file_tree_workspace(
-        &self,
-    ) -> Option<crate::workspace::config::NeoismWorkspace> {
-        let root = self
-            .renderer
-            .file_tree
-            .root()
-            .map(Path::to_path_buf)
-            .or_else(|| self.active_workspace_root.clone())
-            .or_else(|| self.active_pane_workspace_root())?;
-        crate::workspace::load_workspace(&root).ok().flatten()
     }
 }

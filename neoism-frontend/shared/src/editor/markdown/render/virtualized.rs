@@ -23,11 +23,13 @@ use crate::primitives::ide_theme::IdeTheme;
 use crate::primitives::truncate_to_fit;
 use crate::syntax::{highlight_line, syn_color, Lang};
 use crate::widgets::markdown::{
-    list_depth_from_indent, parse_heading_line, web_link_at_start,
+    backslash_escape_at_start, callout_kind_for_quote_line, list_depth_from_indent,
+    parse_callout_line, parse_heading_line, web_link_at_start,
 };
 use crate::widgets::mermaid::{mermaid_scene, parse_mermaid_diagram};
 
 use super::bullet_align;
+use super::callout_accent;
 use super::draw::{
     caret_height, cursor_cell_width, cursor_position_for_text_prefix,
     cursor_y_for_text_line, draw_block_actions, draw_copy_button, draw_drag_ghost,

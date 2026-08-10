@@ -149,44 +149,6 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    /// The footer settings gear menu. Creation has dedicated buttons
-    /// beneath the Notes title, so it does not need another menu layer.
-    pub(crate) fn open_notes_settings_menu(&mut self) {
-        use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
-        use neoism_ui::widgets::modal::ModalAction;
-
-        let items = vec![ContextMenuItem::new(
-            "Visualize Graph",
-            "g",
-            ContextMenuAction::Modal(ModalAction::NotesOpenGraph.into()),
-        )];
-        let (x, y) = self
-            .renderer
-            .notes_sidebar
-            .settings_button_rect()
-            .map(|rect| (rect[0], rect[1] - 8.0))
-            .unwrap_or((0.0, 0.0));
-        let scale = self.sugarloaf.scale_factor();
-        let size = self.sugarloaf.window_size();
-        self.renderer.context_menu.open(
-            "Notes".to_string(),
-            items,
-            x,
-            y,
-            size.width as f32 / scale,
-            self.context_menu_logical_height(),
-        );
-        self.mark_dirty();
-    }
-
-    pub(crate) fn open_notes_create_menu_at_button(&mut self) {
-        if let Some(rect) = self.renderer.notes_sidebar.settings_button_rect() {
-            self.open_notes_create_menu(rect[0], rect[1] - 8.0);
-        } else {
-            self.open_notes_create_menu(0.0, 0.0);
-        }
-    }
-
     pub(crate) fn open_notes_vault_menu_for_selector(&mut self) {
         self.renderer
             .notes_sidebar

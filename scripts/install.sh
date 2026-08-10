@@ -84,13 +84,6 @@ for b in "${BINARIES[@]}"; do
   printf '   %s\n' "$BIN_DIR/$b"
 done
 
-
-# --- terminfo (best effort) ----------------------------------------------
-if command -v tic >/dev/null 2>&1; then
-  ti="$(find "$tmp" -name 'rio.terminfo' | head -1)"
-  [ -n "$ti" ] && tic -xe xterm-rio,rio "$ti" 2>/dev/null && say "terminfo installed" || true
-fi
-
 say "Done. Neoism ${VERSION} installed."
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

@@ -18,8 +18,6 @@ pub mod git_watcher_filter;
 pub mod note_roots;
 pub mod title_format;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod workspace_note_index;
-
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;

@@ -71,6 +71,7 @@ pub(crate) fn responses_request_body(
     }
     if let Some(reasoning) = responses_reasoning_options(&model_id, variant) {
         body["reasoning"] = reasoning;
+        body["include"] = json!(["reasoning.encrypted_content"]);
     }
     body
 }
@@ -347,10 +348,27 @@ impl ResponsesSseParser {
         if self.active_reasoning_item_id.as_deref() == Some(&item_id) {
             self.active_reasoning_item_id = None;
         }
-        finished
-            .into_iter()
-            .map(|id| ProviderStreamEvent::ReasoningEnd { id })
-            .collect()
+        let mut events = Vec::new();
+        if let (Some(id), Some(encrypted_content)) = (
+            finished.first(),
+            item.get("encrypted_content").and_then(Value::as_str),
+        ) {
+            events.push(ProviderStreamEvent::ReasoningMetadata {
+                id: id.clone(),
+                metadata: json!({
+                    "openai": {
+                        "summary": item.get("summary").cloned().unwrap_or_else(|| json!([])),
+                        "encryptedContent": encrypted_content,
+                    }
+                }),
+            });
+        }
+        events.extend(
+            finished
+                .into_iter()
+                .map(|id| ProviderStreamEvent::ReasoningEnd { id }),
+        );
+        events
     }
 
     fn finish_all_reasoning_summary_parts(&mut self) -> Vec<ProviderStreamEvent> {
@@ -415,9 +433,7 @@ impl ResponsesSseParser {
 fn parse_tool_arguments(tool_name: &str, raw: &str) -> Value {
     match serde_json::from_str(raw) {
         Ok(value) => value,
-        Err(_)
-            if matches!(tool_name, "apply_patch" | "patch") && !raw.trim().is_empty() =>
-        {
+        Err(_) if tool_name == "apply_patch" && !raw.trim().is_empty() => {
             json!({ "patchText": raw })
         }
         Err(_) => json!({}),
@@ -433,6 +449,13 @@ fn responses_input_items(messages: &[ProviderMessage]) -> Vec<Value> {
         match message.role {
             ProviderRole::User => input.push(responses_input_message(message)),
             ProviderRole::Assistant => {
+                input.extend(message.reasoning.iter().map(|reasoning| {
+                    json!({
+                        "type": "reasoning",
+                        "summary": reasoning.summary,
+                        "encrypted_content": reasoning.encrypted_content,
+                    })
+                }));
                 if !message.content.trim().is_empty() {
                     input.push(responses_input_message(message));
                 }

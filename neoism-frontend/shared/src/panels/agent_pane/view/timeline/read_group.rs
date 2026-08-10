@@ -129,12 +129,7 @@ fn is_read_like_tool(tool: &str) -> bool {
             | "ls"
             | "find"
             | "search"
-            | "ffgrep"
-            | "fffind"
             | "multigrep"
-            | "ffmultigrep"
-            | "fffmultigrep"
-            | "fffmultigrepbatch"
             | "toolgroup"
     )
 }

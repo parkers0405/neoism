@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::web::{bounded_arg, limit_text, render_web_body, string_array_or_single_arg};
+use super::web::render_web_body;
 use super::*;
 
 fn allow_context(root: &Path) -> ToolContext {
@@ -32,7 +32,7 @@ async fn safe_filesystem_tools_execute_inside_project() {
     let read = execute(
         "read",
         context.clone(),
-        json!({ "path": "src/lib.rs", "limit": 1 }),
+        json!({ "filePath": "src/lib.rs", "limit": 1 }),
     )
     .await
     .unwrap();
@@ -40,43 +40,17 @@ async fn safe_filesystem_tools_execute_inside_project() {
     assert!(read.output.contains("1: fn main() {}"));
 
     std::fs::write(root.join("src/other.rs"), "fn other() {}\n").unwrap();
-    let batch_read = execute(
-        "read",
-        context.clone(),
-        json!({ "paths": ["src/lib.rs", "src/other.rs"], "limit": 1 }),
-    )
-    .await
-    .unwrap();
-    assert!(batch_read.output.contains("src/lib.rs"));
-    assert!(batch_read.output.contains("src/other.rs"));
-    assert_eq!(batch_read.metadata.as_ref().unwrap()["type"], "batch");
-    assert_eq!(batch_read.metadata.as_ref().unwrap()["count"], 2);
-
-    let file_paths_batch_read = execute(
-        "read",
-        context.clone(),
-        json!({ "paths": [], "filePaths": ["src/lib.rs", "src/other.rs"], "limit": 1 }),
-    )
-    .await
-    .unwrap();
-    assert!(file_paths_batch_read.output.contains("src/lib.rs"));
-    assert!(file_paths_batch_read.output.contains("src/other.rs"));
-    assert_eq!(
-        file_paths_batch_read.metadata.as_ref().unwrap()["type"],
-        "batch"
-    );
-    assert_eq!(file_paths_batch_read.metadata.as_ref().unwrap()["count"], 2);
-
-    let listed = execute("list", context.clone(), json!({ "path": "." }))
+    let listed = execute("read", context.clone(), json!({ "filePath": "." }))
         .await
         .unwrap();
-    assert_eq!(listed.output, "src/");
+    assert!(listed.output.contains("<type>directory</type>"));
+    assert!(listed.output.contains("src/"));
 
     let grep = execute("grep", context.clone(), json!({ "pattern": "needle" }))
         .await
         .unwrap();
     assert!(grep.output.contains("src/lib.rs:"));
-    assert!(grep.output.contains("Line 2:"));
+    assert!(grep.output.contains("Line 2"));
 
     let glob = execute("glob", context, json!({ "pattern": "*.rs" }))
         .await
@@ -88,7 +62,7 @@ async fn safe_filesystem_tools_execute_inside_project() {
 }
 
 #[tokio::test]
-async fn grep_and_glob_return_opencode_style_metadata() {
+async fn grep_and_glob_return_bounded_fff_metadata() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-search-metadata-{}",
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
@@ -106,11 +80,11 @@ async fn grep_and_glob_return_opencode_style_metadata() {
     )
     .await
     .unwrap();
-    assert!(grep.output.contains("Found 2 matches (showing first 1)"));
+    assert!(grep.output.contains("Grep: Found"));
     assert!(grep.output.contains("src/a.rs:"));
     assert!(!grep.output.contains("src/b.txt"));
     let metadata = grep.metadata.unwrap();
-    assert_eq!(metadata["matches"], 2);
+    assert_eq!(metadata["engine"], "fff");
     assert_eq!(metadata["truncated"], true);
     assert_eq!(metadata["items"].as_array().unwrap().len(), 1);
     assert_eq!(metadata["items"][0]["line"], 1);
@@ -118,13 +92,13 @@ async fn grep_and_glob_return_opencode_style_metadata() {
     let glob = execute(
         "glob",
         context.clone(),
-        json!({ "pattern": "*.{rs,txt}", "path": "src", "exclude": "b.txt", "limit": 1 }),
+        json!({ "pattern": "a.rs", "path": "src", "limit": 1 }),
     )
     .await
     .unwrap();
     let metadata = glob.metadata.unwrap();
     assert_eq!(metadata["count"], 1);
-    assert_eq!(metadata["total"], 1);
+    assert_eq!(metadata["engine"], "fff");
     assert_eq!(metadata["truncated"], false);
     assert_eq!(metadata["items"].as_array().unwrap().len(), 1);
 
@@ -141,7 +115,7 @@ async fn grep_and_glob_return_opencode_style_metadata() {
 }
 
 #[tokio::test]
-async fn fff_tools_search_files_contents_and_variants() {
+async fn canonical_search_tools_expose_fff_modes_and_multi_pattern_search() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-fff-search-{}",
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
@@ -157,28 +131,17 @@ async fn fff_tools_search_files_contents_and_variants() {
     let context = allow_context(&root);
 
     let find = execute(
-        "fffind",
+        "glob",
         context.clone(),
-        json!({ "query": "upload", "limit": 5 }),
+        json!({ "pattern": "upload", "limit": 5 }),
     )
     .await
     .unwrap();
     assert!(find.output.contains("src/upload.rs"));
     assert_eq!(find.metadata.as_ref().unwrap()["engine"], "fff");
 
-    let listed = execute(
-        "fffind",
-        context.clone(),
-        json!({ "path": "src", "limit": 10 }),
-    )
-    .await
-    .unwrap();
-    assert!(listed.output.contains("other.rs"));
-    assert!(listed.output.contains("upload.rs"));
-    assert_eq!(listed.metadata.as_ref().unwrap()["engine"], "directory");
-
     let grep = execute(
-        "ffgrep",
+        "grep",
         context.clone(),
         json!({ "pattern": "PrepareUpload", "limit": 5 }),
     )
@@ -189,7 +152,7 @@ async fn fff_tools_search_files_contents_and_variants() {
     assert_eq!(grep.metadata.as_ref().unwrap()["engine"], "fff");
 
     let scoped_grep = execute(
-        "ffgrep",
+        "grep",
         context.clone(),
         json!({ "pattern": "PrepareUpload", "path": "src", "include": "*.rs", "limit": 5 }),
     )
@@ -199,9 +162,9 @@ async fn fff_tools_search_files_contents_and_variants() {
     assert!(scoped_grep.output.contains("Line 1"));
 
     let multi = execute(
-        "fff_multi_grep",
+        "grep",
         context,
-        json!({ "patterns": ["PrepareUpload", "prepare_upload"], "limit": 10 }),
+        json!({ "pattern": ["PrepareUpload", "prepare_upload"], "limit": 10 }),
     )
     .await
     .unwrap();
@@ -213,7 +176,7 @@ async fn fff_tools_search_files_contents_and_variants() {
 }
 
 #[tokio::test]
-async fn notes_tool_indexes_and_queries_workspace_notes() {
+async fn notes_tool_uses_plain_workspace_note_files() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-notes-{}",
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
@@ -226,8 +189,6 @@ async fn notes_tool_indexes_and_queries_workspace_notes() {
     let notes_root =
         notes_home.join(neoism_workspace_index::config::DEFAULT_NOTES_WORKSPACE);
     let roadmap = "Roadmap.md".to_string();
-    let plan = "Plan.md".to_string();
-    let planning_roadmap = "Planning/Roadmap.md".to_string();
     std::fs::create_dir_all(&notes_root).unwrap();
     std::fs::write(
         notes_root.join("Roadmap.md"),
@@ -244,21 +205,14 @@ async fn notes_tool_indexes_and_queries_workspace_notes() {
     let init = execute("notes", context.clone(), json!({ "operation": "init" }))
         .await
         .unwrap();
-    assert!(init.output.contains("Initialized note graph"));
+    assert!(init.output.contains("Notes folder"));
     assert_eq!(init.metadata.as_ref().unwrap()["operation"], "init");
 
-    let backlinks = execute(
-        "notes",
-        context.clone(),
-        json!({ "operation": "backlinks", "note": "Roadmap" }),
-    )
-    .await
-    .unwrap();
-    assert!(backlinks.output.contains(&format!("{plan}:3 -> {roadmap}")));
-    assert_eq!(
-        backlinks.metadata.as_ref().unwrap()["links"][0]["sourcePath"],
-        plan
-    );
+    let list = execute("notes", context.clone(), json!({ "operation": "list" }))
+        .await
+        .unwrap();
+    assert!(list.output.contains(&roadmap));
+    assert!(list.output.contains("Plan.md"));
 
     let search = execute(
         "notes",
@@ -269,20 +223,10 @@ async fn notes_tool_indexes_and_queries_workspace_notes() {
     .unwrap();
     assert!(search.output.contains(&format!("{roadmap}:7")));
 
-    let properties = execute(
-        "notes",
-        context.clone(),
-        json!({ "operation": "properties", "note": "Roadmap" }),
-    )
-    .await
-    .unwrap();
-    assert!(properties
-        .output
-        .contains(&format!("{roadmap} owner=\"Parker\"")));
-    assert_eq!(
-        properties.metadata.as_ref().unwrap()["properties"][0]["path"],
-        roadmap
-    );
+    let tasks = execute("notes", context.clone(), json!({ "operation": "tasks" }))
+        .await
+        .unwrap();
+    assert!(tasks.output.contains("Roadmap.md:7 - [ ] ship notes"));
 
     let toggled = execute(
         "notes",
@@ -291,29 +235,16 @@ async fn notes_tool_indexes_and_queries_workspace_notes() {
     )
     .await
     .unwrap();
-    assert!(toggled
-        .output
-        .contains(&format!("{roadmap}:7 - [x] ship notes")));
-    assert_eq!(toggled.metadata.as_ref().unwrap()["task"]["checked"], true);
+    assert!(toggled.output.contains("Roadmap.md:7"));
+    assert_eq!(toggled.metadata.as_ref().unwrap()["checked"], true);
+    assert!(std::fs::read_to_string(notes_root.join("Roadmap.md"))
+        .unwrap()
+        .contains("- [x] ship notes"));
 
-    std::fs::create_dir_all(notes_root.join("Planning")).unwrap();
-    std::fs::rename(
-        notes_root.join("Roadmap.md"),
-        notes_root.join("Planning/Roadmap.md"),
-    )
-    .unwrap();
-    let repaired = execute(
-        "notes",
-        context,
-        json!({ "operation": "repairMove", "oldPath": roadmap, "newPath": planning_roadmap }),
-    )
-    .await
-    .unwrap();
-    assert!(repaired.output.contains("Repaired 1 links in 1 files"));
-    assert_eq!(
-        std::fs::read_to_string(notes_root.join("Plan.md")).unwrap(),
-        "# Plan\n\nBack to [[Planning/Roadmap]].\n"
-    );
+    let graph = execute("notes", context, json!({ "operation": "graph" }))
+        .await
+        .unwrap();
+    assert_eq!(graph.metadata.as_ref().unwrap()["disabled"], true);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -336,81 +267,13 @@ async fn safe_tools_reject_external_paths() {
         "read",
         ToolContext::new(&root)
             .with_permissions(BTreeMap::from([("read".to_string(), json!("allow"))])),
-        json!({ "path": external.to_string_lossy() }),
+        json!({ "filePath": external.to_string_lossy() }),
     )
     .await
     .unwrap_err();
     assert!(error.to_string().contains("external_directory"));
 
     let _ = std::fs::remove_file(external);
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn read_many_reads_per_file_ranges() {
-    let root = std::env::temp_dir().join(format!(
-        "neoism-agent-read-many-{}",
-        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/a.rs"), "a1\na2\na3\na4\n").unwrap();
-    std::fs::write(root.join("src/b.rs"), "b1\nb2\nb3\n").unwrap();
-
-    let result = execute(
-        "read_many",
-        allow_context(&root),
-        json!({
-            "files": [
-                { "path": "src/a.rs", "ranges": [{ "offset": 2, "limit": 2 }] },
-                { "path": "src/b.rs", "offset": 3, "limit": 1 }
-            ]
-        }),
-    )
-    .await
-    .unwrap();
-
-    assert!(result.output.contains("2: a2"));
-    assert!(result.output.contains("3: a3"));
-    assert!(result.output.contains("3: b3"));
-    assert_eq!(result.metadata.unwrap()["count"], 2);
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn read_around_reads_pattern_window() {
-    let root = std::env::temp_dir().join(format!(
-        "neoism-agent-read-around-{}",
-        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(
-        root.join("src/lib.rs"),
-        "one\ntwo\nfn target() {}\nfour\nfive\n",
-    )
-    .unwrap();
-
-    let result = execute(
-        "read_around",
-        allow_context(&root),
-        json!({
-            "path": "src/lib.rs",
-            "line": 0,
-            "pattern": "target",
-            "before": 1,
-            "after": 1
-        }),
-    )
-    .await
-    .unwrap();
-
-    assert!(result.output.contains("2: two"));
-    assert!(result.output.contains("3: fn target() {}"));
-    assert!(result.output.contains("4: four"));
-    assert!(!result.output.contains("1: one"));
-
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -443,7 +306,7 @@ async fn external_directory_permission_allows_whitelisted_paths() {
                 Value::Object(external_rules),
             ),
         ])),
-        json!({ "path": external.to_string_lossy() }),
+        json!({ "filePath": external.to_string_lossy() }),
     )
     .await
     .unwrap();
@@ -468,12 +331,12 @@ async fn read_tool_lists_directories_with_offsets() {
     let result = execute(
         "read",
         allow_context(&root),
-        json!({ "path": "dir", "offset": 2, "limit": 2 }),
+        json!({ "filePath": "dir", "offset": 2, "limit": 2 }),
     )
     .await
     .unwrap();
     assert!(result.output.contains("<type>directory</type>"));
-    assert!(result.output.contains("b.txt\nsub/"));
+    assert!(result.output.contains("a.txt\nb.txt"));
     let metadata = result.metadata.unwrap();
     assert_eq!(metadata["type"], "directory");
     assert_eq!(metadata["truncated"], false);
@@ -482,7 +345,7 @@ async fn read_tool_lists_directories_with_offsets() {
 }
 
 #[tokio::test]
-async fn read_tool_prefers_file_path_over_path_context() {
+async fn read_tool_uses_the_canonical_file_path_argument() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-read-filepath-{}",
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
@@ -495,7 +358,6 @@ async fn read_tool_prefers_file_path_over_path_context() {
         "read",
         allow_context(&root),
         json!({
-            "path": root.to_string_lossy(),
             "filePath": "TASK.md",
             "offset": 1,
             "limit": 5,
@@ -577,6 +439,52 @@ async fn read_tool_returns_media_attachment_metadata() {
 }
 
 #[tokio::test]
+async fn write_tool_creates_nested_missing_directories() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-write-nested-{}",
+        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    execute(
+        "write",
+        allow_context(&root),
+        json!({ "filePath": "new/deep/file.txt", "content": "nested\n" }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("new/deep/file.txt")).unwrap(),
+        "nested\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn read_tool_rejects_invalid_utf8_text() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-read-invalid-utf8-{}",
+        neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("invalid.txt"), [b'a', 0xff, b'\n']).unwrap();
+
+    let error = execute(
+        "read",
+        allow_context(&root),
+        json!({ "filePath": "invalid.txt" }),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("not valid UTF-8"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn bash_tool_runs_in_project_and_obeys_permission() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-bash-tool-{}",
@@ -648,8 +556,13 @@ async fn bash_tool_stops_when_cancelled() {
         .expect("bash tool should return quickly after cancellation")
         .unwrap()
         .unwrap_err();
-    assert!(error.to_string().contains("bash command aborted"));
-    assert!(error.to_string().contains("started"));
+    let error = error.to_string();
+    assert!(error.to_ascii_lowercase().contains("command aborted"));
+    assert!(
+        error.contains("started") || error.contains("(no output)"),
+        "{error}"
+    );
+    assert!(!error.contains("finished"), "{error}");
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -668,7 +581,7 @@ async fn safe_tools_apply_permission_rules() {
         ("read".to_string(), json!("deny")),
     ]));
 
-    let error = execute("read", context, json!({ "path": "file.txt" }))
+    let error = execute("read", context, json!({ "filePath": "file.txt" }))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("permission read"));
@@ -692,7 +605,7 @@ async fn write_and_edit_tools_modify_project_files() {
     let written = execute(
         "write",
         context.clone(),
-        json!({ "path": "notes.txt", "content": "hello world" }),
+        json!({ "filePath": "notes.txt", "content": "hello world" }),
     )
     .await
     .unwrap();
@@ -705,7 +618,7 @@ async fn write_and_edit_tools_modify_project_files() {
     let edited = execute(
         "edit",
         context,
-        json!({ "path": "notes.txt", "old": "world", "new": "neoism" }),
+        json!({ "filePath": "notes.txt", "oldString": "world", "newString": "neoism" }),
     )
     .await
     .unwrap();
@@ -806,17 +719,16 @@ async fn apply_patch_tool_modifies_project_files() {
         .unwrap();
 
     let patch = "\
-diff --git a/notes.txt b/notes.txt
---- a/notes.txt
-+++ b/notes.txt
-@@ -1 +1 @@
+*** Begin Patch
+*** Update File: notes.txt
+@@
 -hello world
 +hello neoism
-";
+*** End Patch";
     let result = execute(
         "apply_patch",
         allow_context(&root),
-        json!({ "patch": patch }),
+        json!({ "patchText": patch }),
     )
     .await
     .unwrap();
@@ -997,21 +909,6 @@ async fn v4a_apply_patch_rejects_move_to_existing_target() {
 }
 
 #[test]
-fn patch_paths_collects_new_and_modified_paths() {
-    let paths = patch::paths(
-        "\
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-diff --git a/new.txt b/new.txt
---- /dev/null
-+++ b/new.txt
-",
-    );
-    assert_eq!(paths, vec!["src/lib.rs", "new.txt"]);
-}
-
-#[test]
 fn render_web_body_strips_tags_and_caps_output() {
     let (body, truncated) =
         render_web_body(b"<html><body>Hello <b>Neoism</b></body></html>");
@@ -1019,49 +916,8 @@ fn render_web_body_strips_tags_and_caps_output() {
     assert!(!truncated);
 }
 
-#[test]
-fn web_batch_args_accept_arrays_and_single_fallbacks() {
-    let urls = string_array_or_single_arg(
-        &json!({ "urls": ["https://example.com", "https://neoism.dev"] }),
-        "urls",
-        "url",
-    )
-    .unwrap();
-    assert_eq!(urls, vec!["https://example.com", "https://neoism.dev"]);
-
-    let single = string_array_or_single_arg(
-        &json!({ "url": "https://example.com" }),
-        "urls",
-        "url",
-    )
-    .unwrap();
-    assert_eq!(single, vec!["https://example.com"]);
-
-    let error =
-        string_array_or_single_arg(&json!({ "urls": [] }), "urls", "url").unwrap_err();
-    assert!(error.to_string().contains("must not be empty"));
-}
-
-#[test]
-fn web_batch_limits_are_bounded() {
-    assert_eq!(bounded_arg(&json!({}), "concurrency", 4, 8), 4);
-    assert_eq!(
-        bounded_arg(&json!({ "concurrency": 0 }), "concurrency", 4, 8),
-        1
-    );
-    assert_eq!(
-        bounded_arg(&json!({ "concurrency": 99 }), "concurrency", 4, 8),
-        8
-    );
-
-    let (limited, truncated) = limit_text("abcdef", 3);
-    assert!(truncated);
-    assert!(limited.starts_with("abc"));
-    assert!(limited.contains("Item output truncated"));
-}
-
 #[tokio::test]
-async fn file_tools_accept_opencode_argument_aliases() {
+async fn file_tools_accept_canonical_arguments() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-tool-aliases-{}",
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
@@ -1150,7 +1006,7 @@ async fn edit_tool_rejects_patch_text_payloads() {
 
     assert!(error
         .to_string()
-        .contains("tool argument filePath is required"));
+        .contains("invalid tool input: $input.filePath is required"));
     assert_eq!(
         std::fs::read_to_string(root.join("TASK.md")).unwrap(),
         "before\n"
@@ -1194,6 +1050,9 @@ async fn v4a_patch_does_not_partially_apply_when_later_file_fails() {
 #[test]
 fn advertised_tools_use_opencode_patch_contract() {
     let tools = list();
+    assert!(tools.iter().all(|tool| tool.output_schema.is_some()));
+    let output_schema = tools[0].output_schema.as_ref().unwrap();
+    assert_eq!(output_schema["required"], json!(["title", "metadata"]));
     assert!(tools.iter().any(|tool| tool.id == "apply_patch"));
     assert!(!tools.iter().any(|tool| tool.id == "patch"));
     let edit = tools.iter().find(|tool| tool.id == "edit").unwrap();
@@ -1204,6 +1063,33 @@ fn advertised_tools_use_opencode_patch_contract() {
     let apply_patch = tools.iter().find(|tool| tool.id == "apply_patch").unwrap();
     assert_eq!(apply_patch.parameters["required"], json!(["patchText"]));
     assert!(apply_patch.parameters["properties"].get("patch").is_none());
+    let ids = tools
+        .iter()
+        .map(|tool| tool.id.as_str())
+        .collect::<Vec<_>>();
+    for removed in [
+        "read_many",
+        "read_around",
+        "list",
+        "ffgrep",
+        "fffind",
+        "fff_multi_grep",
+        "webfetch_batch",
+        "websearch_batch",
+    ] {
+        assert!(
+            !ids.contains(&removed),
+            "removed duplicate tool {removed} was advertised"
+        );
+    }
+    let read = tools.iter().find(|tool| tool.id == "read").unwrap();
+    assert_eq!(read.parameters["required"], json!(["filePath"]));
+    assert!(read.parameters["properties"].get("path").is_none());
+    let grep = tools.iter().find(|tool| tool.id == "grep").unwrap();
+    assert_eq!(grep.parameters["required"], json!(["pattern"]));
+    for tool in tools {
+        assert_eq!(tool.parameters["additionalProperties"], false);
+    }
 }
 
 #[tokio::test]
@@ -1222,7 +1108,7 @@ async fn write_tool_obeys_edit_permission() {
     let error = execute(
         "write",
         context,
-        json!({ "path": "notes.txt", "content": "blocked" }),
+        json!({ "filePath": "notes.txt", "content": "blocked" }),
     )
     .await
     .unwrap_err();
@@ -1360,7 +1246,7 @@ async fn lsp_tool_checks_external_directory_permission_for_file_operations() {
         "lsp",
         ToolContext::new(&root)
             .with_permissions(BTreeMap::from([("lsp".to_string(), json!("allow"))])),
-        json!({ "operation": "documentSymbol", "file": external.to_string_lossy() }),
+        json!({ "operation": "documentSymbol", "filePath": external.to_string_lossy() }),
     )
     .await
     .unwrap_err();
@@ -1378,7 +1264,7 @@ async fn lsp_tool_checks_external_directory_permission_for_file_operations() {
                 serde_json::Value::Object(external_rules),
             ),
         ])),
-        json!({ "operation": "documentSymbol", "file": external.to_string_lossy() }),
+        json!({ "operation": "documentSymbol", "filePath": external.to_string_lossy() }),
     )
     .await
     .unwrap();

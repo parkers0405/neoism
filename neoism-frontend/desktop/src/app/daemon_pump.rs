@@ -11,6 +11,8 @@ use crate::daemon_client::{
 use crate::event::{EventProxy, RioEvent, RioEventType};
 use neoism_protocol::workspace::WorkspaceClientMessage;
 
+const DAEMON_CLIENT_RUNTIME_WORKERS: usize = 2;
+
 pub struct DesktopDaemonConnection {
     _runtime: tokio::runtime::Runtime,
     runtime_handle: tokio::runtime::Handle,
@@ -28,6 +30,9 @@ impl DesktopDaemonConnection {
         event_proxy: EventProxy,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            // One websocket receive loop plus lightweight async sends do not
+            // need Tokio's default one-worker-per-logical-CPU allocation.
+            .worker_threads(DAEMON_CLIENT_RUNTIME_WORKERS)
             .thread_name("neoism-desktop-daemon-client")
             .enable_all()
             .build()?;

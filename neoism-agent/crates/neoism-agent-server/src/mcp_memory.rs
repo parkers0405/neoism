@@ -782,7 +782,9 @@ fn safe_memory_path(root: &MemoryRoot, raw: &str) -> anyhow::Result<PathBuf> {
 }
 
 fn reindex_root(root: &MemoryRoot) -> anyhow::Result<()> {
-    let _ = neoism_workspace_index::NoteGraph::from_workspace(root.workspace.clone())?;
+    // Memory entries are ordinary Markdown files. Persistent note graph
+    // indexing is disabled, so writes need no database follow-up.
+    let _ = root;
     Ok(())
 }
 

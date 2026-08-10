@@ -1,5 +1,11 @@
 use super::*;
 
+fn claim_live_panel_owner(owner: &mut Option<WorkspaceKey>, workspace: &WorkspaceKey) {
+    if owner.is_none() {
+        *owner = Some(workspace.clone());
+    }
+}
+
 impl Screen<'_> {
     pub(crate) fn initial_process_workspace_root() -> Option<PathBuf> {
         let cwd = std::env::current_dir().ok()?;
@@ -399,6 +405,15 @@ impl Screen<'_> {
         let Some(id) = self.current_workspace_id() else {
             return;
         };
+        // `Screen` starts with live file/notes panels but no owner key. Claim
+        // them for the initial workspace before any operation redirects the
+        // context manager to another grid. Otherwise the first
+        // `load_current_workspace_chrome` treats those live panels as the new
+        // workspace's state: the new workspace inherits both open sidebars,
+        // while returning to the original workspace restores fresh (closed)
+        // defaults.
+        claim_live_panel_owner(&mut self.file_tree_workspace, &id);
+        claim_live_panel_owner(&mut self.notes_sidebar_workspace, &id);
         let next_tabs_empty = self.renderer.buffer_tabs.tabs().is_empty();
         let saved_tabs_non_empty = self
             .workspace_buffer_tabs
@@ -495,6 +510,10 @@ impl Screen<'_> {
             let notes_width = self.renderer.notes_sidebar.width();
             let had_workspace = self.notes_sidebar_workspace.is_some();
             if let Some(old_id) = self.notes_sidebar_workspace.take() {
+                if let Some(path) = self.renderer.notes_sidebar.workspace_path() {
+                    self.workspace_notes_vaults
+                        .insert(old_id.clone(), path.to_path_buf());
+                }
                 let outgoing = std::mem::take(&mut self.renderer.notes_sidebar);
                 self.workspace_notes_sidebars.insert(old_id, outgoing);
             }
@@ -508,6 +527,20 @@ impl Screen<'_> {
                             std::mem::take(&mut self.renderer.notes_sidebar)
                         }
                     });
+            if incoming.workspace_path().is_none() {
+                if let Some(path) = self.workspace_notes_vaults.get(&id).cloned() {
+                    #[cfg(target_os = "macos")]
+                    incoming.set_workspace_path(Some(path));
+                    #[cfg(not(target_os = "macos"))]
+                    incoming.set_workspace(
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("Notes")
+                            .to_string(),
+                        Some(path),
+                    );
+                }
+            }
             incoming.set_width(notes_width);
             incoming.set_scale(self.renderer.chrome_scale());
             self.renderer.notes_sidebar = incoming;
@@ -1065,5 +1098,28 @@ impl Screen<'_> {
             return;
         };
         self.set_active_workspace_root(root, true);
+    }
+}
+
+#[cfg(test)]
+mod workspace_panel_owner_tests {
+    use super::claim_live_panel_owner;
+
+    #[test]
+    fn initial_live_panel_is_claimed_by_current_workspace() {
+        let mut owner = None;
+
+        claim_live_panel_owner(&mut owner, &"workspace-a".to_string());
+
+        assert_eq!(owner.as_deref(), Some("workspace-a"));
+    }
+
+    #[test]
+    fn existing_live_panel_owner_is_not_reassigned() {
+        let mut owner = Some("workspace-a".to_string());
+
+        claim_live_panel_owner(&mut owner, &"workspace-b".to_string());
+
+        assert_eq!(owner.as_deref(), Some("workspace-a"));
     }
 }

@@ -47,8 +47,6 @@ impl Screen<'_> {
         })();
         match result {
             Ok(()) => {
-                self.invalidate_note_index_for_path(path);
-                self.rebuild_note_graph_for_path(path);
                 self.refresh_file_tree_entries();
                 self.renderer.notifications.push(
                     format!("Created note {}", path.display()),
@@ -121,6 +119,21 @@ impl Screen<'_> {
             .is_some_and(|markdown| markdown.is_grab_dragging())
     }
 
+    fn yank_contact_link(&mut self, target: &str, clipboard: &mut Clipboard) -> bool {
+        let value = neoism_ui::editor::markdown::markdown_contact_value(target);
+        let Some(value) = value else {
+            return false;
+        };
+        let value = value.trim().to_string();
+        clipboard.set(ClipboardType::Clipboard, value.clone());
+        self.renderer.notifications.push(
+            format!("Yanked `{value}`"),
+            neoism_ui::panels::notifications::NotificationLevel::Info,
+        );
+        self.mark_dirty();
+        true
+    }
+
     pub fn handle_markdown_mouse_press(
         &mut self,
         button: MouseButton,
@@ -177,7 +190,10 @@ impl Screen<'_> {
                 .active_markdown()
                 .and_then(|markdown| markdown.link_at(x, y))
             {
-                self.open_markdown_link_target(target);
+                let contact = target.path.to_string_lossy().into_owned();
+                if !self.yank_contact_link(&contact, clipboard) {
+                    self.open_markdown_link_target(target);
+                }
                 return true;
             }
             if let Some(markdown) =
@@ -221,7 +237,10 @@ impl Screen<'_> {
             .active_markdown()
             .and_then(|markdown| markdown.link_at(x, y))
         {
-            self.open_markdown_link_target(target);
+            let contact = target.path.to_string_lossy().into_owned();
+            if !self.yank_contact_link(&contact, clipboard) {
+                self.open_markdown_link_target(target);
+            }
             return true;
         }
         if let Some(rect) = self
@@ -1142,17 +1161,22 @@ impl Screen<'_> {
                         .active_markdown()
                         .and_then(|markdown| markdown.resolve_markdown_link(&target));
                     if let Some(target) = resolved {
-                        self.open_markdown_link_target(target);
+                        let contact = target.path.to_string_lossy().into_owned();
+                        if !self.yank_contact_link(&contact, clipboard) {
+                            self.open_markdown_link_target(target);
+                        }
                     }
                 }
                 neoism_ui::editor::markdown::MarkdownCursorLink::External(target) => {
-                    self.open_markdown_link_target(
-                        neoism_ui::editor::markdown::MarkdownLinkTarget {
-                            path: std::path::PathBuf::from(target),
-                            line: None,
-                            code_ref: false,
-                        },
-                    );
+                    if !self.yank_contact_link(&target, clipboard) {
+                        self.open_markdown_link_target(
+                            neoism_ui::editor::markdown::MarkdownLinkTarget {
+                                path: std::path::PathBuf::from(target),
+                                line: None,
+                                code_ref: false,
+                            },
+                        );
+                    }
                 }
             }
             return;
@@ -1281,7 +1305,12 @@ impl Screen<'_> {
                         message = Some(Self::markdown_yank_message(&register));
                     }
                     if applied.sync_clipboard {
-                        clipboard.set(ClipboardType::Clipboard, register);
+                        let clipboard_text = if applied.yank_notification {
+                            neoism_ui::editor::markdown::rendered_inline_text(&register)
+                        } else {
+                            register
+                        };
+                        clipboard.set(ClipboardType::Clipboard, clipboard_text);
                     }
                 }
                 // Macro replay for markdown: feed chars while replaying.
@@ -1561,7 +1590,12 @@ impl Screen<'_> {
                         handled = applied.handled;
                         if let Some(register) = applied.register {
                             if applied.sync_clipboard {
-                                clipboard.set(ClipboardType::Clipboard, register.clone());
+                                clipboard.set(
+                                    ClipboardType::Clipboard,
+                                    neoism_ui::editor::markdown::rendered_inline_text(
+                                        &register,
+                                    ),
+                                );
                             }
                             if applied.yank_notification {
                                 yank_message =

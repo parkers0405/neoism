@@ -55,7 +55,8 @@ pub(crate) struct SessionShellRequest {
 
 pub(crate) async fn abort_session_run(state: &AppState, session_id: &str) -> bool {
     let cancelled = state.inner.runs.write().await.remove(session_id);
-    if let Some(cancelled) = &cancelled {
+    let coordinated = state.inner.session_coordinator.abort_run(session_id).await;
+    if let Some(cancelled) = cancelled.as_ref().or(coordinated.as_ref()) {
         cancelled.cancel.store(true, Ordering::SeqCst);
     }
     let was_busy = state
@@ -113,7 +114,7 @@ pub(crate) async fn abort_session_run(state: &AppState, session_id: &str) -> boo
         }
     }
 
-    cancelled.is_some() || was_busy
+    cancelled.is_some() || coordinated.is_some() || was_busy
 }
 
 pub(crate) async fn create_subtask_session(

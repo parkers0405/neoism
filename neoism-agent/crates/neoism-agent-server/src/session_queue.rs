@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -109,13 +107,57 @@ pub(crate) async fn enqueue_prompt_request(
     session_id: &str,
     request: PromptRequest,
 ) -> Result<(bool, usize), ApiError> {
-    let mut workers = state.inner.prompt_queue_workers.write().await;
+    enqueue_prompt_request_with_delivery(state, session_id, request, "queue").await
+}
+
+pub(crate) async fn enqueue_prompt_request_with_delivery(
+    state: &AppState,
+    session_id: &str,
+    request: PromptRequest,
+    delivery: &str,
+) -> Result<(bool, usize), ApiError> {
+    if !matches!(delivery, "steer" | "queue") {
+        return Err(ApiError::bad_request(format!(
+            "delivery must be steer or queue, got {delivery}"
+        )));
+    }
+    if let Some(message_id) = request.message_id.as_ref() {
+        let queued = state
+            .inner
+            .store
+            .list_queued_prompt_entries(session_id)
+            .await?;
+        if let Some((existing, existing_delivery)) = queued
+            .iter()
+            .find(|(queued, _)| queued.message_id.as_ref() == Some(message_id))
+        {
+            if existing_delivery != delivery
+                || serde_json::to_value(existing).ok()
+                    != serde_json::to_value(&request).ok()
+            {
+                return Err(ApiError::conflict(format!(
+                    "message {message_id} is already queued with different prompt content"
+                )));
+            }
+            return Ok((false, queued.len()));
+        }
+    }
     let queue_len = state
-        .inner
-        .store
-        .enqueue_prompt(session_id, &request)
+        .enqueue_prompt_with_event(
+            session_id,
+            &request,
+            delivery,
+            EventPayload::new(
+                event_type::SESSION_PROMPT_ADMITTED,
+                json!({
+                    "sessionID": session_id,
+                    "delivery": delivery,
+                    "request": request,
+                }),
+            ),
+        )
         .await?;
-    let start_worker = workers.insert(session_id.to_string());
+    let start_worker = state.inner.session_coordinator.wake(session_id).await;
     Ok((start_worker, queue_len))
 }
 
@@ -129,10 +171,9 @@ async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueI
     let running = state.inner.runs.read().await.contains_key(session_id);
     let worker = state
         .inner
-        .prompt_queue_workers
-        .read()
-        .await
-        .contains(session_id);
+        .session_coordinator
+        .worker_active(session_id)
+        .await;
     SessionQueueInfo {
         session_id: session_id.to_string(),
         count: items.len(),
@@ -209,14 +250,6 @@ async fn clear_queued_prompts(state: &AppState, session_id: &str) -> usize {
         .clear_queued_prompts(session_id)
         .await
         .unwrap_or(0);
-    if !state.inner.runs.read().await.contains_key(session_id) {
-        state
-            .inner
-            .prompt_queue_workers
-            .write()
-            .await
-            .remove(session_id);
-    }
     removed
 }
 
@@ -228,14 +261,6 @@ async fn pop_queued_prompt(state: &AppState, session_id: &str) -> Option<PromptR
         .await
         .ok()
         .flatten();
-    if popped.is_some() && !state.inner.runs.read().await.contains_key(session_id) {
-        state
-            .inner
-            .prompt_queue_workers
-            .write()
-            .await
-            .remove(session_id);
-    }
     popped
 }
 
@@ -267,16 +292,22 @@ async fn next_queued_prompt(
     state: &AppState,
     session_id: &str,
 ) -> Option<(PromptRequest, usize)> {
-    let mut workers = state.inner.prompt_queue_workers.write().await;
+    next_prompt_with_delivery(state, session_id, None).await
+}
+
+async fn next_prompt_with_delivery(
+    state: &AppState,
+    session_id: &str,
+    delivery: Option<&str>,
+) -> Option<(PromptRequest, usize)> {
     let Some(request) = state
         .inner
         .store
-        .pop_queued_prompt(session_id)
+        .pop_queued_prompt_with_delivery(session_id, delivery)
         .await
         .ok()
         .flatten()
     else {
-        workers.remove(session_id);
         return None;
     };
     let remaining = state
@@ -295,10 +326,9 @@ pub(crate) async fn publish_prompt_queue_status(
 ) {
     let active_worker = state
         .inner
-        .prompt_queue_workers
-        .read()
-        .await
-        .contains(session_id);
+        .session_coordinator
+        .worker_active(session_id)
+        .await;
     let status = if active_worker
         || queue_len > 0
         || state.inner.runs.read().await.contains_key(session_id)
@@ -350,7 +380,9 @@ pub(crate) async fn drain_queued_prompts_into_active_run(
     session_id: &str,
 ) -> usize {
     let mut drained = 0;
-    while let Some((request, remaining)) = next_queued_prompt(state, session_id).await {
+    while let Some((request, remaining)) =
+        next_prompt_with_delivery(state, session_id, Some("steer")).await
+    {
         publish_prompt_queue_changed(state, session_id, "dequeue", Some(&request), 1)
             .await;
         publish_prompt_queue_status(state, session_id, remaining).await;
@@ -366,9 +398,21 @@ pub(crate) async fn drain_queued_prompts_into_active_run(
 }
 
 async fn wait_until_session_not_running(state: &AppState, session_id: &str) {
-    while state.inner.runs.read().await.contains_key(session_id) {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    // Adopt any run installed by recovery/tests/older internal callers so the
+    // coordinator remains compatible with durable run restoration while the
+    // map is phased behind the keyed owner API.
+    if let Some(run) = state.inner.runs.read().await.get(session_id).cloned() {
+        let _ = state
+            .inner
+            .session_coordinator
+            .try_start_run(session_id, run)
+            .await;
     }
+    state
+        .inner
+        .session_coordinator
+        .wait_until_idle(session_id)
+        .await;
 }
 
 pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
@@ -376,6 +420,14 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
         wait_until_session_not_running(&state, &session_id).await;
         let Some((request, remaining)) = next_queued_prompt(&state, &session_id).await
         else {
+            if state
+                .inner
+                .session_coordinator
+                .finish_worker_cycle(&session_id)
+                .await
+            {
+                continue;
+            }
             break;
         };
         publish_prompt_queue_changed(&state, &session_id, "dequeue", Some(&request), 1)
@@ -400,8 +452,7 @@ pub(crate) fn spawn_drain_prompt_queue(state: AppState, session_id: String) {
 
 pub(crate) async fn resume_prompt_queues(state: AppState) -> anyhow::Result<()> {
     for session_id in state.inner.store.queued_session_ids().await? {
-        let mut workers = state.inner.prompt_queue_workers.write().await;
-        if workers.insert(session_id.clone()) {
+        if state.inner.session_coordinator.wake(&session_id).await {
             tokio::spawn(drain_prompt_queue(state.clone(), session_id));
         }
     }

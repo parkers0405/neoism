@@ -17,6 +17,11 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
     let mut out = Vec::new();
     let mut rest = line;
     while !rest.is_empty() {
+        if let Some((escaped, consumed)) = md::backslash_escape_at_start(rest) {
+            out.push(MarkdownInlineSegment::Text(escaped.to_string()));
+            rest = &rest[consumed..];
+            continue;
+        }
         if let Some(after) = rest.strip_prefix("**") {
             if let Some(end) = after.find("**") {
                 out.push(MarkdownInlineSegment::Bold(after[..end].to_string()));
@@ -45,12 +50,9 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
             }
         }
         if let Some(link) = md::parse_markdown_link(rest) {
-            let web_target = md::web_url_target(link.target);
-            let target = web_target.map(str::to_string).or_else(|| {
-                md::looks_like_file_ref(link.target).then(|| link.target.to_string())
-            });
+            let target = md::rendered_link_target(link.target).map(str::to_string);
             out.push(MarkdownInlineSegment::MarkdownLink {
-                label: link.label.to_string(),
+                label: markdown_link_visible_label(link.label).to_string(),
                 source_target: link.target.to_string(),
                 target,
             });
@@ -63,6 +65,24 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
         rest = &rest[text.len()..];
     }
     out
+}
+
+fn markdown_link_visible_label(label: &str) -> &str {
+    [
+        ("**", "**"),
+        ("__", "__"),
+        ("~~", "~~"),
+        ("`", "`"),
+        ("*", "*"),
+    ]
+    .into_iter()
+    .find_map(|(open, close)| {
+        label
+            .strip_prefix(open)
+            .and_then(|inner| inner.strip_suffix(close))
+            .filter(|inner| !inner.is_empty())
+    })
+    .unwrap_or(label)
 }
 
 fn parse_plain_markdown_segment(text: &str, out: &mut Vec<MarkdownInlineSegment>) {

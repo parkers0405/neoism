@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,8 +12,8 @@ use neoism_agent_core::{
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
-use sqlx::SqlitePool;
-use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
+use sqlx::{Acquire as _, SqlitePool};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use turso::Value as SqlValue;
 
 use crate::auth_store::AuthStore;
@@ -36,9 +36,10 @@ pub(crate) struct InnerState {
     pub(crate) provider_catalog: ProviderCatalog,
     pub(crate) provider_oauth: RwLock<HashMap<String, ProviderOAuthPending>>,
     pub(crate) plugins: PluginRegistry,
+    pub(crate) workspace_runtimes: crate::workspace_runtime::WorkspaceRuntimeRegistry,
     pub(crate) statuses: RwLock<HashMap<String, SessionStatus>>,
     pub(crate) runs: RwLock<HashMap<String, SessionRun>>,
-    pub(crate) prompt_queue_workers: RwLock<HashSet<String>>,
+    pub(crate) session_coordinator: crate::session_coordinator::SessionCoordinator,
     pub(crate) background_jobs:
         RwLock<HashMap<String, crate::background_job::BackgroundJob>>,
     pub(crate) background_job_cancellations: RwLock<HashMap<String, oneshot::Sender<()>>>,
@@ -51,6 +52,7 @@ pub(crate) struct InnerState {
     pub(crate) ptys: RwLock<HashMap<String, PtyInfo>>,
     pub(crate) pty_connect_tokens: RwLock<crate::pty::ConnectTokens>,
     events: broadcast::Sender<EventPayload>,
+    event_writer: mpsc::UnboundedSender<(EventPayload, bool)>,
 }
 
 pub(crate) struct PermissionPending {
@@ -62,7 +64,7 @@ pub(crate) struct QuestionPending {
     pub(crate) sender: oneshot::Sender<Result<Vec<Vec<String>>, String>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct SessionRun {
     pub(crate) id: String,
     pub(crate) started_at: u64,
@@ -141,13 +143,20 @@ pub(crate) struct SessionStore {
 
 /// The two storage engines behind one set of SQL. Every statement the store
 /// issues must stay inside the dialect both engines support (FTS5 is the one
-/// exception, handled explicitly). Turso connections come from an internal
-/// pool, so `connect()` per operation is cheap and lets MVCC run writes
-/// concurrently.
+/// exception, handled explicitly). Reads may run concurrently, while writes
+/// pass through one process-local gate. SQLite-family engines only have one
+/// durable writer at a time; queueing here avoids making ordinary in-process
+/// contention consume the backend's bounded busy retry budget.
 #[derive(Clone)]
 enum Db {
-    Sqlite(SqlitePool),
-    Turso(turso::Database),
+    Sqlite {
+        pool: SqlitePool,
+        write_gate: Arc<Mutex<()>>,
+    },
+    Turso {
+        database: turso::Database,
+        write_gate: Arc<Mutex<()>>,
+    },
 }
 
 /// An engine-agnostic row: column names plus SQLite-typed values.
@@ -220,6 +229,43 @@ fn opt_text(value: Option<String>) -> SqlValue {
 
 fn int(value: i64) -> SqlValue {
     SqlValue::Integer(value)
+}
+
+fn event_statements(
+    event: &EventPayload,
+    aggregate_id: &str,
+    session_id: Option<String>,
+    owner_id: Option<&str>,
+) -> anyhow::Result<Vec<(String, Vec<SqlValue>)>> {
+    Ok(vec![
+        (
+            r#"
+            INSERT INTO event_sequences (aggregate_id, seq, owner_id)
+            VALUES (?, 0, ?)
+            ON CONFLICT(aggregate_id) DO UPDATE SET
+                seq = event_sequences.seq + 1,
+                owner_id = COALESCE(event_sequences.owner_id, excluded.owner_id)
+            "#
+            .to_string(),
+            vec![
+                text(aggregate_id),
+                opt_text(owner_id.map(ToOwned::to_owned)),
+            ],
+        ),
+        (
+            "INSERT INTO events (event_id, kind, aggregate_id, aggregate_seq, owner_id, session_id, event_json, created) VALUES (?, ?, ?, (SELECT seq FROM event_sequences WHERE aggregate_id = ?), ?, ?, ?, ?)".to_string(),
+            vec![
+                text(event.id.to_string()),
+                text(event.kind.clone()),
+                text(aggregate_id),
+                text(aggregate_id),
+                opt_text(owner_id.map(ToOwned::to_owned)),
+                opt_text(session_id),
+                text(serde_json::to_string(event)?),
+                int(sqlite_i64(crate::now_millis())),
+            ],
+        ),
+    ])
 }
 
 type SqliteQuery<'q> =
@@ -296,19 +342,28 @@ fn turso_error_is_busy(error: &turso::Error) -> bool {
 }
 
 impl Db {
-    async fn execute(&self, sql: &str, params: Vec<SqlValue>) -> anyhow::Result<u64> {
+    async fn lock_writer(&self) -> tokio::sync::OwnedMutexGuard<()> {
         match self {
-            Db::Sqlite(pool) => {
+            Self::Sqlite { write_gate, .. } | Self::Turso { write_gate, .. } => {
+                write_gate.clone().lock_owned().await
+            }
+        }
+    }
+
+    async fn execute(&self, sql: &str, params: Vec<SqlValue>) -> anyhow::Result<u64> {
+        let _writer = self.lock_writer().await;
+        match self {
+            Db::Sqlite { pool, .. } => {
                 let mut query = sqlx::query(sql);
                 for param in params {
                     query = bind_value(query, param);
                 }
                 Ok(query.execute(pool).await?.rows_affected())
             }
-            Db::Turso(db) => Ok(turso_busy_retry(|| {
+            Db::Turso { database, .. } => Ok(turso_busy_retry(|| {
                 let params = params.clone();
                 async move {
-                    let conn = db.connect()?;
+                    let conn = database.connect()?;
                     conn.execute(sql, params).await
                 }
             })
@@ -322,7 +377,7 @@ impl Db {
         params: Vec<SqlValue>,
     ) -> anyhow::Result<Vec<DbRow>> {
         match self {
-            Db::Sqlite(pool) => {
+            Db::Sqlite { pool, .. } => {
                 let mut query = sqlx::query(sql);
                 for param in params {
                     query = bind_value(query, param);
@@ -330,10 +385,10 @@ impl Db {
                 let rows = query.fetch_all(pool).await?;
                 rows.iter().map(sqlite_row_to_db_row).collect()
             }
-            Db::Turso(db) => Ok(turso_busy_retry(|| {
+            Db::Turso { database, .. } => Ok(turso_busy_retry(|| {
                 let params = params.clone();
                 async move {
-                    let conn = db.connect()?;
+                    let conn = database.connect()?;
                     let mut rows = conn.query(sql, params).await?;
                     let columns = Arc::new(rows.column_names());
                     let mut out = Vec::new();
@@ -371,6 +426,50 @@ impl Db {
             .context("query returned no rows")?
             .i64_at(0)
     }
+
+    async fn execute_transaction(
+        &self,
+        statements: Vec<(String, Vec<SqlValue>)>,
+    ) -> anyhow::Result<()> {
+        let _writer = self.lock_writer().await;
+        match self {
+            Db::Sqlite { pool, .. } => {
+                let mut connection = pool.acquire().await?;
+                let mut transaction = connection.begin().await?;
+                for (sql, params) in statements {
+                    let mut query = sqlx::query(&sql);
+                    for param in params {
+                        query = bind_value(query, param);
+                    }
+                    query.execute(&mut *transaction).await?;
+                }
+                transaction.commit().await?;
+            }
+            Db::Turso { database, .. } => {
+                // Retrying only individual statements is unsafe here: a Busy
+                // can happen while beginning or committing too. A failed
+                // attempt is dropped/rolled back, then the complete atomic
+                // unit is replayed on a fresh immediate transaction.
+                turso_busy_retry(|| {
+                    let statements = statements.clone();
+                    async move {
+                        let mut connection = database.connect()?;
+                        let transaction = connection
+                            .transaction_with_behavior(
+                                turso::transaction::TransactionBehavior::Immediate,
+                            )
+                            .await?;
+                        for (sql, params) in statements {
+                            transaction.execute(&sql, params).await?;
+                        }
+                        transaction.commit().await
+                    }
+                })
+                .await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -401,6 +500,7 @@ impl AppState {
 
     async fn from_store(store: SessionStore) -> anyhow::Result<Self> {
         let (events, _) = broadcast::channel(1024);
+        let (event_writer, mut event_reader) = mpsc::unbounded_channel();
         let auth_store = AuthStore::from_env();
         let permission_approvals = store.list_permission_approvals().await?;
         store.interrupt_stale_runs().await?;
@@ -413,9 +513,10 @@ impl AppState {
                 provider_catalog: ProviderCatalog::from_env(),
                 provider_oauth: RwLock::new(HashMap::new()),
                 plugins: PluginRegistry::default(),
+                workspace_runtimes: Default::default(),
                 statuses: RwLock::new(HashMap::new()),
                 runs: RwLock::new(HashMap::new()),
-                prompt_queue_workers: RwLock::new(HashSet::new()),
+                session_coordinator: Default::default(),
                 background_jobs: RwLock::new(HashMap::new()),
                 background_job_cancellations: RwLock::new(HashMap::new()),
                 permissions: RwLock::new(HashMap::new()),
@@ -427,8 +528,27 @@ impl AppState {
                 ptys: RwLock::new(HashMap::new()),
                 pty_connect_tokens: RwLock::new(crate::pty::ConnectTokens::default()),
                 events,
+                event_writer,
             }),
         };
+        let durable_store = state.inner.store.clone();
+        let durable_events = state.inner.events.clone();
+        let durable_plugins = state.inner.plugins.clone();
+        tokio::spawn(async move {
+            while let Some((event, broadcast)) = event_reader.recv().await {
+                match durable_store.append_event(&event).await {
+                    Ok(()) => {
+                        durable_plugins.publish_event(&event);
+                        if broadcast {
+                            let _ = durable_events.send(event);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(event = %event.kind, %error, "failed to durably commit event");
+                    }
+                }
+            }
+        });
         crate::session_queue::resume_prompt_queues(state.clone()).await?;
         Ok(state)
     }
@@ -438,15 +558,10 @@ impl AppState {
     }
 
     pub(crate) fn publish(&self, event: EventPayload) {
-        self.inner.plugins.publish_event(&event);
-        let store = self.inner.store.clone();
-        let persisted = event.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let _ = store.append_event(&persisted).await;
-            });
+        let broadcast = self.inner.events.receiver_count() > 0;
+        if let Err(error) = self.inner.event_writer.send((event, broadcast)) {
+            tracing::error!(event = %error.0.0.kind, "durable event writer stopped");
         }
-        let _ = self.inner.events.send(event);
     }
 
     #[cfg(test)]
@@ -462,17 +577,201 @@ impl AppState {
         event: EventPayload,
         owner_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.inner.plugins.publish_event(&event);
         self.inner
             .store
             .append_event_with_owner(&event, owner_id)
             .await?;
+        self.inner.plugins.publish_event(&event);
         let _ = self.inner.events.send(event);
         Ok(())
+    }
+
+    pub(crate) fn publish_committed(&self, event: EventPayload) {
+        self.inner.plugins.publish_event(&event);
+        let _ = self.inner.events.send(event);
+    }
+
+    pub(crate) async fn update_session_with_event(
+        &self,
+        info: &SessionInfo,
+        event: EventPayload,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .store
+            .commit_projection_event(
+                vec![(
+                    "UPDATE sessions SET info_json = ?, updated = ? WHERE id = ?"
+                        .to_string(),
+                    vec![
+                        text(serde_json::to_string(info)?),
+                        int(sqlite_i64(info.time.updated)),
+                        text(info.id.to_string()),
+                    ],
+                )],
+                &event,
+                None,
+            )
+            .await?;
+        self.publish_committed(event);
+        Ok(())
+    }
+
+    pub(crate) async fn append_message_with_event(
+        &self,
+        session_id: &str,
+        message: &MessageWithParts,
+        event: EventPayload,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .store
+            .commit_projection_event(
+                vec![(
+                    "INSERT INTO messages (id, session_id, message_json, created, position) VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE session_id = ?))".to_string(),
+                    vec![
+                        text(message_id(message)),
+                        text(session_id),
+                        text(serde_json::to_string(message)?),
+                        int(sqlite_i64(message_created(message))),
+                        text(session_id),
+                    ],
+                )],
+                &event,
+                None,
+            )
+            .await?;
+        if let Err(error) = self
+            .inner
+            .store
+            .fts_insert_message(session_id, message)
+            .await
+        {
+            tracing::warn!(%error, "failed to index atomically committed message");
+        }
+        self.publish_committed(event);
+        Ok(())
+    }
+
+    pub(crate) async fn update_message_with_event(
+        &self,
+        session_id: &str,
+        message: &MessageWithParts,
+        event: EventPayload,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .store
+            .commit_projection_event(
+                vec![
+                    (
+                        "UPDATE messages SET message_json = ? WHERE session_id = ? AND id = ?"
+                            .to_string(),
+                        vec![
+                            text(serde_json::to_string(message)?),
+                            text(session_id),
+                            text(message_id(message)),
+                        ],
+                    ),
+                    (
+                        "DELETE FROM message_embeddings WHERE message_id = ?".to_string(),
+                        vec![text(message_id(message))],
+                    ),
+                ],
+                &event,
+                None,
+            )
+            .await?;
+        self.publish_committed(event);
+        Ok(())
+    }
+
+    pub(crate) async fn put_context_epoch_with_event(
+        &self,
+        session_id: &str,
+        epoch: &crate::context_epoch::ContextEpoch,
+        event: EventPayload,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .store
+            .commit_projection_event(
+                vec![(
+                    r#"
+                    INSERT INTO session_context_epochs
+                        (session_id, baseline_json, snapshot_json, generation, baseline_seq, updated)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        snapshot_json = excluded.snapshot_json,
+                        generation = excluded.generation,
+                        updated = excluded.updated
+                    "#
+                    .to_string(),
+                    vec![
+                        text(session_id),
+                        text(serde_json::to_string(&epoch.baseline)?),
+                        text(serde_json::to_string(&epoch.snapshot)?),
+                        int(sqlite_i64(epoch.generation)),
+                        int(sqlite_i64(epoch.baseline_seq)),
+                        int(sqlite_i64(epoch.updated)),
+                    ],
+                )],
+                &event,
+                None,
+            )
+            .await?;
+        self.publish_committed(event);
+        Ok(())
+    }
+
+    pub(crate) async fn enqueue_prompt_with_event(
+        &self,
+        session_id: &str,
+        request: &PromptRequest,
+        delivery: &str,
+        event: EventPayload,
+    ) -> anyhow::Result<usize> {
+        self.inner
+            .store
+            .commit_projection_event(
+                vec![(
+                    "INSERT INTO prompt_queue (id, session_id, position, request_json, created, delivery) VALUES (?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM prompt_queue WHERE session_id = ?), ?, ?, ?)".to_string(),
+                    vec![
+                        text(Id::ascending(IdKind::Event).to_string()),
+                        text(session_id),
+                        text(session_id),
+                        text(serde_json::to_string(request)?),
+                        int(sqlite_i64(crate::now_millis())),
+                        text(delivery),
+                    ],
+                )],
+                &event,
+                None,
+            )
+            .await?;
+        self.publish_committed(event);
+        self.inner.store.queued_prompt_count(session_id).await
     }
 }
 
 impl SessionStore {
+    async fn commit_projection_event(
+        &self,
+        mut projection: Vec<(String, Vec<SqlValue>)>,
+        event: &EventPayload,
+        owner_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let aggregate_id = crate::sync::aggregate_id(event);
+        let session_id = event
+            .properties
+            .get("sessionID")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        projection.extend(event_statements(
+            event,
+            &aggregate_id,
+            session_id,
+            owner_id,
+        )?);
+        self.db.execute_transaction(projection).await
+    }
+
     pub(crate) async fn open_default() -> anyhow::Result<Self> {
         let backend = db_backend_from_env()?;
         let state_dir = PathBuf::from(crate::default_state_dir());
@@ -509,6 +808,7 @@ impl SessionStore {
                     .filename(&path)
                     .create_if_missing(true)
                     .foreign_keys(true)
+                    .busy_timeout(std::time::Duration::from_secs(5))
                     .pragma("journal_mode", "WAL")
                     .pragma("synchronous", "NORMAL");
                 let pool = SqlitePoolOptions::new()
@@ -518,7 +818,10 @@ impl SessionStore {
                     .with_context(|| {
                         format!("failed to open SQLite database {}", path.display())
                     })?;
-                Db::Sqlite(pool)
+                Db::Sqlite {
+                    pool,
+                    write_gate: Arc::new(Mutex::new(())),
+                }
             }
             DbBackend::Turso => {
                 let path = path
@@ -528,7 +831,10 @@ impl SessionStore {
                     .build()
                     .await
                     .with_context(|| format!("failed to open turso database {path}"))?;
-                Db::Turso(database)
+                Db::Turso {
+                    database,
+                    write_gate: Arc::new(Mutex::new(())),
+                }
             }
         };
         let store = Self {
@@ -640,7 +946,24 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS session_context_epochs (
+                session_id TEXT PRIMARY KEY,
+                baseline_json TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                baseline_seq INTEGER NOT NULL,
+                updated INTEGER NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
         self.ensure_event_columns().await?;
+        self.ensure_prompt_queue_columns().await?;
         self.db
             .execute(
                 r#"
@@ -673,6 +996,12 @@ impl SessionStore {
         self.db
             .execute(
                 "CREATE INDEX IF NOT EXISTS idx_events_seq ON events(seq)",
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id)",
                 Vec::new(),
             )
             .await?;
@@ -731,7 +1060,7 @@ impl SessionStore {
     }
 
     pub(crate) fn semantic_search_supported(&self) -> bool {
-        matches!(self.db, Db::Turso(_))
+        matches!(self.db, Db::Turso { .. })
     }
 
     /// Messages that still need an embedding for `model` — new messages plus
@@ -1025,8 +1354,8 @@ impl SessionStore {
                 self.backfill_fts().await
             }
             Err(error) => match &self.db {
-                Db::Sqlite(_) => Err(error),
-                Db::Turso(_) => {
+                Db::Sqlite { .. } => Err(error),
+                Db::Turso { .. } => {
                     tracing::warn!(
                         %error,
                         "FTS5 is unavailable on the turso backend; message search will use a LIKE scan"
@@ -1237,6 +1566,18 @@ impl SessionStore {
         Ok(())
     }
 
+    async fn ensure_prompt_queue_columns(&self) -> anyhow::Result<()> {
+        if !self.table_has_column("prompt_queue", "delivery").await? {
+            self.db
+                .execute(
+                    "ALTER TABLE prompt_queue ADD COLUMN delivery TEXT NOT NULL DEFAULT 'queue'",
+                    Vec::new(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn table_has_column(&self, table: &str, column: &str) -> anyhow::Result<bool> {
         let rows = self
             .db
@@ -1314,6 +1655,40 @@ impl SessionStore {
         Ok(())
     }
 
+    pub(crate) async fn get_context_epoch(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<crate::context_epoch::ContextEpoch>> {
+        let row = self
+            .db
+            .fetch_optional(
+                "SELECT baseline_json, snapshot_json, generation, baseline_seq, updated FROM session_context_epochs WHERE session_id = ?",
+                vec![text(session_id)],
+            )
+            .await?;
+        row.map(|row| {
+            Ok(crate::context_epoch::ContextEpoch {
+                baseline: decode_json(row.get_str("baseline_json")?)?,
+                snapshot: decode_json(row.get_str("snapshot_json")?)?,
+                generation: row.get_i64("generation")?.max(1) as u64,
+                baseline_seq: row.get_i64("baseline_seq")?.max(0) as u64,
+                updated: row.get_i64("updated")?.max(0) as u64,
+            })
+        })
+        .transpose()
+    }
+
+    pub(crate) async fn message_sequence(&self, session_id: &str) -> anyhow::Result<u64> {
+        Ok(self
+            .db
+            .fetch_scalar_i64(
+                "SELECT COALESCE(MAX(position), 0) FROM messages WHERE session_id = ?",
+                vec![text(session_id)],
+            )
+            .await?
+            .max(0) as u64)
+    }
+
     pub(crate) async fn get_session(
         &self,
         session_id: &str,
@@ -1337,6 +1712,7 @@ impl SessionStore {
             "DELETE FROM messages WHERE session_id = ?",
             "DELETE FROM prompt_queue WHERE session_id = ?",
             "DELETE FROM session_runs WHERE session_id = ?",
+            "DELETE FROM session_context_epochs WHERE session_id = ?",
             "DELETE FROM message_embeddings WHERE session_id = ?",
         ] {
             self.db.execute(sql, vec![text(session_id)]).await?;
@@ -1607,6 +1983,19 @@ impl SessionStore {
         session_id: &str,
         request: &PromptRequest,
     ) -> anyhow::Result<usize> {
+        self.enqueue_prompt_with_delivery(session_id, request, "queue")
+            .await
+    }
+
+    pub(crate) async fn enqueue_prompt_with_delivery(
+        &self,
+        session_id: &str,
+        request: &PromptRequest,
+        delivery: &str,
+    ) -> anyhow::Result<usize> {
+        if !matches!(delivery, "steer" | "queue") {
+            anyhow::bail!("unsupported prompt delivery {delivery}");
+        }
         let position = self
             .db
             .fetch_scalar_i64(
@@ -1616,13 +2005,14 @@ impl SessionStore {
             .await?;
         self.db
             .execute(
-                "INSERT INTO prompt_queue (id, session_id, position, request_json, created) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO prompt_queue (id, session_id, position, request_json, created, delivery) VALUES (?, ?, ?, ?, ?, ?)",
                 vec![
                     text(Id::ascending(IdKind::Event).to_string()),
                     text(session_id),
                     int(position),
                     text(serde_json::to_string(request)?),
                     int(sqlite_i64(crate::now_millis())),
+                    text(delivery),
                 ],
             )
             .await?;
@@ -1633,15 +2023,32 @@ impl SessionStore {
         &self,
         session_id: &str,
     ) -> anyhow::Result<Vec<PromptRequest>> {
+        Ok(self
+            .list_queued_prompt_entries(session_id)
+            .await?
+            .into_iter()
+            .map(|(request, _)| request)
+            .collect())
+    }
+
+    pub(crate) async fn list_queued_prompt_entries(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<(PromptRequest, String)>> {
         let rows = self
             .db
             .fetch_all(
-                "SELECT request_json FROM prompt_queue WHERE session_id = ? ORDER BY position ASC, created ASC",
+                "SELECT request_json, delivery FROM prompt_queue WHERE session_id = ? ORDER BY position ASC, created ASC",
                 vec![text(session_id)],
             )
             .await?;
         rows.into_iter()
-            .map(|row| decode_json(row.get_str("request_json")?))
+            .map(|row| {
+                Ok((
+                    decode_json(row.get_str("request_json")?)?,
+                    row.get_str("delivery")?,
+                ))
+            })
             .collect()
     }
 
@@ -1663,14 +2070,26 @@ impl SessionStore {
         &self,
         session_id: &str,
     ) -> anyhow::Result<Option<PromptRequest>> {
-        let Some(row) = self
-            .db
-            .fetch_optional(
+        self.pop_queued_prompt_with_delivery(session_id, None).await
+    }
+
+    pub(crate) async fn pop_queued_prompt_with_delivery(
+        &self,
+        session_id: &str,
+        delivery: Option<&str>,
+    ) -> anyhow::Result<Option<PromptRequest>> {
+        let (sql, parameters) = if let Some(delivery) = delivery {
+            (
+                "SELECT id, request_json FROM prompt_queue WHERE session_id = ? AND delivery = ? ORDER BY position ASC, created ASC LIMIT 1",
+                vec![text(session_id), text(delivery)],
+            )
+        } else {
+            (
                 "SELECT id, request_json FROM prompt_queue WHERE session_id = ? ORDER BY position ASC, created ASC LIMIT 1",
                 vec![text(session_id)],
             )
-            .await?
-        else {
+        };
+        let Some(row) = self.db.fetch_optional(sql, parameters).await? else {
             return Ok(None);
         };
         let id = row.get_str("id")?;
@@ -1718,28 +2137,18 @@ impl SessionStore {
         owner_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let aggregate_id = crate::sync::aggregate_id(event);
-        let aggregate_seq = self
-            .next_aggregate_sequence(&aggregate_id, owner_id)
-            .await?;
         let session_id = event
             .properties
             .get("sessionID")
             .and_then(Value::as_str)
             .map(ToString::to_string);
         self.db
-            .execute(
-                "INSERT INTO events (event_id, kind, aggregate_id, aggregate_seq, owner_id, session_id, event_json, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                vec![
-                    text(event.id.to_string()),
-                    text(event.kind.clone()),
-                    text(aggregate_id),
-                    int(aggregate_seq),
-                    opt_text(owner_id.map(ToOwned::to_owned)),
-                    opt_text(session_id),
-                    text(serde_json::to_string(event)?),
-                    int(sqlite_i64(crate::now_millis())),
-                ],
-            )
+            .execute_transaction(event_statements(
+                event,
+                &aggregate_id,
+                session_id,
+                owner_id,
+            )?)
             .await?;
         Ok(())
     }
@@ -1914,9 +2323,9 @@ impl SessionStore {
     #[cfg(test)]
     pub(crate) async fn close(&self) {
         match &self.db {
-            Db::Sqlite(pool) => pool.close().await,
+            Db::Sqlite { pool, .. } => pool.close().await,
             // Turso has no explicit close; dropping the handle releases it.
-            Db::Turso(_) => {}
+            Db::Turso { .. } => {}
         }
     }
 }

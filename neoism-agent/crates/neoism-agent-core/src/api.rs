@@ -820,10 +820,15 @@ pub struct PtyInfo {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolListItem {
     pub id: String,
     pub description: String,
     pub parameters: Value,
+    /// Schema for the structured result retained alongside model-facing text.
+    /// Older remote tools may not advertise one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

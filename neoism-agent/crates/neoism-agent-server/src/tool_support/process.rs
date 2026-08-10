@@ -5,18 +5,39 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+pub(crate) struct CapturedOutput {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) truncated: bool,
+}
+
 pub(crate) fn read_child_output<T>(
     pipe: Option<T>,
-) -> tokio::task::JoinHandle<anyhow::Result<Vec<u8>>>
+    maximum_bytes: usize,
+) -> tokio::task::JoinHandle<anyhow::Result<CapturedOutput>>
 where
     T: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
         let mut output = Vec::new();
+        let mut truncated = false;
         if let Some(mut pipe) = pipe {
-            pipe.read_to_end(&mut output).await?;
+            let mut chunk = [0_u8; 16 * 1024];
+            loop {
+                let read = pipe.read(&mut chunk).await?;
+                if read == 0 {
+                    break;
+                }
+                let remaining = maximum_bytes.saturating_sub(output.len());
+                if remaining > 0 {
+                    output.extend_from_slice(&chunk[..read.min(remaining)]);
+                }
+                truncated |= read > remaining;
+            }
         }
-        Ok(output)
+        Ok(CapturedOutput {
+            bytes: output,
+            truncated,
+        })
     })
 }
 

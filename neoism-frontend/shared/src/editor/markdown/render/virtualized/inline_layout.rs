@@ -200,7 +200,13 @@ fn inline_wrap_rows(lines: &[InlineWrappedLine]) -> Vec<MarkdownWrapRow> {
 fn inline_visual_row_count(lines: &[InlineWrappedLine]) -> usize {
     lines
         .len()
-        .max(lines.iter().map(inline_line_occupied_rows).max().unwrap_or(1))
+        .max(
+            lines
+                .iter()
+                .map(inline_line_occupied_rows)
+                .max()
+                .unwrap_or(1),
+        )
         .max(1)
 }
 
@@ -302,14 +308,14 @@ fn draw_inline_wrapped_lines(
                 let gap = space_w * lead_ws as f32;
                 // When the same link spans this word gap, underline the
                 // gap so the link reads as one continuous underline.
-                let word_link = word
-                    .runs
-                    .iter()
-                    .find(|r| !r.text.is_empty())
-                    .and_then(|r| match &r.style {
-                        InlineRunStyle::Link(inner) => Some(inner.as_str()),
-                        _ => None,
-                    });
+                let word_link =
+                    word.runs
+                        .iter()
+                        .find(|r| !r.text.is_empty())
+                        .and_then(|r| match &r.style {
+                            InlineRunStyle::Link(inner) => Some(inner.as_str()),
+                            _ => None,
+                        });
                 if let (Some(prev), Some(cur)) = (prev_link_target, word_link) {
                     if prev == cur {
                         draw_rect_clipped(
@@ -753,8 +759,14 @@ fn line_from_word(
     drop_rows: usize,
     drop_offset: f32,
 ) -> InlineWrappedLine {
-    let mut line =
-        inline_line_for_row(row_ix, max_w, hang_px, drop_rows, drop_offset, visible_start);
+    let mut line = inline_line_for_row(
+        row_ix,
+        max_w,
+        hang_px,
+        drop_rows,
+        drop_offset,
+        visible_start,
+    );
     push_word_to_line(&mut line, word);
     line
 }
@@ -814,6 +826,11 @@ fn inline_runs_for_text(raw: &str) -> Vec<InlineRun> {
     let mut ix = 0usize;
     while ix < text.len() {
         let rest = &text[ix..];
+        if let Some((escaped, consumed)) = backslash_escape_at_start(rest) {
+            push_inline_char(&mut runs, InlineRunStyle::Normal, escaped);
+            ix += consumed;
+            continue;
+        }
         if let Some(token) = parse_illuminate_token(rest) {
             let letter = token.letter.to_string();
             let source_len = token.source_len;
@@ -1040,4 +1057,17 @@ fn line_marker_layout<'a>(
     let offset = (indent_px + marker_slot).min((width - 24.0).max(0.0));
     let body = raw.get(marker_len..).unwrap_or_default();
     (offset, body, marker_len)
+}
+
+#[cfg(test)]
+mod inline_layout_tests {
+    use super::*;
+
+    #[test]
+    fn escaped_stars_stay_normal_in_virtual_markdown_runs() {
+        let runs = inline_runs_for_text(r"\* note and \** partial");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "* note and ** partial");
+        assert_eq!(runs[0].style, InlineRunStyle::Normal);
+    }
 }

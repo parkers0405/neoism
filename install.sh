@@ -7,8 +7,7 @@
 #   - neoism, neoism-workspace-daemon, neoism-agent -> BIN_DIR
 #   - wasm bundle + Vite web build (optional)        -> neoism-frontend/web/dist
 #
-# Everything user-facing (terminfo entry, desktop launcher + icons, default
-# config) is handled by the
+# Everything user-facing (desktop launcher + icons and default config) is handled by the
 # app's first-run bootstrap on launch — see
 # neoism-frontend/desktop/src/bootstrap.rs. Prebuilt installs use
 # scripts/install.sh (download) or `neoism update` instead.
@@ -235,7 +234,7 @@ fi
 
 cat <<EOF
 
-First launch bootstraps the rest automatically (terminfo, desktop launcher,
-default config, parsers). Make sure this is on PATH:
+First launch bootstraps the rest automatically (desktop launcher, default
+config, parsers). Make sure this is on PATH:
   export PATH="$BIN_DIR:\$PATH"
 EOF

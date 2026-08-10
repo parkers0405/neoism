@@ -157,15 +157,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         time.as_secs_f32(),
                         Some(self.last_pointer_pos),
                         self.chrome_scale,
-                        // Stop the side panel at the TOP of the full-width
-                        // status bar (the band bottom) so it doesn't paint
-                        // over it — matches the tree / notes / git.
-                        Some(layout.status_line.y),
-                        // Start the side panel at the same band top as
-                        // the file tree (below the full-width top bar +
-                        // workspace strip), so the two line up. The tree
-                        // sits at the buffer-tabs row.
-                        Some(layout.buffer_tabs.y),
                         &[],
                     );
                 }

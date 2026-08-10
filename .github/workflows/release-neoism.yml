@@ -139,7 +139,6 @@ jobs:
           mkdir -p "stage/$OUT"
           BIN="target/${{ matrix.target }}/release"
           cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "stage/$OUT/"
-          cp misc/rio.terminfo "stage/$OUT/" 2>/dev/null || true
           if [[ "${{ matrix.goos }}" == "darwin" ]]; then
             # Neoism.app: double-clickable + Finder "Open With" candidate for
             # code/markdown/json (CFBundleDocumentTypes in misc/macos/Info.plist).

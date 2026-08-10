@@ -453,7 +453,7 @@ async fn session_revert_and_unrevert_restore_file_snapshots() {
             action: neoism_agent_core::PermissionAction::Allow,
         }],
         "write",
-        json!({ "path": "file.txt", "content": "after" }),
+        json!({ "filePath": "file.txt", "content": "after" }),
     )
     .await
     .unwrap();
@@ -539,7 +539,7 @@ async fn session_revert_snapshot_conflict_keeps_messages_and_files() {
             action: neoism_agent_core::PermissionAction::Allow,
         }],
         "write",
-        json!({ "path": "file.txt", "content": "after" }),
+        json!({ "filePath": "file.txt", "content": "after" }),
     )
     .await
     .unwrap();

@@ -1483,8 +1483,8 @@ fn acp_tool_kind(tool: &str) -> &'static str {
         "bash" => "execute",
         "webfetch" | "websearch" => "fetch",
         "edit" | "patch" | "write" | "apply_patch" => "edit",
-        "grep" | "glob" | "ffgrep" | "fffind" | "fff_multi_grep" => "search",
-        "read" | "list" => "read",
+        "grep" | "glob" => "search",
+        "read" => "read",
         _ => "other",
     }
 }
@@ -1493,7 +1493,7 @@ fn acp_tool_locations(tool: &str, input: &Value) -> Vec<Value> {
     let key = match tool.to_ascii_lowercase().as_str() {
         "read" | "edit" | "write" => Some("filePath"),
         "apply_patch" | "patch" => None,
-        "glob" | "grep" | "ffgrep" | "fffind" | "fff_multi_grep" | "list" => Some("path"),
+        "glob" | "grep" => Some("path"),
         _ => None,
     };
     key.and_then(|key| input.get(key).or_else(|| input.get("path")))

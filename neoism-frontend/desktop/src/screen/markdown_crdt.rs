@@ -328,22 +328,6 @@ impl Screen<'_> {
         pane.mark_saved();
         let path = pane.path.clone();
         self.sync_markdown_tab_modified(&path, false);
-        if let Some(result) = self.apply_generated_neoism_tasks_save(&path) {
-            let (message, level) = match result {
-                Ok(message) => (
-                    message,
-                    neoism_ui::panels::notifications::NotificationLevel::Info,
-                ),
-                Err(err) => (
-                    err,
-                    neoism_ui::panels::notifications::NotificationLevel::Error,
-                ),
-            };
-            self.renderer.notifications.push(message, level);
-            return true;
-        }
-        self.invalidate_note_index_for_path(&path);
-        self.rebuild_note_graph_for_path(&path);
         self.renderer.notifications.push(
             format!("Wrote {}", path.display()),
             neoism_ui::panels::notifications::NotificationLevel::Info,

@@ -294,13 +294,30 @@ fn measure_item(
                     inline_wrapped_lines_raw(sugarloaf, text, width, hang, &opts)
                         .len()
                         .max(1)
-                } else if let Some(quote_len) = quote_marker_len(text) {
-                    // Mirror the styled blockquote: `> ` hidden, body indented
-                    // past the accent bar, italic metrics.
-                    let body = text.get(quote_len.min(text.len())..).unwrap_or_default();
-                    let quote_opts = DrawOpts {
-                        italic: true,
+                } else if let Some(callout) = parse_callout_line(text) {
+                    let callout_opts = DrawOpts {
+                        bold: true,
+                        color: theme.u8(callout_accent(callout.kind, theme)),
                         ..opts
+                    };
+                    let inline_lines = inline_wrapped_lines_dropcap(
+                        sugarloaf,
+                        callout.title(),
+                        (width - QUOTE_BODY_INDENT).max(24.0),
+                        &callout_opts,
+                    )
+                    .0;
+                    inline_visual_row_count(&inline_lines)
+                } else if let Some(quote_len) = quote_marker_len(text) {
+                    let body = text.get(quote_len.min(text.len())..).unwrap_or_default();
+                    let callout_kind = callout_kind_for_quote_line(&pane.lines, line_ix);
+                    let quote_opts = if callout_kind.is_some() {
+                        opts
+                    } else {
+                        DrawOpts {
+                            italic: true,
+                            ..opts
+                        }
                     };
                     let inline_lines = inline_wrapped_lines_dropcap(
                         sugarloaf,
@@ -1410,9 +1427,26 @@ fn draw_markdown_line(
         };
         // Blockquotes render styled (accent bar + italic body, `> ` hidden)
         // except on the cursor's own line, which reveals raw like everything.
+        let callout_header = (!pane.reveals_source_line(line_ix))
+            .then(|| parse_callout_line(text))
+            .flatten();
+        let callout_kind = (!pane.reveals_source_line(line_ix))
+            .then(|| callout_kind_for_quote_line(&pane.lines, line_ix))
+            .flatten();
         let quote_styled =
-            pane.cursor_line != line_ix && quote_marker_len(text).is_some();
-        let line_opts = if quote_styled {
+            !pane.reveals_source_line(line_ix) && quote_marker_len(text).is_some();
+        let line_opts = if let Some(callout) = callout_header {
+            DrawOpts {
+                bold: true,
+                color: theme.u8(callout_accent(callout.kind, theme)),
+                ..opts
+            }
+        } else if callout_kind.is_some() {
+            DrawOpts {
+                color: theme.u8_alpha(theme.fg, 0.94),
+                ..opts
+            }
+        } else if quote_styled {
             DrawOpts {
                 italic: true,
                 color: theme.u8_alpha(theme.fg, 0.92),
@@ -1469,6 +1503,9 @@ fn draw_markdown_line(
             );
         }
         if quote_styled {
+            let accent = callout_kind
+                .map(|kind| callout_accent(kind, theme))
+                .unwrap_or(theme.accent);
             // Accent bar spanning every wrapped row of the quote.
             draw_rounded_rect_clipped(
                 sugarloaf,
@@ -1478,7 +1515,7 @@ fn draw_markdown_line(
                 3.5,
                 line_h * visual_lines as f32 + 2.0,
                 1.75,
-                theme.f32_alpha(theme.accent, 0.85),
+                theme.f32_alpha(accent, 0.85),
                 DEPTH,
                 ORDER_BG + 2,
             );
@@ -1925,6 +1962,14 @@ fn draw_line_marker<'a>(
         return (x, raw, 0, 0);
     }
     let Some(marker) = parse_markdown_list_marker(raw) else {
+        if let Some(callout) = parse_callout_line(raw) {
+            return (
+                x + QUOTE_BODY_INDENT,
+                callout.title(),
+                callout.marker_len,
+                0,
+            );
+        }
         // Blockquote: hide the `> ` marker and indent the body past the
         // accent bar (the caller draws the bar once it knows the wrapped
         // row count).

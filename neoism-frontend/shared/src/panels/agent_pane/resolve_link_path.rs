@@ -7,14 +7,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::input_controller::decode_percent_path;
+
 /// Directory names skipped during the name-search descent. Match the
 /// desktop fork's prior behaviour: VCS metadata and common heavy
 /// build/dependency trees that would dwarf the actual workspace.
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules"];
 
-/// Strip an optional `file://` prefix and trim whitespace.
-fn normalize_target(target: &str) -> &str {
-    target.strip_prefix("file://").unwrap_or(target).trim()
+/// Strip an optional `file://` prefix, decode URI path bytes, and trim
+/// whitespace. Plain filesystem references remain byte-for-byte unchanged.
+fn normalize_target(target: &str) -> String {
+    let target = target.trim();
+    target
+        .strip_prefix("file://")
+        .map(decode_percent_path)
+        .unwrap_or_else(|| target.to_string())
 }
 
 /// Resolve `target` against `root`:
@@ -30,7 +37,7 @@ pub fn resolve_link_path(
     find_by_name: impl FnOnce(&Path, &str, usize) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
     let raw = normalize_target(target);
-    let path = PathBuf::from(raw);
+    let path = PathBuf::from(&raw);
     if path.is_absolute() {
         return path.exists().then_some(path);
     }
@@ -39,7 +46,7 @@ pub fn resolve_link_path(
         return Some(direct);
     }
     if path.components().count() == 1 {
-        return find_by_name(root, raw, 4);
+        return find_by_name(root, &raw, 4);
     }
     None
 }
@@ -101,6 +108,16 @@ mod tests {
         let url = format!("file://{}", tmp.path().display());
         let resolved = resolve_link_path(&url, Path::new("/"), |_, _, _| None);
         assert_eq!(resolved.as_deref(), Some(tmp.path()));
+    }
+
+    #[test]
+    fn file_uri_percent_encoded_spaces_are_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Patriot Report.md");
+        std::fs::write(&path, "report").unwrap();
+        let url = format!("file://{}", path.display()).replace(' ', "%20");
+        let resolved = resolve_link_path(&url, Path::new("/"), |_, _, _| None);
+        assert_eq!(resolved.as_deref(), Some(path.as_path()));
     }
 
     #[test]

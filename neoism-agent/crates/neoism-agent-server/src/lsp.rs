@@ -1734,9 +1734,8 @@ fn lsp_tool_blocking(
     context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let operation =
-        string_arg_either_many(&arguments, &["operation", "op", "command"])
-            .ok_or_else(|| anyhow::anyhow!("tool argument operation is required"))?;
+    let operation = string_arg(&arguments, "operation")
+        .ok_or_else(|| anyhow::anyhow!("tool argument operation is required"))?;
     match normalize_operation(&operation).as_str() {
         "status" => {
             context.ensure_allowed("lsp", "*")?;
@@ -1745,7 +1744,7 @@ fn lsp_tool_blocking(
         }
         "workspace_symbol" => {
             context.ensure_allowed("lsp", "*")?;
-            let query = string_arg_either_many(&arguments, &["query", "symbol", "name"])
+            let query = string_arg(&arguments, "query")
                 .ok_or_else(|| anyhow::anyhow!("tool argument query is required"))?;
             let result = workspace_symbols(&context.cwd, &query);
             if result.is_empty() {
@@ -1958,15 +1957,14 @@ fn normalize_operation(operation: &str) -> String {
 }
 
 fn file_arg(arguments: &Value) -> anyhow::Result<String> {
-    string_arg_either_many(arguments, &["file", "path", "filePath"])
-        .ok_or_else(|| anyhow::anyhow!("tool argument file is required"))
+    string_arg(arguments, "filePath")
+        .ok_or_else(|| anyhow::anyhow!("tool argument filePath is required"))
 }
 
 fn position_args(arguments: &Value) -> anyhow::Result<(u32, u32)> {
     let line = u32_arg(arguments, "line")
         .ok_or_else(|| anyhow::anyhow!("tool argument line is required"))?;
     let character = u32_arg(arguments, "character")
-        .or_else(|| u32_arg(arguments, "column"))
         .ok_or_else(|| anyhow::anyhow!("tool argument character is required"))?;
     Ok((line, character))
 }
@@ -1974,6 +1972,15 @@ fn position_args(arguments: &Value) -> anyhow::Result<(u32, u32)> {
 fn string_arg_either_many(arguments: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| arguments.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn string_arg(arguments: &Value, key: &str) -> Option<String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)

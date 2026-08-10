@@ -14,13 +14,9 @@ pub fn vertical_overlay_scroll_pixels(delta: &ScrollDelta, row_height: f32) -> f
     }
 }
 
-/// Vertical pixels per wheel notch for the agent timeline / chat
-/// pane. Calmer than overlay panels because the chat is dense and a
-/// big step makes it hard to track the conversation. LineDelta lines
-/// land at ~24px and PixelDelta passes through so high-resolution
-/// trackpads preserve their native smoothness.
+/// Host-neutral fallback used outside the rendered desktop timeline.
 pub fn agent_timeline_scroll_pixels(delta: &ScrollDelta) -> f32 {
-    agent_timeline_wheel(delta).pixels
+    agent_timeline_wheel(delta, 24.0).pixels
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,13 +25,13 @@ pub struct AgentTimelineWheel {
     pub smooth: bool,
 }
 
-/// Convert agent timeline wheel input while preserving the device class.
-/// Mouse wheels arrive as line deltas and should be animated; precision
-/// trackpads arrive as pixel deltas and already feel smooth when applied 1:1.
-pub fn agent_timeline_wheel(delta: &ScrollDelta) -> AgentTimelineWheel {
+/// Convert agent timeline input while preserving its device class. Mouse-wheel
+/// notches keep the Markdown-style three-line distance but use the dedicated
+/// short easing path; precision trackpads remain direct, 1:1 pixel input.
+pub fn agent_timeline_wheel(delta: &ScrollDelta, line_height: f32) -> AgentTimelineWheel {
     match delta {
         ScrollDelta::Lines { x: _, y } => AgentTimelineWheel {
-            pixels: y.clamp(-3.0, 3.0) * 24.0,
+            pixels: y.clamp(-3.0, 3.0) * line_height.max(1.0) * 3.0,
             smooth: true,
         },
         ScrollDelta::Pixels { x: _, y } => AgentTimelineWheel {

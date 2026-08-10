@@ -17,8 +17,9 @@ use crate::session_actions::{
 };
 use crate::state::{AppState, QuestionPending};
 use crate::{
-    ask_permission_for_tool, execute_mcp_tool_by_runtime_id, now_millis,
-    parse_permission_required_error, permission, plugin, tool, user_model_from_model_ref,
+    ask_permission_for_tool, execute_mcp_gateway, execute_mcp_tool_by_runtime_id,
+    now_millis, parse_permission_required_error, permission, plugin, tool,
+    user_model_from_model_ref,
 };
 
 #[allow(dead_code)]
@@ -64,6 +65,28 @@ async fn execute_tool_call_with_env_and_cancel(
 ) -> Result<tool::ToolExecutionResult, String> {
     let started = crate::perf::now();
     let input_bytes = input.to_string().len();
+    if let Some(result) = execute_mcp_gateway(
+        directory,
+        tool_name,
+        input.clone(),
+        &permissions,
+        cancel.clone(),
+        state.cloned(),
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    {
+        let result = settle_direct_tool_result(result, state.is_none())?;
+        log_tool_perf(
+            "mcp_gateway",
+            directory,
+            tool_name,
+            input_bytes,
+            &result,
+            started,
+        );
+        return Ok(result);
+    }
     if let Some(result) = execute_mcp_tool_by_runtime_id(
         directory,
         tool_name,
@@ -75,7 +98,7 @@ async fn execute_tool_call_with_env_and_cancel(
     .await
     .map_err(|error| error.to_string())?
     {
-        let result = truncate_direct_tool_result(result, state.is_none());
+        let result = settle_direct_tool_result(result, state.is_none())?;
         log_tool_perf("mcp", directory, tool_name, input_bytes, &result, started);
         return Ok(result);
     }
@@ -90,7 +113,7 @@ async fn execute_tool_call_with_env_and_cancel(
     .await
     .map_err(|error| error.to_string())?
     {
-        let result = truncate_direct_tool_result(result, state.is_none());
+        let result = settle_direct_tool_result(result, state.is_none())?;
         log_tool_perf(
             "custom",
             directory,
@@ -117,7 +140,7 @@ async fn execute_tool_call_with_env_and_cancel(
     )
     .await
     .map_err(|error| error.to_string())?;
-    let result = truncate_direct_tool_result(result, state.is_none());
+    let result = settle_direct_tool_result(result, state.is_none())?;
     log_tool_perf(
         "builtin",
         directory,
@@ -148,6 +171,17 @@ fn log_tool_perf(
         elapsed_ms = crate::perf::elapsed_ms(started),
         "tool execution completed"
     );
+}
+
+fn settle_direct_tool_result(
+    result: tool::ToolExecutionResult,
+    persist_artifact: bool,
+) -> Result<tool::ToolExecutionResult, String> {
+    let result = truncate_direct_tool_result(result, persist_artifact)?;
+    result
+        .validate(&tool::standard_output_schema())
+        .map_err(|error| error.to_string())?;
+    Ok(result)
 }
 
 async fn execute_stateful_tool_call(
@@ -208,7 +242,7 @@ async fn execute_stateful_tool_call(
                 .unwrap_or(20)
                 .min(100) as usize;
             let scope_session = input
-                .get("sessionId")
+                .get("session_id")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
@@ -313,7 +347,7 @@ async fn execute_stateful_tool_call(
             Ok(Some(result))
         }
         "task" => {
-            let agent_name = string_arg_either(&input, "subagent_type", "agent")
+            let agent_name = string_arg(&input, "subagent_type")
                 .ok_or_else(|| "tool argument subagent_type is required".to_string())?;
             ensure_tool_permission(permissions, "task", &agent_name)?;
             let prompt = string_arg(&input, "prompt")
@@ -653,14 +687,16 @@ pub(crate) fn ensure_tool_permission(
     permissions: &[PermissionRule],
     permission_name: &str,
     target: &str,
-) -> Result<(), String> {
+) -> Result<(), crate::permission_runtime::PermissionCheckError> {
     match permission::evaluate(permission_name, target, permissions).action {
         PermissionAction::Allow => Ok(()),
-        PermissionAction::Ask => Err(format!(
-            "tool permission {permission_name} for {target} requires approval"
+        PermissionAction::Ask => Err(crate::permission_runtime::permission_required(
+            permission_name,
+            target,
         )),
-        PermissionAction::Deny => Err(format!(
-            "tool permission {permission_name} for {target} is denied"
+        PermissionAction::Deny => Err(crate::permission_runtime::permission_denied(
+            permission_name,
+            target,
         )),
     }
 }
@@ -671,10 +707,6 @@ fn string_arg(input: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned)
-}
-
-fn string_arg_either(input: &Value, primary: &str, alternate: &str) -> Option<String> {
-    string_arg(input, primary).or_else(|| string_arg(input, alternate))
 }
 
 fn bool_arg(input: &Value, key: &str) -> Option<bool> {
@@ -1138,6 +1170,14 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
 ) -> Result<tool::ToolExecutionResult, String> {
     let started = crate::perf::now();
     let input_bytes = input.to_string().len();
+    let workspace = state
+        .inner
+        .workspace_runtimes
+        .acquire(directory, &state.inner.plugins)
+        .await;
+    let workspace_plugins = &workspace.plugins;
+    let workspace_directory = workspace.root.to_string_lossy().into_owned();
+    let directory = workspace_directory.as_str();
     let mut one_time_rules = Vec::new();
     let project_id = state
         .inner
@@ -1147,6 +1187,43 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
         .map_err(|error| error.to_string())?
         .map(|session| session.project_id)
         .unwrap_or_else(|| project_info(directory.to_string()).id);
+    // Invocation hooks are part of one logical tool call. Approval may resume
+    // permission evaluation, but it must never rerun hooks or regenerate the
+    // environment and thereby duplicate plugin side effects.
+    let ctx = plugin::ToolExecutionContext {
+        tool_id: tool_name.to_string(),
+        directory: directory.to_string(),
+        session_id: Some(session_id.to_string()),
+        message_id: Some(message_id.to_string()),
+        call_id: Some(call_id.to_string()),
+    };
+    let mut hooked_input = input;
+    workspace_plugins
+        .tool_execute_before(&ctx, &mut hooked_input)
+        .map_err(|error| error.to_string())?;
+    let mut env = BTreeMap::new();
+    let is_custom_tool = crate::custom_tool::list(directory)
+        .iter()
+        .any(|tool| tool.id == tool_name);
+    if tool_name == "bash" || tool_name == "background_task" || is_custom_tool {
+        workspace_plugins
+            .shell_env(
+                &plugin::ShellEnvContext {
+                    cwd: directory.to_string(),
+                    session_id: Some(session_id.to_string()),
+                    call_id: Some(call_id.to_string()),
+                },
+                &mut env,
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    let cancel = state
+        .inner
+        .runs
+        .read()
+        .await
+        .get(session_id.as_str())
+        .map(|run| run.cancel.clone());
     for _ in 0..4 {
         let mut effective = permissions.clone();
         effective.extend(
@@ -1160,44 +1237,6 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
                 .unwrap_or_default(),
         );
         effective.extend(one_time_rules.clone());
-        let ctx = plugin::ToolExecutionContext {
-            tool_id: tool_name.to_string(),
-            directory: directory.to_string(),
-            session_id: Some(session_id.to_string()),
-            message_id: Some(message_id.to_string()),
-            call_id: Some(call_id.to_string()),
-        };
-        let mut hooked_input = input.clone();
-        state
-            .inner
-            .plugins
-            .tool_execute_before(&ctx, &mut hooked_input)
-            .map_err(|error| error.to_string())?;
-        let mut env = BTreeMap::new();
-        let is_custom_tool = crate::custom_tool::list(directory)
-            .iter()
-            .any(|tool| tool.id == tool_name);
-        if tool_name == "bash" || tool_name == "background_task" || is_custom_tool {
-            state
-                .inner
-                .plugins
-                .shell_env(
-                    &plugin::ShellEnvContext {
-                        cwd: directory.to_string(),
-                        session_id: Some(session_id.to_string()),
-                        call_id: Some(call_id.to_string()),
-                    },
-                    &mut env,
-                )
-                .map_err(|error| error.to_string())?;
-        }
-        let cancel = state
-            .inner
-            .runs
-            .read()
-            .await
-            .get(session_id.as_str())
-            .map(|run| run.cancel.clone());
         if let Some(result) = execute_stateful_tool_call(
             state,
             session_id,
@@ -1212,12 +1251,10 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
         .await?
         {
             let mut result = result;
-            state
-                .inner
-                .plugins
+            workspace_plugins
                 .tool_execute_after(&ctx, &mut result)
                 .map_err(|error| error.to_string())?;
-            apply_central_output_truncation(&mut result);
+            apply_central_output_truncation(&mut result)?;
             publish_lsp_updated_if_needed(state, &result);
             tracing::info!(
                 target: "neoism_agent::perf",
@@ -1241,18 +1278,16 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
             effective,
             tool_name,
             hooked_input.clone(),
-            env,
-            cancel,
+            env.clone(),
+            cancel.clone(),
         )
         .await
         {
             Ok(mut result) => {
-                state
-                    .inner
-                    .plugins
+                workspace_plugins
                     .tool_execute_after(&ctx, &mut result)
                     .map_err(|error| error.to_string())?;
-                apply_central_output_truncation(&mut result);
+                apply_central_output_truncation(&mut result)?;
                 publish_lsp_updated_if_needed(state, &result);
                 tracing::info!(
                     target: "neoism_agent::perf",
@@ -1320,14 +1355,16 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
 fn truncate_direct_tool_result(
     mut result: tool::ToolExecutionResult,
     enabled: bool,
-) -> tool::ToolExecutionResult {
+) -> Result<tool::ToolExecutionResult, String> {
     if enabled {
-        apply_central_output_truncation(&mut result);
+        apply_central_output_truncation(&mut result)?;
     }
-    result
+    Ok(result)
 }
 
-fn apply_central_output_truncation(result: &mut tool::ToolExecutionResult) {
+fn apply_central_output_truncation(
+    result: &mut tool::ToolExecutionResult,
+) -> Result<(), String> {
     // Bail only when a previous pass already spilled this output to disk.
     // Keying on "truncated" here was wrong: fff/web tools reuse that key as a
     // pagination flag, which blocked their large outputs from ever spilling.
@@ -1337,12 +1374,13 @@ fn apply_central_output_truncation(result: &mut tool::ToolExecutionResult) {
         .and_then(|metadata| metadata.get("outputPath"))
         .is_some()
     {
-        return;
+        return Ok(());
     }
     let original_output = result.output.clone();
-    let truncated = crate::tool::truncate::truncate_output(&original_output);
+    let truncated = crate::tool::truncate::truncate_output(&original_output)
+        .map_err(|error| format!("failed to retain complete tool output: {error}"))?;
     if !truncated.truncated {
-        return;
+        return Ok(());
     }
     result.output = truncated.output;
 
@@ -1371,6 +1409,7 @@ fn apply_central_output_truncation(result: &mut tool::ToolExecutionResult) {
         );
     }
     result.metadata = Some(Value::Object(metadata));
+    Ok(())
 }
 
 pub(crate) fn publish_lsp_updated_if_needed(

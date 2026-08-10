@@ -206,6 +206,26 @@ pub(crate) struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    /// Create an independent registry seeded with runtime registrations. This
+    /// is used as the base for one workspace so configured plugins never leak
+    /// into unrelated locations.
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            plugins: Arc::new(RwLock::new(
+                self.plugins
+                    .read()
+                    .expect("plugin registry lock poisoned")
+                    .clone(),
+            )),
+            statuses: Arc::new(RwLock::new(
+                self.statuses
+                    .read()
+                    .expect("plugin registry lock poisoned")
+                    .clone(),
+            )),
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn register<P>(&self, plugin: P)
     where

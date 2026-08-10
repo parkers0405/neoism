@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -49,23 +48,31 @@ pub struct RemoteSearchRoute {
 }
 
 pub struct NativeSearchService {
-    pickers: Mutex<HashMap<PathBuf, fff_search::FilePicker>>,
     remote: Mutex<Option<RemoteSearchRoute>>,
+    local_root_pin: Mutex<Option<neoism_agent_server::picker_registry::PickerRootPin>>,
 }
 
 impl NativeSearchService {
     pub fn new() -> Self {
         Self {
-            pickers: Mutex::new(HashMap::new()),
             remote: Mutex::new(None),
+            local_root_pin: Mutex::new(None),
         }
     }
 
     /// Install (or clear) the daemon route — set on workspace switch
     /// alongside the file tree's `set_remote_files`.
     pub fn set_remote(&self, route: Option<RemoteSearchRoute>) {
+        let remote_active = route.is_some();
         if let Ok(mut remote) = self.remote.lock() {
             *remote = route;
+        }
+        if remote_active {
+            // The host owns search/indexing for a joined workspace. Do not
+            // keep an unrelated local picker resident while routing remotely.
+            if let Ok(mut pin) = self.local_root_pin.lock() {
+                *pin = None;
+            }
         }
     }
 
@@ -120,12 +127,22 @@ impl NativeSearchService {
         if !is_project_workspace(cwd) {
             return None;
         }
-        let mut pickers = self.pickers.lock().ok()?;
-        if !pickers.contains_key(cwd) {
-            let picker = build_fff_picker(cwd)?;
-            pickers.insert(cwd.to_path_buf(), picker);
+        if let Ok(mut pin) = self.local_root_pin.lock() {
+            let already_pinned = pin.as_ref().is_some_and(|pin| pin.is_for(cwd));
+            if !already_pinned {
+                *pin = Some(neoism_agent_server::picker_registry::pin(cwd));
+            }
         }
-        pickers.get(cwd).map(op)
+        neoism_agent_server::picker_registry::with_picker(cwd, op)
+            .inspect_err(|error| {
+                tracing::warn!(
+                    target: "neoism::finder",
+                    root = %cwd.display(),
+                    %error,
+                    "shared fff-search query failed"
+                );
+            })
+            .ok()
     }
 }
 
@@ -302,40 +319,6 @@ impl SearchService for NativeSearchService {
         let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
         (!path.is_empty()).then(|| PathBuf::from(path))
     }
-}
-
-/// Build (and fully scan) an fff-search `FilePicker` for `cwd` with the
-/// safe finder config: AI mode, no content indexing, no mmap cache. Shared
-/// with the agent input bar's `@` file-mention picker so both surfaces use
-/// one construction path.
-pub(crate) fn build_fff_picker(cwd: &Path) -> Option<fff_search::FilePicker> {
-    let mut picker = fff_search::FilePicker::new(fff_search::FilePickerOptions {
-        base_path: cwd.display().to_string(),
-        mode: fff_search::FFFMode::Ai,
-        enable_mmap_cache: false,
-        ..Default::default()
-    })
-    .inspect_err(|error| {
-        tracing::warn!(
-            target: "neoism::finder",
-            ?error,
-            "fff-search picker initialization failed"
-        );
-    })
-    .ok()?;
-
-    picker
-        .collect_files()
-        .inspect_err(|error| {
-            tracing::warn!(
-                target: "neoism::finder",
-                ?error,
-                "fff-search file scan failed"
-            );
-        })
-        .ok()?;
-
-    Some(picker)
 }
 
 fn collect_files_with_rg(cwd: &Path) -> Vec<String> {

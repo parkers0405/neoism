@@ -141,6 +141,19 @@ fn table_cell_lines_keeps_empty_cells_visible() {
 }
 
 #[test]
+fn table_cell_wrapping_reopens_bold_on_every_visual_line() {
+    let tokens =
+        inline_wrap_tokens("**Give $100, get $100 in account credit after 90 days**");
+    assert!(tokens.len() > 1);
+    assert!(tokens
+        .iter()
+        .all(|token| token.source().starts_with("**") && token.source().ends_with("**")));
+    assert!(tokens
+        .iter()
+        .all(|token| !rendered_inline_text(&token.source()).contains('*')));
+}
+
+#[test]
 fn copy_link_target_round_trips_code_text() {
     let text = "fn main() {\n    println!(\"hi%\");\n}";
     let target = format!("{COPY_LINK_PREFIX}{}", escape_copy_target(text));
@@ -283,6 +296,49 @@ fn web_links_render_as_clickable_labels_or_blue_bare_urls() {
         &token.style,
         InlineWrapStyle::MarkdownLink(target) if target == "https://neoism.dev/a-very-long-path"
     )));
+}
+
+#[test]
+fn file_uri_links_render_as_clickable_labels() {
+    let source = "[Report](file:///tmp/Patriot%20Nursing%20Report.md)";
+    let segments = parsed_markdown_inline_line(source);
+    assert!(segments.iter().any(|segment| matches!(
+        segment,
+        MarkdownInlineSegment::MarkdownLink { label, target: Some(target), .. }
+            if label == "Report" && target == "file:///tmp/Patriot%20Nursing%20Report.md"
+    )));
+    assert_eq!(rendered_inline_text(source), "Report");
+}
+
+#[test]
+fn hard_wrapped_file_link_is_joined_without_touching_fenced_code() {
+    let source = "[`Reports/Patriot Nursing Messaging and Payment\nReconciliation.md`](file:///tmp/Patriot%20Nursing%20\nReconciliation.md)\n```md\n[a\nb](file:///tmp/a%20\nb.md)\n```";
+    let normalized = normalize_multiline_markdown_links(source);
+    assert!(normalized.starts_with(
+        "[`Reports/Patriot Nursing Messaging and Payment Reconciliation.md`](file:///tmp/Patriot%20Nursing%20Reconciliation.md)"
+    ));
+    assert!(normalized.contains("```md\n[a\nb](file:///tmp/a%20\nb.md)\n```"));
+
+    let prose = "[IMPORTANT]\nKeep this paragraph.\n[Report](file:///tmp/report.md)";
+    assert!(matches!(
+        normalize_multiline_markdown_links(prose),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}
+
+#[test]
+fn code_styled_markdown_link_label_drops_its_nested_markers() {
+    let source = "[`Reports/Patriot.md`](file:///tmp/Patriot.md)";
+    assert_eq!(rendered_inline_text(source), "Reports/Patriot.md");
+}
+
+#[test]
+fn commonmark_backslash_escapes_render_literal_markers() {
+    let source = r"\* note and \** partial";
+    assert_eq!(rendered_inline_text(source), "* note and ** partial");
+    assert!(!parsed_markdown_inline_line(source)
+        .iter()
+        .any(|segment| matches!(segment, MarkdownInlineSegment::Bold(_))));
 }
 
 #[test]

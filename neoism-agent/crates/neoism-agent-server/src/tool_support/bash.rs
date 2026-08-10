@@ -13,6 +13,8 @@ use super::args::{optional_string, required_string, usize_arg};
 use super::paths::{display_path, existing_project_path};
 use super::{process, shell_scan, truncate, ToolContext, ToolExecutionResult};
 
+const MAX_CAPTURE_BYTES_PER_STREAM: usize = 1024 * 1024;
+
 /// The login shell's fully-resolved environment, captured exactly ONCE
 /// per process. Running `$SHELL -lc <cmd>` for every tool call re-sources
 /// the entire login profile each time (`path_helper`, Homebrew init,
@@ -128,7 +130,12 @@ pub(super) async fn bash_tool(
     // Non-login `-c` + the once-captured login env (see `LOGIN_ENV`): the
     // profile is already resolved, so we skip re-sourcing it per command.
     #[cfg(not(windows))]
-    let login_env = login_shell_env(&shell).await;
+    let login_env = tokio::select! {
+        env = login_shell_env(&shell) => env,
+        _ = process::wait_for_cancel(context.cancel.clone()) => {
+            anyhow::bail!("{} command aborted\n(no output)", runtime.display_name());
+        }
+    };
     let mut process = Command::new(&shell);
     runtime.apply_command(&mut process, &command, false);
     process
@@ -147,8 +154,10 @@ pub(super) async fn bash_tool(
         .spawn()
         .with_context(|| format!("failed to spawn shell {shell}"))?;
     let child_id = child.id();
-    let stdout_task = process::read_child_output(child.stdout.take());
-    let stderr_task = process::read_child_output(child.stderr.take());
+    let stdout_task =
+        process::read_child_output(child.stdout.take(), MAX_CAPTURE_BYTES_PER_STREAM);
+    let stderr_task =
+        process::read_child_output(child.stderr.take(), MAX_CAPTURE_BYTES_PER_STREAM);
     let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
     tokio::pin!(timeout);
     let wait_result: anyhow::Result<std::process::ExitStatus> = tokio::select! {
@@ -167,13 +176,14 @@ pub(super) async fn bash_tool(
 
     let stdout = stdout_task.await??;
     let stderr = stderr_task.await??;
-    let stdout = String::from_utf8_lossy(&stdout);
-    let stderr = String::from_utf8_lossy(&stderr);
+    let capture_truncated = stdout.truncated || stderr.truncated;
+    let stdout = String::from_utf8_lossy(&stdout.bytes);
+    let stderr = String::from_utf8_lossy(&stderr.bytes);
     let mut rendered = String::new();
-    let mut truncated = false;
+    let mut truncated = capture_truncated;
     let mut output_path = None;
     if !stdout.is_empty() {
-        let output = truncate::truncate_output(&stdout);
+        let output = truncate::truncate_output(&stdout)?;
         truncated |= output.truncated;
         output_path = output.output_path;
         rendered.push_str(&output.output);
@@ -182,13 +192,18 @@ pub(super) async fn bash_tool(
         if !rendered.is_empty() {
             rendered.push('\n');
         }
-        let output = truncate::truncate_output(&stderr);
+        let output = truncate::truncate_output(&stderr)?;
         truncated |= output.truncated;
         output_path = output_path.or(output.output_path);
         rendered.push_str(&output.output);
     }
     if rendered.is_empty() {
         rendered.push_str("(no output)");
+    }
+    if capture_truncated {
+        rendered.push_str(
+            "\n\n[process output capture truncated at the 1 MiB per-stream safety limit]",
+        );
     }
 
     let status = match wait_result {
@@ -207,6 +222,7 @@ pub(super) async fn bash_tool(
         "timeout": timeout_ms,
         "workdir": display_path(&context.cwd, &cwd),
         "truncated": truncated,
+        "captureTruncated": capture_truncated,
         "alwaysPatterns": scan.always_patterns.into_iter().collect::<Vec<_>>(),
         "commandPatterns": scan.command_patterns.into_iter().collect::<Vec<_>>(),
         "externalDirectories": scan.external_dirs.into_iter().collect::<Vec<_>>(),

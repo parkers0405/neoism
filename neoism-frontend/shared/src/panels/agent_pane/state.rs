@@ -600,6 +600,7 @@ pub struct NeoismAgentPane {
     /// settle quickly instead of drifting on after the wheel stops.
     timeline_scroll_decay_tau: f32,
     timeline_scroll_stop_px_s: f32,
+    timeline_scroll_min_frame_step_px: f32,
     timeline_measure_cache: RefCell<HashMap<TimelineMeasureKey, f32>>,
     markdown_blocks_cache:
         RefCell<HashMap<MarkdownBlocksKey, (CachedMarkdownBlocks, u64)>>,
@@ -925,6 +926,7 @@ impl Default for NeoismAgentPane {
             timeline_last_tick_at: None,
             timeline_scroll_decay_tau: Self::TIMELINE_TRACKPAD_DECAY_TAU,
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
+            timeline_scroll_min_frame_step_px: Self::TIMELINE_TRACKPAD_MIN_FRAME_STEP_PX,
             timeline_measure_cache: RefCell::new(HashMap::new()),
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: Cell::new(0),

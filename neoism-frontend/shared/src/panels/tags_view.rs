@@ -11,7 +11,6 @@
 //! refresh path.
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use web_time::Duration;
@@ -368,47 +367,10 @@ impl NeoismTagsPane {
     }
 }
 
-// Native: pull tag groups from the local sqlite-backed note graph.
+// The persistent Obsidian-style tag/graph index is disabled for now.
 #[cfg(not(target_arch = "wasm32"))]
-fn load_tag_groups(root: &Path) -> Result<Vec<TagGroup>, String> {
-    use neoism_workspace_index::{NoteGraph, NoteQueryLimit};
-
-    let graph =
-        NoteGraph::open(root).map_err(|err| format!("Could not open tags: {err}"))?;
-    let tags = graph
-        .tags(NoteQueryLimit(1000))
-        .map_err(|err| format!("Could not load tags: {err}"))?;
-    let occurrences = graph
-        .tag_occurrences(None, NoteQueryLimit(20_000))
-        .map_err(|err| format!("Could not load tag files: {err}"))?;
-
-    let mut files_by_tag = BTreeMap::<String, BTreeMap<String, TagFile>>::new();
-    for occurrence in occurrences {
-        let absolute = graph.workspace().root.join(&occurrence.path);
-        files_by_tag
-            .entry(occurrence.tag)
-            .or_default()
-            .entry(occurrence.path.clone())
-            .or_insert_with(|| TagFile {
-                path: absolute,
-                label: compact_note_path(&occurrence.path).to_string(),
-                title: occurrence.title,
-                line: occurrence.line.max(1) as usize,
-            });
-    }
-
-    Ok(tags
-        .into_iter()
-        .map(|tag| TagGroup {
-            files: files_by_tag
-                .remove(&tag.tag)
-                .unwrap_or_default()
-                .into_values()
-                .collect(),
-            tag: tag.tag,
-        })
-        .filter(|group| !group.files.is_empty())
-        .collect())
+fn load_tag_groups(_root: &Path) -> Result<Vec<TagGroup>, String> {
+    Ok(Vec::new())
 }
 
 // Wasm: workspace-index pulls sqlx/tokio/notify (native-only). The
@@ -417,11 +379,6 @@ fn load_tag_groups(root: &Path) -> Result<Vec<TagGroup>, String> {
 #[cfg(target_arch = "wasm32")]
 fn load_tag_groups(_root: &Path) -> Result<Vec<TagGroup>, String> {
     Ok(Vec::new())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn compact_note_path(path: &str) -> &str {
-    path.strip_prefix("neoism/").unwrap_or(path)
 }
 
 fn point_in_rect(x: f32, y: f32, rect: [f32; 4]) -> bool {

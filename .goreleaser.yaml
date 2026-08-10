@@ -8,7 +8,7 @@ version: 2
 # TODO(neoism): This GoReleaser config is inherited from Rio and is currently
 # DISABLED (see .github/workflows/release.yml — the live release path is
 # release-neoism.yml). It still references Rio's cargo package names
-# (rioterm, rio-window, rio-backend, ...), rio.desktop, and rio terminfo, which
+# (rioterm, rio-window, rio-backend, ...) and rio.desktop, which
 # no longer exist in this workspace. Rio/personal identity has been stripped;
 # a full neoism packaging retarget is still needed before re-enabling this.
 
@@ -24,9 +24,6 @@ env:
 
 before:
   hooks:
-    - if: '{{ ne .Runtime.Goos "windows" }}'
-      cmd: tic -xe rio -o misc misc/rio.terminfo
-      output: true
     - if: '{{ eq .Runtime.Goos "windows" }}'
       cmd: dotnet tool install --global wix --version 5.0.2
       output: true
@@ -168,8 +165,6 @@ nfpms:
         contents:
           - src: ./misc/neoism.desktop
             dst: /usr/share/applications/neoism.desktop
-          - src: ./misc/r/rio
-            dst: /usr/share/terminfo/r/rio
           - src: ./neoism-frontend/desktop/assets/icons/neoism.png
             dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     contents:
@@ -191,8 +186,6 @@ nfpms:
         contents:
           - src: ./misc/neoism.desktop
             dst: /usr/share/applications/neoism.desktop
-          - src: ./misc/r/rio
-            dst: /usr/share/terminfo/r/rio
           - src: ./neoism-frontend/desktop/assets/icons/neoism.png
             dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     contents:
@@ -214,8 +207,6 @@ nfpms:
         contents:
           - src: ./misc/neoism.desktop
             dst: /usr/share/applications/neoism.desktop
-          - src: ./misc/r/rio
-            dst: /usr/share/terminfo/r/rio
           - src: ./neoism-frontend/desktop/assets/icons/neoism.png
             dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     contents:
@@ -237,8 +228,6 @@ nfpms:
         contents:
           - src: ./misc/neoism.desktop
             dst: /usr/share/applications/neoism.desktop
-          - src: ./misc/r/rio
-            dst: /usr/share/terminfo/r/rio
           - src: ./neoism-frontend/desktop/assets/icons/neoism.png
             dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     contents:

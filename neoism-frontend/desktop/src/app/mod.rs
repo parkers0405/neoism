@@ -1967,10 +1967,8 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 }
             }
             RioEventType::Rio(RioEvent::WorkspaceNotesWake) => {
-                if let Some(route) = self.router.routes.get_mut(&window_id) {
-                    route.window.screen.drain_workspace_note_index_events();
-                    route.request_redraw();
-                }
+                // Persistent note indexing is disabled. Keep accepting the
+                // legacy wake event so older helpers cannot disrupt routing.
             }
             RioEventType::Rio(RioEvent::Bell) => {
                 if should_play_audio_bell(self.config.terminal.bell.audio) {

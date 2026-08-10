@@ -1,5 +1,6 @@
 use super::*;
 use crate::state::{DbBackend, SessionStore};
+use crate::tool_selection::provider_tool_map;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
@@ -28,7 +29,7 @@ fn gpt_models_get_opencode_patch_toolset() {
     assert!(use_apply_patch_for_model("openai/gpt-5.4-codex"));
     assert!(use_apply_patch_for_model("codex-mini-latest"));
     assert!(tool_allowed_for_model("apply_patch", "gpt-5.5"));
-    assert!(tool_allowed_for_model("edit", "gpt-5.5"));
+    assert!(!tool_allowed_for_model("edit", "gpt-5.5"));
     assert!(!tool_allowed_for_model("write", "gpt-5.5"));
 
     assert!(!use_apply_patch_for_model("gpt-4.1"));
@@ -36,10 +37,21 @@ fn gpt_models_get_opencode_patch_toolset() {
     assert!(tool_allowed_for_model("edit", "gpt-4.1"));
     assert!(tool_allowed_for_model("write", "gpt-4.1"));
 
-    let available = HashSet::from(["apply_patch".to_string()]);
+    let available = provider_tool_map(
+        &tool::list()
+            .into_iter()
+            .filter(|tool| tool.id == "apply_patch")
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        normalize_provider_tool_name("apply_patch", &json!({}), &available).as_deref(),
+        Some("apply_patch")
+    );
+    // Provider calls must use the exact advertised name. Silent aliases make
+    // stale prompts and mismatched schemas much harder to detect.
     assert_eq!(
         normalize_provider_tool_name("patch", &json!({}), &available).as_deref(),
-        Some("apply_patch")
+        None
     );
     assert_eq!(
         normalize_provider_tool_name(
@@ -48,7 +60,7 @@ fn gpt_models_get_opencode_patch_toolset() {
             &available,
         )
         .as_deref(),
-        Some("apply_patch")
+        None
     );
     assert!(normalize_provider_tool_name("edit", &json!({}), &available).is_none());
 }
@@ -88,7 +100,7 @@ async fn diagnostic_tool_results_publish_lsp_updated_event() {
 fn compacted_summary_is_added_to_provider_context() {
     let session_id = neoism_agent_core::new_session_id();
     let message_id = Id::ascending(IdKind::Message);
-    let mut info = SessionInfo {
+    let info = SessionInfo {
         id: session_id.clone(),
         slug: "summary-test".to_string(),
         project_id: "global".to_string(),
@@ -109,7 +121,7 @@ fn compacted_summary_is_added_to_provider_context() {
         permission: None,
         extra: BTreeMap::new(),
     };
-    let messages = vec![MessageWithParts {
+    let mut messages = vec![MessageWithParts {
         info: MessageInfo::User(UserMessage {
             id: message_id.clone(),
             session_id: session_id.clone(),
@@ -126,17 +138,15 @@ fn compacted_summary_is_added_to_provider_context() {
         }),
         parts: vec![Part::Text(TextPart {
             id: Id::ascending(IdKind::Part),
-            session_id,
+            session_id: session_id.clone(),
             message_id,
             text: "summarize this context".to_string(),
             synthetic: None,
             time: None,
         })],
     }];
-    info.extra.insert(
-        "summary".to_string(),
-        json!({ "text": build_session_summary(&messages), "messageCount": messages.len() }),
-    );
+    let summary = build_session_summary(&messages);
+    messages.extend(test_compaction_pair(&session_id, None, &summary));
 
     let provider_messages = provider_messages_for_session(&info, &messages, "stub", None);
 
@@ -227,7 +237,7 @@ fn compacted_summary_trims_messages_already_covered_by_summary() {
     let session_id = neoism_agent_core::new_session_id();
     let first_id = Id::ascending(IdKind::Message);
     let second_id = Id::ascending(IdKind::Message);
-    let mut info = SessionInfo {
+    let info = SessionInfo {
         id: session_id.clone(),
         slug: "summary-tail-test".to_string(),
         project_id: "global".to_string(),
@@ -248,60 +258,61 @@ fn compacted_summary_trims_messages_already_covered_by_summary() {
         permission: None,
         extra: BTreeMap::new(),
     };
-    let messages = vec![
-        MessageWithParts {
-            info: MessageInfo::User(UserMessage {
-                id: first_id.clone(),
-                session_id: session_id.clone(),
-                time: CreatedTime { created: 1 },
-                agent: "build".to_string(),
-                model: UserModel {
-                    provider_id: "neoism".to_string(),
-                    model_id: "stub".to_string(),
-                    variant: None,
-                },
-                system: None,
-                tools: None,
-                author: None,
-            }),
-            parts: vec![Part::Text(TextPart {
-                id: Id::ascending(IdKind::Part),
-                session_id: session_id.clone(),
-                message_id: first_id,
-                text: "old compacted request".to_string(),
-                synthetic: None,
-                time: None,
-            })],
-        },
-        MessageWithParts {
-            info: MessageInfo::User(UserMessage {
-                id: second_id.clone(),
-                session_id: session_id.clone(),
-                time: CreatedTime { created: 2 },
-                agent: "build".to_string(),
-                model: UserModel {
-                    provider_id: "neoism".to_string(),
-                    model_id: "stub".to_string(),
-                    variant: None,
-                },
-                system: None,
-                tools: None,
-                author: None,
-            }),
-            parts: vec![Part::Text(TextPart {
-                id: Id::ascending(IdKind::Part),
-                session_id,
-                message_id: second_id,
-                text: "new tail request".to_string(),
-                synthetic: None,
-                time: None,
-            })],
-        },
-    ];
-    info.extra.insert(
-        "summary".to_string(),
-        json!({ "text": "Summary covers old compacted request.", "messageCount": 1 }),
-    );
+    let old_message = MessageWithParts {
+        info: MessageInfo::User(UserMessage {
+            id: first_id.clone(),
+            session_id: session_id.clone(),
+            time: CreatedTime { created: 1 },
+            agent: "build".to_string(),
+            model: UserModel {
+                provider_id: "neoism".to_string(),
+                model_id: "stub".to_string(),
+                variant: None,
+            },
+            system: None,
+            tools: None,
+            author: None,
+        }),
+        parts: vec![Part::Text(TextPart {
+            id: Id::ascending(IdKind::Part),
+            session_id: session_id.clone(),
+            message_id: first_id,
+            text: "old compacted request".to_string(),
+            synthetic: None,
+            time: None,
+        })],
+    };
+    let tail_message = MessageWithParts {
+        info: MessageInfo::User(UserMessage {
+            id: second_id.clone(),
+            session_id: session_id.clone(),
+            time: CreatedTime { created: 2 },
+            agent: "build".to_string(),
+            model: UserModel {
+                provider_id: "neoism".to_string(),
+                model_id: "stub".to_string(),
+                variant: None,
+            },
+            system: None,
+            tools: None,
+            author: None,
+        }),
+        parts: vec![Part::Text(TextPart {
+            id: Id::ascending(IdKind::Part),
+            session_id: session_id.clone(),
+            message_id: second_id.clone(),
+            text: "new tail request".to_string(),
+            synthetic: None,
+            time: None,
+        })],
+    };
+    let mut messages = vec![old_message];
+    messages.extend(test_compaction_pair(
+        &session_id,
+        Some(second_id.clone()),
+        "Summary covers old compacted request.",
+    ));
+    messages.push(tail_message);
 
     let provider_messages = provider_messages_for_session(&info, &messages, "stub", None);
 
@@ -315,6 +326,82 @@ fn compacted_summary_trims_messages_already_covered_by_summary() {
         .iter()
         .skip(2)
         .any(|message| message.content.contains("old compacted request")));
+}
+
+fn test_compaction_pair(
+    session_id: &neoism_agent_core::SessionId,
+    tail_start_message_id: Option<neoism_agent_core::MessageId>,
+    summary: &str,
+) -> [MessageWithParts; 2] {
+    let user_id = Id::ascending(IdKind::Message);
+    let assistant_id = Id::ascending(IdKind::Message);
+    [
+        MessageWithParts {
+            info: MessageInfo::User(UserMessage {
+                id: user_id.clone(),
+                session_id: session_id.clone(),
+                time: CreatedTime { created: 10 },
+                agent: "neoism".to_string(),
+                model: UserModel {
+                    provider_id: "neoism".to_string(),
+                    model_id: "stub".to_string(),
+                    variant: None,
+                },
+                system: None,
+                tools: None,
+                author: None,
+            }),
+            parts: vec![Part::Compaction(CompactionPart {
+                id: Id::ascending(IdKind::Part),
+                session_id: session_id.clone(),
+                message_id: user_id.clone(),
+                reason: "test".to_string(),
+                summary: false,
+                tail_start_message_id,
+            })],
+        },
+        MessageWithParts {
+            info: MessageInfo::Assistant(AssistantMessage {
+                id: assistant_id.clone(),
+                session_id: session_id.clone(),
+                time: CompletedTime {
+                    created: 11,
+                    completed: Some(12),
+                },
+                parent_id: user_id,
+                mode: "compaction".to_string(),
+                agent: "neoism".to_string(),
+                path: AssistantPath {
+                    cwd: "/tmp".to_string(),
+                    root: "/tmp".to_string(),
+                },
+                cost: 0.0,
+                tokens: TokenUsage::default(),
+                model_id: "stub".to_string(),
+                provider_id: "neoism".to_string(),
+                finish: Some("stop".to_string()),
+                error: None,
+            }),
+            parts: vec![
+                Part::Compaction(CompactionPart {
+                    id: Id::ascending(IdKind::Part),
+                    session_id: session_id.clone(),
+                    message_id: assistant_id.clone(),
+                    reason: "summary".to_string(),
+                    summary: true,
+                    tail_start_message_id: None,
+                }),
+                Part::Text(TextPart {
+                    id: Id::ascending(IdKind::Part),
+                    session_id: session_id.clone(),
+                    message_id: assistant_id,
+                    text: summary.to_string(),
+                    synthetic: Some(true),
+                    time: None,
+                }),
+            ],
+        },
+    ]
 }
 
 #[test]
@@ -1110,6 +1197,152 @@ async fn sync_history_accepts_opencode_aggregate_sequence_map() {
 }
 
 #[tokio::test]
+async fn concurrent_event_commits_keep_one_gapless_aggregate_sequence() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-atomic-events-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id().to_string();
+    let commits = (0..24).map(|index| {
+        let state = state.clone();
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            state
+                .publish_persisted(EventPayload::new(
+                    event_type::SESSION_STATUS,
+                    json!({ "sessionID": session_id, "index": index }),
+                ))
+                .await
+        })
+    });
+    for result in futures::future::join_all(commits).await {
+        result.unwrap().unwrap();
+    }
+    let events = state
+        .inner
+        .store
+        .list_events_after(0, 100, Some(&session_id))
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 24);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.aggregate_seq)
+            .collect::<Vec<_>>(),
+        (0..24).collect::<Vec<_>>()
+    );
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn turso_transactions_retry_while_another_store_is_writing() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-busy-retry-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+
+    // Two separately opened stores deliberately do not share the in-process
+    // write gate. This reproduces a debug/production or multi-process writer
+    // holding the database while the durable event transaction begins.
+    let event_store = SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
+        .await
+        .unwrap();
+    let projection_store =
+        SessionStore::open_with_backend(path.clone(), DbBackend::Turso)
+            .await
+            .unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let session = store_test_session(&session_id, now_millis());
+    projection_store.insert_session(&session).await.unwrap();
+
+    let writes = 64;
+    let mut tasks = Vec::with_capacity(writes * 2);
+    for index in 0..writes {
+        let store = event_store.clone();
+        let session_id = session_id.clone();
+        tasks.push(tokio::spawn(async move {
+            store
+                .append_event(&EventPayload::new(
+                    event_type::SESSION_STATUS,
+                    json!({ "sessionID": session_id, "index": index }),
+                ))
+                .await
+        }));
+
+        let store = projection_store.clone();
+        let mut session = session.clone();
+        tasks.push(tokio::spawn(async move {
+            session.time.updated += index as u64 + 1;
+            store.update_session(&session).await
+        }));
+    }
+    for result in futures::future::join_all(tasks).await {
+        result.unwrap().unwrap();
+    }
+
+    let events = event_store
+        .list_events_after(0, writes, Some(session_id.as_str()))
+        .await
+        .unwrap();
+    assert_eq!(events.len(), writes);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.aggregate_seq)
+            .collect::<Vec<_>>(),
+        (0..writes as i64).collect::<Vec<_>>()
+    );
+
+    drop(projection_store);
+    drop(event_store);
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn context_epochs_survive_restart_and_advance_on_instruction_change() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-context-epoch-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("AGENTS.md"), "first instructions\n").unwrap();
+    let path = root.join("agent.sqlite3");
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let mut session = store_test_session(&session_id, now_millis());
+    session.directory = root.to_string_lossy().to_string();
+    state.inner.store.insert_session(&session).await.unwrap();
+    let first = context_epoch::reconcile(&state, &mut session)
+        .await
+        .unwrap();
+    assert_eq!(first.generation, 1);
+    drop(state);
+
+    std::fs::write(root.join("AGENTS.md"), "second instructions\n").unwrap();
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let mut session = state
+        .inner
+        .store
+        .get_session(session_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = context_epoch::reconcile(&state, &mut session)
+        .await
+        .unwrap();
+    assert_eq!(second.generation, 2);
+    assert_eq!(second.baseline, first.baseline);
+    assert_ne!(second.snapshot, first.snapshot);
+    drop(state);
+    cleanup_sqlite_files(&path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn sync_replay_persists_opencode_events() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-sync-replay-{}.sqlite3",
@@ -1592,7 +1825,7 @@ impl plugin::NativePlugin for TestNativePlugin {
         args: &mut Value,
     ) -> anyhow::Result<()> {
         if ctx.tool_id == "read" {
-            *args = json!({ "path": "input.txt" });
+            *args = json!({ "filePath": "input.txt" });
         }
         Ok(())
     }
@@ -1654,7 +1887,7 @@ async fn native_plugin_hooks_can_shape_tools_and_chat_context() {
                     "/experimental/tool/read/execute?directory={}",
                     root.to_string_lossy()
                 ),
-                Some(json!({ "path": "missing.txt" })),
+                Some(json!({ "filePath": "missing.txt" })),
             ))
             .await
             .unwrap(),
@@ -2749,7 +2982,7 @@ async fn append_snapshot_test_messages(
                     tool: "write".to_string(),
                     call_id: "call_write_1".to_string(),
                     state: ToolState::Completed {
-                        input: json!({ "path": "file.txt", "content": "after" }),
+                        input: json!({ "filePath": "file.txt", "content": "after" }),
                         output: "wrote file".to_string(),
                         metadata,
                         title: "Write file.txt".to_string(),

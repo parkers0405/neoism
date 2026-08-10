@@ -87,7 +87,6 @@ jobs:
              target/release/neoism-workspace-daemon \
              target/release/neoism-agent \
              "stage/$OUT/"
-          cp misc/rio.terminfo "stage/$OUT/" 2>/dev/null || true
           tar -C stage -czf "$OUT.tar.gz" "$OUT"
           sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256"
 

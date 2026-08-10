@@ -94,19 +94,11 @@ pub struct NotesSidebar {
     icon_rects: Vec<([f32; 4], usize)>,
     selected_cursor_rect: Option<[f32; 4]>,
     workspace_rect: Option<[f32; 4]>,
-    /// The footer settings gear (right of the vault selector) — opens
-    /// the Notes settings menu. Reachable with ArrowRight from the vault
-    /// selector, clickable, focus tracked by `settings_selected`.
-    settings_rect: Option<[f32; 4]>,
-    settings_selected: bool,
     /// Compact create actions directly below the Notes wordmark.
     new_note_rect: Option<[f32; 4]>,
     new_folder_rect: Option<[f32; 4]>,
     /// Short accent pulse when the vault selector is activated.
     vault_press_started_at: Option<Instant>,
-    /// Per-letter NEOISM wordmark header — same hover/shimmer animation
-    /// as the splash and the agent home.
-    wordmark: crate::panels::agent_pane::state::NeoismWordmarkState,
     /// Pending vim-style numeric count (e.g. `5` then `j` moves 5 rows).
     /// Accumulated by [`push_count_digit`](Self::push_count_digit) and
     /// consumed by the next motion via [`take_count`](Self::take_count).
@@ -196,8 +188,6 @@ struct NoteSidebarRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotesSidebarHit {
     WorkspacePicker,
-    /// The footer settings gear.
-    Settings,
     /// Pencil-note action directly below the Notes title.
     NewNote,
     /// Folder-plus action directly below the Notes title.
@@ -246,18 +236,9 @@ impl Default for NotesSidebar {
             icon_rects: Vec::new(),
             selected_cursor_rect: None,
             workspace_rect: None,
-            settings_rect: None,
-            settings_selected: false,
             new_note_rect: None,
             new_folder_rect: None,
             vault_press_started_at: None,
-            wordmark: crate::panels::agent_pane::state::NeoismWordmarkState {
-                hover: [0.0; 6],
-                last_frame_at: None,
-                rect: None,
-                click_started: None,
-                click_pos: None,
-            },
             pending_count: None,
             pending_g: false,
             notes_drag: None,
@@ -308,7 +289,6 @@ impl NotesSidebar {
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
         if !focused {
-            self.settings_selected = false;
             self.clear_pending();
         }
     }
@@ -603,33 +583,11 @@ impl NotesSidebar {
 
     pub fn select_selector(&mut self) {
         self.selector_selected = true;
-        self.settings_selected = false;
     }
 
-    pub fn is_settings_selected(&self) -> bool {
-        self.selector_selected && self.settings_selected
-    }
-
-    /// The footer settings gear rect — menus anchor to it.
-    pub fn settings_button_rect(&self) -> Option<[f32; 4]> {
-        self.settings_rect
-    }
-
-    /// ArrowLeft/Right on the footer walks vault selector <-> settings
-    /// gear. Elsewhere horizontal keys keep their normal meaning.
-    pub fn move_horizontal_focus(&mut self, right: bool) -> bool {
-        if !self.selector_selected {
-            return false;
-        }
-        if right && !self.settings_selected {
-            self.settings_selected = true;
-            true
-        } else if !right && self.settings_selected {
-            self.settings_selected = false;
-            true
-        } else {
-            false
-        }
+    /// The vault selector is the footer's only horizontal target.
+    pub fn move_horizontal_focus(&mut self, _right: bool) -> bool {
+        false
     }
 
     pub fn workspace_path(&self) -> Option<PathBuf> {
@@ -675,7 +633,6 @@ impl NotesSidebar {
 
     pub fn set_selected(&mut self, index: usize) {
         self.selector_selected = false;
-        self.settings_selected = false;
         if !self.rows.is_empty() {
             self.move_selection_to(index.min(self.rows.len().saturating_sub(1)));
         }
@@ -708,7 +665,6 @@ impl NotesSidebar {
         }
         if self.rows.is_empty() || self.selected_index + 1 >= self.rows.len() {
             self.selector_selected = true;
-            self.settings_selected = false;
         } else {
             self.set_selected(
                 (self.selected_index + 1).min(self.rows.len().saturating_sub(1)),
@@ -719,7 +675,6 @@ impl NotesSidebar {
     pub fn select_prev(&mut self) {
         if self.selector_selected {
             self.selector_selected = false;
-            self.settings_selected = false;
             if !self.rows.is_empty() {
                 self.selected_index = self.rows.len().saturating_sub(1);
                 self.clamp_scroll(self.last_panel_height_rows);
@@ -990,8 +945,8 @@ impl NotesSidebar {
     /// this to keep requesting redraws so the eased motion plays out
     /// instead of snapping on the next unrelated frame.
     pub fn is_animating(&self) -> bool {
-        // The visible wordmark has a wall-clock idle shimmer, so the panel
-        // must own redraws even after its springs and hover settle.
+        // The visible Notes wordmark intentionally shimmers at idle. Alt+N
+        // therefore owns redraws for as long as the panel is on screen.
         self.visible
     }
 
@@ -1004,11 +959,6 @@ impl NotesSidebar {
         for (rect, index) in &self.note_rects {
             if rect_contains(*rect, x, y) {
                 return Some(NotesSidebarHit::Note(*index));
-            }
-        }
-        if let Some(r) = self.settings_rect {
-            if rect_contains(r, x, y) {
-                return Some(NotesSidebarHit::Settings);
             }
         }
         if let Some(r) = self.new_note_rect {
@@ -1052,13 +1002,12 @@ impl NotesSidebar {
         theme: &IdeTheme,
         occlusion: &[[f32; 4]],
         mouse: Option<(f32, f32)>,
-        now_seconds: f32,
+        _now_seconds: f32,
     ) {
         if !self.visible || panel_width <= 0.0 || panel_height <= 0.0 {
             return;
         }
         self.workspace_rect = None;
-        self.settings_rect = None;
         self.new_note_rect = None;
         self.new_folder_rect = None;
         self.empty_create_rect = None;
@@ -1099,110 +1048,82 @@ impl NotesSidebar {
             clip_rect: Some(panel_clip),
             ..DrawOpts::default()
         };
-        let action_opts = DrawOpts {
-            font_size: icon_size,
-            color: theme.u8_alpha(theme.fg, 0.72),
+        let header_y = content_y + 8.0 * self.scale;
+        // The Notes header intentionally keeps its per-letter shimmer alive
+        // whenever Alt+N is visible, including while the panel is idle.
+        const SPLASH: &str = "Notes";
+        const SHIMMER_PERIOD: f32 = 3.4;
+        const SHIMMER_AMP: f32 = 0.03;
+        // The host passes Unix time as f32, which is too large to retain
+        // frame-sized precision. Use the shared wrapped animation clock so
+        // the shimmer advances smoothly instead of quantizing to a still.
+        let shimmer_seconds = crate::cursor_style::rainbow_now_seconds();
+        let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
+        let target_w = (content_w - row_pad_x * 2.0).max(1.0);
+        let probe_opts = DrawOpts {
+            font_size: 10.0,
+            font_id: pixel_font,
+            ..DrawOpts::default()
+        };
+        let probe_w = sugarloaf.text_mut().measure(SPLASH, &probe_opts).max(1.0);
+        let splash_size = (16.0 * self.scale).min((10.0 * target_w / probe_w).max(10.0));
+        let wordmark_h = splash_size * 1.15;
+        let letter_opts = DrawOpts {
+            font_size: splash_size,
+            color: theme.u8(theme.fg),
+            extrude: true,
+            font_id: pixel_font,
             clip_rect: Some(panel_clip),
             ..DrawOpts::default()
         };
-
-        let header_y = content_y + 8.0 * self.scale;
-        // "Notes" splash header — the bundled Press Start 2P arcade
-        // face (same as the agent side-panel headings) with the
-        // wordmark's per-letter hover lift + shimmer, sized to span
-        // the full panel top.
-        let wordmark_h;
-        {
-            use crate::panels::agent_pane::view::wordmark::WordmarkState;
-            const SPLASH: &str = "Notes";
-            const SHIMMER_PERIOD: f32 = 3.4;
-            const SHIMMER_AMP: f32 = 0.03;
-            const HOVER_RATE: f32 = 10.0;
-            const HOVER_SCALE: f32 = 0.18;
-            const HOVER_LIFT: f32 = 0.16;
-            let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
-            let target_w = (content_w - row_pad_x * 2.0).max(1.0);
-            let probe_opts = DrawOpts {
-                font_size: 10.0,
-                font_id: pixel_font,
-                ..DrawOpts::default()
+        let mut letter_x = content_x + row_pad_x;
+        for (index, ch) in SPLASH.chars().enumerate() {
+            let letter = ch.to_string();
+            let letter_width =
+                sugarloaf.text_mut().measure(&letter, &letter_opts).max(1.0);
+            let shimmer = ((shimmer_seconds / SHIMMER_PERIOD + index as f32 * 0.16)
+                * std::f32::consts::TAU)
+                .sin()
+                * SHIMMER_AMP;
+            let scale = 1.0 + shimmer;
+            let opts = DrawOpts {
+                font_size: splash_size * scale,
+                ..letter_opts
             };
-            let probe_w = sugarloaf.text_mut().measure(SPLASH, &probe_opts).max(1.0);
-            // Match the agent side-panel heading size (~15.5px drawn);
-            // the width fit only kicks in on very narrow panels.
-            let splash_size =
-                (16.0 * self.scale).min((10.0 * target_w / probe_w).max(10.0));
-            wordmark_h = splash_size * 1.15;
-            let rect = [content_x + row_pad_x, header_y, target_w, wordmark_h];
-            self.wordmark.set_rect(rect);
-            let dt = self.wordmark.frame_delta_seconds();
-            let smoothing = 1.0 - (-HOVER_RATE * dt).exp();
-            let letter_opts = DrawOpts {
-                font_size: splash_size,
-                color: theme.u8(theme.fg),
-                extrude: true,
-                font_id: pixel_font,
-                clip_rect: Some(panel_clip),
-                ..DrawOpts::default()
-            };
-            let mut lx = rect[0];
-            for (i, ch) in SPLASH.chars().enumerate() {
-                let letter = ch.to_string();
-                let lw = sugarloaf.text_mut().measure(&letter, &letter_opts).max(1.0);
-                let target = mouse
-                    .map(|(mx, my)| {
-                        mx >= lx
-                            && mx <= lx + lw
-                            && my >= rect[1]
-                            && my <= rect[1] + wordmark_h
-                    })
-                    .unwrap_or(false) as u8 as f32;
-                let hover = &mut self.wordmark.hover[i];
-                *hover += (target - *hover) * smoothing;
-                let hover = hover.clamp(0.0, 1.0);
-                let shimmer = ((now_seconds / SHIMMER_PERIOD + i as f32 * 0.16)
-                    * std::f32::consts::TAU)
-                    .sin()
-                    * SHIMMER_AMP;
-                let extra = 1.0 + hover * HOVER_SCALE + shimmer;
-                let opts = DrawOpts {
-                    font_size: splash_size * extra,
-                    ..letter_opts
-                };
-                let lift = hover * HOVER_LIFT * wordmark_h;
-                draw_text_with_occlusion(
-                    sugarloaf,
-                    lx + lw * (1.0 - extra) * 0.5,
-                    header_y + (wordmark_h - splash_size * extra) * 0.5 - lift,
-                    &letter,
-                    &opts,
-                    occlusion,
-                );
-                lx += lw;
-            }
+            draw_text_with_occlusion(
+                sugarloaf,
+                letter_x + letter_width * (1.0 - scale) * 0.5,
+                header_y + (wordmark_h - splash_size * scale) * 0.5,
+                &letter,
+                &opts,
+                occlusion,
+            );
+            letter_x += letter_width;
         }
 
-        // Quick-create actions share the title row: Notes on the left,
-        // new note + folder hugging the right edge.
+        // Quick-create actions share the title row while there is room. On a
+        // narrow sidebar they move together to a second row instead of
+        // colliding with or clipping the Notes wordmark.
         let create_size = (row_h * 0.86).max(22.0 * self.scale);
+        let create_gap = 4.0 * self.scale;
+        let create_right = content_x + content_w - row_pad_x;
+        let new_note_x = create_right - create_size * 2.0 - create_gap;
         // Sugarloaf normalizes the Nerd Font run to the same centered
         // primary-font line box as the title, so the button and hit target
         // can use the row's geometric center without a family-specific lift.
-        let create_y = header_y + (wordmark_h - create_size) * 0.5;
-        let create_gap = 4.0 * self.scale;
-        let create_right = content_x + content_w - row_pad_x;
+        let create_y =
+            if notes_header_actions_wrap(letter_x, new_note_x, 8.0 * self.scale) {
+                header_y + wordmark_h + 6.0 * self.scale
+            } else {
+                header_y + (wordmark_h - create_size) * 0.5
+            };
         let new_folder_rect = [
             create_right - create_size,
             create_y,
             create_size,
             create_size,
         ];
-        let new_note_rect = [
-            new_folder_rect[0] - create_gap - create_size,
-            create_y,
-            create_size,
-            create_size,
-        ];
+        let new_note_rect = [new_note_x, create_y, create_size, create_size];
         self.new_note_rect = Some(new_note_rect);
         self.new_folder_rect = Some(new_folder_rect);
         let create_opts = DrawOpts {
@@ -1238,8 +1159,7 @@ impl NotesSidebar {
         }
 
         let footer_y = content_y + content_h - row_h - 6.0 * self.scale;
-        // Footer: vault selector row + the settings gear on its right
-        // (vault and graph/settings controls stay out of the create row).
+        // Footer: the vault selector owns the full row.
         let footer_divider_y = footer_y - 6.0 * self.scale;
         sugarloaf.rect(
             None,
@@ -1251,54 +1171,13 @@ impl NotesSidebar {
             DEPTH,
             ORDER + 1,
         );
-        let settings_w = row_h;
         let workspace_rect = [
             content_x + 6.0 * self.scale,
             footer_y,
-            (content_w - settings_w - 16.0 * self.scale).max(0.0),
+            (content_w - 12.0 * self.scale).max(0.0),
             row_h,
         ];
         self.workspace_rect = Some(workspace_rect);
-        let settings_rect = [
-            content_x + content_w - settings_w - 6.0 * self.scale,
-            footer_y,
-            settings_w,
-            row_h,
-        ];
-        self.settings_rect = Some(settings_rect);
-        if self.focused && self.selector_selected && self.settings_selected {
-            sugarloaf.quad(
-                None,
-                settings_rect[0],
-                settings_rect[1],
-                settings_rect[2],
-                settings_rect[3],
-                theme.f32_alpha(theme.hover, 0.5),
-                [6.0 * self.scale; 4],
-                DEPTH,
-                ORDER + 2,
-            );
-            // The block cursor stays visible while the gear is focused
-            // — it parks just left of the settings button instead of
-            // vanishing when focus walks off the vault selector.
-            let cursor_w = (font_size * 0.6).max(2.0);
-            let cursor_h = (row_h - 6.0 * self.scale).max(font_size).min(row_h);
-            self.selected_cursor_rect = Some([
-                (settings_rect[0] - cursor_w - 4.0 * self.scale).max(content_x),
-                footer_y + (row_h - cursor_h) / 2.0,
-                cursor_w,
-                cursor_h,
-            ]);
-        }
-        draw_icon_centered_with_occlusion(
-            sugarloaf,
-            settings_rect[0],
-            settings_rect,
-            "\u{f013}",
-            &action_opts,
-            occlusion,
-            true,
-        );
         let header_bottom = (header_y + wordmark_h).max(create_y + create_size);
         let list_y = header_bottom + 8.0 * self.scale;
         let list_h = (footer_y - list_y - 8.0 * self.scale).max(row_h);
@@ -1865,8 +1744,7 @@ impl NotesSidebar {
             sugarloaf.text_mut().draw(cx, text_y, &l.label, &label_opts);
         }
 
-        let footer_hover =
-            self.focused && self.selector_selected && !self.settings_selected;
+        let footer_hover = self.focused && self.selector_selected;
         let pointer_hover =
             mouse.is_some_and(|(mx, my)| rect_contains(workspace_rect, mx, my));
         let press_progress = self.vault_press_started_at.and_then(|started| {
@@ -2460,6 +2338,11 @@ fn rect_contains(rect: [f32; 4], x: f32, y: f32) -> bool {
     x >= rect[0] && y >= rect[1] && x <= rect[0] + rect[2] && y <= rect[1] + rect[3]
 }
 
+#[inline]
+fn notes_header_actions_wrap(title_right: f32, actions_left: f32, gap: f32) -> bool {
+    title_right + gap > actions_left
+}
+
 /// Scale a packed `[r, g, b, a]` color's alpha by `alpha` — used to dim
 /// the drag SOURCE row to a placeholder while it rides the cursor.
 /// Mirrors `file_tree::render::fade_u8`.
@@ -2473,6 +2356,12 @@ mod tests {
     use super::*;
 
     const VAULT: &str = "/tmp/neoism-notes-test-vault";
+
+    #[test]
+    fn narrow_notes_header_moves_both_create_actions_below_the_title() {
+        assert!(!notes_header_actions_wrap(120.0, 132.0, 8.0));
+        assert!(notes_header_actions_wrap(126.0, 132.0, 8.0));
+    }
 
     /// Build a sidebar with `n` flat note rows + one expandable folder
     /// ("dir") containing a single child, rooted at a synthetic vault.

@@ -122,13 +122,13 @@ impl NeoismAgentPane {
     /// do, without a lingering low-speed tail.
     pub(crate) const TIMELINE_TRACKPAD_DECAY_TAU: f32 = 0.28;
     pub(crate) const TIMELINE_TRACKPAD_STOP_PX_S: f32 = 50.0;
-    /// External mouse wheel: each notch is animated (small immediate nudge,
-    /// rest delivered by velocity) so it reads smooth instead of a lurch, but
-    /// with a short half-life so the glide settles in ~0.25s rather than
-    /// drifting on after the wheel stops.
-    pub(crate) const TIMELINE_WHEEL_DECAY_TAU: f32 = 0.12;
-    pub(crate) const TIMELINE_WHEEL_STOP_PX_S: f32 = 30.0;
-
+    pub(crate) const TIMELINE_TRACKPAD_MIN_FRAME_STEP_PX: f32 = 0.0;
+    /// External wheel notches arrive as large, discrete line deltas. Apply a
+    /// small part immediately, then deliver the rest through a short glide so
+    /// one click moves decisively without visibly jumping or drifting.
+    pub(crate) const TIMELINE_WHEEL_DECAY_TAU: f32 = 0.11;
+    pub(crate) const TIMELINE_WHEEL_STOP_PX_S: f32 = 35.0;
+    pub(crate) const TIMELINE_WHEEL_MIN_FRAME_STEP_PX: f32 = 0.75;
     pub fn scroll_timeline_pixels(&mut self, delta_pixels: f32) -> bool {
         self.scroll_timeline_pixels_with_inertia(
             delta_pixels,
@@ -136,16 +136,18 @@ impl NeoismAgentPane {
             7.0,
             Self::TIMELINE_TRACKPAD_DECAY_TAU,
             Self::TIMELINE_TRACKPAD_STOP_PX_S,
+            Self::TIMELINE_TRACKPAD_MIN_FRAME_STEP_PX,
         )
     }
 
     pub fn scroll_timeline_wheel_pixels(&mut self, delta_pixels: f32) -> bool {
         self.scroll_timeline_pixels_with_inertia(
             delta_pixels,
-            delta_pixels * 0.2,
-            12.0,
+            delta_pixels * 0.18,
+            7.5,
             Self::TIMELINE_WHEEL_DECAY_TAU,
             Self::TIMELINE_WHEEL_STOP_PX_S,
+            Self::TIMELINE_WHEEL_MIN_FRAME_STEP_PX,
         )
     }
 
@@ -156,6 +158,7 @@ impl NeoismAgentPane {
         velocity_multiplier: f32,
         decay_tau: f32,
         stop_px_s: f32,
+        min_frame_step_px: f32,
     ) -> bool {
         let started = crate::neoism::agent::perf::now();
         if delta_pixels.abs() < f32::EPSILON {
@@ -191,6 +194,11 @@ impl NeoismAgentPane {
             self.timeline_follow_bottom = true;
         }
         self.pending_timeline_anchor = None;
+        // The render pass stores a row anchor so streaming layout growth can
+        // keep a stationary reader in place. Once the user moves, that anchor
+        // describes the previous frame and must not be restored over this
+        // input; the renderer will capture a fresh anchor after drawing.
+        self.timeline_view_anchor = None;
         // If the user was holding the edge, don't keep building velocity —
         // they can't move further that way and the inertia would feel sticky.
         if (delta_pixels > 0.0 && !at_top) || (delta_pixels < 0.0 && !at_bottom) {
@@ -202,6 +210,7 @@ impl NeoismAgentPane {
                 (self.timeline_velocity_px_s + injected).clamp(-2800.0, 2800.0);
             self.timeline_scroll_decay_tau = decay_tau;
             self.timeline_scroll_stop_px_s = stop_px_s;
+            self.timeline_scroll_min_frame_step_px = min_frame_step_px;
             self.timeline_last_tick_at.get_or_insert_with(Instant::now);
         } else {
             self.timeline_velocity_px_s = 0.0;
@@ -249,6 +258,17 @@ impl NeoismAgentPane {
         let decay = (-dt / self.timeline_scroll_decay_tau.max(0.01)).exp();
         self.timeline_velocity_px_s *= decay;
         let step = self.timeline_velocity_px_s * dt;
+        if self.timeline_scroll_min_frame_step_px > 0.0
+            && step.abs() < self.timeline_scroll_min_frame_step_px
+        {
+            // A mouse wheel's final subpixel steps cannot move a pixel-snapped
+            // glyph every frame. Stop before that hold/jump tail begins; the
+            // direct trackpad path deliberately keeps its 1:1 fractional
+            // motion and uses a zero minimum step.
+            self.timeline_velocity_px_s = 0.0;
+            self.timeline_last_tick_at = None;
+            return false;
+        }
         let next = (self.timeline_scroll_px + step).clamp(0.0, max_scroll);
         if (next - self.timeline_scroll_px).abs() < f32::EPSILON {
             // Hit an edge — kill remaining momentum so we don't burn frames.
@@ -257,6 +277,9 @@ impl NeoismAgentPane {
             return false;
         }
         self.timeline_scroll_px = next;
+        // Streaming can remeasure the growing tail in this same frame. Do not
+        // let its stale pre-glide anchor undo the kinetic step we just applied.
+        self.timeline_view_anchor = None;
         if self.timeline_velocity_px_s < 0.0 && self.timeline_scroll_px <= 1.0 {
             self.timeline_follow_bottom = true;
         }
@@ -303,8 +326,6 @@ impl NeoismAgentPane {
         active: bool,
         ticked_scroll: bool,
         occlusion_count: usize,
-        panel_bottom_override: Option<f32>,
-        panel_top_override: Option<f32>,
     ) {
         if !crate::neoism::agent::perf::enabled() {
             return;
@@ -345,8 +366,6 @@ impl NeoismAgentPane {
             input_w = input_rect[2],
             input_h = input_rect[3],
             occlusion_count,
-            panel_bottom_override = ?panel_bottom_override,
-            panel_top_override = ?panel_top_override,
             "agent pane render perf"
         );
     }
@@ -394,6 +413,7 @@ impl NeoismAgentPane {
         });
         // Kill any in-flight kinetic scroll so the drag is responsive.
         self.pending_timeline_anchor = None;
+        self.timeline_view_anchor = None;
         self.timeline_velocity_px_s = 0.0;
         true
     }
@@ -425,6 +445,7 @@ impl NeoismAgentPane {
         self.timeline_scroll_px = next;
         self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0;
         self.pending_timeline_anchor = None;
+        self.timeline_view_anchor = None;
         self.timeline_last_scroll_at = Some(Instant::now());
         true
     }
@@ -452,6 +473,7 @@ impl NeoismAgentPane {
         self.timeline_scroll_px = (max_scroll - scroll_top).clamp(0.0, max_scroll);
         self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0;
         self.pending_timeline_anchor = None;
+        self.timeline_view_anchor = None;
         self.timeline_last_scroll_at = Some(Instant::now());
     }
 

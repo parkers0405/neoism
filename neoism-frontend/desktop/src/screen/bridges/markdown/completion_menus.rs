@@ -322,38 +322,23 @@ impl Screen<'_> {
         // (display label, inserted target) — page links show project-relative
         // paths instead of a wall of ../../.
         let mut suggestions: Vec<(String, String)> = match query.kind {
-            crate::editor::markdown::state::MarkdownWikiLinkKind::Heading => self
-                .indexed_markdown_heading_suggestions(
-                    &root,
-                    base_dir,
-                    &doc_path,
-                    query.target.as_deref(),
-                    &query.query,
-                    12,
-                )
-                .unwrap_or_default()
-                .into_iter()
-                .map(|target| (target.clone(), target))
-                .collect(),
-            crate::editor::markdown::state::MarkdownWikiLinkKind::Note => self
-                .indexed_markdown_link_suggestions(
-                    &root,
-                    base_dir,
-                    &doc_path,
-                    &query.query,
-                    12,
-                )
-                .unwrap_or_else(|| {
-                    Self::markdown_link_suggestions(
-                        &root,
-                        base_dir,
-                        &doc_path,
-                        &query.query,
-                    )
-                })
-                .into_iter()
-                .map(|target| (target.clone(), target))
-                .collect(),
+            // Heading lookup previously depended on the persistent graph
+            // index. Keep the syntax valid, but leave indexed heading
+            // completion disabled with that subsystem.
+            crate::editor::markdown::state::MarkdownWikiLinkKind::Heading => {
+                Vec::<String>::new()
+                    .into_iter()
+                    .map(|target| (target.clone(), target))
+                    .collect()
+            }
+            // Note linking stays available through a bounded filesystem
+            // scan; it does not create a database or background runtime.
+            crate::editor::markdown::state::MarkdownWikiLinkKind::Note => {
+                Self::markdown_link_suggestions(&root, base_dir, &doc_path, &query.query)
+                    .into_iter()
+                    .map(|target| (target.clone(), target))
+                    .collect()
+            }
             crate::editor::markdown::state::MarkdownWikiLinkKind::CodeRef => {
                 let page_sources: Vec<PathBuf> = doc_vault
                     .as_ref()

@@ -839,7 +839,11 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        if raw_target.starts_with("http://") || raw_target.starts_with("https://") {
+        if raw_target.starts_with("http://")
+            || raw_target.starts_with("https://")
+            || raw_target.starts_with("mailto:")
+            || raw_target.starts_with("tel:")
+        {
             if let Err(error) = crate::background_process::open_url(&raw_target) {
                 self.renderer.notifications.push(
                     format!("Could not open link: {error}"),

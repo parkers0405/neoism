@@ -73,4 +73,5 @@ pub use remote_presence::{
     peer_presence_from_wire, peer_presence_to_wire, presence_buffer_id_for_path,
     PresenceAvatarPeer, PresencePublisher, RemotePresenceStore,
     PRESENCE_HEARTBEAT_INTERVAL_MS, PRESENCE_PUBLISH_MIN_INTERVAL_MS,
+    WORKSPACE_PRESENCE_BUFFER_ID,
 };

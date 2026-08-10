@@ -697,6 +697,7 @@ impl Screen<'_> {
         let mut arm_markdown_leader = false;
         let mut flushed_markdown_leader = false;
         let mut yank_message = None;
+        let mut open_cursor_link = None;
 
         let markdown_mode = self
             .context_manager
@@ -1043,12 +1044,12 @@ impl Screen<'_> {
                             handled = markdown.insert_table_row(false);
                             snap_cursor = handled;
                         }
-                        // Plain Enter in Normal mode toggles the `- [ ]` / `- [x]`
-                        // checkbox on the cursor line (keyboard equivalent of
-                        // clicking the box). Falls through when the line isn't a
-                        // task so Enter stays a no-op elsewhere in Normal mode.
+                        // Links take precedence; task rows retain their existing
+                        // keyboard checkbox toggle when no link is under the cursor.
                         Key::Named(NamedKey::Enter) if plain => {
-                            handled = markdown.toggle_task_at_cursor();
+                            open_cursor_link = markdown.link_at_cursor();
+                            handled = open_cursor_link.is_some()
+                                || markdown.toggle_task_at_cursor();
                         }
                         Key::Named(NamedKey::PageUp) => markdown
                             .scroll_by_content_pixels(-(viewport * 0.86), viewport),
@@ -1127,6 +1128,34 @@ impl Screen<'_> {
                     }
                 }
             }
+        }
+
+        if let Some(link) = open_cursor_link {
+            match link {
+                neoism_ui::editor::markdown::MarkdownCursorLink::Internal {
+                    target,
+                    code_ref: _,
+                } => {
+                    let resolved = self
+                        .context_manager
+                        .current()
+                        .active_markdown()
+                        .and_then(|markdown| markdown.resolve_markdown_link(&target));
+                    if let Some(target) = resolved {
+                        self.open_markdown_link_target(target);
+                    }
+                }
+                neoism_ui::editor::markdown::MarkdownCursorLink::External(target) => {
+                    self.open_markdown_link_target(
+                        neoism_ui::editor::markdown::MarkdownLinkTarget {
+                            path: std::path::PathBuf::from(target),
+                            line: None,
+                            code_ref: false,
+                        },
+                    );
+                }
+            }
+            return;
         }
 
         if let Some(reverse) = open_markdown_search {

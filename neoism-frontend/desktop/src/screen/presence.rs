@@ -23,6 +23,7 @@
 use neoism_protocol::crdt::{CrdtClientMessage, CrdtServerMessage};
 use neoism_ui::editor::crdt::{
     presence_buffer_id_for_path, PeerCursor, PeerPresence, PresencePublisher,
+    WORKSPACE_PRESENCE_BUFFER_ID,
 };
 
 use super::{markdown_crdt::buffer_id_for_notebook_render_path, Screen};
@@ -180,6 +181,16 @@ impl Screen<'_> {
                             code.buffer.mode == neoism_ui::editor::code::CodeMode::Insert,
                         )
                     })
+                })
+                // Agent, terminal, settings, and other non-editor tabs are
+                // still inside this collaborative workspace. Selecting a
+                // local workspace takes the `else` branch and still clears.
+                .or_else(|| {
+                    Some((
+                        WORKSPACE_PRESENCE_BUFFER_ID.to_string(),
+                        PeerCursor::new(0, 0),
+                        false,
+                    ))
                 })
         } else {
             None

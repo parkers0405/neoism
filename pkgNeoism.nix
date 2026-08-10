@@ -92,8 +92,8 @@ in
       ''
         install -D -m 644 misc/neoism.desktop -t \
                           $out/share/applications
-        install -D -m 644 misc/logo.svg \
-                          $out/share/icons/hicolor/scalable/apps/neoism.svg
+        install -D -m 644 neoism-frontend/desktop/assets/icons/neoism.png \
+                          $out/share/icons/hicolor/512x512/apps/neoism.png
 
         # Install terminfo files
         install -dm 755 "$terminfo/share/terminfo/r/"

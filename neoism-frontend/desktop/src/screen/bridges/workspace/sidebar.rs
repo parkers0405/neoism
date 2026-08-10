@@ -687,12 +687,22 @@ impl Screen<'_> {
     }
 
     fn open_path_from_notes_sidebar(&mut self, path: PathBuf) {
-        if crate::screen::bridges::epub::is_epub_path(&path) {
-            self.open_path_in_epub(path);
-        } else if crate::editor::markdown::state::is_markdown_path(&path) {
-            self.open_path_in_markdown(path);
+        let markdown = crate::editor::markdown::state::is_markdown_path(&path);
+        let epub = crate::screen::bridges::epub::is_epub_path(&path);
+        if epub {
+            self.open_path_in_epub(path.clone());
+        } else if markdown {
+            self.open_path_in_markdown(path.clone());
         } else {
-            self.open_path_in_editor(path);
+            self.open_path_in_editor(path.clone());
+        }
+
+        // Opening creates the normal pane first; this vault-scoped read then
+        // replaces its expected local ENOENT with the host's shared bytes.
+        if !epub && self.notes_sidebar_shows_shared_vault() {
+            if let Some(vault_root) = self.served_notes_vault_root() {
+                let _ = self.send_remote_notes_read(vault_root, path, markdown);
+            }
         }
     }
 

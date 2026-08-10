@@ -234,6 +234,9 @@ impl Screen<'_> {
     }
 
     pub(crate) fn create_tab_inner(&mut self) {
+        // Context creation redirects immediately. Save the outgoing chrome
+        // before its workspace identity changes.
+        self.save_current_workspace_chrome();
         let redirect = true;
         // A new top-level workspace is LOCAL even when the current workspace
         // is adopted from a peer. Never feed the host's remote root into a
@@ -254,7 +257,6 @@ impl Screen<'_> {
         } else {
             self.workspace_root_for_new_shell()
         };
-        self.save_current_workspace_chrome();
 
         // We resize the current tab ahead to prepare the
         // dimensions to be copied to next tab.
@@ -306,6 +308,11 @@ impl Screen<'_> {
             return;
         }
         let new_index = self.context_manager.current_index();
+        if let Some(new_id) = self.current_workspace_id() {
+            self.workspace_file_trees.remove(&new_id);
+            self.workspace_notes_sidebars.remove(&new_id);
+            self.workspace_notes_vaults.remove(&new_id);
+        }
         self.context_manager.switch_context_visibility(
             &mut self.sugarloaf,
             old_index,

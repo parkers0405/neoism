@@ -135,14 +135,15 @@ pub(crate) async fn start_assistant_step(
         parts: vec![step_start.clone(), text_part.clone()],
     };
     state
-        .inner
-        .store
-        .append_message(session_id_text, &assistant_message)
+        .append_message_with_event(
+            session_id_text,
+            &assistant_message,
+            EventPayload::new(
+                event_type::MESSAGE_UPDATED,
+                json!({ "sessionID": session_id, "info": assistant_message.info }),
+            ),
+        )
         .await?;
-    state.publish(EventPayload::new(
-        event_type::MESSAGE_UPDATED,
-        json!({ "sessionID": session_id, "info": assistant_message.info }),
-    ));
     for part in [step_start, text_part] {
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
@@ -172,7 +173,7 @@ pub(crate) async fn reset_live_message_for_retry(
     text_part_id: &Id,
     live_message: &Arc<tokio::sync::Mutex<MessageWithParts>>,
 ) -> Result<(), ApiError> {
-    let (info, step_start, text_part) = {
+    let (assistant_message, info, step_start, text_part) = {
         let mut assistant_message = live_message.lock().await;
         let assistant_id = match &assistant_message.info {
             MessageInfo::Assistant(assistant) => assistant.id.clone(),
@@ -203,17 +204,23 @@ pub(crate) async fn reset_live_message_for_retry(
             assistant.cost = 0.0;
             assistant.time.completed = None;
         }
-        state
-            .inner
-            .store
-            .update_message(session_id_text, &assistant_message)
-            .await?;
-        (assistant_message.info.clone(), step_start, text_part)
+        (
+            assistant_message.clone(),
+            assistant_message.info.clone(),
+            step_start,
+            text_part,
+        )
     };
-    state.publish(EventPayload::new(
-        event_type::MESSAGE_UPDATED,
-        json!({ "sessionID": session_id, "info": info }),
-    ));
+    state
+        .update_message_with_event(
+            session_id_text,
+            &assistant_message,
+            EventPayload::new(
+                event_type::MESSAGE_UPDATED,
+                json!({ "sessionID": session_id, "info": info }),
+            ),
+        )
+        .await?;
     for part in [step_start, text_part] {
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
@@ -312,17 +319,18 @@ pub(crate) async fn finish_provider_stream_success(
             !matches!(part, Part::Text(text) if text.id == *text_part_id && text.text.is_empty())
         });
         assistant_message.parts.push(step_finish.clone());
-        state
-            .inner
-            .store
-            .update_message(session_id_text, &assistant_message)
-            .await?;
         (assistant_message.clone(), final_text_part)
     };
-    state.publish(EventPayload::new(
-        event_type::MESSAGE_UPDATED,
-        json!({ "sessionID": session_id, "info": assistant_message.info }),
-    ));
+    state
+        .update_message_with_event(
+            session_id_text,
+            &assistant_message,
+            EventPayload::new(
+                event_type::MESSAGE_UPDATED,
+                json!({ "sessionID": session_id, "info": assistant_message.info }),
+            ),
+        )
+        .await?;
     if let Some(part) = final_text_part {
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
@@ -397,14 +405,15 @@ pub(crate) async fn finish_provider_stream_with_error(
             }
         }
         state
-            .inner
-            .store
-            .update_message(session_id_text, &assistant_message)
+            .update_message_with_event(
+                session_id_text,
+                &assistant_message,
+                EventPayload::new(
+                    event_type::MESSAGE_UPDATED,
+                    json!({ "sessionID": session_id, "info": assistant_message.info }),
+                ),
+            )
             .await?;
-        state.publish(EventPayload::new(
-            event_type::MESSAGE_UPDATED,
-            json!({ "sessionID": session_id, "info": assistant_message.info }),
-        ));
     }
     for part in interrupted_parts {
         state.publish(EventPayload::new(

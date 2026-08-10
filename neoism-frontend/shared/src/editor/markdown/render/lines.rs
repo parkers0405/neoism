@@ -71,6 +71,7 @@ pub(super) fn parse_render_line(line: &str, in_code: bool) -> ParsedRenderLine<'
         md::MarkdownBlockKind::Ordered { depth } => RenderLineKind::Ordered { depth },
         md::MarkdownBlockKind::CodeFence => RenderLineKind::CodeFence,
         md::MarkdownBlockKind::Code => RenderLineKind::Code,
+        md::MarkdownBlockKind::Callout { kind } => RenderLineKind::Callout { kind },
         md::MarkdownBlockKind::Quote => RenderLineKind::Quote,
         md::MarkdownBlockKind::Divider => RenderLineKind::Divider,
     };

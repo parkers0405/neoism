@@ -7,8 +7,9 @@ const DEFAULT_SERVER: &str = "http://127.0.0.1:4096";
 const DEFAULT_HOSTNAME: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 4096;
 const HEALTH_PATH: &str = "/global/health";
-
-static SERVER_THREAD: OnceLock<()> = OnceLock::new();
+static SERVER_PROCESS: OnceLock<
+    std::sync::Mutex<crate::service_process::ServiceProcess>,
+> = OnceLock::new();
 
 pub(crate) fn ensure_started() {
     ensure_started_inner(false);
@@ -36,7 +37,7 @@ fn ensure_started_inner(wait_for_health: bool) {
         return;
     };
 
-    if SERVER_THREAD.get().is_some() {
+    if SERVER_PROCESS.get().is_some() {
         if wait_for_health && !wait_until_healthy(&server, Duration::from_millis(1500)) {
             tracing::warn!(
                 target: "neoism::agent_server",
@@ -57,45 +58,12 @@ fn ensure_started_inner(wait_for_health: bool) {
     tracing::info!(
         target: "neoism::agent_server",
         server = format_args!("http://{hostname}:{port}"),
-        "starting embedded Neoism Agent server"
+        "starting isolated Neoism Agent service process"
     );
 
-    match std::thread::Builder::new()
-        .name("neoism-agent-server".to_string())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("neoism-agent-server-runtime")
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    tracing::error!(
-                        target: "neoism::agent_server",
-                        %error,
-                        "failed to create Neoism Agent runtime"
-                    );
-                    return;
-                }
-            };
-
-            runtime.block_on(async move {
-                let options = neoism_agent_server::ServerOptions {
-                    hostname,
-                    port,
-                    cors: Vec::new(),
-                };
-                if let Err(error) = neoism_agent_server::listen(options).await {
-                    tracing::warn!(
-                        target: "neoism::agent_server",
-                        %error,
-                        "embedded Neoism Agent server exited"
-                    );
-                }
-            });
-        }) {
-        Ok(_handle) => {
-            let _ = SERVER_THREAD.set(());
+    match crate::service_process::spawn_agent(&hostname, port) {
+        Ok(process) => {
+            let _ = SERVER_PROCESS.set(std::sync::Mutex::new(process));
             if wait_for_health
                 && !wait_until_healthy(&server, Duration::from_millis(1500))
             {
@@ -110,7 +78,7 @@ fn ensure_started_inner(wait_for_health: bool) {
             tracing::error!(
                 target: "neoism::agent_server",
                 %error,
-                "failed to spawn Neoism Agent server thread"
+                "failed to spawn Neoism Agent service process"
             );
         }
     }

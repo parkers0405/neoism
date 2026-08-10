@@ -925,7 +925,26 @@ impl StatusLine {
         width: f32,
         palette: &StatusPalette,
     ) {
-        if !self.visible || width <= 0.0 {
+        self.render_in_content_bounds(
+            sugarloaf, x_left, y_top, width, x_left, width, palette,
+        );
+    }
+
+    /// Paint a full-width status strip while laying its interactive content
+    /// out in a narrower column. This keeps status text and pills out from
+    /// underneath persistent side panels without leaving a hole in the bar's
+    /// background or top border.
+    pub fn render_in_content_bounds(
+        &mut self,
+        sugarloaf: &mut Sugarloaf,
+        background_x: f32,
+        y_top: f32,
+        background_width: f32,
+        content_x: f32,
+        content_width: f32,
+        palette: &StatusPalette,
+    ) {
+        if !self.visible || background_width <= 0.0 {
             return;
         }
 
@@ -943,9 +962,9 @@ impl StatusLine {
         let bg_y = (y_top - 1.0 * s).max(0.0);
         sugarloaf.rect(
             None,
-            x_left,
+            background_x,
             bg_y,
-            width,
+            background_width,
             strip_h + (y_top - bg_y),
             palette.f32(palette.bg),
             DEPTH,
@@ -958,9 +977,9 @@ impl StatusLine {
         let border_thickness = (crate::panels::file_tree::FRAME_STROKE * s).max(2.0);
         sugarloaf.rect(
             None,
-            x_left,
+            background_x,
             y_top,
-            width,
+            background_width,
             border_thickness,
             palette.f32(palette.surface),
             DEPTH,
@@ -974,6 +993,17 @@ impl StatusLine {
 
         let mode_color = self.effective_mode_color(palette);
 
+        if content_width <= 0.0 {
+            self.error_pill_rect = PillRect::default();
+            self.warn_pill_rect = PillRect::default();
+            self.branch_rect = PillRect::default();
+            self.split_toggle_rect = PillRect::default();
+            self.lsp_pill_rect = PillRect::default();
+            return;
+        }
+
+        let x_left = content_x;
+        let width = content_width;
         let mut x = x_left;
 
         let mut mode_label_text = mode_label(self.info.mode).to_string();
@@ -1835,6 +1865,41 @@ impl StatusLine {
             black: theme.black,
         };
         self.render(sugarloaf, x_left, y_top, width, &palette);
+    }
+
+    /// `IdeTheme` wrapper for a full-width strip whose pills start at the
+    /// editor column rather than beneath the left side panels.
+    pub fn render_with_ide_theme_in_content_bounds(
+        &mut self,
+        sugarloaf: &mut Sugarloaf,
+        background_x: f32,
+        y_top: f32,
+        background_width: f32,
+        content_x: f32,
+        content_width: f32,
+        theme: &IdeTheme,
+    ) {
+        let palette = StatusPalette {
+            bg: theme.bg,
+            surface: theme.surface,
+            muted: theme.muted,
+            red: theme.red,
+            green: theme.green,
+            yellow: theme.yellow,
+            blue: theme.blue,
+            magenta: theme.magenta,
+            cyan: theme.cyan,
+            black: theme.black,
+        };
+        self.render_in_content_bounds(
+            sugarloaf,
+            background_x,
+            y_top,
+            background_width,
+            content_x,
+            content_width,
+            &palette,
+        );
     }
 }
 

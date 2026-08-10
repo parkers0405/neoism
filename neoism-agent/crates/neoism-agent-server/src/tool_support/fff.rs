@@ -1,22 +1,17 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use fff_search::{
-    has_regex_metacharacters, AiGrepConfig, FFFMode, FilePicker, FilePickerOptions,
-    FuzzySearchOptions, GrepMode, GrepSearchOptions, PaginationArgs, QueryParser,
-    SharedFilePicker, SharedFrecency,
+    has_regex_metacharacters, AiGrepConfig, FilePicker, FuzzySearchOptions, GrepMode,
+    GrepSearchOptions, PaginationArgs, QueryParser,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::args::{
-    optional_string, required_string_either_many, string_either_many, usize_arg,
-};
+use super::args::{optional_string, required_string, usize_arg};
 use super::paths::{
     directory_entries, display_path, existing_project_path, truncate_line,
 };
@@ -24,9 +19,6 @@ use super::{process, ToolContext, ToolExecutionResult};
 
 const DEFAULT_FFF_TIMEOUT_MS: u64 = 45_000;
 const MAX_FFF_TIMEOUT_MS: u64 = 300_000;
-// Bound on waiting for a freshly spawned background index scan before the
-// first query runs against it; matches the old synchronous collect_files cost.
-const INITIAL_SCAN_WAIT_MS: u64 = 15_000;
 const DEFAULT_EXCLUDES: &[&str] = &[
     ".claude/worktrees",
     ".codex",
@@ -37,8 +29,16 @@ const DEFAULT_EXCLUDES: &[&str] = &[
     ".tmp",
 ];
 
-static PICKER_CACHE: OnceLock<Mutex<HashMap<PathBuf, SharedFilePicker>>> =
-    OnceLock::new();
+pub(super) fn warm(root: &Path) {
+    if let Err(error) = crate::picker_registry::warm(root) {
+        tracing::warn!(
+            target: "neoism_agent::fff",
+            root = %root.display(),
+            %error,
+            "failed to warm shared FFF picker"
+        );
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,37 +60,34 @@ struct FffGrepItem {
     fuzzy_score: Option<u16>,
 }
 
-pub(super) async fn fffind_tool(
+pub(super) async fn glob_tool(
     context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
     let timeout_ms = fff_timeout_ms(&arguments);
     let cancel = context.cancel.clone();
-    run_fff_blocking("fffind", timeout_ms, cancel, move || {
-        fffind_tool_sync(context, arguments, timeout_ms)
+    run_fff_blocking("glob", timeout_ms, cancel, move || {
+        glob_tool_sync(context, arguments, timeout_ms)
     })
     .await
 }
 
-fn fffind_tool_sync(
+fn glob_tool_sync(
     context: ToolContext,
     arguments: Value,
     timeout_ms: u64,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let query_text = string_either_many(&arguments, &["query", "pattern"])
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let query_text = required_string(&arguments, "pattern")?.trim().to_string();
     let raw_path = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_string());
     let path = existing_project_path(&context, &raw_path)?;
-    context.ensure_allowed("fffind", &display_path(&context.cwd, &path))?;
+    context.ensure_allowed("glob", &display_path(&context.cwd, &path))?;
     if !path.is_dir() {
-        anyhow::bail!("fffind path must be a directory: {}", path.display());
+        anyhow::bail!("glob path must be a directory: {}", path.display());
     }
     let limit = usize_arg(&arguments, "limit").unwrap_or(50).max(1);
     let offset = usize_arg(&arguments, "offset").unwrap_or(0);
     if query_text.is_empty() {
-        return fffind_directory_fallback(&context, &path, limit, offset, timeout_ms);
+        return glob_directory_fallback(&context, &path, limit, offset, timeout_ms);
     }
     let (items, total_matched) = with_picker(&path, |picker| {
         let parser = QueryParser::default();
@@ -160,7 +157,7 @@ fn fffind_tool_sync(
     }
 
     Ok(ToolExecutionResult {
-        title: format!("FFFind {query_text}"),
+        title: format!("Glob {query_text}"),
         output: output.join("\n"),
         metadata: Some(json!({
             "query": query_text,
@@ -176,7 +173,7 @@ fn fffind_tool_sync(
     })
 }
 
-fn fffind_directory_fallback(
+fn glob_directory_fallback(
     context: &ToolContext,
     path: &Path,
     limit: usize,
@@ -205,7 +202,7 @@ fn fffind_directory_fallback(
     }
     let total = entries.len();
     Ok(ToolExecutionResult {
-        title: "FFFind directory".to_string(),
+        title: "Glob directory".to_string(),
         output: output.join("\n"),
         metadata: Some(json!({
             "query": "",
@@ -222,35 +219,36 @@ fn fffind_directory_fallback(
     })
 }
 
-pub(super) async fn ffgrep_tool(
+pub(super) async fn grep_tool(
     context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
     let timeout_ms = fff_timeout_ms(&arguments);
     let cancel = context.cancel.clone();
-    run_fff_blocking("ffgrep", timeout_ms, cancel, move || {
-        ffgrep_tool_sync(context, arguments, timeout_ms)
+    run_fff_blocking("grep", timeout_ms, cancel, move || {
+        grep_tool_sync(context, arguments, timeout_ms)
     })
     .await
 }
 
-fn ffgrep_tool_sync(
+fn grep_tool_sync(
     context: ToolContext,
     arguments: Value,
     timeout_ms: u64,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let pattern =
-        required_string_either_many(&arguments, &["pattern", "query"])?.to_string();
+    if arguments.get("pattern").is_some_and(Value::is_array) {
+        return multi_grep_tool_sync(context, arguments, timeout_ms);
+    }
+    let pattern = required_string(&arguments, "pattern")?.to_string();
     let limit = usize_arg(&arguments, "limit").unwrap_or(100).max(1);
     let raw_path = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_string());
     let path = existing_project_path(&context, &raw_path)?;
-    context.ensure_allowed("ffgrep", &display_path(&context.cwd, &path))?;
+    context.ensure_allowed("grep", &display_path(&context.cwd, &path))?;
     let include = optional_string(&arguments, "include");
     let exclude = merge_exclude(optional_string(&arguments, "exclude").as_deref());
     let context_lines = usize_arg(&arguments, "context").unwrap_or(0);
     let case_sensitive = arguments
         .get("caseSensitive")
-        .or_else(|| arguments.get("case_sensitive"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let mode = grep_mode(&arguments, &pattern);
@@ -303,62 +301,69 @@ fn ffgrep_tool_sync(
     // search on abort rather than only when the outer select! fires.
     let grep_budget_ms = timeout_ms.saturating_sub(2_000).max(500);
     let abort = context.cancel.clone();
-    let (items, files_with_matches, total_files_searched, next_file_offset, used_mode) =
-        with_picker(&root, |picker| {
-            let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
-            let options = |grep_mode: GrepMode| GrepSearchOptions {
-                page_limit: limit,
-                mode: grep_mode,
-                smart_case: !case_sensitive,
-                before_context: context_lines,
-                after_context: context_lines,
-                classify_definitions: true,
-                trim_whitespace: false,
-                time_budget_ms: grep_budget_ms,
-                abort_signal: abort.clone(),
-                ..Default::default()
-            };
-            if let Some(terms) = &alternation {
-                let constraints = parser.parse(&constraint_text);
-                let refs: Vec<&str> = terms.iter().map(String::as_str).collect();
-                let results = picker.multi_grep(
-                    &refs,
-                    &constraints.constraints,
-                    &options(GrepMode::PlainText),
-                );
-                return (
-                    grep_items(picker, &results),
-                    results.files_with_matches,
-                    results.total_files_searched,
-                    results.next_file_offset,
-                    "multi",
-                );
-            }
-            let query = parser.parse(&query_text);
-            let mut results = picker.grep(&query, &options(mode));
-            let used_mode =
-                if results.matches.is_empty() && mode != GrepMode::Fuzzy && fuzzy_safe {
-                    results = picker.grep(&query, &options(GrepMode::Fuzzy));
-                    if results.matches.is_empty() {
-                        mode_label(mode)
-                    } else {
-                        "fuzzy"
-                    }
-                } else {
-                    mode_label(mode)
-                };
-            (
+    let (
+        mut items,
+        files_with_matches,
+        total_files_searched,
+        next_file_offset,
+        used_mode,
+    ) = with_picker(&root, |picker| {
+        let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
+        let options = |grep_mode: GrepMode| GrepSearchOptions {
+            page_limit: limit,
+            mode: grep_mode,
+            smart_case: !case_sensitive,
+            before_context: context_lines,
+            after_context: context_lines,
+            classify_definitions: true,
+            trim_whitespace: false,
+            time_budget_ms: grep_budget_ms,
+            abort_signal: abort.clone(),
+            ..Default::default()
+        };
+        if let Some(terms) = &alternation {
+            let constraints = parser.parse(&constraint_text);
+            let refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+            let results = picker.multi_grep(
+                &refs,
+                &constraints.constraints,
+                &options(GrepMode::PlainText),
+            );
+            return (
                 grep_items(picker, &results),
                 results.files_with_matches,
                 results.total_files_searched,
                 results.next_file_offset,
-                used_mode,
-            )
-        })?;
-    let output = render_grep_output("FFGrep", &items, files_with_matches, limit);
+                "multi",
+            );
+        }
+        let query = parser.parse(&query_text);
+        let mut results = picker.grep(&query, &options(mode));
+        let used_mode =
+            if results.matches.is_empty() && mode != GrepMode::Fuzzy && fuzzy_safe {
+                results = picker.grep(&query, &options(GrepMode::Fuzzy));
+                if results.matches.is_empty() {
+                    mode_label(mode)
+                } else {
+                    "fuzzy"
+                }
+            } else {
+                mode_label(mode)
+            };
+        (
+            grep_items(picker, &results),
+            results.files_with_matches,
+            results.total_files_searched,
+            results.next_file_offset,
+            used_mode,
+        )
+    })?;
+    let overflowed_limit = items.len() > limit;
+    items.truncate(limit);
+    let output = render_grep_output("Grep", &items, files_with_matches, limit);
 
     Ok(ToolExecutionResult {
-        title: format!("FFGrep {pattern}"),
+        title: format!("Grep {pattern}"),
         output,
         metadata: Some(json!({
             "pattern": pattern,
@@ -371,26 +376,14 @@ fn ffgrep_tool_sync(
             "filesWithMatches": files_with_matches,
             "totalFilesSearched": total_files_searched,
             "nextFileOffset": next_file_offset,
-            "truncated": next_file_offset != 0 || items.len() >= limit,
+            "truncated": next_file_offset != 0 || overflowed_limit || items.len() >= limit,
             "timeout": timeout_ms,
             "items": items,
         })),
     })
 }
 
-pub(super) async fn fff_multi_grep_tool(
-    context: ToolContext,
-    arguments: Value,
-) -> anyhow::Result<ToolExecutionResult> {
-    let timeout_ms = fff_timeout_ms(&arguments);
-    let cancel = context.cancel.clone();
-    run_fff_blocking("fff_multi_grep", timeout_ms, cancel, move || {
-        fff_multi_grep_tool_sync(context, arguments, timeout_ms)
-    })
-    .await
-}
-
-fn fff_multi_grep_tool_sync(
+fn multi_grep_tool_sync(
     context: ToolContext,
     arguments: Value,
     timeout_ms: u64,
@@ -398,27 +391,28 @@ fn fff_multi_grep_tool_sync(
     let patterns = patterns_arg(&arguments)?;
     let raw_path = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_string());
     let path = existing_project_path(&context, &raw_path)?;
-    context.ensure_allowed("fff_multi_grep", &display_path(&context.cwd, &path))?;
+    context.ensure_allowed("grep", &display_path(&context.cwd, &path))?;
     let limit = usize_arg(&arguments, "limit").unwrap_or(100).max(1);
     let context_lines = usize_arg(&arguments, "context").unwrap_or(0);
     let exclude = merge_exclude(optional_string(&arguments, "exclude").as_deref());
-    let constraints = optional_string(&arguments, "constraints").unwrap_or_default();
+    let include = optional_string(&arguments, "include");
     let root = grep_root(&path);
     let constraint_query = grep_query_text(
         &context.cwd,
         &path,
         &root,
-        None,
+        include.as_deref(),
         Some(exclude.as_str()),
-        &constraints,
+        "",
     );
     let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
     let query = parser.parse(&constraint_query);
     let refs = patterns.iter().map(String::as_str).collect::<Vec<_>>();
-    // Same partial-result time budget + cancel propagation as ffgrep.
+    // Use the same partial-result time budget and cancellation propagation as
+    // the single-pattern grep path.
     let grep_budget_ms = timeout_ms.saturating_sub(2_000).max(500);
     let abort = context.cancel.clone();
-    let (items, files_with_matches, total_files_searched, next_file_offset) =
+    let (mut items, files_with_matches, total_files_searched, next_file_offset) =
         with_picker(&root, |picker| {
             let results = picker.multi_grep(
                 &refs,
@@ -441,21 +435,23 @@ fn fff_multi_grep_tool_sync(
                 results.next_file_offset,
             )
         })?;
-    let output = render_grep_output("FFF multi_grep", &items, files_with_matches, limit);
+    let overflowed_limit = items.len() > limit;
+    items.truncate(limit);
+    let output = render_grep_output("Grep", &items, files_with_matches, limit);
 
     Ok(ToolExecutionResult {
-        title: format!("FFF multi_grep {}", patterns.join(", ")),
+        title: format!("Grep {}", patterns.join(", ")),
         output,
         metadata: Some(json!({
             "patterns": patterns,
-            "constraints": constraints,
+            "include": include,
             "exclude": exclude,
             "engine": "fff",
             "matches": items.len(),
             "filesWithMatches": files_with_matches,
             "totalFilesSearched": total_files_searched,
             "nextFileOffset": next_file_offset,
-            "truncated": next_file_offset != 0 || items.len() >= limit,
+            "truncated": next_file_offset != 0 || overflowed_limit || items.len() >= limit,
             "timeout": timeout_ms,
             "items": items,
         })),
@@ -526,122 +522,7 @@ fn with_picker<T>(
     root: &Path,
     operation: impl FnOnce(&FilePicker) -> T,
 ) -> anyhow::Result<T> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let shared = {
-        let cache = PICKER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut cache = cache
-            .lock()
-            .map_err(|_| anyhow::anyhow!("FFF picker cache lock was poisoned"))?;
-        match cache.get(&root) {
-            Some(shared) => shared.clone(),
-            None => {
-                let shared = build_picker(&root)?;
-                cache.insert(root.clone(), shared.clone());
-                shared
-            }
-        }
-        // map lock drops here; queries below run without serializing other roots
-    };
-    if !shared.wait_for_scan(Duration::from_millis(INITIAL_SCAN_WAIT_MS)) {
-        anyhow::bail!(
-            "FFF index for {} is still scanning; retry in a moment",
-            root.display()
-        );
-    }
-    let outcome = {
-        let guard = shared
-            .read()
-            .map_err(|error| anyhow::anyhow!("FFF picker read lock failed: {error}"))?;
-        let picker = guard.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("FFF picker for {} was dropped", root.display())
-        })?;
-        // fff-search is a third-party engine and some inputs make it panic in
-        // a worker (data-dependent: a pathological line, an unhandled regex
-        // decomposition, …). Isolate the call so a library panic becomes a
-        // clean tool error carrying the REAL message, instead of a bare
-        // "worker panicked". Catching here — while the read `guard` is still
-        // held, before it unwinds — is also what stops the shared RwLock from
-        // being POISONED; otherwise one panic bricks every later query against
-        // this cached root.
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(picker)))
-        // `guard`/`picker` drop here NORMALLY: catch_unwind already absorbed
-        // the unwind, so there is no in-flight panic to poison the lock.
-    };
-    match outcome {
-        Ok(value) => Ok(value),
-        Err(payload) => {
-            // The picker's internal state may be inconsistent after a panic —
-            // evict it so the next query rebuilds a fresh index for this root.
-            if let Some(cache) = PICKER_CACHE.get() {
-                if let Ok(mut cache) = cache.lock() {
-                    cache.remove(&root);
-                }
-            }
-            Err(anyhow::anyhow!(
-                "fff search engine panicked ({}); narrow the path/pattern, lower the limit, or switch grep mode",
-                panic_payload_message(payload.as_ref())
-            ))
-        }
-    }
-}
-
-/// Best-effort human message from a `catch_unwind` payload.
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic".to_string()
-    }
-}
-
-fn build_picker(root: &Path) -> anyhow::Result<SharedFilePicker> {
-    let mmap_enabled = fff_mmap_enabled();
-    if fff_perf_logging_enabled() {
-        tracing::info!(
-            root = %root.display(),
-            mmap_enabled,
-            "building fff picker"
-        );
-    }
-    let shared = SharedFilePicker::default();
-    FilePicker::new_with_shared_state(
-        shared.clone(),
-        SharedFrecency::default(),
-        FilePickerOptions {
-            base_path: root.to_string_lossy().to_string(),
-            mode: FFFMode::Ai,
-            enable_mmap_cache: mmap_enabled,
-            // Match fff's default (and opencode's agent integration):
-            // content indexing OFF. Turning it on builds a RESIDENT
-            // content index of the whole tree — reading every file — on
-            // the first query, behind `wait_for_scan`; on a large repo
-            // (esp. macOS) that is a multi-second first-hit freeze. With
-            // it off, the path index still powers `fffind`, and `ffgrep`
-            // greps on demand bounded by `time_budget_ms` (see below),
-            // which is how the reference agent uses it.
-            enable_content_indexing: false,
-            watch: true,
-            follow_symlinks: false,
-            enable_fs_root_scanning: false,
-            enable_home_dir_scanning: false,
-            cache_budget: None,
-        },
-    )
-    .with_context(|| format!("failed to initialize FFF index for {}", root.display()))?;
-    Ok(shared)
-}
-
-fn fff_mmap_enabled() -> bool {
-    std::env::var_os("NEOISM_AGENT_FFF_MMAP")
-        .as_deref()
-        .is_some_and(|value| {
-            matches!(
-                value.to_string_lossy().as_ref(),
-                "1" | "true" | "TRUE" | "yes" | "YES"
-            )
-        })
+    crate::picker_registry::with_picker(root, operation)
 }
 
 fn fff_perf_logging_enabled() -> bool {
@@ -723,7 +604,7 @@ fn grep_query_text(
 }
 
 fn grep_mode(arguments: &Value, pattern: &str) -> GrepMode {
-    match string_either_many(arguments, &["mode", "grepMode", "grep_mode"])
+    match optional_string(arguments, "mode")
         .unwrap_or_default()
         .to_ascii_lowercase()
         .as_str()
@@ -820,8 +701,8 @@ fn render_grep_output(
 }
 
 fn patterns_arg(arguments: &Value) -> anyhow::Result<Vec<String>> {
-    let Some(raw) = arguments.get("patterns") else {
-        anyhow::bail!("tool argument patterns is required");
+    let Some(raw) = arguments.get("pattern") else {
+        anyhow::bail!("tool argument pattern is required");
     };
     let patterns = if let Some(array) = raw.as_array() {
         array
@@ -841,7 +722,7 @@ fn patterns_arg(arguments: &Value) -> anyhow::Result<Vec<String>> {
         Vec::new()
     };
     if patterns.is_empty() {
-        anyhow::bail!("tool argument patterns must contain at least one pattern");
+        anyhow::bail!("tool argument pattern must contain at least one pattern");
     }
     Ok(patterns)
 }

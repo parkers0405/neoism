@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch a neoism binary as a brand-new user: fresh $HOME + XDG dirs so the
-# first-run bootstrap does the full new-user flow (bundled parsers, terminfo,
+# first-run bootstrap does the full new-user flow (bundled parsers,
 # launcher, default config) while still opening on your real Wayland display.
 # The sandboxed XDG_RUNTIME_DIR isolates neoism's IPC/daemon sockets, so a
 # neoism instance you already have running is untouched and not forwarded to.

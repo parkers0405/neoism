@@ -13,13 +13,11 @@ use serde::Deserialize;
 use crate::error::ApiError;
 use crate::session_message_routes::{message_list, MessageListQuery};
 use crate::session_queue::{
-    enqueue_prompt_request, publish_prompt_queue_changed, publish_prompt_queue_status,
+    enqueue_prompt_request_with_delivery, publish_prompt_queue_changed,
+    publish_prompt_queue_status,
 };
 use crate::state::AppState;
-use crate::{
-    append_prompt, compact_session_context, ensure_session, filter_sessions,
-    SessionListQuery,
-};
+use crate::{compact_session_context, ensure_session, filter_sessions, SessionListQuery};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,15 +65,15 @@ pub(crate) async fn v2_prompt(
     Path(session_id): Path<String>,
     Json(request): Json<V2PromptRequest>,
 ) -> Result<Response, ApiError> {
-    let async_delivery = request.delivery.as_deref() == Some("async");
-    let prompt = request.into_prompt_request()?;
-    if async_delivery {
-        enqueue_v2_prompt(&state, &session_id, prompt).await?;
-        return Ok(StatusCode::NO_CONTENT.into_response());
+    let delivery = request.delivery.as_deref().unwrap_or("steer").to_string();
+    if !matches!(delivery.as_str(), "steer" | "queue") {
+        return Err(ApiError::bad_request(
+            "delivery must be either steer or queue",
+        ));
     }
-    let create_reply = !prompt.no_reply;
-    let response = append_prompt(&state, &session_id, prompt, create_reply).await?;
-    Ok(Json(response).into_response())
+    let prompt = request.into_prompt_request()?;
+    enqueue_v2_prompt(&state, &session_id, prompt, &delivery).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 pub(crate) async fn v2_prompt_async(
@@ -83,7 +81,8 @@ pub(crate) async fn v2_prompt_async(
     Path(session_id): Path<String>,
     Json(request): Json<V2PromptRequest>,
 ) -> Result<StatusCode, ApiError> {
-    enqueue_v2_prompt(&state, &session_id, request.into_prompt_request()?).await?;
+    enqueue_v2_prompt(&state, &session_id, request.into_prompt_request()?, "queue")
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -91,11 +90,13 @@ async fn enqueue_v2_prompt(
     state: &AppState,
     session_id: &str,
     request: PromptRequest,
+    delivery: &str,
 ) -> Result<(), ApiError> {
     ensure_session(state, session_id).await?;
     let event_request = request.clone();
     let (start_worker, queue_len) =
-        enqueue_prompt_request(state, session_id, request).await?;
+        enqueue_prompt_request_with_delivery(state, session_id, request, delivery)
+            .await?;
     publish_prompt_queue_changed(state, session_id, "enqueue", Some(&event_request), 0)
         .await;
     publish_prompt_queue_status(state, session_id, queue_len).await;

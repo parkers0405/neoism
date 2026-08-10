@@ -36,6 +36,8 @@ mod screen;
 #[cfg(not(target_arch = "wasm32"))]
 mod server_registry;
 #[cfg(not(target_arch = "wasm32"))]
+mod service_process;
+#[cfg(not(target_arch = "wasm32"))]
 mod ssh_hosts;
 #[cfg(not(target_arch = "wasm32"))]
 mod tailscale;
@@ -470,17 +472,7 @@ pub fn setup_environment_variables(config: &neoism_backend::config::Config) {
 
     #[cfg(unix)]
     {
-        let terminfo = match (
-            teletypewriter::terminfo_exists("xterm-rio"),
-            teletypewriter::terminfo_exists("rio"),
-        ) {
-            // In case `xterm-rio` exists we prioritize it
-            (true, _) => "xterm-rio",
-            // If is only `rio` installed (which was the default for versions under 0.2.27)
-            (false, true) => "rio",
-            // If none, then fallback to `xterm-256color`
-            (false, false) => "xterm-256color",
-        };
+        let terminfo = "xterm-256color";
 
         let span = tracing::span!(tracing::Level::INFO, "setup_environment_variables");
         let _guard = span.enter();
@@ -705,7 +697,7 @@ fn probe_daemon_tcp(port: u16) -> bool {
 enum DaemonMode {
     Explicit,
     ExternalDefaultSocket,
-    EmbeddedLocal,
+    IsolatedLocal,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -714,7 +706,7 @@ impl DaemonMode {
         match self {
             Self::Explicit => "explicit",
             Self::ExternalDefaultSocket => "external-default-socket",
-            Self::EmbeddedLocal => "embedded-local",
+            Self::IsolatedLocal => "isolated-local",
         }
     }
 }
@@ -723,7 +715,7 @@ impl DaemonMode {
 struct ResolvedDaemon {
     url: String,
     mode: DaemonMode,
-    _embedded: Option<embedded_daemon::EmbeddedDaemonHandle>,
+    _service: Option<service_process::ServiceProcess>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -732,16 +724,15 @@ impl ResolvedDaemon {
         Self {
             url,
             mode,
-            _embedded: None,
+            _service: None,
         }
     }
 
-    fn embedded(handle: embedded_daemon::EmbeddedDaemonHandle) -> Self {
-        let url = handle.client_url();
+    fn isolated(url: String, service: service_process::ServiceProcess) -> Self {
         Self {
             url,
-            mode: DaemonMode::EmbeddedLocal,
-            _embedded: Some(handle),
+            mode: DaemonMode::IsolatedLocal,
+            _service: Some(service),
         }
     }
 }
@@ -796,13 +787,38 @@ fn resolve_daemon(daemon_url: Option<&str>) -> Option<ResolvedDaemon> {
         }
     }
 
-    match embedded_daemon::EmbeddedDaemonHandle::spawn() {
-        Ok(handle) => {
-            let resolved = ResolvedDaemon::embedded(handle);
+    match service_process::spawn_daemon() {
+        Ok(service) => {
+            let ready = std::time::Instant::now();
+            let url = loop {
+                #[cfg(unix)]
+                if probe_daemon_socket(&embedded_daemon::default_socket_path()) {
+                    break Some(unix_socket_url(&embedded_daemon::default_socket_path()));
+                }
+                #[cfg(not(unix))]
+                if probe_daemon_tcp(embedded_daemon::default_tcp_port()) {
+                    break Some(format!(
+                        "ws://127.0.0.1:{}/session",
+                        embedded_daemon::default_tcp_port()
+                    ));
+                }
+                if ready.elapsed() >= std::time::Duration::from_secs(3) {
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            };
+            let Some(url) = url else {
+                drop(service);
+                tracing::error!(
+                    "isolated daemon service did not become ready; desktop will run without daemon-backed features"
+                );
+                return None;
+            };
+            let resolved = ResolvedDaemon::isolated(url, service);
             tracing::info!(
                 daemon = resolved.url,
                 mode = resolved.mode.as_str(),
-                "Started embedded daemon at {}",
+                "Started isolated daemon service at {}",
                 resolved.url,
             );
             Some(resolved)
@@ -1274,6 +1290,14 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(result) = service_process::maybe_run_internal_service() {
+        return result;
+    }
+
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+    configure_debug_service_isolation()?;
+
     #[cfg(windows)]
     if run_windows_update_helper()? {
         return Ok(());
@@ -1567,4 +1591,106 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+fn configure_debug_service_isolation() -> io::Result<()> {
+    let process_id = std::process::id().to_string();
+    let profile = std::env::var("NEOISM_DEV_INSTANCE")
+        .ok()
+        .filter(|value| {
+            !value.is_empty()
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                })
+        })
+        .unwrap_or_else(|| "default".to_string());
+    let state_root = dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("neoism-dev")
+        .join(&profile);
+    let cache_root = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("neoism-dev")
+        .join(&profile);
+    std::fs::create_dir_all(&state_root)?;
+    std::fs::create_dir_all(&cache_root)?;
+
+    set_debug_env(
+        "NEOISM_AGENT_STATE_DIR",
+        "NEOISM_DEV_AGENT_STATE_DIR",
+        state_root.join("agent").as_os_str(),
+    );
+    set_debug_env(
+        "NEOISM_AGENT_CACHE_DIR",
+        "NEOISM_DEV_AGENT_CACHE_DIR",
+        cache_root.join("agent").as_os_str(),
+    );
+    set_debug_env(
+        "NEOISM_DAEMON_DATA_DIR",
+        "NEOISM_DEV_DAEMON_DATA_DIR",
+        state_root.join("daemon-data").as_os_str(),
+    );
+    set_debug_env(
+        "NEOISM_STATE_DIR",
+        "NEOISM_DEV_DAEMON_STATE_DIR",
+        state_root.join("daemon-state").as_os_str(),
+    );
+
+    // A debug desktop is commonly launched from a production Neoism terminal,
+    // which exports NEOISM_SERVER. Never treat that inherited production URL
+    // as an intentional debug override.
+    let server = nonempty_env("NEOISM_DEV_AGENT_SERVER")
+        .unwrap_or(format!("http://127.0.0.1:{}", reserve_loopback_port()?));
+    std::env::set_var("NEOISM_SERVER", &server);
+    std::env::set_var("NEOISM_AGENT_SERVER", &server);
+
+    let daemon_port = nonempty_env("NEOISM_DEV_DAEMON_TCP_PORT")
+        .and_then(|value| value.parse::<u16>().ok().filter(|port| *port != 0))
+        .unwrap_or(reserve_loopback_port()?);
+    std::env::set_var("NEOISM_DAEMON_TCP_PORT", daemon_port.to_string());
+
+    if let Some(token) = nonempty_env("NEOISM_DEV_DAEMON_TOKEN") {
+        std::env::set_var("NEOISM_DAEMON_TOKEN", token);
+    } else {
+        embedded_daemon::install_daemon_token_from_file(
+            &state_root.join("daemon-token"),
+        )?;
+    }
+
+    #[cfg(unix)]
+    {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        set_debug_env(
+            "NEOISM_DAEMON_SOCKET",
+            "NEOISM_DEV_DAEMON_SOCKET",
+            runtime.join(format!("neoism-dev-{profile}-{process_id}.sock")),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+fn reserve_loopback_port() -> io::Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    Ok(listener.local_addr()?.port())
+}
+
+#[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+fn nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+fn set_debug_env(key: &str, debug_override: &str, default: impl AsRef<std::ffi::OsStr>) {
+    let value = std::env::var_os(debug_override)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.as_ref().to_os_string());
+    std::env::set_var(key, value);
 }

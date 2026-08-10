@@ -1,45 +1,27 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use neoism_agent_core::ToolListItem;
 use serde_json::Value;
 
-pub(crate) fn provider_tool_id_set(tools: &[ToolListItem]) -> HashSet<String> {
-    tools.iter().map(|tool| tool.id.clone()).collect()
+pub(crate) fn provider_tool_map(tools: &[ToolListItem]) -> HashMap<String, ToolListItem> {
+    tools
+        .iter()
+        .cloned()
+        .map(|tool| (tool.id.clone(), tool))
+        .collect()
 }
 
 pub(crate) fn normalize_provider_tool_name(
     name: &str,
-    input: &Value,
-    available: &HashSet<String>,
+    _input: &Value,
+    available: &HashMap<String, ToolListItem>,
 ) -> Option<String> {
-    if available.contains(name) {
-        return Some(name.to_string());
-    }
-    if name == "patch" && available.contains("apply_patch") {
-        return Some("apply_patch".to_string());
-    }
-    if name == "edit"
-        && available.contains("apply_patch")
-        && patch_text_arg_value(input).is_some()
-    {
-        return Some("apply_patch".to_string());
-    }
-    None
-}
-
-fn patch_text_arg_value(input: &Value) -> Option<&str> {
-    input
-        .get("patchText")
-        .or_else(|| input.get("patch"))
-        .or_else(|| input.get("diff"))
-        .or_else(|| input.get("content"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
+    available.contains_key(name).then(|| name.to_string())
 }
 
 pub(crate) fn tool_allowed_for_model(tool_id: &str, model_id: &str) -> bool {
     if use_apply_patch_for_model(model_id) {
-        tool_id != "write"
+        !matches!(tool_id, "edit" | "write")
     } else {
         tool_id != "apply_patch"
     }

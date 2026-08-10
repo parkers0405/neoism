@@ -1,17 +1,13 @@
 use neoism_agent_core::{
     FilePart, MessageInfo, MessageWithParts, Part, ProviderAttachment, ProviderMessage,
-    ProviderRole, ProviderToolCall, ToolPart, ToolState,
+    ProviderReasoning, ProviderRole, ProviderToolCall, ToolPart, ToolState,
 };
 use serde_json::Value;
-use std::collections::HashSet;
 
 const SUBTASK_COMPLETION_SYSTEM_MARKER: &str =
     "Neoism runtime notification: background subagent completion.";
 const BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER: &str =
     "Neoism runtime notification: background shell task completion.";
-const RECENT_FULL_TOOL_RESULTS: usize = 4;
-const RECENT_TOOL_OUTPUT_MAX_CHARS: usize = 12 * 1024;
-const OLD_TOOL_OUTPUT_MAX_CHARS: usize = 512;
 // Matches opencode's TOOL_OUTPUT_MAX_CHARS for compaction requests. The
 // request that triggers compaction is already near the context limit, so tool
 // outputs must be aggressively truncated or the summarize request itself
@@ -24,14 +20,27 @@ pub(crate) fn is_runtime_system_notification(system: &str) -> bool {
 }
 
 pub(crate) fn provider_messages(messages: &[MessageWithParts]) -> Vec<ProviderMessage> {
-    let recent_full_tool_calls = recent_full_tool_calls(messages);
     provider_messages_with_options(
         messages,
         MessageModelOptions {
             include_attachments: true,
-            recent_full_tool_calls: &recent_full_tool_calls,
-            old_tool_output_max_chars: OLD_TOOL_OUTPUT_MAX_CHARS,
-            preserve_subagent_outputs: true,
+            tool_output_max_chars: None,
+            current_model: None,
+        },
+    )
+}
+
+pub(crate) fn provider_messages_for_model(
+    messages: &[MessageWithParts],
+    provider_id: &str,
+    model_id: &str,
+) -> Vec<ProviderMessage> {
+    provider_messages_with_options(
+        messages,
+        MessageModelOptions {
+            include_attachments: true,
+            tool_output_max_chars: None,
+            current_model: Some((provider_id.to_string(), model_id.to_string())),
         },
     )
 }
@@ -43,33 +52,25 @@ pub(crate) fn compaction_provider_messages(
         messages,
         MessageModelOptions {
             include_attachments: false,
-            recent_full_tool_calls: &HashSet::new(),
-            old_tool_output_max_chars: COMPACTION_TOOL_OUTPUT_MAX_CHARS,
-            // Compaction requests are already near the context limit;
-            // subagent outputs get no exemption there.
-            preserve_subagent_outputs: false,
+            tool_output_max_chars: Some(COMPACTION_TOOL_OUTPUT_MAX_CHARS),
+            current_model: None,
         },
     )
 }
 
-struct MessageModelOptions<'a> {
+struct MessageModelOptions {
     include_attachments: bool,
-    recent_full_tool_calls: &'a HashSet<String>,
-    old_tool_output_max_chars: usize,
-    preserve_subagent_outputs: bool,
-}
-
-/// Subagent results are the condensed product of an entire child session —
-/// truncating them to `OLD_TOOL_OUTPUT_MAX_CHARS` a few steps later erases
-/// everything the fan-out paid for and makes the model re-spawn agents for
-/// answers it already has. They stay at the full recent-output cap instead.
-fn is_subagent_result_tool(tool: &str) -> bool {
-    matches!(tool, "task" | "task_result" | "background_task_result")
+    /// Normal provider turns replay the centrally-bounded result verbatim.
+    /// Only the already-near-limit compaction request applies a second bound.
+    tool_output_max_chars: Option<usize>,
+    /// Opaque provider reasoning can only be replayed to the exact model that
+    /// produced it. A model switch gets the durable visible reasoning text.
+    current_model: Option<(String, String)>,
 }
 
 fn provider_messages_with_options(
     messages: &[MessageWithParts],
-    options: MessageModelOptions<'_>,
+    options: MessageModelOptions,
 ) -> Vec<ProviderMessage> {
     messages
         .iter()
@@ -98,40 +99,24 @@ fn provider_messages_with_options(
                 ));
                 values
             }
-            MessageInfo::Assistant(_) => {
-                assistant_provider_messages(&message.parts, &options)
-            }
+            MessageInfo::Assistant(assistant) => assistant_provider_messages(
+                &message.parts,
+                &options,
+                options
+                    .current_model
+                    .as_ref()
+                    .is_none_or(|(provider, model)| {
+                        assistant.provider_id == *provider && assistant.model_id == *model
+                    }),
+            ),
         })
         .filter(|message| {
             !message.content.trim().is_empty()
                 || !message.tool_calls.is_empty()
+                || !message.reasoning.is_empty()
                 || matches!(message.role, ProviderRole::Tool)
         })
         .collect()
-}
-
-fn recent_full_tool_calls(messages: &[MessageWithParts]) -> HashSet<String> {
-    let mut calls = HashSet::new();
-    for part in messages
-        .iter()
-        .rev()
-        .flat_map(|message| message.parts.iter().rev())
-    {
-        let Part::Tool(part) = part else {
-            continue;
-        };
-        if !matches!(
-            part.state,
-            ToolState::Completed { .. } | ToolState::Error { .. }
-        ) {
-            continue;
-        }
-        calls.insert(part.call_id.clone());
-        if calls.len() >= RECENT_FULL_TOOL_RESULTS {
-            break;
-        }
-    }
-    calls
 }
 
 fn user_provider_message(parts: &[Part], include_attachments: bool) -> ProviderMessage {
@@ -154,9 +139,29 @@ fn user_provider_message(parts: &[Part], include_attachments: bool) -> ProviderM
 
 fn assistant_provider_messages(
     parts: &[Part],
-    options: &MessageModelOptions<'_>,
+    options: &MessageModelOptions,
+    replay_opaque_reasoning: bool,
 ) -> Vec<ProviderMessage> {
-    let content = visible_part_text(parts);
+    let mut content = visible_part_text(parts);
+    if !replay_opaque_reasoning {
+        let visible_reasoning = parts
+            .iter()
+            .filter_map(|part| match part {
+                Part::Reasoning(part) if !part.text.trim().is_empty() => {
+                    Some(part.text.trim())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !visible_reasoning.is_empty() {
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            content.push_str("Previous model reasoning summary:\n");
+            content.push_str(&visible_reasoning);
+        }
+    }
     let tool_parts = parts
         .iter()
         .filter_map(|part| match part {
@@ -173,9 +178,30 @@ fn assistant_provider_messages(
         })
         .collect::<Vec<_>>();
 
+    let reasoning = replay_opaque_reasoning
+        .then(|| parts)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| match part {
+            Part::Reasoning(part) => part.metadata.as_ref()?.get("openai"),
+            _ => None,
+        })
+        .filter_map(|metadata| {
+            Some(ProviderReasoning {
+                summary: metadata.get("summary")?.as_array()?.clone(),
+                encrypted_content: metadata
+                    .get("encryptedContent")?
+                    .as_str()?
+                    .to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+
     let mut messages = Vec::new();
-    if !content.trim().is_empty() || !tool_calls.is_empty() {
-        messages.push(ProviderMessage::assistant_tool_call(content, tool_calls));
+    if !content.trim().is_empty() || !tool_calls.is_empty() || !reasoning.is_empty() {
+        let mut message = ProviderMessage::assistant_tool_call(content, tool_calls);
+        message.reasoning = reasoning;
+        messages.push(message);
     }
     messages.extend(
         tool_parts
@@ -241,26 +267,19 @@ fn tool_input(part: &ToolPart) -> Value {
 
 fn tool_result_messages(
     part: &ToolPart,
-    options: &MessageModelOptions<'_>,
+    options: &MessageModelOptions,
 ) -> Vec<ProviderMessage> {
-    let recent = options.recent_full_tool_calls.contains(&part.call_id)
-        || (options.preserve_subagent_outputs && is_subagent_result_tool(&part.tool));
-    let output_limit = if recent {
-        RECENT_TOOL_OUTPUT_MAX_CHARS
-    } else {
-        options.old_tool_output_max_chars
-    };
     let mut result = match &part.state {
         ToolState::Completed { output, .. } => ProviderMessage::tool_result(
             &part.call_id,
             &part.tool,
-            &tool_output_for_prompt(part, output, output_limit, recent, false),
+            &tool_output_for_prompt(part, output, options.tool_output_max_chars, false),
             false,
         ),
         ToolState::Error { error, .. } => ProviderMessage::tool_result(
             &part.call_id,
             &part.tool,
-            &tool_output_for_prompt(part, error, output_limit, recent, true),
+            &tool_output_for_prompt(part, error, options.tool_output_max_chars, true),
             true,
         ),
         ToolState::Pending { .. } | ToolState::Running { .. } => {
@@ -292,22 +311,19 @@ fn tool_result_messages(
 fn tool_output_for_prompt(
     part: &ToolPart,
     output: &str,
-    max_chars: usize,
-    recent: bool,
+    max_chars: Option<usize>,
     error: bool,
 ) -> String {
-    if let Some(reference) = tool_output_reference(part, output, recent, error) {
+    let Some(max_chars) = max_chars else {
+        return output.to_string();
+    };
+    if let Some(reference) = tool_output_reference(part, error) {
         return reference;
     }
     truncate_tool_output(output, max_chars)
 }
 
-fn tool_output_reference(
-    part: &ToolPart,
-    output: &str,
-    recent: bool,
-    error: bool,
-) -> Option<String> {
+fn tool_output_reference(part: &ToolPart, error: bool) -> Option<String> {
     if !tool_output_was_truncated(part) {
         return None;
     }
@@ -321,10 +337,8 @@ fn tool_output_reference(
         .as_ref()
         .and_then(|artifact| artifact.get("summary"))
         .and_then(Value::as_str);
-    let preview_limit = if recent { 1_024 } else { 0 };
-    let preview = truncate_tool_output(output, preview_limit);
     let kind = if error { "error" } else { "output" };
-    let mut lines = vec![
+    let lines = vec![
         format!(
             "[Tool {} {kind} was too large for prompt replay.]",
             part.tool
@@ -337,11 +351,6 @@ fn tool_output_reference(
             .map(|summary| format!("Summary: {summary}"))
             .unwrap_or_else(|| "Use artifact_read/artifact_search or Read/Grep to inspect only the needed section.".to_string()),
     ];
-    if preview_limit > 0 && !preview.trim().is_empty() {
-        lines.push(String::new());
-        lines.push("Recent preview:".to_string());
-        lines.push(preview);
-    }
     Some(lines.join("\n"))
 }
 
@@ -424,8 +433,8 @@ mod tests {
     use super::*;
     use neoism_agent_core::{
         AssistantMessage, AssistantPath, CompletedTime, CreatedTime, FilePart, Id,
-        IdKind, MessageWithParts, PartTime, TextPart, TokenUsage, ToolPart, UserMessage,
-        UserModel,
+        IdKind, MessageWithParts, PartTime, ReasoningPart, TextPart, TokenUsage,
+        ToolPart, UserMessage, UserModel,
     };
 
     #[test]
@@ -485,11 +494,81 @@ mod tests {
     }
 
     #[test]
-    fn provider_messages_reference_spilled_tool_output_instead_of_replaying_preview() {
+    fn provider_messages_preserve_encrypted_reasoning() {
+        let session_id = Id::ascending(IdKind::Session);
+        let message_id = Id::ascending(IdKind::Message);
+        let messages = provider_messages(&[MessageWithParts {
+            info: assistant_info(message_id.clone(), session_id.clone()),
+            parts: vec![Part::Reasoning(ReasoningPart {
+                id: Id::ascending(IdKind::Part),
+                session_id,
+                message_id,
+                text: "Inspected files".to_string(),
+                time: PartTime {
+                    start: 1,
+                    end: Some(2),
+                },
+                metadata: Some(serde_json::json!({
+                    "openai": {
+                        "summary": [{ "type": "summary_text", "text": "Inspected files" }],
+                        "encryptedContent": "ciphertext"
+                    }
+                })),
+            })],
+        }]);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].reasoning.len(), 1);
+        assert_eq!(messages[0].reasoning[0].encrypted_content, "ciphertext");
+        assert_eq!(
+            messages[0].reasoning[0].summary[0]["text"],
+            "Inspected files"
+        );
+    }
+
+    #[test]
+    fn model_switch_drops_opaque_reasoning_and_keeps_visible_summary() {
+        let session_id = Id::ascending(IdKind::Session);
+        let message_id = Id::ascending(IdKind::Message);
+        let messages = provider_messages_for_model(
+            &[MessageWithParts {
+                info: assistant_info(message_id.clone(), session_id.clone()),
+                parts: vec![Part::Reasoning(ReasoningPart {
+                    id: Id::ascending(IdKind::Part),
+                    session_id,
+                    message_id,
+                    text: "Inspected the runtime and found the lock.".to_string(),
+                    time: PartTime {
+                        start: 1,
+                        end: Some(2),
+                    },
+                    metadata: Some(serde_json::json!({
+                        "openai": {
+                            "summary": [{ "type": "summary_text", "text": "opaque" }],
+                            "encryptedContent": "ciphertext"
+                        }
+                    })),
+                })],
+            }],
+            "anthropic",
+            "claude-next",
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].reasoning.is_empty());
+        assert!(messages[0]
+            .content
+            .contains("Inspected the runtime and found the lock."));
+        assert!(!messages[0].content.contains("ciphertext"));
+    }
+
+    #[test]
+    fn provider_messages_preserve_centrally_bounded_spilled_tool_output() {
         let session_id = Id::ascending(IdKind::Session);
         let message_id = Id::ascending(IdKind::Message);
         let part_id = Id::ascending(IdKind::Part);
-        let large_output = "x".repeat(80_000);
+        let bounded_output =
+            "bounded preview\n\nFull output saved to artifact://tool-output/abc123";
         let messages = provider_messages(&[MessageWithParts {
             info: assistant_info(message_id.clone(), session_id.clone()),
             parts: vec![Part::Tool(ToolPart {
@@ -500,7 +579,7 @@ mod tests {
                 call_id: "call_large".to_string(),
                 state: ToolState::Completed {
                     input: serde_json::json!({ "command": "big-output" }),
-                    output: large_output,
+                    output: bounded_output.to_string(),
                     metadata: serde_json::json!({
                         "truncated": true,
                         "outputPath": "/tmp/neoism-tool-output.txt",
@@ -525,15 +604,11 @@ mod tests {
         }]);
 
         assert_eq!(messages.len(), 2);
-        assert!(messages[1]
-            .content
-            .contains("Artifact: artifact://tool-output/abc123"));
-        assert!(messages[1].content.contains("Summary: big output summary"));
-        assert!(messages[1].content.len() < 2_000);
+        assert_eq!(messages[1].content, bounded_output);
     }
 
     #[test]
-    fn provider_messages_shrink_old_unspilled_tool_results() {
+    fn provider_messages_preserve_old_centrally_bounded_tool_results() {
         let session_id = Id::ascending(IdKind::Session);
         let mut transcript = Vec::new();
         for index in 0..6 {
@@ -567,8 +642,7 @@ mod tests {
             .find(|message| message.tool_call_id.as_deref() == Some("call_0"))
             .expect("old tool result");
 
-        assert!(old_tool.content.len() < 900);
-        assert!(old_tool.content.contains("omitted"));
+        assert_eq!(old_tool.content, "o".repeat(4_000));
     }
 
     #[test]
@@ -869,10 +943,10 @@ mod tests {
     }
 
     #[test]
-    fn older_tool_results_are_truncated_for_prompt_replay() {
+    fn older_tool_results_remain_available_for_prompt_replay() {
         let session_id = Id::ascending(IdKind::Session);
         let mut history = Vec::new();
-        for index in 0..=RECENT_FULL_TOOL_RESULTS {
+        for index in 0..10 {
             let message_id = Id::ascending(IdKind::Message);
             history.push(MessageWithParts {
                 info: MessageInfo::Assistant(AssistantMessage {
@@ -904,7 +978,7 @@ mod tests {
                     call_id: format!("call_{index}"),
                     state: ToolState::Completed {
                         input: serde_json::json!({ "path": format!("file-{index}.rs") }),
-                        output: "x".repeat(OLD_TOOL_OUTPUT_MAX_CHARS + 100),
+                        output: "x".repeat(4_000),
                         metadata: serde_json::json!({}),
                         title: format!("Read file-{index}.rs"),
                         time: PartTime {
@@ -922,11 +996,9 @@ mod tests {
             .filter(|message| matches!(message.role, ProviderRole::Tool))
             .collect::<Vec<_>>();
 
-        assert!(tool_messages[0].content.contains("truncated"));
-        assert!(!tool_messages
-            .last()
-            .expect("recent tool result")
-            .content
-            .contains("truncated"));
+        assert_eq!(tool_messages.len(), 10);
+        assert!(tool_messages
+            .iter()
+            .all(|message| message.content == "x".repeat(4_000)));
     }
 }

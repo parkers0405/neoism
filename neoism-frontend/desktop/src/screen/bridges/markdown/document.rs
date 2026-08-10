@@ -343,26 +343,6 @@ impl Screen<'_> {
         match result {
             Ok(()) => {
                 self.sync_markdown_tab_modified(&path, false);
-                if let Some(result) = self.apply_generated_neoism_tasks_save(&path) {
-                    match result {
-                        Ok(message) => {
-                            self.renderer.notifications.push(
-                                message,
-                                neoism_ui::panels::notifications::NotificationLevel::Info,
-                            );
-                        }
-                        Err(err) => {
-                            self.renderer.notifications.push(
-                                err,
-                                neoism_ui::panels::notifications::NotificationLevel::Error,
-                            );
-                        }
-                    }
-                    self.mark_dirty();
-                    return true;
-                }
-                self.invalidate_note_index_for_path(&path);
-                self.rebuild_note_graph_for_path(&path);
                 self.renderer.notifications.push(
                     format!("Wrote {}", path.display()),
                     neoism_ui::panels::notifications::NotificationLevel::Info,

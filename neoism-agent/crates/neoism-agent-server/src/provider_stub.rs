@@ -22,7 +22,7 @@ impl ProviderRuntime for StubRuntime {
                 yield ProviderStreamEvent::StartStep;
                 for (index, path) in paths.iter().enumerate() {
                     let id = format!("call_parallel_read_{}", index + 1);
-                    let input = json!({ "path": path });
+                    let input = json!({ "filePath": path });
                     yield ProviderStreamEvent::ToolInputStart {
                         id: id.clone(),
                         name: "read".to_string(),
@@ -114,7 +114,7 @@ impl ProviderRuntime for StubRuntime {
                 return;
             }
             if let Some(path) = stub_read_tool_path(&request) {
-                let input = json!({ "path": path });
+                let input = json!({ "filePath": path });
                 let input_text = input.to_string();
                 let input_tokens = request
                     .messages

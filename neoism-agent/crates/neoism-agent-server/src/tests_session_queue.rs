@@ -152,8 +152,18 @@ async fn session_abort_cancels_running_bash_tool() {
         .expect("bash tool should stop shortly after abort")
         .unwrap()
         .unwrap_err();
-    assert!(error.contains("bash command aborted"), "{error}");
-    assert!(error.contains("started"), "{error}");
+    assert!(
+        error.to_ascii_lowercase().contains("command aborted"),
+        "{error}"
+    );
+    // Cancellation may win while the process is starting (including during
+    // one-time login-environment hydration), in which case no command output
+    // exists yet. If the command did start, already-emitted output is kept.
+    assert!(
+        error.contains("started") || error.contains("(no output)"),
+        "{error}"
+    );
+    assert!(!error.contains("finished"), "{error}");
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
@@ -341,10 +351,9 @@ async fn prompt_async_queues_while_session_is_running() {
         loop {
             let worker_done = !state
                 .inner
-                .prompt_queue_workers
-                .read()
-                .await
-                .contains(session.id.as_str());
+                .session_coordinator
+                .worker_active(session.id.as_str())
+                .await;
             let idle = !state
                 .inner
                 .statuses
@@ -401,8 +410,9 @@ async fn queued_prompt_can_be_appended_to_active_run() {
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/session/{}/prompt_async", session.id),
+            &format!("/api/session/{}/prompt", session.id),
             Some(json!({
+                "delivery": "steer",
                 "noReply": true,
                 "parts": [{ "type": "text", "text": "steer this turn" }]
             })),
@@ -443,10 +453,9 @@ async fn queued_prompt_can_be_appended_to_active_run() {
         loop {
             let worker_done = !state
                 .inner
-                .prompt_queue_workers
-                .read()
-                .await
-                .contains(session.id.as_str());
+                .session_coordinator
+                .worker_active(session.id.as_str())
+                .await;
             let idle = !state
                 .inner
                 .statuses
@@ -570,10 +579,9 @@ async fn session_queue_routes_inspect_pop_and_clear() {
         loop {
             let worker_done = !state
                 .inner
-                .prompt_queue_workers
-                .read()
-                .await
-                .contains(session.id.as_str());
+                .session_coordinator
+                .worker_active(session.id.as_str())
+                .await;
             let idle = !state
                 .inner
                 .statuses
@@ -729,6 +737,78 @@ async fn prompt_returns_conflict_while_session_is_running() {
     )
     .await;
     assert!(messages.is_empty());
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn prompt_message_ids_are_idempotent_and_conflict_on_reuse() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-idempotent-prompt-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/session?directory={}", root.to_string_lossy()),
+                Some(json!({})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let message_id = Id::ascending(IdKind::Message).to_string();
+    let body = json!({
+        "messageId": message_id,
+        "noReply": true,
+        "parts": [{ "type": "text", "text": "exactly once" }]
+    });
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/session/{}/message", session.id),
+                Some(body.clone()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(
+        state
+            .inner
+            .store
+            .list_messages(session.id.as_str())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let conflict = app
+        .oneshot(request(
+            Method::POST,
+            &format!("/session/{}/message", session.id),
+            Some(json!({
+                "messageId": message_id,
+                "noReply": true,
+                "parts": [{ "type": "text", "text": "different" }]
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);

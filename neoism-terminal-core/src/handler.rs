@@ -1879,12 +1879,12 @@ fn encode_hex_string(s: &str) -> String {
 }
 
 /// Get termcap/terminfo capability value for the terminal.
-/// Based on misc/rio.termcap and misc/rio.terminfo files.
+/// Based on the capabilities Neoism exposes to child processes.
 fn get_termcap_capability(name: &str) -> Option<String> {
     debug!("XTGETTCAP query for capability: {}", name);
     match name {
         // Terminal name
-        "TN" | "name" => Some("rio".to_string()),
+        "TN" | "name" => Some("neoism".to_string()),
 
         // Colors capability - from terminfo: colors#0x100 (256), pairs#0x7FFF
         "Co" | "colors" => Some("256".to_string()),
@@ -2380,7 +2380,7 @@ mod tests {
 
     #[test]
     fn test_capability_lookup() {
-        assert_eq!(get_termcap_capability("TN"), Some("rio".to_string()));
+        assert_eq!(get_termcap_capability("TN"), Some("neoism".to_string()));
         assert_eq!(get_termcap_capability("Co"), Some("256".to_string()));
         assert_eq!(get_termcap_capability("RGB"), Some("8/8/8".to_string()));
         assert_eq!(get_termcap_capability("invalid"), None);

@@ -1660,6 +1660,58 @@ fn timeline_growth_preserves_reader_position_when_scrolled_up() {
 }
 
 #[test]
+fn mouse_wheel_notch_eases_instead_of_jumping_the_full_distance() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+
+    assert!(pane.scroll_timeline_wheel_pixels(72.0));
+    assert!((pane.timeline_scroll_offset() - 12.96).abs() < 0.01);
+    assert_eq!(pane.timeline_velocity_px_s, 540.0);
+    assert!(pane.timeline_is_inertial());
+}
+
+#[test]
+fn mouse_wheel_glide_stops_before_the_subpixel_tail() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+    assert!(pane.scroll_timeline_wheel_pixels(72.0));
+    pane.timeline_velocity_px_s = 40.0;
+    pane.timeline_last_tick_at = Instant::now().checked_sub(Duration::from_millis(16));
+    let before = pane.timeline_scroll_offset();
+
+    assert!(!pane.tick_timeline_scroll());
+    assert_eq!(pane.timeline_scroll_offset(), before);
+    assert!(!pane.timeline_is_inertial());
+}
+
+#[test]
+fn active_scroll_discards_stale_stream_layout_anchor() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+    pane.set_timeline_view_anchor(Some("visible-message".to_string()), 24.0);
+
+    assert!(pane.scroll_timeline_wheel_pixels(72.0));
+    assert!(pane.timeline_view_anchor().is_none());
+
+    // Rendering captures a new anchor after the immediate wheel step. The
+    // following inertia frame must invalidate that anchor again before a
+    // simultaneous streaming relayout gets a chance to restore it.
+    pane.set_timeline_view_anchor(Some("visible-message".to_string()), 16.0);
+    pane.timeline_last_tick_at = Instant::now().checked_sub(Duration::from_millis(16));
+    assert!(pane.tick_timeline_scroll());
+    assert!(pane.timeline_view_anchor().is_none());
+}
+
+#[test]
+fn trackpad_pixels_keep_the_direct_response_path() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+
+    assert!(pane.scroll_timeline_pixels(17.0));
+    assert_eq!(pane.timeline_scroll_offset(), 17.0);
+}
+
+#[test]
 fn timeline_growth_keeps_following_stream_at_bottom() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);

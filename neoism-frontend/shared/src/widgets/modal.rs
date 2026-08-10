@@ -40,10 +40,6 @@ const ORDER: u8 = 24;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModalAction {
     Close,
-    /// Open the notes graph view (footer settings menu → Graph).
-    NotesOpenGraph,
-    /// Open the notes create menu (footer settings menu → Add…).
-    NotesOpenCreateMenu,
     InstallLsp {
         server: String,
     },

@@ -16,6 +16,8 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_stream::StreamExt;
 
+const MAX_MCP_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
 pub(crate) type NotificationHandler = Arc<dyn Fn(McpNotification) + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -107,6 +109,12 @@ impl StdioJsonRpcClient {
                 }
                 Err(_) => return Err(anyhow!("MCP request {method} timed out")),
             };
+            if line.len() > MAX_MCP_RESPONSE_BYTES {
+                return Err(anyhow!(
+                    "MCP response exceeds {} byte limit",
+                    MAX_MCP_RESPONSE_BYTES
+                ));
+            }
             let value: Value = serde_json::from_str(&line)
                 .with_context(|| "failed to parse MCP JSON-RPC line")?;
             if handle_notification_value(&value, self.notifications.as_ref()) {
@@ -284,7 +292,32 @@ impl HttpJsonRpcClient {
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string);
-            let body = response.text().await.unwrap_or_default();
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_MCP_RESPONSE_BYTES as u64)
+            {
+                return Err(anyhow!(
+                    "MCP HTTP response exceeds {} byte limit",
+                    MAX_MCP_RESPONSE_BYTES
+                ));
+            }
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.with_context(|| {
+                    format!("failed to read MCP HTTP response for {method}")
+                })?;
+                if bytes.len().saturating_add(chunk.len()) > MAX_MCP_RESPONSE_BYTES {
+                    return Err(anyhow!(
+                        "MCP HTTP response exceeds {} byte limit",
+                        MAX_MCP_RESPONSE_BYTES
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let body = String::from_utf8(bytes).with_context(|| {
+                format!("MCP HTTP response for {method} is not UTF-8")
+            })?;
             if status == StatusCode::NOT_FOUND && session_header.is_some() && attempt == 0
             {
                 *self.session_id.lock().await = None;

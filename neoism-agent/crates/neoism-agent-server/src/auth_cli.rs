@@ -120,7 +120,12 @@ struct McpServerArgs {
 #[derive(Clone, Debug, Args)]
 struct OutputArgs {
     /// Agent server URL.
-    #[arg(long, default_value = DEFAULT_SERVER, hide = true)]
+    #[arg(
+        long,
+        env = "NEOISM_SERVER",
+        default_value = DEFAULT_SERVER,
+        hide = true
+    )]
     server: String,
     /// Print JSON instead of human-readable output.
     #[arg(long)]

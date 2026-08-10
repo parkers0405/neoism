@@ -1,5 +1,5 @@
 use super::*;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 impl Screen<'_> {
     pub(crate) fn open_file_tree_new_file_prompt_for_selection(&mut self) {
@@ -219,43 +219,6 @@ impl Screen<'_> {
         }
     }
 
-    pub(crate) fn refresh_note_graph_after_rename(
-        &mut self,
-        old_path: &Path,
-        new_path: &Path,
-    ) {
-        let Some(workspace) = self.file_tree_workspace() else {
-            return;
-        };
-        if !workspace.config.notes.enabled {
-            return;
-        }
-        let note_roots = vault_note_roots(&workspace);
-        if !intersects_note_roots(old_path, &note_roots)
-            && !intersects_note_roots(new_path, &note_roots)
-        {
-            return;
-        }
-        self.workspace_note_indexes.remove(&workspace.root);
-        self.mark_neoism_tags_views_stale(&workspace.root);
-        if old_path.is_file()
-            && crate::editor::markdown::state::is_markdown_path(old_path)
-        {
-            let _ = crate::workspace::remove_note_graph_file(&workspace, old_path);
-        }
-        if new_path.is_file()
-            && crate::editor::markdown::state::is_markdown_path(new_path)
-        {
-            let _ = crate::workspace::replace_note_graph_file(&workspace, new_path);
-        } else if new_path.is_dir() {
-            if let Ok(index) =
-                crate::workspace::notes::WorkspaceNoteIndex::build(&workspace)
-            {
-                let _ = crate::workspace::rebuild_note_graph(&workspace, &index);
-            }
-        }
-    }
-
     pub(crate) fn rename_file_tree_path(&mut self, path: PathBuf, name: String) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
@@ -322,7 +285,6 @@ impl Screen<'_> {
                 self.renderer.modal.close();
                 self.rebind_current_epub_path(&path, target.clone());
                 let label = self.file_tree_display_path(&target);
-                self.refresh_note_graph_after_rename(&path, &target);
                 self.refresh_file_tree_entries();
                 self.file_tree_notify(
                     format!("Renamed to `{label}`"),
@@ -382,7 +344,6 @@ impl Screen<'_> {
             Ok(()) => {
                 self.rebind_current_epub_path(&source, target.clone());
                 let label = self.file_tree_display_path(&target);
-                self.refresh_note_graph_after_rename(&source, &target);
                 self.refresh_file_tree_entries();
                 // Reveal the destination folder so the moved item shows.
                 self.renderer.file_tree.reveal_directory(&dest_dir);

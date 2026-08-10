@@ -16,8 +16,6 @@ impl Screen<'_> {
             self.mark_dirty();
         }
 
-        self.drain_workspace_note_index_events();
-
         self.sync_file_tree_watchers();
 
         let is_search_active = self.search_active();

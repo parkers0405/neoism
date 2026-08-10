@@ -627,6 +627,7 @@ pub struct NeoismAgentPane {
     /// settle quickly instead of drifting on after the wheel stops.
     timeline_scroll_decay_tau: f32,
     timeline_scroll_stop_px_s: f32,
+    timeline_scroll_min_frame_step_px: f32,
     timeline_measure_cache: RefCell<HashMap<TimelineMeasureKey, f32>>,
     // Value is `(blocks, last_used_tick)`. The tick drives true LRU eviction:
     // every cache *hit* (per visible card, per frame) bumps the entry's tick,
@@ -835,6 +836,7 @@ impl Default for NeoismAgentPane {
             timeline_last_tick_at: None,
             timeline_scroll_decay_tau: Self::TIMELINE_TRACKPAD_DECAY_TAU,
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
+            timeline_scroll_min_frame_step_px: Self::TIMELINE_TRACKPAD_MIN_FRAME_STEP_PX,
             timeline_measure_cache: RefCell::new(HashMap::new()),
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: std::cell::Cell::new(0),
@@ -939,28 +941,33 @@ fn file_mention_options(
         .collect()
 }
 
-/// Cached fff-search pickers keyed by mention root. Mirrors the finder's
-/// per-root cache (`host::finder_search`): building a fresh `FilePicker`
-/// (a full directory scan) on every `@` keystroke would be far too slow,
-/// so each root is scanned once and its picker reused for later queries.
-fn file_mention_pickers() -> &'static Mutex<HashMap<PathBuf, fff_search::FilePicker>> {
-    static PICKERS: OnceLock<Mutex<HashMap<PathBuf, fff_search::FilePicker>>> =
-        OnceLock::new();
-    PICKERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Run `op` against the cached picker for `root`, building and scanning it
-/// on first use. Returns `None` if the picker could not be built.
+/// Run `op` against the same bounded, watched picker registry used by Finder
+/// and agent file tools. Returns `None` if the picker could not be built.
 fn with_file_mention_picker<T>(
     root: &Path,
     op: impl FnOnce(&fff_search::FilePicker) -> T,
 ) -> Option<T> {
-    let mut pickers = file_mention_pickers().lock().ok()?;
-    if !pickers.contains_key(root) {
-        let picker = crate::host::finder_search::build_fff_picker(root)?;
-        pickers.insert(root.to_path_buf(), picker);
+    // Only the currently used mention root is pinned. Switching workspaces
+    // releases the previous pin so the bounded registry can retire it.
+    static ACTIVE_ROOT: OnceLock<
+        Mutex<Option<neoism_agent_server::picker_registry::PickerRootPin>>,
+    > = OnceLock::new();
+    if let Ok(mut pin) = ACTIVE_ROOT.get_or_init(|| Mutex::new(None)).lock() {
+        let already_pinned = pin.as_ref().is_some_and(|pin| pin.is_for(root));
+        if !already_pinned {
+            *pin = Some(neoism_agent_server::picker_registry::pin(root));
+        }
     }
-    pickers.get(root).map(op)
+    neoism_agent_server::picker_registry::with_picker(root, op)
+        .inspect_err(|error| {
+            tracing::warn!(
+                target: "neoism::agent_mentions",
+                root = %root.display(),
+                %error,
+                "shared fff-search query failed"
+            );
+        })
+        .ok()
 }
 
 /// True when any component of a relative path falls in the historic

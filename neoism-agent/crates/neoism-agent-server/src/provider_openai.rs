@@ -359,6 +359,7 @@ mod tests {
         let options = BTreeMap::from([
             ("temperature".to_string(), json!(0.7)),
             ("reasoning_effort".to_string(), json!("high")),
+            ("prompt_cache_key".to_string(), json!("session-1")),
             ("model".to_string(), json!("malicious")),
             ("stream".to_string(), json!(false)),
         ]);
@@ -369,6 +370,7 @@ mod tests {
         assert_eq!(body["stream"], true);
         assert_eq!(body["temperature"], 0.7);
         assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["prompt_cache_key"], "session-1");
     }
 }
 
@@ -391,6 +393,9 @@ fn openai_api_key_responses_stream(
             &request.messages,
             &request.tools,
         );
+        if let Some(session_id) = request.session_id.as_deref().filter(|id| !id.is_empty()) {
+            body["prompt_cache_key"] = Value::String(session_id.to_string());
+        }
         merge_provider_options(&mut body, &request.options);
         let mut request_builder = client
             .client
@@ -485,6 +490,9 @@ fn openai_oauth_responses_stream(
             &request.messages,
             &request.tools,
         );
+        if let Some(session_id) = request.session_id.as_deref().filter(|id| !id.is_empty()) {
+            body["prompt_cache_key"] = Value::String(session_id.to_string());
+        }
         merge_provider_options(&mut body, &request.options);
         let mut request_builder = client
             .client

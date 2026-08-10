@@ -40,15 +40,15 @@ fn vertical_overlay_scroll_clamps_row_height_to_one() {
 }
 
 #[test]
-fn agent_timeline_scroll_uses_calmer_line_step() {
+fn agent_timeline_scroll_preserves_wheel_and_trackpad_device_paths() {
     assert_eq!(
         agent_timeline_scroll_pixels(&ScrollDelta::Lines { x: 0.0, y: 1.0 }),
-        24.0
+        72.0
     );
     assert_eq!(
-        agent_timeline_wheel(&ScrollDelta::Lines { x: 0.0, y: 1.0 }),
+        agent_timeline_wheel(&ScrollDelta::Lines { x: 0.0, y: 1.0 }, 24.0),
         AgentTimelineWheel {
-            pixels: 24.0,
+            pixels: 72.0,
             smooth: true,
         }
     );
@@ -57,7 +57,7 @@ fn agent_timeline_scroll_uses_calmer_line_step() {
         -17.0
     );
     assert_eq!(
-        agent_timeline_wheel(&ScrollDelta::Pixels { x: 0.0, y: -17.0 }),
+        agent_timeline_wheel(&ScrollDelta::Pixels { x: 0.0, y: -17.0 }, 24.0),
         AgentTimelineWheel {
             pixels: -17.0,
             smooth: false,
@@ -69,11 +69,11 @@ fn agent_timeline_scroll_uses_calmer_line_step() {
 fn agent_timeline_scroll_caps_mouse_wheel_bursts() {
     assert_eq!(
         agent_timeline_scroll_pixels(&ScrollDelta::Lines { x: 0.0, y: 8.0 }),
-        72.0
+        216.0
     );
     assert_eq!(
         agent_timeline_scroll_pixels(&ScrollDelta::Lines { x: 0.0, y: -8.0 }),
-        -72.0
+        -216.0
     );
 }
 

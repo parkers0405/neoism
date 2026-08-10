@@ -381,32 +381,3 @@ mod tests {
         assert!(error.to_string().contains("has no hunks"));
     }
 }
-
-pub(crate) fn paths(patch: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    for line in patch.lines() {
-        let candidates = if let Some(rest) = line.strip_prefix("diff --git ") {
-            rest.split_whitespace().collect::<Vec<_>>()
-        } else if let Some(path) = line.strip_prefix("+++ ") {
-            vec![path]
-        } else if let Some(path) = line.strip_prefix("--- ") {
-            vec![path]
-        } else {
-            Vec::new()
-        };
-        for candidate in candidates {
-            let path = candidate
-                .strip_prefix("a/")
-                .or_else(|| candidate.strip_prefix("b/"))
-                .unwrap_or(candidate);
-            if path == "/dev/null" || path.starts_with('"') || path.trim().is_empty() {
-                continue;
-            }
-            let path = path.to_string();
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
-        }
-    }
-    paths
-}

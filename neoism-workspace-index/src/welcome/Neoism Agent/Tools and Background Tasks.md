@@ -9,16 +9,16 @@ Neoism's built-in inventory includes:
 | Group | Examples |
 |---|---|
 | Shell | `bash`, `background_task`, `background_task_result` |
-| Files | `read`, `read_many`, `read_around`, `write`, `edit`, `apply_patch`, `list`, `glob` |
-| Search | `grep`, `ffgrep`, `fff_multi_grep`, `fffind` |
-| Web | `webfetch`, `webfetch_batch`, `websearch`, `websearch_batch` |
+| Files | `read`; model-specific `write`/`edit` or `apply_patch` |
+| Search | FFF-backed `grep` and `glob` |
+| Web | `webfetch`, `websearch` |
 | Code intelligence | `lsp` |
 | Knowledge | `notes`, `skill`, built-in Memory/Docs MCP tools |
 | Workflow | `question`, `plan_enter`, `todowrite` |
 | Delegation | `task`, `task_result`, `stop_task` |
 | Runtime | `complete_goal`, background-task cancellation routes |
 
-MCP servers can add more tools. The effective tool list is filtered by global and per-agent `tools` maps.
+MCP servers are exposed through one `execute` discovery/call gateway so their schemas do not flood every model request. The effective tool list is filtered by global and per-agent `tools` maps.
 
 ```jsonc
 {
@@ -61,13 +61,14 @@ Large outputs are bounded. Some tool results are spilled to a reference rather t
 
 ## File editing
 
-`write`, `edit`, and `apply_patch` are separate tools:
+Mutation tools are mutually exclusive for each model:
 
-- `write` creates/replaces complete content where enabled.
-- `edit` replaces a targeted exact string.
-- `apply_patch` performs structured multi-region add/update/delete patches.
+- GPT/Codex models receive only `apply_patch`, which performs structured multi-region add/update/delete patches.
+- Other models receive `edit` for targeted exact replacement and `write` for new files or intentional full replacement.
 
 All map to the `edit` permission. Agents are instructed not to overwrite unrelated concurrent work.
+
+`read` handles both files and directories with bounded streaming output. Agents issue multiple independent `read`, `grep`, `glob`, `webfetch`, or `websearch` calls together; the runtime executes up to ten calls concurrently. This replaces sequential batch wrappers with one strict schema per operation.
 
 ## Tool loops and limits
 

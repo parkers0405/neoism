@@ -1,11 +1,9 @@
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 use anyhow::Context;
 use serde_json::{json, Value};
 
-use super::args::patch_text_arg;
+use super::args::required_string;
 use super::paths::{display_path, project_path_for_write};
 use super::{diagnostics, format, locks, patch, ToolContext, ToolExecutionResult};
 
@@ -24,118 +22,7 @@ pub(super) async fn apply_patch_tool(
     context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let patch = patch_text_arg(&arguments)
-        .ok_or_else(|| anyhow::anyhow!("tool argument patch is required"))?;
-    if patch.trim().is_empty() {
-        anyhow::bail!("tool argument patch must not be empty");
-    }
-
-    if patch.contains("*** Begin Patch") {
-        return apply_v4a_patch(context, patch).await;
-    }
-
-    let paths = patch::paths(patch);
-    if paths.is_empty() {
-        anyhow::bail!(
-            "patch had no parseable file headers — expected unified diff (--- a/path / +++ b/path) or the V4A envelope (*** Begin Patch ... *** End Patch)"
-        );
-    }
-    let mut targets = Vec::new();
-    for path in &paths {
-        let target = project_path_for_write(&context, path)?;
-        context.ensure_allowed("edit", &display_path(&context.cwd, &target))?;
-        targets.push(target);
-    }
-    tracing::info!(paths = ?paths, "apply_patch waiting for file locks");
-    let _locks = locks::lock_files(targets.clone()).await;
-    tracing::info!(paths = ?paths, "apply_patch acquired file locks");
-    let mut before_states = BTreeMap::new();
-    for target in &targets {
-        before_states.insert(
-            target.clone(),
-            crate::snapshot::FileState::from_path(&target)?,
-        );
-    }
-
-    let mut child = Command::new("git")
-        .args(["apply", "--whitespace=nowarn", "--"])
-        .current_dir(&context.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| "failed to start git apply")?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(patch.as_bytes())
-            .with_context(|| "failed to send patch to git apply")?;
-    }
-    let output = tokio::task::spawn_blocking(move || {
-        tracing::info!("apply_patch git apply wait start");
-        child
-            .wait_with_output()
-            .with_context(|| "failed to wait for git apply")
-    })
-    .await
-    .with_context(|| "git apply task panicked")??;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
-        anyhow::bail!(
-            "patch failed: {}",
-            if stderr.is_empty() { stdout } else { stderr }
-        );
-    }
-
-    // Snapshots, formatting and LSP diagnostics all do blocking I/O (diagnostics
-    // wait on the language server). Run them off the async executor so the agent
-    // response never freezes after applying a patch.
-    let diagnostic_paths = targets;
-    tokio::task::spawn_blocking(move || {
-        let formatted = format::format_paths(
-            &context.cwd,
-            context.formatter(),
-            before_states.keys().cloned().collect::<Vec<_>>(),
-        );
-        let mut metadata = json!({ "paths": paths });
-        let mut snapshots = Vec::new();
-        for (path, before) in before_states {
-            if let Some(snapshot) =
-                crate::snapshot::file_change(&context.cwd, &path, before)?
-            {
-                snapshots.push(snapshot);
-            }
-        }
-        crate::snapshot::add_metadata_snapshots(&mut metadata, snapshots);
-        format::attach_formatted(&mut metadata, &formatted);
-        // Touch first (the single blocking diagnostics wait + cache), then read
-        // the cache — mirrors opencode's touchFile-then-diagnostics.
-        metadata["lspTouch"] =
-            diagnostics::touch_paths(&context.cwd, diagnostic_paths.clone());
-        let report = diagnostics::attach_lsp_diagnostics(
-            &context.cwd,
-            diagnostic_paths,
-            &mut metadata,
-        );
-
-        let mut output = if stdout.is_empty() {
-            format!("Applied patch to:\n{}", paths.join("\n"))
-        } else {
-            stdout
-        };
-        if let Some(report) = report {
-            output.push_str("\n\n");
-            output.push_str(&report);
-        }
-
-        Ok(ToolExecutionResult {
-            title: format!("Applied patch to {} file(s)", paths.len()),
-            output,
-            metadata: Some(metadata),
-        })
-    })
-    .await
-    .with_context(|| "apply_patch metadata task panicked")?
+    apply_v4a_patch(context, required_string(&arguments, "patchText")?).await
 }
 
 async fn apply_v4a_patch(

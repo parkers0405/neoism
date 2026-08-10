@@ -33,6 +33,11 @@ pub(crate) fn now_millis() -> u64 {
 }
 
 pub(crate) fn default_state_dir() -> String {
+    if let Ok(dir) = std::env::var("NEOISM_AGENT_STATE_DIR") {
+        if !dir.trim().is_empty() {
+            return dir;
+        }
+    }
     #[cfg(windows)]
     {
         return windows_neoism_dir("state", ".neoism/state");
@@ -47,6 +52,11 @@ pub(crate) fn default_state_dir() -> String {
 }
 
 pub(crate) fn default_cache_dir() -> String {
+    if let Ok(dir) = std::env::var("NEOISM_AGENT_CACHE_DIR") {
+        if !dir.trim().is_empty() {
+            return dir;
+        }
+    }
     #[cfg(windows)]
     {
         return windows_neoism_dir("cache", ".neoism/cache");

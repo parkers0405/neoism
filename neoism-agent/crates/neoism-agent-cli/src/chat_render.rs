@@ -201,10 +201,8 @@ fn format_tool_activity(tool: &str, input: &Value) -> String {
 
 fn tool_summary_group(tool: &str) -> &str {
     match tool {
-        "read" | "list" => "read",
-        "grep" | "glob" | "ffgrep" | "fffind" | "fff_multi_grep" | "websearch" => {
-            "search"
-        }
+        "read" => "read",
+        "grep" | "glob" | "websearch" => "search",
         "webfetch" => "fetch",
         "bash" => "exec",
         "write" | "edit" | "apply_patch" => "edit",

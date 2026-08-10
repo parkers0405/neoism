@@ -176,9 +176,7 @@ pub(super) fn finish_open_tool_calls(
 fn parse_tool_input(tool_name: &str, raw: &str) -> serde_json::Value {
     match serde_json::from_str(raw) {
         Ok(value) => value,
-        Err(_)
-            if matches!(tool_name, "apply_patch" | "patch") && !raw.trim().is_empty() =>
-        {
+        Err(_) if tool_name == "apply_patch" && !raw.trim().is_empty() => {
             serde_json::json!({ "patchText": raw })
         }
         Err(_) => serde_json::Value::String(raw.to_string()),

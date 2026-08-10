@@ -6,7 +6,8 @@ mod tests {
     };
 
     use super::super::helpers::*;
-    use super::super::links::markdown_link_open_action;
+    use super::super::links::{markdown_contact_value, markdown_link_open_action};
+    use super::super::rendered_inline_text;
     use super::super::source_map::InlineSourceMap;
     use super::super::types::*;
     use super::super::vim::VimState;
@@ -1094,6 +1095,21 @@ mod tests {
     }
 
     #[test]
+    fn contact_link_targets_remain_external_for_mouse_activation() {
+        let pane = pane_for_test();
+
+        for target in [
+            "mailto:hello@example.com",
+            "tel:+15128277441",
+            "https://neoism.dev/docs",
+        ] {
+            let link = pane.resolve_markdown_link(target).unwrap();
+            assert_eq!(link.path, std::path::PathBuf::from(target));
+            assert_eq!(link.line, None);
+        }
+    }
+
+    #[test]
     fn markdown_link_targets_resolve_heading_text() {
         let mut pane = pane_for_test();
         let dir = std::env::temp_dir()
@@ -1663,6 +1679,29 @@ mod tests {
                 target: "Roadmap.md".to_string(),
                 code_ref: false,
             })
+        );
+    }
+
+    #[test]
+    fn contact_links_yank_only_the_address_or_number() {
+        assert_eq!(
+            markdown_contact_value("mailto:hello@example.com"),
+            Some("hello@example.com")
+        );
+        assert_eq!(
+            markdown_contact_value("tel:+1 (512) 827-7441"),
+            Some("+1 (512) 827-7441")
+        );
+        assert_eq!(markdown_contact_value("https://neoism.dev"), None);
+    }
+
+    #[test]
+    fn outbound_yank_text_strips_inline_markdown_markers() {
+        assert_eq!(
+            rendered_inline_text(
+                "# Call [(512) 827-7441](tel:+15128277441) and **ask now** #\n- `today`"
+            ),
+            "Call (512) 827-7441 and ask now\ntoday"
         );
     }
 

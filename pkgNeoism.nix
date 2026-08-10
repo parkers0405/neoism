@@ -8,7 +8,6 @@
   darwin,
   autoPatchelfHook,
   cmake,
-  ncurses,
   pkg-config,
   gcc-unwrapped,
   fontconfig,
@@ -61,7 +60,7 @@ in
       fileset = unions ([
           ./Cargo.lock
           ./Cargo.toml
-          ./misc # Extra desktop/terminfo files
+          ./misc # Extra desktop files
         ]
         ++ (map (x: ./. + "/${x}") cargoToml.workspace.members));
     };
@@ -75,7 +74,6 @@ in
     nativeBuildInputs =
       [
         rustPlatform.bindgenHook
-        ncurses
       ]
       ++ lib.optionals stdenv.isLinux [
         cmake
@@ -83,23 +81,12 @@ in
         autoPatchelfHook
       ];
 
-    outputs = [
-      "out"
-      "terminfo"
-    ];
-
     postInstall =
       ''
         install -D -m 644 misc/neoism.desktop -t \
                           $out/share/applications
         install -D -m 644 neoism-frontend/desktop/assets/icons/neoism.png \
                           $out/share/icons/hicolor/512x512/apps/neoism.png
-
-        # Install terminfo files
-        install -dm 755 "$terminfo/share/terminfo/r/"
-        tic -xe xterm-rio,rio,rio-direct -o "$terminfo/share/terminfo" misc/rio.terminfo
-        mkdir -p $out/nix-support
-        echo "$terminfo" >> $out/nix-support/propagated-user-env-packages
       ''
       + lib.optionalString stdenv.hostPlatform.isDarwin ''
         mkdir -p $out/Applications/Neoism.app/Contents/MacOS \

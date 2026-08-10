@@ -49,6 +49,7 @@ mod openapi;
 mod perf;
 mod permission;
 mod permission_runtime;
+pub mod picker_registry;
 mod platform_shell;
 mod plugin;
 mod project;
@@ -71,11 +72,13 @@ mod route_query;
 pub mod rust_lsp {
     pub use crate::language_server::*;
 }
+mod context_epoch;
 mod search_routes;
 mod semantic;
 mod server_util;
 mod session_actions;
 mod session_context;
+mod session_coordinator;
 mod session_export_route;
 mod session_helpers;
 mod session_import_route;
@@ -102,13 +105,14 @@ mod vcs;
 mod vcs_routes;
 #[cfg(windows)]
 mod windows_acl;
+mod workspace_runtime;
 mod worktree;
 mod worktree_routes;
 
 #[cfg(test)]
 use agent::AgentCatalog;
 pub(crate) use agent_tool_registry::{
-    available_tools_for_directory, configured_mcp_tools_with_state,
+    available_tools_for_directory, configured_mcp_tools_with_state, execute_mcp_gateway,
     execute_mcp_tool_by_runtime_id, provider_tools_for_agent,
 };
 use anyhow::Context;
@@ -135,8 +139,8 @@ use neoism_agent_core::{
 };
 #[cfg(test)]
 use neoism_agent_core::{
-    CreatedTime, EventPayload, Id, IdKind, MessageInfo, MessageWithParts, Page, Part,
-    PermissionRule, PromptPart, PromptRequest, ProviderMessage, ProviderRole,
+    CompactionPart, CreatedTime, EventPayload, Id, IdKind, MessageInfo, MessageWithParts,
+    Page, Part, PermissionRule, PromptPart, PromptRequest, ProviderMessage, ProviderRole,
     SessionInfo, TextPart, UserMessage, UserModel,
 };
 pub(crate) use permission_runtime::{

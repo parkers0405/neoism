@@ -662,42 +662,50 @@ async fn v2_prompt_accepts_subtask_parts_and_children_page() {
         Some("xhigh")
     );
 
-    let response: MessageWithParts = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::POST,
-                &format!("/api/session/{}/prompt", parent.id),
-                Some(json!({
-                    "parts": [{
-                        "type": "subtask",
-                        "prompt": "Inspect the v2 subtask path",
-                        "description": "Inspect v2",
-                        "agent": "general"
-                    }]
-                })),
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert!(
-        response
-            .parts
-            .iter()
-            .any(|part| matches!(part, Part::Text(_))),
-        "parent agent should continue after v2 subtask completion"
-    );
-    let parent_messages: Vec<MessageWithParts> = response_json(
-        app.clone()
-            .oneshot(request(
-                Method::GET,
-                &format!("/session/{}/message", parent.id),
-                None,
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/api/session/{}/prompt", parent.id),
+            Some(json!({
+                "delivery": "steer",
+                "parts": [{
+                    "type": "subtask",
+                    "prompt": "Inspect the v2 subtask path",
+                    "description": "Inspect v2",
+                    "agent": "general"
+                }]
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let parent_messages = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let messages = state
+                .inner
+                .store
+                .list_messages(parent.id.as_str())
+                .await
+                .unwrap();
+            let finished = messages.iter().any(|message| {
+                message.parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        Part::Tool(tool)
+                            if tool.tool == "task"
+                                && matches!(&tool.state, ToolState::Completed { .. })
+                    )
+                })
+            });
+            if finished {
+                break messages;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("v2 prompt should complete");
     assert!(
         parent_messages.iter().any(|message| {
             message.parts.iter().any(|part| {
@@ -733,7 +741,24 @@ async fn v2_prompt_accepts_subtask_parts_and_children_page() {
     assert_eq!(child_model.provider_id, "neoism");
     assert_eq!(child_model.id, "stub");
     assert_eq!(child_model.variant.as_deref(), Some("xhigh"));
-    wait_for_session_message_count(&state, children.items[0].id.as_str(), 2).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if state
+                .inner
+                .store
+                .list_messages(children.items[0].id.as_str())
+                .await
+                .unwrap()
+                .len()
+                >= 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("v2 child session should produce a reply");
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);

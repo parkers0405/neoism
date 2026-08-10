@@ -7,6 +7,23 @@ use neoism_window::event::ElementState;
 use neoism_window::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use std::path::{Path, PathBuf};
 
+/// Agent surfaces own their complete pane body and should meet the tab chrome
+/// directly. The grid's top margin includes a small terminal-only breathing
+/// strip; remove it for top-aligned Agent panes without letting lower split
+/// panes grow upward into their pane-local tab strip.
+fn attach_agent_surface_to_tab_chrome(
+    mut rect: [f32; 4],
+    top_aligned: bool,
+    terminal_top_padding: f32,
+) -> [f32; 4] {
+    if top_aligned {
+        let extension = terminal_top_padding.max(0.0).min(rect[1].max(0.0));
+        rect[1] -= extension;
+        rect[3] += extension;
+    }
+    rect
+}
+
 impl Screen<'_> {
     pub(crate) fn handle_neoism_agent_key(
         &mut self,
@@ -584,32 +601,27 @@ impl Screen<'_> {
                 )
             })
             .unwrap_or(0.0);
-        // Logical bottom above the global status strip. The agent
-        // pane's chat + input must never share a row with the app
-        // status line at the bottom of the window, so the *pane rect*
-        // is bounded here. The *side panel* uses the band bottom
-        // (`side_panel_band`) below so it stops at the top of the
-        // full-width status bar, mirroring the file tree column.
+        // Logical bottom above the global status strip. The Agent pane,
+        // including its pane-owned side panel, must never share a row
+        // with the app status line.
         let logical_window_bottom = (window_size.height as f32 / scale
             - self.renderer.status_line_height())
         .max(0.0);
-        let (visible_nodes, scaled_margin) = {
+        let (visible_nodes, scaled_margin, min_slot_top) = {
             let grid = self.context_manager.current_grid();
-            (
-                grid.contexts()
-                    .keys()
-                    .copied()
-                    .filter(|node| grid.is_context_visible(*node))
-                    .collect::<Vec<_>>(),
-                grid.scaled_margin,
-            )
+            let visible_nodes = grid
+                .contexts()
+                .keys()
+                .copied()
+                .filter(|node| grid.is_context_visible(*node))
+                .collect::<Vec<_>>();
+            let min_slot_top = visible_nodes
+                .iter()
+                .filter_map(|node| grid.contexts().get(node))
+                .map(|item| item.slot_rect[1])
+                .fold(f32::INFINITY, f32::min);
+            (visible_nodes, grid.scaled_margin, min_slot_top)
         };
-        // Start the agent side panel at the same band top as the file
-        // tree / notes / git (below the full-width top chrome: top bar
-        // + workspace strip). `rio_island_height()` alone omitted the
-        // top-bar strip, leaving the panel one row above the tree.
-        let (sidebar_top, sidebar_bottom) = self.side_panel_band();
-
         // Local presence display name — the same seed the editor caret /
         // top-chrome presence orb use. Threaded into each agent pane so a
         // user message with no explicit `author` renders the local user's
@@ -651,12 +663,17 @@ impl Screen<'_> {
                 item.layout_rect[2] / scale,
                 item.layout_rect[3] / scale,
             ];
+            let top_aligned = neoism_ui::session_layout::is_pane_top_aligned(
+                item.slot_rect[1],
+                min_slot_top,
+            );
+            rect = attach_agent_surface_to_tab_chrome(
+                rect,
+                top_aligned,
+                terminal_top_padding_for_chrome_scale(chrome_scale),
+            );
             rect[3] = rect[3].min((logical_window_bottom - rect[1]).max(0.0));
             let is_active_pane = route_id == active_route;
-            let panel_bottom_override = is_active_pane.then_some(sidebar_bottom);
-            // Match the file tree / workspace sidebars: start below the
-            // rio island, not at absolute window top.
-            let panel_top_override = is_active_pane.then_some(sidebar_top);
             crate::neoism::view::render(
                 &mut self.sugarloaf,
                 agent,
@@ -666,8 +683,6 @@ impl Screen<'_> {
                 now_seconds,
                 mouse,
                 chrome_scale,
-                panel_bottom_override,
-                panel_top_override,
                 &text_occlusions,
             );
             let animation_reason = agent.animation_reason();
@@ -865,6 +880,7 @@ impl Screen<'_> {
 
     pub(crate) fn neoism_agent_scroll_wheel(
         delta: &neoism_window::event::MouseScrollDelta,
+        line_height: f32,
     ) -> neoism_ui::editor::scroll_model::AgentTimelineWheel {
         // Calmer than overlay panels — small flicks should travel a
         // comfortable amount, not lurch across the chat. See
@@ -883,13 +899,13 @@ impl Screen<'_> {
                 }
             }
         };
-        agent_timeline_wheel(&shared)
+        agent_timeline_wheel(&shared, line_height)
     }
 
     pub(crate) fn neoism_agent_scroll_pixels(
         delta: &neoism_window::event::MouseScrollDelta,
     ) -> f32 {
-        Self::neoism_agent_scroll_wheel(delta).pixels
+        Self::neoism_agent_scroll_wheel(delta, 24.0).pixels
     }
 
     pub(crate) fn start_agent(&mut self, kind: crate::neoism::icon::AgentKind) {
@@ -1464,8 +1480,12 @@ impl Screen<'_> {
     }
 
     pub(crate) fn resolve_neoism_agent_link_path(&self, target: &str) -> Option<PathBuf> {
-        let raw = target.strip_prefix("file://").unwrap_or(target).trim();
-        let path = PathBuf::from(raw);
+        let target = target.trim();
+        let raw = target
+            .strip_prefix("file://")
+            .map(neoism_ui::panels::agent_pane::input_controller::decode_percent_path)
+            .unwrap_or_else(|| target.to_string());
+        let path = PathBuf::from(&raw);
         if path.is_absolute() {
             return path.exists().then_some(path);
         }
@@ -1480,7 +1500,7 @@ impl Screen<'_> {
             return Some(direct);
         }
         if path.components().count() == 1 {
-            return self.find_neoism_file_by_name(&root, raw, 4);
+            return self.find_neoism_file_by_name(&root, &raw, 4);
         }
         None
     }
@@ -1868,5 +1888,26 @@ impl Screen<'_> {
         let _ = tab; // tab struct only needed to look up route_id; kept for parity
         self.reapply_chrome_layout();
         true
+    }
+}
+
+#[cfg(test)]
+mod agent_surface_geometry_tests {
+    use super::attach_agent_surface_to_tab_chrome;
+
+    #[test]
+    fn top_agent_surface_consumes_terminal_only_breathing_strip() {
+        assert_eq!(
+            attach_agent_surface_to_tab_chrome([20.0, 56.0, 800.0, 500.0], true, 6.0,),
+            [20.0, 50.0, 800.0, 506.0]
+        );
+    }
+
+    #[test]
+    fn lower_agent_surface_preserves_its_local_tab_boundary() {
+        assert_eq!(
+            attach_agent_surface_to_tab_chrome([20.0, 356.0, 800.0, 200.0], false, 6.0,),
+            [20.0, 356.0, 800.0, 200.0]
+        );
     }
 }

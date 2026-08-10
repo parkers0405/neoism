@@ -725,7 +725,6 @@ impl Screen<'_> {
         let Some(path) = path else {
             return false;
         };
-        self.invalidate_note_index_for_path(&path);
         self.renderer.notes_sidebar.refresh_notes();
         self.open_path_in_markdown(path);
         let marker = format!("<!-- neoism-epub-annotation:start {annotation_id} -->");

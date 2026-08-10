@@ -749,6 +749,7 @@ mod tests {
                 id: "edit".to_string(),
                 description: String::new(),
                 parameters: json!({ "type": "object" }),
+                output_schema: None,
             }],
             options: Default::default(),
             headers: Default::default(),

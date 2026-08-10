@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,32 +14,28 @@ pub(crate) struct TruncatedOutput {
     pub(crate) output_path: Option<PathBuf>,
 }
 
-pub(crate) fn truncate_output(text: &str) -> TruncatedOutput {
+pub(crate) fn truncate_output(text: &str) -> std::io::Result<TruncatedOutput> {
     if fits(text) {
-        return TruncatedOutput {
+        return Ok(TruncatedOutput {
             output: text.to_string(),
             truncated: false,
             output_path: None,
-        };
+        });
     }
 
     let preview = head_tail(text, MAX_LINES, MAX_BYTES);
-    let output_path = write_full_output(text).ok();
-    let output = if let Some(path) = &output_path {
-        format!(
-            "...output truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: {}\nUse Grep to search the full content or Read with offset/limit to view specific sections.\n\n{}",
-            path.display(),
-            preview
-        )
-    } else {
-        format!("...output truncated...\n\n{preview}")
-    };
+    let output_path = write_full_output(text)?;
+    let output = format!(
+        "...output truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: {}\nUse Grep to search the full content or Read with offset/limit to view specific sections.\n\n{}",
+        output_path.display(),
+        preview
+    );
 
-    TruncatedOutput {
+    Ok(TruncatedOutput {
         output,
         truncated: true,
-        output_path,
-    }
+        output_path: Some(output_path),
+    })
 }
 
 fn fits(text: &str) -> bool {
@@ -114,12 +111,13 @@ fn write_full_output(text: &str) -> std::io::Result<PathBuf> {
 
 fn write_full_output_in(dir: PathBuf, text: &str) -> std::io::Result<PathBuf> {
     fs::create_dir_all(&dir)?;
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let path = dir.join(format!("tool-{millis}-{}.txt", std::process::id()));
-    fs::write(&path, text)?;
+    let id = neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event);
+    let path = dir.join(format!("tool-{id}.txt"));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(text.as_bytes())?;
     Ok(path)
 }
 
@@ -165,7 +163,7 @@ mod tests {
 
     #[test]
     fn keeps_small_output_unchanged() {
-        let output = truncate_output("hello");
+        let output = truncate_output("hello").unwrap();
         assert_eq!(output.output, "hello");
         assert!(!output.truncated);
         assert!(output.output_path.is_none());
@@ -177,7 +175,7 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        let output = truncate_output(&text);
+        let output = truncate_output(&text).unwrap();
         assert!(output.truncated);
         assert!(output.output.contains("...output truncated..."));
         assert!(output.output.contains("0"));

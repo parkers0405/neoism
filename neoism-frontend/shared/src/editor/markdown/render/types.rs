@@ -23,11 +23,21 @@ pub(super) enum RenderLineKind {
     Empty,
     Heading(u8),
     Paragraph,
-    Task { checked: bool, depth: usize },
-    Bullet { depth: usize },
-    Ordered { depth: usize },
+    Task {
+        checked: bool,
+        depth: usize,
+    },
+    Bullet {
+        depth: usize,
+    },
+    Ordered {
+        depth: usize,
+    },
     CodeFence,
     Code,
+    Callout {
+        kind: crate::widgets::markdown::MarkdownCalloutKind,
+    },
     Quote,
     Divider,
 }

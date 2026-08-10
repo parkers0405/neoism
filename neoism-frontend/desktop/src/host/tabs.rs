@@ -41,18 +41,6 @@ impl Renderer {
         }
     }
 
-    /// Right edge of the very-top workspace / Island tab strip. This
-    /// strip spans the full window width and must IGNORE the agent side
-    /// panel entirely — only true window-edge chrome (the git-diff
-    /// panel) carves into it. The agent side panel is NOT window-edge
-    /// chrome: it lives *inside* a single pane's `layout_rect` (the
-    /// carve happens off the pane's own rect, see
-    /// `view::side_panel::carve_panel_rect`), so it must never drag the
-    /// top workspace strip leftward. Mirror the file tree, which the
-    /// top strip likewise ignores. The per-pane buffer-tab strips DO get
-    /// pushed by the side panel — see [`content_right_edge`] /
-    /// [`right_chrome_inset`], which the buffer-tab + status-line layout
-    /// uses instead.
     /// Right edge of the top workspace / Island strip. It spans the
     /// full window width: the strip lives in the top chrome *above* the
     /// side-panel band, so the git-diff panel (Alt+G) and agent side
@@ -67,49 +55,16 @@ impl Renderer {
         logical_width
     }
 
-    /// Right edge of the editor *content* band — the buffer-tab strip,
-    /// breadcrumbs and status line. This band IS pushed in by the
-    /// git-diff panel (Alt+G) and the agent side panel (Alt+H), while
-    /// the top workspace/Island strip (`right_chrome_edge`) stays full
-    /// width.
-    ///
-    /// The side-panel clamp only applies when the agent IS the full-
-    /// window workspace tab (no splits): there the workspace buffer-tab
-    /// strip runs the whole window width and would otherwise paint over
-    /// the panel's top. Once splits exist (`pane_tabs` non-empty), every
-    /// pane's strip is already bounded by that pane's `layout_rect`, and
-    /// the active agent pane could sit on the *left* — clamping the
-    /// global right edge to its mid-window side panel would drag the
-    /// other panes' strips leftward.
+    /// Right edge of the editor chrome band. Only true window-edge
+    /// chrome may reserve space here. The Agent side panel is owned by
+    /// its Agent pane and is carved from that pane's content rect, so it
+    /// must never shorten workspace or per-pane tab strips.
     fn content_right_edge(
         &self,
-        context_manager: &ContextManager<EventProxy>,
+        _context_manager: &ContextManager<EventProxy>,
         logical_width: f32,
     ) -> f32 {
-        // Git panel always pushes the content band's right edge in.
-        let mut right =
-            logical_width - self.git_diff_panel.effective_width(logical_width);
-        // Agent side panel pushes it too — but only reserve the width it
-        // ACTUALLY drew last frame (`last_panel_rect`). When the panel is
-        // redacted for a narrow window (`carve_panel_rect` → None), its
-        // last rect is None and it draws nothing, so reserving its nominal
-        // `width()` (as the old `!user_hidden()` check did) shoved the tab
-        // strip with phantom padding behind an invisible panel.
-        if let Some(agent) = context_manager.current().neoism_agent.as_ref() {
-            if let Some([panel_x, _, panel_w, panel_h]) =
-                agent.side_panel().last_panel_rect()
-            {
-                if panel_w > 0.0 && panel_h > 0.0 {
-                    // Empty-tab-strip layout clamps to the panel's left
-                    // edge; otherwise just subtract its drawn width.
-                    if self.pane_tabs.is_empty() {
-                        right = right.min(panel_x);
-                    } else {
-                        right -= panel_w;
-                    }
-                }
-            }
-        }
+        let right = logical_width - self.git_diff_panel.effective_width(logical_width);
         right.clamp(0.0, logical_width)
     }
 

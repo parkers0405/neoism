@@ -114,7 +114,7 @@ pub(crate) async fn search_tool(
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
     let artifact = resolve_artifact(&context, &arguments).await?;
-    let query = required_string_either(&arguments, "query", "pattern")?;
+    let query = crate::tool::args::required_string(&arguments, "query")?.to_string();
     let limit = usize_arg(&arguments, "limit")
         .unwrap_or(DEFAULT_ARTIFACT_SEARCH_LIMIT)
         .max(1);
@@ -155,7 +155,8 @@ async fn resolve_artifact(
     context: &ToolContext,
     arguments: &Value,
 ) -> anyhow::Result<ToolArtifact> {
-    let id_or_uri = required_string_either(arguments, "artifact", "artifactId")?;
+    let id_or_uri =
+        crate::tool::args::required_string(arguments, "artifact")?.to_string();
     let id = id_or_uri
         .strip_prefix("artifact://tool-output/")
         .unwrap_or(&id_or_uri);
@@ -272,20 +273,6 @@ fn summarize(output: &str) -> String {
     } else {
         summary
     }
-}
-
-fn required_string_either(
-    arguments: &Value,
-    primary: &str,
-    secondary: &str,
-) -> anyhow::Result<String> {
-    arguments
-        .get(primary)
-        .or_else(|| arguments.get(secondary))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("missing {primary}"))
 }
 
 fn likely_file_mention(line: &str) -> Option<String> {

@@ -147,7 +147,7 @@ pub(crate) async fn openapi_doc() -> Json<Value> {
                         "tools": { "type": "object", "additionalProperties": { "type": "boolean" } },
                         "parts": { "type": "array", "items": { "$ref": "#/components/schemas/PromptPart" } },
                         "prompt": { "type": "string", "description": "v2 convenience field converted to a text part when parts is omitted" },
-                        "delivery": { "type": "string", "enum": ["sync", "async"] },
+                        "delivery": { "type": "string", "enum": ["steer", "queue"], "default": "steer" },
                         "variant": { "type": "string" }
                     }
                 },

@@ -145,7 +145,6 @@ impl Screen<'_> {
         self.renderer.notes_sidebar.set_focused(true);
         self.renderer.file_tree.set_focused(false);
         match hit {
-            NotesSidebarHit::Settings => self.open_notes_settings_menu(),
             NotesSidebarHit::NewNote => self.create_untitled_note_in_open_vault(),
             NotesSidebarHit::NewFolder => self.create_untitled_folder_in_open_vault(),
             NotesSidebarHit::CreateFirstNote => {
@@ -326,9 +325,6 @@ impl Screen<'_> {
         match std::fs::rename(&source, &target) {
             Ok(()) => {
                 self.rebind_current_epub_path(&source, target.clone());
-                // Same index/link-graph refresh the notes rename runs, so
-                // wiki-links and the graph track the moved page/subtree.
-                self.refresh_note_graph_after_rename(&source, &target);
                 // Reveal the destination folder so the moved item shows,
                 // re-list the panel, and keep the sidebar focused.
                 self.renderer.notes_sidebar.reveal_dir(&dest_dir);
@@ -368,7 +364,6 @@ impl Screen<'_> {
                 self.renderer.notes_sidebar.note_path(index)
             }
             NotesSidebarHit::WorkspacePicker
-            | NotesSidebarHit::Settings
             | NotesSidebarHit::NewNote
             | NotesSidebarHit::NewFolder
             | NotesSidebarHit::CreateFirstNote
@@ -520,10 +515,6 @@ impl Screen<'_> {
             }
             Key::Named(NamedKey::Enter) => {
                 self.renderer.notes_sidebar.clear_pending();
-                if self.renderer.notes_sidebar.is_settings_selected() {
-                    self.open_notes_settings_menu();
-                    return true;
-                }
                 if self.renderer.notes_sidebar.is_selector_selected() {
                     self.open_notes_vault_menu_for_selector();
                     return true;
@@ -796,8 +787,6 @@ impl Screen<'_> {
         match result {
             Ok(()) => {
                 self.renderer.modal.close();
-                self.invalidate_note_index_for_path(&path);
-                self.rebuild_note_graph_for_path(&path);
                 self.renderer.notes_sidebar.refresh_notes();
                 self.renderer.notes_sidebar.set_focused(true);
                 self.renderer.notifications.push(
@@ -810,49 +799,6 @@ impl Screen<'_> {
                 NotificationLevel::Error,
             ),
         }
-        self.mark_dirty();
-    }
-
-    /// The ⋮ header menu: create actions that always target the vault the
-    /// sidebar is currently viewing.
-    pub(crate) fn open_notes_create_menu(&mut self, x: f32, y: f32) {
-        use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
-        use neoism_ui::widgets::modal::ModalAction;
-
-        let dir = self.notes_creation_dir().display().to_string();
-        let items = vec![
-            ContextMenuItem::new(
-                "New Note",
-                "a",
-                ContextMenuAction::Modal(
-                    ModalAction::NotesPromptNewFile { dir: dir.clone() }.into(),
-                ),
-            ),
-            ContextMenuItem::new(
-                "New Drawing",
-                "p",
-                ContextMenuAction::Modal(
-                    ModalAction::NotesNewDrawing { dir: dir.clone() }.into(),
-                ),
-            ),
-            ContextMenuItem::new(
-                "New Folder",
-                "f",
-                ContextMenuAction::Modal(
-                    ModalAction::FileTreePromptNewFolder { dir }.into(),
-                ),
-            ),
-        ];
-        let scale = self.sugarloaf.scale_factor();
-        let size = self.sugarloaf.window_size();
-        self.renderer.context_menu.open(
-            "Create".to_string(),
-            items,
-            x,
-            y,
-            size.width as f32 / scale,
-            self.context_menu_logical_height(),
-        );
         self.mark_dirty();
     }
 }

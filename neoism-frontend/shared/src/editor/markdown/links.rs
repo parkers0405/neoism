@@ -4,6 +4,14 @@ use super::helpers::*;
 use super::types::*;
 use crate::widgets::markdown::web_link_at;
 
+pub fn markdown_contact_value(target: &str) -> Option<&str> {
+    target
+        .strip_prefix("mailto:")
+        .or_else(|| target.strip_prefix("tel:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 pub fn markdown_link_open_action(
     target: &MarkdownLinkTarget,
     path_is_dir: bool,
@@ -221,7 +229,7 @@ impl MarkdownPane {
         // and web URLs must survive resolution verbatim. Treating them as a
         // relative filesystem path destroys the scheme and prevents the host
         // from dispatching the click.
-        if target.contains("://") {
+        if target.contains("://") || is_external_markdown_target(target) {
             return PathBuf::from(target);
         }
         let target = PathBuf::from(target);

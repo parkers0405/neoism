@@ -3,6 +3,24 @@ use crate::workspace::{self as neo_workspace};
 use std::path::PathBuf;
 
 impl Screen<'_> {
+    /// Resolve creation to the vault currently displayed by Alt+N. If the
+    /// sidebar has not been initialized yet, fall back to the vault linked
+    /// to the active project (or Default for an unlinked project).
+    pub(crate) fn notes_creation_dir(&mut self) -> PathBuf {
+        if let Some(path) = self.renderer.notes_sidebar.workspace_path() {
+            return path;
+        }
+        let root = self
+            .active_workspace_root
+            .clone()
+            .or_else(|| self.active_pane_workspace_root())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let workspace = notes_workspace_for_root_or_default(&root);
+        let _ = neo_workspace::ensure_notes_workspace(&workspace);
+        workspace.notes_workspace_dir()
+    }
+
     pub(crate) fn create_current_neoism_note(&mut self) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
@@ -30,8 +48,6 @@ impl Screen<'_> {
         })();
         match result {
             Ok(()) => {
-                self.invalidate_note_index_for_path(&target);
-                self.rebuild_note_graph_for_path(&target);
                 self.renderer.notes_sidebar.refresh_notes();
                 self.refresh_file_tree_entries();
                 self.open_path_in_markdown(target);
@@ -83,122 +99,6 @@ impl Screen<'_> {
         }
     }
 
-    /// Build an Obsidian-style note-graph view: query the note link
-    /// graph, force-lay-it-out into a neodraw `Scene`, and open it on the
-    /// sketch canvas (so pan/zoom/movement come for free).
-    pub(crate) fn open_neoism_graph_view(&mut self) {
-        use neoism_ui::panels::notifications::NotificationLevel;
-
-        // PER-VAULT: the graph follows the vault the sidebar is VIEWING
-        // (same resolution as note creation) — the old code-root
-        // resolution drew the code workspace's linked vault even while
-        // the user browsed a different one. The Vaults-root pseudo-vault
-        // spans every vault and has no index of its own, so it falls
-        // back to the code-root resolution.
-        let viewed_vault = self
-            .renderer
-            .notes_sidebar
-            .workspace_path()
-            .filter(|path| *path != neo_workspace::notes_vaults_dir())
-            .and_then(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            });
-        let workspace = match viewed_vault {
-            Some(name) => neo_workspace::vault_notes_workspace(&name),
-            None => {
-                let root = self
-                    .active_workspace_root
-                    .clone()
-                    .or_else(|| self.active_pane_workspace_root())
-                    .or_else(|| std::env::current_dir().ok())
-                    .unwrap_or_else(|| PathBuf::from("."));
-                notes_workspace_for_root_or_default(&root)
-            }
-        };
-        if let Err(err) = neo_workspace::ensure_notes_workspace(&workspace) {
-            self.renderer.notifications.push(
-                format!("Could not prepare Neoism notes: {err}"),
-                NotificationLevel::Error,
-            );
-            self.mark_dirty();
-            return;
-        }
-        let note_dir = workspace.notes_workspace_dir();
-
-        let graph = match neo_workspace::NoteGraph::from_workspace(workspace) {
-            Ok(graph) => graph,
-            Err(err) => {
-                self.renderer.notifications.push(
-                    format!("Could not open note graph: {err}"),
-                    NotificationLevel::Error,
-                );
-                self.mark_dirty();
-                return;
-            }
-        };
-        // `from_workspace` reindexes first so freshly-saved `[[wiki links]]`
-        // show up as edges.
-        let summary = match graph.graph(neo_workspace::NoteQueryLimit(2000)) {
-            Ok(summary) => summary,
-            Err(err) => {
-                self.renderer.notifications.push(
-                    format!("Could not read note graph: {err}"),
-                    NotificationLevel::Error,
-                );
-                self.mark_dirty();
-                return;
-            }
-        };
-        if summary.nodes.is_empty() {
-            self.renderer.notifications.push(
-                "No notes to visualize yet".to_string(),
-                NotificationLevel::Info,
-            );
-            self.mark_dirty();
-            return;
-        }
-
-        let mut index = std::collections::HashMap::new();
-        let mut labels = Vec::with_capacity(summary.nodes.len());
-        let mut paths = Vec::with_capacity(summary.nodes.len());
-        for (i, node) in summary.nodes.iter().enumerate() {
-            index.insert(node.path.clone(), i);
-            labels.push(if node.title.is_empty() {
-                node.path.clone()
-            } else {
-                node.title.clone()
-            });
-            // DB paths are relative to a note root — resolve via the
-            // workspace so click-to-open finds the real file.
-            let abs = graph
-                .workspace()
-                .resolve_note_path(std::path::Path::new(&node.path));
-            paths.push(abs.to_string_lossy().into_owned());
-        }
-        let edges: Vec<(usize, usize)> = summary
-            .edges
-            .iter()
-            .filter_map(|e| {
-                Some((*index.get(&e.source_path)?, *index.get(&e.target_path)?))
-            })
-            .collect();
-
-        // Open a VIRTUAL draw tab (never written to disk — no file
-        // artifact) and attach the live animated simulation on top.
-        let target = note_dir.join("Neoism Graph.neodraw");
-        self.open_path_in_draw(target);
-        // Show a clean tab title (no `.neodraw` extension).
-        self.renderer.buffer_tabs.set_active_title("Neoism Graph");
-
-        let sim = neoism_ui::editor::neodraw::GraphSim::new(&labels, &paths, &edges);
-        if let Some(pane) = self.context_manager.current_mut().draw.as_mut() {
-            pane.graph = Some(sim);
-            pane.graph_needs_center = true;
-        }
-        self.mark_dirty();
-    }
-
     /// Point the notes sidebar at the current served/joined workspace's
     /// notes source: the HOST's ONE linked vault (listed over the daemon
     /// files plane), or the "no linked vault" empty state when the host
@@ -245,7 +145,10 @@ impl Screen<'_> {
         // shows instead of the host's other vaults. Only a plain local
         // `home` session (no served root) falls through to this machine's
         // personal vault below.
-        if self.point_notes_sidebar_at_served_vault() {
+        let initialize_served_vault =
+            self.renderer.notes_sidebar.workspace_path().is_none()
+                && !self.renderer.notes_sidebar.shows_vault_actions();
+        if initialize_served_vault && self.point_notes_sidebar_at_served_vault() {
             let visibility_changed =
                 self.renderer.notes_sidebar.toggle_focus_or_visibility();
             if self.renderer.notes_sidebar.is_visible() {
@@ -257,31 +160,65 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        // Local workspace: never the vault-actions empty state (local
-        // always resolves a vault) — keep the empty state byte-identical.
-        self.renderer.notes_sidebar.set_vault_actions(false);
-
-        let root = self
-            .active_workspace_root
-            .clone()
-            .or_else(|| self.active_pane_workspace_root())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let workspace = notes_workspace_for_root_or_default(&root);
-        // Seed the selected vault plus the bundled Default/Welcome docs.
-        // This is safe for both linked projects and the virtual Default
-        // workspace: it never creates project metadata in the active cwd.
-        if let Err(err) = neo_workspace::ensure_notes_workspace(&workspace) {
-            self.renderer.notifications.push(
-                format!("Could not prepare Neoism notes: {err}"),
-                NotificationLevel::Error,
+        if self.served_workspace_root().is_some() {
+            let visibility_changed =
+                self.renderer.notes_sidebar.toggle_focus_or_visibility();
+            if self.renderer.notes_sidebar.is_visible() {
+                self.renderer.file_tree.set_focused(false);
+            }
+            if visibility_changed {
+                self.reapply_chrome_layout();
+            }
+            self.mark_dirty();
+            return;
+        }
+        if self.renderer.notes_sidebar.workspace_path().is_none() {
+            if let Some(path) = self.current_workspace_id().and_then(|workspace| {
+                self.workspace_notes_vaults.get(&workspace).cloned()
+            }) {
+                #[cfg(target_os = "macos")]
+                self.renderer.notes_sidebar.set_workspace_path(Some(path));
+                #[cfg(not(target_os = "macos"))]
+                self.renderer.notes_sidebar.set_workspace(
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Notes")
+                        .to_string(),
+                    Some(path),
+                );
+            }
+        }
+        // Resolve linked/default only the first time this workspace opens its
+        // notes panel. Each workspace owns a saved sidebar instance, so later
+        // Alt+N toggles must preserve that workspace's explicitly viewed vault.
+        if self.renderer.notes_sidebar.workspace_path().is_none() {
+            self.renderer.notes_sidebar.set_vault_actions(false);
+            let root = self
+                .active_workspace_root
+                .clone()
+                .or_else(|| self.active_pane_workspace_root())
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let workspace = notes_workspace_for_root_or_default(&root);
+            if let Err(err) = neo_workspace::ensure_notes_workspace(&workspace) {
+                self.renderer.notifications.push(
+                    format!("Could not prepare Neoism notes: {err}"),
+                    NotificationLevel::Error,
+                );
+            }
+            self.renderer.notes_sidebar.set_workspace(
+                notes_sidebar_workspace_name(&workspace),
+                Some(workspace.notes_workspace_dir()),
             );
         }
-        self.renderer.notes_sidebar.set_workspace(
-            notes_sidebar_workspace_name(&workspace),
-            Some(workspace.notes_workspace_dir()),
-        );
         let visibility_changed = self.renderer.notes_sidebar.toggle_focus_or_visibility();
+        if let (Some(workspace), Some(path)) = (
+            self.current_workspace_id(),
+            self.renderer.notes_sidebar.workspace_path(),
+        ) {
+            self.workspace_notes_vaults
+                .insert(workspace, path.to_path_buf());
+        }
         if self.renderer.notes_sidebar.is_visible() {
             self.renderer.file_tree.set_focused(false);
         }

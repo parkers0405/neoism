@@ -152,6 +152,63 @@ impl Screen<'_> {
     pub(crate) fn sync_file_tree_watchers(&mut self) {
         self.sync_file_tree_git_watcher();
         self.sync_file_tree_fs_watcher();
+        self.sync_notes_fs_watcher();
+    }
+
+    /// Keep the visible local Notes vault live independently from the file
+    /// tree. Vaults commonly live outside the project root, and Alt+N remains
+    /// useful while the tree is closed, so sharing the tree watcher loses
+    /// agent-created files and directories.
+    pub(crate) fn sync_notes_fs_watcher(&mut self) {
+        let next_root = (self.renderer.notes_sidebar.is_visible()
+            && !self.notes_sidebar_shows_shared_vault())
+        .then(|| self.renderer.notes_sidebar.workspace_path())
+        .flatten();
+        if self.notes_fs_watch_root == next_root {
+            return;
+        }
+        self.notes_fs_watcher = None;
+        self.notes_fs_watch_root = None;
+
+        let Some(root) = next_root else {
+            return;
+        };
+        let event_proxy = self.context_manager.event_proxy();
+        let window_id = self.context_manager.window_id();
+        let watch_root = root.clone();
+        let mut watcher = match notify::RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| match event {
+                Ok(event) if file_tree_fs_event_relevant(&watch_root, &event) => {
+                    event_proxy.send_event(
+                        neoism_backend::event::RioEventType::Rio(
+                            neoism_backend::event::RioEvent::PrepareRefreshFileTree,
+                        ),
+                        window_id,
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(target: "neoism::notes", "vault watcher failed: {err:?}");
+                }
+            },
+            notify::Config::default(),
+        ) {
+            Ok(watcher) => watcher,
+            Err(err) => {
+                tracing::warn!(target: "neoism::notes", "unable to create vault watcher: {err:?}");
+                return;
+            }
+        };
+        if let Err(err) = watcher.watch(&root, notify::RecursiveMode::Recursive) {
+            tracing::warn!(
+                target: "neoism::notes",
+                path = %root.display(),
+                "unable to watch notes vault: {err:?}"
+            );
+            return;
+        }
+        self.notes_fs_watch_root = Some(root);
+        self.notes_fs_watcher = Some(watcher);
     }
 
     pub(crate) fn sync_file_tree_fs_watcher(&mut self) {

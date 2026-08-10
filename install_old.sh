@@ -20,7 +20,6 @@ INSTALL_SYSTEM_DEPS=1
 INSTALL_NEOVIM=1
 INSTALL_TREESITTER=1
 INSTALL_TS_CLI=0
-INSTALL_TERMINFO=1
 DRY_RUN=0
 
 TREE_SITTER_LANGS_ENV="${TREE_SITTER_LANGS:-}"
@@ -42,7 +41,6 @@ Options:
   --skip-neovim             Do not install/check nvim
   --skip-treesitter         Do not install managed Treesitter parsers
   --with-tree-sitter-cli    Install tree-sitter CLI if missing
-  --skip-terminfo           Do not install terminal compatibility terminfo with tic
   --dry-run                 Print commands without running them
   -h, --help                Show this help
 
@@ -442,16 +440,6 @@ install_treesitter_parsers() {
   done
 }
 
-install_terminfo() {
-  [ "$INSTALL_TERMINFO" -eq 1 ] || return 0
-  if ! have tic; then
-    warn "tic not found; skipping terminfo install"
-    return 0
-  fi
-  log "Installing Neoism terminfo"
-  run tic -xe xterm-rio,rio "$ROOT_DIR/misc/rio.terminfo"
-}
-
 build_neoism() {
   local cargo_args=(build -p neoism)
   local output
@@ -536,10 +524,6 @@ while [ "$#" -gt 0 ]; do
       INSTALL_TS_CLI=1
       shift
       ;;
-    --skip-terminfo)
-      INSTALL_TERMINFO=0
-      shift
-      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -570,7 +554,6 @@ install_system_deps
 ensure_rust
 ensure_neovim
 install_treesitter_parsers
-install_terminfo
 build_neoism
 
 cat <<EOF

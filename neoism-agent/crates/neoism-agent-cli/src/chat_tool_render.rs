@@ -113,10 +113,6 @@ fn tool_display_name(tool: &str) -> &str {
         "write" => "Write",
         "edit" => "Edit",
         "apply_patch" | "patch" => "Patch",
-        "ffgrep" => "FFGrep",
-        "fffind" => "FFFind",
-        "fff_multi_grep" => "FFF multi_grep",
-        "list" => "List",
         "grep" => "Grep",
         "glob" => "Glob",
         "webfetch" => "Fetch",
@@ -138,14 +134,9 @@ fn render_generic_cell(tool: &str, input: &Value, output: &str) {
         "read" => non_empty_lines(output)
             .map(|count| format!("read {count} lines"))
             .unwrap_or_else(|| "no output".to_string()),
-        "list" => non_empty_lines(output)
-            .map(|count| format!("{count} entries"))
-            .unwrap_or_else(|| "empty".to_string()),
-        "grep" | "glob" | "ffgrep" | "fffind" | "fff_multi_grep" => {
-            non_empty_lines(output)
-                .map(|count| format!("{count} matches"))
-                .unwrap_or_else(|| "no matches".to_string())
-        }
+        "grep" | "glob" => non_empty_lines(output)
+            .map(|count| format!("{count} matches"))
+            .unwrap_or_else(|| "no matches".to_string()),
         "webfetch" => format!("{} chars", output.chars().count()),
         "websearch" => non_empty_lines(output)
             .map(|count| format!("{count} results"))
@@ -286,12 +277,8 @@ fn non_empty_lines(output: &str) -> Option<usize> {
 
 pub(crate) fn tool_target(tool: &str, input: &Value) -> String {
     let keys = match tool {
-        "read" | "write" | "edit" => &["filePath", "file_path", "file", "path"][..],
-        "list" => &["path", "filePath", "file_path", "file"][..],
-        "grep" | "ffgrep" => &["pattern", "query", "path", "filePath", "file_path"][..],
-        "fffind" => &["query", "pattern", "path", "filePath", "file_path"][..],
-        "fff_multi_grep" => &["patterns", "path", "filePath", "file_path"][..],
-        "glob" => &["pattern", "path", "filePath", "file_path"][..],
+        "read" | "write" | "edit" => &["filePath"][..],
+        "grep" | "glob" => &["pattern", "path"][..],
         "bash" => &["command", "cmd"][..],
         "webfetch" => &["url"][..],
         "websearch" => &["query"][..],

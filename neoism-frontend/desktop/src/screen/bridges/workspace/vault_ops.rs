@@ -1,6 +1,6 @@
 use super::*;
 use crate::workspace::{self as neo_workspace};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 impl Screen<'_> {
     pub(crate) fn open_notes_vault_add_prompt(&mut self) {
@@ -175,6 +175,10 @@ impl Screen<'_> {
         let viewed_vault = neo_workspace::vault_notes_workspace(&name);
         match neo_workspace::ensure_notes_workspace(&viewed_vault) {
             Ok(()) => {
+                if let Some(workspace) = self.current_workspace_id() {
+                    self.workspace_notes_vaults
+                        .insert(workspace, viewed_vault.notes_workspace_dir());
+                }
                 self.renderer.notes_sidebar.set_vault_actions(false);
                 self.renderer
                     .notes_sidebar
@@ -430,216 +434,13 @@ impl Screen<'_> {
 
     pub(crate) fn open_neoism_workspace_view(
         &mut self,
-        kind: crate::editor::file_tree::VirtualEntryKind,
+        _kind: crate::editor::file_tree::VirtualEntryKind,
     ) {
         use neoism_ui::panels::notifications::NotificationLevel;
-
-        let Some(root) = self
-            .renderer
-            .file_tree
-            .root()
-            .map(Path::to_path_buf)
-            .or_else(|| self.active_workspace_root.clone())
-            .or_else(|| self.active_pane_workspace_root())
-        else {
-            self.renderer.notifications.push(
-                "No active workspace for Neoism view",
-                NotificationLevel::Warn,
-            );
-            self.mark_dirty();
-            return;
-        };
-
-        let graph = match neo_workspace::NoteGraph::open(&root) {
-            Ok(graph) => graph,
-            Err(err) => {
-                self.renderer.notifications.push(
-                    format!("Could not open Neoism note graph: {err}"),
-                    NotificationLevel::Error,
-                );
-                self.mark_dirty();
-                return;
-            }
-        };
-
-        let path = neoism_workspace_view_path(graph.workspace(), kind);
-        if kind == crate::editor::file_tree::VirtualEntryKind::Tags {
-            self.open_neoism_tags_view(graph.workspace().root.clone(), path);
-            return;
-        }
-
-        let source = match kind {
-            crate::editor::file_tree::VirtualEntryKind::Tasks => {
-                render_tasks_view(&graph)
-            }
-            crate::editor::file_tree::VirtualEntryKind::Tags => unreachable!(),
-            crate::editor::file_tree::VirtualEntryKind::NeoismWorkspace => {
-                Ok("# Neoism\n\nOpen a note, folder, task view, or tag view.\n"
-                    .to_string())
-            }
-        };
-        let source = match source {
-            Ok(source) => source,
-            Err(err) => {
-                self.renderer.notifications.push(
-                    format!("Could not build Neoism view: {err}"),
-                    NotificationLevel::Error,
-                );
-                self.mark_dirty();
-                return;
-            }
-        };
-
-        let result = (|| -> std::io::Result<()> {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, source)
-        })();
-        if let Err(err) = result {
-            self.renderer.notifications.push(
-                format!("Could not write Neoism view {}: {err}", path.display()),
-                NotificationLevel::Error,
-            );
-            self.mark_dirty();
-            return;
-        }
-
-        self.open_generated_neoism_markdown_view(graph.workspace().root.clone(), path);
-    }
-
-    fn open_generated_neoism_markdown_view(
-        &mut self,
-        workspace_root: PathBuf,
-        path: PathBuf,
-    ) {
-        self.set_active_workspace_root(workspace_root, false);
-        self.clear_current_workspace_buf_enter_guard();
-        self.renderer.buffer_tabs.ensure_terminal_tab();
-        self.renderer.buffer_tabs.open_markdown(path.clone());
-        self.activate_markdown_path(path);
-        self.reapply_chrome_layout();
-        self.renderer.trail_cursor.reset();
+        self.renderer.notifications.push(
+            "Indexed Notes views are disabled for now".to_string(),
+            NotificationLevel::Info,
+        );
         self.mark_dirty();
-    }
-
-    pub(crate) fn indexed_markdown_link_suggestions(
-        &mut self,
-        root: &Path,
-        base_dir: &Path,
-        current_doc: &Path,
-        query: &str,
-        limit: usize,
-    ) -> Option<Vec<String>> {
-        let workspace = neo_workspace::load_workspace(root).ok().flatten()?;
-        if !workspace.config.notes.enabled {
-            return Some(Vec::new());
-        }
-        if !self.workspace_note_indexes.contains_key(&workspace.root) {
-            if let Err(err) = self.rebuild_note_graph_for_root(&workspace.root) {
-                tracing::warn!(
-                    target: "neoism::workspace",
-                    root = %workspace.root.display(),
-                    error = %err,
-                    "failed to build note index"
-                );
-                return Some(Vec::new());
-            }
-        }
-        self.workspace_note_indexes
-            .get(&workspace.root)
-            .map(|index| index.link_suggestions(base_dir, current_doc, query, limit))
-    }
-
-    pub(crate) fn indexed_markdown_heading_suggestions(
-        &mut self,
-        root: &Path,
-        base_dir: &Path,
-        current_doc: &Path,
-        target: Option<&str>,
-        query: &str,
-        limit: usize,
-    ) -> Option<Vec<String>> {
-        let workspace = neo_workspace::load_workspace(root).ok().flatten()?;
-        if !workspace.config.notes.enabled {
-            return Some(Vec::new());
-        }
-        if !self.workspace_note_indexes.contains_key(&workspace.root) {
-            if let Err(err) = self.rebuild_note_graph_for_root(&workspace.root) {
-                tracing::warn!(
-                    target: "neoism::workspace",
-                    root = %workspace.root.display(),
-                    error = %err,
-                    "failed to build note index"
-                );
-                return Some(Vec::new());
-            }
-        }
-        self.workspace_note_indexes
-            .get(&workspace.root)
-            .map(|index| {
-                index.heading_suggestions(base_dir, current_doc, target, query, limit)
-            })
-    }
-
-    pub(crate) fn invalidate_note_index_for_path(&mut self, path: &Path) {
-        let Some(root) = self
-            .active_workspace_root
-            .clone()
-            .or_else(|| self.active_pane_workspace_root())
-        else {
-            return;
-        };
-        if path.starts_with(&root) {
-            self.workspace_note_indexes.remove(&root);
-        }
-    }
-
-    pub(crate) fn apply_generated_neoism_tasks_save(
-        &mut self,
-        path: &Path,
-    ) -> Option<Result<String, String>> {
-        let root = self
-            .active_workspace_root
-            .clone()
-            .or_else(|| self.active_pane_workspace_root())?;
-        let workspace = neo_workspace::load_workspace(&root).ok().flatten()?;
-        if path
-            != neoism_workspace_view_path(
-                &workspace,
-                crate::editor::file_tree::VirtualEntryKind::Tasks,
-            )
-        {
-            return None;
-        }
-
-        Some(
-            apply_generated_task_updates(&workspace, path).map(|report| {
-                if report.changed == 0 {
-                    "No task checkbox changes to apply".to_string()
-                } else {
-                    self.workspace_note_indexes.remove(&workspace.root);
-                    for file in &report.changed_files {
-                        if let Err(err) =
-                            neo_workspace::replace_note_graph_file(&workspace, file)
-                        {
-                            tracing::warn!(
-                                target: "neoism::workspace",
-                                path = %file.display(),
-                                error = %err,
-                                "failed to refresh note graph after generated task save"
-                            );
-                        }
-                    }
-                    format!(
-                        "Updated {} task{} in {} note{}",
-                        report.changed,
-                        plural_suffix(report.changed),
-                        report.changed_files.len(),
-                        plural_suffix(report.changed_files.len())
-                    )
-                }
-            }),
-        )
     }
 }

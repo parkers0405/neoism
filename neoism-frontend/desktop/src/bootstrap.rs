@@ -2,7 +2,6 @@
 //!
 //! On every launch a background thread checks for and installs anything a
 //! `./install.sh` run would have set up that a plain binary drop is missing:
-//!   - the `xterm-rio`/`rio` terminfo entry (compiled into `~/.terminfo`)
 //!   - the Linux desktop launcher + icons (with MIME declarations for
 //!     Open With / default-app pickers)
 //!   - the Windows Start Menu shortcut, user `PATH`, `App Paths`
@@ -11,13 +10,13 @@
 //! Everything is idempotent (cheap stat checks on repeat launches) and
 //! best-effort: failures are logged and never block or fail the launch.
 
+#[cfg(any(target_os = "linux", windows))]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::Path;
+#[cfg(windows)]
 use std::path::PathBuf;
 
-#[cfg(unix)]
-const TERMINFO_SOURCE: &str = include_str!("../../../misc/rio.terminfo");
 #[cfg(target_os = "linux")]
 const DESKTOP_ENTRY: &str = include_str!("../../../misc/neoism.desktop");
 #[cfg(target_os = "linux")]
@@ -42,65 +41,12 @@ pub fn spawn() {
     std::thread::Builder::new()
         .name("neoism-bootstrap".into())
         .spawn(move || {
-            #[cfg(unix)]
-            install_terminfo();
             #[cfg(target_os = "linux")]
             install_desktop_entry();
             #[cfg(windows)]
             install_start_menu_shortcut(windows_exe);
         })
         .ok();
-}
-
-//  Terminfo
-
-#[cfg(unix)]
-fn terminfo_installed() -> bool {
-    let mut candidates = vec![
-        PathBuf::from("/usr/share/terminfo/x/xterm-rio"),
-        PathBuf::from("/usr/lib/terminfo/x/xterm-rio"),
-        PathBuf::from("/etc/terminfo/x/xterm-rio"),
-    ];
-    if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join(".terminfo/x/xterm-rio"));
-        // Darwin ncurses hashes the leading char as hex ('x' == 0x78).
-        candidates.push(home.join(".terminfo/78/xterm-rio"));
-    }
-    candidates.iter().any(|path| path.is_file())
-}
-
-#[cfg(unix)]
-fn install_terminfo() {
-    if terminfo_installed() {
-        return;
-    }
-    let Some(home) = dirs::home_dir() else {
-        return;
-    };
-
-    let source_path = std::env::temp_dir().join("neoism-rio.terminfo");
-    if fs::write(&source_path, TERMINFO_SOURCE).is_err() {
-        return;
-    }
-    let status = std::process::Command::new("tic")
-        .arg("-xe")
-        .arg("xterm-rio,rio")
-        .arg("-o")
-        .arg(home.join(".terminfo"))
-        .arg(&source_path)
-        .status();
-    let _ = fs::remove_file(&source_path);
-    match status {
-        Ok(status) if status.success() => {
-            tracing::info!("bootstrap: installed rio terminfo into ~/.terminfo");
-        }
-        Ok(status) => {
-            tracing::warn!(%status, "bootstrap: tic failed to compile terminfo");
-        }
-        Err(err) => {
-            tracing::warn!(%err, "bootstrap: tic unavailable; skipped terminfo install");
-        }
-    }
 }
 
 //  Desktop launcher + icons (Linux)

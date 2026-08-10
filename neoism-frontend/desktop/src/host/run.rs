@@ -40,6 +40,18 @@ fn terminal_splash_wants_visible(
     !alt_screen && no_command_yet && !running_command && !cursor_advanced_past_splash
 }
 
+/// Modal material and its contents must use Sugarloaf's late overlay pass.
+///
+/// Sugarloaf deliberately flushes ordinary UI text after normal quads. A
+/// translucent modal submitted as a normal quad therefore cannot occlude that
+/// text: the later text pass paints sharp glyphs through the modal material.
+/// The overlay pass preserves the modal's alpha blending while placing both
+/// its backdrop/surface and its own text after the ordinary UI text pass.
+#[inline]
+fn modal_uses_late_overlay(modal_active: bool) -> bool {
+    modal_active
+}
+
 impl Renderer {
     #[inline]
     pub fn run(
@@ -52,9 +64,6 @@ impl Renderer {
         self.terminal_splash_animating = false;
         let grid = context_manager.current_grid_mut();
         let active_key = grid.current;
-        let active_is_epub = grid
-            .current_item()
-            .is_some_and(|item| item.val.epub.is_some());
         let visible_nodes: Vec<_> = grid
             .contexts()
             .keys()
@@ -1064,20 +1073,22 @@ impl Renderer {
                 logical_height,
             );
 
-            // Status line spans the full window width along the bottom
-            // edge. The side panels stop at its top rather than running
-            // underneath, so it no longer insets for the tree / notes /
-            // git, and the terminal composer floats above it (in the
-            // content column) instead of snapping the bar to its width.
+            // The status material spans the full bottom edge, while its
+            // actual labels and pills start at the editor column. This keeps
+            // cwd/mode text from showing beneath the file tree or Notes.
             let status_y = (logical_height - self.status_line.scaled_height()).max(0.0);
             let status_left = 0.0;
             let status_width = logical_width.max(0.0);
+            let status_content_left = side_x.min(logical_width);
+            let status_content_width = (logical_width - status_content_left).max(0.0);
             self.status_line.set_split_toggle(false, false);
-            self.status_line.render_with_ide_theme(
+            self.status_line.render_with_ide_theme_in_content_bounds(
                 sugarloaf,
                 status_left,
                 status_y,
                 status_width,
+                status_content_left,
+                status_content_width,
                 &self.theme,
             );
             if !input_overlay_active {
@@ -1377,12 +1388,13 @@ impl Renderer {
             None,
         );
 
-        // EPUB glyphs flush after the normal shape pass, so a normal modal
-        // quad lets them punch through it. Route only this modal through
-        // Sugarloaf's late overlay pass: the reader stays visible everywhere
-        // outside the modal instead of receiving a fullscreen blackout.
-        let modal_over_epub = self.modal.is_active() && active_is_epub;
-        if modal_over_epub {
+        // Sugarloaf's ordinary UI text flushes after normal quads. Route the
+        // complete modal material through its purpose-built late overlay pass
+        // so underlying glyphs cannot paint through the translucent surface.
+        // This keeps the backdrop and panel translucent; it does not replace
+        // the material with an opaque blackout.
+        let modal_late_overlay = modal_uses_late_overlay(self.modal.is_active());
+        if modal_late_overlay {
             sugarloaf.set_late_overlay_mode(true);
         }
         self.modal.render(
@@ -1390,7 +1402,7 @@ impl Renderer {
             (window_size.width, window_size.height, scale_factor),
             &self.theme,
         );
-        if modal_over_epub {
+        if modal_late_overlay {
             sugarloaf.set_late_overlay_mode(false);
         }
 
@@ -1602,7 +1614,13 @@ impl neoism_ui::panels::buffer_tabs::AgentIconProvider<crate::neoism::icon::Agen
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_splash_wants_visible;
+    use super::{modal_uses_late_overlay, terminal_splash_wants_visible};
+
+    #[test]
+    fn every_active_modal_uses_late_overlay_material() {
+        assert!(modal_uses_late_overlay(true));
+        assert!(!modal_uses_late_overlay(false));
+    }
 
     #[test]
     fn terminal_splash_stays_visible_before_any_command() {

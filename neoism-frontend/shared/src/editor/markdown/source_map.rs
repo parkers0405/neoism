@@ -1,5 +1,7 @@
 use super::parse_markdown_link_parts;
-use crate::widgets::markdown::{parse_markdown_link, web_url_target};
+use crate::widgets::markdown::{
+    backslash_escape_at_start, parse_markdown_link, rendered_link_target,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlineSourceMap {
@@ -143,6 +145,12 @@ fn build_inline_map(text: &str, base: usize, builder: &mut InlineSourceMapBuilde
     let mut ix = 0usize;
     while ix < text.len() {
         let rest = &text[ix..];
+        if let Some((escaped, consumed)) = backslash_escape_at_start(rest) {
+            builder.hide_range(base + ix, base + ix + 1);
+            builder.push_visible_char(base + ix + 1, base + ix + consumed, escaped);
+            ix += consumed;
+            continue;
+        }
         if rest.starts_with("<!--") {
             if let Some(end_rel) = rest[4..].find("-->") {
                 let end = ix + 4 + end_rel + 3;
@@ -163,7 +171,7 @@ fn build_inline_map(text: &str, base: usize, builder: &mut InlineSourceMapBuilde
             continue;
         }
         if let Some(link) = parse_markdown_link(rest) {
-            if web_url_target(link.target).is_some() {
+            if rendered_link_target(link.target).is_some() {
                 let label_start = ix + 1;
                 let label_end = label_start + link.label.len();
                 let raw_end = ix + link.consumed;
@@ -368,6 +376,22 @@ mod tests {
         let map = InlineSourceMap::new(text);
         assert_eq!(map.visible_text(), "See Search Engineer now");
         assert_eq!(map.visible_for_source(text.find('[').unwrap()), 4);
+    }
+
+    #[test]
+    fn maps_standard_file_uri_link_to_its_label() {
+        let text = "[Report](file:///tmp/Patriot%20Report.md)";
+        assert_eq!(InlineSourceMap::new(text).visible_text(), "Report");
+    }
+
+    #[test]
+    fn commonmark_backslash_escapes_hide_only_the_backslash() {
+        let map = InlineSourceMap::new(r"\* note and \** partial");
+        assert_eq!(map.visible_text(), "* note and ** partial");
+        assert_eq!(map.source_for_visible(0), 1);
+        assert_eq!(map.visible_for_source(0), 0);
+
+        assert_eq!(InlineSourceMap::new(r"\n").visible_text(), r"\n");
     }
 
     #[test]

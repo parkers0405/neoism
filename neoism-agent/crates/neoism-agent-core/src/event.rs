@@ -58,12 +58,14 @@ pub mod event_type {
     pub const SESSION_COMPACTION_DELTA: &str = "session.next.compaction.delta";
     pub const SESSION_COMPACTION_ENDED: &str = "session.next.compaction.ended";
     pub const SESSION_COMPACTED: &str = "session.compacted";
+    pub const SESSION_CONTEXT_UPDATED: &str = "session.context.updated";
     pub const SESSION_CREATED: &str = "session.created";
     pub const SESSION_DELETED: &str = "session.deleted";
     pub const SESSION_ERROR: &str = "session.error";
     pub const SESSION_BACKGROUND_TASK_COMPLETED: &str =
         "session.background_task.completed";
     pub const SESSION_QUEUE_UPDATED: &str = "session.queue.updated";
+    pub const SESSION_PROMPT_ADMITTED: &str = "session.prompt.admitted";
     pub const SESSION_STATUS: &str = "session.status";
     pub const SESSION_SUBTASK_COMPLETED: &str = "session.subtask.completed";
     pub const SESSION_UPDATED: &str = "session.updated";

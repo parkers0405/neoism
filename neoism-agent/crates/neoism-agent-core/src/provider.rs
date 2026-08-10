@@ -33,6 +33,13 @@ pub struct ProviderAttachment {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProviderReasoning {
+    pub summary: Vec<Value>,
+    pub encrypted_content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderMessage {
     pub role: ProviderRole,
     pub content: String,
@@ -40,6 +47,8 @@ pub struct ProviderMessage {
     pub attachments: Vec<ProviderAttachment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ProviderToolCall>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning: Vec<ProviderReasoning>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,6 +64,7 @@ impl ProviderMessage {
             content: content.into(),
             attachments: Vec::new(),
             tool_calls: Vec::new(),
+            reasoning: Vec::new(),
             tool_call_id: None,
             tool_name: None,
             tool_error: None,
@@ -70,6 +80,7 @@ impl ProviderMessage {
             content: content.into(),
             attachments: Vec::new(),
             tool_calls,
+            reasoning: Vec::new(),
             tool_call_id: None,
             tool_name: None,
             tool_error: None,
@@ -87,6 +98,7 @@ impl ProviderMessage {
             content: content.into(),
             attachments: Vec::new(),
             tool_calls: Vec::new(),
+            reasoning: Vec::new(),
             tool_call_id: Some(call_id.into()),
             tool_name: Some(name.into()),
             tool_error: error.then_some(true),
@@ -158,6 +170,10 @@ pub enum ProviderStreamEvent {
     },
     ReasoningEnd {
         id: String,
+    },
+    ReasoningMetadata {
+        id: String,
+        metadata: Value,
     },
     ToolInputStart {
         id: String,

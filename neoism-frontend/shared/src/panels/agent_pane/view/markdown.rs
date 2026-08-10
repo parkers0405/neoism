@@ -325,9 +325,7 @@ fn wrap_table_cells(
         .into_iter()
         .map(|cell| {
             cell.lines()
-                .flat_map(|line| {
-                    md::wrap_words_measured(sugarloaf, line.trim(), cell_w, opts)
-                })
+                .flat_map(|line| wrap_inline_aware(sugarloaf, line.trim(), cell_w, opts))
                 .collect::<Vec<_>>()
                 .join("\n")
         })
@@ -716,7 +714,13 @@ pub fn layout_assistant_markdown(
     // declarations, removes markup, preserves safe text, and suppresses the
     // contents of executable/embedded elements.
     let safe_text = safe_canvas_markdown(text);
-    let text = safe_text.as_ref();
+    // Model output occasionally hard-wraps a long explicit link across source
+    // lines. CommonMark treats that as one inline link, but this renderer lays
+    // out prose one physical line at a time. Join only the interior of those
+    // links (never fenced code) before block layout so `[label](file://...)`
+    // remains a rendered label instead of leaking `](` and the URI.
+    let normalized_links = normalize_multiline_markdown_links(safe_text.as_ref());
+    let text = normalized_links.as_ref();
     if text.trim().is_empty() {
         return Vec::new();
     }
@@ -887,6 +891,134 @@ pub fn layout_assistant_markdown(
     trim_outer_blank_blocks(&mut blocks);
 
     blocks
+}
+
+fn normalize_multiline_markdown_links(markdown: &str) -> Cow<'_, str> {
+    if !markdown.contains('\n') || !markdown.contains("](") {
+        return Cow::Borrowed(markdown);
+    }
+
+    let mut output = String::with_capacity(markdown.len());
+    let mut prose = String::new();
+    let mut in_fence = false;
+    let mut changed = false;
+    for line in markdown.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        if fence {
+            changed |= collapse_multiline_links_in_prose(&prose, &mut output);
+            prose.clear();
+            output.push_str(line);
+            in_fence = !in_fence;
+        } else if in_fence {
+            output.push_str(line);
+        } else {
+            prose.push_str(line);
+        }
+    }
+    changed |= collapse_multiline_links_in_prose(&prose, &mut output);
+
+    changed
+        .then_some(Cow::Owned(output))
+        .unwrap_or(Cow::Borrowed(markdown))
+}
+
+fn collapse_multiline_links_in_prose(prose: &str, output: &mut String) -> bool {
+    let mut cursor = 0usize;
+    let mut changed = false;
+    while cursor < prose.len() {
+        let Some(open_rel) = prose[cursor..].find('[') else {
+            output.push_str(&prose[cursor..]);
+            break;
+        };
+        let open = cursor + open_rel;
+        output.push_str(&prose[cursor..open]);
+        let Some((end, label_end, target_start)) = multiline_link_bounds(&prose[open..])
+        else {
+            output.push('[');
+            cursor = open + 1;
+            continue;
+        };
+        let end = open + end;
+        let label_end = open + label_end;
+        let target_start = open + target_start;
+        let link = &prose[open..end];
+        if !link.contains(['\n', '\r']) {
+            output.push_str(link);
+            cursor = end;
+            continue;
+        }
+
+        output.push('[');
+        output.push_str(
+            &prose[open + 1..label_end]
+                .split(['\r', '\n'])
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        output.push_str("](");
+        output.push_str(
+            &prose[target_start..end - 1]
+                .split(['\r', '\n'])
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join(""),
+        );
+        output.push(')');
+        changed = true;
+        cursor = end;
+    }
+    changed
+}
+
+/// `(consumed, label_end, target_start)` for a Markdown link at byte zero.
+fn multiline_link_bounds(value: &str) -> Option<(usize, usize, usize)> {
+    value.strip_prefix('[')?;
+    let mut label_end = None;
+    let mut escaped = false;
+    for (index, ch) in value[1..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == ']' {
+            let absolute = index + 1;
+            if value[absolute + 1..].starts_with('(') {
+                label_end = Some(absolute);
+            }
+            break;
+        }
+    }
+    let label_end = label_end?;
+    let target_start = label_end + 2;
+    let mut depth = 1usize;
+    let mut escaped = false;
+    for (relative, ch) in value[target_start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((target_start + relative + 1, label_end, target_start));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn trim_outer_blank_blocks(blocks: &mut Vec<AssistantMarkdownBlock>) {

@@ -142,6 +142,13 @@ impl Screen<'_> {
             return true;
         }
 
+        let agent_line_height = {
+            let rich_text_id = self.context_manager.current().rich_text_id;
+            self.sugarloaf
+                .get_text_layout(&rich_text_id)
+                .map(|layout| layout.dimensions.height.round().max(1.0))
+                .unwrap_or(24.0)
+        };
         if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
             if agent.picker_contains_point(mouse_x, mouse_y) {
                 let pixels = Self::vertical_overlay_scroll_pixels(delta, 34.0);
@@ -171,7 +178,7 @@ impl Screen<'_> {
                     }
                     return true;
                 }
-                let wheel = Self::neoism_agent_scroll_wheel(delta);
+                let wheel = Self::neoism_agent_scroll_wheel(delta, agent_line_height);
                 let handled = if wheel.smooth {
                     agent.scroll_timeline_wheel_pixels(wheel.pixels)
                 } else {

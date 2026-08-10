@@ -176,9 +176,6 @@ impl Screen<'_> {
             if let Some(path) = self.current_workspace_id().and_then(|workspace| {
                 self.workspace_notes_vaults.get(&workspace).cloned()
             }) {
-                #[cfg(target_os = "macos")]
-                self.renderer.notes_sidebar.set_workspace_path(Some(path));
-                #[cfg(not(target_os = "macos"))]
                 self.renderer.notes_sidebar.set_workspace(
                     path.file_name()
                         .and_then(|name| name.to_str())

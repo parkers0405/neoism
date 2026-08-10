@@ -127,6 +127,12 @@ pub struct MarkdownLinkTarget {
     pub code_ref: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkdownCursorLink {
+    Internal { target: String, code_ref: bool },
+    External(String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownLinkOpenAction {
     OpenDirectory,

@@ -22,8 +22,6 @@ const TERMINFO_SOURCE: &str = include_str!("../../../misc/rio.terminfo");
 const DESKTOP_ENTRY: &str = include_str!("../../../misc/neoism.desktop");
 #[cfg(target_os = "linux")]
 const ICON_PNG: &[u8] = include_bytes!("../assets/icons/neoism.png");
-#[cfg(target_os = "linux")]
-const ICON_SVG: &str = include_str!("../assets/splash/neoism-wordmark.svg");
 
 /// MIME types the desktop entry declares so file managers offer Neoism in
 /// Open With / default-app pickers for code and text files.
@@ -148,10 +146,15 @@ fn install_desktop_entry() {
             wrote = true;
         }
     }
-    if !png_path.exists() && write_if_dir_creatable(&png_path, ICON_PNG) {
+    let png_stale = fs::read(&png_path)
+        .map(|existing| existing != ICON_PNG)
+        .unwrap_or(true);
+    if png_stale && write_if_dir_creatable(&png_path, ICON_PNG) {
         wrote = true;
     }
-    if !svg_path.exists() && write_if_dir_creatable(&svg_path, ICON_SVG.as_bytes()) {
+    // Older builds installed the splash wordmark under the same icon name.
+    // Launchers prefer that scalable asset over the canonical square PNG.
+    if svg_path.exists() && fs::remove_file(&svg_path).is_ok() {
         wrote = true;
     }
 

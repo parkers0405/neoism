@@ -52,6 +52,9 @@ impl Renderer {
         self.terminal_splash_animating = false;
         let grid = context_manager.current_grid_mut();
         let active_key = grid.current;
+        let active_is_epub = grid
+            .current_item()
+            .is_some_and(|item| item.val.epub.is_some());
         let visible_nodes: Vec<_> = grid
             .contexts()
             .keys()
@@ -1374,11 +1377,22 @@ impl Renderer {
             None,
         );
 
+        // EPUB glyphs flush after the normal shape pass, so a normal modal
+        // quad lets them punch through it. Route only this modal through
+        // Sugarloaf's late overlay pass: the reader stays visible everywhere
+        // outside the modal instead of receiving a fullscreen blackout.
+        let modal_over_epub = self.modal.is_active() && active_is_epub;
+        if modal_over_epub {
+            sugarloaf.set_late_overlay_mode(true);
+        }
         self.modal.render(
             sugarloaf,
             (window_size.width, window_size.height, scale_factor),
             &self.theme,
         );
+        if modal_over_epub {
+            sugarloaf.set_late_overlay_mode(false);
+        }
 
         // Right-side git diff panel — flush against the window's right
         // edge, spanning the middle band like the file tree: below the

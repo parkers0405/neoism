@@ -368,6 +368,11 @@ pub const PRESENCE_PUBLISH_MIN_INTERVAL_MS: u64 = 75;
 /// never expires a live-but-idle peer.
 pub const PRESENCE_HEARTBEAT_INTERVAL_MS: u64 = 4_000;
 
+/// Presence-only buffer used while a member is in a non-editor tab of a
+/// collaborative workspace. The daemon connection scopes this record to one
+/// workspace; renderers must never treat it as a file path.
+pub const WORKSPACE_PRESENCE_BUFFER_ID: &str = "workspace://presence";
+
 #[derive(Debug, Clone, PartialEq)]
 struct PublishedState {
     buffer_id: PresenceBufferId,
@@ -778,6 +783,32 @@ mod tests {
             CrdtClientMessage::ClearPresence { buffer_id, .. } if buffer_id == "buf-b"
         ));
         assert!(publisher.tick(None, 4_000).is_empty(), "clear only once");
+    }
+
+    #[test]
+    fn workspace_presence_keeps_membership_until_workspace_leave() {
+        let mut publisher = PresencePublisher::new("me", "My Laptop");
+        publisher.tick(Some(("buf-a", cursor(1, 2), None, false)), 1_000);
+
+        let agent_tab = publisher.tick(
+            Some((WORKSPACE_PRESENCE_BUFFER_ID, cursor(0, 0), None, false)),
+            2_000,
+        );
+        assert!(matches!(
+            &agent_tab[0],
+            CrdtClientMessage::ClearPresence { buffer_id, .. } if buffer_id == "buf-a"
+        ));
+        assert_eq!(
+            published(&agent_tab)[0].buffer_id,
+            WORKSPACE_PRESENCE_BUFFER_ID
+        );
+
+        let leave = publisher.tick(None, 3_000);
+        assert!(matches!(
+            &leave[0],
+            CrdtClientMessage::ClearPresence { buffer_id, .. }
+                if buffer_id == WORKSPACE_PRESENCE_BUFFER_ID
+        ));
     }
 
     #[test]

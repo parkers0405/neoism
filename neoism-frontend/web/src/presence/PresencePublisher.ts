@@ -29,6 +29,9 @@ export const PRESENCE_PUBLISH_MIN_INTERVAL_MS = 75;
  * never expires a live-but-idle peer. */
 export const PRESENCE_HEARTBEAT_INTERVAL_MS = 4_000;
 
+/** Presence-only target for non-editor tabs inside the current workspace. */
+export const WORKSPACE_PRESENCE_BUFFER_ID = "workspace://presence";
+
 export interface ActivePresenceTarget {
   bufferId: string;
   cursor: CrdtCursorPosition;

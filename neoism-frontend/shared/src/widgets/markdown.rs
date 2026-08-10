@@ -484,13 +484,17 @@ pub fn parse_markdown_link(value: &str) -> Option<MarkdownLink<'_>> {
     })
 }
 
-/// Return a clean HTTP(S) target while preserving balanced URL parentheses.
+/// Return a clean external link target while preserving balanced URL parentheses.
 /// Ambient prose punctuation (`https://x.dev).`) is excluded from the target.
 pub fn web_url_target(value: &str) -> Option<&str> {
     let value = value.trim_start_matches(|ch: char| {
         matches!(ch, '<' | '(' | '[' | '{' | '\'' | '"' | '`')
     });
-    if !(value.starts_with("https://") || value.starts_with("http://")) {
+    if !(value.starts_with("https://")
+        || value.starts_with("http://")
+        || value.starts_with("mailto:")
+        || value.starts_with("tel:"))
+    {
         return None;
     }
     let mut end = value.len();
@@ -515,7 +519,13 @@ pub fn web_url_target(value: &str) -> Option<&str> {
         }
         end -= ch.len_utf8();
     }
-    let scheme_len = if value.starts_with("https://") { 8 } else { 7 };
+    let scheme_len = if value.starts_with("https://") {
+        8
+    } else if value.starts_with("http://") || value.starts_with("mailto:") {
+        7
+    } else {
+        4
+    };
     let target = &value[..end];
     (end > scheme_len && !target.chars().any(char::is_whitespace)).then_some(target)
 }
@@ -536,7 +546,11 @@ pub fn web_link_at_start(text: &str) -> Option<WebLinkSpan> {
         }
     }
 
-    if text.starts_with("https://") || text.starts_with("http://") {
+    if text.starts_with("https://")
+        || text.starts_with("http://")
+        || text.starts_with("mailto:")
+        || text.starts_with("tel:")
+    {
         let token_end = text
             .find(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '"' | '\'' | '`'))
             .unwrap_or(text.len());
@@ -985,6 +999,17 @@ mod tests {
         assert_eq!(links[0].target, "https://jobs.example/x");
         assert_eq!(links[1].target, "https://neoism.dev/docs");
         assert_eq!(&text[links[1].raw_start..links[1].raw_end], links[1].target);
+    }
+
+    #[test]
+    fn phone_links_support_markdown_labels_and_bare_tel_targets() {
+        let text = "Call [support](tel:+15551234567) or tel:+15557654321.";
+        let links = web_link_spans(text);
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].target, "tel:+15551234567");
+        assert_eq!(&text[links[0].label_start..links[0].label_end], "support");
+        assert_eq!(links[1].target, "tel:+15557654321");
     }
 
     #[test]

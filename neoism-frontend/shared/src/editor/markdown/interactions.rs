@@ -496,6 +496,7 @@ impl MarkdownPane {
     }
 
     pub fn end_drag(&mut self) -> bool {
+        let was_visual = matches!(self.mode, MarkdownMode::Visual);
         let clicked_handle = self
             .pending_block_menu_rect
             .filter(|_| self.dragging_line.is_some() && !self.drag_moved);
@@ -516,10 +517,8 @@ impl MarkdownPane {
         self.drag_start_y = 0.0;
         self.drag_moved = false;
         self.pending_block_menu_rect = if reordered { None } else { clicked_handle };
-        if matches!(self.mode, MarkdownMode::Visual)
-            && self.normalized_visual_range().is_none()
-        {
-            self.enter_insert();
+        if was_visual && self.normalized_visual_range().is_none() {
+            self.enter_normal();
         }
         was_dragging || reordered
     }

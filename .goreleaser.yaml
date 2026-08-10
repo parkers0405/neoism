@@ -166,17 +166,17 @@ nfpms:
       rpm:
         dependencies: [glibc, libstdc++]
         contents:
-          - src: ./misc/rio.desktop
-            dst: /usr/share/applications/rio.desktop
+          - src: ./misc/neoism.desktop
+            dst: /usr/share/applications/neoism.desktop
           - src: ./misc/r/rio
             dst: /usr/share/terminfo/r/rio
-          - src: ./misc/logo.svg
-            dst: /usr/share/icons/hicolor/scalable/apps/rio.svg
+          - src: ./neoism-frontend/desktop/assets/icons/neoism.png
+            dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     contents:
-      - src: ./misc/rio.desktop
-        dst: /usr/share/applications/rio.desktop
-      - src: ./misc/logo.svg
-        dst: /usr/share/icons/hicolor/scalable/apps/rio.svg
+      - src: ./misc/neoism.desktop
+        dst: /usr/share/applications/neoism.desktop
+      - src: ./neoism-frontend/desktop/assets/icons/neoism.png
+        dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     section: admin
     priority: optional
   - formats: [deb, rpm]
@@ -189,17 +189,17 @@ nfpms:
       rpm:
         dependencies: [glibc, libstdc++]
         contents:
-          - src: ./misc/rio.desktop
-            dst: /usr/share/applications/rio.desktop
+          - src: ./misc/neoism.desktop
+            dst: /usr/share/applications/neoism.desktop
           - src: ./misc/r/rio
             dst: /usr/share/terminfo/r/rio
-          - src: ./misc/logo.svg
-            dst: /usr/share/icons/hicolor/scalable/apps/rio.svg
+          - src: ./neoism-frontend/desktop/assets/icons/neoism.png
+            dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     contents:
-      - src: ./misc/rio.desktop
-        dst: /usr/share/applications/rio.desktop
-      - src: ./misc/logo.svg
-        dst: /usr/share/icons/hicolor/scalable/apps/rio.svg
+      - src: ./misc/neoism.desktop
+        dst: /usr/share/applications/neoism.desktop
+      - src: ./neoism-frontend/desktop/assets/icons/neoism.png
+        dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     section: admin
     priority: optional
   - formats: [deb, rpm]
@@ -212,17 +212,17 @@ nfpms:
       rpm:
         dependencies: [glibc, libstdc++]
         contents:
-          - src: ./misc/rio.desktop
-            dst: /usr/share/applications/rio.desktop
+          - src: ./misc/neoism.desktop
+            dst: /usr/share/applications/neoism.desktop
           - src: ./misc/r/rio
             dst: /usr/share/terminfo/r/rio
-          - src: ./misc/logo.svg
-            dst: /usr/share/icons/hicolor/scalable/apps/rio.svg
+          - src: ./neoism-frontend/desktop/assets/icons/neoism.png
+            dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     contents:
-      - src: ./misc/rio.desktop
-        dst: /usr/share/applications/rio.desktop
-      - src: ./misc/logo.svg
-        dst: /usr/share/icons/hicolor/scalable/apps/rio.svg
+      - src: ./misc/neoism.desktop
+        dst: /usr/share/applications/neoism.desktop
+      - src: ./neoism-frontend/desktop/assets/icons/neoism.png
+        dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     section: admin
     priority: optional
   - formats: [deb, rpm]
@@ -235,17 +235,17 @@ nfpms:
       rpm:
         dependencies: [glibc, libstdc++]
         contents:
-          - src: ./misc/rio.desktop
-            dst: /usr/share/applications/rio.desktop
+          - src: ./misc/neoism.desktop
+            dst: /usr/share/applications/neoism.desktop
           - src: ./misc/r/rio
             dst: /usr/share/terminfo/r/rio
-          - src: ./misc/logo.svg
-            dst: /usr/share/icons/hicolor/scalable/apps/rio.svg
+          - src: ./neoism-frontend/desktop/assets/icons/neoism.png
+            dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     contents:
-      - src: ./misc/rio.desktop
-        dst: /usr/share/applications/rio.desktop
-      - src: ./misc/logo.svg
-        dst: /usr/share/icons/hicolor/scalable/apps/rio.svg
+      - src: ./misc/neoism.desktop
+        dst: /usr/share/applications/neoism.desktop
+      - src: ./neoism-frontend/desktop/assets/icons/neoism.png
+        dst: /usr/share/icons/hicolor/512x512/apps/neoism.png
     section: admin
     priority: optional
 

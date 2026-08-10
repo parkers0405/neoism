@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::helpers::*;
 use super::types::*;
+use crate::widgets::markdown::web_link_at;
 
 pub fn markdown_link_open_action(
     target: &MarkdownLinkTarget,
@@ -23,6 +24,44 @@ pub fn markdown_link_open_action(
 }
 
 impl MarkdownPane {
+    pub fn link_at_cursor(&self) -> Option<MarkdownCursorLink> {
+        let line = self.lines.get(self.cursor_line)?;
+        let byte_col = floor_char_boundary(line, self.cursor_col.min(line.len()));
+        let char_col = line[..byte_col].chars().count();
+
+        if let Some(inner) = wiki_link_at_byte(line, byte_col) {
+            let parsed = parse_markdown_link_parts(inner)?;
+            if parsed.code_ref {
+                return Some(MarkdownCursorLink::Internal {
+                    target: inner.to_string(),
+                    code_ref: true,
+                });
+            }
+            if is_external_markdown_target(&parsed.target) {
+                return Some(MarkdownCursorLink::External(parsed.target));
+            }
+            return Some(MarkdownCursorLink::Internal {
+                target: inner.to_string(),
+                code_ref: false,
+            });
+        }
+
+        if let Some(span) = web_link_at(line, char_col) {
+            return Some(MarkdownCursorLink::External(span.target));
+        }
+
+        markdown_link_at_byte(line, byte_col).map(|target| {
+            if is_external_markdown_target(&target) {
+                MarkdownCursorLink::External(target)
+            } else {
+                MarkdownCursorLink::Internal {
+                    target,
+                    code_ref: false,
+                }
+            }
+        })
+    }
+
     pub fn wiki_link_query_before_cursor(&self) -> Option<MarkdownWikiLinkQuery> {
         let bounds = self.wiki_link_bounds_before_cursor()?;
         let line = self.lines.get(self.cursor_line)?;
@@ -253,4 +292,53 @@ impl MarkdownPane {
             close_start,
         })
     }
+}
+
+fn wiki_link_at_byte(line: &str, byte_col: usize) -> Option<&str> {
+    let mut search_from = 0usize;
+    while let Some(open_rel) = line.get(search_from..)?.find("[[") {
+        let open_start = search_from + open_rel;
+        let inner_start = open_start + 2;
+        let close_start = inner_start + line.get(inner_start..)?.find("]]")?;
+        let raw_end = close_start + 2;
+        if (open_start..=raw_end).contains(&byte_col) {
+            return line.get(inner_start..close_start);
+        }
+        search_from = raw_end;
+    }
+    None
+}
+
+fn is_external_markdown_target(target: &str) -> bool {
+    target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("mailto:")
+        || target.starts_with("tel:")
+}
+
+fn markdown_link_at_byte(line: &str, byte_col: usize) -> Option<String> {
+    let mut search_from = 0usize;
+    while let Some(label_rel) = line.get(search_from..)?.find('[') {
+        let label_start = search_from + label_rel;
+        let Some(label_end_rel) = line.get(label_start..)?.find("](") else {
+            search_from = label_start + 1;
+            continue;
+        };
+        let label_end = label_start + label_end_rel;
+        let target_start = label_end + 2;
+        let Some(target_end_rel) = line.get(target_start..)?.find(')') else {
+            search_from = label_start + 1;
+            continue;
+        };
+        let target_end = target_start + target_end_rel;
+        let raw_end = target_end + 1;
+        if (label_start..=raw_end).contains(&byte_col) {
+            let target = line.get(target_start..target_end)?.trim();
+            if !target.is_empty() {
+                return Some(target.to_string());
+            }
+        }
+        search_from = raw_end;
+    }
+    None
 }

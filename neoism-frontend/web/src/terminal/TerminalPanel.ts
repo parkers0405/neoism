@@ -19,6 +19,7 @@ import {
 } from "../presence/presence";
 import {
   PresencePublisher,
+  WORKSPACE_PRESENCE_BUFFER_ID,
   type ActivePresenceTarget,
 } from "../presence/PresencePublisher";
 import { RemotePresenceStore } from "../presence/RemotePresenceStore";
@@ -3096,9 +3097,9 @@ export class TerminalPanel {
 
   /**
    * Where is the local user? Markdown tabs publish their caret (or
-   * reading position on the legacy DOM viewer). Terminal/agent/file
-   * tabs publish nothing, which makes the publisher clear any
-   * previous presence.
+   * reading position on the legacy DOM viewer). Other tabs publish
+   * workspace membership without claiming a file cursor. This panel is
+   * workspace-scoped, so dispose() remains the true leave operation.
    */
   private currentPresenceTarget(): ActivePresenceTarget | null {
     const markdownBufferId = this.activeMarkdownBufferId();
@@ -3120,9 +3121,14 @@ export class TerminalPanel {
       };
     }
     // Editor-like file tabs used to publish the embedded-nvim grid
-    // cursor. That plane is gone; the native CodePane will publish a
-    // real caret here.
-    return null;
+    // cursor. That plane is gone; until the native CodePane publishes a
+    // real caret, retain workspace membership like terminal/agent tabs.
+    return {
+      bufferId: WORKSPACE_PRESENCE_BUFFER_ID,
+      cursor: { line: 0, column: 0, offset: null },
+      selection: null,
+      insert: false,
+    };
   }
 
   private activeMarkdownBufferId(): string | null {

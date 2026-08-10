@@ -113,27 +113,14 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        let root = self
-            .active_workspace_root
-            .clone()
-            .or_else(|| self.active_pane_workspace_root())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let Ok(Some(mut workspace)) = neo_workspace::load_workspace(&root) else {
-            self.renderer.notifications.push(
-                "No active Neoism workspace".to_string(),
-                NotificationLevel::Warn,
-            );
-            self.mark_dirty();
-            return;
-        };
-        workspace.config.notes.workspace = name.clone();
-        match neo_workspace::save_workspace(&workspace)
-            .and_then(|_| neo_workspace::ensure_notes_workspace(&workspace))
-        {
+        let vault = neo_workspace::vault_notes_workspace(&name);
+        match neo_workspace::ensure_notes_workspace(&vault) {
             Ok(()) => {
                 self.renderer
                     .notes_sidebar
-                    .set_workspace(name, Some(workspace.notes_workspace_dir()));
+                    .set_workspace(name, Some(vault.notes_workspace_dir()));
+                self.renderer.notes_sidebar.refresh_notes();
+                self.renderer.notes_sidebar.set_focused(true);
             }
             Err(err) => self.renderer.notifications.push(
                 format!("Could not add vault: {err}"),
@@ -182,54 +169,21 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        // Inside a JOINED workspace there is no local workspace config to
-        // write — selecting one of the user's OWN vaults simply points the
-        // panel at that local vault on this machine's disk (read straight
-        // from the filesystem, exactly as outside a joined workspace).
-        if self.served_workspace_root().is_some() {
-            let local_vault = neo_workspace::vault_notes_workspace(&name);
-            if let Err(err) = neo_workspace::ensure_notes_workspace(&local_vault) {
-                self.renderer.notifications.push(
-                    format!("Could not open vault: {err}"),
-                    NotificationLevel::Error,
-                );
-                self.mark_dirty();
-                return;
-            }
-            self.renderer.notes_sidebar.set_vault_actions(false);
-            self.renderer
-                .notes_sidebar
-                .set_workspace(name, Some(local_vault.notes_workspace_dir()));
-            self.renderer.notes_sidebar.refresh_notes();
-            self.renderer.notes_sidebar.set_focused(true);
-            self.mark_dirty();
-            return;
-        }
-        let root = self
-            .active_workspace_root
-            .clone()
-            .or_else(|| self.active_pane_workspace_root())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let Ok(Some(mut workspace)) = neo_workspace::load_workspace(&root) else {
-            self.renderer.notifications.push(
-                "No active Neoism workspace".to_string(),
-                NotificationLevel::Warn,
-            );
-            self.mark_dirty();
-            return;
-        };
-        workspace.config.notes.workspace = name.clone();
-        match neo_workspace::save_workspace(&workspace)
-            .and_then(|_| neo_workspace::ensure_notes_workspace(&workspace))
-        {
+        // Vault selection changes what this notes panel is VIEWING. It must
+        // not require or rewrite a project `.neoism/workspace.json`; project
+        // linkage is a separate explicit action in the vault menu.
+        let viewed_vault = neo_workspace::vault_notes_workspace(&name);
+        match neo_workspace::ensure_notes_workspace(&viewed_vault) {
             Ok(()) => {
+                self.renderer.notes_sidebar.set_vault_actions(false);
                 self.renderer
                     .notes_sidebar
-                    .set_workspace(name, Some(workspace.notes_workspace_dir()));
+                    .set_workspace(name, Some(viewed_vault.notes_workspace_dir()));
                 self.renderer.notes_sidebar.refresh_notes();
+                self.renderer.notes_sidebar.set_focused(true);
             }
             Err(err) => self.renderer.notifications.push(
-                format!("Could not switch vault: {err}"),
+                format!("Could not open vault: {err}"),
                 NotificationLevel::Error,
             ),
         }
@@ -248,34 +202,35 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        let root = self
-            .active_workspace_root
-            .clone()
-            .or_else(|| self.active_pane_workspace_root())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let Ok(Some(mut workspace)) = neo_workspace::load_workspace(&root) else {
+        let Some(old_dir) = self.renderer.notes_sidebar.workspace_path() else {
             self.renderer.notifications.push(
-                "No active Neoism workspace".to_string(),
+                "No vault is currently open".to_string(),
                 NotificationLevel::Warn,
             );
             self.mark_dirty();
             return;
         };
-        let old_dir = workspace.notes_workspace_dir();
-        workspace.config.notes.workspace = name.clone();
-        let new_dir = workspace.notes_workspace_dir();
-        let result = if old_dir.exists() && old_dir != new_dir {
-            std::fs::rename(&old_dir, &new_dir).or_else(|_| {
-                std::fs::create_dir_all(&new_dir)?;
-                Ok(())
-            })
+        let vaults_dir = neo_workspace::notes_vaults_dir();
+        if old_dir.parent() != Some(vaults_dir.as_path()) {
+            self.renderer.notifications.push(
+                "Only local vaults can be renamed".to_string(),
+                NotificationLevel::Warn,
+            );
+            self.mark_dirty();
+            return;
+        }
+        let new_dir = neo_workspace::vault_notes_workspace(&name).notes_workspace_dir();
+        let result = if old_dir == new_dir {
+            Ok(())
+        } else if new_dir.exists() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("vault already exists: {}", new_dir.display()),
+            ))
         } else {
-            std::fs::create_dir_all(&new_dir)
+            std::fs::rename(&old_dir, &new_dir)
         };
-        match result
-            .and_then(|_| neo_workspace::save_workspace(&workspace))
-            .and_then(|_| neo_workspace::ensure_notes_workspace(&workspace))
-        {
+        match result {
             Ok(()) => self
                 .renderer
                 .notes_sidebar

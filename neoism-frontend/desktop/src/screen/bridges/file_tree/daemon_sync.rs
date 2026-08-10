@@ -300,6 +300,61 @@ impl Screen<'_> {
         self.send_remote_notes_create_entry(vault_root, dir, name, false)
     }
 
+    /// Read a file from the host's shared notes vault. The linked vault may
+    /// live outside the served project root, so scope this request explicitly
+    /// to that vault instead of using the normal remote editor backend.
+    pub(crate) fn send_remote_notes_read(
+        &mut self,
+        vault_root: std::path::PathBuf,
+        path: std::path::PathBuf,
+        markdown: bool,
+    ) -> bool {
+        let Some((handle, runtime)) =
+            self.context_manager.daemon_link_handle_and_runtime()
+        else {
+            return false;
+        };
+        let Ok(relative) = path.strip_prefix(&vault_root) else {
+            return false;
+        };
+        if markdown {
+            if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(&path) {
+                pane.mark_remote_loading();
+            }
+        } else if let Some(pane) = self.context_manager.code_pane_mut_by_path(&path) {
+            pane.mark_remote_loading();
+        }
+        let request_id = handle.allocate_request_id();
+        if markdown {
+            self.pending_remote_markdown_opens
+                .insert(request_id, path.clone());
+        } else {
+            self.pending_remote_code_opens
+                .insert(request_id, path.clone());
+        }
+        let relative = relative.to_string_lossy().into_owned();
+        runtime.spawn(async move {
+            if let Err(error) = handle
+                .send_files_with_request_id(
+                    request_id,
+                    neoism_protocol::files::FilesClientMessage::ReadFile {
+                        path: relative,
+                    },
+                    Some(vault_root),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "neoism::remote_files",
+                    %error,
+                    request_id,
+                    "remote note read send failed"
+                );
+            }
+        });
+        true
+    }
+
     pub(crate) fn send_remote_notes_create_dir(
         &mut self,
         vault_root: std::path::PathBuf,

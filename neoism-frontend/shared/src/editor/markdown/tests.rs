@@ -1570,6 +1570,103 @@ mod tests {
     }
 
     #[test]
+    fn click_after_mouse_visual_selection_returns_to_normal_mode() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["select this text".to_string()];
+        pane.register_block_rect(
+            0,
+            [0.0, 0.0, 200.0, 24.0],
+            [-30.0, 0.0, 20.0, 24.0],
+            0.0,
+            0.0,
+            0,
+            10.0,
+            20.0,
+            200.0,
+            None,
+        );
+        let chars = pane.lines[0].chars().count();
+        measured_text_line(&mut pane, 0, chars, 10.0);
+
+        assert!(pane.click_at(0.0, 4.0));
+        assert!(pane.update_drag(60.0, 4.0));
+        assert!(pane.end_drag());
+        assert_eq!(pane.mode, MarkdownMode::Visual);
+
+        assert!(pane.click_at(90.0, 4.0));
+        assert!(pane.end_drag());
+
+        assert_eq!(pane.mode, MarkdownMode::Normal);
+        assert!(pane.visual_anchor.is_none());
+        assert!(pane.cursor_col > 6);
+    }
+
+    #[test]
+    fn cursor_link_resolves_internal_web_and_phone_targets() {
+        let mut pane = pane_for_test();
+        pane.lines = vec![
+            "Open [[Roadmap]]".to_string(),
+            "Visit [Neoism](https://neoism.dev/docs)".to_string(),
+            "Call [support](tel:+15551234567)".to_string(),
+            "Bare https://example.com/help".to_string(),
+            "Dial tel:+15557654321".to_string(),
+            "Open [Roadmap](Roadmap.md)".to_string(),
+        ];
+
+        pane.cursor_line = 0;
+        pane.cursor_col = "Open [[Road".len();
+        assert_eq!(
+            pane.link_at_cursor(),
+            Some(MarkdownCursorLink::Internal {
+                target: "Roadmap".to_string(),
+                code_ref: false,
+            })
+        );
+
+        pane.cursor_line = 1;
+        pane.cursor_col = "Visit [Neo".len();
+        assert_eq!(
+            pane.link_at_cursor(),
+            Some(MarkdownCursorLink::External(
+                "https://neoism.dev/docs".to_string()
+            ))
+        );
+
+        pane.cursor_line = 2;
+        pane.cursor_col = "Call [supp".len();
+        assert_eq!(
+            pane.link_at_cursor(),
+            Some(MarkdownCursorLink::External("tel:+15551234567".to_string()))
+        );
+
+        pane.cursor_line = 3;
+        pane.cursor_col = "Bare https://exam".len();
+        assert_eq!(
+            pane.link_at_cursor(),
+            Some(MarkdownCursorLink::External(
+                "https://example.com/help".to_string()
+            ))
+        );
+
+        pane.cursor_line = 4;
+        pane.cursor_col = "Dial tel:+1555".len();
+        assert_eq!(
+            pane.link_at_cursor(),
+            Some(MarkdownCursorLink::External("tel:+15557654321".to_string()))
+        );
+
+        pane.cursor_line = 5;
+        pane.cursor_col = "Open [Road".len();
+        assert_eq!(
+            pane.link_at_cursor(),
+            Some(MarkdownCursorLink::Internal {
+                target: "Roadmap.md".to_string(),
+                code_ref: false,
+            })
+        );
+    }
+
+    #[test]
     fn read_only_mouse_drag_includes_the_glyph_under_the_press() {
         let mut pane = pane_for_test();
         pane.read_only = true;

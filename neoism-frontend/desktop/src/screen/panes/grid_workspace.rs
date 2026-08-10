@@ -529,9 +529,6 @@ impl Screen<'_> {
                     });
             if incoming.workspace_path().is_none() {
                 if let Some(path) = self.workspace_notes_vaults.get(&id).cloned() {
-                    #[cfg(target_os = "macos")]
-                    incoming.set_workspace_path(Some(path));
-                    #[cfg(not(target_os = "macos"))]
                     incoming.set_workspace(
                         path.file_name()
                             .and_then(|name| name.to_str())

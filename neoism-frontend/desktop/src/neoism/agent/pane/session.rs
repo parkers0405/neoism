@@ -105,7 +105,11 @@ impl NeoismAgentPane {
         scroll_top: f32,
         viewport_h: f32,
     ) {
-        const LOAD_OLDER_LIMIT: usize = 128;
+        // Bound each UI insertion independently of conversational turn size.
+        // A single tool-heavy turn can contain hundreds of stored messages;
+        // loading until its user boundary causes a large synchronous prepend
+        // and Markdown layout hitch when the background fetch completes.
+        const LOAD_OLDER_LIMIT: usize = 64;
         let threshold = (viewport_h * 0.75).max(720.0);
         if self.timeline_follow_bottom
             || scroll_top > threshold
@@ -122,7 +126,6 @@ impl NeoismAgentPane {
         {
             return;
         }
-        self.timeline_last_older_request_at = Some(Instant::now());
         self.timeline_history.loading_older = true;
         self.timeline_history.last_requested_session_id = Some(session_id.clone());
         self.push_outbound(OutboundAgentCommand::LoadOlderTimeline {

@@ -183,14 +183,22 @@ pub(crate) async fn run_provider_stream_step(
                     "Provider stream timed out after {} ms without an event",
                     idle_timeout.as_millis()
                 );
+                let tool_calls_started =
+                    !provider_stream_timeout_is_retryable(&stream_state);
                 tracing::warn!(
                     session_id = %ctx.session_id,
                     run_id = ctx.run_id,
                     timeout_ms = idle_timeout.as_millis(),
                     saw_progress,
+                    tool_calls_started,
                     "provider stream idle timeout"
                 );
-                if !saw_progress {
+                // Partial reasoning or text is safe to discard and re-stream.
+                // A tool call is not: retrying the provider step could execute
+                // the same mutation twice under a new provider call id. Keep
+                // that case terminal, but do not turn ordinary long-reasoning
+                // stalls into hard failures merely because some tokens arrived.
+                if !tool_calls_started {
                     return Err(ProviderStreamStepError::unfinalized(message, true));
                 }
                 finish_provider_stream_with_error(
@@ -376,6 +384,10 @@ fn event_is_progress(event: &ProviderStreamEvent) -> bool {
         | ProviderStreamEvent::ToolResult { .. }
         | ProviderStreamEvent::ToolError { .. } => true,
     }
+}
+
+fn provider_stream_timeout_is_retryable(stream: &ProviderStreamStepState) -> bool {
+    stream.executed_tool_calls.is_empty()
 }
 
 fn provider_event_delta_bytes(event: &ProviderStreamEvent) -> usize {
@@ -947,4 +959,26 @@ async fn publish_queued_tool_result(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_stream_timeout_is_retryable, ProviderStreamStepState};
+
+    #[test]
+    fn idle_timeout_retries_partial_reasoning_before_any_tool_call() {
+        let stream =
+            ProviderStreamStepState::new("openai".to_string(), "model".to_string());
+
+        assert!(provider_stream_timeout_is_retryable(&stream));
+    }
+
+    #[test]
+    fn idle_timeout_does_not_replay_an_executed_tool_call() {
+        let mut stream =
+            ProviderStreamStepState::new("openai".to_string(), "model".to_string());
+        stream.executed_tool_calls.insert("call-1".to_string());
+
+        assert!(!provider_stream_timeout_is_retryable(&stream));
+    }
 }

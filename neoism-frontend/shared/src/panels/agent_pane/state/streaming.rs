@@ -6,7 +6,10 @@ impl NeoismAgentPane {
         scroll_top: f32,
         viewport_h: f32,
     ) {
-        const LOAD_OLDER_LIMIT: usize = 128;
+        // Keep history materialization frame-sized. Long agent turns are
+        // allowed to span multiple pages instead of arriving as one huge UI
+        // prepend merely to reach their user-message boundary.
+        const LOAD_OLDER_LIMIT: usize = 64;
         let threshold = (viewport_h * 0.75).max(720.0);
         if self.timeline_follow_bottom
             || scroll_top > threshold

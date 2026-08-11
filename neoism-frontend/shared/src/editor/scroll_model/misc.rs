@@ -26,8 +26,8 @@ pub struct AgentTimelineWheel {
 }
 
 /// Convert agent timeline input while preserving its device class. Mouse-wheel
-/// notches keep the Markdown-style three-line distance but use the dedicated
-/// short easing path; precision trackpads remain direct, 1:1 pixel input.
+/// notches move three physical text rows through the code-style spring;
+/// precision trackpads remain direct, 1:1 pixel input.
 pub fn agent_timeline_wheel(delta: &ScrollDelta, line_height: f32) -> AgentTimelineWheel {
     match delta {
         ScrollDelta::Lines { x: _, y } => AgentTimelineWheel {

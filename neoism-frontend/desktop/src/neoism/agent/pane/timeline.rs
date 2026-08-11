@@ -27,6 +27,14 @@ impl NeoismAgentPane {
         });
     }
 
+    fn shift_timeline_view_anchor_for_scroll(&mut self, scroll_offset_delta: f32) {
+        if let Some(anchor) = self.timeline_view_anchor.as_mut() {
+            // Preserve the logical row under the reader while wheel inertia
+            // and streamed tool/code-block relayout happen in the same frame.
+            anchor.screen_offset += scroll_offset_delta;
+        }
+    }
+
     pub fn drain_ui_events(&mut self) -> Vec<NeoismAgentUiEvent> {
         std::mem::take(&mut self.ui_events)
     }
@@ -55,6 +63,7 @@ impl NeoismAgentPane {
         content_height_px: f32,
         viewport_height_px: f32,
     ) {
+        let old_scroll_px = self.timeline_scroll_px;
         let old_max_scroll =
             (self.timeline_content_height_px - self.timeline_viewport_height_px).max(0.0);
         let old_scroll_top =
@@ -108,6 +117,11 @@ impl NeoismAgentPane {
                 self.clamp_timeline_scroll();
             }
         }
+        let max_scroll = self.max_timeline_scroll();
+        if let Some(target) = self.timeline_wheel_target_px.as_mut() {
+            *target = (*target + self.timeline_scroll_px - old_scroll_px)
+                .clamp(0.0, max_scroll);
+        }
     }
 
     pub fn timeline_contains_point(&self, x: f32, y: f32) -> bool {
@@ -122,33 +136,56 @@ impl NeoismAgentPane {
     /// do, without a lingering low-speed tail.
     pub(crate) const TIMELINE_TRACKPAD_DECAY_TAU: f32 = 0.28;
     pub(crate) const TIMELINE_TRACKPAD_STOP_PX_S: f32 = 50.0;
-    pub(crate) const TIMELINE_TRACKPAD_MIN_FRAME_STEP_PX: f32 = 0.0;
-    /// External wheel notches arrive as large, discrete line deltas. Apply a
-    /// small part immediately, then deliver the rest through a short glide so
-    /// one click moves decisively without visibly jumping or drifting.
-    pub(crate) const TIMELINE_WHEEL_DECAY_TAU: f32 = 0.11;
-    pub(crate) const TIMELINE_WHEEL_STOP_PX_S: f32 = 35.0;
-    pub(crate) const TIMELINE_WHEEL_MIN_FRAME_STEP_PX: f32 = 0.75;
     pub fn scroll_timeline_pixels(&mut self, delta_pixels: f32) -> bool {
+        if self.timeline_wheel_target_px.take().is_some() {
+            self.timeline_velocity_px_s = 0.0;
+        }
         self.scroll_timeline_pixels_with_inertia(
             delta_pixels,
             delta_pixels,
             7.0,
             Self::TIMELINE_TRACKPAD_DECAY_TAU,
             Self::TIMELINE_TRACKPAD_STOP_PX_S,
-            Self::TIMELINE_TRACKPAD_MIN_FRAME_STEP_PX,
         )
     }
 
     pub fn scroll_timeline_wheel_pixels(&mut self, delta_pixels: f32) -> bool {
-        self.scroll_timeline_pixels_with_inertia(
-            delta_pixels,
-            delta_pixels * 0.18,
-            7.5,
-            Self::TIMELINE_WHEEL_DECAY_TAU,
-            Self::TIMELINE_WHEEL_STOP_PX_S,
-            Self::TIMELINE_WHEEL_MIN_FRAME_STEP_PX,
-        )
+        if delta_pixels.abs() < f32::EPSILON {
+            return false;
+        }
+        let max_scroll = self.max_timeline_scroll();
+        if max_scroll <= 0.0 {
+            self.timeline_wheel_target_px = None;
+            self.timeline_velocity_px_s = 0.0;
+            return false;
+        }
+        let base = self
+            .timeline_wheel_target_px
+            .unwrap_or(self.timeline_scroll_px);
+        let target = (base + delta_pixels).clamp(0.0, max_scroll);
+        if (target - base).abs() < f32::EPSILON {
+            if self.timeline_wheel_target_px.is_some()
+                && (target - self.timeline_scroll_px).abs() >= 0.5
+            {
+                return true;
+            }
+            self.timeline_wheel_target_px = None;
+            self.timeline_velocity_px_s = 0.0;
+            return false;
+        }
+        if delta_pixels > 0.0 {
+            self.timeline_follow_bottom = false;
+            self.timeline_history.last_requested_session_id = None;
+        }
+        let now = Instant::now();
+        if self.timeline_wheel_target_px.is_none() {
+            self.timeline_velocity_px_s = 0.0;
+            self.timeline_last_tick_at = Some(now);
+        }
+        self.timeline_wheel_target_px = Some(target);
+        self.timeline_last_scroll_at = Some(now);
+        self.pending_timeline_anchor = None;
+        true
     }
 
     pub(crate) fn scroll_timeline_pixels_with_inertia(
@@ -158,7 +195,6 @@ impl NeoismAgentPane {
         velocity_multiplier: f32,
         decay_tau: f32,
         stop_px_s: f32,
-        min_frame_step_px: f32,
     ) -> bool {
         let started = crate::neoism::agent::perf::now();
         if delta_pixels.abs() < f32::EPSILON {
@@ -181,24 +217,24 @@ impl NeoismAgentPane {
             );
             return false;
         }
-        // Direct nudge for instant response, plus a velocity injection so the
-        // scroll keeps gliding after the wheel/touchpad event ends. External
-        // mouse wheels use a tiny nudge and a stronger glide; precision
-        // trackpads keep the existing 1:1 direct response.
+        // Direct response plus a velocity injection preserves the existing
+        // precision-trackpad glide.
         let at_top = self.timeline_scroll_px >= max_scroll - 0.5;
         let at_bottom = self.timeline_scroll_px <= 0.5;
         let before = self.timeline_scroll_px;
         self.timeline_scroll_px =
             (self.timeline_scroll_px + immediate).clamp(0.0, max_scroll);
+        if self.timeline_scroll_px > before {
+            // One completed history page stays latched until the reader moves
+            // farther upward. This prevents hidden tool-heavy pages from
+            // cascading through the transcript without another gesture.
+            self.timeline_history.last_requested_session_id = None;
+        }
         if delta_pixels < 0.0 && self.timeline_scroll_px <= 1.0 {
             self.timeline_follow_bottom = true;
         }
         self.pending_timeline_anchor = None;
-        // The render pass stores a row anchor so streaming layout growth can
-        // keep a stationary reader in place. Once the user moves, that anchor
-        // describes the previous frame and must not be restored over this
-        // input; the renderer will capture a fresh anchor after drawing.
-        self.timeline_view_anchor = None;
+        self.shift_timeline_view_anchor_for_scroll(self.timeline_scroll_px - before);
         // If the user was holding the edge, don't keep building velocity —
         // they can't move further that way and the inertia would feel sticky.
         if (delta_pixels > 0.0 && !at_top) || (delta_pixels < 0.0 && !at_bottom) {
@@ -210,7 +246,6 @@ impl NeoismAgentPane {
                 (self.timeline_velocity_px_s + injected).clamp(-2800.0, 2800.0);
             self.timeline_scroll_decay_tau = decay_tau;
             self.timeline_scroll_stop_px_s = stop_px_s;
-            self.timeline_scroll_min_frame_step_px = min_frame_step_px;
             self.timeline_last_tick_at.get_or_insert_with(Instant::now);
         } else {
             self.timeline_velocity_px_s = 0.0;
@@ -235,9 +270,48 @@ impl NeoismAgentPane {
     }
 
     pub fn tick_timeline_scroll(&mut self) -> bool {
-        // Velocity-based stop threshold — refresh-rate independent, tuned per
-        // input device at injection time so neither trackpads nor wheels keep
-        // crawling once the deliberate part of the motion has ended.
+        if let Some(mut target) = self.timeline_wheel_target_px {
+            let now = Instant::now();
+            let dt = self
+                .timeline_last_tick_at
+                .map(|last| now.duration_since(last).as_secs_f32().min(0.05))
+                .unwrap_or(1.0 / 60.0);
+            self.timeline_last_tick_at = Some(now);
+            target = target.clamp(0.0, self.max_timeline_scroll());
+            self.timeline_wheel_target_px = Some(target);
+
+            const OMEGA: f32 = 16.0;
+            const MAX_SUBSTEP: f32 = 1.0 / 240.0;
+            let before = self.timeline_scroll_px;
+            let mut remaining = dt;
+            while remaining > 0.0 {
+                let step = remaining.min(MAX_SUBSTEP);
+                let delta = target - self.timeline_scroll_px;
+                let accel =
+                    OMEGA * OMEGA * delta - 2.0 * OMEGA * self.timeline_velocity_px_s;
+                self.timeline_velocity_px_s += accel * step;
+                self.timeline_scroll_px += self.timeline_velocity_px_s * step;
+                remaining -= step;
+            }
+            self.timeline_scroll_px = self
+                .timeline_scroll_px
+                .clamp(0.0, self.max_timeline_scroll());
+            self.shift_timeline_view_anchor_for_scroll(self.timeline_scroll_px - before);
+            if (target - self.timeline_scroll_px).abs() < 0.5
+                && self.timeline_velocity_px_s.abs() < 30.0
+            {
+                let before_snap = self.timeline_scroll_px;
+                self.timeline_scroll_px = target;
+                self.shift_timeline_view_anchor_for_scroll(target - before_snap);
+                self.timeline_velocity_px_s = 0.0;
+                self.timeline_wheel_target_px = None;
+                self.timeline_last_tick_at = None;
+            }
+            self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0 && target <= 1.0;
+            self.timeline_last_scroll_at = Some(now);
+            return true;
+        }
+        // Velocity-based stop threshold for the precision trackpad path.
         if self.timeline_velocity_px_s.abs() < self.timeline_scroll_stop_px_s {
             self.timeline_velocity_px_s = 0.0;
             self.timeline_last_tick_at = None;
@@ -258,17 +332,6 @@ impl NeoismAgentPane {
         let decay = (-dt / self.timeline_scroll_decay_tau.max(0.01)).exp();
         self.timeline_velocity_px_s *= decay;
         let step = self.timeline_velocity_px_s * dt;
-        if self.timeline_scroll_min_frame_step_px > 0.0
-            && step.abs() < self.timeline_scroll_min_frame_step_px
-        {
-            // A mouse wheel's final subpixel steps cannot move a pixel-snapped
-            // glyph every frame. Stop before that hold/jump tail begins; the
-            // direct trackpad path deliberately keeps its 1:1 fractional
-            // motion and uses a zero minimum step.
-            self.timeline_velocity_px_s = 0.0;
-            self.timeline_last_tick_at = None;
-            return false;
-        }
         let next = (self.timeline_scroll_px + step).clamp(0.0, max_scroll);
         if (next - self.timeline_scroll_px).abs() < f32::EPSILON {
             // Hit an edge — kill remaining momentum so we don't burn frames.
@@ -276,10 +339,9 @@ impl NeoismAgentPane {
             self.timeline_last_tick_at = None;
             return false;
         }
+        let before = self.timeline_scroll_px;
         self.timeline_scroll_px = next;
-        // Streaming can remeasure the growing tail in this same frame. Do not
-        // let its stale pre-glide anchor undo the kinetic step we just applied.
-        self.timeline_view_anchor = None;
+        self.shift_timeline_view_anchor_for_scroll(next - before);
         if self.timeline_velocity_px_s < 0.0 && self.timeline_scroll_px <= 1.0 {
             self.timeline_follow_bottom = true;
         }
@@ -288,7 +350,8 @@ impl NeoismAgentPane {
     }
 
     pub fn timeline_is_inertial(&self) -> bool {
-        self.timeline_velocity_px_s.abs() >= self.timeline_scroll_stop_px_s
+        self.timeline_wheel_target_px.is_some()
+            || self.timeline_velocity_px_s.abs() >= self.timeline_scroll_stop_px_s
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -415,6 +478,7 @@ impl NeoismAgentPane {
         self.pending_timeline_anchor = None;
         self.timeline_view_anchor = None;
         self.timeline_velocity_px_s = 0.0;
+        self.timeline_wheel_target_px = None;
         true
     }
 
@@ -442,7 +506,11 @@ impl NeoismAgentPane {
         if (next - self.timeline_scroll_px).abs() < f32::EPSILON {
             return false;
         }
+        let before = self.timeline_scroll_px;
         self.timeline_scroll_px = next;
+        if next > before {
+            self.timeline_history.last_requested_session_id = None;
+        }
         self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0;
         self.pending_timeline_anchor = None;
         self.timeline_view_anchor = None;
@@ -470,7 +538,11 @@ impl NeoismAgentPane {
         let progress = ((y - track[1]) / track[3].max(1.0)).clamp(0.0, 1.0);
         // Higher y → further down the visible content → less `timeline_scroll_px`.
         let scroll_top = progress * max_scroll;
+        let before = self.timeline_scroll_px;
         self.timeline_scroll_px = (max_scroll - scroll_top).clamp(0.0, max_scroll);
+        if self.timeline_scroll_px > before {
+            self.timeline_history.last_requested_session_id = None;
+        }
         self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0;
         self.pending_timeline_anchor = None;
         self.timeline_view_anchor = None;

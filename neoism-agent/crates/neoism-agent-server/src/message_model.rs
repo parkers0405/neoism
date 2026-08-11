@@ -89,7 +89,16 @@ fn provider_messages_with_options(
                         } else {
                             format!("{system}\n\n{text}")
                         };
-                        values.push(ProviderMessage::text(ProviderRole::System, content));
+                        // Keep runtime notifications in their chronological
+                        // position. Provider adapters fold System messages
+                        // into the global instruction block, which both
+                        // separates a completion from the turn it should wake
+                        // and buries it among every older notification. The
+                        // persisted `UserMessage.system` marker still keeps
+                        // this out of user bubbles in the UI; provider-side it
+                        // is a trusted runtime-state turn, immediately before
+                        // the reply it triggers.
+                        values.push(ProviderMessage::text(ProviderRole::User, content));
                         return values;
                     }
                 }
@@ -904,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_subtask_completion_is_system_only_provider_context() {
+    fn runtime_subtask_completion_stays_in_chronological_provider_context() {
         let session_id = Id::ascending(IdKind::Session);
         let message_id = Id::ascending(IdKind::Message);
         let text_part_id = Id::ascending(IdKind::Part);
@@ -935,7 +944,7 @@ mod tests {
         }]);
 
         assert_eq!(messages.len(), 1);
-        assert!(matches!(messages[0].role, ProviderRole::System));
+        assert!(matches!(messages[0].role, ProviderRole::User));
         assert!(messages[0]
             .content
             .contains(SUBTASK_COMPLETION_SYSTEM_MARKER));

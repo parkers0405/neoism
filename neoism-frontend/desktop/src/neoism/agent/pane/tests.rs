@@ -1389,46 +1389,61 @@ fn timeline_growth_preserves_reader_position_when_scrolled_up() {
 }
 
 #[test]
-fn mouse_wheel_notch_eases_instead_of_jumping_the_full_distance() {
+fn mouse_wheel_notch_uses_a_fixed_spring_target() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
 
-    assert!(pane.scroll_timeline_wheel_pixels(72.0));
-    assert!((pane.timeline_scroll_offset() - 12.96).abs() < 0.01);
-    assert_eq!(pane.timeline_velocity_px_s, 540.0);
+    assert!(pane.scroll_timeline_wheel_pixels(24.0));
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert_eq!(pane.timeline_wheel_target_px, Some(24.0));
+    assert_eq!(pane.timeline_velocity_px_s, 0.0);
     assert!(pane.timeline_is_inertial());
+    pane.timeline_last_tick_at = Instant::now().checked_sub(Duration::from_millis(16));
+
+    assert!(pane.tick_timeline_scroll());
+    assert!(pane.timeline_scroll_offset() > 0.0);
+    assert!(pane.timeline_scroll_offset() < 24.0);
 }
 
 #[test]
-fn mouse_wheel_glide_stops_before_the_subpixel_tail() {
+fn consecutive_mouse_wheel_notches_accumulate_a_deterministic_target() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
-    assert!(pane.scroll_timeline_wheel_pixels(72.0));
-    pane.timeline_velocity_px_s = 40.0;
-    pane.timeline_last_tick_at = Instant::now().checked_sub(Duration::from_millis(16));
-    let before = pane.timeline_scroll_offset();
 
-    assert!(!pane.tick_timeline_scroll());
-    assert_eq!(pane.timeline_scroll_offset(), before);
-    assert!(!pane.timeline_is_inertial());
+    assert!(pane.scroll_timeline_wheel_pixels(24.0));
+    assert!(pane.scroll_timeline_wheel_pixels(24.0));
+    assert_eq!(pane.timeline_wheel_target_px, Some(48.0));
 }
 
 #[test]
-fn active_scroll_discards_stale_stream_layout_anchor() {
+fn active_scroll_advances_stream_layout_anchor_with_reader() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
     pane.set_timeline_view_anchor(Some("visible-message".to_string()), 24.0);
 
-    assert!(pane.scroll_timeline_wheel_pixels(72.0));
-    assert!(pane.timeline_view_anchor().is_none());
-
-    // Rendering captures a new anchor after the immediate wheel step. The
-    // following inertia frame must invalidate that anchor again before a
-    // simultaneous streaming relayout gets a chance to restore it.
-    pane.set_timeline_view_anchor(Some("visible-message".to_string()), 16.0);
+    assert!(pane.scroll_timeline_wheel_pixels(24.0));
+    let (_, immediate_offset) = pane.timeline_view_anchor().expect("anchor");
+    assert_eq!(immediate_offset, 24.0);
     pane.timeline_last_tick_at = Instant::now().checked_sub(Duration::from_millis(16));
     assert!(pane.tick_timeline_scroll());
-    assert!(pane.timeline_view_anchor().is_none());
+    let (_, spring_offset) = pane.timeline_view_anchor().expect("anchor");
+    assert!(spring_offset > immediate_offset);
+
+    // A streamed block above the anchor grows by 200 px in the same frame.
+    // Restoring the logical row must keep its post-wheel screen position.
+    pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
+    let shifted_row_top = 624.0;
+    pane.restore_timeline_view_anchor(shifted_row_top, spring_offset);
+    let restored_scroll_top = pane.max_timeline_scroll() - pane.timeline_scroll_offset();
+    assert!((shifted_row_top - restored_scroll_top - spring_offset).abs() < 0.01);
+
+    // The spring moves the same logical anchor along with the reader. If streamed
+    // code or a completed apply-patch card remeasures in this frame, restoring
+    // this anchor preserves the newly scrolled-to position.
+    pane.timeline_last_tick_at = Instant::now().checked_sub(Duration::from_millis(16));
+    assert!(pane.tick_timeline_scroll());
+    let (_, inertial_offset) = pane.timeline_view_anchor().expect("anchor");
+    assert!(inertial_offset > spring_offset);
 }
 
 #[test]
@@ -1505,16 +1520,26 @@ fn older_timeline_request_gate_reopens_after_success() {
     pane.timeline_follow_bottom = false;
     pane.maybe_request_older_timeline_page(0.0, 500.0);
     assert!(pane.timeline_history.loading_older);
-    assert_eq!(pane.drain_pending_outbound().len(), 1);
+    let commands = pane.drain_pending_outbound();
+    assert_eq!(commands.len(), 1);
+    assert!(matches!(
+        &commands[0],
+        OutboundAgentCommand::LoadOlderTimeline { limit: 64, .. }
+    ));
 
     // The in-flight gate blocks duplicates.
     pane.maybe_request_older_timeline_page(0.0, 500.0);
     assert_eq!(pane.drain_pending_outbound().len(), 0);
 
-    // Once the response clears the gate, remaining near the boundary loads
-    // the next page without requiring another wheel event.
+    // Completing a page does not cascade into another request just because
+    // hidden tool rows left the viewport near the boundary.
     pane.timeline_history.loading_older = false;
-    pane.timeline_history.last_requested_session_id = None;
+    pane.maybe_request_older_timeline_page(0.0, 500.0);
+    assert_eq!(pane.drain_pending_outbound().len(), 0);
+
+    // Explicit movement farther into history re-arms exactly one page.
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 900.0, 300.0);
+    assert!(pane.scroll_timeline_pixels(10.0));
     pane.maybe_request_older_timeline_page(0.0, 500.0);
     assert_eq!(pane.drain_pending_outbound().len(), 1);
 }
@@ -1556,7 +1581,10 @@ fn apply_older_page_prepends_and_keeps_loading_when_full() {
     assert_eq!(pane.messages[0].id, "m-older");
     assert!(pane.timeline_history.has_older);
     assert!(!pane.timeline_history.loading_older);
-    assert_eq!(pane.timeline_last_older_request_at, None);
+    assert_eq!(
+        pane.timeline_history.last_requested_session_id.as_deref(),
+        Some("session-1")
+    );
     assert_eq!(
         pane.timeline_history.oldest_loaded_cursor.as_deref(),
         Some("raw-oldest")

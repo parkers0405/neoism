@@ -1104,8 +1104,6 @@ impl NeoismAgentPane {
         limit: usize,
     ) {
         if self.session_id.as_deref() != Some(session_id.as_str()) {
-            self.timeline_history.loading_older = false;
-            self.timeline_history.last_requested_session_id = None;
             return;
         }
         let cursor =
@@ -1116,33 +1114,21 @@ impl NeoismAgentPane {
             .name(format!("neoism-agent-history-{session_id}"))
             .spawn(move || {
                 let update = match (|| {
-                    let mut before = cursor;
-                    let mut pages = Vec::new();
-                    let mut raw_count = 0usize;
-                    let (oldest_cursor, reached_start) = loop {
-                        let page = fetch_session_messages_page(
-                            &server,
-                            &session_id,
-                            before.as_deref(),
-                            limit,
-                        )?;
-                        raw_count += page.raw_count;
-                        let reached_start = page.raw_count < limit;
-                        let oldest_cursor = page.oldest_cursor.clone();
-                        let turn_complete = page.oldest_role.as_deref() == Some("user");
-                        pages.push(page.blocks);
-                        if reached_start || turn_complete || oldest_cursor.is_none() {
-                            break (oldest_cursor, reached_start);
-                        }
-                        if oldest_cursor == before {
-                            return Err("history cursor did not advance".to_string());
-                        }
-                        before = oldest_cursor.clone();
-                    };
-                    let mut older = Vec::new();
-                    for blocks in pages.into_iter().rev() {
-                        older.extend(blocks);
-                    }
+                    // Exactly one bounded server page per UI request. Do not
+                    // chase a user-role boundary: a tool-heavy agent turn may
+                    // be hundreds of messages long, and accumulating all of
+                    // it off-thread still creates one enormous synchronous
+                    // prepend/layout operation on the render thread.
+                    let page = fetch_session_messages_page(
+                        &server,
+                        &session_id,
+                        cursor.as_deref(),
+                        limit,
+                    )?;
+                    let raw_count = page.raw_count;
+                    let reached_start = raw_count < limit;
+                    let oldest_cursor = page.oldest_cursor;
+                    let older = page.blocks;
                     Ok::<_, String>((older, raw_count, oldest_cursor, reached_start))
                 })() {
                     Ok((older, raw_count, oldest_cursor, reached_start)) => {
@@ -1185,11 +1171,10 @@ impl NeoismAgentPane {
         oldest_cursor: Option<String>,
         reached_start: bool,
     ) {
-        self.timeline_history.loading_older = false;
-        self.timeline_history.last_requested_session_id = None;
         if self.session_id.as_deref() != Some(session_id.as_str()) {
             return;
         }
+        self.timeline_history.loading_older = false;
         // "Is there more history?" is a property of *stored messages*, not the
         // expanded render blocks. A full page (raw_count == limit) means more
         // may remain; a short page means we hit the start. Comparing block
@@ -1207,7 +1192,6 @@ impl NeoismAgentPane {
         if older.is_empty() {
             self.timeline_history.has_older = !reached_start;
             self.timeline_history.oldest_loaded_cursor = oldest_cursor;
-            self.timeline_last_older_request_at = None;
             return;
         }
         self.mark_timeline_prepend_pending_at_current_height();
@@ -1215,7 +1199,6 @@ impl NeoismAgentPane {
         let prepended = older.len();
         self.messages.splice(0..0, older);
         self.timeline_history.has_older = !reached_start;
-        self.timeline_last_older_request_at = None;
         // Incremental fold instead of a full relayout: keep the existing cache
         // and tell the renderer how many messages landed at the front. Without
         // this every page rerendered all prior rows, so pagination slowed down

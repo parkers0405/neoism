@@ -824,7 +824,6 @@ impl NeoismAgentPane {
                 }) => {
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
                         self.timeline_history.loading_older = false;
-                        self.timeline_history.last_requested_session_id = None;
                         self.system_message("History", error);
                     }
                     changed = true;

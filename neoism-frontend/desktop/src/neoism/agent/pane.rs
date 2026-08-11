@@ -615,19 +615,15 @@ pub struct NeoismAgentPane {
     /// Count of messages just prepended by history pagination, awaiting an
     /// incremental layout fold (consumed by `take_timeline_prepend`).
     pub(super) pending_timeline_prepend_count: Option<usize>,
-    /// When the last older-history request fired. Rate-limits pagination so a
-    /// page that adds little height (e.g. collapsed tool groups) can't trigger
-    /// a back-to-back load cascade that drags the whole transcript in at once.
-    pub(super) timeline_last_older_request_at: Option<Instant>,
     timeline_last_scroll_at: Option<Instant>,
     timeline_velocity_px_s: f32,
     timeline_last_tick_at: Option<Instant>,
-    /// Per-gesture inertia tuning captured at injection time. Trackpads keep
-    /// the long-standing glide; external mouse wheels animate each notch but
-    /// settle quickly instead of drifting on after the wheel stops.
+    /// Fixed destination for discrete mouse-wheel notches. Precision trackpad
+    /// input leaves this unset and keeps the existing kinetic path.
+    timeline_wheel_target_px: Option<f32>,
+    /// Per-gesture inertia tuning for precision trackpad input.
     timeline_scroll_decay_tau: f32,
     timeline_scroll_stop_px_s: f32,
-    timeline_scroll_min_frame_step_px: f32,
     timeline_measure_cache: RefCell<HashMap<TimelineMeasureKey, f32>>,
     // Value is `(blocks, last_used_tick)`. The tick drives true LRU eviction:
     // every cache *hit* (per visible card, per frame) bumps the entry's tick,
@@ -830,13 +826,12 @@ impl Default for NeoismAgentPane {
             pending_timeline_prepend_height_px: None,
             pending_timeline_prepend_delta_px: None,
             pending_timeline_prepend_count: None,
-            timeline_last_older_request_at: None,
             timeline_last_scroll_at: None,
             timeline_velocity_px_s: 0.0,
             timeline_last_tick_at: None,
+            timeline_wheel_target_px: None,
             timeline_scroll_decay_tau: Self::TIMELINE_TRACKPAD_DECAY_TAU,
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
-            timeline_scroll_min_frame_step_px: Self::TIMELINE_TRACKPAD_MIN_FRAME_STEP_PX,
             timeline_measure_cache: RefCell::new(HashMap::new()),
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: std::cell::Cell::new(0),

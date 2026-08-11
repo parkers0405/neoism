@@ -109,7 +109,9 @@ impl NeoismAgentPane {
         if self.has_active_selection() {
             return false;
         }
-        if self.timeline_velocity_px_s.abs() >= 4.0 {
+        if self.timeline_wheel_target_px.is_some()
+            || self.timeline_velocity_px_s.abs() >= 4.0
+        {
             return true;
         }
         self.timeline_last_scroll_at.is_some_and(|last| {

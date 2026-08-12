@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use neoism_agent_core::{McpToolInfo, PermissionRule, ToolListItem};
+use neoism_agent_core::{McpToolInfo, PermissionAction, PermissionRule, ToolListItem};
 use serde_json::{json, Value};
 
+use crate::agent::AgentCatalog;
 use crate::error::ApiError;
 use crate::session_loop::wait_for_cancellation;
 use crate::state::AppState;
@@ -92,8 +93,59 @@ pub(crate) async fn provider_tools_for_agent(
     if !mcp.is_empty() {
         visible.push(mcp_gateway_tool(&mcp));
     }
+    append_task_agent_descriptions(directory, permissions, &mut visible)?;
     visible.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(visible)
+}
+
+fn append_task_agent_descriptions(
+    directory: &str,
+    permissions: &[PermissionRule],
+    tools: &mut [ToolListItem],
+) -> Result<(), ApiError> {
+    let Some(task) = tools.iter_mut().find(|tool| tool.id == "task") else {
+        return Ok(());
+    };
+    let catalog = AgentCatalog::load(directory)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let description = task_agent_description(&catalog, permissions);
+    if !description.is_empty() {
+        task.description.push_str("\n\n");
+        task.description.push_str(&description);
+    }
+    Ok(())
+}
+
+fn task_agent_description(
+    catalog: &AgentCatalog,
+    permissions: &[PermissionRule],
+) -> String {
+    let agents = catalog
+        .list()
+        .into_iter()
+        .filter(|agent| agent.mode != "primary" && !agent.hidden)
+        .filter(|agent| {
+            permission::evaluate("task", &agent.name, permissions).action
+                != PermissionAction::Deny
+        })
+        .map(|agent| {
+            format!(
+                "- {}: {}",
+                agent.name,
+                agent.description.unwrap_or_else(|| {
+                    "This subagent should only be called manually by the user."
+                        .to_string()
+                })
+            )
+        })
+        .collect::<Vec<_>>();
+    if agents.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Available agent types and the tools they have access to:\n{}",
+        agents.join("\n")
+    )
 }
 
 fn mcp_gateway_tool(tools: &[ToolListItem]) -> ToolListItem {
@@ -488,6 +540,45 @@ fn search_score(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_description_advertises_permitted_subagents_like_opencode() {
+        let catalog =
+            AgentCatalog::from_config(&neoism_agent_core::NeoismConfig::default());
+        let build = catalog.get("build").unwrap();
+        let permissions = permission::from_config_map(&build.permission);
+
+        let description = task_agent_description(&catalog, &permissions);
+
+        assert!(description.contains("- explore: Fast agent specialized"));
+        assert!(description.contains("how do API endpoints work?"));
+        assert!(description.contains("- general: General-purpose agent"));
+        assert!(!description.contains("compaction"));
+        assert!(!description.contains("title"));
+    }
+
+    #[test]
+    fn task_description_hides_denied_subagents() {
+        let catalog =
+            AgentCatalog::from_config(&neoism_agent_core::NeoismConfig::default());
+        let permissions = vec![
+            PermissionRule {
+                permission: "task".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "task".to_string(),
+                pattern: "explore".to_string(),
+                action: PermissionAction::Deny,
+            },
+        ];
+
+        let description = task_agent_description(&catalog, &permissions);
+
+        assert!(!description.contains("- explore:"));
+        assert!(description.contains("- general:"));
+    }
 
     fn mcp_tool(client: &str, name: &str, description: &str) -> McpToolInfo {
         McpToolInfo {

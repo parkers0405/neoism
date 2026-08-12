@@ -33,6 +33,15 @@ pub struct NeoismConfig {
         alias = "reasoningEffort"
     )]
     pub variant: Option<String>,
+    /// Controls the length of final text emitted by supported providers.
+    /// OpenAI GPT-5 Responses models support low, medium, and high.
+    #[serde(
+        default,
+        alias = "text_verbosity",
+        alias = "textVerbosity",
+        alias = "verbosity"
+    )]
+    pub text_verbosity: Option<TextVerbosity>,
     #[serde(default, alias = "small_model")]
     pub small_model: Option<String>,
     #[serde(default, alias = "default_agent")]
@@ -82,6 +91,24 @@ pub struct NeoismConfig {
     pub experimental: ExperimentalConfig,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TextVerbosity {
+    Low,
+    Medium,
+    High,
+}
+
+impl TextVerbosity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 /// `shell` as a plain string ("fish"), or the terminal config's
@@ -562,6 +589,24 @@ mod tests {
                 serde_json::from_value(json!({ key: "medium" })).unwrap();
             assert_eq!(config.variant.as_deref(), Some("medium"), "{key}");
         }
+    }
+
+    #[test]
+    fn text_verbosity_accepts_supported_config_spellings() {
+        for key in [
+            "text-verbosity",
+            "text_verbosity",
+            "textVerbosity",
+            "verbosity",
+        ] {
+            let config: NeoismConfig =
+                serde_json::from_value(json!({ key: "high" })).unwrap();
+            assert_eq!(config.text_verbosity, Some(TextVerbosity::High), "{key}");
+        }
+        assert!(serde_json::from_value::<NeoismConfig>(json!({
+            "text-verbosity": "maximum"
+        }))
+        .is_err());
     }
 
     #[test]

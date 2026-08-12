@@ -76,6 +76,7 @@ Agent settings are nested under `agent`:
 {
   "agent": {
     "reasoning-effort": "high",
+    "text-verbosity": "low",
     "input-hints": true,
     "permission": {
       "edit": "ask",

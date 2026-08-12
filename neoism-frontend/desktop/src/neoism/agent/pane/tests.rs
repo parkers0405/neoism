@@ -739,6 +739,36 @@ fn model_change_queues_context_limit_refresh_for_runtime() {
 }
 
 #[test]
+fn zero_token_compaction_usage_does_not_reset_context_meter() {
+    let mut pane = NeoismAgentPane::default();
+    let mut completed = NeoismAgentMessage::assistant("done");
+    completed.usage = Some(NeoismAgentUsage {
+        input: 18_000,
+        output: 500,
+        reasoning: 250,
+        cache_read: 31_250,
+        cache_write: 0,
+        total: 50_000,
+        cost_micros: 0,
+        context_limit: Some(400_000),
+    });
+    let mut compacted = NeoismAgentMessage::compaction("summary", "auto");
+    compacted.usage = Some(NeoismAgentUsage {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache_read: 0,
+        cache_write: 0,
+        total: 0,
+        cost_micros: 0,
+        context_limit: Some(400_000),
+    });
+    pane.messages.extend([completed, compacted]);
+
+    assert_eq!(pane.latest_usage().map(|usage| usage.total), Some(50_000));
+}
+
+#[test]
 fn agent_model_and_thinking_changes_preserve_composer_draft() {
     let mut pane = NeoismAgentPane::default();
     pane.insert_text("keep this question");
@@ -797,6 +827,58 @@ fn stale_idle_snapshot_keeps_streamed_assistant_text_by_id() {
 
     assert_eq!(refreshed.len(), 2);
     assert_eq!(refreshed[1].text, "streamed final answer");
+}
+
+#[test]
+fn child_hydration_merges_snapshot_without_losing_streamed_prefix() {
+    let snapshot = vec![
+        NeoismAgentMessage::user("inspect it").with_id("msg-user"),
+        NeoismAgentMessage::assistant("").with_id("part-answer"),
+    ];
+    let live =
+        vec![NeoismAgentMessage::assistant("the streamed prefix").with_id("part-answer")];
+
+    let merged = merge_session_snapshot(snapshot, live);
+
+    assert_eq!(merged.len(), 2);
+    assert_eq!(merged[1].text, "the streamed prefix");
+}
+
+#[test]
+fn child_live_cache_accumulates_deltas_before_navigation() {
+    let mut messages = Vec::new();
+
+    apply_cached_part_delta(
+        &mut messages,
+        Some("part-answer"),
+        Some("text"),
+        "the prefix",
+    );
+    apply_cached_part_delta(
+        &mut messages,
+        Some("part-answer"),
+        Some("text"),
+        " and suffix",
+    );
+
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id, "part-answer");
+    assert_eq!(messages[0].text, "the prefix and suffix");
+}
+
+#[test]
+fn session_cache_preserves_each_transcripts_scroll_state() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("ses-root".to_string());
+    pane.messages = vec![NeoismAgentMessage::user("root")];
+    pane.timeline_scroll_px = 240.0;
+    pane.timeline_follow_bottom = false;
+
+    pane.cache_current_session();
+
+    let cached = pane.session_cache.get("ses-root").expect("root cache");
+    assert_eq!(cached.timeline_scroll_px, 240.0);
+    assert!(!cached.timeline_follow_bottom);
 }
 
 #[test]

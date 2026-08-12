@@ -1021,6 +1021,36 @@ pub(crate) async fn handle_slash_command(
     session_id: String,
     text: String,
 ) {
+    let trimmed = text.trim();
+    if trimmed == "/cd" || trimmed.starts_with("/cd ") {
+        let directory = trimmed.strip_prefix("/cd").unwrap_or_default().trim();
+        if directory.is_empty() {
+            emit_command_output(
+                &inner,
+                Some(session_id),
+                "Directory",
+                "usage: /cd <directory>",
+            );
+            return;
+        }
+        let body = json!({ "directory": directory });
+        match http_patch_json(&inner, &format!("/session/{session_id}"), &body).await {
+            Ok(value) => {
+                let resolved = value
+                    .get("directory")
+                    .and_then(Value::as_str)
+                    .unwrap_or(directory);
+                emit_command_output(
+                    &inner,
+                    Some(session_id),
+                    "Directory",
+                    format!("Switched location to {resolved}"),
+                );
+            }
+            Err(error) => emit_error(&inner.tx, error),
+        }
+        return;
+    }
     let path = format!("/session/{session_id}/cmd");
     let body = json!({ "command": text });
     emit_command_result(

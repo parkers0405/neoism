@@ -370,7 +370,16 @@ pub(crate) fn apply_agent_event_to_pane(
             pane.push_notice_event(title, body, map_notice_level(level));
         }
         AgentServerMessage::CommandOutput { title, body, .. } => {
-            pane.system_message(title, body);
+            if title == "Directory" {
+                if let Some(directory) = body.strip_prefix("Switched location to ") {
+                    pane.set_directory(Some(directory.to_string()));
+                    pane.location_message(body);
+                } else {
+                    pane.system_message(title, body);
+                }
+            } else {
+                pane.system_message(title, body);
+            }
         }
 
         // -- Tool / permission gating ----------------------------
@@ -458,6 +467,7 @@ pub(crate) fn apply_agent_event_to_pane(
             pane.apply_provider_state(provider_id, model, agent, thinking, context_limit);
         }
         AgentServerMessage::ProviderCatalog { providers } => {
+            pane.set_model_context_limits(model_context_limits_from_catalog(&providers));
             pane.set_model_options(model_options_from_catalog(&providers));
         }
         AgentServerMessage::ConfigDefaults {
@@ -625,6 +635,21 @@ pub(crate) fn model_options_from_catalog(
         }
     }
     out
+}
+
+pub(crate) fn model_context_limits_from_catalog(
+    providers: &[neoism_protocol::agent::ProviderInfo],
+) -> std::collections::HashMap<String, u64> {
+    providers
+        .iter()
+        .flat_map(|provider| {
+            provider.models.iter().filter_map(move |model| {
+                model
+                    .context_limit
+                    .map(|limit| (format!("{}/{}", provider.id, model.id), limit))
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn agent_options_from_catalog(

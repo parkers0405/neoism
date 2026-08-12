@@ -13,6 +13,7 @@ Neoism's application configuration uses domain blocks. Agent settings belong und
     "small-model": "anthropic/claude-haiku-4-5",
     "default-agent": "build",
     "variant": "high",
+    "text-verbosity": "low",
     "instructions": ["AGENTS.md"],
     "permission": {
       "edit": "ask",
@@ -63,6 +64,7 @@ Objects are deep-merged. Arrays and scalar values are replaced by the higher-pre
 | `model` | Default `provider/model` selection. |
 | `small-model` | Less expensive model used for lightweight internal work when available. |
 | `variant` | Default reasoning/model variant, such as `high`. |
+| `text-verbosity` | Response length for supported models: `low`, `medium`, or `high`. GPT-5.x defaults to `low`. |
 | `default-agent` | Initial primary agent. |
 | `agent` | Named custom agent definitions. |
 | `command` | Named prompt commands. |
@@ -87,6 +89,7 @@ Objects are deep-merged. Arrays and scalar values are replaced by the higher-pre
     "small-model": "anthropic/claude-haiku-4-5",
     "default-agent": "build",
     "variant": "high",
+    "text-verbosity": "low",
     "agent": {
       "review": {
         "description": "Reviews changes without editing files",

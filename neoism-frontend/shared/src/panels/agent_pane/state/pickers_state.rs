@@ -85,6 +85,34 @@ impl NeoismAgentPane {
         ));
     }
 
+    pub fn open_directory_picker(&mut self) {
+        let mut options = Vec::new();
+        if let Some(directory) = self.directory.as_deref() {
+            let mut current = NeoismAgentPickerOption::new(
+                directory,
+                "Current session directory",
+                "current",
+                directory,
+            );
+            current.is_current = true;
+            options.push(current);
+        }
+        options.push(NeoismAgentPickerOption::new(
+            "~/",
+            "Home directory",
+            "directory",
+            "~",
+        ));
+        let mut picker = NeoismAgentPicker::new(
+            NeoismAgentPickerKind::Directory,
+            "Change directory",
+            options,
+            0,
+        );
+        picker.search_placeholder = Some("Path or fuzzy directory".to_string());
+        self.picker = Some(picker);
+    }
+
     pub fn open_skill_picker(&mut self) {
         self.push_outbound(OutboundAgentCommand::RefreshSkills {
             directory: self.directory.clone(),

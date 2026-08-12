@@ -12,13 +12,31 @@ impl NeoismAgentPane {
         let Some(event_stream) = self.event_stream.as_mut() else {
             return changed;
         };
-        for update in event_stream.drain() {
+        let stream_session_id = event_stream.session_id().to_string();
+        let updates = event_stream.drain();
+        let stream_is_active =
+            self.session_id.as_deref() == Some(stream_session_id.as_str());
+        for update in updates {
             drained_updates += 1;
             match update {
                 AgentSessionUpdate::Messages {
                     messages,
                     oldest_cursor,
                 } => {
+                    if !stream_is_active {
+                        let cached = self
+                            .session_cache
+                            .entry(stream_session_id.clone())
+                            .or_insert_with(CachedAgentSession::live_only);
+                        cached.messages = merge_session_snapshot(
+                            messages,
+                            std::mem::take(&mut cached.messages),
+                        );
+                        cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
+                        cached.hydrated = true;
+                        changed = true;
+                        continue;
+                    }
                     let messages = self.compact_inbound_user_texts(messages);
                     let messages = self.merge_pending_user_prompts(messages);
                     let mut messages = self.preserve_streamed_response_text(messages);
@@ -106,17 +124,22 @@ impl NeoismAgentPane {
                     // history refreshes as completion.
                 }
                 AgentSessionUpdate::SessionIdle => {
-                    if self.is_streaming() {
+                    if stream_is_active && self.is_streaming() {
                         self.note_streaming(NeoismAgentStreamingState::Idle, None);
                         changed = true;
                     }
-                    self.abort_requested_at = None;
+                    if stream_is_active {
+                        self.abort_requested_at = None;
+                    }
                 }
                 AgentSessionUpdate::System { title, body } => {
                     self.system_message(title, body);
                     changed = true;
                 }
                 AgentSessionUpdate::Retrying { attempt, message } => {
+                    if !stream_is_active {
+                        continue;
+                    }
                     // Recoverable provider error: the server is backing off and
                     // retrying the in-flight run. Show it inline where the
                     // "Thinking…" indicator lives so the run doesn't look
@@ -131,6 +154,9 @@ impl NeoismAgentPane {
                     preview,
                     started_at,
                 } => {
+                    if !stream_is_active {
+                        continue;
+                    }
                     let decision = status_policy::queue_status_decision(
                         count,
                         preview,
@@ -158,7 +184,9 @@ impl NeoismAgentPane {
                     }
                 }
                 AgentSessionUpdate::DequeuedPrompt { text } => {
-                    changed |= self.insert_dequeued_user_prompt(text);
+                    if stream_is_active {
+                        changed |= self.insert_dequeued_user_prompt(text);
+                    }
                 }
                 AgentSessionUpdate::SubagentStatus {
                     session_id,
@@ -167,6 +195,11 @@ impl NeoismAgentPane {
                     title,
                     agent,
                 } => {
+                    let refresh_completed = matches!(
+                        branch_status_from_runtime(&status),
+                        BranchStatus::Completed | BranchStatus::Stopped
+                    );
+                    self.ensure_session_preloaded(session_id.clone(), refresh_completed);
                     self.upsert_live_subagent_entry(&session_id, title, agent);
                     let branch_status = branch_status_from_runtime(&status);
                     self.note_subagent_runtime(
@@ -228,8 +261,16 @@ impl NeoismAgentPane {
                         Vec::new(),
                     )
                     .with_id(format!("background-task-{job_id}"));
-                    self.upsert_part_message(message);
-                    self.ensure_background_task_activity_clock();
+                    if stream_is_active {
+                        self.upsert_part_message(message);
+                        self.ensure_background_task_activity_clock();
+                    } else {
+                        let cached = self
+                            .session_cache
+                            .entry(stream_session_id.clone())
+                            .or_insert_with(CachedAgentSession::live_only);
+                        upsert_cached_part_message(&mut cached.messages, message);
+                    }
                     changed = true;
                 }
                 AgentSessionUpdate::SubagentCompleted {
@@ -239,6 +280,7 @@ impl NeoismAgentPane {
                     agent,
                 } => {
                     if !task_id.is_empty() {
+                        self.ensure_session_preloaded(task_id.clone(), true);
                         self.upsert_live_subagent_entry(&task_id, title, agent);
                         let branch_status = branch_status_from_runtime(&status);
                         self.note_subagent_runtime(task_id.clone(), branch_status, None);
@@ -278,6 +320,9 @@ impl NeoismAgentPane {
                     }
                 }
                 AgentSessionUpdate::GoalUpdated { goal, version } => {
+                    if !stream_is_active {
+                        continue;
+                    }
                     // SESSION_UPDATED carries the authoritative goal, so apply
                     // it live whether it was set, changed, paused, completed,
                     // blocked, or CLEARED (goal = None). The `version` lets the
@@ -295,35 +340,130 @@ impl NeoismAgentPane {
                 } => {
                     delta_updates += 1;
                     delta_bytes += delta.len();
-                    self.apply_part_delta(message_id, part_id, kind, &delta);
-                    if !self.suppress_streaming_after_abort() {
-                        self.refresh_streaming_from_tail();
+                    if stream_is_active {
+                        self.apply_part_delta(message_id, part_id, kind, &delta);
+                        if !self.suppress_streaming_after_abort() {
+                            self.refresh_streaming_from_tail();
+                        }
+                    } else {
+                        let cached = self
+                            .session_cache
+                            .entry(stream_session_id.clone())
+                            .or_insert_with(CachedAgentSession::live_only);
+                        apply_cached_part_delta(
+                            &mut cached.messages,
+                            part_id.as_deref(),
+                            kind.as_deref(),
+                            &delta,
+                        );
                     }
                     changed = true;
                 }
                 AgentSessionUpdate::PartUpdated(message) => {
-                    let kind = message.kind;
-                    let title = message.title.clone();
-                    self.upsert_part_message(message);
-                    if !self.suppress_streaming_after_abort() {
-                        self.note_streaming_from_part(kind, &title);
+                    if stream_is_active {
+                        let kind = message.kind;
+                        let title = message.title.clone();
+                        self.upsert_part_message(message);
+                        if !self.suppress_streaming_after_abort() {
+                            self.note_streaming_from_part(kind, &title);
+                        }
+                    } else {
+                        let cached = self
+                            .session_cache
+                            .entry(stream_session_id.clone())
+                            .or_insert_with(CachedAgentSession::live_only);
+                        upsert_cached_part_message(&mut cached.messages, message);
                     }
                     changed = true;
                 }
                 AgentSessionUpdate::PartRemoved(part_id) => {
-                    self.remove_part_message(&part_id);
+                    if stream_is_active {
+                        self.remove_part_message(&part_id);
+                    } else if let Some(cached) =
+                        self.session_cache.get_mut(&stream_session_id)
+                    {
+                        cached.messages.retain(|message| message.id != part_id);
+                    }
+                    changed = true;
+                }
+                AgentSessionUpdate::ChildPartDelta {
+                    session_id,
+                    message_id,
+                    part_id,
+                    kind,
+                    delta,
+                } => {
+                    delta_updates += 1;
+                    delta_bytes += delta.len();
+                    if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        self.apply_part_delta(message_id, part_id, kind, &delta);
+                        if !self.suppress_streaming_after_abort() {
+                            self.refresh_streaming_from_tail();
+                        }
+                    } else {
+                        let cached = self
+                            .session_cache
+                            .entry(session_id)
+                            .or_insert_with(CachedAgentSession::live_only);
+                        apply_cached_part_delta(
+                            &mut cached.messages,
+                            part_id.as_deref(),
+                            kind.as_deref(),
+                            &delta,
+                        );
+                    }
+                    changed = true;
+                }
+                AgentSessionUpdate::ChildPartUpdated {
+                    session_id,
+                    message,
+                } => {
+                    if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        let kind = message.kind;
+                        let title = message.title.clone();
+                        self.upsert_part_message(message);
+                        if !self.suppress_streaming_after_abort() {
+                            self.note_streaming_from_part(kind, &title);
+                        }
+                    } else {
+                        let cached = self
+                            .session_cache
+                            .entry(session_id)
+                            .or_insert_with(CachedAgentSession::live_only);
+                        upsert_cached_part_message(&mut cached.messages, message);
+                    }
+                    changed = true;
+                }
+                AgentSessionUpdate::ChildPartRemoved {
+                    session_id,
+                    part_id,
+                } => {
+                    if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        self.remove_part_message(&part_id);
+                    } else if let Some(cached) = self.session_cache.get_mut(&session_id) {
+                        cached.messages.retain(|message| message.id != part_id);
+                    }
                     changed = true;
                 }
                 AgentSessionUpdate::CompactionStarted { id, reason } => {
+                    if !stream_is_active {
+                        continue;
+                    }
                     self.start_compaction_message(id, reason);
                     self.note_streaming(NeoismAgentStreamingState::Compacting, None);
                     changed = true;
                 }
                 AgentSessionUpdate::CompactionDelta { delta } => {
+                    if !stream_is_active {
+                        continue;
+                    }
                     self.apply_compaction_delta(&delta);
                     changed = true;
                 }
                 AgentSessionUpdate::CompactionEnded { summary, kind } => {
+                    if !stream_is_active {
+                        continue;
+                    }
                     self.finish_compaction_message(&summary, &kind);
                     if self.is_streaming() {
                         self.note_streaming(NeoismAgentStreamingState::Idle, None);
@@ -757,7 +897,28 @@ impl NeoismAgentPane {
                 Ok(NeoismAgentBackgroundUpdate::SidePanelSubagentsRefreshed(
                     subagents,
                 )) => {
+                    let root_id = subagents.first().map(|root| root.id.clone());
+                    if let Some(root_id) = root_id.as_ref() {
+                        self.session_tree_root_id = Some(root_id.clone());
+                    }
+                    let preload_ids = subagents
+                        .iter()
+                        .skip(1)
+                        .map(|entry| entry.id.clone())
+                        .collect::<Vec<_>>();
                     self.side_panel.set_subagents(subagents);
+                    // A restored/nested child may initially be subscribed to
+                    // itself or its immediate parent. Once the tree lookup
+                    // resolves the actual root, move the one global stream to
+                    // that root so every sibling/descendant keeps hydrating.
+                    if self.is_subagent_session() {
+                        if let Some(root_id) = root_id {
+                            self.start_session_updates(&root_id);
+                        }
+                    }
+                    for session_id in preload_ids {
+                        self.ensure_session_preloaded(session_id, false);
+                    }
                     self.reconcile_task_message_statuses();
                     self.sync_subagent_waiting_clock();
                     changed = true;
@@ -794,6 +955,71 @@ impl NeoismAgentPane {
                         // it can't clear a goal a live event just set.
                         let version = goal.as_ref().map(|goal| goal.updated).unwrap_or(0);
                         self.side_panel.set_session_goal(goal, version);
+                        changed = true;
+                    }
+                }
+                Ok(NeoismAgentBackgroundUpdate::SessionPreloaded {
+                    session_id,
+                    state,
+                    messages,
+                    oldest_cursor,
+                }) => {
+                    self.session_preloads_in_flight.remove(&session_id);
+                    let active = self.session_id.as_deref() == Some(session_id.as_str());
+                    let cached = self.session_cache.remove(&session_id);
+                    let cached_live = cached
+                        .as_ref()
+                        .map(|cached| cached.messages.clone())
+                        .unwrap_or_default();
+                    let live = if active {
+                        merge_session_snapshot(self.messages.clone(), cached_live)
+                    } else {
+                        cached_live
+                    };
+                    let merged = merge_session_snapshot(messages, live);
+                    let mut timeline_history = cached
+                        .as_ref()
+                        .map(|cached| cached.timeline_history.clone())
+                        .unwrap_or_default();
+                    timeline_history.oldest_loaded_cursor = oldest_cursor;
+                    self.session_cache.insert(
+                        session_id.clone(),
+                        CachedAgentSession {
+                            state,
+                            messages: merged.clone(),
+                            timeline_history: timeline_history.clone(),
+                            timeline_scroll_px: cached
+                                .as_ref()
+                                .map(|cached| cached.timeline_scroll_px)
+                                .unwrap_or_default(),
+                            timeline_follow_bottom: cached
+                                .as_ref()
+                                .map(|cached| cached.timeline_follow_bottom)
+                                .unwrap_or(true),
+                            hydrated: true,
+                        },
+                    );
+                    if active {
+                        self.messages = merged;
+                        self.timeline_history = timeline_history;
+                        self.rebase_current_turn_trace();
+                        self.invalidate_timeline_layout();
+                    }
+                    if self.pending_session_switch.as_deref() == Some(session_id.as_str())
+                    {
+                        self.activate_cached_session(&session_id);
+                    }
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::SessionPreloadFailed {
+                    session_id,
+                    error,
+                }) => {
+                    self.session_preloads_in_flight.remove(&session_id);
+                    if self.pending_session_switch.as_deref() == Some(session_id.as_str())
+                    {
+                        self.pending_session_switch = None;
+                        self.system_message("Session", error);
                         changed = true;
                     }
                 }

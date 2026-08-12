@@ -32,7 +32,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // editor/file → terminal.
         let (mode, primary_kind, primary): (Mode, PrimaryKind, String) =
             if self.is_neoism_agent_tab_active() {
-                (Mode::Agent, PrimaryKind::Agent, "Neoism Agent".to_string())
+                (Mode::Agent, PrimaryKind::Agent, "Neoism".to_string())
             } else if let Some(pane) = self.markdown_pane.as_ref() {
                 // A markdown tab paints through the live pane. Map the
                 // pane's own edit mode onto the vi-style pill where it

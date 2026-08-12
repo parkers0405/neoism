@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 
 use crate::auth_store::AuthStore;
 use crate::provider_error::ProviderError;
-use crate::provider_responses::{responses_request_body, ResponsesSseParser};
+use crate::provider_responses::{
+    gpt5_text_verbosity, responses_request_body_with_text_verbosity, ResponsesSseParser,
+};
 
 use super::provider_chat_completion::{
     chat_completion_messages, chat_completion_tools, reasoning_effort,
@@ -124,6 +126,12 @@ impl ProviderRuntime for OpenAiRuntime {
             if let Some(top_p) = crate::provider_transform::model_top_p(&request.model_id) {
                 body["top_p"] = json!(top_p);
             }
+            apply_chat_text_verbosity(
+                &request.provider_id,
+                request.api.as_ref().map(|api| api.id.as_str()).unwrap_or(&request.model_id),
+                request.text_verbosity,
+                &mut body,
+            );
             crate::provider_transform::apply_openai_compatible_request_quirks(&request, &mut body);
             merge_provider_options(&mut body, &request.options);
 
@@ -321,6 +329,23 @@ impl ProviderRuntime for OpenAiRuntime {
     }
 }
 
+fn apply_chat_text_verbosity(
+    provider_id: &str,
+    model_id: &str,
+    configured: Option<neoism_agent_core::TextVerbosity>,
+    body: &mut Value,
+) {
+    // OpenCode excludes Azure because that API rejects the field. GPT-5.x
+    // models reached through Neoism's compatible chat path accept the same
+    // value as a top-level `verbosity` field.
+    if provider_id.eq_ignore_ascii_case("azure") {
+        return;
+    }
+    if let Some(verbosity) = gpt5_text_verbosity(model_id, configured) {
+        body["verbosity"] = Value::String(verbosity.to_string());
+    }
+}
+
 fn merge_provider_options(body: &mut Value, options: &BTreeMap<String, Value>) {
     let Some(object) = body.as_object_mut() else {
         return;
@@ -372,6 +397,32 @@ mod tests {
         assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(body["prompt_cache_key"], "session-1");
     }
+
+    #[test]
+    fn chat_request_uses_opencode_gpt5_verbosity_rules() {
+        let mut body = json!({});
+        apply_chat_text_verbosity("openai", "gpt-5.5", None, &mut body);
+        assert_eq!(body["verbosity"], "low");
+
+        let mut configured = json!({});
+        apply_chat_text_verbosity(
+            "openai",
+            "gpt-5.6-sol",
+            Some(neoism_agent_core::TextVerbosity::High),
+            &mut configured,
+        );
+        assert_eq!(configured["verbosity"], "high");
+
+        for (provider, model) in [
+            ("azure", "gpt-5.5"),
+            ("openai", "gpt-5.3-codex"),
+            ("openai", "gpt-5.2-chat-latest"),
+        ] {
+            let mut excluded = json!({});
+            apply_chat_text_verbosity(provider, model, None, &mut excluded);
+            assert!(excluded.get("verbosity").is_none(), "{provider}/{model}");
+        }
+    }
 }
 
 // Platform Responses API with a plain API key — the wire format the gpt-5.6
@@ -387,11 +438,12 @@ fn openai_api_key_responses_stream(
 
         let endpoint = std::env::var("NEOISM_AGENT_OPENAI_RESPONSES_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1/responses".to_string());
-        let mut body = responses_request_body(
+        let mut body = responses_request_body_with_text_verbosity(
             request.model_id.clone(),
             request.variant.as_deref(),
             &request.messages,
             &request.tools,
+            request.text_verbosity,
         );
         if let Some(session_id) = request.session_id.as_deref().filter(|id| !id.is_empty()) {
             body["prompt_cache_key"] = Value::String(session_id.to_string());
@@ -484,11 +536,12 @@ fn openai_oauth_responses_stream(
 
         let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_RESPONSES_URL")
             .unwrap_or_else(|_| CODEX_RESPONSES_ENDPOINT.to_string());
-        let mut body = responses_request_body(
+        let mut body = responses_request_body_with_text_verbosity(
             request.model_id.clone(),
             request.variant.as_deref(),
             &request.messages,
             &request.tools,
+            request.text_verbosity,
         );
         if let Some(session_id) = request.session_id.as_deref().filter(|id| !id.is_empty()) {
             body["prompt_cache_key"] = Value::String(session_id.to_string());

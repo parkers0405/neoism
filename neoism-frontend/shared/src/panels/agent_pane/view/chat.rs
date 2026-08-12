@@ -135,7 +135,13 @@ pub fn render_chat_with<P, D>(
     );
 
     if composer_visible {
-        sugarloaf.set_late_overlay_mode(true);
+        // Image overlays render in Sugarloaf's normal image pass. Routing the
+        // composer surface to the late quad pass would paint that surface over
+        // attached-image thumbnails. The timeline is already clipped exactly
+        // at the composer border above, so image-bearing composers do not need
+        // that extra masking pass.
+        let late_overlay = pane.input_images().is_empty();
+        sugarloaf.set_late_overlay_mode(late_overlay);
         user_input::render_input(
             sugarloaf,
             pane,
@@ -148,6 +154,8 @@ pub fn render_chat_with<P, D>(
             occlusion_rects,
             prepared_input_rows,
         );
-        sugarloaf.set_late_overlay_mode(false);
+        if late_overlay {
+            sugarloaf.set_late_overlay_mode(false);
+        }
     }
 }

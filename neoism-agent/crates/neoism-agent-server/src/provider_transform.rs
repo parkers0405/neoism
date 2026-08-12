@@ -650,6 +650,7 @@ mod tests {
             provider_id: "openrouter".to_string(),
             model_id: "openai/gpt-5".to_string(),
             variant: Some("high".to_string()),
+            text_verbosity: None,
             api: Some(ProviderApiInfo {
                 id: "openai/gpt-5".to_string(),
                 url: "https://openrouter.ai/api/v1".to_string(),
@@ -676,6 +677,7 @@ mod tests {
             provider_id: "alibaba-cn".to_string(),
             model_id: "qwen3-plus".to_string(),
             variant: Some("xhigh".to_string()),
+            text_verbosity: None,
             api: Some(ProviderApiInfo {
                 id: "qwen3-plus".to_string(),
                 url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
@@ -707,6 +709,7 @@ mod tests {
             provider_id: "openai".to_string(),
             model_id: "gpt-5.5".to_string(),
             variant: None,
+            text_verbosity: None,
             api: Some(ProviderApiInfo {
                 id: "gpt-5.5".to_string(),
                 url: "https://api.openai.com/v1".to_string(),
@@ -732,6 +735,7 @@ mod tests {
             provider_id: "openai".to_string(),
             model_id: "claude-sonnet-4".to_string(),
             variant: None,
+            text_verbosity: None,
             api: None,
             auth_env: Vec::new(),
             messages: vec![
@@ -768,6 +772,7 @@ mod tests {
             provider_id: "anthropic".to_string(),
             model_id: "sonnet-latest".to_string(),
             variant: None,
+            text_verbosity: None,
             api: None,
             auth_env: Vec::new(),
             messages: vec![
@@ -799,6 +804,7 @@ mod tests {
             provider_id: "amazon-bedrock".to_string(),
             model_id: "anthropic.claude-sonnet-4".to_string(),
             variant: None,
+            text_verbosity: None,
             api: None,
             auth_env: Vec::new(),
             messages: vec![
@@ -833,6 +839,7 @@ mod tests {
             provider_id: "openai".to_string(),
             model_id: "mistral-medium".to_string(),
             variant: None,
+            text_verbosity: None,
             api: None,
             auth_env: Vec::new(),
             messages: vec![

@@ -378,8 +378,8 @@ fn submit_plain_prompt_while_streaming_queues_without_transcript_echo() {
         0,
         "queued submissions should stay out of the transcript until dequeue"
     );
-    assert_eq!(pane.queued_prompt_count, 1);
-    assert_eq!(pane.queued_prompt_preview.as_deref(), Some("queued turn"));
+    assert_eq!(pane.queued_prompt_count, 0);
+    assert_eq!(pane.queued_prompt_preview, None);
     let drained = pane.drain_pending_outbound();
     assert_eq!(drained.len(), 1);
     match &drained[0] {
@@ -535,6 +535,48 @@ fn first_model_and_thinking_choices_request_insert_only_config_persistence() {
             thinking: Some(thinking),
         } if thinking == "high"
     )));
+}
+
+#[test]
+fn provider_catalog_limit_survives_limitless_state_updates() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_model_context_limits(HashMap::from([(
+        "openai/gpt-5.6-sol".to_string(),
+        400_000,
+    )]));
+
+    // Config defaults may arrive after the provider catalog.
+    pane.apply_provider_state(
+        None,
+        Some("openai/gpt-5.6-sol".to_string()),
+        Some("build".to_string()),
+        Some("medium".to_string()),
+        None,
+    );
+    assert_eq!(pane.model_context_limit, Some(400_000));
+
+    // Subsequent agent/thinking updates also omit the limit.
+    pane.apply_provider_state(None, None, None, Some("high".to_string()), None);
+    assert_eq!(pane.model_context_limit, Some(400_000));
+}
+
+#[test]
+fn provider_catalog_limit_applies_when_catalog_arrives_after_model() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_provider_state(
+        None,
+        Some("openai/gpt-5.6-sol".to_string()),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(pane.model_context_limit, None);
+
+    pane.set_model_context_limits(HashMap::from([(
+        "openai/gpt-5.6-sol".to_string(),
+        400_000,
+    )]));
+    assert_eq!(pane.model_context_limit, Some(400_000));
 }
 
 #[test]

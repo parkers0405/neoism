@@ -490,20 +490,28 @@ pub(crate) fn usage_from_value(value: Option<&Value>) -> Option<Usage> {
     let input = value.get("input").and_then(Value::as_u64).unwrap_or(0);
     let output = value.get("output").and_then(Value::as_u64).unwrap_or(0);
     let reasoning = value.get("reasoning").and_then(Value::as_u64).unwrap_or(0);
+    let cache = value.get("cache").unwrap_or(&Value::Null);
     let cache_read = value
         .get("cacheRead")
         .or_else(|| value.get("cache_read"))
+        .or_else(|| cache.get("read"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let cache_write = value
         .get("cacheWrite")
         .or_else(|| value.get("cache_write"))
+        .or_else(|| cache.get("write"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let total = value
-        .get("total")
-        .and_then(Value::as_u64)
-        .unwrap_or(input.saturating_add(output));
+    // OpenCode's UI deliberately ignores the provider's `total` here and
+    // reconstructs context from its normalized buckets. Do the same for the
+    // live workspace bridge so live UsageUpdate and hydrated history cannot
+    // disagree about the same step.
+    let total = input
+        .saturating_add(output)
+        .saturating_add(reasoning)
+        .saturating_add(cache_read)
+        .saturating_add(cache_write);
     let cost_micros = value
         .get("costMicros")
         .or_else(|| value.get("cost_micros"))
@@ -524,4 +532,24 @@ pub(crate) fn usage_from_value(value: Option<&Value>) -> Option<Usage> {
         cost_micros,
         context_limit,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_usage_matches_opencode_normalized_bucket_sum() {
+        let usage = usage_from_value(Some(&json!({
+            "total": 99_999,
+            "input": 2_789,
+            "output": 154,
+            "reasoning": 80,
+            "cache": { "read": 70_064, "write": 0 }
+        })))
+        .unwrap();
+
+        assert_eq!(usage.total, 73_087);
+        assert_eq!(usage.cache_read, 70_064);
+    }
 }

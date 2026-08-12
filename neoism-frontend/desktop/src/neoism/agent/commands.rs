@@ -7,18 +7,20 @@ use neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand;
 use serde_json::{json, Value};
 
 use super::api::{
-    api_request_json, api_request_json_with_read_timeout, fetch_session_messages,
-    fetch_session_messages_page, fetch_session_state, fetch_skill_options,
-    first_interaction_id, first_interaction_value, format_mcp_status, format_permissions,
-    format_questions, format_queue, is_permission_reply, normalize_model_ref,
-    normalize_thinking, percent_encode, permission_reply_alias, prompt_model_json,
-    question_answers, question_count, session_model_json,
+    api_request_json, api_request_json_with_read_timeout, fetch_directory_options,
+    fetch_session_messages, fetch_session_messages_page, fetch_session_state,
+    fetch_skill_options, first_interaction_id, first_interaction_value,
+    format_mcp_status, format_permissions, format_questions, format_queue,
+    is_permission_reply, normalize_model_ref, normalize_thinking, percent_encode,
+    permission_reply_alias, prompt_model_json, question_answers, question_count,
+    session_model_json,
 };
 use super::pane::{
-    NeoismAgentBackgroundUpdate, NeoismAgentMessage, NeoismAgentMessageKind,
-    NeoismAgentMode, NeoismAgentNoticeLevel, NeoismAgentPane, NeoismAgentStreamingState,
+    merge_session_snapshot, CachedAgentSession, NeoismAgentBackgroundUpdate,
+    NeoismAgentMessage, NeoismAgentMode, NeoismAgentNoticeLevel, NeoismAgentPane,
+    NeoismAgentStreamingState,
 };
-use super::picker::NeoismAgentPickerOption;
+use super::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
 use super::side_panel::SessionGoal;
 
 impl NeoismAgentPane {
@@ -41,6 +43,10 @@ impl NeoismAgentPane {
                 self.switch_session(session_id);
             }
             SlashCommandAction::OpenSessionsPicker => self.open_sessions_picker(),
+            SlashCommandAction::ChangeDirectory(directory) => {
+                self.change_directory(directory)
+            }
+            SlashCommandAction::OpenDirectoryPicker => self.open_directory_picker(),
             SlashCommandAction::OpenSubagentPicker => self.open_subagent_picker(),
             SlashCommandAction::ShowSkills => self.show_skills(),
             SlashCommandAction::ShowSkill(name) => self.show_skill(name),
@@ -101,6 +107,75 @@ impl NeoismAgentPane {
             SlashCommandAction::ClearGoal => self.clear_goal(),
             SlashCommandAction::PauseGoal => self.set_goal_paused(true),
             SlashCommandAction::ResumeGoal => self.set_goal_paused(false),
+        }
+    }
+
+    fn open_directory_picker(&mut self) {
+        let session_id = match self.ensure_session() {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                self.system_message("Directory", error);
+                return;
+            }
+        };
+        match fetch_directory_options(
+            &self.server,
+            &session_id,
+            self.directory.as_deref(),
+        ) {
+            Ok(options) if !options.is_empty() => {
+                let selected = options
+                    .iter()
+                    .position(|option| option.is_current)
+                    .unwrap_or(0);
+                let mut picker = NeoismAgentPicker::new(
+                    NeoismAgentPickerKind::Directory,
+                    "Change directory",
+                    options,
+                    selected,
+                );
+                picker.search_placeholder = Some("Path or fuzzy directory".to_string());
+                self.picker = Some(picker);
+            }
+            Ok(_) => self.system_message("Directory", "no directories found"),
+            Err(error) => self.system_message("Directory", error),
+        }
+    }
+
+    pub(super) fn change_directory(&mut self, requested: String) {
+        let session_id = match self.ensure_session() {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                self.system_message("Directory", error);
+                return;
+            }
+        };
+        let body = json!({ "directory": requested });
+        match api_request_json(
+            &self.server,
+            "PATCH",
+            &format!("/session/{session_id}"),
+            Some(&body),
+        ) {
+            Ok(Some(value)) => {
+                let directory = value
+                    .get("directory")
+                    .and_then(Value::as_str)
+                    .unwrap_or(requested.as_str())
+                    .to_string();
+                self.directory = Some(directory.clone());
+                self.invalidate_skill_options();
+                self.close_picker();
+                self.side_panel.invalidate_goal_refresh();
+                let mut message = NeoismAgentMessage::system(
+                    "Directory",
+                    format!("Switched location to {directory}"),
+                );
+                message.tool = "location_notice".to_string();
+                self.upsert_part_message(message);
+            }
+            Ok(None) => self.system_message("Directory", "server returned no session"),
+            Err(error) => self.system_message("Directory failed", error),
         }
     }
 
@@ -420,111 +495,170 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn execute_switch_session_command(&mut self, session_id: String) {
-        let started = super::perf::now();
-        let previous_session_id = self.session_id.clone();
-        let previous_message_count = self.messages.len();
         if session_id.is_empty() {
             return;
         }
-        let state_started = super::perf::now();
-        let state = fetch_session_state(&self.server, &session_id).ok();
-        let state_ok = state.is_some();
-        let state_us = super::perf::elapsed_us(state_started);
-        let messages_started = super::perf::now();
-        match fetch_session_messages_page(&self.server, &session_id, None, 80) {
-            Ok(page) => {
-                let messages = page.blocks;
-                self.clear_pending_user_prompts();
-                self.session_id = Some(session_id.clone());
-                self.side_panel
-                    .set_viewed_session_id(Some(session_id.clone()));
-                self.input.clear();
-                self.close_picker();
-                self.reset_session_runtime_ui();
-                // Pagination state is per-session. Leaking the previous
-                // session's cursor/has_older here either disabled "load
-                // older" entirely or fed the server a foreign message id,
-                // which resolves to the newest page and dedupes to nothing.
-                self.timeline_history = Default::default();
-                self.timeline_history.oldest_loaded_cursor = page.oldest_cursor;
-                // Any session switch returns the panel to chat view — the
-                // "← Back" home-override peek shouldn't linger onto the
-                // newly opened session.
-                self.side_panel.set_show_home_override(false);
-                self.side_panel.invalidate_subagent_refresh();
-                // Reset the previous session's goal AND its version, then
-                // force a refetch so the Goal section reflects the session we
-                // just switched to (a fresh version lets the new goal apply).
-                self.side_panel.reset_session_goal();
-                self.side_panel.invalidate_goal_refresh();
-                // Pull the session's stored agent / model / thinking so the
-                // bottom-input chips reflect the resumed turn instead of the
-                // pane's default config.
-                self.parent_session_id =
-                    state.as_ref().and_then(|state| state.parent_id.clone());
-                if let Some(state) = state {
-                    if let Some(agent) = state.agent {
-                        self.agent = Some(agent);
-                    }
-                    if let Some(model) = state.model {
-                        self.model = model;
-                    }
-                    self.thinking = state.thinking;
-                    self.execute_refresh_model_context_limit_command();
-                }
-                if self.is_subagent_session() {
-                    self.clear_composer();
-                    self.set_cursor_rect(None);
-                    self.close_picker();
-                }
-                self.messages = messages;
-                self.invalidate_timeline_layout();
-                let hydrate_started = super::perf::now();
-                self.hydrate_runtime_status_for_session(&session_id);
-                let hydrate_us = super::perf::elapsed_us(hydrate_started);
-                self.start_session_updates(&session_id);
-                if self.messages.is_empty() {
-                    self.system_message("Session", format!("session {session_id}"));
-                }
-                if super::perf::enabled() {
-                    tracing::info!(
-                        target: "neoism::agent_ui_perf",
-                        previous_session_id = previous_session_id.as_deref(),
-                        session_id,
-                        previous_message_count,
-                        message_count = self.messages.len(),
-                        tool_messages = self.messages.iter().filter(|message| matches!(message.kind, NeoismAgentMessageKind::Tool | NeoismAgentMessageKind::Subtask)).count(),
-                        text_bytes = self.messages.iter().map(|message| message.text.len()).sum::<usize>(),
-                        state_ok,
-                        state_us,
-                        messages_ok = true,
-                        messages_us = super::perf::elapsed_us(messages_started),
-                        hydrate_us,
-                        total_us = super::perf::elapsed_us(started),
-                        "agent switch session"
-                    );
-                }
-            }
-            Err(error) => {
-                if super::perf::enabled() {
-                    tracing::warn!(
-                        target: "neoism::agent_ui_perf",
-                        previous_session_id = previous_session_id.as_deref(),
-                        session_id,
-                        previous_message_count,
-                        state_ok,
-                        state_us,
-                        messages_ok = false,
-                        messages_us = super::perf::elapsed_us(messages_started),
-                        total_us = super::perf::elapsed_us(started),
-                        error = %error,
-                        "agent switch session failed"
-                    );
-                }
-                self.side_panel.invalidate_subagent_refresh();
-                self.system_message("Session", error)
+        if self
+            .session_cache
+            .get(&session_id)
+            .is_some_and(|cached| cached.hydrated)
+        {
+            self.activate_cached_session(&session_id);
+            return;
+        }
+        // Keep the current transcript painted while the target hydrates off
+        // the UI thread. A live child cache may already contain streamed
+        // deltas; the preload result merges with them before activation.
+        self.pending_session_switch = Some(session_id.clone());
+        self.ensure_session_preloaded(session_id, false);
+    }
+
+    pub(crate) fn ensure_session_preloaded(&mut self, session_id: String, force: bool) {
+        if session_id.is_empty() {
+            return;
+        }
+        if !force
+            && self
+                .session_cache
+                .get(&session_id)
+                .is_some_and(|cached| cached.hydrated)
+        {
+            return;
+        }
+        if !self.session_preloads_in_flight.insert(session_id.clone()) {
+            return;
+        }
+        self.session_cache
+            .entry(session_id.clone())
+            .or_insert_with(CachedAgentSession::live_only);
+        let server = self.server.clone();
+        let tx = self.background_sender();
+        let thread_session_id = session_id.clone();
+        let spawn = thread::Builder::new()
+            .name(format!("neoism-agent-preload-{thread_session_id}"))
+            .spawn(move || {
+                let update = fetch_session_state(&server, &thread_session_id)
+                    .and_then(|state| {
+                        fetch_session_messages_page(
+                            &server,
+                            &thread_session_id,
+                            None,
+                            100,
+                        )
+                        .map(|page| {
+                            NeoismAgentBackgroundUpdate::SessionPreloaded {
+                                session_id: thread_session_id.clone(),
+                                state,
+                                messages: page.blocks,
+                                oldest_cursor: page.oldest_cursor,
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|error| {
+                        NeoismAgentBackgroundUpdate::SessionPreloadFailed {
+                            session_id: thread_session_id,
+                            error,
+                        }
+                    });
+                let _ = tx.send(update);
+            });
+        if let Err(error) = spawn {
+            self.session_preloads_in_flight.remove(&session_id);
+            if self.pending_session_switch.as_deref() == Some(session_id.as_str()) {
+                self.pending_session_switch = None;
+                self.system_message(
+                    "Session",
+                    format!("failed to preload session: {error}"),
+                );
             }
         }
+    }
+
+    pub(crate) fn cache_current_session(&mut self) {
+        let Some(session_id) = self.session_id.clone() else {
+            return;
+        };
+        let state = neoism_ui::panels::agent_pane::api_mapping::SessionState {
+            agent: self.agent.clone(),
+            model: (!self.model.is_empty()).then(|| self.model.clone()),
+            thinking: self.thinking.clone(),
+            parent_id: self.parent_session_id.clone(),
+            directory: self.directory.clone(),
+        };
+        let live = self
+            .session_cache
+            .remove(&session_id)
+            .map(|cached| cached.messages)
+            .unwrap_or_default();
+        self.session_cache.insert(
+            session_id,
+            CachedAgentSession {
+                state,
+                messages: merge_session_snapshot(self.messages.clone(), live),
+                timeline_history: self.timeline_history.clone(),
+                timeline_scroll_px: self.timeline_scroll_px,
+                timeline_follow_bottom: self.timeline_follow_bottom,
+                hydrated: true,
+            },
+        );
+    }
+
+    pub(crate) fn activate_cached_session(&mut self, session_id: &str) {
+        if self.session_id.as_deref() == Some(session_id) {
+            self.pending_session_switch = None;
+            return;
+        }
+        let Some(cached) = self.session_cache.get(session_id).cloned() else {
+            return;
+        };
+        self.cache_current_session();
+        let state = cached.state;
+        if state.parent_id.is_none() {
+            self.session_tree_root_id = Some(session_id.to_string());
+        } else if self.session_tree_root_id.is_none() {
+            self.session_tree_root_id = state.parent_id.clone();
+        }
+        self.clear_pending_user_prompts();
+        self.session_id = Some(session_id.to_string());
+        self.parent_session_id = state.parent_id.clone();
+        self.side_panel
+            .set_viewed_session_id(Some(session_id.to_string()));
+        self.input.clear();
+        self.close_picker();
+        self.reset_session_runtime_ui();
+        self.timeline_history = cached.timeline_history;
+        self.timeline_scroll_px = cached.timeline_scroll_px;
+        self.timeline_follow_bottom = cached.timeline_follow_bottom;
+        self.side_panel.set_show_home_override(false);
+        self.side_panel.invalidate_subagent_refresh();
+        self.side_panel.reset_session_goal();
+        self.side_panel.invalidate_goal_refresh();
+        if let Some(directory) = state.directory {
+            self.directory = Some(directory);
+            self.invalidate_skill_options();
+        }
+        if let Some(agent) = state.agent {
+            self.agent = Some(agent);
+        }
+        if let Some(model) = state.model {
+            self.model = model;
+        }
+        self.thinking = state.thinking;
+        self.execute_refresh_model_context_limit_command();
+        if self.is_subagent_session() {
+            self.clear_composer();
+            self.set_cursor_rect(None);
+            self.close_picker();
+        }
+        self.messages = cached.messages;
+        self.invalidate_timeline_layout();
+        self.hydrate_runtime_status_for_session(session_id);
+        let stream_session_id = self
+            .session_tree_root_id
+            .clone()
+            .unwrap_or_else(|| session_id.to_string());
+        self.start_session_updates(&stream_session_id);
+        self.pending_session_switch = None;
     }
 
     pub(super) fn send_prompt(
@@ -1093,9 +1227,11 @@ impl NeoismAgentPane {
             &format!("/session/{session_id}/abort"),
             None,
         ) {
-            Ok(_) => {
-                self.system_message("Abort", "session abort requested");
-            }
+            // Escape already updates the local running state immediately.
+            // A successful abort is intentionally silent: surfacing it as a
+            // system notice leaves an unnecessary "interrupted run" pill in
+            // the chat every time the user presses Escape.
+            Ok(_) => {}
             Err(error) => self.system_message("Abort", error),
         }
     }
@@ -1300,6 +1436,7 @@ impl NeoismAgentPane {
             .to_string();
         self.session_id = Some(id.clone());
         self.parent_session_id = None;
+        self.session_tree_root_id = Some(id.clone());
         self.side_panel.set_viewed_session_id(Some(id.clone()));
         Ok(id)
     }

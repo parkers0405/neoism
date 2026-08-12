@@ -11,6 +11,12 @@ impl NeoismAgentPane {
             self.submit_connect_secret(picker.query.clone());
             return true;
         }
+        if picker.kind == NeoismAgentPickerKind::Directory {
+            if let Some(directory) = directory_picker_target(&picker) {
+                self.change_directory(directory);
+            }
+            return true;
+        }
         let Some(option) = picker.selected_option().cloned() else {
             return true;
         };
@@ -28,6 +34,7 @@ impl NeoismAgentPane {
             NeoismAgentPickerKind::Session | NeoismAgentPickerKind::Subagent => {
                 self.switch_session(option.value);
             }
+            NeoismAgentPickerKind::Directory => unreachable!("handled above"),
             NeoismAgentPickerKind::Skill => self.apply_skill_mention(option),
             NeoismAgentPickerKind::SkillMention => {
                 self.apply_inline_skill_mention(option);
@@ -725,5 +732,55 @@ impl NeoismAgentPane {
             }
         }
         expanded
+    }
+}
+
+fn directory_picker_target(picker: &NeoismAgentPicker) -> Option<String> {
+    let query = picker.query.trim();
+    let selected = picker.selected_option().map(|option| option.value.clone());
+    if query.is_empty() {
+        return selected;
+    }
+    let looks_like_path = query.starts_with(['~', '/', '.', '\\'])
+        || query.contains(['/', '\\'])
+        || query.as_bytes().get(1) == Some(&b':');
+    if looks_like_path || selected.is_none() {
+        Some(query.to_string())
+    } else {
+        selected
+    }
+}
+
+#[cfg(test)]
+mod directory_picker_tests {
+    use super::*;
+
+    fn picker() -> NeoismAgentPicker {
+        NeoismAgentPicker::new(
+            NeoismAgentPickerKind::Directory,
+            "Change directory",
+            vec![
+                NeoismAgentPickerOption::new("current/", "", "current", "/tmp/current"),
+                NeoismAgentPickerOption::new("other/", "", "directory", "/tmp/other"),
+            ],
+            0,
+        )
+    }
+
+    #[test]
+    fn directory_picker_uses_selected_fuzzy_match() {
+        let mut picker = picker();
+        picker.set_query("other".to_string());
+        assert_eq!(directory_picker_target(&picker).as_deref(), Some("/tmp/other"));
+    }
+
+    #[test]
+    fn directory_picker_accepts_explicit_tilde_path() {
+        let mut picker = picker();
+        picker.set_query("~/projects/neoism".to_string());
+        assert_eq!(
+            directory_picker_target(&picker).as_deref(),
+            Some("~/projects/neoism")
+        );
     }
 }

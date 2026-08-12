@@ -278,8 +278,6 @@ impl NeoismAgentPane {
         if self.is_streaming() {
             self.last_control_c_at = Some(now);
             self.abort_session();
-            self.messages
-                .push(NeoismAgentMessage::subtask("Interrupted", "run stopped"));
             return;
         }
         let double = self
@@ -288,8 +286,6 @@ impl NeoismAgentPane {
         self.last_control_c_at = Some(now);
         if double {
             self.abort_session();
-            self.messages
-                .push(NeoismAgentMessage::subtask("Interrupted", "run stopped"));
         }
     }
 
@@ -719,6 +715,11 @@ impl NeoismAgentPane {
         }) {
             picker.replace_options(options);
         }
+    }
+
+    pub(crate) fn invalidate_skill_options(&mut self) {
+        self.skill_options.clear();
+        self.skill_options_directory = None;
     }
 
     pub(crate) fn refresh_skill_options(&mut self) -> Result<(), String> {

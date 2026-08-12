@@ -2,12 +2,13 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::state::{
-    NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind, NeoismAgentPane,
-    NeoismAgentImage, NeoismAgentTodo,
+    NeoismAgentImage, NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind,
+    NeoismAgentPane, NeoismAgentTodo,
 };
 
 use super::assistant::{
-    render_assistant_text_with, render_reasoning_message_with, ASSISTANT_TEXT_PAD_LEFT,
+    render_assistant_text_with, render_reasoning_message_with,
+    ASSISTANT_RESPONSE_FOOTER_H, ASSISTANT_TEXT_PAD_LEFT,
 };
 use super::code_block::{
     render_code_block, warm_code_block_render_cache, AgentCodeMessage, AgentCodePane,
@@ -96,6 +97,7 @@ where
         h: f32,
         body_id: &str,
         text: &str,
+        response_footer: &str,
         markdown_blocks: Option<&[AssistantMarkdownBlock]>,
         pane: &mut P,
         theme: &IdeTheme,
@@ -113,6 +115,7 @@ where
             h,
             body_id,
             text,
+            response_footer,
             markdown_blocks,
             pane,
             theme,
@@ -497,6 +500,39 @@ where
         return 0.0;
     }
 
+    if message.kind() == AgentMessageCardKind::System
+        && message.tool() == "location_notice"
+    {
+        let Some(notice_opts) = opts_with_clip(
+            DrawOpts {
+                font_size: 13.0 * s,
+                color: theme.u8(theme.muted),
+                ..DrawOpts::default()
+            },
+            viewport_clip,
+        ) else {
+            return h;
+        };
+        let lines = wrap_text(
+            sugarloaf,
+            AgentToolMessage::text(message),
+            (w - 36.0 * s).max(80.0 * s),
+            &notice_opts,
+            8,
+        );
+        for (index, line) in lines.iter().enumerate() {
+            draw_text_clipped(
+                sugarloaf,
+                x + 18.0 * s,
+                y + 2.0 * s + index as f32 * 19.0 * s,
+                line,
+                &notice_opts,
+                occlusion_rects,
+            );
+        }
+        return h;
+    }
+
     match message.kind() {
         AgentMessageCardKind::Assistant => {
             return D::render_assistant_text(
@@ -507,6 +543,7 @@ where
                 h,
                 AgentToolMessage::id(message),
                 AgentToolMessage::text(message),
+                AgentToolMessage::status(message),
                 markdown_blocks,
                 pane,
                 theme,
@@ -820,7 +857,7 @@ where
             if AgentToolMessage::text(message).trim().is_empty() {
                 return 0.0;
             }
-            D::measure_markdown_text(
+            let markdown_h = D::measure_markdown_text(
                 sugarloaf,
                 pane,
                 AgentToolMessage::text(message),
@@ -830,7 +867,12 @@ where
                 (width - 30.0 * s - ASSISTANT_TEXT_PAD_LEFT * s).max(80.0 * s),
                 theme,
                 s,
-            )
+            );
+            if AgentToolMessage::status(message).trim().is_empty() {
+                markdown_h
+            } else {
+                markdown_h + ASSISTANT_RESPONSE_FOOTER_H * s
+            }
         }
         AgentMessageCardKind::Reasoning => {
             if AgentToolMessage::text(message).trim().is_empty() {
@@ -953,6 +995,18 @@ where
                 );
                 42.0 * s + markdown_h
             }
+        }
+        AgentMessageCardKind::System if message.tool() == "location_notice" => {
+            let mut notice_opts = body_opts;
+            notice_opts.font_size = 13.0 * s;
+            let lines = wrap_text(
+                sugarloaf,
+                AgentToolMessage::text(message),
+                (width - 36.0 * s).max(80.0 * s),
+                &notice_opts,
+                8,
+            );
+            lines.len().max(1) as f32 * 19.0 * s + 4.0 * s
         }
         _ => {
             let lines = wrap_text(
@@ -1168,6 +1222,7 @@ where
             (h - 34.0 * s).max(0.0),
             AgentToolMessage::id(message),
             AgentToolMessage::text(message),
+            "",
             markdown_blocks,
             pane,
             theme,

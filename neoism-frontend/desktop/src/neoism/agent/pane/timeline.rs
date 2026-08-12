@@ -563,13 +563,20 @@ impl NeoismAgentPane {
         let tx = self.background_tx.clone();
         std::thread::Builder::new()
             .name("neoism-agent-model-limit".into())
-            .spawn(move || {
-                let limit = fetch_model_context_limit(&server, &model).ok().flatten();
-                let _ =
-                    tx.send(NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {
-                        model,
-                        limit,
-                    });
+            .spawn(move || match fetch_model_context_limit(&server, &model) {
+                Ok(limit) => {
+                    let _ = tx.send(
+                        NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {
+                            model,
+                            limit,
+                        },
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    model,
+                    "failed to refresh agent model context limit"
+                ),
             })
             .ok();
     }
@@ -579,7 +586,15 @@ impl NeoismAgentPane {
             .messages
             .iter()
             .rev()
-            .find_map(|message| message.usage.clone())?;
+            // Compaction summaries and aborted generations carry a zeroed
+            // usage object. Treating that as a real snapshot made the meter
+            // flash to 0 before the next provider step revealed the existing
+            // (often tens-of-thousands-token) context again.
+            .find_map(|message| {
+                message.usage.clone().filter(|usage| {
+                    usage.input > 0 || usage.output > 0 || usage.total > 0
+                })
+            })?;
         usage.context_limit = self.model_context_limit.or(usage.context_limit);
         Some(usage)
     }

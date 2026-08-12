@@ -466,6 +466,9 @@ async fn generate_model_compaction_summary(
         model_id: model.model_id.clone(),
         session_id: Some(session_id.to_string()),
         variant: model.variant.clone(),
+        text_verbosity: crate::session_prompt::configured_text_verbosity(Some(
+            &info.directory,
+        )),
         api: metadata.api,
         auth_env: metadata.auth_env,
         messages: provider_messages,
@@ -505,22 +508,13 @@ async fn generate_model_compaction_summary(
                     continue;
                 }
                 raw.push_str(&delta);
-                if append_compaction_text_delta(
+                publish_compaction_text_delta(
                     state,
                     session_id,
                     assistant_message_id,
                     assistant_text_part_id,
                     &delta,
-                )
-                .await
-                .is_none()
-                {
-                    return None;
-                }
-                state.publish(EventPayload::new(
-                    event_type::SESSION_COMPACTION_DELTA,
-                    json!({ "sessionID": session_id, "text": delta }),
-                ));
+                );
             }
             ProviderStreamEvent::Error { .. } if raw.trim().is_empty() => return None,
             ProviderStreamEvent::Error { .. } => break,
@@ -868,37 +862,18 @@ fn assistant_parent_id(message: &MessageWithParts) -> Option<String> {
     }
 }
 
-async fn append_compaction_text_delta(
+fn publish_compaction_text_delta(
     state: &AppState,
     session_id: &str,
     assistant_message_id: &str,
     assistant_text_part_id: &str,
     delta: &str,
-) -> Option<()> {
-    // Best-effort live persistence so a reload mid-compaction shows progress.
-    // CRUCIAL: a transient store hiccup must NOT abort the whole summary — this
-    // used to `?`-propagate the error, which discarded the entire model summary
-    // mid-stream and silently fell back to local truncation ("... earlier
-    // context truncated during local compaction."). The full summary is also
-    // written once when streaming finishes (`finish_compaction_assistant_message`),
-    // so a dropped delta here is harmless.
-    if let Ok(Some(mut message)) = state
-        .inner
-        .store
-        .get_message(session_id, assistant_message_id)
-        .await
-    {
-        for part in &mut message.parts {
-            if let Part::Text(text) = part {
-                if text.id.as_str() == assistant_text_part_id {
-                    text.text.push_str(delta);
-                    break;
-                }
-            }
-        }
-        let _ = state.inner.store.update_message(session_id, &message).await;
-    }
-    state.publish(EventPayload::new(
+) {
+    // Match normal assistant streaming and OpenCode: deltas are transient UI
+    // progress, while the complete summary is persisted once at the semantic
+    // boundary. Persisting both events plus the growing message for every token
+    // made compaction itself increasingly slow.
+    state.publish_live(EventPayload::new(
         event_type::MESSAGE_PART_DELTA,
         json!({
             "sessionID": session_id,
@@ -909,7 +884,10 @@ async fn append_compaction_text_delta(
             "delta": delta,
         }),
     ));
-    Some(())
+    state.publish_live(EventPayload::new(
+        event_type::SESSION_COMPACTION_DELTA,
+        json!({ "sessionID": session_id, "text": delta }),
+    ));
 }
 
 fn text_part_id(message: &MessageWithParts) -> Option<String> {
@@ -1558,7 +1536,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compaction_text_delta_updates_real_persisted_message() {
+    async fn compaction_text_delta_is_live_until_summary_finishes() {
         let path = std::env::temp_dir().join(format!(
             "neoism-agent-compaction-live-{}.sqlite3",
             neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
@@ -1586,25 +1564,22 @@ mod tests {
             .append_message(info.id.as_str(), &assistant)
             .await
             .unwrap();
+        let mut events = state.subscribe();
 
-        append_compaction_text_delta(
+        publish_compaction_text_delta(
             &state,
             info.id.as_str(),
             &assistant_id,
             &part_id,
             "## Goal",
-        )
-        .await
-        .expect("delta append");
-        append_compaction_text_delta(
+        );
+        publish_compaction_text_delta(
             &state,
             info.id.as_str(),
             &assistant_id,
             &part_id,
             "\n- Live",
-        )
-        .await
-        .expect("delta append");
+        );
 
         let stored = state
             .inner
@@ -1613,7 +1588,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(summarize_parts(&stored.parts), "## Goal\n- Live");
+        assert_eq!(summarize_parts(&stored.parts), "");
+        let mut deltas = Vec::new();
+        for _ in 0..4 {
+            let event = events.recv().await.unwrap();
+            if event.kind == event_type::MESSAGE_PART_DELTA {
+                deltas.push(event.properties["delta"].as_str().unwrap().to_string());
+            }
+        }
+        assert_eq!(deltas.concat(), "## Goal\n- Live");
         let _ = std::fs::remove_file(&path);
     }
 

@@ -116,6 +116,8 @@ pub struct ProviderGenerationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_verbosity: Option<crate::TextVerbosity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api: Option<ProviderApiInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auth_env: Vec<String>,

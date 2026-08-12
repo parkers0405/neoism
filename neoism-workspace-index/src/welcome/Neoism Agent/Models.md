@@ -18,12 +18,15 @@ Use `/model` in an agent pane or open the model picker from the agent header. Th
   "agent": {
     "model": "anthropic/claude-sonnet-4-5",
     "small-model": "anthropic/claude-haiku-4-5",
-    "variant": "high"
+    "variant": "high",
+    "text-verbosity": "low"
   }
 }
 ```
 
 `model` is the normal default. `small-model` is available for lightweight internal work. `variant` selects a provider/model variant when one exists.
+
+`text-verbosity` controls response length for supported models. Valid values are `low`, `medium`, and `high`. Neoism defaults compatible non-chat GPT-5.x models to `low`, matching OpenCode v2.
 
 ## Resolution order
 

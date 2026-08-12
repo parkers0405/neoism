@@ -677,6 +677,11 @@ pub struct NeoismAgentPane {
     pending_question: Option<NeoismAgentPendingQuestion>,
     pending_question_queue: VecDeque<NeoismAgentPendingQuestion>,
     model_context_limit: Option<u64>,
+    /// Context limits from the most recent provider catalog, keyed by the
+    /// canonical `provider/model` reference. Keeping the catalog here makes
+    /// config-default and provider-catalog replies order-independent: those
+    /// requests are issued together and may complete in either order.
+    model_context_limits: HashMap<String, u64>,
     model_options: Vec<NeoismAgentPickerOption>,
     recent_model_options: Vec<NeoismAgentPickerOption>,
     agent_options: Vec<NeoismAgentPickerOption>,
@@ -985,6 +990,7 @@ impl Default for NeoismAgentPane {
             pending_question: None,
             pending_question_queue: VecDeque::new(),
             model_context_limit: None,
+            model_context_limits: HashMap::new(),
             model_options: Vec::new(),
             recent_model_options: Vec::new(),
             agent_options: Vec::new(),
@@ -1103,7 +1109,11 @@ impl NeoismAgentPane {
     /// Replace the directory (workspace root) label. The chrome's
     /// breadcrumbs / status pull from this.
     pub fn set_directory(&mut self, directory: Option<String>) {
-        self.directory = directory.and_then(|d| (!d.trim().is_empty()).then_some(d));
+        let directory = directory.and_then(|d| (!d.trim().is_empty()).then_some(d));
+        if self.directory != directory {
+            self.skill_options.clear();
+        }
+        self.directory = directory;
     }
 
     /// Update the model's context-window limit, used by the usage chip.
@@ -1111,6 +1121,15 @@ impl NeoismAgentPane {
     /// `ProviderState` flow.
     pub fn set_model_context_limit(&mut self, context_limit: Option<u64>) {
         self.model_context_limit = context_limit;
+    }
+
+    /// Cache all model limits advertised by the provider catalog and refresh
+    /// the active model immediately. The workspace host requests config
+    /// defaults and providers concurrently, so this must work whether the
+    /// model or the catalog arrives first.
+    pub fn set_model_context_limits(&mut self, context_limits: HashMap<String, u64>) {
+        self.model_context_limits = context_limits;
+        self.model_context_limit = self.model_context_limits.get(&self.model).copied();
     }
 
     /// Stamp a fresh usage snapshot onto the latest assistant message
@@ -1333,7 +1352,13 @@ impl NeoismAgentPane {
         if let Some(thinking) = thinking {
             self.set_thinking_local(thinking);
         }
-        self.set_model_context_limit(context_limit);
+        // A ProviderState/ConfigDefaults message commonly carries no limit.
+        // That means "not included", not "this model has no context window".
+        // Clearing here made unrelated agent/thinking updates erase a limit
+        // that the provider catalog had already resolved.
+        if context_limit.is_some() {
+            self.set_model_context_limit(context_limit);
+        }
     }
 
     /// Record a session-idle transition. Mirrors `SessionIdle`.

@@ -37,6 +37,21 @@ pub(super) enum AgentSessionUpdate {
     },
     PartUpdated(NeoismAgentMessage),
     PartRemoved(String),
+    ChildPartDelta {
+        session_id: String,
+        message_id: Option<String>,
+        part_id: Option<String>,
+        kind: Option<String>,
+        delta: String,
+    },
+    ChildPartUpdated {
+        session_id: String,
+        message: NeoismAgentMessage,
+    },
+    ChildPartRemoved {
+        session_id: String,
+        part_id: String,
+    },
     CompactionStarted {
         id: String,
         reason: String,
@@ -385,6 +400,34 @@ fn send_event_updates(
             SessionEventUpdate::PartRemoved(part_id) => {
                 tx.send(AgentSessionUpdate::PartRemoved(part_id))?;
             }
+            SessionEventUpdate::ChildPartDelta {
+                session_id,
+                message_id,
+                part_id,
+                kind,
+                delta,
+            } => tx.send(AgentSessionUpdate::ChildPartDelta {
+                session_id,
+                message_id,
+                part_id,
+                kind,
+                delta,
+            })?,
+            SessionEventUpdate::ChildPartUpdated { session_id, part } => {
+                if let Some(message) = part_block(&part) {
+                    tx.send(AgentSessionUpdate::ChildPartUpdated {
+                        session_id,
+                        message,
+                    })?;
+                }
+            }
+            SessionEventUpdate::ChildPartRemoved {
+                session_id,
+                part_id,
+            } => tx.send(AgentSessionUpdate::ChildPartRemoved {
+                session_id,
+                part_id,
+            })?,
             SessionEventUpdate::CompactionStarted { id, reason } => {
                 tx.send(AgentSessionUpdate::CompactionStarted { id, reason })?;
             }

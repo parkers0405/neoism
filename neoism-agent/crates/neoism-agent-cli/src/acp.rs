@@ -1840,11 +1840,14 @@ fn usage_from_message(message: &MessageWithParts) -> Value {
     let MessageInfo::Assistant(info) = &message.info else {
         return Value::Null;
     };
-    let total = info.tokens.input
-        + info.tokens.output
-        + info.tokens.reasoning
-        + info.tokens.cache.read
-        + info.tokens.cache.write;
+    // Match OpenCode's ACP usage: sum the normalized token buckets.
+    let total = info
+        .tokens
+        .input
+        .saturating_add(info.tokens.output)
+        .saturating_add(info.tokens.reasoning)
+        .saturating_add(info.tokens.cache.read)
+        .saturating_add(info.tokens.cache.write);
     json!({
         "totalTokens": total,
         "inputTokens": info.tokens.input,
@@ -1872,7 +1875,11 @@ fn usage_from_assistant_info(info: &Value) -> Value {
         .and_then(|cache| cache.get("write"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let total = input + output + reasoning + cache_read + cache_write;
+    let total = input
+        .saturating_add(output)
+        .saturating_add(reasoning)
+        .saturating_add(cache_read)
+        .saturating_add(cache_write);
     if total == 0 {
         return Value::Null;
     }

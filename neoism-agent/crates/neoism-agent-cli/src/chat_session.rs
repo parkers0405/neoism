@@ -319,10 +319,7 @@ fn latest_assistant_with_tokens(messages: &[Value]) -> Option<&Value> {
 }
 
 fn token_total(tokens: &Value) -> u64 {
-    let explicit_total = tokens.get("total").and_then(Value::as_u64).unwrap_or(0);
-    if explicit_total > 0 {
-        return explicit_total;
-    }
+    // OpenCode's visible context metric sums the normalized token buckets.
     tokens
         .get("input")
         .and_then(Value::as_u64)

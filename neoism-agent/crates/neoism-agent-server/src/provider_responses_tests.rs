@@ -98,6 +98,34 @@ fn responses_request_body_defaults_gpt5_reasoning_summary() {
 
     assert_eq!(body["reasoning"]["effort"], "medium");
     assert_eq!(body["reasoning"]["summary"], "auto");
+    assert_eq!(body["text"]["verbosity"], "low");
+}
+
+#[test]
+fn responses_request_body_honors_configured_text_verbosity() {
+    let body = responses_request_body_with_text_verbosity(
+        "gpt-5.6-sol",
+        Some("medium"),
+        &[ProviderMessage::text(ProviderRole::User, "Hello")],
+        &[],
+        Some(neoism_agent_core::TextVerbosity::High),
+    );
+
+    assert_eq!(body["text"]["verbosity"], "high");
+}
+
+#[test]
+fn responses_request_body_omits_text_verbosity_for_codex_and_chat_models() {
+    for model in ["gpt-5.3-codex", "gpt-5.2-chat-latest", "claude-sonnet-4"] {
+        let body = responses_request_body_with_text_verbosity(
+            model,
+            None,
+            &[ProviderMessage::text(ProviderRole::User, "Hello")],
+            &[],
+            Some(neoism_agent_core::TextVerbosity::High),
+        );
+        assert!(body.get("text").is_none(), "{model}");
+    }
 }
 
 #[test]

@@ -121,16 +121,10 @@ async fn handle_acp_session_update(
                 let mut collector = ctx.collector.lock().await;
                 collector.text.push_str(delta);
             }
-            {
-                let mut message = ctx.live_message.lock().await;
-                append_text_delta(&mut message.parts, ctx.text_part_id.as_str(), delta);
-                ctx.state
-                    .inner
-                    .store
-                    .update_message(&ctx.child_id, &message)
-                    .await?;
-            }
-            ctx.state.publish(EventPayload::new(
+            let mut message = ctx.live_message.lock().await;
+            append_text_delta(&mut message.parts, ctx.text_part_id.as_str(), delta);
+            drop(message);
+            ctx.state.publish_live(EventPayload::new(
                 event_type::MESSAGE_PART_DELTA,
                 json!({
                     "sessionID": ctx.child_id,
@@ -183,6 +177,11 @@ async fn update_external_tool_part(
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("in_progress");
+    let durable = update
+        .get("sessionUpdate")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "tool_call")
+        || matches!(status, "completed" | "failed" | "error");
     let session_id = Id::parse(IdKind::Session, ctx.child_id.clone())
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let existing_nested_session_id = ctx
@@ -309,17 +308,24 @@ async fn update_external_tool_part(
                 input,
             ),
         };
-        ctx.state
-            .inner
-            .store
-            .update_message(&ctx.child_id, &message)
-            .await?;
+        if durable {
+            ctx.state
+                .inner
+                .store
+                .update_message(&ctx.child_id, &message)
+                .await?;
+        }
         part
     };
-    ctx.state.publish(EventPayload::new(
+    let event = EventPayload::new(
         event_type::MESSAGE_PART_UPDATED,
         json!({ "sessionID": ctx.child_id, "part": part, "time": now_millis() }),
-    ));
+    );
+    if durable {
+        ctx.state.publish(event);
+    } else {
+        ctx.state.publish_live(event);
+    }
     if let Some((nested_id, status, output)) = finished_nested {
         finish_nested_external_session(ctx, &nested_id, &status, &output).await?;
     }

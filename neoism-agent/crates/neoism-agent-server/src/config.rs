@@ -600,16 +600,23 @@ mod agent_view_tests {
             "ui": { "status-fps": false },
             "agent": {
                 "model": "anthropic/claude-opus-5",
+                "text-verbosity": "high",
                 "permission": { "edit": "ask" }
             }
         }));
         // Only the agent block survives — terminal/appearance/ui are dropped.
         assert_eq!(view["model"], "anthropic/claude-opus-5");
+        assert_eq!(view["text-verbosity"], "high");
         assert_eq!(view["permission"]["edit"], "ask");
         assert!(view.get("appearance").is_none());
         assert!(view.get("ui").is_none());
         // The shared terminal shell fills in as the agent's shell.
         assert_eq!(view["shell"], json!({ "program": "fish" }));
+        let parsed: NeoismConfig = serde_json::from_value(view).unwrap();
+        assert_eq!(
+            parsed.text_verbosity,
+            Some(neoism_agent_core::TextVerbosity::High)
+        );
     }
 
     #[test]

@@ -1073,22 +1073,21 @@ impl Renderer {
                 logical_height,
             );
 
-            // The status material spans the full bottom edge, while its
-            // actual labels and pills start at the editor column. This keeps
-            // cwd/mode text from showing beneath the file tree or Notes.
+            // The complete status bar spans the full bottom edge, including
+            // its labels and pills. It sits underneath the file tree/Notes;
+            // sidebars stop at `status_y` rather than pushing status content
+            // inward to the editor column.
             let status_y = (logical_height - self.status_line.scaled_height()).max(0.0);
             let status_left = 0.0;
             let status_width = logical_width.max(0.0);
-            let status_content_left = side_x.min(logical_width);
-            let status_content_width = (logical_width - status_content_left).max(0.0);
             self.status_line.set_split_toggle(false, false);
             self.status_line.render_with_ide_theme_in_content_bounds(
                 sugarloaf,
                 status_left,
                 status_y,
                 status_width,
-                status_content_left,
-                status_content_width,
+                status_left,
+                status_width,
                 &self.theme,
             );
             if !input_overlay_active {

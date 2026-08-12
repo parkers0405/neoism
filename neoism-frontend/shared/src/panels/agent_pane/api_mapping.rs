@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 use super::state::{
-    picker::NeoismAgentPickerOption, NeoismAgentMessage, NeoismAgentMessageKind,
-    NeoismAgentImage, NeoismAgentOutputKind, NeoismAgentTodo, NeoismAgentUsage,
+    picker::NeoismAgentPickerOption, NeoismAgentImage, NeoismAgentMessage,
+    NeoismAgentMessageKind, NeoismAgentOutputKind, NeoismAgentTodo, NeoismAgentUsage,
 };
 
 const SUBTASK_COMPLETION_SYSTEM_MARKER: &str =
@@ -29,6 +31,7 @@ pub struct SessionState {
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub parent_id: Option<String>,
+    pub directory: Option<String>,
 }
 
 pub fn model_options_from_providers_json(value: &Value) -> Vec<NeoismAgentPickerOption> {
@@ -240,11 +243,17 @@ pub fn session_state_from_json(value: &Value) -> SessionState {
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|s| !s.is_empty());
+    let directory = value
+        .get("directory")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
     SessionState {
         agent,
         model: model_ref,
         thinking,
         parent_id,
+        directory,
     }
 }
 
@@ -385,18 +394,151 @@ pub fn message_blocks_from_response(
     messages: &[Value],
     newest_first: bool,
 ) -> Vec<NeoismAgentMessage> {
+    // OpenCode measures an answer from its parent user prompt, rather than
+    // from the instant the provider-side assistant record happened to be
+    // opened. Build the lookup before ordering the response so this remains
+    // correct whether the endpoint returned newest-first or oldest-first.
+    let user_created = messages
+        .iter()
+        .filter_map(|message| {
+            let info = message.get("info")?;
+            (info.get("role").and_then(Value::as_str) == Some("user"))
+                .then(|| {
+                    Some((
+                        info.get("id")?.as_str()?.to_string(),
+                        info.get("time")?.get("created")?.as_u64()?,
+                    ))
+                })
+                .flatten()
+        })
+        .collect::<HashMap<_, _>>();
+    // Background completion replies are parented to a synthetic runtime user
+    // message, not the human request that launched the task. Recover that
+    // durable origin through the parent task part so the final footer measures
+    // the whole user-visible operation (including the subagent wait).
+    let task_origins = messages
+        .iter()
+        .filter_map(|message| {
+            let info = message.get("info")?;
+            (info.get("role").and_then(Value::as_str) == Some("assistant"))
+                .then_some(message)
+        })
+        .flat_map(|message| {
+            let info = message.get("info").unwrap_or(&Value::Null);
+            let parent_id = info
+                .get("parentID")
+                .or_else(|| info.get("parentId"))
+                .or_else(|| info.get("parent_id"))
+                .and_then(Value::as_str);
+            let created = parent_id.and_then(|id| user_created.get(id)).copied();
+            message
+                .get("parts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(move |part| {
+                    Some((task_session_id_from_part(part)?, created?))
+                })
+        })
+        .collect::<HashMap<_, _>>();
+    let runtime_origins = messages
+        .iter()
+        .filter_map(|message| {
+            let info = message.get("info")?;
+            if info.get("role").and_then(Value::as_str) != Some("user")
+                || !info
+                    .get("system")
+                    .and_then(Value::as_str)
+                    .is_some_and(|system| {
+                        system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER)
+                    })
+            {
+                return None;
+            }
+            let message_id = info.get("id")?.as_str()?.to_string();
+            let origin = message
+                .get("parts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .flat_map(task_ids_from_completion_text)
+                .filter_map(|task_id| task_origins.get(task_id).copied())
+                .min()?;
+            Some((message_id, origin))
+        })
+        .collect::<HashMap<_, _>>();
     let mut indexes = (0..messages.len()).collect::<Vec<_>>();
     if newest_first {
         indexes.reverse();
     }
     let mut out = Vec::new();
     for index in indexes {
-        out.extend(message_blocks(&messages[index]));
+        let message = &messages[index];
+        let response_started_at = message
+            .get("info")
+            .and_then(|info| {
+                info.get("parentID")
+                    .or_else(|| info.get("parentId"))
+                    .or_else(|| info.get("parent_id"))
+            })
+            .and_then(Value::as_str)
+            .and_then(|parent_id| {
+                runtime_origins
+                    .get(parent_id)
+                    .or_else(|| user_created.get(parent_id))
+            })
+            .copied();
+        out.extend(message_blocks_with_start(message, response_started_at));
     }
     out
 }
 
+fn task_session_id_from_part(part: &Value) -> Option<String> {
+    if part.get("type").and_then(Value::as_str) != Some("tool")
+        || part.get("tool").and_then(Value::as_str) != Some("task")
+    {
+        return None;
+    }
+    let state = part.get("state").unwrap_or(&Value::Null);
+    for metadata in [state.get("metadata"), part.get("metadata")]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(session_id) = metadata
+            .get("sessionId")
+            .or_else(|| metadata.get("sessionID"))
+            .or_else(|| metadata.get("session_id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            return Some(session_id.to_string());
+        }
+    }
+    state
+        .get("output")
+        .and_then(Value::as_str)
+        .and_then(|output| task_ids_from_completion_text(output).next())
+        .map(str::to_string)
+}
+
+fn task_ids_from_completion_text(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("task_id:")
+            .and_then(|value| value.trim().split_whitespace().next())
+            .filter(|value| !value.is_empty())
+    })
+}
+
 pub fn message_blocks(message: &Value) -> Vec<NeoismAgentMessage> {
+    message_blocks_with_start(message, None)
+}
+
+fn message_blocks_with_start(
+    message: &Value,
+    response_started_at: Option<u64>,
+) -> Vec<NeoismAgentMessage> {
     let role = message
         .get("info")
         .and_then(|info| info.get("role"))
@@ -500,6 +642,14 @@ pub fn message_blocks(message: &Value) -> Vec<NeoismAgentMessage> {
     let mut blocks = parts.iter().filter_map(part_block).collect::<Vec<_>>();
     if role == "assistant" {
         normalize_assistant_reasoning_order(&mut blocks);
+        if let Some(footer) = assistant_response_footer(message, response_started_at) {
+            if let Some(answer) = blocks
+                .iter_mut()
+                .rfind(|block| block.kind == NeoismAgentMessageKind::Assistant)
+            {
+                answer.status = footer;
+            }
+        }
         // Show a run that ended in a TERMINAL error. Transient errors retry
         // silently (see session_retry) and, if they recover, leave no
         // `info.error` — so nothing shows and the run just keeps going. An
@@ -517,6 +667,110 @@ pub fn message_blocks(message: &Value) -> Vec<NeoismAgentMessage> {
         }
     }
     blocks
+}
+
+fn assistant_response_footer(
+    message: &Value,
+    response_started_at: Option<u64>,
+) -> Option<String> {
+    let info = message.get("info")?;
+    let intermediate_tool_step = info
+        .get("finish")
+        .and_then(Value::as_str)
+        .is_some_and(|finish| matches!(finish, "tool-calls" | "unknown"));
+    if intermediate_tool_step && info.get("error").is_none_or(Value::is_null) {
+        return None;
+    }
+    let time = info.get("time")?;
+    let completed = time.get("completed")?.as_u64()?;
+    let created = response_started_at.or_else(|| time.get("created")?.as_u64())?;
+    let agent = info
+        .get("agent")
+        .or_else(|| info.get("mode"))
+        .and_then(Value::as_str)
+        .map(display_agent_name)
+        .filter(|value| !value.is_empty())?;
+    let model = info
+        .get("modelId")
+        .or_else(|| info.get("modelID"))
+        .or_else(|| info.get("model_id"))
+        .and_then(Value::as_str)
+        .map(display_model_name)
+        .filter(|value| !value.is_empty())?;
+    let duration = display_response_duration(completed.saturating_sub(created));
+    Some(format!("{agent} · {model} · {duration}"))
+}
+
+fn display_agent_name(value: &str) -> String {
+    value
+        .split(|ch: char| ch == '-' || ch == '_' || ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(capitalize_word)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn display_model_name(value: &str) -> String {
+    let value = value.rsplit('/').next().unwrap_or(value);
+    if let Some(rest) = value
+        .strip_prefix("gpt-")
+        .or_else(|| value.strip_prefix("GPT-"))
+    {
+        let mut parts = rest.split(['-', '_']).filter(|part| !part.is_empty());
+        let Some(version) = parts.next() else {
+            return "GPT".to_string();
+        };
+        let suffix = parts.map(capitalize_word).collect::<Vec<_>>().join(" ");
+        return if suffix.is_empty() {
+            format!("GPT-{version}")
+        } else {
+            format!("GPT-{version} {suffix}")
+        };
+    }
+    value
+        .split(|ch: char| ch == '-' || ch == '_' || ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.to_ascii_lowercase().as_str() {
+            "gpt" => "GPT".to_string(),
+            "api" => "API".to_string(),
+            "ai" => "AI".to_string(),
+            _ if part.chars().all(|ch| ch.is_ascii_digit() || ch == '.') => {
+                part.to_string()
+            }
+            _ => capitalize_word(part),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn capitalize_word(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_uppercase().chain(chars).collect()
+}
+
+fn display_response_duration(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        return format!("{milliseconds}ms");
+    }
+    if milliseconds < 60_000 {
+        return format!("{:.1}s", milliseconds as f64 / 1_000.0);
+    }
+    if milliseconds < 3_600_000 {
+        let minutes = milliseconds / 60_000;
+        let seconds = (milliseconds % 60_000) / 1_000;
+        return format!("{minutes}m {seconds}s");
+    }
+    if milliseconds < 86_400_000 {
+        let hours = milliseconds / 3_600_000;
+        let minutes = (milliseconds % 3_600_000) / 60_000;
+        return format!("{hours}h {minutes}m");
+    }
+    let days = milliseconds / 86_400_000;
+    let hours = (milliseconds % 86_400_000) / 3_600_000;
+    format!("{days}d {hours}h")
 }
 
 /// Extract a human-readable message from an assistant `info.error`, tolerating
@@ -572,6 +826,23 @@ fn is_compaction_summary_message(parts: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_usage_matches_opencode_normalized_bucket_sum() {
+        let usage = usage_from_step_finish(&json!({
+            "tokens": {
+                "total": 9_999,
+                "input": 100,
+                "output": 20,
+                "reasoning": 80,
+                "cache": { "read": 5, "write": 3 }
+            },
+            "cost": 0.0
+        }))
+        .unwrap();
+
+        assert_eq!(usage.total, 208);
+    }
 
     #[test]
     fn provider_models_map_to_sorted_picker_options_and_context_limits() {
@@ -681,6 +952,7 @@ mod tests {
         let session = session_state_from_json(&json!({
             "agent": "review",
             "parentID": "ses-parent",
+            "directory": "/tmp/project",
             "model": {
                 "provider_id": "openai",
                 "model_id": "gpt-5",
@@ -691,6 +963,7 @@ mod tests {
         assert_eq!(session.model.as_deref(), Some("openai/gpt-5"));
         assert_eq!(session.thinking.as_deref(), Some("xhigh"));
         assert_eq!(session.parent_id.as_deref(), Some("ses-parent"));
+        assert_eq!(session.directory.as_deref(), Some("/tmp/project"));
     }
 
     #[test]
@@ -736,6 +1009,130 @@ mod tests {
         assert_eq!(blocks[0].text, "old prompt");
         assert_eq!(blocks[1].kind, NeoismAgentMessageKind::Assistant);
         assert_eq!(blocks[1].text, "new reply");
+    }
+
+    #[test]
+    fn completed_answer_gets_opencode_style_agent_model_and_duration_footer() {
+        let assistant = json!({
+            "info": {
+                "id": "msg-answer",
+                "role": "assistant",
+                "parentID": "msg-prompt",
+                "agent": "build",
+                "modelId": "gpt-5.6-sol",
+                "time": { "created": 1_200, "completed": 219_000 }
+            },
+            "parts": [
+                { "id": "prt-first", "type": "text", "text": "working" },
+                { "id": "prt-final", "type": "text", "text": "done" }
+            ]
+        });
+        let user = json!({
+            "info": {
+                "id": "msg-prompt",
+                "role": "user",
+                "time": { "created": 1_000 }
+            },
+            "parts": [{ "id": "prt-prompt", "type": "text", "text": "please fix it" }]
+        });
+
+        let blocks = message_blocks_from_response(&[assistant, user], true);
+
+        assert_eq!(blocks[1].status, "");
+        assert_eq!(blocks[2].status, "Build · GPT-5.6 Sol · 3m 38s");
+    }
+
+    #[test]
+    fn background_subagent_answer_duration_starts_at_human_request() {
+        let final_answer = json!({
+            "info": {
+                "id": "msg-final",
+                "role": "assistant",
+                "parentID": "msg-runtime-completion",
+                "agent": "build",
+                "modelId": "gpt-5.6-sol",
+                "time": { "created": 180_000, "completed": 194_769 }
+            },
+            "parts": [{ "id": "prt-final", "type": "text", "text": "done" }]
+        });
+        let runtime_completion = json!({
+            "info": {
+                "id": "msg-runtime-completion",
+                "role": "user",
+                "system": SUBTASK_COMPLETION_SYSTEM_MARKER,
+                "time": { "created": 171_000 }
+            },
+            "parts": [{
+                "id": "prt-runtime-completion",
+                "type": "text",
+                "text": "Subagent finished.\ntask_id: ses-child\nstatus: completed"
+            }]
+        });
+        let task_launch = json!({
+            "info": {
+                "id": "msg-launch",
+                "role": "assistant",
+                "parentID": "msg-human",
+                "finish": "tool-calls",
+                "time": { "created": 1_100, "completed": 2_000 }
+            },
+            "parts": [{
+                "id": "prt-task",
+                "type": "tool",
+                "tool": "task",
+                "state": {
+                    "status": "completed",
+                    "metadata": { "sessionId": "ses-child", "background": true },
+                    "output": "task_id: ses-child\nstatus: running"
+                }
+            }]
+        });
+        let human = json!({
+            "info": {
+                "id": "msg-human",
+                "role": "user",
+                "time": { "created": 1_000 }
+            },
+            "parts": [{ "id": "prt-human", "type": "text", "text": "inspect it" }]
+        });
+
+        let blocks = message_blocks_from_response(
+            &[final_answer, runtime_completion, task_launch, human],
+            true,
+        );
+        let answer = blocks
+            .iter()
+            .find(|block| block.text == "done")
+            .expect("final answer");
+
+        assert_eq!(answer.status, "Build · GPT-5.6 Sol · 3m 13s");
+    }
+
+    #[test]
+    fn response_duration_and_model_labels_follow_opencode_units() {
+        assert_eq!(display_response_duration(450), "450ms");
+        assert_eq!(display_response_duration(12_350), "12.3s");
+        assert_eq!(display_response_duration(3_660_000), "1h 1m");
+        assert_eq!(display_model_name("openai/gpt-5.6-sol"), "GPT-5.6 Sol");
+        assert_eq!(display_agent_name("code-review"), "Code Review");
+    }
+
+    #[test]
+    fn intermediate_tool_call_message_does_not_get_a_response_footer() {
+        let blocks = message_blocks(&json!({
+            "info": {
+                "id": "msg-tool-step",
+                "role": "assistant",
+                "agent": "build",
+                "modelId": "gpt-5.6-sol",
+                "finish": "tool-calls",
+                "time": { "created": 1_000, "completed": 2_000 }
+            },
+            "parts": [{ "id": "prt-progress", "type": "text", "text": "checking" }]
+        }));
+
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].status.is_empty());
     }
 
     #[test]
@@ -967,16 +1364,18 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
         }),
         "subtask" => Some(subtask_block(part)),
         "tool" => Some(tool_block(part)),
-        "file" if part
-            .get("mime")
-            .and_then(Value::as_str)
-            .is_some_and(|mime| mime.starts_with("image/")) => {
-                image_from_part(part).map(|image| {
-                    let mut message = agent_message_user("");
-                    message.images.push(image);
-                    message
-                })
-            }
+        "file"
+            if part
+                .get("mime")
+                .and_then(Value::as_str)
+                .is_some_and(|mime| mime.starts_with("image/")) =>
+        {
+            image_from_part(part).map(|image| {
+                let mut message = agent_message_user("");
+                message.images.push(image);
+                message
+            })
+        }
         "file" => part
             .get("filename")
             .and_then(Value::as_str)
@@ -1177,13 +1576,14 @@ fn usage_from_step_finish(part: &Value) -> Option<NeoismAgentUsage> {
         .saturating_add(token_field(tokens, &["cacheRead", "cache_read"]));
     let cache_write = token_field(cache, &["write"])
         .saturating_add(token_field(tokens, &["cacheWrite", "cache_write"]));
-    let total = token_field(tokens, &["total"]).max(
-        input
-            .saturating_add(output)
-            .saturating_add(reasoning)
-            .saturating_add(cache_read)
-            .saturating_add(cache_write),
-    );
+    // Match OpenCode v2's UI/ACP context metric exactly. These buckets are
+    // normalized by the server (cache removed from input, reasoning removed
+    // from output), so summing all five reconstructs the full context usage.
+    let total = input
+        .saturating_add(output)
+        .saturating_add(reasoning)
+        .saturating_add(cache_read)
+        .saturating_add(cache_write);
     let cost = part
         .get("cost")
         .and_then(Value::as_f64)

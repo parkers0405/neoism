@@ -221,7 +221,7 @@ mod tests {
         assert!(plan.prompt.unwrap().contains("plan agent"));
         assert_eq!(general.mode, "subagent");
         assert_eq!(explore.mode, "subagent");
-        assert!(explore.prompt.unwrap().contains("Explore"));
+        assert!(explore.prompt.unwrap().contains("file search specialist"));
     }
 
     #[test]

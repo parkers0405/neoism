@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path as FsPath, PathBuf};
 
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -34,7 +35,14 @@ pub(crate) struct SessionUpdateRequest {
     agent: Option<String>,
     permission: Option<Vec<neoism_agent_core::PermissionRule>>,
     model: Option<neoism_agent_core::ModelRef>,
+    directory: Option<String>,
     time: Option<SessionUpdateTime>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct SessionDirectoryQuery {
+    query: Option<String>,
+    limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -172,6 +180,18 @@ pub(crate) async fn session_update(
     if let Some(model) = update.model {
         info.model = Some(model);
     }
+    if let Some(directory) = update.directory {
+        if state.inner.runs.read().await.contains_key(&session_id) {
+            return Err(ApiError::conflict(
+                "cannot change directory while the session is running",
+            ));
+        }
+        let project_context = resolve_session_directory(&info.directory, &directory)?;
+        info.directory = project_context.directory;
+        info.project_id = project_context.info.id;
+        info.path = project_context.path;
+        crate::context_epoch::reconcile(&state, &mut info).await?;
+    }
     if let Some(time) = update.time {
         if let Some(archived) = time.archived {
             info.time.archived = Some(archived);
@@ -184,6 +204,168 @@ pub(crate) async fn session_update(
         json!({ "sessionID": session_id, "info": info }),
     ));
     Ok(Json(info))
+}
+
+pub(crate) async fn session_directory_options(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<SessionDirectoryQuery>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let info = state
+        .inner
+        .store
+        .get_session(&session_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Session not found"))?;
+    let current = PathBuf::from(info.directory);
+    let search_root = directory_search_root(&current);
+    let needle = query.query.unwrap_or_default();
+    let limit = query.limit.unwrap_or(256).clamp(1, 1_000);
+    let options = tokio::task::spawn_blocking(move || {
+        fff_directory_options(&search_root, &current, &needle, limit)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("directory search failed: {error}")))??;
+    Ok(Json(options))
+}
+
+fn resolve_session_directory(
+    current: &str,
+    requested: &str,
+) -> Result<project::ProjectContext, ApiError> {
+    let requested = requested.trim();
+    let requested = requested
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            requested
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(requested)
+        .trim();
+    if requested.is_empty() {
+        return Err(ApiError::bad_request("usage: /cd <directory>"));
+    }
+    let expanded = expand_home_path(requested)?;
+    let candidate = if expanded.is_absolute() {
+        expanded
+    } else {
+        PathBuf::from(current).join(expanded)
+    };
+    let canonical = candidate.canonicalize().map_err(|error| {
+        ApiError::bad_request(format!(
+            "directory {} is not accessible: {error}",
+            candidate.display()
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(ApiError::bad_request(format!(
+            "{} is not a directory",
+            canonical.display()
+        )));
+    }
+    Ok(project::discover(canonical))
+}
+
+fn expand_home_path(path: &str) -> Result<PathBuf, ApiError> {
+    if path == "~" {
+        return home_directory()
+            .ok_or_else(|| ApiError::bad_request("cannot resolve home directory"));
+    }
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        return home_directory()
+            .map(|home| home.join(rest))
+            .ok_or_else(|| ApiError::bad_request("cannot resolve home directory"));
+    }
+    if path.starts_with('~') {
+        return Err(ApiError::bad_request(
+            "only ~ and ~/... home paths are supported",
+        ));
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn home_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+}
+
+fn directory_search_root(current: &FsPath) -> PathBuf {
+    current
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(current)
+        .to_path_buf()
+}
+
+fn fff_directory_options(
+    root: &FsPath,
+    current: &FsPath,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<String>, ApiError> {
+    let mut options = Vec::new();
+    push_directory_option(&mut options, current);
+    if let Some(parent) = current.parent() {
+        push_directory_option(&mut options, parent);
+    }
+    if let Some(home) = home_directory() {
+        push_directory_option(&mut options, &home);
+    }
+    let remaining = limit.saturating_sub(options.len());
+    if remaining == 0 {
+        return Ok(options);
+    }
+    let relatives = crate::picker_registry::with_picker(root, |picker| {
+        let parser = fff_search::QueryParser::new(fff_search::DirSearchConfig);
+        let parsed = parser.parse(query);
+        picker
+            .fuzzy_search_directories(
+                &parsed,
+                fff_search::FuzzySearchOptions {
+                    max_threads: 0,
+                    project_path: Some(root),
+                    pagination: fff_search::PaginationArgs {
+                        offset: 0,
+                        limit: remaining,
+                    },
+                    ..Default::default()
+                },
+            )
+            .items
+            .iter()
+            .map(|item| item.relative_path(picker))
+            .collect::<Vec<_>>()
+    })
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    for relative in relatives {
+        let relative = relative.trim_end_matches(['/', '\\']);
+        if !relative.is_empty() {
+            push_directory_option(&mut options, &root.join(relative));
+        }
+        if options.len() >= limit {
+            break;
+        }
+    }
+    Ok(options)
+}
+
+fn push_directory_option(options: &mut Vec<String>, path: &FsPath) {
+    let path = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    if !path.is_empty() && !options.iter().any(|existing| existing == &path) {
+        options.push(path);
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -435,4 +617,44 @@ fn retarget_message(
         }
     }
     message
+}
+
+#[cfg(test)]
+mod directory_tests {
+    use super::*;
+
+    #[test]
+    fn session_directory_resolves_relative_and_quoted_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-session-cd-{}",
+            Id::ascending(IdKind::Event)
+        ));
+        let current = root.join("from");
+        let target = root.join("to with spaces");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+
+        let resolved = resolve_session_directory(
+            current.to_string_lossy().as_ref(),
+            "'../to with spaces'",
+        )
+        .unwrap();
+
+        assert_eq!(
+            PathBuf::from(resolved.directory),
+            target.canonicalize().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn session_directory_expands_home_and_rejects_named_users() {
+        if let Some(home) = home_directory() {
+            assert_eq!(
+                expand_home_path("~/projects").unwrap(),
+                home.join("projects")
+            );
+        }
+        assert!(expand_home_path("~someone/projects").is_err());
+    }
 }

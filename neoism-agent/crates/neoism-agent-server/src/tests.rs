@@ -730,6 +730,53 @@ async fn setting_a_new_goal_reopens_a_completed_goal() {
 }
 
 #[tokio::test]
+async fn session_directory_patch_moves_and_persists_the_session() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-session-cd-route-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let current = root.join("current");
+    let target = root.join("target");
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let mut session = store_test_session(&session_id, now_millis());
+    session.directory = current.to_string_lossy().to_string();
+    state.inner.store.insert_session(&session).await.unwrap();
+
+    let response: SessionInfo = response_json(
+        app(state.clone())
+            .oneshot(request(
+                Method::PATCH,
+                &format!("/session/{session_id}"),
+                Some(json!({ "directory": "../target" })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let expected = target.canonicalize().unwrap().to_string_lossy().to_string();
+    assert_eq!(response.directory, expected);
+    let stored = state
+        .inner
+        .store
+        .get_session(session_id.as_str())
+        .await
+        .unwrap()
+        .expect("moved session remains stored");
+    assert_eq!(stored.directory, expected);
+    assert!(stored.extra.contains_key("contextEpoch"));
+
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn semantic_store_ranks_by_vector_distance_on_turso() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-sem-{}.turso.db",
@@ -1149,6 +1196,43 @@ async fn sync_history_replays_persisted_events() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["type"], event_type::SESSION_STATUS);
     assert_eq!(events[0]["properties"]["sessionID"], session_id.as_str());
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn live_stream_events_broadcast_without_entering_sync_history() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-live-events-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let mut events = state.subscribe();
+    state.publish_live(EventPayload::new(
+        event_type::MESSAGE_PART_DELTA,
+        json!({
+            "sessionID": session_id,
+            "messageID": "message-live",
+            "partID": "part-live",
+            "field": "text",
+            "delta": "token"
+        }),
+    ));
+
+    let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.kind, event_type::MESSAGE_PART_DELTA);
+    assert_eq!(event.properties["delta"], "token");
+    assert!(state
+        .inner
+        .store
+        .list_events_after(0, 10, Some(session_id.as_str()))
+        .await
+        .unwrap()
+        .is_empty());
     cleanup_sqlite_files(&path);
 }
 

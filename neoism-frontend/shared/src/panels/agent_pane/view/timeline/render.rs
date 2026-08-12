@@ -491,7 +491,9 @@ pub(crate) fn display_timeline_message<M: AgentTimelineMessage>(
     message: &M,
     previous_visible_was_edit_tool: bool,
 ) -> Option<M> {
-    if message.kind() == AgentTimelineMessageKind::System {
+    if message.kind() == AgentTimelineMessageKind::System
+        && message.tool() != "location_notice"
+    {
         return None;
     }
     let mut display_message = message.clone();

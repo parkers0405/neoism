@@ -17,6 +17,9 @@ use crate::primitives::ide_theme::IdeTheme;
 /// in `measure_message_height_with` must subtract the SAME amount from the
 /// wrap width or card heights drift.
 pub(super) const ASSISTANT_TEXT_PAD_LEFT: f32 = 18.0;
+/// Extra room below a settled assistant answer for the OpenCode-style
+/// `Agent · Model · Duration` provenance line.
+pub(super) const ASSISTANT_RESPONSE_FOOTER_H: f32 = 28.0;
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_assistant_text_with<P: AgentMarkdownPane>(
@@ -27,6 +30,7 @@ pub fn render_assistant_text_with<P: AgentMarkdownPane>(
     h: f32,
     body_id: &str,
     text: &str,
+    response_footer: &str,
     markdown_blocks: Option<&[AssistantMarkdownBlock]>,
     pane: &mut P,
     theme: &IdeTheme,
@@ -61,13 +65,19 @@ pub fn render_assistant_text_with<P: AgentMarkdownPane>(
         );
         cached_blocks.as_slice()
     };
+    let footer_h = if response_footer.trim().is_empty() {
+        0.0
+    } else {
+        ASSISTANT_RESPONSE_FOOTER_H * s
+    };
+    let body_h = (h - footer_h).max(0.0);
     render_markdown_blocks(
         sugarloaf,
         blocks,
         x + pad_left,
         y,
         (w - pad_left).max(80.0 * s),
-        h,
+        body_h,
         pane,
         theme,
         s,
@@ -79,7 +89,69 @@ pub fn render_assistant_text_with<P: AgentMarkdownPane>(
         viewport_clip,
         occlusion_rects,
     );
+    if footer_h > 0.0 {
+        render_assistant_response_footer(
+            sugarloaf,
+            x + pad_left,
+            y + body_h + 8.0 * s,
+            response_footer.trim(),
+            theme,
+            s,
+            viewport_clip,
+            occlusion_rects,
+        );
+    }
     h
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_assistant_response_footer(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    footer: &str,
+    theme: &IdeTheme,
+    s: f32,
+    viewport_clip: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+) {
+    let (agent, rest) = footer
+        .split_once(" · ")
+        .map(|(agent, rest)| (agent, Some(rest)))
+        .unwrap_or((footer, None));
+    let Some(agent_opts) = opts_with_clip(
+        DrawOpts {
+            font_size: 12.0 * s,
+            color: theme.u8(theme.blue),
+            ..DrawOpts::default()
+        },
+        viewport_clip,
+    ) else {
+        return;
+    };
+    draw_text_clipped(sugarloaf, x, y, agent, &agent_opts, occlusion_rects);
+    let Some(rest) = rest else {
+        return;
+    };
+    let rest_x = x + sugarloaf.text_mut().measure(agent, &agent_opts);
+    let Some(rest_opts) = opts_with_clip(
+        DrawOpts {
+            font_size: 12.0 * s,
+            color: theme.u8(theme.muted),
+            ..DrawOpts::default()
+        },
+        viewport_clip,
+    ) else {
+        return;
+    };
+    draw_text_clipped(
+        sugarloaf,
+        rest_x,
+        y,
+        &format!(" · {rest}"),
+        &rest_opts,
+        occlusion_rects,
+    );
 }
 
 pub fn render_reasoning_message_with<P, M>(

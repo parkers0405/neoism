@@ -655,6 +655,7 @@ mod tests {
             provider_id: "anthropic".to_string(),
             model_id: "claude-sonnet-4".to_string(),
             variant: None,
+            text_verbosity: None,
             api: None,
             auth_env: Vec::new(),
             messages: vec![
@@ -696,6 +697,7 @@ mod tests {
             provider_id: "anthropic".to_string(),
             model_id: "claude-sonnet-4".to_string(),
             variant: Some("high".to_string()),
+            text_verbosity: None,
             api: None,
             auth_env: Vec::new(),
             messages: vec![ProviderMessage::text(ProviderRole::User, "think")],

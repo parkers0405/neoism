@@ -114,7 +114,7 @@ impl Screen<'_> {
                         .and_then(neoism_ui::panels::git_branch::branch_for);
                     (
                         neoism_ui::panels::status_line::Mode::Agent,
-                        "Neoism Agent".to_string(),
+                        "Neoism".to_string(),
                         neoism_ui::panels::status_line::PrimaryKind::Agent,
                         branch,
                         None,

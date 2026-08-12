@@ -632,9 +632,9 @@ impl<A> BufferTabs<A> {
             + 1;
         self.tabs.push(BufferTab {
             title: if number == 1 {
-                "Neoism Agent".to_string()
+                "Neoism".to_string()
             } else {
-                format!("Neoism Agent {number}")
+                format!("Neoism {number}")
             },
             modified: false,
             custom_icon: None,

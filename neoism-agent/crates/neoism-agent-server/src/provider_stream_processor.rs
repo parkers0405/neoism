@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use futures::future::join_all;
+use futures::{stream::FuturesUnordered, StreamExt};
 use neoism_agent_core::{
     event_type, EventPayload, Id, IdKind, MessageWithParts, Part, PartTime,
     PermissionRule, ProviderGenerationResponse, ProviderStreamEvent, ReasoningPart,
@@ -410,16 +410,10 @@ pub(crate) async fn process_provider_stream_event(
                 return Ok(());
             }
             stream.provider_response.text.push_str(&delta);
-            {
-                let mut message = ctx.live_message.lock().await;
-                append_text_delta(&mut message.parts, ctx.text_part_id.as_str(), &delta);
-                ctx.state
-                    .inner
-                    .store
-                    .update_message(ctx.session_id_text, &message)
-                    .await?;
-            }
-            ctx.state.publish(EventPayload::new(
+            let mut message = ctx.live_message.lock().await;
+            append_text_delta(&mut message.parts, ctx.text_part_id.as_str(), &delta);
+            drop(message);
+            ctx.state.publish_live(EventPayload::new(
                 event_type::MESSAGE_PART_DELTA,
                 json!({
                     "sessionID": ctx.session_id,
@@ -469,16 +463,10 @@ pub(crate) async fn process_provider_stream_event(
             if delta.is_empty() {
                 return Ok(());
             }
-            {
-                let mut message = ctx.live_message.lock().await;
-                append_text_delta(&mut message.parts, part_id.as_str(), &delta);
-                ctx.state
-                    .inner
-                    .store
-                    .update_message(ctx.session_id_text, &message)
-                    .await?;
-            }
-            ctx.state.publish(EventPayload::new(
+            let mut message = ctx.live_message.lock().await;
+            append_text_delta(&mut message.parts, part_id.as_str(), &delta);
+            drop(message);
+            ctx.state.publish_live(EventPayload::new(
                 event_type::MESSAGE_PART_DELTA,
                 json!({
                     "sessionID": ctx.session_id,
@@ -574,23 +562,8 @@ pub(crate) async fn process_provider_stream_event(
             let Some(part_id) = stream.tool_parts.get(&id).cloned() else {
                 return Ok(());
             };
-            let part = {
-                let mut message = ctx.live_message.lock().await;
-                let part =
-                    append_tool_input_delta(&mut message.parts, part_id.as_str(), &delta);
-                ctx.state
-                    .inner
-                    .store
-                    .update_message(ctx.session_id_text, &message)
-                    .await?;
-                part
-            };
-            if let Some(part) = part {
-                ctx.state.publish(EventPayload::new(
-                    event_type::MESSAGE_PART_UPDATED,
-                    json!({ "sessionID": ctx.session_id, "part": part, "time": now_millis() }),
-                ));
-            }
+            let mut message = ctx.live_message.lock().await;
+            append_tool_input_delta(&mut message.parts, part_id.as_str(), &delta);
         }
         ProviderStreamEvent::ToolInputEnd { .. } => {}
         ProviderStreamEvent::ToolCall { id, name, input } => {
@@ -869,16 +842,30 @@ async fn flush_pending_tool_calls(
         return Ok(());
     }
     let tasks = stream.tool_tasks.drain(..).collect::<Vec<_>>();
-    let results = join_all(tasks.into_iter().map(|(call, task)| async move {
-        let result = task
-            .await
-            .unwrap_or_else(|error| Err(format!("tool execution task failed: {error}")));
-        QueuedToolResult { call, result }
-    }))
-    .await;
-    for result in results {
-        publish_queued_tool_result(ctx, result).await?;
+    let mut pending = FuturesUnordered::new();
+    for (call, task) in tasks {
+        pending.push(async move {
+            let result = task.await.unwrap_or_else(|error| {
+                Err(format!("tool execution task failed: {error}"))
+            });
+            QueuedToolResult { call, result }
+        });
     }
+    let mut updated_parts = Vec::new();
+    while let Some(result) = pending.next().await {
+        let part = apply_queued_tool_result(ctx, result).await;
+        if let Some(part) = part {
+            // Do not make a fast tool wait behind the slowest parallel call
+            // before the UI can show its result. The authoritative message is
+            // still persisted once below after the whole batch settles.
+            ctx.state.publish_live(EventPayload::new(
+                event_type::MESSAGE_PART_UPDATED,
+                json!({ "sessionID": ctx.session_id, "part": part, "time": now_millis() }),
+            ));
+            updated_parts.push(part);
+        }
+    }
+    persist_queued_tool_results(ctx, updated_parts).await?;
     Ok(())
 }
 
@@ -919,40 +906,41 @@ fn spawn_tool_call(
     })
 }
 
-async fn publish_queued_tool_result(
+async fn apply_queued_tool_result(
     ctx: &ProviderStreamEventContext<'_>,
     result: QueuedToolResult,
-) -> Result<(), ApiError> {
-    let part = match result.result {
-        Ok(tool_result) => {
-            let mut message = ctx.live_message.lock().await;
-            let part = set_tool_completed(
-                &mut message.parts,
-                result.call.part_id.as_str(),
-                tool_result.output,
-                tool_result.title,
-                tool_result.metadata.unwrap_or_else(|| json!({})),
-            );
-            ctx.state
-                .inner
-                .store
-                .update_message(ctx.session_id_text, &message)
-                .await?;
-            part
-        }
+) -> Option<Part> {
+    let mut message = ctx.live_message.lock().await;
+    match result.result {
+        Ok(tool_result) => set_tool_completed(
+            &mut message.parts,
+            result.call.part_id.as_str(),
+            tool_result.output,
+            tool_result.title,
+            tool_result.metadata.unwrap_or_else(|| json!({})),
+        ),
         Err(error) => {
-            let mut message = ctx.live_message.lock().await;
-            let part =
-                set_tool_error(&mut message.parts, result.call.part_id.as_str(), error);
-            ctx.state
-                .inner
-                .store
-                .update_message(ctx.session_id_text, &message)
-                .await?;
-            part
+            set_tool_error(&mut message.parts, result.call.part_id.as_str(), error)
         }
-    };
-    if let Some(part) = part {
+    }
+}
+
+async fn persist_queued_tool_results(
+    ctx: &ProviderStreamEventContext<'_>,
+    updated_parts: Vec<Part>,
+) -> Result<(), ApiError> {
+    if updated_parts.is_empty() {
+        return Ok(());
+    }
+    {
+        let message = ctx.live_message.lock().await;
+        ctx.state
+            .inner
+            .store
+            .update_message(ctx.session_id_text, &message)
+            .await?;
+    }
+    for part in updated_parts {
         ctx.state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
             json!({ "sessionID": ctx.session_id, "part": part, "time": now_millis() }),

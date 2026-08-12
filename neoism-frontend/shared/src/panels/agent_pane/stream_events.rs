@@ -153,6 +153,25 @@ pub enum SessionEventUpdate {
     },
     PartUpdated(Value),
     PartRemoved(String),
+    /// A transcript delta from a child session while the parent tree is the
+    /// subscribed session. Hosts cache these by `session_id` so opening a
+    /// running subagent shows the complete stream instead of only the suffix
+    /// produced after navigation.
+    ChildPartDelta {
+        session_id: String,
+        message_id: Option<String>,
+        part_id: Option<String>,
+        kind: Option<String>,
+        delta: String,
+    },
+    ChildPartUpdated {
+        session_id: String,
+        part: Value,
+    },
+    ChildPartRemoved {
+        session_id: String,
+        part_id: String,
+    },
     CompactionStarted {
         id: String,
         reason: String,
@@ -325,12 +344,26 @@ pub fn classify_session_event(
             if is_child_event {
                 return source_session_id
                     .map(|child_id| {
-                        vec![SessionEventUpdate::SubagentActivity {
-                            session_id: child_id,
-                            status: "active".to_string(),
-                            current_tool: Some("responding".to_string()),
-                            started_at: None,
-                        }]
+                        vec![
+                            SessionEventUpdate::SubagentActivity {
+                                session_id: child_id.clone(),
+                                status: "active".to_string(),
+                                current_tool: Some("responding".to_string()),
+                                started_at: None,
+                            },
+                            SessionEventUpdate::ChildPartDelta {
+                                session_id: child_id,
+                                message_id: event_message_id(properties)
+                                    .map(str::to_string),
+                                part_id: event_part_id(properties).map(str::to_string),
+                                kind: event_part_kind(properties).map(str::to_string),
+                                delta: properties
+                                    .get("delta")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            },
+                        ]
                     })
                     .unwrap_or_default();
             }
@@ -375,6 +408,12 @@ pub fn classify_session_event(
                             started_at: activity.started_at,
                         });
                     }
+                    if let Some(child_id) = source_session_id {
+                        out.push(SessionEventUpdate::ChildPartUpdated {
+                            session_id: child_id,
+                            part: part.clone(),
+                        });
+                    }
                     return out;
                 }
             }
@@ -385,7 +424,15 @@ pub fn classify_session_event(
         }
         "message.part.removed" => {
             if is_child_event {
-                return Vec::new();
+                return match (source_session_id, event_part_id(properties)) {
+                    (Some(session_id), Some(part_id)) => {
+                        vec![SessionEventUpdate::ChildPartRemoved {
+                            session_id,
+                            part_id: part_id.to_string(),
+                        }]
+                    }
+                    _ => Vec::new(),
+                };
             }
             event_part_id(properties)
                 .map(|part_id| vec![SessionEventUpdate::PartRemoved(part_id.to_string())])
@@ -645,6 +692,11 @@ pub fn classify_session_event(
                 vec![SessionEventUpdate::QuestionRemoved { request_id }]
             }
         }
+        // A user-triggered Escape is control flow, not an error worth adding
+        // to the GUI. Some runtimes still broadcast the abort through the
+        // generic session.error channel after the abort endpoint succeeds;
+        // discard that event while preserving real provider/runtime errors.
+        "session.error" if is_session_interruption(properties) => Vec::new(),
         "session.error" => vec![SessionEventUpdate::System {
             title: "Neoism Agent".to_string(),
             body: session_error_message(properties),
@@ -685,25 +737,35 @@ pub fn task_status_from_parent_part(part: &Value) -> Option<SubagentTaskStatus> 
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| task_id_from_output(output))?;
-    // The task tool's OWN `state.status` is the authoritative completion
-    // signal: when the `task` tool part finishes its sub-agent has
-    // finished, full stop. Honour a terminal `state.status` over the
-    // (often-lagging) `metadata.status` / output marker — otherwise a
-    // finished sub-agent can keep reporting "active" because its metadata
-    // hasn't caught up, which is exactly how the row got stuck on
-    // "responding"/"working".
+    let background = metadata
+        .get("background")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            state
+                .get("input")
+                .and_then(|input| input.get("background"))
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(false);
+    let runtime_status = metadata
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| task_status_from_output(output));
+    // A background task tool completes as soon as it has LAUNCHED the child;
+    // that does not mean the child completed. Its metadata/output lifecycle
+    // remains authoritative until child session.status/subtask.completed
+    // reports the real terminal transition. Foreground tasks are different:
+    // their tool call stays open for the child's lifetime, so a terminal tool
+    // state is authoritative and may override stale runtime metadata.
     let tool_state_status = state
         .get("status")
         .and_then(Value::as_str)
         .map(normalize_subagent_status);
-    let status = match tool_state_status {
-        Some(status @ ("completed" | "error")) => status.to_string(),
-        _ => metadata
-            .get("status")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| task_status_from_output(output).map(str::to_string))
-            .unwrap_or_else(|| "active".to_string()),
+    let status = match (background, runtime_status, tool_state_status) {
+        (true, Some(status), _) => status.to_string(),
+        (_, _, Some(status @ ("completed" | "error"))) => status.to_string(),
+        (_, Some(status), _) => status.to_string(),
+        _ => "active".to_string(),
     };
     Some(SubagentTaskStatus {
         session_id,
@@ -881,6 +943,24 @@ pub fn session_error_message(properties: &Value) -> String {
         .to_string()
 }
 
+fn is_session_interruption(properties: &Value) -> bool {
+    let error = properties.get("error").unwrap_or(properties);
+    error
+        .get("interrupted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || error
+            .get("data")
+            .and_then(|data| data.get("interrupted"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || error
+            .get("message")
+            .or_else(|| error.get("data").and_then(|data| data.get("message")))
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.eq_ignore_ascii_case("session aborted"))
+}
+
 fn compaction_usage_from_summary(summary: &str, kind: &str) -> Option<NeoismAgentUsage> {
     if kind == "error" {
         return None;
@@ -1013,11 +1093,9 @@ mod tests {
     }
 
     #[test]
-    fn task_tool_completion_overrides_lagging_metadata_status() {
-        // The task tool part finished (`state.status: completed`) while its
-        // metadata still claims the sub-agent is "running". The tool's own
-        // terminal state wins so the sub-agent reaches a terminal status —
-        // this is what stops the row sticking on "responding"/"working".
+    fn foreground_task_tool_completion_overrides_lagging_metadata_status() {
+        // Foreground task calls stay open for the child lifetime, so their
+        // terminal tool state wins over stale child metadata.
         let part = json!({
             "type": "tool",
             "tool": "task",
@@ -1032,6 +1110,33 @@ mod tests {
         let status = task_status_from_parent_part(&part).unwrap();
         assert_eq!(status.session_id, "ses_child");
         assert_eq!(status.status, "completed");
+    }
+
+    #[test]
+    fn background_task_launch_completion_keeps_child_active() {
+        // A background task's tool call completes immediately after launch.
+        // The child is still running and must remain visible in the sidebar.
+        let part = json!({
+            "type": "tool",
+            "tool": "task",
+            "state": {
+                "status": "completed",
+                "input": { "background": true },
+                "output": "task_id: ses_child\nstatus: running",
+                "time": { "start": 9 },
+                "metadata": {
+                    "sessionId": "ses_child",
+                    "background": true,
+                    "status": "running",
+                    "agent": "explore"
+                }
+            }
+        });
+
+        let status = task_status_from_parent_part(&part).unwrap();
+        assert_eq!(status.session_id, "ses_child");
+        assert_eq!(status.status, "active");
+        assert_eq!(status.agent.as_deref(), Some("explore"));
     }
 
     #[test]
@@ -1159,6 +1264,61 @@ mod tests {
     }
 
     #[test]
+    fn tracked_child_text_delta_is_forwarded_for_live_transcript_cache() {
+        let mut state = SessionEventUpdateState::default();
+        let _ = classify_session_event(
+            json!({
+                "type": "message.part.updated",
+                "properties": {
+                    "sessionId": "ses_root",
+                    "part": {
+                        "id": "part_task",
+                        "type": "tool",
+                        "tool": "task",
+                        "state": {
+                            "output": "task_id: ses_child\nstatus: running"
+                        }
+                    }
+                }
+            }),
+            "ses_root",
+            &mut state,
+        );
+
+        let updates = classify_session_event(
+            json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionId": "ses_child",
+                    "parentSessionId": "ses_root",
+                    "messageID": "msg_child",
+                    "partID": "part_child_answer",
+                    "partType": "text",
+                    "field": "text",
+                    "delta": "the prefix"
+                }
+            }),
+            "ses_root",
+            &mut state,
+        );
+
+        assert!(matches!(
+            &updates[1],
+            SessionEventUpdate::ChildPartDelta {
+                session_id,
+                message_id: Some(message_id),
+                part_id: Some(part_id),
+                kind: Some(kind),
+                delta,
+            } if session_id == "ses_child"
+                && message_id == "msg_child"
+                && part_id == "part_child_answer"
+                && kind == "text"
+                && delta == "the prefix"
+        ));
+    }
+
+    #[test]
     fn classify_session_event_requests_idle_refresh_once_until_busy() {
         let idle = json!({
             "type": "session.status",
@@ -1204,6 +1364,48 @@ mod tests {
             ),
             vec![SessionEventUpdate::SessionIdle {
                 refresh_messages: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn classify_session_event_hides_user_interruption_error() {
+        let mut state = SessionEventUpdateState::default();
+        let updates = classify_session_event(
+            json!({
+                "type": "session.error",
+                "properties": {
+                    "sessionId": "ses_root",
+                    "error": { "message": "Session aborted", "interrupted": true }
+                }
+            }),
+            "ses_root",
+            &mut state,
+        );
+
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn classify_session_event_keeps_real_errors_visible() {
+        let mut state = SessionEventUpdateState::default();
+        let updates = classify_session_event(
+            json!({
+                "type": "session.error",
+                "properties": {
+                    "sessionId": "ses_root",
+                    "error": { "data": { "message": "provider exploded" } }
+                }
+            }),
+            "ses_root",
+            &mut state,
+        );
+
+        assert_eq!(
+            updates,
+            vec![SessionEventUpdate::System {
+                title: "Neoism Agent".to_string(),
+                body: "provider exploded".to_string(),
             }]
         );
     }

@@ -70,6 +70,17 @@ fn file(path: &str) -> BufferTab<()> {
 }
 
 #[test]
+fn neoism_agent_tabs_use_short_product_title() {
+    let mut tabs = BufferTabs::<()>::new();
+
+    let first = tabs.open_neoism_agent(41);
+    let second = tabs.open_neoism_agent(42);
+
+    assert_eq!(tabs.tabs()[first].title, "Neoism");
+    assert_eq!(tabs.tabs()[second].title, "Neoism 2");
+}
+
+#[test]
 fn long_tab_title_is_ellipsized_within_its_pixel_budget() {
     let fitted = BufferTabs::<()>::fit_title(
         "A very long Monocraft EPUB filename that must stay inside its tab.epub",

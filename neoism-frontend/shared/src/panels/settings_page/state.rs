@@ -130,6 +130,7 @@ pub(crate) const SETTINGS: &[SettingDef] = &[
     // ── Agent ── (only settings the neoism agent actually reads)
     action(Category::Agent, "Model & providers", "Pick the agent model, or connect a provider (API key / OAuth).", "open-model", "Choose\u{2026}"),
     sel(Category::Agent, "agent.reasoning-effort", "Reasoning effort", "How hard the model thinks.", &["low", "medium", "high", "xhigh", "max"], "medium"),
+    sel(Category::Agent, "agent.text-verbosity", "Response length", "How detailed supported models make their final text.", &["low", "medium", "high"], "low"),
     tog(Category::Agent, "agent.dangerously-skip-permissions", "Skip permission prompts", "Auto-allow agent actions that would prompt. Explicit deny rules still deny.", false),
 
     // ── Developer ──

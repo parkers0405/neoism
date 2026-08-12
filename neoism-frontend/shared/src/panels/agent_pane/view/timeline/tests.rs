@@ -121,6 +121,27 @@ fn live_window_reveals_trace_and_system_stays_hidden() {
 }
 
 #[test]
+fn location_notice_stays_visible_without_exposing_other_system_messages() {
+    let mut location = text_message(
+        "location",
+        NeoismAgentMessageKind::System,
+        "Switched location to /tmp/project",
+    );
+    location.tool = "location_notice".to_string();
+    let messages = vec![
+        text_message("internal", NeoismAgentMessageKind::System, "internal"),
+        location,
+    ];
+
+    assert_eq!(
+        timeline_message_visibility(&messages, None),
+        vec![false, true]
+    );
+    assert!(super::render::display_timeline_message(&messages[0], false).is_none());
+    assert!(super::render::display_timeline_message(&messages[1], false).is_some());
+}
+
+#[test]
 fn live_read_tools_group_into_one_display_message() {
     let messages = vec![
         tool_message("read-a", "read", "Read(src/a.rs)", "completed"),

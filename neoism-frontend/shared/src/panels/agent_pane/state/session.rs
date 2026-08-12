@@ -11,6 +11,29 @@ impl NeoismAgentPane {
             self.submit_connect_secret(picker.query.clone());
             return true;
         }
+        if picker.kind == NeoismAgentPickerKind::Directory {
+            let query = picker.query.trim();
+            let selected = picker.selected_option().map(|option| option.value.clone());
+            let path = if query.is_empty() {
+                selected
+            } else if query.starts_with(['~', '/', '.', '\\'])
+                || query.contains(['/', '\\'])
+                || query.as_bytes().get(1) == Some(&b':')
+                || selected.is_none()
+            {
+                Some(query.to_string())
+            } else {
+                selected
+            };
+            if let (Some(session_id), Some(path)) = (self.session_id.clone(), path) {
+                self.push_outbound(OutboundAgentCommand::SlashCommand {
+                    name: "cd".to_string(),
+                    args: path,
+                });
+                self.side_panel.set_viewed_session_id(Some(session_id));
+            }
+            return true;
+        }
         let Some(option) = picker.selected_option().cloned() else {
             return true;
         };
@@ -28,6 +51,7 @@ impl NeoismAgentPane {
             NeoismAgentPickerKind::Session | NeoismAgentPickerKind::Subagent => {
                 self.switch_session(option.value);
             }
+            NeoismAgentPickerKind::Directory => unreachable!("handled above"),
             NeoismAgentPickerKind::Skill => self.apply_skill_mention(option),
             NeoismAgentPickerKind::SkillMention => {
                 self.apply_inline_skill_mention(option)
@@ -315,6 +339,14 @@ impl NeoismAgentPane {
         self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
     }
 
+    /// Add a quiet, unboxed transcript line for a successful `/cd`.
+    pub fn location_message(&mut self, text: impl Into<String>) {
+        let mut message = NeoismAgentMessage::system("Directory", text);
+        message.tool = "location_notice".to_string();
+        self.messages.push(message);
+        self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
+    }
+
     pub(in crate::panels::agent_pane::state) fn send_prompt_with_echo(
         &mut self,
         prompt: &str,
@@ -488,6 +520,16 @@ impl NeoismAgentPane {
                     self.open_sessions_picker();
                 }
             }
+            "/cd" => {
+                if args_vec.is_empty() {
+                    self.open_directory_picker();
+                } else {
+                    self.push_outbound(OutboundAgentCommand::SlashCommand {
+                        name: "cd".to_string(),
+                        args: args_tail,
+                    });
+                }
+            }
             "/sub-agent" | "/subagents" | "/sub" => self.open_subagent_picker(),
             "/skill" | "/skills" => {
                 if args_vec.is_empty() {
@@ -544,7 +586,12 @@ impl NeoismAgentPane {
         &mut self,
         value: String,
     ) {
+        let changed = self.model != value;
         self.model = value;
+        if changed {
+            self.model_context_limit =
+                self.model_context_limits.get(&self.model).copied();
+        }
     }
 
     pub(in crate::panels::agent_pane::state) fn remember_model_value(

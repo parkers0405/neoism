@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use neoism_backend::clipboard::ClipboardImage;
+use neoism_ui::panels::agent_pane::api_mapping::SessionState;
 use neoism_ui::panels::agent_pane::input_controller::{self, AgentInputBuffer};
 use neoism_ui::panels::agent_pane::interaction_policy;
 use neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand;
@@ -226,6 +227,29 @@ pub(super) struct AgentTimelineHistoryState {
     pub last_requested_session_id: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct CachedAgentSession {
+    pub state: SessionState,
+    pub messages: Vec<NeoismAgentMessage>,
+    pub timeline_history: AgentTimelineHistoryState,
+    pub timeline_scroll_px: f32,
+    pub timeline_follow_bottom: bool,
+    pub hydrated: bool,
+}
+
+impl CachedAgentSession {
+    pub(super) fn live_only() -> Self {
+        Self {
+            state: SessionState::default(),
+            messages: Vec::new(),
+            timeline_history: AgentTimelineHistoryState::default(),
+            timeline_scroll_px: 0.0,
+            timeline_follow_bottom: true,
+            hydrated: false,
+        }
+    }
+}
+
 impl Default for AgentTimelineHistoryState {
     fn default() -> Self {
         Self {
@@ -411,6 +435,19 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         session_id: String,
         goal: Option<SessionGoal>,
     },
+    /// OpenCode-style background hydration for parent/child navigation. Live
+    /// events continue landing in the per-session cache while this request is
+    /// in flight; the applier merges instead of replacing them.
+    SessionPreloaded {
+        session_id: String,
+        state: SessionState,
+        messages: Vec<NeoismAgentMessage>,
+        oldest_cursor: Option<String>,
+    },
+    SessionPreloadFailed {
+        session_id: String,
+        error: String,
+    },
     /// An older history page, fetched off the UI thread. `messages` is in
     /// ascending (oldest-first) order, ready to prepend. `raw_count` is the
     /// number of stored messages the server returned (vs expanded blocks),
@@ -528,6 +565,13 @@ pub struct NeoismAgentPane {
     skill_options_directory: Option<Option<String>>,
     file_mention_anchor: Option<usize>,
     event_stream: Option<AgentSessionEventStream>,
+    /// Transcript/state caches keyed by real session id. Parent and child
+    /// sessions remain resident while navigation only changes `session_id`,
+    /// matching OpenCode's route-over-global-store model.
+    pub(super) session_cache: HashMap<String, CachedAgentSession>,
+    pub(super) session_preloads_in_flight: BTreeSet<String>,
+    pub(super) pending_session_switch: Option<String>,
+    pub(super) session_tree_root_id: Option<String>,
     background_tx: Sender<NeoismAgentBackgroundUpdate>,
     background_rx: Receiver<NeoismAgentBackgroundUpdate>,
     /// Semantic session-search coalescing: at most one fetch in flight; a
@@ -606,8 +650,8 @@ pub struct NeoismAgentPane {
     selectable_lines_len: usize,
     selection_anchor: Option<SelectionPoint>,
     selection_focus: Option<SelectionPoint>,
-    timeline_scroll_px: f32,
-    timeline_follow_bottom: bool,
+    pub(super) timeline_scroll_px: f32,
+    pub(super) timeline_follow_bottom: bool,
     timeline_content_height_px: f32,
     timeline_viewport_height_px: f32,
     timeline_viewport_rect: Option<[f32; 4]>,
@@ -774,6 +818,10 @@ impl Default for NeoismAgentPane {
             skill_options_directory: None,
             file_mention_anchor: None,
             event_stream: None,
+            session_cache: HashMap::new(),
+            session_preloads_in_flight: BTreeSet::new(),
+            pending_session_switch: None,
+            session_tree_root_id: None,
             background_tx,
             background_rx,
             semantic_in_flight: false,
@@ -1133,6 +1181,91 @@ fn merge_part_message(
         }
     }
     incoming
+}
+
+/// Merge a stored transcript snapshot with parts that arrived live while the
+/// snapshot request was in flight. Live text wins when the stored part is
+/// empty or an older prefix, mirroring OpenCode's hydration tracker.
+pub(super) fn merge_session_snapshot(
+    snapshot: Vec<NeoismAgentMessage>,
+    live: Vec<NeoismAgentMessage>,
+) -> Vec<NeoismAgentMessage> {
+    let mut merged = Vec::with_capacity(snapshot.len().max(live.len()));
+    for incoming in snapshot {
+        if let Some(existing) = live
+            .iter()
+            .find(|existing| same_streamed_part_identity(existing, &incoming))
+        {
+            merged.push(merge_part_message(existing.clone(), incoming));
+        } else {
+            merged.push(incoming);
+        }
+    }
+    for message in live {
+        if !merged
+            .iter()
+            .any(|existing| same_streamed_part_identity(existing, &message))
+        {
+            merged.push(message);
+        }
+    }
+    merged
+}
+
+pub(super) fn upsert_cached_part_message(
+    messages: &mut Vec<NeoismAgentMessage>,
+    message: NeoismAgentMessage,
+) {
+    if !message.id.is_empty() {
+        if let Some(index) = messages
+            .iter()
+            .position(|existing| same_streamed_part_identity(existing, &message))
+        {
+            messages[index] = merge_part_message(messages[index].clone(), message);
+            return;
+        }
+    }
+    messages.push(message);
+}
+
+pub(super) fn apply_cached_part_delta(
+    messages: &mut Vec<NeoismAgentMessage>,
+    part_id: Option<&str>,
+    kind: Option<&str>,
+    delta: &str,
+) {
+    if delta.is_empty() {
+        return;
+    }
+    if let Some(part_id) = part_id.filter(|id| !id.is_empty()) {
+        if let Some(message) = messages.iter_mut().find(|message| message.id == part_id) {
+            message.text.push_str(delta);
+            return;
+        }
+        let message = match kind {
+            Some("reasoning" | "thinking") => {
+                NeoismAgentMessage::reasoning(delta).with_id(part_id.to_string())
+            }
+            _ => NeoismAgentMessage::assistant(delta).with_id(part_id.to_string()),
+        };
+        messages.push(message);
+        return;
+    }
+    let message_kind = match kind {
+        Some("reasoning" | "thinking") => NeoismAgentMessageKind::Reasoning,
+        _ => NeoismAgentMessageKind::Assistant,
+    };
+    if let Some(message) = messages
+        .iter_mut()
+        .rfind(|message| message.kind == message_kind)
+    {
+        message.text.push_str(delta);
+    } else {
+        messages.push(match message_kind {
+            NeoismAgentMessageKind::Reasoning => NeoismAgentMessage::reasoning(delta),
+            _ => NeoismAgentMessage::assistant(delta),
+        });
+    }
 }
 
 fn same_streamed_part_identity(a: &NeoismAgentMessage, b: &NeoismAgentMessage) -> bool {

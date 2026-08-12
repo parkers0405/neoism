@@ -21,6 +21,8 @@ pub enum NeoismAgentPickerKind {
     SkillMention,
     Thinking,
     Session,
+    /// Directory-only FFF picker opened by `/cd`.
+    Directory,
     Subagent,
     Skill,
     /// `/connect` stage 1 — the "Connect a provider" list (Popular +
@@ -536,7 +538,11 @@ impl NeoismAgentPicker {
                 emitted_header = false;
                 continue;
             }
-            let matches = option_matches(option, &words) || pending_header_matches;
+            let matches = if self.kind == NeoismAgentPickerKind::Directory {
+                directory_option_matches(option, &words)
+            } else {
+                option_matches(option, &words)
+            } || pending_header_matches;
             if !matches {
                 continue;
             }
@@ -734,6 +740,18 @@ fn option_matches(option: &NeoismAgentPickerOption, words: &[&str]) -> bool {
     haystack.push_str(&option.section);
     haystack.make_ascii_lowercase();
     words.iter().all(|word| haystack.contains(word))
+}
+
+fn directory_option_matches(option: &NeoismAgentPickerOption, words: &[&str]) -> bool {
+    let haystack = format!("{} {}", option.title, option.value).to_ascii_lowercase();
+    words.iter().all(|word| {
+        if haystack.contains(word) {
+            return true;
+        }
+        let mut chars = haystack.chars();
+        word.chars()
+            .all(|needle| chars.by_ref().any(|candidate| candidate == needle))
+    })
 }
 
 fn slash_option_match_rank(option: &NeoismAgentPickerOption, query: &str) -> (u8, usize) {

@@ -61,9 +61,9 @@ use crate::session_queue::{
     prompt_async, session_queue, session_queue_clear, session_queue_pop,
 };
 use crate::session_routes::{
-    session_children, session_create, session_delete, session_diff, session_fork,
-    session_get, session_list, session_set_pin, session_share, session_status,
-    session_todo_list, session_unshare, session_update,
+    session_children, session_create, session_delete, session_diff,
+    session_directory_options, session_fork, session_get, session_list, session_set_pin,
+    session_share, session_status, session_todo_list, session_unshare, session_update,
 };
 use crate::session_undo::{
     session_redo, session_revert, session_undo, session_undo_tree, session_unrevert,
@@ -281,6 +281,10 @@ pub fn app(state: AppState) -> Router {
         .route("/session/:session_id/undo", get(session_undo_tree))
         .route("/session/:session_id/undo/tree", get(session_undo_tree))
         .route("/session/:session_id/summarize", post(session_summarize))
+        .route(
+            "/session/:session_id/directory",
+            get(session_directory_options),
+        )
         .route(
             "/session/:session_id",
             get(session_get)

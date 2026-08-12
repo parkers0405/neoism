@@ -288,6 +288,7 @@ pub fn default_config_file_content() -> String {
     //     "model": "anthropic/claude-opus-5",
     //     "small-model": "anthropic/claude-haiku-4-5",
     //     "reasoning-effort": "high", // low | medium | high | xhigh | max
+    //     "text-verbosity": "low",    // low | medium | high
     //     "permission": { "edit": "ask", "bash": "ask" },
     //     "mcp": { "my-server": { "type": "local", "command": ["my-mcp"] } },
     // },

@@ -564,6 +564,14 @@ impl AppState {
         }
     }
 
+    /// Broadcast transient stream progress without appending it to the durable
+    /// event log. The complete message is persisted at semantic boundaries;
+    /// writing every provider delta here stalls the provider and amplifies the
+    /// growing message into thousands of database writes.
+    pub(crate) fn publish_live(&self, event: EventPayload) {
+        let _ = self.inner.events.send(event);
+    }
+
     #[cfg(test)]
     pub(crate) async fn publish_persisted(
         &self,

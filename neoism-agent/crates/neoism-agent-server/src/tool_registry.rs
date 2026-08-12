@@ -322,7 +322,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
         ),
         tool(
             "task",
-            "Delegate work to a subagent",
+            "Delegate work to a subagent. For broad read-only codebase research, launch the explore subagent as the only tool call in the step. Strongly prefer stopping the parent turn and waiting for Neoism to deliver its concise completion result when further work depends on it. The parent may continue user conversation or genuinely independent light work, but must not duplicate the exploration with parent-session tools or poll while it runs.",
             json!({
                 "type": "object",
                 "properties": {

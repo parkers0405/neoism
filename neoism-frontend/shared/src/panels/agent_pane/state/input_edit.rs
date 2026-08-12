@@ -208,8 +208,6 @@ impl NeoismAgentPane {
         if self.is_streaming() {
             self.last_control_c_at = Some(now);
             self.abort_session();
-            self.messages
-                .push(NeoismAgentMessage::subtask("Interrupted", "run stopped"));
             return;
         }
         let double = self.last_control_c_at.is_some_and(|last| {
@@ -218,8 +216,6 @@ impl NeoismAgentPane {
         self.last_control_c_at = Some(now);
         if double {
             self.abort_session();
-            self.messages
-                .push(NeoismAgentMessage::subtask("Interrupted", "run stopped"));
         }
     }
 

@@ -1075,7 +1075,7 @@ pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
         .iter()
         .enumerate()
         .map(|(index, message)| match message.kind() {
-            AgentTimelineMessageKind::System => false,
+            AgentTimelineMessageKind::System => message.tool() == "location_notice",
             AgentTimelineMessageKind::Reasoning
             | AgentTimelineMessageKind::Tool
             | AgentTimelineMessageKind::Subtask

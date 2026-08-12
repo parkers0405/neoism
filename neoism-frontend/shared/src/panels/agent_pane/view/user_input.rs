@@ -650,7 +650,8 @@ pub fn render_user_message(
             line_y,
             text_w,
             theme,
-            s * 2.35,
+            s,
+            super::image_preview::MESSAGE_THUMB_SIZE,
             viewport_clip,
             occlusion_rects,
         );
@@ -833,6 +834,7 @@ pub fn render_input(
             (box_w - 36.0 * s).max(0.0),
             theme,
             s,
+            super::image_preview::COMPOSER_THUMB_SIZE,
             [box_x, box_y, box_w, box_h],
             occlusion_rects,
         );

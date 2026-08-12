@@ -16,7 +16,10 @@ const THUMB_SIZE: f32 = 64.0;
 fn image_id(image: &NeoismAgentImage) -> u32 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     image.url.hash(&mut hasher);
-    0xA100_0000 | (hasher.finish() as u32 & 0x00ff_ffff)
+    // Keep agent attachments out of the notebook image namespace. Sharing
+    // 0xA100 IDs allowed a cached full-size notebook/terminal texture to be
+    // reused for a small chat preview, producing a giant overlay across text.
+    0xA700_0000 | (hasher.finish() as u32 & 0x00ff_ffff)
 }
 
 fn image_bytes(url: &str) -> Option<Vec<u8>> {
@@ -59,10 +62,11 @@ pub fn render_image_strip(
     max_w: f32,
     theme: &IdeTheme,
     s: f32,
+    thumb_size: f32,
     clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) {
-    let size = THUMB_SIZE * s;
+    let size = thumb_size * s;
     let gap = 10.0 * s;
     let mut thumb_x = x;
     for image in images {
@@ -111,6 +115,9 @@ pub fn render_image_strip(
         thumb_x += size + gap;
     }
 }
+
+pub const COMPOSER_THUMB_SIZE: f32 = THUMB_SIZE;
+pub const MESSAGE_THUMB_SIZE: f32 = 150.0;
 
 fn clip_image(rect: [f32; 4], clip: [f32; 4]) -> Option<([f32; 4], [f32; 4])> {
     let [x, y, w, h] = rect;

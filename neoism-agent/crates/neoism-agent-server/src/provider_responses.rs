@@ -38,11 +38,22 @@ struct ResponsesToolCallState {
     arguments: String,
 }
 
+#[cfg(test)]
 pub(crate) fn responses_request_body(
     model: impl Into<String>,
     variant: Option<&str>,
     messages: &[ProviderMessage],
     tools: &[ToolListItem],
+) -> Value {
+    responses_request_body_with_text_verbosity(model, variant, messages, tools, None)
+}
+
+pub(crate) fn responses_request_body_with_text_verbosity(
+    model: impl Into<String>,
+    variant: Option<&str>,
+    messages: &[ProviderMessage],
+    tools: &[ToolListItem],
+    text_verbosity: Option<neoism_agent_core::TextVerbosity>,
 ) -> Value {
     let model = model.into();
     let model_id = model.clone();
@@ -73,7 +84,32 @@ pub(crate) fn responses_request_body(
         body["reasoning"] = reasoning;
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
+    if let Some(verbosity) = gpt5_text_verbosity(&model_id, text_verbosity) {
+        body["text"] = json!({ "verbosity": verbosity });
+    }
     body
+}
+
+pub(crate) fn gpt5_text_verbosity(
+    model_id: &str,
+    configured: Option<neoism_agent_core::TextVerbosity>,
+) -> Option<&'static str> {
+    let model_id = model_id.to_ascii_lowercase();
+    // Match OpenCode v2's provider transform exactly: low by default for
+    // non-chat, non-Codex GPT-5.x models. Other model families may reject the
+    // Responses API text-verbosity field, so a global config value is ignored
+    // for those models rather than poisoning their requests.
+    if !model_id.contains("gpt-5.")
+        || model_id.contains("codex")
+        || model_id.contains("-chat")
+    {
+        return None;
+    }
+    Some(
+        configured
+            .unwrap_or(neoism_agent_core::TextVerbosity::Low)
+            .as_str(),
+    )
 }
 
 const ULTRA_DELEGATION_INSTRUCTIONS: &str = "\n\nProactive multi-agent delegation is active. Use the task tool to spawn sub-agents whenever parallel work would materially improve speed or quality — fanning out across files, independent subtasks, or broad searches. Do not wait for the user to ask for delegation.";

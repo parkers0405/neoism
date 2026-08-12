@@ -66,8 +66,17 @@ pub(super) fn fetch_model_context_limit(
     server: &str,
     model_ref: &str,
 ) -> Result<Option<u64>, String> {
-    let value = api_request_json(server, "GET", "/config/providers", None)?
-        .ok_or_else(|| "Neoism Agent returned an empty provider response".to_string())?;
+    // The provider catalog is assembled lazily and can exceed the normal
+    // 900 ms UI-request timeout on a cold agent-server start. A timeout here
+    // silently left the usage panel without its `/ context limit` denominator.
+    let value = api_request_json_with_read_timeout(
+        server,
+        "GET",
+        "/config/providers",
+        None,
+        Duration::from_secs(5),
+    )?
+    .ok_or_else(|| "Neoism Agent returned an empty provider response".to_string())?;
     Ok(model_context_limit_from_providers_json(&value, model_ref))
 }
 
@@ -126,6 +135,66 @@ pub(super) fn fetch_agent_options(
             }),
     );
     Ok(out)
+}
+
+pub(super) fn fetch_directory_options(
+    server: &str,
+    session_id: &str,
+    current_directory: Option<&str>,
+) -> Result<Vec<NeoismAgentPickerOption>, String> {
+    let value = api_request_json_with_read_timeout(
+        server,
+        "GET",
+        &format!("/session/{session_id}/directory?limit=512"),
+        None,
+        Duration::from_secs(20),
+    )?
+    .ok_or_else(|| "Neoism Agent returned an empty directory response".to_string())?;
+    let directories = value
+        .as_array()
+        .ok_or_else(|| "Neoism Agent returned malformed directories".to_string())?;
+    Ok(directories
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|path| {
+            let label = compact_picker_directory(path);
+            let mut option = NeoismAgentPickerOption::new(
+                &label,
+                path,
+                if current_directory == Some(path) {
+                    "current"
+                } else {
+                    "directory"
+                },
+                path,
+            );
+            option.is_current = current_directory == Some(path);
+            option
+        })
+        .collect())
+}
+
+fn compact_picker_directory(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let normalized = std::env::var("HOME")
+        .ok()
+        .filter(|home| !home.is_empty())
+        .and_then(|home| {
+            let home = home.replace('\\', "/");
+            if normalized == home {
+                Some("~".to_string())
+            } else {
+                normalized
+                    .strip_prefix(&format!("{home}/"))
+                    .map(|rest| format!("~/{rest}"))
+            }
+        })
+        .unwrap_or(normalized);
+    if normalized.ends_with('/') {
+        normalized
+    } else {
+        format!("{normalized}/")
+    }
 }
 
 pub(super) fn fetch_skill_options(
@@ -1490,6 +1559,8 @@ impl From<neoism_ui::panels::agent_pane::state::NeoismAgentMessage>
     for NeoismAgentMessage
 {
     fn from(message: neoism_ui::panels::agent_pane::state::NeoismAgentMessage) -> Self {
+        let status = message.status.clone();
+        let tool = message.tool.clone();
         let todos = message
             .todos
             .into_iter()
@@ -1527,6 +1598,10 @@ impl From<neoism_ui::panels::agent_pane::state::NeoismAgentMessage>
             }
         };
         out.id = message.id;
+        // Assistant `status` carries the settled response footer
+        // (agent/model/duration). Keep it alongside ordinary tool statuses.
+        out.status = status;
+        out.tool = tool;
         out.line_offset = message.line_offset;
         out.detail = message.detail;
         out.usage = message.usage.map(NeoismAgentUsage::from);

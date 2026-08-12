@@ -21,6 +21,8 @@ pub enum SlashCommandAction {
     OpenAgentPicker,
     SwitchSession(String),
     OpenSessionsPicker,
+    ChangeDirectory(String),
+    OpenDirectoryPicker,
     OpenSubagentPicker,
     ShowSkills,
     ShowSkill(String),
@@ -109,6 +111,13 @@ pub fn plan_slash_command(text: &str) -> SlashCommandAction {
             SlashCommandAction::SwitchSession,
             SlashCommandAction::OpenSessionsPicker,
         ),
+        "/cd" => {
+            if args.is_empty() {
+                SlashCommandAction::OpenDirectoryPicker
+            } else {
+                SlashCommandAction::ChangeDirectory(args.join(" "))
+            }
+        }
         "/sub-agent" | "/subagents" | "/sub" => SlashCommandAction::OpenSubagentPicker,
         "/skill" | "/skills" => plan_skill_command(&args),
         "/queue" => SlashCommandAction::HandleQueue(args.first().cloned()),
@@ -236,6 +245,12 @@ fn slash_option_specs() -> &'static [SlashOptionSpec] {
             description: "Compact session context",
             footer: "server",
             value: "/compact",
+        },
+        SlashOptionSpec {
+            title: "/cd",
+            description: "Move this session to another directory",
+            footer: "picker",
+            value: "/cd",
         },
         SlashOptionSpec {
             title: "/goal",
@@ -409,6 +424,14 @@ mod tests {
             plan_slash_command("/session sess-1"),
             SlashCommandAction::SwitchSession("sess-1".to_string())
         );
+        assert_eq!(
+            plan_slash_command("/cd"),
+            SlashCommandAction::OpenDirectoryPicker
+        );
+        assert_eq!(
+            plan_slash_command("/cd ~/My Projects/neoism"),
+            SlashCommandAction::ChangeDirectory("~/My Projects/neoism".to_string())
+        );
     }
 
     #[test]
@@ -553,6 +576,7 @@ mod tests {
             Some("/help")
         );
         assert!(options.iter().any(|option| option.value == "/compact"));
+        assert!(options.iter().any(|option| option.value == "/cd"));
         assert!(options.iter().any(|option| option.value == "/undo"));
         assert!(options.iter().any(|option| option.value == "/redo"));
         assert!(options.iter().any(|option| option.value == "/exit"));

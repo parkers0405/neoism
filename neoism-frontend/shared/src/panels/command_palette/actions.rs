@@ -344,7 +344,7 @@ pub struct PaletteShaderEntry {
 pub fn theme_picker_modal_spec() -> ModalSpec {
     let themes = [
         ("pastel_dark", "Pastel Dark", "Neoism default"),
-        ("nvchad_one", "NvChad One", "Base46-style"),
+        ("nvchad_one", "One Dark", "Balanced dark"),
         ("tokyo_night", "Tokyo Night", "Blue/purple"),
         ("catppuccin_mocha", "Catppuccin Mocha", "Warm pastel"),
     ];
@@ -360,9 +360,11 @@ pub fn theme_picker_modal_spec() -> ModalSpec {
             )
         })
         .collect();
-    // Runtime themes (ide-themes/*.toml + Mash Up Pack themes) after
-    // the builtin four, same action.
-    for (name, description) in crate::primitives::ide_theme::custom_ide_theme_entries() {
+    // Bundled Base46 themes, then runtime themes, all using the same action.
+    let extra_themes = crate::primitives::ide_theme::nvchad_ide_theme_entries()
+        .into_iter()
+        .chain(crate::primitives::ide_theme::custom_ide_theme_entries());
+    for (name, description) in extra_themes {
         let hint = if description.is_empty() {
             "Custom theme".to_string()
         } else {
@@ -440,12 +442,16 @@ where
 /// One installed Mash Up Pack, as the host lists it for the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteMashupEntry {
-    /// Stable id (directory name under `packs/`).
-    pub id: String,
+    /// Stable id (directory name under `packs/`); `None` deactivates packs.
+    pub id: Option<String>,
     /// Display name from the manifest.
     pub name: String,
     /// Manifest description plus the slots the pack ships.
     pub detail: String,
+    /// Resolved theme name, used by the live preview card.
+    pub theme: Option<String>,
+    pub shader_overlay: Option<String>,
+    pub font_family: Option<String>,
 }
 
 pub fn mashup_packs_modal_spec(packs: Vec<PaletteMashupEntry>) -> ModalSpec {
@@ -464,7 +470,7 @@ pub fn mashup_packs_modal_spec(packs: Vec<PaletteMashupEntry>) -> ModalSpec {
         ModalButton::new(
             pack.name,
             pack.detail,
-            ModalAction::ApplyMashupPack { id: Some(pack.id) },
+            ModalAction::ApplyMashupPack { id: pack.id },
         )
     }));
     buttons.push(ModalButton::new("Close", "Esc", ModalAction::Close));

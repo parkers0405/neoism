@@ -371,6 +371,33 @@ impl CommandPalette {
         self.start_open_pop();
     }
 
+    pub fn enter_mashups_mode(
+        &mut self,
+        mut packs: Vec<super::actions::PaletteMashupEntry>,
+    ) {
+        packs.insert(
+            0,
+            super::actions::PaletteMashupEntry {
+                id: None,
+                name: "None".to_string(),
+                detail: "Deactivate pack; keep the current theme and clear its shader"
+                    .to_string(),
+                theme: None,
+                shader_overlay: None,
+                font_family: None,
+            },
+        );
+        self.enabled = true;
+        self.mode = PaletteMode::Mashups(packs);
+        self.query.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.caret_blink_start = Instant::now();
+        self.last_scroll_time = None;
+        self.reset_motion();
+        self.start_open_pop();
+    }
+
     pub fn enter_shaders_mode(&mut self, shaders: Vec<PaletteShaderEntry>) {
         self.enabled = true;
         self.mode = PaletteMode::Shaders(shaders);

@@ -9,6 +9,8 @@ use neoism_terminal_core::colors::ColorRgb;
 use std::sync::RwLock;
 use sugarloaf::Color;
 
+use super::nvchad_themes;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdeThemeName {
     PastelDark,
@@ -118,6 +120,48 @@ pub fn custom_ide_theme(name: &str) -> Option<IdeTheme> {
         .map(|entry| entry.theme)
 }
 
+/// Look up one of the NvChad Base46 palettes bundled into both native and web.
+fn nvchad_ide_theme(name: &str) -> Option<IdeTheme> {
+    let (name, packed) = nvchad_themes::THEMES
+        .iter()
+        .find(|(candidate, _)| *candidate == name)?;
+    let mut c = [0; 26];
+    for (index, color) in c.iter_mut().enumerate() {
+        let offset = index * 6;
+        *color = u32::from_str_radix(&packed[offset..offset + 6], 16).ok()?;
+    }
+    Some(IdeTheme {
+        name: IdeThemeName::Custom(name),
+        bg: c[0],
+        fg: c[1],
+        surface: c[2],
+        hover: c[3],
+        border: c[4],
+        muted: c[5],
+        dim: c[6],
+        accent: c[7],
+        folder: c[8],
+        red: c[9],
+        green: c[10],
+        yellow: c[11],
+        blue: c[12],
+        magenta: c[13],
+        cyan: c[14],
+        white: c[1],
+        black: c[15],
+        syn_comment: c[16],
+        syn_string: c[17],
+        syn_number: c[18],
+        syn_keyword: c[19],
+        syn_statement: c[20],
+        syn_func: c[21],
+        syn_type: c[22],
+        syn_property: c[23],
+        syn_constructor: c[24],
+        syn_special: c[25],
+    })
+}
+
 /// Replace the whole custom-theme set (called after a disk scan, so
 /// deleted theme files disappear from pickers). Names are interned once
 /// per distinct string — re-registering an existing name reuses its
@@ -130,7 +174,9 @@ pub fn replace_custom_ide_themes(themes: Vec<(String, String, IdeTheme)>) {
     for (name, description, mut theme) in themes {
         // Builtin names always win: silently shadowing `tokyo_night`
         // with a file would make the picker ambiguous.
-        if IdeThemeName::ALL.iter().any(|b| b.as_str() == name) {
+        if IdeThemeName::ALL.iter().any(|b| b.as_str() == name)
+            || nvchad_ide_theme(&name).is_some()
+        {
             continue;
         }
         let interned: &'static str = registry
@@ -164,6 +210,14 @@ pub fn custom_ide_theme_entries() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// Shipped Base46 themes with a stable source label for picker detail text.
+pub fn nvchad_ide_theme_entries() -> Vec<(String, String)> {
+    nvchad_themes::THEMES
+        .iter()
+        .map(|(name, _)| (name.to_string(), "Bundled theme".to_string()))
+        .collect()
+}
+
 /// Builtins first, then customs — the single source of truth for every
 /// theme list (palette themes mode, hamburger → Themes, web).
 pub fn all_ide_theme_names() -> Vec<String> {
@@ -171,6 +225,11 @@ pub fn all_ide_theme_names() -> Vec<String> {
         .iter()
         .map(|name| name.as_str().to_string())
         .collect();
+    names.extend(
+        nvchad_themes::THEMES
+            .iter()
+            .map(|(name, _)| name.to_string()),
+    );
     names.extend(custom_ide_theme_entries().into_iter().map(|(name, _)| name));
     names
 }
@@ -199,7 +258,9 @@ impl IdeTheme {
             "nvchad_one" => Self::nvchad_one(),
             "tokyo_night" => Self::tokyo_night(),
             "catppuccin_mocha" => Self::catppuccin_mocha(),
-            other => custom_ide_theme(other).unwrap_or_else(Self::pastel_dark),
+            other => nvchad_ide_theme(other)
+                .or_else(|| custom_ide_theme(other))
+                .unwrap_or_else(Self::pastel_dark),
         }
     }
 
@@ -642,6 +703,29 @@ mod custom_theme_tests {
         // Unknown names still fall back to pastel_dark.
         replace_custom_ide_themes(Vec::new());
         assert_eq!(IdeTheme::by_name("phosphor").bg, IdeTheme::pastel_dark().bg);
+    }
+
+    #[test]
+    fn all_nvchad_themes_are_bundled_and_resolvable() {
+        assert_eq!(nvchad_themes::THEMES.len(), 97);
+        for (name, packed) in nvchad_themes::THEMES {
+            assert_eq!(packed.len(), 26 * 6, "bad packed palette for {name}");
+            let theme = IdeTheme::by_name(name);
+            assert_eq!(theme.name.as_str(), *name);
+            assert_ne!(theme.fg, theme.bg, "illegible palette for {name}");
+        }
+
+        let onedark = IdeTheme::by_name("onedark");
+        assert_eq!(onedark.bg, 0x1e222a);
+        assert_eq!(onedark.syn_string, 0x98c379);
+        let ayu_light = IdeTheme::by_name("ayu_light");
+        assert_eq!(ayu_light.bg, 0xfafafa);
+        assert!(!ayu_light.is_dark());
+
+        let names = all_ide_theme_names();
+        for (name, _) in nvchad_themes::THEMES {
+            assert!(names.iter().any(|candidate| candidate == name));
+        }
     }
 
     #[test]

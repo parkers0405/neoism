@@ -73,9 +73,12 @@ pub fn mashup_palette_entries() -> Vec<PaletteMashupEntry> {
                 format!("{} · {slots}", pack.description)
             };
             PaletteMashupEntry {
-                id: pack.id,
+                id: Some(pack.id),
                 name: pack.name,
                 detail,
+                theme: pack.theme,
+                shader_overlay: pack.shader_overlay,
+                font_family: pack.font_family,
             }
         })
         .collect()
@@ -218,6 +221,23 @@ pub fn seed_example_packs() {
 }
 
 const EXAMPLE_PACKS: &[(&str, &[(&str, &[u8])])] = &[
+    (
+        "neon-unit-01",
+        &[
+            (
+                "pack.json",
+                include_bytes!("mashup/seed/neon-unit-01/pack.json"),
+            ),
+            (
+                "theme.json",
+                include_bytes!("mashup/seed/neon-unit-01/theme.json"),
+            ),
+            (
+                "unit-sync.glsl",
+                include_bytes!("mashup/seed/neon-unit-01/unit-sync.glsl"),
+            ),
+        ],
+    ),
     (
         "phosphor",
         &[

@@ -987,6 +987,9 @@ impl NeoismSettingsPane {
     }
     /// Options for the dropdown of a Select or FontFamily control.
     pub(crate) fn dropdown_options(&self, idx: usize) -> Vec<String> {
+        if SETTINGS[idx].key == "appearance.theme" {
+            return crate::primitives::ide_theme::all_ide_theme_names();
+        }
         match SETTINGS[idx].control {
             Control::Select { options, .. } => {
                 options.iter().map(|o| o.to_string()).collect()

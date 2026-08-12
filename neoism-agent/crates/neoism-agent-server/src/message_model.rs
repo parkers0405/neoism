@@ -13,6 +13,11 @@ const BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER: &str =
 // outputs must be aggressively truncated or the summarize request itself
 // overflows the very model that is supposed to shrink the session.
 const COMPACTION_TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
+// Stateful execution normally applies the central 50 KiB truncator before a
+// result is persisted. Keep replay bounded too so legacy/imported records or a
+// malformed tool result cannot expand every later provider request without
+// limit.
+const NORMAL_TOOL_OUTPUT_MAX_CHARS: usize = 51_200;
 
 pub(crate) fn is_runtime_system_notification(system: &str) -> bool {
     system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER)
@@ -24,7 +29,7 @@ pub(crate) fn provider_messages(messages: &[MessageWithParts]) -> Vec<ProviderMe
         messages,
         MessageModelOptions {
             include_attachments: true,
-            tool_output_max_chars: None,
+            tool_output_max_chars: Some(NORMAL_TOOL_OUTPUT_MAX_CHARS),
             current_model: None,
         },
     )
@@ -39,7 +44,7 @@ pub(crate) fn provider_messages_for_model(
         messages,
         MessageModelOptions {
             include_attachments: true,
-            tool_output_max_chars: None,
+            tool_output_max_chars: Some(NORMAL_TOOL_OUTPUT_MAX_CHARS),
             current_model: Some((provider_id.to_string(), model_id.to_string())),
         },
     )
@@ -323,13 +328,30 @@ fn tool_output_for_prompt(
     max_chars: Option<usize>,
     error: bool,
 ) -> String {
+    if tool_output_was_compacted(part) {
+        return "[Old tool result content cleared]".to_string();
+    }
     let Some(max_chars) = max_chars else {
         return output.to_string();
     };
+    // The central truncator's persisted preview is already within the normal
+    // replay budget and carries useful head/tail context. Artifact-only
+    // substitution remains reserved for the tighter compaction request.
+    if max_chars == NORMAL_TOOL_OUTPUT_MAX_CHARS
+        && output.chars().count() <= NORMAL_TOOL_OUTPUT_MAX_CHARS
+    {
+        return output.to_string();
+    }
     if let Some(reference) = tool_output_reference(part, error) {
         return reference;
     }
     truncate_tool_output(output, max_chars)
+}
+
+fn tool_output_was_compacted(part: &ToolPart) -> bool {
+    tool_state_metadata(part)
+        .and_then(|metadata| metadata.get("compacted"))
+        .is_some_and(|value| !value.is_null())
 }
 
 fn tool_output_reference(part: &ToolPart, error: bool) -> Option<String> {
@@ -417,6 +439,9 @@ fn tool_attachments(part: &ToolPart) -> Vec<ProviderAttachment> {
     let ToolState::Completed { metadata, .. } = &part.state else {
         return Vec::new();
     };
+    if tool_output_was_compacted(part) {
+        return Vec::new();
+    }
     metadata
         .get("attachments")
         .and_then(Value::as_array)
@@ -652,6 +677,79 @@ mod tests {
             .expect("old tool result");
 
         assert_eq!(old_tool.content, "o".repeat(4_000));
+    }
+
+    #[test]
+    fn provider_messages_defensively_bound_legacy_oversized_tool_results() {
+        let session_id = Id::ascending(IdKind::Session);
+        let message_id = Id::ascending(IdKind::Message);
+        let messages = provider_messages(&[MessageWithParts {
+            info: assistant_info(message_id.clone(), session_id.clone()),
+            parts: vec![Part::Tool(ToolPart {
+                id: Id::ascending(IdKind::Part),
+                session_id,
+                message_id,
+                tool: "legacy".to_string(),
+                call_id: "call_legacy_large".to_string(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({}),
+                    output: "x".repeat(NORMAL_TOOL_OUTPUT_MAX_CHARS * 2),
+                    metadata: serde_json::json!({}),
+                    title: "Legacy output".to_string(),
+                    time: PartTime {
+                        start: 1,
+                        end: Some(2),
+                    },
+                },
+                metadata: None,
+            })],
+        }]);
+        let result = messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("call_legacy_large"))
+            .expect("tool result");
+
+        assert!(result.content.len() < NORMAL_TOOL_OUTPUT_MAX_CHARS + 512);
+        assert!(result
+            .content
+            .contains("Tool output truncated for prompt replay"));
+    }
+
+    #[test]
+    fn provider_messages_clear_compacted_tool_results_and_media() {
+        let session_id = Id::ascending(IdKind::Session);
+        let message_id = Id::ascending(IdKind::Message);
+        let messages = provider_messages(&[MessageWithParts {
+            info: assistant_info(message_id.clone(), session_id.clone()),
+            parts: vec![Part::Tool(ToolPart {
+                id: Id::ascending(IdKind::Part),
+                session_id,
+                message_id,
+                tool: "read".to_string(),
+                call_id: "call_old".to_string(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({ "path": "old.txt" }),
+                    output: "old contents".repeat(1_000),
+                    metadata: serde_json::json!({
+                        "compacted": 42,
+                        "attachments": [{
+                            "mime": "image/png",
+                            "url": "data:image/png;base64,abc"
+                        }]
+                    }),
+                    title: "Read old.txt".to_string(),
+                    time: PartTime {
+                        start: 1,
+                        end: Some(2),
+                    },
+                },
+                metadata: None,
+            })],
+        }]);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content, "[Old tool result content cleared]");
+        assert!(messages[1].attachments.is_empty());
     }
 
     #[test]

@@ -125,6 +125,14 @@ pub struct NeoismAgentMessage {
     /// the server would tag each broadcast user part with its sender's
     /// name; see the `TODO(shared-author)` seam in `api_mapping::part_block`.
     pub author: Option<String>,
+    pub images: Vec<NeoismAgentImage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NeoismAgentImage {
+    pub filename: String,
+    pub url: String,
+    pub mime: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -198,6 +206,7 @@ pub struct TimelineMeasureKey {
     line_offset: Option<usize>,
     todos: u64,
     detail: u64,
+    images: u64,
     selected_tool_group_child: u64,
 }
 
@@ -383,6 +392,7 @@ impl NeoismAgentMessage {
             detail: String::new(),
             usage: None,
             author: None,
+            images: Vec::new(),
         }
     }
 }
@@ -487,6 +497,24 @@ impl NeoismAgentInputAttachment {
             | Self::Skill { token, .. }
             | Self::File { token, .. } => token,
         }
+    }
+}
+
+impl NeoismAgentPane {
+    pub fn input_images(&self) -> Vec<NeoismAgentImage> {
+        self.input_attachments
+            .iter()
+            .filter_map(|attachment| match attachment {
+                NeoismAgentInputAttachment::File {
+                    filename, url, mime, ..
+                } if mime.starts_with("image/") => Some(NeoismAgentImage {
+                    filename: filename.clone(),
+                    url: url.clone(),
+                    mime: mime.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -1313,8 +1341,6 @@ impl NeoismAgentPane {
         if self.is_streaming() {
             self.note_streaming(NeoismAgentStreamingState::Idle, None);
         }
-        self.queued_prompt_count = 0;
-        self.queued_prompt_preview = None;
         self.abort_requested_at = None;
     }
 
@@ -1548,6 +1574,20 @@ fn merge_part_message(
     let terminal_task_status = existing.status.clone();
     if incoming.usage.is_none() {
         incoming.usage = existing.usage;
+    }
+    if incoming.kind == NeoismAgentMessageKind::User
+        && existing.kind == NeoismAgentMessageKind::User
+    {
+        if incoming.text.trim().is_empty() {
+            incoming.text = existing.text.clone();
+        }
+        for image in existing.images {
+            if !incoming.images.contains(&image) {
+                incoming.images.push(image);
+            }
+        }
+    } else if incoming.images.is_empty() {
+        incoming.images = existing.images;
     }
     if matches!(
         incoming.kind,

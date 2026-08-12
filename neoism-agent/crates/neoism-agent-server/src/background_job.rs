@@ -7,8 +7,8 @@ use anyhow::Context;
 use axum::extract::{Path as AxumPath, State};
 use axum::Json;
 use neoism_agent_core::{
-    create, event_type, EventPayload, Id, IdDirection, PermissionRule, PromptPart,
-    PromptRequest,
+    create, event_type, EventPayload, Id, IdDirection, IdKind, PermissionRule,
+    PromptPart, PromptRequest,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -479,17 +479,20 @@ async fn enqueue_parent_background_task_completion_prompt(
     }
     let request = background_task_completion_request(job);
     let event_request = request.clone();
-    let (start_worker, queue_len) = crate::session_queue::enqueue_prompt_request(
-        state,
-        job.session_id.as_str(),
-        request,
-    )
-    .await?;
+    let (start_worker, queue_len) =
+        crate::session_queue::enqueue_prompt_request_with_delivery(
+            state,
+            job.session_id.as_str(),
+            request,
+            "continue",
+        )
+        .await?;
     crate::session_queue::publish_prompt_queue_changed(
         state,
         job.session_id.as_str(),
         "enqueue",
         Some(&event_request),
+        Some("continue"),
         0,
     )
     .await;
@@ -510,7 +513,13 @@ async fn enqueue_parent_background_task_completion_prompt(
 
 fn background_task_completion_request(job: &BackgroundJob) -> PromptRequest {
     PromptRequest {
-        message_id: None,
+        message_id: Some(
+            Id::parse(
+                IdKind::Message,
+                format!("msg_background_completion_{}", job.id),
+            )
+            .expect("runtime completion message id"),
+        ),
         model: None,
         agent: None,
         no_reply: false,
@@ -858,6 +867,7 @@ mod tests {
         let job = test_job(BackgroundJobStatus::Completed, "finished");
         let request = background_task_completion_request(&job);
 
+        assert!(request.message_id.is_some());
         let system = request.system.as_deref().expect("system notification");
         assert!(system.contains(BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER));
         assert!(system.contains("runtime, not by the user"));

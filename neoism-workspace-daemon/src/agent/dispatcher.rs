@@ -67,14 +67,27 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
         }
         AgentClientMessage::SubmitPrompt {
             session_id,
+            message_id,
             text,
-            attachments: _,
+            attachments,
             mode,
             model,
             thinking,
+            delivery,
         } => {
-            spawn_inflight(&inner, session_id.clone(), move |inner| {
-                handle_submit_prompt(inner, session_id, text, mode, model, thinking)
+            tokio::spawn(async move {
+                handle_submit_prompt(
+                    inner,
+                    session_id,
+                    message_id,
+                    text,
+                    attachments,
+                    mode,
+                    model,
+                    thinking,
+                    delivery,
+                )
+                .await;
             });
         }
         AgentClientMessage::CancelInflight { session_id } => {
@@ -83,11 +96,6 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             tokio::spawn(async move {
                 let _ =
                     post_no_body(&inner, &format!("/session/{session_id}/abort")).await;
-            });
-        }
-        AgentClientMessage::EnqueuePrompt { session_id, text } => {
-            tokio::spawn(async move {
-                handle_enqueue_prompt(inner, session_id, text).await;
             });
         }
         AgentClientMessage::ClearQueue { session_id } => {

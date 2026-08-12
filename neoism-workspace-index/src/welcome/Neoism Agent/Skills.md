@@ -2,6 +2,16 @@
 
 A skill is a reusable instruction package stored in a `SKILL.md` file. Skills are discovered when a session builds its tool inventory and loaded on demand through the `skill` tool.
 
+## Add a skill
+
+Create a directory containing `SKILL.md`, add the frontmatter shown below, then start a new agent session. For a project-local skill, the complete path is:
+
+```text
+<project>/.neoism/skills/database-migrations/SKILL.md
+```
+
+For a user-wide skill, use `~/.config/neoism/skills/database-migrations/SKILL.md`. Run `/skills` in the agent composer to verify that Neoism discovered it. Use `agent.skills.paths` only when the skill lives somewhere else.
+
 ## Skill format
 
 ```markdown

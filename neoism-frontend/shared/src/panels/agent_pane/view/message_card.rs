@@ -3,7 +3,7 @@ use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::state::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind, NeoismAgentPane,
-    NeoismAgentTodo,
+    NeoismAgentImage, NeoismAgentTodo,
 };
 
 use super::assistant::{
@@ -57,6 +57,7 @@ pub trait AgentMessageCardMessage: AgentToolMessage + AgentCodeMessage {
     fn kind(&self) -> AgentMessageCardKind;
     fn output_kind(&self) -> AgentMessageCardOutputKind;
     fn card_todos(&self) -> &[Self::CardTodo];
+    fn images(&self) -> &[NeoismAgentImage];
     /// Display name of who sent this (user) message — seeds the presence
     /// orb + hover tooltip. `None` = the local user (see
     /// [`AgentMessageCardPane::local_author_name`]).
@@ -166,6 +167,7 @@ where
         w: f32,
         h: f32,
         text: &str,
+        images: &[NeoismAgentImage],
         orb_seed: &str,
         orb_label: &str,
         mouse: Option<(f32, f32)>,
@@ -181,6 +183,7 @@ where
             w,
             h,
             text,
+            images,
             orb_seed,
             orb_label,
             mouse,
@@ -325,6 +328,10 @@ macro_rules! neoism_ui_impl_agent_message_card_message {
                 &self.todos
             }
 
+            fn images(&self) -> &[$crate::panels::agent_pane::state::NeoismAgentImage] {
+                &self.images
+            }
+
             fn author(&self) -> Option<&str> {
                 self.author.as_deref()
             }
@@ -381,6 +388,10 @@ impl AgentMessageCardMessage for NeoismAgentMessage {
 
     fn card_todos(&self) -> &[Self::CardTodo] {
         &self.todos
+    }
+
+    fn images(&self) -> &[NeoismAgentImage] {
+        &self.images
     }
 
     fn author(&self) -> Option<&str> {
@@ -516,13 +527,18 @@ where
                 AgentMessageCardMessage::author(message),
                 AgentMessageCardPane::local_author_name(pane),
             );
+            let display_text = user_message_display_text(
+                AgentToolMessage::text(message),
+                message.images(),
+            );
             return D::render_user_message(
                 sugarloaf,
                 x,
                 y,
                 w,
                 h,
-                AgentToolMessage::text(message),
+                &display_text,
+                message.images(),
                 &identity.seed,
                 &identity.label,
                 mouse,
@@ -839,14 +855,19 @@ where
             // right pad 14 = 56s), so the measured height equals what's drawn.
             let mut user_opts = body_opts;
             user_opts.font_size = 13.5 * s;
+            let display_text = user_message_display_text(
+                AgentToolMessage::text(message),
+                message.images(),
+            );
             let lines = wrap_text(
                 sugarloaf,
-                AgentToolMessage::text(message),
+                &display_text,
                 (width - 56.0 * s).max(80.0 * s),
                 &user_opts,
                 6,
             );
-            24.0 * s + lines.len() as f32 * 19.0 * s
+            let image_h = if message.images().is_empty() { 0.0 } else { 164.0 * s };
+            24.0 * s + image_h + lines.len().max(1) as f32 * 19.0 * s
         }
         AgentMessageCardKind::Tool
             if message.output_kind() == AgentMessageCardOutputKind::Todos =>
@@ -946,6 +967,38 @@ where
     }
 }
 
+fn user_message_display_text(text: &str, images: &[NeoismAgentImage]) -> String {
+    if images.is_empty() {
+        return text.to_string();
+    }
+    let mut display = text.to_string();
+    while let Some(start) = display.find('[') {
+        let Some(relative_end) = display[start..].find(']') else {
+            break;
+        };
+        let end = start + relative_end + 1;
+        let label = display[start + 1..end - 1].trim().to_ascii_lowercase();
+        let attachment_anchor = label
+            .strip_prefix("image")
+            .is_some_and(|suffix| {
+                suffix.is_empty()
+                    || suffix.starts_with(':')
+                    || suffix
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_digit())
+            });
+        if attachment_anchor {
+            display.replace_range(start..end, "");
+        } else {
+            // Continue after this non-attachment bracket without repeatedly
+            // finding it. A sentinel is restored before returning.
+            display.replace_range(start..start + 1, "\u{1}");
+        }
+    }
+    display.replace('\u{1}', "[").trim().to_string()
+}
+
 fn measure_code_tool_message_height(text: &str, s: f32) -> f32 {
     if text.trim().is_empty() {
         0.0
@@ -957,7 +1010,35 @@ fn measure_code_tool_message_height(text: &str, s: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::measure_code_tool_message_height;
+    use super::{measure_code_tool_message_height, user_message_display_text};
+    use crate::panels::agent_pane::state::NeoismAgentImage;
+
+    fn image() -> NeoismAgentImage {
+        NeoismAgentImage {
+            filename: "clipboard.png".to_string(),
+            url: "data:image/png;base64,AA==".to_string(),
+            mime: "image/png".to_string(),
+        }
+    }
+
+    #[test]
+    fn rendered_image_hides_compact_and_server_placeholders() {
+        assert_eq!(
+            user_message_display_text(
+                "[image1] what is this?\n[image: clipboard.png]",
+                &[image()],
+            ),
+            "what is this?"
+        );
+    }
+
+    #[test]
+    fn image_placeholder_text_stays_without_rendered_media() {
+        assert_eq!(
+            user_message_display_text("[image1] what is this?", &[]),
+            "[image1] what is this?"
+        );
+    }
 
     #[test]
     fn code_tool_height_caps_large_blocks() {

@@ -10,6 +10,7 @@ pub mod derivations;
 pub mod draw;
 pub mod fx;
 pub mod home;
+pub mod image_preview;
 pub mod layout;
 pub mod markdown;
 pub mod message_card;
@@ -52,6 +53,7 @@ pub(super) const INPUT_HELP_STRIP_H: f32 = 28.0;
 /// Height (in logical px, pre-scale) reserved at the very bottom of the pane
 /// for the streaming status line. Stays fixed regardless of the input rect.
 pub(super) const STREAMING_STATUS_LINE_H: f32 = 26.0;
+pub(super) const INPUT_IMAGE_RAIL_H: f32 = 82.0;
 
 pub fn clear_overlays(sugarloaf: &mut Sugarloaf) {
     sugarloaf.clear_image_overlays_for(OVERLAY_PANEL_ID);

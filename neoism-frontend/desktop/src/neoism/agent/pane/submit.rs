@@ -87,7 +87,9 @@ impl NeoismAgentPane {
         let prompt = text.clone();
         let was_streaming = self.is_streaming();
         if !was_streaming {
-            self.messages.push(NeoismAgentMessage::user(text));
+            let mut message = NeoismAgentMessage::user(text);
+            message.images = self.input_images();
+            self.messages.push(message);
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
         }
         self.abort_requested_at = None;
@@ -99,11 +101,6 @@ impl NeoismAgentPane {
         let send_result = self.send_prompt(&prompt, !was_streaming);
         self.input_attachments.clear();
         match send_result {
-            Ok(()) if was_streaming => {
-                self.queued_prompt_count =
-                    self.queued_prompt_count.saturating_add(1).max(1);
-                self.queued_prompt_preview.get_or_insert(prompt);
-            }
             Ok(()) => {}
             Err(error) => {
                 self.system_message("Prompt failed", error);
@@ -131,11 +128,6 @@ impl NeoismAgentPane {
         }
         self.abort_requested_at = None;
         match self.send_prompt(&prompt, !was_streaming) {
-            Ok(()) if was_streaming => {
-                self.queued_prompt_count =
-                    self.queued_prompt_count.saturating_add(1).max(1);
-                self.queued_prompt_preview.get_or_insert(prompt);
-            }
             Ok(()) => {}
             Err(error) => {
                 self.system_message("Prompt failed", error);

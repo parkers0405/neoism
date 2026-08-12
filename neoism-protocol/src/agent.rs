@@ -121,6 +121,7 @@ pub enum AgentClientMessage {
     /// proxy.
     SubmitPrompt {
         session_id: String,
+        message_id: String,
         text: String,
         #[serde(default)]
         attachments: Vec<Attachment>,
@@ -136,15 +137,12 @@ pub enum AgentClientMessage {
         /// (`"low"|"medium"|"high"|"xhigh"`).
         #[serde(default)]
         thinking: Option<String>,
+        delivery: PromptDelivery,
     },
     /// Cancel the current prompt for a specific session (the original
     /// [`AgentClientMessage::Cancel`] cancels the whole-connection
     /// proxy turn instead).
     CancelInflight { session_id: String },
-    /// Push a prompt onto the session's queue without running it
-    /// immediately. The agent-server flushes the queue when the
-    /// current turn finishes.
-    EnqueuePrompt { session_id: String, text: String },
     /// Clear the pending queue without running any of its entries.
     ClearQueue { session_id: String },
     /// Stop one running background shell task and its process tree.
@@ -661,6 +659,13 @@ pub enum PermissionDecision {
     Yes,
     Always,
     No,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptDelivery {
+    Steer,
+    Queue,
 }
 
 /// Wire-side attachment placeholder. Today's chrome only sends plain

@@ -580,9 +580,7 @@ impl NeoismAgentPane {
             .iter()
             .rev()
             .find_map(|message| message.usage.clone())?;
-        if usage.context_limit.is_none() {
-            usage.context_limit = self.model_context_limit;
-        }
+        usage.context_limit = self.model_context_limit.or(usage.context_limit);
         Some(usage)
     }
 

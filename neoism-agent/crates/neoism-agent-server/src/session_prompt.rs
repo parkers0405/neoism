@@ -6,9 +6,9 @@ use neoism_agent_core::{
     CreatedTime, EventPayload, Id, IdKind, MessageInfo, MessageWithParts, ModelLimit,
     Part, PermissionRule, PromptPart, PromptRequest, ProviderGenerationRequest,
     ProviderMessage, ProviderRole, ProviderStreamEvent, SessionInfo, SubtaskPart,
-    TextPart, TokenUsage, ToolListItem, UserMessage, UserModel,
+    TextPart, TokenUsage, ToolListItem, ToolState, UserMessage, UserModel,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio_stream::StreamExt;
 
 use crate::agent::AgentCatalog;
@@ -52,6 +52,8 @@ const DEFAULT_OUTPUT_TOKEN_MAX: u64 = 32_000;
 const FALLBACK_AUTO_COMPACTION_THRESHOLD: u64 = 120_000;
 const AUTO_COMPACTION_ESTIMATED_PROMPT_RATIO_NUMERATOR: u64 = 3;
 const AUTO_COMPACTION_ESTIMATED_PROMPT_RATIO_DENOMINATOR: u64 = 4;
+const TOOL_PRUNE_MINIMUM_TOKENS: u64 = 20_000;
+const TOOL_PRUNE_PROTECT_TOKENS: u64 = 40_000;
 
 pub(crate) async fn append_prompt(
     state: &AppState,
@@ -587,7 +589,100 @@ pub(crate) async fn append_prompt(
     }
 
     finish_session_run(state, session_id.as_str(), &run_id).await;
+    if let Err(error) = prune_old_tool_outputs(state, &session_id_text).await {
+        tracing::warn!(session_id = %session_id_text, %error, "tool-output pruning failed");
+    }
     Ok(final_assistant_message)
+}
+
+async fn prune_old_tool_outputs(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), ApiError> {
+    let mut messages = state.inner.store.list_messages(session_id).await?;
+    let mut total = 0_u64;
+    let mut pruned = 0_u64;
+    let mut selected = Vec::new();
+    let mut turns = 0_usize;
+
+    'messages: for message_index in (0..messages.len()).rev() {
+        let message = &messages[message_index];
+        if matches!(message.info, MessageInfo::User(_)) {
+            turns += 1;
+        }
+        if turns < 2 {
+            continue;
+        }
+        if message
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::Compaction(_)))
+        {
+            break;
+        }
+        for part_index in (0..message.parts.len()).rev() {
+            let Part::Tool(tool) = &message.parts[part_index] else {
+                continue;
+            };
+            if tool.tool == "skill" {
+                continue;
+            }
+            let ToolState::Completed {
+                output, metadata, ..
+            } = &tool.state
+            else {
+                continue;
+            };
+            if metadata
+                .get("compacted")
+                .is_some_and(|value| !value.is_null())
+            {
+                break 'messages;
+            }
+            let size = estimate_tokens(output);
+            total = total.saturating_add(size);
+            if total <= TOOL_PRUNE_PROTECT_TOKENS {
+                continue;
+            }
+            pruned = pruned.saturating_add(size);
+            selected.push((message_index, part_index));
+        }
+    }
+
+    if pruned <= TOOL_PRUNE_MINIMUM_TOKENS {
+        return Ok(());
+    }
+    let compacted = now_millis();
+    let mut touched = std::collections::BTreeSet::new();
+    for (message_index, part_index) in selected {
+        let Part::Tool(tool) = &mut messages[message_index].parts[part_index] else {
+            continue;
+        };
+        let ToolState::Completed { metadata, .. } = &mut tool.state else {
+            continue;
+        };
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert("compacted".to_string(), json!(compacted));
+            touched.insert(message_index);
+        }
+    }
+    for message_index in touched {
+        let message = &messages[message_index];
+        state
+            .inner
+            .store
+            .update_message(session_id, message)
+            .await?;
+        for part in &message.parts {
+            if matches!(part, Part::Tool(_)) {
+                state.publish(EventPayload::new(
+                    event_type::MESSAGE_PART_UPDATED,
+                    json!({ "sessionID": session_id, "part": part, "time": compacted }),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn same_user_prompt(existing: &MessageWithParts, proposed: &MessageWithParts) -> bool {
@@ -1178,6 +1273,16 @@ pub(crate) async fn compaction_request_token_budget(
     estimated_prompt_compaction_threshold(usable)
 }
 
+pub(crate) async fn compaction_preserve_recent_token_budget(
+    state: &AppState,
+    model: &UserModel,
+) -> u64 {
+    auto_compaction_threshold_for_user_model(state, model)
+        .await
+        .unwrap_or(FALLBACK_AUTO_COMPACTION_THRESHOLD)
+        / 4
+}
+
 pub(crate) fn estimated_provider_prompt_tokens(messages: &[ProviderMessage]) -> u64 {
     messages
         .iter()
@@ -1193,6 +1298,19 @@ pub(crate) fn estimated_provider_prompt_tokens(messages: &[ProviderMessage]) -> 
                 .sum::<u64>();
             estimate_tokens(&message.content)
                 .saturating_add(tool_tokens)
+                .saturating_add(
+                    message
+                        .reasoning
+                        .iter()
+                        .map(|reasoning| {
+                            estimate_tokens(&reasoning.encrypted_content).saturating_add(
+                                estimate_tokens(
+                                    &Value::Array(reasoning.summary.clone()).to_string(),
+                                ),
+                            )
+                        })
+                        .sum::<u64>(),
+                )
                 .saturating_add(message.attachments.len() as u64 * 256)
                 .saturating_add(6)
         })
@@ -1297,6 +1415,7 @@ fn token_usage_total(tokens: &TokenUsage) -> u64 {
         tokens
             .input
             .saturating_add(tokens.output)
+            .saturating_add(tokens.reasoning)
             .saturating_add(tokens.cache.read)
             .saturating_add(tokens.cache.write)
     })
@@ -1722,7 +1841,7 @@ mod tests {
     }
 
     #[test]
-    fn overflow_token_count_matches_opencode_reasoning_fallback() {
+    fn overflow_token_count_includes_separately_normalized_reasoning() {
         let without_total = TokenUsage {
             total: None,
             input: 100,
@@ -1730,7 +1849,7 @@ mod tests {
             reasoning: 80,
             cache: neoism_agent_core::CacheUsage { read: 5, write: 3 },
         };
-        assert_eq!(token_usage_total(&without_total), 128);
+        assert_eq!(token_usage_total(&without_total), 208);
 
         let with_total = TokenUsage {
             total: Some(208),

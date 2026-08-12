@@ -36,7 +36,10 @@ pub fn usage_detail_lines(
     } else {
         lines.push(format!("Context {} tokens", format_count(usage.total)));
     }
-    if total_cost_micros > 0 || usage.cost_micros > 0 {
+    // The latest turn reflects the current provider/auth route. If it is free
+    // (OAuth subscription or a zero-cost model), do not surface paid estimates
+    // retained from older turns that used different or stale catalog metadata.
+    if usage.cost_micros > 0 {
         lines.push(format!("Total price {}", format_cost(total_cost_micros)));
         lines.push(format!("Last turn {}", format_cost(usage.cost_micros)));
     }
@@ -157,5 +160,14 @@ mod tests {
                 "Model gpt-5.5",
             ]
         );
+    }
+
+    #[test]
+    fn detail_lines_omit_stale_price_after_switching_to_subscription_auth() {
+        let lines =
+            usage_detail_lines(usage(32_000, 0, Some(400_000)), 256_900, "gpt-5.6-sol");
+
+        assert!(lines.iter().all(|line| !line.contains("price")));
+        assert!(lines.iter().all(|line| !line.contains("Last turn")));
     }
 }

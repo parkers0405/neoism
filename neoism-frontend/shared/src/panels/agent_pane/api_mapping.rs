@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 use super::state::{
     picker::NeoismAgentPickerOption, NeoismAgentMessage, NeoismAgentMessageKind,
-    NeoismAgentOutputKind, NeoismAgentTodo, NeoismAgentUsage,
+    NeoismAgentImage, NeoismAgentOutputKind, NeoismAgentTodo, NeoismAgentUsage,
 };
 
 const SUBTASK_COMPLETION_SYSTEM_MARKER: &str =
@@ -326,6 +326,7 @@ fn agent_message_new(
         detail: String::new(),
         usage: None,
         author: None,
+        images: Vec::new(),
     }
 }
 
@@ -429,7 +430,18 @@ pub fn message_blocks(message: &Value) -> Vec<NeoismAgentMessage> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        if text.is_empty() {
+        let images = parts
+            .iter()
+            .filter(|part| {
+                part.get("type").and_then(Value::as_str) == Some("file")
+                    && part
+                        .get("mime")
+                        .and_then(Value::as_str)
+                        .is_some_and(|mime| mime.starts_with("image/"))
+            })
+            .filter_map(image_from_part)
+            .collect::<Vec<_>>();
+        if text.is_empty() && images.is_empty() {
             return Vec::new();
         }
         let system = info.get("system").and_then(Value::as_str).unwrap_or("");
@@ -445,6 +457,7 @@ pub fn message_blocks(message: &Value) -> Vec<NeoismAgentMessage> {
             agent_message_user(text)
         };
         let mut message = message;
+        message.images = images;
         message.id = id;
         // Shared-session author (wired): the agent-server stamps the true
         // sender's display name onto the user message `info` under the key
@@ -954,6 +967,16 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
         }),
         "subtask" => Some(subtask_block(part)),
         "tool" => Some(tool_block(part)),
+        "file" if part
+            .get("mime")
+            .and_then(Value::as_str)
+            .is_some_and(|mime| mime.starts_with("image/")) => {
+                image_from_part(part).map(|image| {
+                    let mut message = agent_message_user("");
+                    message.images.push(image);
+                    message
+                })
+            }
         "file" => part
             .get("filename")
             .and_then(Value::as_str)
@@ -1006,6 +1029,20 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
         id
     };
     Some(message)
+}
+
+fn image_from_part(part: &Value) -> Option<NeoismAgentImage> {
+    let url = part.get("url").and_then(Value::as_str)?.to_string();
+    let mime = part.get("mime").and_then(Value::as_str)?.to_string();
+    Some(NeoismAgentImage {
+        filename: part
+            .get("filename")
+            .and_then(Value::as_str)
+            .unwrap_or("image")
+            .to_string(),
+        url,
+        mime,
+    })
 }
 
 fn subtask_block(part: &Value) -> NeoismAgentMessage {

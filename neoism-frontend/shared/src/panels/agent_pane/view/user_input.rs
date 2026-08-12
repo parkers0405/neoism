@@ -3,7 +3,7 @@ use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::input_controller::{visual_row_index, InputWrapRow};
 use crate::panels::agent_pane::state::{
-    NeoismAgentPane, NeoismAgentPendingPermission, NeoismAgentPermissionChoice,
+    NeoismAgentImage, NeoismAgentPane, NeoismAgentPendingPermission, NeoismAgentPermissionChoice,
     NeoismAgentStreamingState,
 };
 
@@ -58,6 +58,7 @@ pub trait AgentUserInputPane {
 
     fn input(&self) -> &str;
     fn input_help_visible(&self) -> bool;
+    fn input_images(&self) -> Vec<NeoismAgentImage>;
     fn cursor_byte(&self) -> usize;
     fn set_cursor_rect(&mut self, rect: Option<[f32; 4]>);
     fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>);
@@ -145,6 +146,10 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn input_help_visible(&self) -> bool {
                 <$pane>::input_help_visible(self)
+            }
+
+            fn input_images(&self) -> Vec<$crate::panels::agent_pane::state::NeoismAgentImage> {
+                <$pane>::input_images(self)
             }
 
             fn cursor_byte(&self) -> usize {
@@ -363,6 +368,10 @@ impl AgentUserInputPane for NeoismAgentPane {
         NeoismAgentPane::input_help_visible(self)
     }
 
+    fn input_images(&self) -> Vec<NeoismAgentImage> {
+        NeoismAgentPane::input_images(self)
+    }
+
     fn cursor_byte(&self) -> usize {
         NeoismAgentPane::cursor_byte(self)
     }
@@ -571,6 +580,7 @@ pub fn render_user_message(
     w: f32,
     h: f32,
     text: &str,
+    images: &[NeoismAgentImage],
     // Presence identity resolved by `user_message_orb_identity` — the
     // orb seed (a display name) and the hover-tooltip label.
     orb_seed: &str,
@@ -632,6 +642,20 @@ pub fn render_user_message(
     let text_x = orb_x + orb + 10.0 * s;
     let text_w = (bubble_x + bubble_w - text_x - pad_x).max(80.0 * s);
     let mut line_y = y + 12.0 * s;
+    if !images.is_empty() {
+        super::image_preview::render_image_strip(
+            sugarloaf,
+            images,
+            text_x,
+            line_y,
+            text_w,
+            theme,
+            s * 2.35,
+            viewport_clip,
+            occlusion_rects,
+        );
+        line_y += 164.0 * s;
+    }
     for line in wrap_text(sugarloaf, text, text_w, &opts, 6) {
         draw_agent_prompt_text(
             sugarloaf,
@@ -770,7 +794,13 @@ pub fn render_input(
     // Bottom band INSIDE the box hosts the square send button; wrapped
     // text never enters it.
     let bottom_reserved = if show_status { 42.0 } else { 38.0 } * s;
-    let text_top_pad = if show_status { 15.0 } else { 11.0 } * s;
+    let input_images = pane.input_images();
+    let image_rail_h = if input_images.is_empty() {
+        0.0
+    } else {
+        super::INPUT_IMAGE_RAIL_H * s
+    };
+    let text_top_pad = (if show_status { 15.0 } else { 11.0 }) * s + image_rail_h;
     let border_w = (FRAME_STROKE * s).max(2.0);
     sugarloaf.rounded_rect(
         None,
@@ -794,6 +824,19 @@ pub fn render_input(
         (corner_radius - border_w).max(0.0),
         ORDER_PANEL + 1,
     );
+    if !input_images.is_empty() {
+        super::image_preview::render_image_strip(
+            sugarloaf,
+            &input_images,
+            box_x + 18.0 * s,
+            box_y + 12.0 * s,
+            (box_w - 36.0 * s).max(0.0),
+            theme,
+            s,
+            [box_x, box_y, box_w, box_h],
+            occlusion_rects,
+        );
+    }
 
     let usage_label = pane.usage_summary_label();
     let usage_opts = DrawOpts {
@@ -845,7 +888,12 @@ pub fn render_input(
     let opts = DrawOpts {
         font_size: 16.0 * s,
         color: text_color,
-        clip_rect: Some([text_x, box_y + 6.0 * s, text_w, box_h - bottom_reserved]),
+        clip_rect: Some([
+            text_x,
+            box_y + 6.0 * s + image_rail_h,
+            text_w,
+            (box_h - bottom_reserved - image_rail_h).max(INPUT_LINE_H * s),
+        ]),
         ..DrawOpts::default()
     };
     let wrapped_rows = prepared_wrap_rows

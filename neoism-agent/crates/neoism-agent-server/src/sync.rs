@@ -327,6 +327,11 @@ async fn project_session_queue_updated(
         .unwrap_or("snapshot");
     match action {
         "enqueue" => {
+            let delivery = payload
+                .properties
+                .get("delivery")
+                .and_then(Value::as_str)
+                .unwrap_or("queue");
             if let Some(request) = payload
                 .properties
                 .get("request")
@@ -337,14 +342,33 @@ async fn project_session_queue_updated(
                 state
                     .inner
                     .store
-                    .enqueue_prompt(&session_id, &request)
+                    .enqueue_prompt_with_delivery(&session_id, &request, delivery)
                     .await?;
             }
         }
         "pop" | "dequeue" => {
-            let _ = state.inner.store.pop_queued_prompt(&session_id).await?;
+            if let Some(delivery) = payload
+                .properties
+                .get("delivery")
+                .and_then(Value::as_str)
+            {
+                let _ = state
+                    .inner
+                    .store
+                    .pop_queued_prompt_with_delivery(&session_id, Some(delivery))
+                    .await?;
+            } else {
+                let _ = state.inner.store.pop_user_queued_prompt(&session_id).await?;
+            }
         }
         "clear" => {
+            let _ = state
+                .inner
+                .store
+                .clear_user_queued_prompts(&session_id)
+                .await?;
+        }
+        "clear-all" => {
             let _ = state.inner.store.clear_queued_prompts(&session_id).await?;
         }
         "snapshot" => {

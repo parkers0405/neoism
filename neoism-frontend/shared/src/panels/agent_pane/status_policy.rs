@@ -14,11 +14,6 @@ pub fn queue_status_decision(
     started_at: Option<u64>,
     is_streaming: bool,
 ) -> QueueStatusDecision {
-    let (count, preview) = if started_at.is_some() {
-        (count, preview)
-    } else {
-        (0, None)
-    };
     QueueStatusDecision {
         count,
         preview,
@@ -79,12 +74,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inactive_queue_status_clears_count_and_preview() {
+    fn idle_queue_status_preserves_authoritative_count_and_preview() {
         assert_eq!(
             queue_status_decision(3, Some("queued prompt".to_string()), None, false),
             QueueStatusDecision {
-                count: 0,
-                preview: None,
+                count: 3,
+                preview: Some("queued prompt".to_string()),
                 should_enter_thinking: false,
                 started_at: None,
             }

@@ -40,7 +40,14 @@ use crate::state::AppState;
 
 /// Wire format version for [`SessionBundle`]. Bumped if the shape changes in a
 /// way that older importers cannot read.
-pub const SESSION_BUNDLE_VERSION: u32 = 1;
+pub const SESSION_BUNDLE_VERSION: u32 = 2;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedPromptBundleItem {
+    pub request: PromptRequest,
+    pub delivery: String,
+}
 
 /// A self-contained, host-independent snapshot of a single agent session.
 ///
@@ -60,7 +67,7 @@ pub struct SessionBundle {
     pub messages: Vec<MessageWithParts>,
     /// Prompts still queued for this session, in queue order. `import_session`
     /// re-enqueues them so the resume path drains them on the new host.
-    pub queued_prompts: Vec<PromptRequest>,
+    pub queued_prompts: Vec<QueuedPromptBundleItem>,
     /// Absolute workspace (git worktree) root on the exporting host, if known.
     /// Absolute paths inside the bundle are stripped of this prefix so the
     /// importer can re-root them under `target_workspace_root`. `None` when the
@@ -96,7 +103,12 @@ pub async fn export_session(
         .await?
         .ok_or_else(|| anyhow!("session {session_id} not found"))?;
     let messages = store.list_messages(session_id).await?;
-    let queued_prompts = store.list_queued_prompts(session_id).await?;
+    let queued_prompts = store
+        .list_queued_prompt_entries(session_id)
+        .await?
+        .into_iter()
+        .map(|(request, delivery)| QueuedPromptBundleItem { request, delivery })
+        .collect();
 
     // Derive the workspace root: directory == <root>/<path>. Stripping `path`
     // from the tail of `directory` yields the root the importer will replace.
@@ -203,8 +215,14 @@ pub async fn import_session(
     }
 
     // Re-enqueue still-pending prompts so resume_prompt_queues drains them.
-    for request in &bundle.queued_prompts {
-        store.enqueue_prompt(session_id.as_str(), request).await?;
+    for item in &bundle.queued_prompts {
+        store
+            .enqueue_prompt_with_delivery(
+                session_id.as_str(),
+                &item.request,
+                &item.delivery,
+            )
+            .await?;
     }
 
     Ok(session_id)

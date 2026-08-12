@@ -46,6 +46,10 @@ impl AgentTimelineMessage for NeoismAgentMessage {
         &self.detail
     }
 
+    fn images(&self) -> &[crate::panels::agent_pane::state::NeoismAgentImage] {
+        &self.images
+    }
+
     fn todos_empty(&self) -> bool {
         self.todos.is_empty()
     }
@@ -77,6 +81,7 @@ impl AgentTimelineMessage for NeoismAgentMessage {
             detail,
             usage: None,
             author: None,
+            images: Vec::new(),
         }
     }
 }

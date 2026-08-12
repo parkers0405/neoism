@@ -5,7 +5,8 @@
 //! desktop remotes should not each invent their own translation table; this
 //! module is the shared contract for the daemon-backed agent runtime.
 
-use neoism_protocol::agent::{AgentClientMessage, PermissionDecision};
+use base64::Engine;
+use neoism_protocol::agent::{AgentClientMessage, Attachment, PermissionDecision};
 use serde_json::Value;
 
 use crate::panels::agent_pane::outbound::OutboundAgentCommand;
@@ -29,10 +30,12 @@ pub enum AgentProtocolMapping {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAgentProtocolPrompt {
+    pub message_id: String,
     pub text: String,
     pub mode: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<String>,
+    pub delivery: neoism_protocol::agent::PromptDelivery,
 }
 
 pub fn map_outbound_command(
@@ -46,31 +49,38 @@ pub fn map_outbound_command(
     match command {
         Cmd::EnsureSession => Mapping::EnsureSession,
         Cmd::SendPrompt {
+            message_id,
             text,
-            parts: _,
+            parts,
             system: _,
             agent,
             model,
             thinking,
+            delivery,
             transcript_echo: _,
         } => {
+            let attachments = parts.into_iter().filter_map(part_attachment).collect();
             let mode = agent.or_else(|| context.default_agent.clone());
             let model = non_empty(model).or_else(|| context.default_model.clone());
             let thinking = thinking.or_else(|| context.default_thinking.clone());
             match context.active_session_id.clone() {
                 Some(session_id) => Mapping::Messages(vec![Msg::SubmitPrompt {
                     session_id,
+                    message_id,
                     text,
-                    attachments: Vec::new(),
+                    attachments,
                     mode,
                     model,
                     thinking,
+                    delivery,
                 }]),
                 None => Mapping::PendingPrompt(PendingAgentProtocolPrompt {
+                    message_id,
                     text,
                     mode,
                     model,
                     thinking,
+                    delivery,
                 }),
             }
         }
@@ -274,6 +284,23 @@ pub fn map_outbound_command(
     }
 }
 
+fn part_attachment(part: Value) -> Option<Attachment> {
+    if part.get("type").and_then(Value::as_str) != Some("file") {
+        return None;
+    }
+    let mime = part.get("mime").and_then(Value::as_str)?.to_string();
+    let url = part.get("url").and_then(Value::as_str)?;
+    let (_, encoded) = url.strip_prefix("data:")?.split_once(',')?;
+    Some(Attachment {
+        kind: mime,
+        path: part
+            .get("filename")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        bytes: base64::engine::general_purpose::STANDARD.decode(encoded).ok()?,
+    })
+}
+
 pub fn followup_after_thread_created(session_id: String) -> Vec<AgentClientMessage> {
     vec![
         AgentClientMessage::GetHistory {
@@ -354,12 +381,14 @@ mod tests {
     fn send_prompt_without_session_becomes_pending_prompt() {
         let mapped = map_outbound_command(
             OutboundAgentCommand::SendPrompt {
+                message_id: crate::panels::agent_pane::outbound::next_prompt_message_id(),
                 text: "hello".to_string(),
                 parts: Vec::new(),
                 system: None,
                 agent: None,
                 model: String::new(),
                 thinking: None,
+                delivery: neoism_protocol::agent::PromptDelivery::Steer,
                 transcript_echo: true,
             },
             &AgentProtocolMappingContext::default(),

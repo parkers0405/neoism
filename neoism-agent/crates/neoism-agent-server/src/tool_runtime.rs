@@ -841,6 +841,7 @@ async fn queue_child_task_prompt(
         child_session_id,
         "enqueue",
         Some(&event_request),
+        Some("queue"),
         0,
     )
     .await;

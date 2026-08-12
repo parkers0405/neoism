@@ -2,6 +2,17 @@
 
 Model Context Protocol servers extend Neoism Agent with tools, resources, and prompts. Neoism supports local subprocess servers and remote HTTP servers, including remote OAuth flows.
 
+## Add a server
+
+The easiest route is **hamburger menu -> Extensions**, find an MCP extension, and choose **Install**. The Extensions page writes the server definition and shows its live status.
+
+To add a custom server manually, put its definition in one of these locations, then start a new agent session:
+
+- Global: `~/.config/neoism/mcp.json` or `~/.config/neoism/config.json` under `agent.mcp`.
+- Project: `<project>/neoism.json` under top-level `mcp`.
+
+An `mcp.json` file accepts either `{ "mcp": { "server-name": {...} } }` or the bare `{ "server-name": {...} }` map. Use `/mcp` to confirm whether Neoism connected, disabled, or failed the server.
+
 ## Local server
 
 ```jsonc

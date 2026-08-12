@@ -70,6 +70,7 @@ impl NeoismAgentPane {
             line_offset: message.line_offset,
             todos: hash_value(&message.todos),
             detail: hash_value(&message.detail),
+            images: hash_value(&message.images),
             selected_tool_group_child: 0,
         }
     }
@@ -395,11 +396,6 @@ impl NeoismAgentPane {
             self.note_streaming(NeoismAgentStreamingState::Thinking, None);
         }
         match self.send_prompt(&text, !was_streaming) {
-            Ok(()) if was_streaming => {
-                self.queued_prompt_count =
-                    self.queued_prompt_count.saturating_add(1).max(1);
-                self.queued_prompt_preview.get_or_insert(text);
-            }
             Ok(()) => {}
             Err(error) => {
                 self.system_message("Prompt failed", error);

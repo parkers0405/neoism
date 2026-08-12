@@ -31,6 +31,7 @@ fn tool_message(id: &str, tool: &str, title: &str, status: &str) -> NeoismAgentM
         detail: format!("{title} detail"),
         usage: None,
         author: None,
+        images: Vec::new(),
     }
 }
 
@@ -53,6 +54,7 @@ fn text_message(
         detail: String::new(),
         usage: None,
         author: None,
+        images: Vec::new(),
     }
 }
 

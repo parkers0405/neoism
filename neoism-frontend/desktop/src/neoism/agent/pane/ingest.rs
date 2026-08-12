@@ -110,13 +110,6 @@ impl NeoismAgentPane {
                         self.note_streaming(NeoismAgentStreamingState::Idle, None);
                         changed = true;
                     }
-                    if self.queued_prompt_count != 0
-                        || self.queued_prompt_preview.is_some()
-                    {
-                        self.queued_prompt_count = 0;
-                        self.queued_prompt_preview = None;
-                        changed = true;
-                    }
                     self.abort_requested_at = None;
                 }
                 AgentSessionUpdate::System { title, body } => {
@@ -397,21 +390,25 @@ impl NeoismAgentPane {
                     changed = true;
                 }
                 OutboundAgentCommand::SendPrompt {
+                    message_id,
                     text,
                     parts,
                     system,
                     agent,
                     model,
                     thinking,
+                    delivery,
                     transcript_echo,
                 } => {
                     if let Err(error) = self.execute_send_prompt_command(
+                        message_id,
                         text,
                         parts,
                         system,
                         agent,
                         model,
                         thinking,
+                        delivery,
                         transcript_echo,
                     ) {
                         self.system_message("Prompt failed", error);

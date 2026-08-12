@@ -109,6 +109,7 @@ pub trait AgentTimelineMessage: Clone {
     fn tool(&self) -> &str;
     fn output_kind(&self) -> AgentTimelineOutputKind;
     fn detail(&self) -> &str;
+    fn images(&self) -> &[crate::panels::agent_pane::state::NeoismAgentImage];
     fn todos_empty(&self) -> bool;
     fn with_text(&self, text: String) -> Self;
     fn tool_group_message(
@@ -390,6 +391,10 @@ macro_rules! neoism_ui_impl_agent_timeline_message {
                 &self.detail
             }
 
+            fn images(&self) -> &[$crate::panels::agent_pane::state::NeoismAgentImage] {
+                &self.images
+            }
+
             fn todos_empty(&self) -> bool {
                 self.todos.is_empty()
             }
@@ -421,6 +426,7 @@ macro_rules! neoism_ui_impl_agent_timeline_message {
                     detail,
                     usage: None,
                     author: None,
+                    images: Vec::new(),
                 }
             }
         }

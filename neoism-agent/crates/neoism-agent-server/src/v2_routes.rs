@@ -97,8 +97,15 @@ async fn enqueue_v2_prompt(
     let (start_worker, queue_len) =
         enqueue_prompt_request_with_delivery(state, session_id, request, delivery)
             .await?;
-    publish_prompt_queue_changed(state, session_id, "enqueue", Some(&event_request), 0)
-        .await;
+    publish_prompt_queue_changed(
+        state,
+        session_id,
+        "enqueue",
+        Some(&event_request),
+        Some(delivery),
+        0,
+    )
+    .await;
     publish_prompt_queue_status(state, session_id, queue_len).await;
     if start_worker {
         tokio::spawn(crate::session_queue::drain_prompt_queue(
@@ -111,6 +118,15 @@ async fn enqueue_v2_prompt(
 
 impl V2PromptRequest {
     fn into_prompt_request(self) -> Result<PromptRequest, ApiError> {
+        if self
+            .system
+            .as_deref()
+            .is_some_and(crate::message_model::is_runtime_system_notification)
+        {
+            return Err(ApiError::bad_request(
+                "runtime notification markers are reserved for the server",
+            ));
+        }
         let mut model = self.model;
         if let (Some(model), Some(variant)) = (&mut model, self.variant) {
             model.variant = Some(variant);

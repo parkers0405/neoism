@@ -369,7 +369,11 @@ fn mcp_search_result(
     let exact_query = query.trim().to_ascii_lowercase();
     let mut matches = tools
         .iter()
-        .filter(|tool| namespace.is_none_or(|value| tool.client == value))
+        .filter(|tool| {
+            namespace.is_none_or(|value| {
+                mcp_canonical_namespace(&tool.client).eq_ignore_ascii_case(value.trim())
+            })
+        })
         .filter_map(|tool| {
             let path = mcp_canonical_path(tool);
             if !exact_query.is_empty() && path.to_ascii_lowercase() == exact_query {
@@ -421,6 +425,13 @@ fn mcp_canonical_path(tool: &McpToolInfo) -> String {
     mcp_path(&runtime_id)
         .map(|(namespace, name)| format!("{namespace}.{name}"))
         .unwrap_or_else(|| format!("{}.{}", tool.client, tool.name))
+}
+
+fn mcp_canonical_namespace(client: &str) -> String {
+    let runtime_id = mcp::tool_runtime_id(client, "tool");
+    mcp_path(&runtime_id)
+        .map(|(namespace, _)| namespace)
+        .unwrap_or_else(|| client.to_string())
 }
 
 fn search_terms(query: &str) -> Vec<String> {
@@ -554,5 +565,23 @@ mod tests {
         let result = mcp_search_result(&tools, &json!({ "query": "create issue" }));
         let payload: Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(payload["items"][0]["path"], "odd_server.create_issue");
+    }
+
+    #[test]
+    fn gateway_namespace_filter_accepts_advertised_sanitized_name() {
+        let tools = vec![
+            mcp_tool("neoism-docs", "docs.search", "Search product documentation"),
+            mcp_tool("github", "search", "Search repositories"),
+        ];
+        let result = mcp_search_result(
+            &tools,
+            &json!({
+                "namespace": "neoism_docs",
+                "query": "docs search read MCP server configuration skills SKILL.md"
+            }),
+        );
+        let payload: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(payload["items"][0]["path"], "neoism_docs.docs_search");
+        assert_eq!(payload["items"].as_array().unwrap().len(), 1);
     }
 }

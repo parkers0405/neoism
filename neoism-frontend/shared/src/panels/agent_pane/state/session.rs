@@ -79,11 +79,6 @@ impl NeoismAgentPane {
         let send_result = self.send_prompt_with_echo(&prompt, &text, !was_streaming);
         self.input_attachments.clear();
         match send_result {
-            Ok(()) if was_streaming => {
-                self.queued_prompt_count =
-                    self.queued_prompt_count.saturating_add(1).max(1);
-                self.queued_prompt_preview.get_or_insert(prompt);
-            }
             Ok(()) => {}
             Err(error) => {
                 self.system_message("Prompt failed", error);
@@ -328,8 +323,9 @@ impl NeoismAgentPane {
     ) -> Result<(), String> {
         let echo_prompt = echo_prompt.to_string();
         if transcript_echo {
-            self.messages
-                .push(NeoismAgentMessage::user(echo_prompt.clone()));
+            let mut message = NeoismAgentMessage::user(echo_prompt.clone());
+            message.images = self.input_images();
+            self.messages.push(message);
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
         }
         // Mirror the desktop's `commands::send_prompt`: build the
@@ -345,12 +341,14 @@ impl NeoismAgentPane {
         let parts = self.prompt_parts_for(prompt);
         let system = self.prompt_system_for(prompt);
         self.push_outbound(OutboundAgentCommand::SendPrompt {
+            message_id: crate::panels::agent_pane::outbound::next_prompt_message_id(),
             text: prompt.to_string(),
             parts,
             system,
             agent: self.agent.clone(),
             model: self.model.clone(),
             thinking: self.thinking.clone(),
+            delivery: neoism_protocol::agent::PromptDelivery::Steer,
             transcript_echo,
         });
         if transcript_echo {

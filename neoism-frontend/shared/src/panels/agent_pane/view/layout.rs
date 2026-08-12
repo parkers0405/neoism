@@ -1,7 +1,8 @@
 use crate::panels::agent_pane::state::NeoismAgentPane;
 
 use super::{
-    CHAT_INPUT_MIN_H, HOME_INPUT_MIN_H, INPUT_HELP_STRIP_H, INPUT_LINE_H, MAX_INPUT_LINES,
+    CHAT_INPUT_MIN_H, HOME_INPUT_MIN_H, INPUT_HELP_STRIP_H, INPUT_IMAGE_RAIL_H, INPUT_LINE_H,
+    MAX_INPUT_LINES,
 };
 
 /// Horizontal padding applied to both the chat timeline and the input
@@ -19,6 +20,7 @@ pub trait AgentPaneInput {
     fn input(&self) -> &str;
     fn input_help_visible(&self) -> bool;
     fn background_task_details_expanded(&self) -> bool;
+    fn input_image_count(&self) -> usize;
     /// Exact rows registered by the most recent render, when they still
     /// describe the current draft. Non-rendering hosts may return `None`.
     fn input_visual_row_count(&self) -> Option<usize> {
@@ -39,6 +41,10 @@ impl AgentPaneInput for NeoismAgentPane {
         self.background_task_details_expanded()
     }
 
+    fn input_image_count(&self) -> usize {
+        self.input_images().len()
+    }
+
     fn input_visual_row_count(&self) -> Option<usize> {
         NeoismAgentPane::input_visual_row_count(self)
     }
@@ -47,7 +53,7 @@ impl AgentPaneInput for NeoismAgentPane {
 pub fn home_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f32; 4] {
     let [x, y, w, h] = rect;
     let input_w = home_input_width(rect, s);
-    let input_h = pane.input_visual_row_count().map_or_else(
+    let mut input_h = pane.input_visual_row_count().map_or_else(
         || {
             input_height_for_width(
                 pane.input(),
@@ -66,6 +72,9 @@ pub fn home_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
             )
         },
     );
+    if pane.input_image_count() > 0 {
+        input_h += INPUT_IMAGE_RAIL_H * s;
+    }
     let input_x = x + (w - input_w) * 0.5;
     // The wordmark anchors a fixed gap above this card, so the pair
     // reads as one group centered slightly above the pane's midline.
@@ -91,12 +100,15 @@ pub fn home_input_rect_for_visual_rows(
 ) -> [f32; 4] {
     let [x, y, w, h] = rect;
     let input_w = home_input_width(rect, s);
-    let input_h = input_height_for_visual_rows(
+    let mut input_h = input_height_for_visual_rows(
         visual_rows,
         s,
         true,
         pane.background_task_details_expanded(),
     );
+    if pane.input_image_count() > 0 {
+        input_h += INPUT_IMAGE_RAIL_H * s;
+    }
     let input_x = x + (w - input_w) * 0.5;
     let input_y = y + h * 0.46;
     [input_x, input_y, input_w, input_h]
@@ -128,7 +140,7 @@ pub fn chat_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
         0.0
     };
     let bottom_pad = help_h * s;
-    let input_h = pane.input_visual_row_count().map_or_else(
+    let mut input_h = pane.input_visual_row_count().map_or_else(
         || {
             input_height_for_width(
                 pane.input(),
@@ -147,6 +159,9 @@ pub fn chat_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
             )
         },
     );
+    if pane.input_image_count() > 0 {
+        input_h += INPUT_IMAGE_RAIL_H * s;
+    }
     [input_x, y + h - input_h - bottom_pad, input_w, input_h]
 }
 
@@ -164,12 +179,15 @@ pub fn chat_input_rect_for_visual_rows(
         0.0
     };
     let bottom_pad = help_h * s;
-    let input_h = input_height_for_visual_rows(
+    let mut input_h = input_height_for_visual_rows(
         visual_rows,
         s,
         false,
         pane.background_task_details_expanded(),
     );
+    if pane.input_image_count() > 0 {
+        input_h += INPUT_IMAGE_RAIL_H * s;
+    }
     [input_x, y + h - input_h - bottom_pad, input_w, input_h]
 }
 
@@ -239,6 +257,10 @@ mod tests {
 
         fn background_task_details_expanded(&self) -> bool {
             false
+        }
+
+        fn input_image_count(&self) -> usize {
+            0
         }
 
         fn input_visual_row_count(&self) -> Option<usize> {

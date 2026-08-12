@@ -848,15 +848,16 @@ export type AgentClientMessage =
   | {
       SubmitPrompt: {
         session_id: string;
+        message_id: string;
         text: string;
         attachments?: Attachment[];
         mode?: string | null;
         model?: string | null;
         thinking?: string | null;
+        delivery: "steer" | "queue";
       };
     }
   | { CancelInflight: { session_id: string } }
-  | { EnqueuePrompt: { session_id: string; text: string } }
   | { ClearQueue: { session_id: string } }
   | { StopBackgroundTask: { session_id: string; job_id: string } }
   | { RetryLast: { session_id: string } }

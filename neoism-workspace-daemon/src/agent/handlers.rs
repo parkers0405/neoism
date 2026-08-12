@@ -307,23 +307,6 @@ pub(crate) fn history_from_agent_message(
 
 // -- Prompt / submission ----------------------------------------------------
 
-pub(crate) fn spawn_inflight<F, Fut>(inner: &Arc<AgentInner>, session_id: String, task: F)
-where
-    F: FnOnce(Arc<AgentInner>) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    // Cancel any prior in-flight request for this session so retries
-    // don't pile up.
-    cancel_inflight(inner, &session_id);
-    let inner_clone = inner.clone();
-    let key = session_id.clone();
-    let handle = tokio::spawn(async move {
-        task(inner_clone.clone()).await;
-        inner_clone.inflight.lock().remove(&key);
-    });
-    inner.inflight.lock().insert(session_id, handle);
-}
-
 pub(crate) fn cancel_inflight(inner: &Arc<AgentInner>, session_id: &str) {
     if let Some(handle) = inner.inflight.lock().remove(session_id) {
         handle.abort();
@@ -333,15 +316,39 @@ pub(crate) fn cancel_inflight(inner: &Arc<AgentInner>, session_id: &str) {
 pub(crate) async fn handle_submit_prompt(
     inner: Arc<AgentInner>,
     session_id: String,
+    message_id: String,
     text: String,
+    attachments: Vec<neoism_protocol::agent::Attachment>,
     mode: Option<String>,
     model: Option<String>,
     thinking: Option<String>,
+    delivery: neoism_protocol::agent::PromptDelivery,
 ) {
     let mut body = serde_json::Map::new();
+    let mut parts = vec![json!({ "type": "text", "text": text })];
+    for attachment in attachments {
+        if attachment.bytes.is_empty() {
+            continue;
+        }
+        use base64::Engine;
+        let mime = attachment.kind;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(attachment.bytes);
+        parts.push(json!({
+            "type": "file",
+            "mime": mime,
+            "filename": attachment.path.unwrap_or_else(|| "image".to_string()),
+            "url": format!("data:{mime};base64,{encoded}"),
+        }));
+    }
+    body.insert("parts".to_string(), Value::Array(parts));
+    body.insert("messageId".to_string(), Value::String(message_id));
     body.insert(
-        "parts".to_string(),
-        json!([{ "type": "text", "text": text }]),
+        "delivery".to_string(),
+        Value::String(match delivery {
+            neoism_protocol::agent::PromptDelivery::Steer => "steer",
+            neoism_protocol::agent::PromptDelivery::Queue => "queue",
+        }
+        .to_string()),
     );
     if let Some(mode) = mode {
         body.insert("agent".to_string(), Value::String(mode));
@@ -360,30 +367,10 @@ pub(crate) async fn handle_submit_prompt(
     }
     if let Err(err) = http_post_json(
         &inner,
-        &format!("/session/{session_id}/message"),
+        &format!("/api/session/{session_id}/prompt"),
         &Value::Object(body),
     )
     .await
-    {
-        emit_error(&inner.tx, err);
-    }
-}
-
-pub(crate) async fn handle_enqueue_prompt(
-    inner: Arc<AgentInner>,
-    session_id: String,
-    text: String,
-) {
-    // The agent-server doesn't expose a typed "push to queue without
-    // running" endpoint distinct from `/message`; for now we POST the
-    // prompt normally — the runtime will queue it behind any active
-    // turn. TODO(wave-cutover): switch to a dedicated /queue route
-    // once the agent-server lands one so we don't dispatch in-flight.
-    let body = json!({
-        "parts": [{ "type": "text", "text": text }],
-    });
-    if let Err(err) =
-        http_post_json(&inner, &format!("/session/{session_id}/message"), &body).await
     {
         emit_error(&inner.tx, err);
     }

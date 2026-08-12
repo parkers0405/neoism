@@ -219,11 +219,13 @@ impl ChromeBridge {
         };
         self.send_agent_envelope(&AgentClientMessage::SubmitPrompt {
             session_id,
+            message_id: prompt.message_id,
             text: prompt.text,
             attachments: prompt.attachments,
             mode: prompt.mode,
             model: prompt.model,
             thinking: prompt.thinking,
+            delivery: prompt.delivery,
         });
     }
 
@@ -682,11 +684,13 @@ impl ChromeBridge {
         self.agent_state.history_cursor = None;
         self.agent_state.history_pending_live = None;
         self.agent_state.pending_prompt = Some(PendingAgentPrompt {
+            message_id: neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
             text: trimmed.to_string(),
             attachments: Vec::new(),
             mode,
             model,
             thinking,
+            delivery: neoism_protocol::agent::PromptDelivery::Steer,
         });
         self.create_agent_thread_with_defaults();
     }
@@ -732,19 +736,23 @@ impl ChromeBridge {
         if let Some(session_id) = self.agent_state.session_id.clone() {
             self.send_agent_envelope(&AgentClientMessage::SubmitPrompt {
                 session_id,
+                message_id: neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
                 text,
                 attachments,
                 mode,
                 model,
                 thinking,
+                delivery: neoism_protocol::agent::PromptDelivery::Steer,
             });
         } else {
             self.agent_state.pending_prompt = Some(PendingAgentPrompt {
+                message_id: neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
                 text,
                 attachments,
                 mode,
                 model,
                 thinking,
+                delivery: neoism_protocol::agent::PromptDelivery::Steer,
             });
             self.create_agent_thread_with_defaults();
         }
@@ -889,11 +897,13 @@ impl ChromeBridge {
                 }
                 AgentProtocolMapping::PendingPrompt(prompt) => {
                     self.agent_state.pending_prompt = Some(PendingAgentPrompt {
+                        message_id: prompt.message_id,
                         text: prompt.text,
                         attachments: Vec::new(),
                         mode: prompt.mode,
                         model: prompt.model,
                         thinking: prompt.thinking,
+                        delivery: prompt.delivery,
                     });
                     if self.agent_state.session_id.is_none() {
                         self.create_agent_thread_with_defaults();

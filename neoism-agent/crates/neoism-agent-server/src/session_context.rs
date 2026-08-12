@@ -19,7 +19,9 @@ use crate::{
     ensure_session, instruction, message_model, now_millis, use_apply_patch_for_model,
 };
 
-const PROTECTED_COMPACTION_TAIL_MESSAGES: usize = 8;
+const DEFAULT_COMPACTION_TAIL_TURNS: usize = 2;
+const MIN_PRESERVE_RECENT_TOKENS: u64 = 2_000;
+const MAX_PRESERVE_RECENT_TOKENS: u64 = 8_000;
 
 const COMPACTION_PROMPT_TEMPLATE: &str = r#"Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
@@ -148,7 +150,8 @@ async fn run_compaction(
         .map(user_model_from_model_ref)
         .unwrap_or_else(default_user_model);
     let existing_messages = state.inner.store.list_messages(session_id).await?;
-    let tail_start_message_id = protected_tail_start_message_id(&existing_messages);
+    let tail_start_message_id =
+        protected_tail_start_message_id(state, &model, &existing_messages).await;
     let user_message = compaction_user_message(
         &info,
         &model,
@@ -605,6 +608,7 @@ fn compaction_request_prompt(previous_summary: Option<&str>) -> String {
 }
 
 fn clean_model_compaction_summary(raw: &str) -> Option<String> {
+    const MAX_COMPACTION_SUMMARY_CHARS: usize = 32_000;
     let stripped = strip_think_blocks(raw);
     let fenced = stripped
         .trim()
@@ -614,7 +618,11 @@ fn clean_model_compaction_summary(raw: &str) -> Option<String> {
         .unwrap_or(stripped.trim())
         .trim()
         .to_string();
-    let summary = sanitize_compaction_summary(&fenced);
+    let mut summary = sanitize_compaction_summary(&fenced);
+    if summary.chars().count() > MAX_COMPACTION_SUMMARY_CHARS {
+        summary = summary.chars().take(MAX_COMPACTION_SUMMARY_CHARS).collect();
+        summary.push_str("\n\n[Compaction summary truncated to its replay budget.]");
+    }
     (!summary.is_empty()).then_some(summary)
 }
 
@@ -801,19 +809,56 @@ fn compaction_tail_start_message_id(message: &MessageWithParts) -> Option<String
     })
 }
 
-fn protected_tail_start_message_id(messages: &[MessageWithParts]) -> Option<String> {
-    let mut remaining = PROTECTED_COMPACTION_TAIL_MESSAGES;
-    for message in messages.iter().rev() {
-        if is_compaction_user_message(message) || is_compaction_assistant_message(message)
-        {
+async fn protected_tail_start_message_id(
+    state: &AppState,
+    model: &neoism_agent_core::UserModel,
+    messages: &[MessageWithParts],
+) -> Option<String> {
+    let budget =
+        crate::session_prompt::compaction_preserve_recent_token_budget(state, model)
+            .await
+            .clamp(MIN_PRESERVE_RECENT_TOKENS, MAX_PRESERVE_RECENT_TOKENS);
+    let user_starts = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            matches!(message.info, MessageInfo::User(_))
+                && !is_compaction_user_message(message)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let recent = &user_starts[user_starts
+        .len()
+        .saturating_sub(DEFAULT_COMPACTION_TAIL_TURNS)..];
+    let mut total = 0_u64;
+    let mut keep = None;
+    for recent_index in (0..recent.len()).rev() {
+        let start = recent[recent_index];
+        let end = recent
+            .get(recent_index + 1)
+            .copied()
+            .unwrap_or(messages.len());
+        let size = crate::session_prompt::estimated_provider_prompt_tokens(
+            &message_model::provider_messages(&messages[start..end]),
+        );
+        if total.saturating_add(size) <= budget {
+            total = total.saturating_add(size);
+            keep = Some(message_id(&messages[start]));
             continue;
         }
-        if remaining == 0 {
-            return Some(message_id(message));
+        let remaining = budget.saturating_sub(total);
+        for split in start + 1..end {
+            let suffix = crate::session_prompt::estimated_provider_prompt_tokens(
+                &message_model::provider_messages(&messages[split..end]),
+            );
+            if suffix <= remaining {
+                keep = Some(message_id(&messages[split]));
+                break;
+            }
         }
-        remaining -= 1;
+        break;
     }
-    None
+    keep
 }
 
 fn assistant_parent_id(message: &MessageWithParts) -> Option<String> {

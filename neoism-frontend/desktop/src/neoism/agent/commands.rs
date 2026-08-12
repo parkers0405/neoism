@@ -542,12 +542,14 @@ impl NeoismAgentPane {
             self.push_outbound(OutboundAgentCommand::EnsureSession);
         }
         self.push_outbound(OutboundAgentCommand::SendPrompt {
+            message_id: neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
             text: prompt,
             parts,
             system,
             agent: self.agent.clone(),
             model: self.model.clone(),
             thinking: self.thinking.clone(),
+            delivery: neoism_protocol::agent::PromptDelivery::Steer,
             transcript_echo,
         });
         Ok(())
@@ -555,12 +557,14 @@ impl NeoismAgentPane {
 
     pub(super) fn execute_send_prompt_command(
         &mut self,
+        message_id: String,
         text: String,
         parts: Vec<Value>,
         system: Option<String>,
         agent: Option<String>,
         model: String,
         thinking: Option<String>,
+        delivery: neoism_protocol::agent::PromptDelivery,
         transcript_echo: bool,
     ) -> Result<(), String> {
         if self.is_subagent_session() {
@@ -576,7 +580,7 @@ impl NeoismAgentPane {
         // no author and the server echo is deduped onto it by text.
         let author = self.local_presence_name().map(str::to_string);
         let body = json!({
-            "messageId": null,
+            "messageId": message_id,
             "model": prompt_model_json(model.as_str(), thinking.as_deref()),
             "agent": agent,
             "noReply": false,
@@ -584,12 +588,16 @@ impl NeoismAgentPane {
             "tools": null,
             "author": author,
             "parts": parts,
+            "delivery": match delivery {
+                neoism_protocol::agent::PromptDelivery::Steer => "steer",
+                neoism_protocol::agent::PromptDelivery::Queue => "queue",
+            },
         });
         self.start_session_updates(&session_id);
         api_request_json(
             &self.server,
             "POST",
-            &format!("/session/{session_id}/prompt_async"),
+            &format!("/api/session/{session_id}/prompt"),
             Some(&body),
         )?;
         if transcript_echo {

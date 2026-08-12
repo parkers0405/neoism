@@ -1993,7 +1993,7 @@ impl SessionStore {
         request: &PromptRequest,
         delivery: &str,
     ) -> anyhow::Result<usize> {
-        if !matches!(delivery, "steer" | "queue") {
+        if !matches!(delivery, "steer" | "queue" | "continue") {
             anyhow::bail!("unsupported prompt delivery {delivery}");
         }
         let position = self
@@ -2066,11 +2066,62 @@ impl SessionStore {
         Ok(count.max(0) as usize)
     }
 
-    pub(crate) async fn pop_queued_prompt(
+    pub(crate) async fn user_queued_prompt_count(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<usize> {
+        let count = self
+            .db
+            .fetch_scalar_i64(
+                "SELECT COUNT(*) FROM prompt_queue WHERE session_id = ? AND delivery != 'continue'",
+                vec![text(session_id)],
+            )
+            .await?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub(crate) async fn pop_user_queued_prompt(
         &self,
         session_id: &str,
     ) -> anyhow::Result<Option<PromptRequest>> {
-        self.pop_queued_prompt_with_delivery(session_id, None).await
+        let Some(row) = self
+            .db
+            .fetch_optional(
+                "SELECT id, request_json FROM prompt_queue WHERE session_id = ? AND delivery != 'continue' ORDER BY position ASC, created ASC LIMIT 1",
+                vec![text(session_id)],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let id = row.get_str("id")?;
+        let request = decode_json(row.get_str("request_json")?)?;
+        self.db
+            .execute("DELETE FROM prompt_queue WHERE id = ?", vec![text(id)])
+            .await?;
+        Ok(Some(request))
+    }
+
+    pub(crate) async fn pop_active_continuation_prompt(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<PromptRequest>> {
+        let Some(row) = self
+            .db
+            .fetch_optional(
+                "SELECT id, request_json FROM prompt_queue WHERE session_id = ? AND delivery IN ('steer', 'continue') ORDER BY position ASC, created ASC LIMIT 1",
+                vec![text(session_id)],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let id = row.get_str("id")?;
+        let request = decode_json(row.get_str("request_json")?)?;
+        self.db
+            .execute("DELETE FROM prompt_queue WHERE id = ?", vec![text(id)])
+            .await?;
+        Ok(Some(request))
     }
 
     pub(crate) async fn pop_queued_prompt_with_delivery(
@@ -2108,6 +2159,20 @@ impl SessionStore {
             .db
             .execute(
                 "DELETE FROM prompt_queue WHERE session_id = ?",
+                vec![text(session_id)],
+            )
+            .await?;
+        Ok(affected as usize)
+    }
+
+    pub(crate) async fn clear_user_queued_prompts(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<usize> {
+        let affected = self
+            .db
+            .execute(
+                "DELETE FROM prompt_queue WHERE session_id = ? AND delivery != 'continue'",
                 vec![text(session_id)],
             )
             .await?;

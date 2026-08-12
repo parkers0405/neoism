@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use axum::extract::{Path, State};
 use axum::Json;
 use neoism_agent_core::{
-    event_type, EventPayload, MessageId, MessageInfo, MessageWithParts, Part,
+    event_type, EventPayload, Id, IdKind, MessageId, MessageInfo, MessageWithParts, Part,
     PermissionAction, PermissionRule, PromptPart, PromptRequest, SessionInfo,
     SessionStatus, TimeInfo, UserModel,
 };
@@ -333,13 +333,17 @@ async fn enqueue_parent_subtask_completion_prompts_if_ready(
     let request = parent_subtask_completions_request(&pending);
     let event_request = request.clone();
     let (start_worker, queue_len) =
-        crate::session_queue::enqueue_prompt_request(state, parent_id, request).await?;
+        crate::session_queue::enqueue_prompt_request_with_delivery(
+            state, parent_id, request, "continue",
+        )
+        .await?;
     mark_parent_subtask_completions_sent(state, &pending).await?;
     crate::session_queue::publish_prompt_queue_changed(
         state,
         parent_id,
         "enqueue",
         Some(&event_request),
+        Some("continue"),
         0,
     )
     .await;
@@ -530,8 +534,19 @@ fn parent_subtask_completions_prompt(completions: &[PendingSubtaskCompletion]) -
 fn parent_subtask_completions_request(
     completions: &[PendingSubtaskCompletion],
 ) -> PromptRequest {
+    let completion_key = completions
+        .iter()
+        .map(|completion| completion.child.id.as_str())
+        .collect::<Vec<_>>()
+        .join("_");
     PromptRequest {
-        message_id: None,
+        message_id: Some(
+            Id::parse(
+                IdKind::Message,
+                format!("msg_subtask_completion_{completion_key}"),
+            )
+            .expect("runtime completion message id"),
+        ),
         model: None,
         agent: None,
         no_reply: false,
@@ -668,6 +683,7 @@ mod tests {
             completed_at: child.time.updated,
         }]);
 
+        assert!(request.message_id.is_some());
         let system = request.system.as_deref().expect("system notification");
         assert!(system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER));
         assert!(system.contains("runtime, not by the user"));

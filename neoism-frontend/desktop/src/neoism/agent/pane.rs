@@ -98,6 +98,7 @@ pub struct NeoismAgentMessage {
     /// `NeoismAgentPane::local_presence_name`). See the `TODO(shared-author)`
     /// seam in the shared `api_mapping::part_block` for the multiplayer path.
     pub author: Option<String>,
+    pub images: Vec<neoism_ui::panels::agent_pane::state::NeoismAgentImage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -184,6 +185,7 @@ pub struct TimelineMeasureKey {
     line_offset: Option<usize>,
     todos: u64,
     detail: u64,
+    images: u64,
     selected_tool_group_child: u64,
 }
 
@@ -320,6 +322,7 @@ impl NeoismAgentMessage {
             detail: String::new(),
             usage: None,
             author: None,
+            images: Vec::new(),
         }
     }
 }
@@ -1074,6 +1077,20 @@ fn merge_part_message(
     let terminal_task_status = existing.status.clone();
     if incoming.usage.is_none() {
         incoming.usage = existing.usage;
+    }
+    if incoming.kind == NeoismAgentMessageKind::User
+        && existing.kind == NeoismAgentMessageKind::User
+    {
+        if incoming.text.trim().is_empty() {
+            incoming.text = existing.text.clone();
+        }
+        for image in existing.images {
+            if !incoming.images.contains(&image) {
+                incoming.images.push(image);
+            }
+        }
+    } else if incoming.images.is_empty() {
+        incoming.images = existing.images;
     }
     if matches!(
         incoming.kind,

@@ -1536,6 +1536,7 @@ impl From<neoism_ui::panels::agent_pane::state::NeoismAgentMessage>
         // above default `author` to None — the shared api_mapping already
         // resolved it from info.author / part.author, so just keep it.
         out.author = message.author;
+        out.images = message.images;
         out
     }
 }

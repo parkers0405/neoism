@@ -51,6 +51,7 @@ impl NeoismAgentPane {
             line_offset: message.line_offset,
             todos: hash_value(&message.todos),
             detail: hash_value(&message.detail),
+            images: hash_value(&message.images),
             selected_tool_group_child: 0,
         }
     }

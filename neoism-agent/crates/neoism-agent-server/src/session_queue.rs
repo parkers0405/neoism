@@ -57,7 +57,7 @@ pub(crate) async fn session_queue_clear(
 ) -> Result<Json<SessionQueueMutation>, ApiError> {
     ensure_session(&state, &session_id).await?;
     let removed = clear_queued_prompts(&state, &session_id).await;
-    publish_prompt_queue_changed(&state, &session_id, "clear", None, removed).await;
+    publish_prompt_queue_changed(&state, &session_id, "clear", None, None, removed).await;
     publish_prompt_queue_status(&state, &session_id, 0).await;
     Ok(Json(SessionQueueMutation {
         session_id: session_id.clone(),
@@ -71,10 +71,23 @@ pub(crate) async fn session_queue_pop(
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionQueueMutation>, ApiError> {
     ensure_session(&state, &session_id).await?;
-    let popped = pop_queued_prompt(&state, &session_id).await;
+    let popped = state
+        .inner
+        .store
+        .pop_user_queued_prompt(&session_id)
+        .await
+        .ok()
+        .flatten();
     let removed = usize::from(popped.is_some());
-    publish_prompt_queue_changed(&state, &session_id, "pop", popped.as_ref(), removed)
-        .await;
+    publish_prompt_queue_changed(
+        &state,
+        &session_id,
+        "pop",
+        popped.as_ref(),
+        None,
+        removed,
+    )
+    .await;
     let queue_len = queued_prompt_count(&state, &session_id).await;
     publish_prompt_queue_status(&state, &session_id, queue_len).await;
     Ok(Json(SessionQueueMutation {
@@ -93,8 +106,15 @@ pub(crate) async fn prompt_async(
     let event_request = request.clone();
     let (start_worker, queue_len) =
         enqueue_prompt_request(&state, &session_id, request).await?;
-    publish_prompt_queue_changed(&state, &session_id, "enqueue", Some(&event_request), 0)
-        .await;
+    publish_prompt_queue_changed(
+        &state,
+        &session_id,
+        "enqueue",
+        Some(&event_request),
+        Some("queue"),
+        0,
+    )
+    .await;
     publish_prompt_queue_status(&state, &session_id, queue_len).await;
     if start_worker {
         tokio::spawn(drain_prompt_queue(state, session_id));
@@ -116,9 +136,9 @@ pub(crate) async fn enqueue_prompt_request_with_delivery(
     request: PromptRequest,
     delivery: &str,
 ) -> Result<(bool, usize), ApiError> {
-    if !matches!(delivery, "steer" | "queue") {
+    if !matches!(delivery, "steer" | "queue" | "continue") {
         return Err(ApiError::bad_request(format!(
-            "delivery must be steer or queue, got {delivery}"
+            "delivery must be steer, queue, or continue, got {delivery}"
         )));
     }
     if let Some(message_id) = request.message_id.as_ref() {
@@ -165,9 +185,12 @@ async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueI
     let items = state
         .inner
         .store
-        .list_queued_prompts(session_id)
+        .list_queued_prompt_entries(session_id)
         .await
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(request, delivery)| (delivery != "continue").then_some(request))
+        .collect::<Vec<_>>();
     let running = state.inner.runs.read().await.contains_key(session_id);
     let worker = state
         .inner
@@ -237,8 +260,13 @@ pub(crate) async fn clear_session_prompt_queue(
     state: &AppState,
     session_id: &str,
 ) -> usize {
-    let removed = clear_queued_prompts(state, session_id).await;
-    publish_prompt_queue_changed(state, session_id, "clear", None, removed).await;
+    let removed = state
+        .inner
+        .store
+        .clear_queued_prompts(session_id)
+        .await
+        .unwrap_or(0);
+    publish_prompt_queue_changed(state, session_id, "clear-all", None, None, removed).await;
     publish_prompt_queue_status(state, session_id, 0).await;
     removed
 }
@@ -247,28 +275,17 @@ async fn clear_queued_prompts(state: &AppState, session_id: &str) -> usize {
     let removed = state
         .inner
         .store
-        .clear_queued_prompts(session_id)
+        .clear_user_queued_prompts(session_id)
         .await
         .unwrap_or(0);
     removed
-}
-
-async fn pop_queued_prompt(state: &AppState, session_id: &str) -> Option<PromptRequest> {
-    let popped = state
-        .inner
-        .store
-        .pop_queued_prompt(session_id)
-        .await
-        .ok()
-        .flatten();
-    popped
 }
 
 pub(crate) async fn queued_prompt_count(state: &AppState, session_id: &str) -> usize {
     state
         .inner
         .store
-        .queued_prompt_count(session_id)
+        .user_queued_prompt_count(session_id)
         .await
         .unwrap_or(0)
 }
@@ -280,10 +297,14 @@ pub(crate) async fn queued_prompt_preview(
     state
         .inner
         .store
-        .list_queued_prompts(session_id)
+        .list_queued_prompt_entries(session_id)
         .await
         .ok()
-        .and_then(|queue| queue.into_iter().next())
+        .and_then(|queue| {
+            queue
+                .into_iter()
+                .find_map(|(request, delivery)| (delivery != "continue").then_some(request))
+        })
         .as_ref()
         .and_then(queued_prompt_text)
 }
@@ -319,6 +340,26 @@ async fn next_prompt_with_delivery(
     Some((request, remaining))
 }
 
+async fn next_active_continuation_prompt(
+    state: &AppState,
+    session_id: &str,
+) -> Option<(PromptRequest, usize)> {
+    let request = state
+        .inner
+        .store
+        .pop_active_continuation_prompt(session_id)
+        .await
+        .ok()
+        .flatten()?;
+    let remaining = state
+        .inner
+        .store
+        .queued_prompt_count(session_id)
+        .await
+        .unwrap_or(0);
+    Some((request, remaining))
+}
+
 pub(crate) async fn publish_prompt_queue_status(
     state: &AppState,
     session_id: &str,
@@ -329,11 +370,21 @@ pub(crate) async fn publish_prompt_queue_status(
         .session_coordinator
         .worker_active(session_id)
         .await;
+    let total_queue_len = state
+        .inner
+        .store
+        .queued_prompt_count(session_id)
+        .await
+        .unwrap_or(queue_len);
+    let visible_queue_len = queued_prompt_count(state, session_id).await;
     let status = if active_worker
-        || queue_len > 0
+        || total_queue_len > 0
         || state.inner.runs.read().await.contains_key(session_id)
     {
-        busy_status(queue_len, queued_prompt_preview(state, session_id).await)
+        busy_status(
+            visible_queue_len,
+            queued_prompt_preview(state, session_id).await,
+        )
     } else {
         SessionStatus::Idle
     };
@@ -349,7 +400,7 @@ pub(crate) async fn publish_prompt_queue_status(
         state.inner.statuses.write().await.remove(session_id);
     }
     let mut payload = session_status_payload(state, session_id, &status).await;
-    payload["queue"] = json!(queue_len);
+    payload["queue"] = json!(visible_queue_len);
     state.publish(EventPayload::new(event_type::SESSION_STATUS, payload));
 }
 
@@ -358,6 +409,7 @@ pub(crate) async fn publish_prompt_queue_changed(
     session_id: &str,
     action: &str,
     request: Option<&PromptRequest>,
+    delivery: Option<&str>,
     removed: usize,
 ) {
     let mut payload = json!({
@@ -368,6 +420,12 @@ pub(crate) async fn publish_prompt_queue_changed(
     });
     if let Some(request) = request {
         payload["request"] = json!(request);
+        if let Some(message_id) = request.message_id.as_ref() {
+            payload["messageID"] = json!(message_id);
+        }
+    }
+    if let Some(delivery) = delivery {
+        payload["delivery"] = json!(delivery);
     }
     state.publish(EventPayload::new(
         event_type::SESSION_QUEUE_UPDATED,
@@ -381,10 +439,17 @@ pub(crate) async fn drain_queued_prompts_into_active_run(
 ) -> usize {
     let mut drained = 0;
     while let Some((request, remaining)) =
-        next_prompt_with_delivery(state, session_id, Some("steer")).await
+        next_active_continuation_prompt(state, session_id).await
     {
-        publish_prompt_queue_changed(state, session_id, "dequeue", Some(&request), 1)
-            .await;
+        publish_prompt_queue_changed(
+            state,
+            session_id,
+            "dequeue",
+            Some(&request),
+            Some("steer"),
+            1,
+        )
+        .await;
         publish_prompt_queue_status(state, session_id, remaining).await;
         drained += 1;
         if let Err(error) = append_prompt(state, session_id, request, false).await {
@@ -430,8 +495,15 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
             }
             break;
         };
-        publish_prompt_queue_changed(&state, &session_id, "dequeue", Some(&request), 1)
-            .await;
+        publish_prompt_queue_changed(
+            &state,
+            &session_id,
+            "dequeue",
+            Some(&request),
+            None,
+            1,
+        )
+        .await;
         publish_prompt_queue_status(&state, &session_id, remaining).await;
         let create_reply = !request.no_reply;
         if let Err(error) =

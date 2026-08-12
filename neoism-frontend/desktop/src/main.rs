@@ -1617,6 +1617,20 @@ fn configure_debug_service_isolation() -> io::Result<()> {
     std::fs::create_dir_all(&state_root)?;
     std::fs::create_dir_all(&cache_root)?;
 
+    // Debug sessions and databases are isolated, but provider credentials are
+    // user identity rather than session state. Share the normal auth store so
+    // a dev window still uses ChatGPT/Codex OAuth limits and subscription
+    // pricing instead of silently falling back to platform-API metadata.
+    let shared_auth = dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("neoism")
+        .join("auth.json");
+    set_debug_env(
+        "NEOISM_AGENT_AUTH_PATH",
+        "NEOISM_DEV_AGENT_AUTH_PATH",
+        shared_auth.as_os_str(),
+    );
     set_debug_env(
         "NEOISM_AGENT_STATE_DIR",
         "NEOISM_DEV_AGENT_STATE_DIR",

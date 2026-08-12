@@ -22,6 +22,20 @@
 //!    the desktop runtime drains the same queue the wasm bridge does.
 
 use serde_json::Value;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use neoism_protocol::agent::PromptDelivery;
+
+static NEXT_PROMPT_ID: AtomicU32 = AtomicU32::new(1);
+
+pub fn next_prompt_message_id() -> String {
+    let millis = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let sequence = NEXT_PROMPT_ID.fetch_add(1, Ordering::Relaxed);
+    format!("msg_{:012x}{:014x}", millis & 0x0000_ffff_ffff_ffff, sequence)
+}
 
 /// A single user-initiated request that needs IO to actually happen.
 ///
@@ -43,12 +57,14 @@ pub enum OutboundAgentCommand {
     /// objects); `system` is the optional skill-augmented system
     /// prompt (`prompt_system_for(text)`).
     SendPrompt {
+        message_id: String,
         text: String,
         parts: Vec<Value>,
         system: Option<String>,
         agent: Option<String>,
         model: String,
         thinking: Option<String>,
+        delivery: PromptDelivery,
         transcript_echo: bool,
     },
 
@@ -311,12 +327,14 @@ mod tests {
         // the contract this module exists to enforce.
         let _ = OutboundAgentCommand::EnsureSession;
         let _ = OutboundAgentCommand::SendPrompt {
+            message_id: next_prompt_message_id(),
             text: "hi".to_string(),
             parts: vec![serde_json::json!({"type": "text", "text": "hi"})],
             system: None,
             agent: Some("build".to_string()),
             model: "claude".to_string(),
             thinking: None,
+            delivery: PromptDelivery::Steer,
             transcript_echo: true,
         };
         let _ = OutboundAgentCommand::SwitchSession {

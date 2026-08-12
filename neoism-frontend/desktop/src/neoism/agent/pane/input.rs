@@ -1,6 +1,26 @@
 use super::*;
 
 impl NeoismAgentPane {
+    pub fn input_images(
+        &self,
+    ) -> Vec<neoism_ui::panels::agent_pane::state::NeoismAgentImage> {
+        self.input_attachments
+            .iter()
+            .filter_map(|attachment| match attachment {
+                NeoismAgentInputAttachment::File { filename, url, mime, .. }
+                    if mime.starts_with("image/") =>
+                {
+                    Some(neoism_ui::panels::agent_pane::state::NeoismAgentImage {
+                        filename: filename.clone(),
+                        url: url.clone(),
+                        mime: mime.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn insert_input_text(&mut self, text: &str) {
         let mut buffer = self.input_buffer();
         buffer.insert_text(text);

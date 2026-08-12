@@ -15,6 +15,10 @@ impl AgentPaneInput for NeoismAgentPane {
         self.background_task_details_expanded()
     }
 
+    fn input_image_count(&self) -> usize {
+        self.input_images().len()
+    }
+
     fn input_visual_row_count(&self) -> Option<usize> {
         self.current_input_wrap_rows().map(|rows| rows.len())
     }

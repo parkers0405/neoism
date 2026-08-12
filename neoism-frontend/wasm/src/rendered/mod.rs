@@ -1212,11 +1212,13 @@ struct AgentBridgeState {
 }
 
 struct PendingAgentPrompt {
+    message_id: String,
     text: String,
     attachments: Vec<neoism_protocol::agent::Attachment>,
     mode: Option<String>,
     model: Option<String>,
     thinking: Option<String>,
+    delivery: neoism_protocol::agent::PromptDelivery,
 }
 
 /// One queued "open this finder hit" intent. Produced by

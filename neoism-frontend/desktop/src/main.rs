@@ -1084,23 +1084,42 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let current = concat!("v", env!("CARGO_PKG_VERSION"));
     println!("neoism {current} ({goos}/{goarch}) — checking for updates…");
 
-    let api = format!("https://api.github.com/repos/{repo}/releases/latest");
+    // The unauthenticated GitHub API is limited to 60 requests/hour per public
+    // IP, so users behind the same NAT could exhaust it and get a misleading
+    // "could not reach GitHub" failure. The regular latest-release URL redirects
+    // to `/releases/tag/<tag>` and does not consume that API quota.
+    let latest_url = format!("https://github.com/{repo}/releases/latest");
+    #[cfg(windows)]
+    let null_device = "NUL";
+    #[cfg(not(windows))]
+    let null_device = "/dev/null";
     let out = std::process::Command::new("curl")
-        .args(["-fsSL", "-A", "neoism-self-update", &api])
+        .args([
+            "-fsSL",
+            "-o",
+            null_device,
+            "-w",
+            "%{url_effective}",
+            "-A",
+            "neoism-self-update",
+            &latest_url,
+        ])
         .output()?;
     if !out.status.success() {
-        return Err(
-            "could not reach GitHub (need `curl`, and a published release)".into(),
-        );
+        return Err(format!(
+            "GitHub release check failed (curl exit status {})",
+            out.status
+        )
+        .into());
     }
-    let latest = serde_json::from_slice::<serde_json::Value>(&out.stdout)
-        .ok()
-        .and_then(|v| {
-            v.get("tag_name")
-                .and_then(|t| t.as_str())
-                .map(str::to_string)
-        })
-        .ok_or("no release found on GitHub yet")?;
+    let effective_url = String::from_utf8(out.stdout)?;
+    let latest = effective_url
+        .trim()
+        .rsplit_once("/releases/tag/")
+        .map(|(_, tag)| tag)
+        .filter(|tag| !tag.is_empty() && !tag.contains('/'))
+        .map(str::to_string)
+        .ok_or("no published GitHub release found")?;
 
     #[cfg(target_os = "macos")]
     let macos_app_is_current = [

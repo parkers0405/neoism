@@ -47,10 +47,7 @@ impl Screen<'_> {
                 true
             }
             Some(TopBarAction::OpenThemes) => {
-                // Mirror the Cmd+P → Themes flow: open the real
-                // theme-picker modal (the rich card with the live
-                // swatch + preview), not just the palette in
-                // "themes mode".
+                // Mirror Cmd+P → Themes: searchable list + live preview.
                 self.open_theme_picker();
                 true
             }

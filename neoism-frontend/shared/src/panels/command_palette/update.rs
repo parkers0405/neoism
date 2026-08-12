@@ -16,7 +16,7 @@ use web_time::Instant;
 use crate::panels::file_tree;
 
 use super::actions::{
-    HostKind, PaletteAction, PaletteBufferTarget, PaletteShaderEntry,
+    HostKind, PaletteAction, PaletteBufferTarget, PaletteMashupEntry, PaletteShaderEntry,
     PaletteWorkspaceEntry, PaletteWorkspaceTarget,
 };
 use super::commands::{COMMANDS, EX_COMMANDS};
@@ -306,6 +306,7 @@ impl CommandPalette {
                 | PaletteRow::BufferMatch { .. }
                 | PaletteRow::Font { .. }
                 | PaletteRow::Theme { .. }
+                | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Buffer { .. }
                 | PaletteRow::WorkspaceHost { .. }
@@ -331,6 +332,7 @@ impl CommandPalette {
                 | PaletteRow::BufferMatch { .. }
                 | PaletteRow::Font { .. }
                 | PaletteRow::Theme { .. }
+                | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Buffer { .. }
                 | PaletteRow::WorkspaceHost { .. }
@@ -351,6 +353,7 @@ impl CommandPalette {
                 PaletteRow::Command { .. }
                 | PaletteRow::BufferMatch { .. }
                 | PaletteRow::Theme { .. }
+                | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Buffer { .. }
                 | PaletteRow::WorkspaceHost { .. }
@@ -372,6 +375,7 @@ impl CommandPalette {
                 PaletteRow::Command { .. }
                 | PaletteRow::BufferMatch { .. }
                 | PaletteRow::Font { .. }
+                | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Buffer { .. }
                 | PaletteRow::WorkspaceHost { .. }
@@ -394,6 +398,7 @@ impl CommandPalette {
                 | PaletteRow::BufferMatch { .. }
                 | PaletteRow::Font { .. }
                 | PaletteRow::Theme { .. }
+                | PaletteRow::Mashup { .. }
                 | PaletteRow::Buffer { .. }
                 | PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
@@ -406,6 +411,26 @@ impl CommandPalette {
             })
     }
 
+    /// Outer `None` means this is not Mashups mode; inner `None` is the
+    /// explicit deactivation row.
+    pub fn get_selected_mashup(&self) -> Option<Option<String>> {
+        self.filtered_rows()
+            .get(self.selected_index)
+            .and_then(|(_, row)| match row {
+                PaletteRow::Mashup { entry } => Some(entry.id.clone()),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn selected_mashup_entry(&self) -> Option<&PaletteMashupEntry> {
+        self.filtered_rows()
+            .get(self.selected_index)
+            .and_then(|(_, row)| match row {
+                PaletteRow::Mashup { entry } => Some(*entry),
+                _ => None,
+            })
+    }
+
     pub fn get_selected_buffer_target(&self) -> Option<PaletteBufferTarget> {
         self.filtered_rows()
             .get(self.selected_index)
@@ -415,6 +440,7 @@ impl CommandPalette {
                 | PaletteRow::BufferMatch { .. }
                 | PaletteRow::Font { .. }
                 | PaletteRow::Theme { .. }
+                | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Ex { .. }
                 | PaletteRow::WorkspaceHost { .. }
@@ -443,6 +469,7 @@ impl CommandPalette {
                 | PaletteRow::BufferMatch { .. }
                 | PaletteRow::Font { .. }
                 | PaletteRow::Theme { .. }
+                | PaletteRow::Mashup { .. }
                 | PaletteRow::Shader { .. }
                 | PaletteRow::Buffer { .. }
                 | PaletteRow::Ex { .. }
@@ -547,6 +574,20 @@ impl CommandPalette {
                 .filter_map(|name| {
                     let score = fuzzy_score(&self.query, name)?;
                     Some((score, PaletteRow::Theme { name }))
+                })
+                .collect(),
+            PaletteMode::Mashups(packs) => packs
+                .iter()
+                .filter_map(|entry| {
+                    let name_score = fuzzy_score(&self.query, &entry.name);
+                    let detail_score = fuzzy_score(&self.query, &entry.detail);
+                    let score = match (name_score, detail_score) {
+                        (Some(a), Some(b)) => a.max(b.saturating_sub(4)),
+                        (Some(a), None) => a,
+                        (None, Some(b)) => b.saturating_sub(4),
+                        (None, None) => return None,
+                    };
+                    Some((score, PaletteRow::Mashup { entry }))
                 })
                 .collect(),
             PaletteMode::Shaders(shaders) => shaders
@@ -796,7 +837,13 @@ impl CommandPalette {
         let logical_w = window_width / scale_factor;
         // Clamp the card to the viewport (finder already does) so the
         // palette doesn't overflow phone-width screens.
-        let width = (super::PALETTE_WIDTH * s).min((logical_w - 16.0 * s).max(160.0));
+        let preferred_width =
+            if matches!(self.mode, PaletteMode::Themes(_) | PaletteMode::Mashups(_)) {
+                super::THEME_PALETTE_WIDTH
+            } else {
+                super::PALETTE_WIDTH
+            };
+        let width = (preferred_width * s).min((logical_w - 16.0 * s).max(160.0));
         let pad = PALETTE_PADDING * s;
         let input_h = INPUT_HEIGHT * s;
         let row_h = RESULT_ITEM_HEIGHT * s;
@@ -822,6 +869,28 @@ impl CommandPalette {
         self.enabled.then(|| {
             let (x, y, w, h) = self.palette_rect(window_width, scale_factor);
             [x, y, w, h]
+        })
+    }
+
+    /// Current painted bounds, including the short scale/slide animation used
+    /// when the palette opens. Text surfaces rendered before the palette use
+    /// this rect to carve only the overlapping glyph fragments.
+    pub fn active_visual_rect(
+        &self,
+        window_width: f32,
+        scale_factor: f32,
+    ) -> Option<[f32; 4]> {
+        self.enabled.then(|| {
+            let (x, y, w, h) = self.palette_rect(window_width, scale_factor);
+            let (pop_scale, pop_offset_y) = self.open_pop_transform(self.scale);
+            let visual_w = w * pop_scale;
+            let visual_h = h * pop_scale;
+            [
+                x + (w - visual_w) * 0.5,
+                y + pop_offset_y,
+                visual_w,
+                visual_h,
+            ]
         })
     }
 
@@ -852,6 +921,12 @@ impl CommandPalette {
             + RESULTS_MARGIN_TOP * s;
         if mouse_y < results_y {
             return Ok(None); // Clicked on input area
+        }
+        if matches!(self.mode, PaletteMode::Themes(_) | PaletteMode::Mashups(_))
+            && pw > 560.0 * self.scale
+            && mouse_x > px + super::THEME_LIST_WIDTH * self.scale
+        {
+            return Ok(None); // Preview pane is informative, not a result row.
         }
 
         let relative_y = mouse_y - results_y - self.list_scroll_spring.position;

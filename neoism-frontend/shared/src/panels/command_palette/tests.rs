@@ -5,8 +5,8 @@
 
 use super::actions::{
     command_visible_for_surface, shaders_modal_spec, theme_picker_modal_spec, HostKind,
-    PaletteAction, PaletteServerEntry, PaletteShaderEntry, PaletteSurface,
-    PaletteWorkspaceEntry, PaletteWorkspaceTarget, WorkspaceHostKind,
+    PaletteAction, PaletteMashupEntry, PaletteServerEntry, PaletteShaderEntry,
+    PaletteSurface, PaletteWorkspaceEntry, PaletteWorkspaceTarget, WorkspaceHostKind,
     WorkspaceVisibility,
 };
 use super::commands::COMMANDS;
@@ -59,6 +59,31 @@ fn test_set_enabled_resets_state() {
 }
 
 #[test]
+fn visual_rect_tracks_the_surface_used_for_text_occlusion() {
+    let mut palette = CommandPalette::new();
+    assert_eq!(palette.active_visual_rect(1200.0, 1.0), None);
+
+    palette.set_enabled(true);
+    palette.pop_on_open = false;
+    assert_eq!(
+        palette.active_visual_rect(1200.0, 1.0),
+        palette.active_rect(1200.0, 1.0)
+    );
+
+    palette.pop_on_open = true;
+    // Pin elapsed time at zero even if the test runner stalls between these
+    // calls, so the opening-animation assertions cannot become timing-flaky.
+    palette.open_pop_started =
+        web_time::Instant::now() + web_time::Duration::from_secs(1);
+    let base = palette.active_rect(1200.0, 1.0).unwrap();
+    let visual = palette.active_visual_rect(1200.0, 1.0).unwrap();
+    assert!(visual[0] >= base[0]);
+    assert!(visual[1] >= base[1]);
+    assert!(visual[2] <= base[2]);
+    assert!(visual[3] <= base[3]);
+}
+
+#[test]
 fn palette_close_commands_are_registered() {
     let close = COMMANDS
         .iter()
@@ -85,9 +110,9 @@ fn theme_picker_modal_spec_lists_native_theme_choices() {
     assert_eq!(spec.title, "Theme Picker");
     assert!(spec.input.is_none());
     assert!(spec.blocking);
-    assert_eq!(spec.buttons.len(), 5);
+    assert!(spec.buttons.len() >= 102);
     assert_eq!(spec.buttons[0].label, "Pastel Dark");
-    assert_eq!(spec.buttons[4].label, "Close");
+    assert_eq!(spec.buttons.last().unwrap().label, "Close");
     match &spec.buttons[0].action {
         crate::widgets::modal::ModalAction::ApplyTheme { name } => {
             assert_eq!(name, "pastel_dark");
@@ -820,12 +845,53 @@ fn enter_themes_mode_filters_and_returns_selected_theme() {
     let filtered = palette.filtered_rows();
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].1.title(), "tokyo_night");
-    assert_eq!(filtered[0].1.shortcut(), "theme");
+    assert_eq!(filtered[0].1.shortcut(), "");
     assert_eq!(
         palette.get_selected_theme(),
         Some("tokyo_night".to_string())
     );
     assert!(palette.get_selected_action().is_none());
+}
+
+#[test]
+fn themes_mode_is_wide_and_preview_pane_does_not_select_rows() {
+    let mut palette = CommandPalette::new();
+    palette.enter_themes_mode(vec!["pastel_dark".into(), "tokyonight".into()]);
+    let [x, _y, width, _height] = palette.active_rect(1200.0, 1.0).unwrap();
+    assert_eq!(width, super::THEME_PALETTE_WIDTH);
+
+    let (_center_x, row_y) = palette.row_center_coords(0, 1200.0, 1.0);
+    assert_eq!(palette.hit_test(x + 40.0, row_y, 1200.0, 1.0), Ok(Some(0)));
+    assert_eq!(
+        palette.hit_test(x + width - 40.0, row_y, 1200.0, 1.0),
+        Ok(None)
+    );
+}
+
+#[test]
+fn mashups_mode_keeps_names_visible_and_returns_pack_id() {
+    let mut palette = CommandPalette::new();
+    palette.enter_mashups_mode(vec![PaletteMashupEntry {
+        id: Some("neon-unit-01".into()),
+        name: "Neon Unit-01".into(),
+        detail: "Violet armor, acid-green telemetry, hazard-orange alerts".into(),
+        theme: Some("neon_unit_01".into()),
+        shader_overlay: Some("unit-sync.glsl".into()),
+        font_family: None,
+    }]);
+
+    palette.set_query("neon".into());
+    let rows = palette.filtered_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.title(), "Neon Unit-01");
+    assert_eq!(
+        palette.get_selected_mashup(),
+        Some(Some("neon-unit-01".into()))
+    );
+    assert_eq!(
+        palette.active_rect(1200.0, 1.0).unwrap()[2],
+        super::THEME_PALETTE_WIDTH
+    );
 }
 
 #[test]

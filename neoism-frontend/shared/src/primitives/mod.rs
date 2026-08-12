@@ -10,6 +10,7 @@ pub mod geom;
 pub mod icons;
 pub mod ide_theme;
 pub mod look;
+mod nvchad_themes;
 pub mod pixel_font;
 pub mod text;
 

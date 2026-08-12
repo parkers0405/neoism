@@ -52,6 +52,8 @@ pub use state::{CommandPalette, WorkspaceMovePhase, WorkspaceMoveStatus};
 // Layout — shared across state/update/render so they live at the
 // crate-module root rather than being duplicated per file.
 pub(crate) const PALETTE_WIDTH: f32 = 480.0;
+pub(crate) const THEME_PALETTE_WIDTH: f32 = 820.0;
+pub(crate) const THEME_LIST_WIDTH: f32 = 300.0;
 pub(crate) const PALETTE_CORNER_RADIUS: f32 = 8.0;
 pub(crate) const PALETTE_MARGIN_TOP: f32 = 80.0;
 pub(crate) const PALETTE_PADDING: f32 = 0.0;

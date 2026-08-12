@@ -6,8 +6,8 @@
 //! Palette mode + row shapes consumed by the filter / render pipelines.
 
 use super::actions::{
-    HostKind, PaletteAction, PaletteBufferEntry, PaletteServerEntry, PaletteShaderEntry,
-    PaletteWorkspaceEntry,
+    HostKind, PaletteAction, PaletteBufferEntry, PaletteMashupEntry, PaletteServerEntry,
+    PaletteShaderEntry, PaletteWorkspaceEntry,
 };
 
 /// What the palette is currently browsing and filtering over.
@@ -24,6 +24,7 @@ pub(crate) enum PaletteMode {
     Commands,
     Fonts(Vec<String>),
     Themes(Vec<String>),
+    Mashups(Vec<PaletteMashupEntry>),
     Shaders(Vec<PaletteShaderEntry>),
     Buffers(Vec<PaletteBufferEntry>),
     Workspaces(Vec<PaletteWorkspaceEntry>),
@@ -56,6 +57,9 @@ pub(crate) enum PaletteRow<'a> {
     },
     Theme {
         name: &'a str,
+    },
+    Mashup {
+        entry: &'a PaletteMashupEntry,
     },
     Shader {
         entry: &'a PaletteShaderEntry,
@@ -121,6 +125,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Command { title, .. } => title,
             PaletteRow::Font { family } => family,
             PaletteRow::Theme { name } => name,
+            PaletteRow::Mashup { entry } => entry.name.as_str(),
             PaletteRow::Shader { entry } => entry.title.as_str(),
             PaletteRow::Buffer { entry } => entry.title.as_str(),
             PaletteRow::WorkspaceHost { label, .. } => label,
@@ -153,7 +158,8 @@ impl<'a> PaletteRow<'a> {
         match *self {
             PaletteRow::Command { shortcut, .. } => shortcut,
             PaletteRow::Font { .. } => "",
-            PaletteRow::Theme { .. } => "theme",
+            PaletteRow::Theme { .. } => "",
+            PaletteRow::Mashup { .. } => "",
             PaletteRow::Shader { entry } => entry.detail.as_str(),
             PaletteRow::Buffer { entry } => entry.detail.as_str(),
             // Host headers surface the dialable daemon endpoint on the
@@ -187,6 +193,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::ServerCreate => Some(PaletteAction::CreateServer),
             PaletteRow::Font { .. }
             | PaletteRow::Theme { .. }
+            | PaletteRow::Mashup { .. }
             | PaletteRow::Shader { .. }
             | PaletteRow::Buffer { .. }
             | PaletteRow::WorkspaceHost { .. }

@@ -51,6 +51,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             || self.finder.is_enabled()
             || self.git_diff.is_visible()
             || self.context_menu.is_visible();
+        let window_width = [
+            layout.buffer_tabs.x + layout.buffer_tabs.w,
+            layout.status_line.x + layout.status_line.w,
+            layout.terminal.x + layout.terminal.w,
+        ]
+        .into_iter()
+        .fold(0.0_f32, f32::max);
+        let command_palette_occlusion =
+            self.command_palette.active_visual_rect(window_width, 1.0);
+        let command_palette_occlusions = command_palette_occlusion.as_slice();
         if input_modal_active {
             self.buffer_tabs.clear_hover_immediate();
             self.buffer_tabs.set_focused(false);
@@ -132,7 +142,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         &ide_theme,
                         1.0,
                         true,
-                        &[],
+                        command_palette_occlusions,
                     );
                 } else {
                     SplashOverlay::clear_image_overlays(sugarloaf);
@@ -157,7 +167,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         time.as_secs_f32(),
                         Some(self.last_pointer_pos),
                         self.chrome_scale,
-                        &[],
+                        command_palette_occlusions,
                     );
                 }
             } else {

@@ -14,6 +14,7 @@ use crate::panels::file_tree;
 use crate::primitives::{draw_overlay_icon_centered, IdeTheme};
 use crate::widgets::scrollbar;
 
+use super::actions::PaletteMashupEntry;
 use super::commands::CommandService;
 use super::fuzzy::{ease_out_back, ease_out_cubic, snap_to_device_px, truncate_to_fit};
 use super::modes::{PaletteMode, PaletteRow};
@@ -26,8 +27,200 @@ use super::{
     INPUT_PADDING_X, LIST_SCROLL_ANIMATION_LENGTH, MAX_VISIBLE_RESULTS, OPEN_POP_MS,
     ORDER, PALETTE_CORNER_RADIUS, PALETTE_PADDING, RESULTS_MARGIN_TOP,
     RESULTS_PADDING_BOTTOM, RESULT_FONT_SIZE, RESULT_ITEM_HEIGHT, SEPARATOR_HEIGHT,
-    SHORTCUT_FONT_SIZE,
+    SHORTCUT_FONT_SIZE, THEME_LIST_WIDTH,
 };
+
+fn theme_display_name(name: &str) -> String {
+    if name == "nvchad_one" {
+        return "One Dark".to_string();
+    }
+    name.split(['_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_theme_preview(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    name: &str,
+    preview: IdeTheme,
+    scale: f32,
+    pack: Option<&PaletteMashupEntry>,
+) {
+    if width < 180.0 * scale || height < 120.0 * scale {
+        return;
+    }
+    stroke_rounded_rect(
+        sugarloaf,
+        x,
+        y,
+        width,
+        height,
+        (1.0 * scale).max(1.0),
+        7.0 * scale,
+        preview.f32(preview.border),
+        preview.f32(preview.bg),
+        DEPTH_ELEMENT,
+        ORDER,
+    );
+
+    let pad = 16.0 * scale;
+    let title_font = 13.0 * scale;
+    let code_font = 12.0 * scale;
+    let clip = [x + 1.0, y + 1.0, width - 2.0, height - 2.0];
+    let title_opts = DrawOpts {
+        font_size: title_font,
+        color: preview.u8(preview.fg),
+        bold: true,
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    let label = pack
+        .map(|entry| entry.name.clone())
+        .unwrap_or_else(|| theme_display_name(name));
+    sugarloaf
+        .overlay_text_mut()
+        .draw(x + pad, y + 13.0 * scale, &label, &title_opts);
+    let hint = "\u{2191}\u{2193} preview  \u{00b7}  Enter apply";
+    let hint_opts = DrawOpts {
+        font_size: 10.0 * scale,
+        color: preview.u8(preview.muted),
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    let hint_w = sugarloaf.overlay_text_mut().measure(hint, &hint_opts);
+    sugarloaf.overlay_text_mut().draw(
+        (x + width - pad - hint_w).max(x + pad),
+        y + 15.0 * scale,
+        hint,
+        &hint_opts,
+    );
+    if let Some(entry) = pack {
+        let detail_opts = DrawOpts {
+            font_size: 10.0 * scale,
+            color: preview.u8(preview.dim),
+            clip_rect: Some(clip),
+            ..DrawOpts::default()
+        };
+        let detail =
+            truncate_to_fit(&entry.detail, width - pad * 2.0, sugarloaf, &detail_opts);
+        sugarloaf.overlay_text_mut().draw(
+            x + pad,
+            y + 35.0 * scale,
+            &detail,
+            &detail_opts,
+        );
+    }
+    let divider_y = y + if pack.is_some() { 57.0 } else { 40.0 } * scale;
+    sugarloaf.overlay_rect(
+        x + pad,
+        divider_y,
+        width - pad * 2.0,
+        1.0,
+        preview.f32(preview.border),
+        DEPTH_ELEMENT + 0.01,
+        ORDER,
+    );
+
+    let line_y = divider_y + 16.0 * scale;
+    let line_h = 25.0 * scale;
+    let code_x = x + pad;
+    let draw_line = |sugarloaf: &mut Sugarloaf, row: usize, parts: &[(&str, u32)]| {
+        let mut cursor_x = code_x;
+        for (text, color) in parts {
+            let opts = DrawOpts {
+                font_size: code_font,
+                color: preview.u8(*color),
+                clip_rect: Some(clip),
+                ..DrawOpts::default()
+            };
+            cursor_x += sugarloaf.overlay_text_mut().draw(
+                cursor_x,
+                line_y + row as f32 * line_h,
+                text,
+                &opts,
+            );
+        }
+    };
+    draw_line(
+        sugarloaf,
+        0,
+        &[
+            ("pub ", preview.syn_keyword),
+            ("struct ", preview.syn_statement),
+            ("Theme ", preview.syn_type),
+            ("{", preview.fg),
+        ],
+    );
+    draw_line(
+        sugarloaf,
+        1,
+        &[
+            ("    name", preview.syn_property),
+            (": ", preview.fg),
+            ("String", preview.syn_type),
+            (",", preview.fg),
+        ],
+    );
+    draw_line(sugarloaf, 2, &[("}", preview.fg)]);
+    draw_line(
+        sugarloaf,
+        3,
+        &[("// Live syntax preview", preview.syn_comment)],
+    );
+    draw_line(
+        sugarloaf,
+        4,
+        &[
+            ("let ", preview.syn_keyword),
+            ("theme", preview.fg),
+            (" = ", preview.fg),
+            ("Theme", preview.syn_constructor),
+            ("::", preview.fg),
+            ("load", preview.syn_func),
+            ("(\"neoism\"", preview.syn_string),
+            (");", preview.fg),
+        ],
+    );
+    draw_line(
+        sugarloaf,
+        5,
+        &[
+            ("if ", preview.syn_keyword),
+            ("theme", preview.fg),
+            (".", preview.fg),
+            ("contrast", preview.syn_property),
+            (" > ", preview.fg),
+            ("4.5", preview.syn_number),
+            (" {", preview.fg),
+        ],
+    );
+    draw_line(
+        sugarloaf,
+        6,
+        &[
+            ("    render", preview.syn_func),
+            ("(&", preview.fg),
+            ("theme", preview.fg),
+            (");", preview.fg),
+        ],
+    );
+    if pack.is_none() {
+        draw_line(sugarloaf, 7, &[("}", preview.fg)]);
+    }
+}
 
 /// Paint a rounded-rect outline by layering two filled rounded rects:
 /// the outer one in `stroke_color`, then a smaller one in `fill_color`
@@ -257,13 +450,9 @@ impl CommandPalette {
         let list_scroll_offset = snap_to_device_px(self.tick_list_scroll(), scale_factor);
         let cursor_offset = self.tick_cursor();
 
-        let (base_palette_x, base_palette_y, base_palette_width, base_palette_height) =
-            self.palette_rect(window_width, scale_factor);
-        let (pop_scale, pop_offset_y) = self.open_pop_transform(s);
-        let palette_width = base_palette_width * pop_scale;
-        let palette_height = base_palette_height * pop_scale;
-        let palette_x = base_palette_x + (base_palette_width - palette_width) / 2.0;
-        let palette_y = base_palette_y + pop_offset_y;
+        let [palette_x, palette_y, palette_width, palette_height] = self
+            .active_visual_rect(window_width, scale_factor)
+            .expect("enabled command palette has visual bounds");
 
         // Keep the body fully opaque so document/editor text behind it
         // never bleeds through the command line or result rows.
@@ -291,12 +480,27 @@ impl CommandPalette {
         let input_width = (content_w - pad * 2.0).max(0.0);
         let input_clip = [input_x, input_y, input_width, input_h];
 
-        // No separate input background — blends with palette bg for minimalism
+        if matches!(self.mode, PaletteMode::Themes(_) | PaletteMode::Mashups(_)) {
+            stroke_rounded_rect(
+                sugarloaf,
+                input_x + 6.0 * s,
+                input_y + 3.0 * s,
+                input_width - 12.0 * s,
+                input_h - 6.0 * s,
+                (1.0 * s).max(1.0),
+                5.0 * s,
+                theme.f32(theme.border),
+                theme.f32(theme.surface),
+                DEPTH_ELEMENT,
+                ORDER,
+            );
+        }
 
         let placeholder = match self.mode {
             PaletteMode::Commands => "Type a command...",
             PaletteMode::Fonts(_) => "Type a font name...",
-            PaletteMode::Themes(_) => "Type a theme name...",
+            PaletteMode::Themes(_) => "Search themes...",
+            PaletteMode::Mashups(_) => "Search Mash Up Packs...",
             PaletteMode::Shaders(_) => "Type a shader name...",
             PaletteMode::Buffers(_) => "Search buffers...",
             PaletteMode::Workspaces(_) => "Search workspaces...",
@@ -421,6 +625,59 @@ impl CommandPalette {
         let list_h = visible_rows as f32 * row_h;
         let list_clip_h = list_h + RESULTS_PADDING_BOTTOM * s;
         let list_bottom = results_y + list_clip_h;
+        let split_theme_preview =
+            matches!(self.mode, PaletteMode::Themes(_) | PaletteMode::Mashups(_))
+                && input_width > 560.0 * s;
+        let list_width = if split_theme_preview {
+            (THEME_LIST_WIDTH * s).min(input_width * 0.45)
+        } else {
+            input_width
+        };
+        if split_theme_preview {
+            let preview_gap = 14.0 * s;
+            let preview_x = input_x + list_width + preview_gap;
+            let preview_width = (input_width - list_width - preview_gap).max(0.0);
+            sugarloaf.overlay_rect(
+                input_x + list_width + preview_gap * 0.5,
+                results_y,
+                1.0,
+                list_clip_h,
+                theme.f32(theme.border),
+                DEPTH_ELEMENT,
+                ORDER,
+            );
+            if let Some(name) = self.get_selected_theme() {
+                draw_theme_preview(
+                    sugarloaf,
+                    preview_x,
+                    results_y + 5.0 * s,
+                    preview_width,
+                    (list_clip_h - 10.0 * s).max(0.0),
+                    &name,
+                    IdeTheme::by_name(&name),
+                    s,
+                    None,
+                );
+            } else if let Some(entry) = self.selected_mashup_entry() {
+                let preview_theme = entry
+                    .theme
+                    .as_deref()
+                    .map(IdeTheme::by_name)
+                    .unwrap_or(*theme);
+                draw_theme_preview(
+                    sugarloaf,
+                    preview_x,
+                    results_y + 5.0 * s,
+                    preview_width,
+                    (list_clip_h - 10.0 * s).max(0.0),
+                    entry.theme.as_deref().unwrap_or("Current theme"),
+                    preview_theme,
+                    s,
+                    Some(entry),
+                );
+            }
+        }
+        let input_width = list_width;
         let list_clip = [input_x, results_y, input_width, list_clip_h];
         let mut next_selected_cursor_rect = None;
         let mut next_server_edit_hit = None;
@@ -809,7 +1066,11 @@ impl CommandPalette {
             };
             // Zed-style namespaced display: command rows read
             // `{service}: {command}` (e.g. `code: Write File`).
-            let display_title = row.display_title();
+            let display_title = match row {
+                PaletteRow::Theme { name } => theme_display_name(name),
+                PaletteRow::Mashup { entry } => entry.name.clone(),
+                _ => row.display_title(),
+            };
             let title =
                 truncate_to_fit(&display_title, title_budget, sugarloaf, &title_opts);
             if matches!(

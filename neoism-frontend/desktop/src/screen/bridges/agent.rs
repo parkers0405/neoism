@@ -582,11 +582,22 @@ impl Screen<'_> {
         let chrome_scale = self.renderer.chrome_scale();
         let mouse = Some((self.mouse.x as f32 / scale, self.mouse.y as f32 / scale));
         let window_size = self.sugarloaf.window_size();
-        let text_occlusions = self.renderer.active_text_occlusion_rects(
+        let mut text_occlusions = self.renderer.active_text_occlusion_rects(
             window_size.width,
             window_size.height,
             scale,
         );
+        // Agent text is emitted into Sugarloaf's ordinary UI-text batch. Carve
+        // the palette's live (animated) surface out of that batch so composer
+        // and timeline glyphs cannot phase through it. The text renderer keeps
+        // fragments outside this rect, unlike suppressing the whole agent pane.
+        if let Some(rect) = self
+            .renderer
+            .command_palette
+            .active_visual_rect(window_size.width, scale)
+        {
+            text_occlusions.push(rect);
+        }
         // Wrapped animation phase, NOT raw epoch seconds: an f32 at
         // ~1.7e9 only resolves ~128-second steps, which froze every
         // clock-driven animation in the pane (send-button loader,

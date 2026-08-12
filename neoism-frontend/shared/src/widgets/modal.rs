@@ -1975,12 +1975,18 @@ impl UniversalModal {
                 clip_rect: Some(action_clip),
                 ..DrawOpts::default()
             };
-            let hint_width = if button.hint.is_empty() {
+            // A long detail must never consume the label's whole row (the
+            // Mash Up picker exposed this with a zero-width selected name).
+            let hint = truncate_to_fit(
+                button.hint.as_str(),
+                row_w * 0.58,
+                sugarloaf,
+                &hint_opts,
+            );
+            let hint_width = if hint.is_empty() {
                 0.0
             } else {
-                sugarloaf
-                    .text_mut()
-                    .measure(button.hint.as_str(), &hint_opts)
+                sugarloaf.text_mut().measure(&hint, &hint_opts)
             };
             let label_budget = (row_w - 28.0 * s - hint_width - 12.0 * s).max(0.0);
             let label = truncate_to_fit(
@@ -1993,15 +1999,10 @@ impl UniversalModal {
                 .text_mut()
                 .draw(label_x, label_y, label.as_str(), &label_opts);
 
-            if !button.hint.is_empty() {
+            if !hint.is_empty() {
                 let hint_x = row_x + row_w - 14.0 * s - hint_width;
                 let hint_y = row_y + (row_h - META_FONT_SIZE * s) / 2.0;
-                sugarloaf.text_mut().draw(
-                    hint_x,
-                    hint_y,
-                    button.hint.as_str(),
-                    &hint_opts,
-                );
+                sugarloaf.text_mut().draw(hint_x, hint_y, &hint, &hint_opts);
             }
         }
 

@@ -1,0 +1,32 @@
+// Neon Unit-01 - biomechanical command-center cyberpunk. The restrained
+// shader preserves text clarity while adding sync bars and colored edge light.
+{
+  "pack": {
+    "name": "Neon Unit-01",
+    "description": "Violet armor, acid-green telemetry, hazard-orange alerts",
+    "shader-overlay": "unit-sync.glsl"
+  },
+  "scrollbar": {
+    "width": 7,
+    "radius-factor": 0.12,
+    "min-thumb": 24,
+    "thumb": "#7547b8",
+    "thumb-drag": "#b7ff2a",
+    "track": "#171124"
+  },
+  "wordmark": {
+    "colors": ["#9b5de5", "#b7ff2a", "#ff7a1a", "#ff3ca6"]
+  },
+  "icons": {
+    "folder": { "color": "#b7ff2a" },
+    "file": { "color": "#a88bd4" },
+    "workspace": { "color": "#ff7a1a" },
+    "tab.terminal": { "color": "#b7ff2a" },
+    "status.branch": { "color": "#ff3ca6" },
+    "status.lsp": { "color": "#39e6d0" },
+    "status.error": { "color": "#ff3158" },
+    "status.warn": { "color": "#ffb000" },
+    "note": { "color": "#9b5de5" },
+    "palette.neoism-agent": { "color": "#ff7a1a" }
+  }
+}

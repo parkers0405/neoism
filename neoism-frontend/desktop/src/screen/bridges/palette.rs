@@ -408,22 +408,20 @@ impl Screen<'_> {
     }
 
     pub fn open_theme_picker(&mut self) {
-        // Pick up theme files dropped since launch before the spec
-        // snapshots the registry.
+        // Pick up theme files dropped since launch, then use the shared
+        // searchable split picker (list + live code preview).
         crate::mashup::sync_custom_ide_themes();
         self.renderer
-            .modal
-            .open(neoism_ui::panels::command_palette::theme_picker_modal_spec());
+            .command_palette
+            .enter_themes_mode(neoism_ui::primitives::ide_theme::all_ide_theme_names());
         self.mark_dirty();
     }
 
     pub fn open_mashup_picker(&mut self) {
         crate::mashup::sync_custom_ide_themes();
-        self.renderer.modal.open(
-            neoism_ui::panels::command_palette::mashup_packs_modal_spec(
-                crate::mashup::mashup_palette_entries(),
-            ),
-        );
+        self.renderer
+            .command_palette
+            .enter_mashups_mode(crate::mashup::mashup_palette_entries());
         self.mark_dirty();
     }
 
@@ -614,6 +612,20 @@ impl Screen<'_> {
                     clipboard
                         .set(neoism_backend::clipboard::ClipboardType::Clipboard, font);
                     self.renderer.command_palette.set_enabled(false);
+                    self.mark_dirty();
+                    return true;
+                }
+
+                if let Some(theme) = self.renderer.command_palette.get_selected_theme() {
+                    self.renderer.command_palette.set_enabled(false);
+                    self.apply_unified_theme(&theme);
+                    self.mark_dirty();
+                    return true;
+                }
+
+                if let Some(pack) = self.renderer.command_palette.get_selected_mashup() {
+                    self.renderer.command_palette.set_enabled(false);
+                    self.apply_mashup_pack(pack);
                     self.mark_dirty();
                     return true;
                 }

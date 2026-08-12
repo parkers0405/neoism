@@ -1272,6 +1272,18 @@ impl Route<'_> {
                             .renderer
                             .command_palette
                             .get_selected_font();
+                        let selected_theme = self
+                            .window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .get_selected_theme();
+                        let selected_mashup = self
+                            .window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .get_selected_mashup();
                         let selected_buffer = self
                             .window
                             .screen
@@ -1291,6 +1303,28 @@ impl Route<'_> {
                             .command_palette
                             .get_selected_workspace_target();
                         use neoism_ui::panels::command_palette::PaletteAction;
+
+                        if let Some(theme) = selected_theme {
+                            self.window
+                                .screen
+                                .renderer
+                                .command_palette
+                                .set_enabled(false);
+                            self.window.screen.apply_unified_theme(&theme);
+                            self.request_overlay_redraw();
+                            return true;
+                        }
+
+                        if let Some(pack) = selected_mashup {
+                            self.window
+                                .screen
+                                .renderer
+                                .command_palette
+                                .set_enabled(false);
+                            self.window.screen.apply_mashup_pack(pack);
+                            self.request_overlay_redraw();
+                            return true;
+                        }
 
                         // Workspaces-mode Enter: same open/adopt path
                         // the mouse pick takes. Without this branch a

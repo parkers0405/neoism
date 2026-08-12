@@ -41,6 +41,15 @@ Update an existing installation with:
 neoism update
 ```
 
+If an older Neoism release cannot complete its update check, re-run the
+installer to bootstrap onto the latest release without using the old updater:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/parkers0405/neoism/main/scripts/install.sh | bash
+```
+
+Close all running Neoism windows before reopening the newly installed version.
+
 Build the full stack from source with:
 
 ```sh

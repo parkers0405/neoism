@@ -80,7 +80,12 @@ mkdir -p "$BIN_DIR"
 for b in "${BINARIES[@]}"; do
   src="$(find "$tmp" -type f -name "$b" -perm -u+x | head -1)"
   [ -n "$src" ] || err "binary '$b' not found in $asset"
-  install -m 0755 "$src" "$BIN_DIR/$b"
+  # Stage beside the destination, then rename. This never leaves a partially
+  # written executable if the download/install is interrupted, and Unix can
+  # safely replace the path while an older process still has its image mapped.
+  staged="$BIN_DIR/.$b.new"
+  install -m 0755 "$src" "$staged"
+  mv -f "$staged" "$BIN_DIR/$b"
   printf '   %s\n' "$BIN_DIR/$b"
 done
 
@@ -95,4 +100,4 @@ esac
 if ! "$BIN_DIR/neoism" --version >/dev/null 2>&1; then
   warn "installed binary did not run successfully; if this is NixOS or another non-FHS Linux, build from source with ./install.sh"
 fi
-printf '\nRun:  neoism\nUpdate later:  neoism update   (or re-run this installer)\n'
+printf '\nClose every running Neoism window, then run:  neoism\nUpdate later:  neoism update   (or re-run this installer if an older updater fails)\n'

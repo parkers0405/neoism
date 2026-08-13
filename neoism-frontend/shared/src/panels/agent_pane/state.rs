@@ -41,6 +41,7 @@ use crate::panels::agent_pane::usage_policy::{
 };
 
 use self::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
+pub use self::pickers_state::{mcp_action_options, mcp_options_from_status};
 use self::side_panel::{BranchStatus, NeoismAgentSidePanel};
 
 use crate::panels::agent_pane::question_policy::NeoismAgentPendingQuestion;

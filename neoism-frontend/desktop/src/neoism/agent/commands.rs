@@ -10,10 +10,9 @@ use super::api::{
     api_request_json, api_request_json_with_read_timeout, fetch_directory_options,
     fetch_session_messages, fetch_session_messages_page, fetch_session_state,
     fetch_skill_options, first_interaction_id, first_interaction_value,
-    format_mcp_status, format_permissions, format_questions, format_queue,
-    is_permission_reply, normalize_model_ref, normalize_thinking, percent_encode,
-    permission_reply_alias, prompt_model_json, question_answers, question_count,
-    session_model_json,
+    format_permissions, format_questions, format_queue, is_permission_reply,
+    normalize_model_ref, normalize_thinking, percent_encode, permission_reply_alias,
+    prompt_model_json, question_answers, question_count, session_model_json,
 };
 use super::pane::{
     merge_session_snapshot, CachedAgentSession, NeoismAgentBackgroundUpdate,
@@ -891,20 +890,120 @@ impl NeoismAgentPane {
         }
     }
 
-    fn show_mcp(&mut self) {
-        self.push_outbound(OutboundAgentCommand::ShowMcp {
-            directory: self.directory.clone(),
-        });
+    pub(super) fn show_mcp(&mut self) {
+        let path = self
+            .directory
+            .as_deref()
+            .map(|dir| format!("/mcp/catalog?directory={}", percent_encode(dir)))
+            .unwrap_or_else(|| "/mcp/catalog".to_string());
+        match api_request_json(&self.server, "GET", &path, None) {
+            Ok(value) => {
+                let options =
+                    neoism_ui::panels::agent_pane::state::mcp_options_from_status(
+                        value.as_ref().unwrap_or(&Value::Null),
+                    );
+                self.picker = Some(NeoismAgentPicker::new(
+                    NeoismAgentPickerKind::Mcp,
+                    "MCP servers",
+                    options,
+                    0,
+                ));
+            }
+            Err(error) => self.system_message("MCP", error),
+        }
     }
 
-    pub(super) fn execute_show_mcp_command(&mut self, directory: Option<String>) {
-        let path = directory
+    pub(super) fn begin_mcp_oauth(&mut self, name: String) {
+        let directory = self
+            .directory
             .as_deref()
-            .map(|dir| format!("/mcp?directory={}", percent_encode(dir)))
-            .unwrap_or_else(|| "/mcp".to_string());
-        match api_request_json(&self.server, "GET", &path, None) {
-            Ok(value) => self.system_message("MCP", format_mcp_status(value.as_ref())),
-            Err(error) => self.system_message("MCP", error),
+            .map(|dir| format!("?directory={}", percent_encode(dir)))
+            .unwrap_or_default();
+        let path = format!("/mcp/{}/auth{directory}", percent_encode(&name));
+        let value = match api_request_json(&self.server, "POST", &path, Some(&json!({})))
+        {
+            Ok(value) => value.unwrap_or(Value::Null),
+            Err(error) => {
+                self.system_message(&name, error);
+                return;
+            }
+        };
+        let Some(url) = value.get("authorizationUrl").and_then(Value::as_str) else {
+            self.system_message(&name, "MCP server returned no authorization URL");
+            return;
+        };
+        let browser_error = crate::background_process::open_url(url).err();
+        let lead = browser_error.map_or_else(
+            || "Opened your browser to authorize this MCP server.".to_string(),
+            |error| format!("Could not open your browser ({error})."),
+        );
+        self.system_message(
+            name,
+            format!("{lead}\n\nAuthorization URL:\n[{url}]({url})"),
+        );
+    }
+
+    pub(super) fn execute_mcp_action(&mut self, value: &Value) {
+        let Some(name) = value.get("name").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(action) = value.get("action").and_then(Value::as_str) else {
+            return;
+        };
+        if action == "authenticate" {
+            self.begin_mcp_oauth(name.to_string());
+            return;
+        }
+        let directory = self
+            .directory
+            .as_deref()
+            .map(|dir| format!("?directory={}", percent_encode(dir)))
+            .unwrap_or_default();
+        let (method, path, body) = match action {
+            "enable" => (
+                "PATCH",
+                format!("/mcp/{}/config{directory}", percent_encode(name)),
+                Some(json!({ "enabled": true })),
+            ),
+            "disable" => (
+                "PATCH",
+                format!("/mcp/{}/config{directory}", percent_encode(name)),
+                Some(json!({ "enabled": false })),
+            ),
+            "connect" => (
+                "POST",
+                format!("/mcp/{}/connect{directory}", percent_encode(name)),
+                Some(json!({})),
+            ),
+            "disconnect" => (
+                "POST",
+                format!("/mcp/{}/disconnect{directory}", percent_encode(name)),
+                Some(json!({})),
+            ),
+            "logout" => (
+                "DELETE",
+                format!("/mcp/{}/auth{directory}", percent_encode(name)),
+                None,
+            ),
+            _ => return,
+        };
+        let result = if action == "connect" {
+            api_request_json_with_read_timeout(
+                &self.server,
+                method,
+                &path,
+                body.as_ref(),
+                Duration::from_secs(35),
+            )
+        } else {
+            api_request_json(&self.server, method, &path, body.as_ref())
+        };
+        match result {
+            Ok(Some(Value::Bool(false))) if action == "connect" => {
+                self.begin_mcp_oauth(name.to_string())
+            }
+            Ok(_) => self.show_mcp(),
+            Err(error) => self.system_message(name, error),
         }
     }
 

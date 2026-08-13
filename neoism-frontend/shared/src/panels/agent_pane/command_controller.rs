@@ -339,8 +339,8 @@ fn slash_option_specs() -> &'static [SlashOptionSpec] {
         },
         SlashOptionSpec {
             title: "/mcp",
-            description: "Show MCP status",
-            footer: "server",
+            description: "Manage MCP servers",
+            footer: "picker",
             value: "/mcp",
         },
         SlashOptionSpec {

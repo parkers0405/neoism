@@ -104,6 +104,10 @@ async fn auth_start_builds_authorization_url_and_persists_transient_fields() {
     );
     assert_eq!(entry.server_url.as_deref(), Some("https://example.com/mcp"));
     assert_eq!(entry.oauth_directory.as_deref(), Some(directory));
+    assert_eq!(
+        entry.oauth_redirect_uri.as_deref(),
+        Some("http://127.0.0.1/callback")
+    );
     assert!(entry.code_verifier.is_some());
     let _ = fs::remove_dir_all(root);
 }
@@ -118,6 +122,20 @@ fn origin_extracts_url_origin_without_path() {
         origin("http://localhost:3000/mcp").as_deref(),
         Some("http://localhost:3000")
     );
+}
+
+#[test]
+fn default_oauth_redirect_uses_the_active_agent_server() {
+    let previous = std::env::var("NEOISM_SERVER").ok();
+    std::env::set_var("NEOISM_SERVER", "http://127.0.0.1:39319/");
+    assert_eq!(
+        super::mcp_oauth::redirect_uri_for_test("webflow", &Default::default()),
+        "http://127.0.0.1:39319/mcp/webflow/auth/callback"
+    );
+    match previous {
+        Some(value) => std::env::set_var("NEOISM_SERVER", value),
+        None => std::env::remove_var("NEOISM_SERVER"),
+    }
 }
 
 #[tokio::test]

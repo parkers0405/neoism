@@ -139,7 +139,7 @@ const MENU: [MenuSpec; 5] = [
     },
     MenuSpec {
         icon: MenuIcon::Service(CommandService::Agent),
-        label: "Neoism Agent",
+        label: "Neoism",
         keybind: "Alt + A",
     },
     MenuSpec {

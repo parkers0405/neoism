@@ -344,11 +344,13 @@ pub(crate) async fn handle_submit_prompt(
     body.insert("messageId".to_string(), Value::String(message_id));
     body.insert(
         "delivery".to_string(),
-        Value::String(match delivery {
-            neoism_protocol::agent::PromptDelivery::Steer => "steer",
-            neoism_protocol::agent::PromptDelivery::Queue => "queue",
-        }
-        .to_string()),
+        Value::String(
+            match delivery {
+                neoism_protocol::agent::PromptDelivery::Steer => "steer",
+                neoism_protocol::agent::PromptDelivery::Queue => "queue",
+            }
+            .to_string(),
+        ),
     );
     if let Some(mode) = mode {
         body.insert("agent".to_string(), Value::String(mode));
@@ -988,12 +990,148 @@ pub(crate) fn skill_info_from_value(value: &Value) -> Option<SkillInfo> {
     })
 }
 
-pub(crate) async fn handle_show_mcp(inner: Arc<AgentInner>, directory: Option<String>) {
+pub(crate) async fn handle_list_mcp(inner: Arc<AgentInner>, directory: Option<String>) {
     let path = match directory.as_deref().filter(|d| !d.is_empty()) {
-        Some(dir) => format!("/mcp?directory={}", percent_encode(dir)),
-        None => "/mcp".to_string(),
+        Some(dir) => format!("/mcp/catalog?directory={}", percent_encode(dir)),
+        None => "/mcp/catalog".to_string(),
     };
-    emit_command_result(&inner, None, "MCP", http_get_json(&inner, &path).await);
+    match http_get_json(&inner, &path).await {
+        Ok(status) => {
+            let _ = inner.tx.send(AgentServerMessage::McpCatalog { status });
+        }
+        Err(error) => {
+            let _ = inner
+                .tx
+                .send(AgentServerMessage::McpFailed { name: None, error });
+        }
+    }
+}
+
+pub(crate) async fn handle_mcp_oauth_authorize(
+    inner: Arc<AgentInner>,
+    name: String,
+    directory: Option<String>,
+) {
+    let query = directory
+        .as_deref()
+        .filter(|directory| !directory.is_empty())
+        .map(|directory| format!("?directory={}", percent_encode(directory)))
+        .unwrap_or_default();
+    let path = format!("/mcp/{}/auth{query}", percent_encode(&name));
+    match http_post_json(&inner, &path, &json!({})).await {
+        Ok(value) => match value.get("authorizationUrl").and_then(Value::as_str) {
+            Some(url) => {
+                let _ = inner.tx.send(AgentServerMessage::McpOauthUrl {
+                    name,
+                    url: url.to_string(),
+                });
+            }
+            None => {
+                let _ = inner.tx.send(AgentServerMessage::McpFailed {
+                    name: Some(name),
+                    error: "MCP server returned no authorization URL".to_string(),
+                });
+            }
+        },
+        Err(error) => {
+            let _ = inner.tx.send(AgentServerMessage::McpFailed {
+                name: Some(name),
+                error,
+            });
+        }
+    }
+}
+
+fn mcp_directory_query(directory: Option<&str>) -> String {
+    directory
+        .filter(|directory| !directory.is_empty())
+        .map(|directory| format!("?directory={}", percent_encode(directory)))
+        .unwrap_or_default()
+}
+
+pub(crate) async fn handle_mcp_set_enabled(
+    inner: Arc<AgentInner>,
+    name: String,
+    enabled: bool,
+    directory: Option<String>,
+) {
+    let path = format!(
+        "/mcp/{}/config{}",
+        percent_encode(&name),
+        mcp_directory_query(directory.as_deref())
+    );
+    emit_mcp_changed(
+        &inner,
+        name,
+        http_patch_json(&inner, &path, &json!({ "enabled": enabled })).await,
+    );
+}
+
+pub(crate) async fn handle_mcp_simple_action(
+    inner: Arc<AgentInner>,
+    name: String,
+    directory: Option<String>,
+    action: &str,
+) {
+    let path = format!(
+        "/mcp/{}/{action}{}",
+        percent_encode(&name),
+        mcp_directory_query(directory.as_deref())
+    );
+    let result = http_post_json(&inner, &path, &json!({})).await;
+    if action == "connect" && matches!(result.as_ref(), Ok(Value::Bool(false))) {
+        let auth_path = format!(
+            "/mcp/{}/auth{}",
+            percent_encode(&name),
+            mcp_directory_query(directory.as_deref())
+        );
+        match http_post_json(&inner, &auth_path, &json!({})).await {
+            Ok(value) => match value.get("authorizationUrl").and_then(Value::as_str) {
+                Some(url) => {
+                    let _ = inner.tx.send(AgentServerMessage::McpOauthUrl {
+                        name,
+                        url: url.to_string(),
+                    });
+                }
+                None => emit_mcp_changed(
+                    &inner,
+                    name,
+                    Err("MCP server returned no authorization URL".to_string()),
+                ),
+            },
+            Err(error) => emit_mcp_changed(&inner, name, Err(error)),
+        }
+        return;
+    }
+    emit_mcp_changed(&inner, name, result);
+}
+
+pub(crate) async fn handle_mcp_remove_auth(
+    inner: Arc<AgentInner>,
+    name: String,
+    directory: Option<String>,
+) {
+    let path = format!(
+        "/mcp/{}/auth{}",
+        percent_encode(&name),
+        mcp_directory_query(directory.as_deref())
+    );
+    emit_mcp_changed(
+        &inner,
+        name,
+        http_delete(&inner, &path).await.map(|_| Value::Null),
+    );
+}
+
+fn emit_mcp_changed(inner: &AgentInner, name: String, result: Result<Value, String>) {
+    let message = match result {
+        Ok(_) => AgentServerMessage::McpChanged { name },
+        Err(error) => AgentServerMessage::McpFailed {
+            name: Some(name),
+            error,
+        },
+    };
+    let _ = inner.tx.send(message);
 }
 
 pub(crate) async fn handle_show_permissions(inner: Arc<AgentInner>, session_id: String) {

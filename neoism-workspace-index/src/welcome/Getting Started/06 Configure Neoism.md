@@ -92,7 +92,7 @@ Choose a model through the agent model picker before hard-coding `agent.model`; 
 ## Related files and overrides
 
 - `.neoism/workspace.json` stores per-workspace identity and notes settings and is written automatically.
-- `~/.config/neoism/mcp.json` can hold MCP server entries and merges after `config.json`.
+- `~/.config/neoism/mcp.json` can hold a bare MCP server map or `{ "mcp": {...} }` and merges after ordinary config in that directory. Projects may use top-level `mcp` in `neoism.json` or `.neoism/mcp.json`. See [[Neoism Agent/MCP Servers]].
 - `~/.config/neoism/skills/` contains agent skills.
 - `~/.config/neoism/agent/`, `mode/`, and `command/` contain Markdown agent definitions.
 - `NEOISM_DISPLAY_NAME`, `NEOISM_NOTES_HOME`, `NEOISM_LOG_LEVEL`, `NEOISM_LOG_FILE`, and `NEOISM_REQUIRE_AUTH` provide targeted environment overrides.

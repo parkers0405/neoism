@@ -770,10 +770,12 @@ impl NeoismAgentPane {
                     self.execute_show_skills_command(directory);
                     changed = true;
                 }
-                OutboundAgentCommand::ShowMcp { directory } => {
-                    self.execute_show_mcp_command(directory);
-                    changed = true;
-                }
+                OutboundAgentCommand::RefreshMcp { .. }
+                | OutboundAgentCommand::McpOauthAuthorize { .. }
+                | OutboundAgentCommand::McpSetEnabled { .. }
+                | OutboundAgentCommand::McpConnect { .. }
+                | OutboundAgentCommand::McpDisconnect { .. }
+                | OutboundAgentCommand::McpRemoveAuth { .. } => {}
                 OutboundAgentCommand::ShowPermissions { session_id } => {
                     self.execute_show_permissions_command(session_id);
                     changed = true;

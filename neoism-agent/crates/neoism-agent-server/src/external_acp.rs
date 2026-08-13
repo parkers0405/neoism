@@ -176,7 +176,7 @@ impl AcpClient {
                     },
                     "clientInfo": {
                         "name": "neoism-agent",
-                        "title": "Neoism Agent",
+                        "title": "Neoism",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
                 }),

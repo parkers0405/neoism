@@ -7,7 +7,9 @@ use crate::panels::agent_pane::state::picker::{
 use crate::panels::agent_pane::state::NeoismAgentPane;
 
 use crate::primitives::ide_theme::IdeTheme;
-use crate::widgets::inline_picker::{InlinePickerRow, InlinePickerView};
+use crate::widgets::inline_picker::{
+    InlinePickerRow, InlinePickerStatus, InlinePickerView,
+};
 
 pub trait AgentPickerPane {
     fn picker_mut(&mut self) -> Option<&mut NeoismAgentPicker>;
@@ -64,6 +66,16 @@ pub fn render_picker(
             is_header: option.is_header,
             is_current: option.is_current,
             is_pinned: option.pinned,
+            status: (picker.kind == NeoismAgentPickerKind::Mcp).then(|| {
+                match option.footer.as_str() {
+                    "connected" => InlinePickerStatus::Good,
+                    "needs auth" | "needs registration" | "ready" => {
+                        InlinePickerStatus::Warning
+                    }
+                    "failed" => InlinePickerStatus::Error,
+                    _ => InlinePickerStatus::Muted,
+                }
+            }),
         })
         .collect::<Vec<_>>();
     if let Some(render_state) = crate::widgets::inline_picker::render_limited(

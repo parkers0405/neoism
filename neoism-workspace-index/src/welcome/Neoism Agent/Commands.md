@@ -11,7 +11,7 @@ The Agent server defines:
 | `/init` | Analyze the project and create or refresh `AGENTS.md` guidance. |
 | `/summarize` | Summarize the current session. |
 
-The Neoism client also supplies runtime commands such as `/model`, `/agent`, `/variant`, `/sessions`, `/new`, `/undo`, `/redo`, `/compact`, `/status`, `/subagents`, `/yolo`, `/hints`, `/answer`, and `/reject`. These control the UI/session rather than acting as configured prompt templates.
+The Neoism client also supplies runtime commands such as `/model`, `/agent`, `/mcp`, `/variant`, `/sessions`, `/new`, `/undo`, `/redo`, `/compact`, `/status`, `/subagents`, `/yolo`, `/hints`, `/answer`, and `/reject`. These control the UI/session rather than acting as configured prompt templates. `/mcp` opens the inline MCP management picker described in [[MCP Servers]].
 
 ## Define a command
 

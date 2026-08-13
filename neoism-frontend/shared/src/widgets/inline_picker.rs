@@ -48,6 +48,16 @@ pub struct InlinePickerRow<'a> {
     /// Draw a small pin glyph on the right of the row to mark a pinned
     /// session.
     pub is_pinned: bool,
+    /// Optional semantic status dot drawn immediately before the footer.
+    pub status: Option<InlinePickerStatus>,
+}
+
+#[derive(Clone, Copy)]
+pub enum InlinePickerStatus {
+    Good,
+    Warning,
+    Error,
+    Muted,
 }
 
 #[derive(Clone, Copy)]
@@ -492,6 +502,7 @@ pub fn render_limited(
                 .overlay_text_mut()
                 .measure(row.footer, &footer_opts)
                 + 22.0 * s
+                + if row.status.is_some() { 12.0 * s } else { 0.0 }
         };
         let footer_x = x + width - footer_w;
         // Reserve a gap before the footer so long titles don't smear
@@ -525,6 +536,29 @@ pub fn render_limited(
             );
         }
         if !row.footer.is_empty() {
+            if let Some(status) = row.status {
+                let color = match status {
+                    InlinePickerStatus::Good => theme.green,
+                    InlinePickerStatus::Warning => theme.yellow,
+                    InlinePickerStatus::Error => theme.red,
+                    InlinePickerStatus::Muted => theme.muted,
+                };
+                let dot_d = 6.0 * s;
+                let dot_x = footer_x - dot_d - 6.0 * s;
+                let dot_y = row_y + (row_h - dot_d) / 2.0;
+                if dot_y >= list_y && dot_y + dot_d <= list_bottom {
+                    sugarloaf.overlay_rounded_rect(
+                        dot_x,
+                        dot_y,
+                        dot_d,
+                        dot_d,
+                        theme.f32(color),
+                        DEPTH,
+                        dot_d / 2.0,
+                        ORDER + 5,
+                    );
+                }
+            }
             sugarloaf.overlay_text_mut().draw(
                 footer_x,
                 row_y + 15.0 * s,

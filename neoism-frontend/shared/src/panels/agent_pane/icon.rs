@@ -99,7 +99,7 @@ impl AgentKind {
             AgentKind::Claude => "Claude Code",
             AgentKind::Codex => "Codex",
             AgentKind::OpenCode => "OpenCode",
-            AgentKind::Neoism => "Neoism Agent",
+            AgentKind::Neoism => "Neoism",
         }
     }
 }

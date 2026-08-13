@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use neoism_agent_core::{
-    McpConfig, McpContent, McpPromptInfo, McpResource, McpStatus, McpToolCallResult,
-    McpToolInfo,
+    McpCatalogEntry, McpConfig, McpContent, McpPromptInfo, McpResource, McpStatus,
+    McpToolCallResult, McpToolInfo,
 };
 use serde_json::Value;
 
@@ -40,6 +40,40 @@ pub(crate) fn status(
         &config,
         auth_store,
     ))
+}
+
+pub(crate) fn catalog(
+    directory: &str,
+    auth_store: &McpAuthStore,
+) -> anyhow::Result<BTreeMap<String, McpCatalogEntry>> {
+    let config = crate::config::load(directory)?.info.mcp;
+    Ok(config
+        .iter()
+        .map(|(name, entry)| {
+            let oauth_capable = matches!(
+                entry,
+                McpConfig::Remote { oauth, .. } if usable_oauth_config(oauth).is_some()
+            );
+            let status =
+                status_for_entry_with_directory(Some(directory), name, entry, auth_store);
+            let has_credentials =
+                auth_store.get(name).ok().flatten().is_some_and(|entry| {
+                    entry.tokens.is_some() || entry.client_info.is_some()
+                });
+            (
+                name.clone(),
+                McpCatalogEntry {
+                    enabled: is_enabled(entry),
+                    runtime_connected: matches!(status, McpStatus::Connected),
+                    status,
+                    oauth_capable,
+                    has_credentials,
+                    config_writable: std::env::var("NEOISM_AGENT_CONFIG_CONTENT")
+                        .is_err(),
+                },
+            )
+        })
+        .collect())
 }
 
 #[allow(dead_code)]

@@ -214,9 +214,40 @@ pub fn map_outbound_command(
             .unwrap_or(Mapping::Unsupported(
                 "slash command requires an active session",
             )),
-        Cmd::ShowMcp { directory } => Mapping::Messages(vec![Msg::ShowMcp {
+        Cmd::RefreshMcp { directory } => Mapping::Messages(vec![Msg::ShowMcp {
             directory: directory.or_else(|| context.default_directory.clone()),
         }]),
+        Cmd::McpOauthAuthorize { name, directory } => {
+            Mapping::Messages(vec![Msg::McpOauthAuthorize {
+                name,
+                directory: directory.or_else(|| context.default_directory.clone()),
+            }])
+        }
+        Cmd::McpSetEnabled {
+            name,
+            enabled,
+            directory,
+        } => Mapping::Messages(vec![Msg::McpSetEnabled {
+            name,
+            enabled,
+            directory: directory.or_else(|| context.default_directory.clone()),
+        }]),
+        Cmd::McpConnect { name, directory } => Mapping::Messages(vec![Msg::McpConnect {
+            name,
+            directory: directory.or_else(|| context.default_directory.clone()),
+        }]),
+        Cmd::McpDisconnect { name, directory } => {
+            Mapping::Messages(vec![Msg::McpDisconnect {
+                name,
+                directory: directory.or_else(|| context.default_directory.clone()),
+            }])
+        }
+        Cmd::McpRemoveAuth { name, directory } => {
+            Mapping::Messages(vec![Msg::McpRemoveAuth {
+                name,
+                directory: directory.or_else(|| context.default_directory.clone()),
+            }])
+        }
         Cmd::ShowPermissions { session_id } => {
             Mapping::Messages(vec![Msg::ShowPermissions { session_id }])
         }
@@ -297,7 +328,9 @@ fn part_attachment(part: Value) -> Option<Attachment> {
             .get("filename")
             .and_then(Value::as_str)
             .map(str::to_string),
-        bytes: base64::engine::general_purpose::STANDARD.decode(encoded).ok()?,
+        bytes: base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()?,
     })
 }
 

@@ -578,7 +578,7 @@ fn connect_provider_row(provider: &ConnectProvider) -> NeoismAgentPickerOption {
 fn connect_loading_options() -> Vec<NeoismAgentPickerOption> {
     vec![NeoismAgentPickerOption::new(
         "Loading providers...",
-        "Fetching from Neoism Agent",
+        "Fetching from Neoism",
         "loading",
         "",
     )]

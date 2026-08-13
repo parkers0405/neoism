@@ -57,6 +57,8 @@ Configuration is merged from lower to higher precedence:
 
 Objects are deep-merged. Arrays and scalar values are replaced by the higher-precedence value. This lets a project override one permission without repeating every global setting.
 
+MCP definitions may also live in a dedicated `mcp.json` or `mcp.jsonc`. A dedicated MCP catalog is merged after ordinary configuration files in the same directory. See [[MCP Servers]] for global/project shapes, OAuth fields, and management commands.
+
 ## Main fields
 
 | Field | Purpose |

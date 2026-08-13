@@ -601,7 +601,7 @@ fn ensure_memory_root(root: &MemoryRoot) -> anyhow::Result<()> {
 
 fn initial_index(scope: &str) -> String {
     format!(
-        "# Memory\n\nCompact {scope} memory index for Neoism Agent. Keep this file short: one link per memory plus a one-line recall summary. Put details in topic files next to this file and read them on demand.\n\n"
+        "# Memory\n\nCompact {scope} memory index for Neoism. Keep this file short: one link per memory plus a one-line recall summary. Put details in topic files next to this file and read them on demand.\n\n"
     )
 }
 

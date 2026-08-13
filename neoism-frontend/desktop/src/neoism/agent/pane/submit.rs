@@ -30,6 +30,21 @@ impl NeoismAgentPane {
                 self.remember_model_option(&option);
                 self.apply_model(option.value)
             }
+            NeoismAgentPickerKind::Mcp => {
+                self.picker = Some(NeoismAgentPicker::new(
+                    NeoismAgentPickerKind::McpActions,
+                    &format!("{} actions", option.title),
+                    neoism_ui::panels::agent_pane::state::mcp_action_options(
+                        &serde_json::from_str(&option.value).unwrap_or_default(),
+                    ),
+                    0,
+                ));
+            }
+            NeoismAgentPickerKind::McpActions => {
+                self.execute_mcp_action(
+                    &serde_json::from_str(&option.value).unwrap_or_default(),
+                );
+            }
             NeoismAgentPickerKind::Thinking => self.apply_thinking(option.value),
             NeoismAgentPickerKind::Session | NeoismAgentPickerKind::Subagent => {
                 self.switch_session(option.value);
@@ -771,7 +786,10 @@ mod directory_picker_tests {
     fn directory_picker_uses_selected_fuzzy_match() {
         let mut picker = picker();
         picker.set_query("other".to_string());
-        assert_eq!(directory_picker_target(&picker).as_deref(), Some("/tmp/other"));
+        assert_eq!(
+            directory_picker_target(&picker).as_deref(),
+            Some("/tmp/other")
+        );
     }
 
     #[test]

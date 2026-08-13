@@ -114,6 +114,7 @@ fn render_permission_prompt(
             is_header: false,
             is_current: false,
             is_pinned: false,
+            status: None,
         })
         .collect::<Vec<_>>();
     let visual_selected = VISUAL_SELECTION_ORDER
@@ -193,6 +194,7 @@ fn render_question_prompt(
             is_header: true,
             is_current: false,
             is_pinned: false,
+            status: None,
         }]
     } else {
         rows_data
@@ -204,6 +206,7 @@ fn render_question_prompt(
                 is_header: false,
                 is_current: false,
                 is_pinned: false,
+                status: None,
             })
             .collect::<Vec<_>>()
     };

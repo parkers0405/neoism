@@ -5,8 +5,8 @@ use axum::http::HeaderMap;
 use axum::response::Html;
 use axum::Json;
 use neoism_agent_core::{
-    McpAuthRemoveResponse, McpAuthStartResponse, McpConfig, McpPromptInfo, McpResource,
-    McpStatus, McpToolCallResult, McpToolInfo,
+    McpAuthRemoveResponse, McpAuthStartResponse, McpCatalogEntry, McpConfig,
+    McpPromptInfo, McpResource, McpStatus, McpToolCallResult, McpToolInfo,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -27,6 +27,11 @@ pub(crate) struct CodeRequest {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub(crate) struct McpConfigPatch {
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct OAuthCallbackQuery {
     pub code: String,
     pub state: Option<String>,
@@ -44,6 +49,17 @@ pub(crate) async fn mcp_status(
     )?))
 }
 
+pub(crate) async fn mcp_catalog(
+    Query(query): Query<InstanceQuery>,
+    headers: HeaderMap,
+) -> Result<Json<BTreeMap<String, McpCatalogEntry>>, ApiError> {
+    let directory = resolve_directory(query.directory, &headers);
+    Ok(Json(mcp::catalog(
+        &directory,
+        &mcp_auth::McpAuthStore::from_env(),
+    )?))
+}
+
 pub(crate) async fn mcp_add(
     Json(request): Json<McpAddRequest>,
 ) -> Json<BTreeMap<String, McpStatus>> {
@@ -55,6 +71,26 @@ pub(crate) async fn mcp_add(
     );
     status.insert(request.name, state);
     Json(status)
+}
+
+pub(crate) async fn mcp_config_patch(
+    Path(name): Path<String>,
+    Query(query): Query<InstanceQuery>,
+    headers: HeaderMap,
+    Json(request): Json<McpConfigPatch>,
+) -> Result<Json<McpCatalogEntry>, ApiError> {
+    let directory = resolve_directory(query.directory, &headers);
+    crate::config::set_mcp_enabled(&directory, &name, request.enabled)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if !request.enabled {
+        let _ = mcp::disconnect(&directory, &name).await;
+    }
+    mcp::catalog(&directory, &mcp_auth::McpAuthStore::from_env())?
+        .remove(&name)
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::bad_request(format!("MCP server {name} is not configured"))
+        })
 }
 
 pub(crate) async fn mcp_auth_start(

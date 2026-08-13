@@ -60,6 +60,10 @@ Remember that the last matching wildcard rule wins.
 - For remote servers, verify URL, TLS, headers, OAuth callback, and network reachability.
 - Increase `timeout` only after identifying a genuinely slow startup.
 
+`MCP server <name> does not support OAuth` describes the effective Neoism configuration, not necessarily the remote service. It means the entry is local, omits `oauth`, or has `"oauth": false`. For an OAuth-capable remote server, add `"oauth": true` or `"oauth": {}` to the effective entry, reopen `/mcp`, and choose **Connect**. Restart Neoism if an old process still has the previous catalog.
+
+For CLI diagnosis, run `neoism mcp auth list`. Use `neoism mcp auth <name> --no-open` to print the authorization URL when automatic browser launching fails. See [[MCP Servers]] for complete examples.
+
 ## LSP tool fails
 
 - Check LSP status.

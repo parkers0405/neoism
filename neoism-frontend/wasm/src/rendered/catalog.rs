@@ -491,6 +491,16 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::SkillCatalog { skills } => {
             pane.set_skill_options(skill_options_from_catalog(&skills));
         }
+        AgentServerMessage::McpCatalog { status } => {
+            pane.set_mcp_status(status);
+        }
+        AgentServerMessage::McpOauthUrl { name, url } => {
+            pane.apply_mcp_oauth_url(name, url);
+        }
+        AgentServerMessage::McpFailed { name, error } => {
+            pane.system_message(name.unwrap_or_else(|| "MCP".to_string()), error);
+        }
+        AgentServerMessage::McpChanged { .. } => pane.open_mcp_picker(),
         AgentServerMessage::UsageUpdate { usage, .. } => {
             pane.apply_usage(map_usage(usage));
         }
@@ -602,6 +612,10 @@ pub(crate) fn agent_event_session_id(
         | AgentServerMessage::ConfigDefaults { .. }
         | AgentServerMessage::AgentCatalog { .. }
         | AgentServerMessage::SkillCatalog { .. }
+        | AgentServerMessage::McpCatalog { .. }
+        | AgentServerMessage::McpOauthUrl { .. }
+        | AgentServerMessage::McpFailed { .. }
+        | AgentServerMessage::McpChanged { .. }
         | AgentServerMessage::ConnectProviderCatalog { .. }
         | AgentServerMessage::ConnectOauthUrl { .. }
         | AgentServerMessage::ConnectFinished { .. }
@@ -659,7 +673,7 @@ pub(crate) fn agent_options_from_catalog(
 
     let mut out = vec![NeoismAgentPickerOption::new(
         "session default",
-        "Use Neoism Agent default",
+        "Use Neoism default",
         "default",
         "",
     )];

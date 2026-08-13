@@ -88,6 +88,179 @@ pub(crate) fn load(directory: &str) -> anyhow::Result<LoadedConfig> {
     Ok(LoadedConfig { info })
 }
 
+pub(crate) fn set_mcp_enabled(
+    directory: &str,
+    name: &str,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    let directory = absolute_path(directory);
+    let worktree = worktree_root(&directory);
+    let mut candidates = global_config_files();
+    if !env_truthy("NEOISM_AGENT_DISABLE_PROJECT_CONFIG") {
+        candidates.extend(project_config_files(&directory, worktree.as_deref()));
+    }
+    for dir in config_directories(&directory, worktree.as_deref()) {
+        candidates.extend(config_files_in_dir(&dir));
+        candidates.extend([dir.join("mcp.json"), dir.join("mcp.jsonc")]);
+    }
+    if let Ok(file) = std::env::var("NEOISM_AGENT_CONFIG") {
+        candidates.push(PathBuf::from(file));
+    }
+    if let Ok(content) = std::env::var("NEOISM_AGENT_CONFIG_CONTENT") {
+        let value = parse_jsonc(&content)
+            .context("failed to parse NEOISM_AGENT_CONFIG_CONTENT")?;
+        if mcp_entry(&value, false, false, name).is_some() {
+            anyhow::bail!(
+                "MCP server {name} is defined by read-only NEOISM_AGENT_CONFIG_CONTENT"
+            );
+        }
+    }
+
+    let source = candidates
+        .iter()
+        .rev()
+        .find(|path| {
+            read_config_value(path).ok().flatten().is_some_and(|value| {
+                mcp_entry(
+                    &value,
+                    is_mcp_file(path),
+                    is_shared_terminal_config(path),
+                    name,
+                )
+                .is_some()
+            })
+        })
+        .cloned();
+    let loaded = load(directory.to_string_lossy().as_ref())?;
+    let effective = loaded
+        .info
+        .mcp
+        .get(name)
+        .cloned()
+        .with_context(|| format!("MCP server {name} is not configured"))?;
+    let path = source
+        .unwrap_or_else(|| PathBuf::from(crate::default_config_dir()).join("mcp.json"));
+    let dedicated = is_mcp_file(&path);
+    let mut value = read_config_value(&path)?.unwrap_or_else(|| json!({}));
+    let root = mcp_map_mut(&mut value, dedicated, is_shared_terminal_config(&path))?;
+    let entry = root
+        .entry(name.to_string())
+        .or_insert(serde_json::to_value(effective)?);
+    let object = entry
+        .as_object_mut()
+        .with_context(|| format!("MCP server {name} config is not an object"))?;
+    object.insert("enabled".to_string(), Value::Bool(enabled));
+    write_config_value(&path, &value)
+}
+
+fn read_config_value(path: &Path) -> anyhow::Result<Option<Value>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read config file {}", path.display()))?;
+    Ok(Some(parse_jsonc(&text).with_context(|| {
+        format!("failed to parse config file {}", path.display())
+    })?))
+}
+
+fn is_mcp_file(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("mcp.json" | "mcp.jsonc")
+    )
+}
+
+fn mcp_entry<'a>(
+    value: &'a Value,
+    dedicated: bool,
+    shared: bool,
+    name: &str,
+) -> Option<&'a Value> {
+    if dedicated {
+        value.get("mcp").unwrap_or(value).get(name)
+    } else if shared {
+        value.get("agent")?.get("mcp")?.get(name)
+    } else {
+        value.get("mcp")?.get(name)
+    }
+}
+
+fn mcp_map_mut(
+    value: &mut Value,
+    dedicated: bool,
+    shared: bool,
+) -> anyhow::Result<&mut Map<String, Value>> {
+    let wrapped = dedicated && value.get("mcp").is_some();
+    let target = if wrapped {
+        value
+    } else if shared {
+        value
+            .as_object_mut()
+            .context("config root is not an object")?
+            .entry("agent")
+            .or_insert_with(|| json!({}))
+    } else {
+        value
+    };
+    if dedicated && !wrapped {
+        return target
+            .as_object_mut()
+            .context("MCP config root is not an object");
+    }
+    let object = target
+        .as_object_mut()
+        .context("config root is not an object")?;
+    object
+        .entry("mcp")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("mcp config is not an object")
+}
+
+fn write_config_value(path: &Path, value: &Value) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("neoism.tmp");
+    std::fs::write(&temp, format!("{}\n", serde_json::to_string_pretty(value)?))?;
+    std::fs::rename(&temp, path)
+        .with_context(|| format!("failed to replace config file {}", path.display()))
+}
+
+#[cfg(test)]
+mod mcp_write_tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn set_mcp_enabled_updates_the_owning_project_file() {
+        let _lock = env_lock().lock().unwrap();
+        let root = std::env::temp_dir()
+            .join(format!("neoism-mcp-toggle-{}", std::process::id()));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config = project.join("neoism.json");
+        std::fs::write(
+            &config,
+            r#"{"mcp":{"neoism-toggle-test":{"type":"remote","url":"https://example.com/mcp","enabled":true}},"theme":"keep"}"#,
+        )
+        .unwrap();
+        std::env::set_var("NEOISM_AGENT_DISABLE_PROJECT_CONFIG", "0");
+        set_mcp_enabled(project.to_str().unwrap(), "neoism-toggle-test", false).unwrap();
+        let value: Value =
+            serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(value["mcp"]["neoism-toggle-test"]["enabled"], false);
+        assert_eq!(value["theme"], "keep");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
 pub(crate) fn roots(directory: &str) -> Vec<PathBuf> {
     let directory = absolute_path(directory);
     let worktree = worktree_root(&directory);

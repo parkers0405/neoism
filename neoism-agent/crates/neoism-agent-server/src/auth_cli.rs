@@ -157,13 +157,18 @@ struct McpAuthStart {
     authorization_url: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct McpAuthRemove {
+    success: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum McpStatus {
     Connected,
     Disabled,
     NeedsAuth,
-    NeedsClientRegistration,
+    NeedsClientRegistration { error: String },
     Failed { error: String },
 }
 
@@ -347,8 +352,7 @@ async fn run_mcp(command: McpCommand) -> Result<(), String> {
 }
 
 async fn mcp_list(output: OutputArgs, auth_only: bool) -> Result<(), String> {
-    let status: BTreeMap<String, McpStatus> =
-        get_json(&output.server, "/mcp/status").await?;
+    let status: BTreeMap<String, McpStatus> = get_json(&output.server, "/mcp").await?;
     if output.json {
         return print_json(&status);
     }
@@ -367,8 +371,8 @@ async fn mcp_authenticate(
     no_open: bool,
     output: OutputArgs,
 ) -> Result<(), String> {
-    let started: McpAuthStart =
-        post_json(&output.server, "/mcp/auth", &json!({ "name": name })).await?;
+    let auth_path = mcp_auth_path(&name);
+    let started: McpAuthStart = post_json(&output.server, &auth_path, &json!({})).await?;
     println!(
         "Authorize {name} in your browser:\n\n{}",
         started.authorization_url
@@ -384,11 +388,8 @@ async fn mcp_authenticate(
 
     let deadline = Instant::now() + AUTH_TIMEOUT;
     loop {
-        let status: BTreeMap<String, McpStatus> = get_json(
-            &output.server,
-            &format!("/mcp/status?name={}", percent_encode(&name)),
-        )
-        .await?;
+        let status: BTreeMap<String, McpStatus> =
+            get_json(&output.server, "/mcp").await?;
         match status.get(&name) {
             Some(McpStatus::Connected) => {
                 return print_result(
@@ -409,14 +410,11 @@ async fn mcp_authenticate(
 }
 
 async fn mcp_logout(args: McpServerArgs) -> Result<(), String> {
-    let removed: bool = delete_json(
-        &args.output.server,
-        &format!("/mcp/auth/{}", percent_encode(&args.name)),
-    )
-    .await?;
+    let removed: McpAuthRemove =
+        delete_json(&args.output.server, &mcp_auth_path(&args.name)).await?;
     print_result(
         &args.output,
-        json!({ "name": args.name, "removed": removed }),
+        json!({ "name": args.name, "removed": removed.success }),
         || format!("Removed OAuth credentials for {}.", args.name),
     )
 }
@@ -487,7 +485,9 @@ fn mcp_status_label(status: &McpStatus) -> String {
         McpStatus::Connected => "connected".into(),
         McpStatus::Disabled => "disabled".into(),
         McpStatus::NeedsAuth => "authentication required".into(),
-        McpStatus::NeedsClientRegistration => "client registration required".into(),
+        McpStatus::NeedsClientRegistration { error } => {
+            format!("client registration required: {error}")
+        }
         McpStatus::Failed { error } => format!("failed: {error}"),
     }
 }
@@ -545,6 +545,10 @@ fn percent_encode(value: &str) -> String {
             byte => format!("%{byte:02X}"),
         })
         .collect()
+}
+
+fn mcp_auth_path(name: &str) -> String {
+    format!("/mcp/{}/auth", percent_encode(name))
 }
 
 fn print_result<T: serde::Serialize>(
@@ -622,7 +626,7 @@ async fn response_json<T: DeserializeOwned>(
     response: Result<reqwest::Response, reqwest::Error>,
 ) -> Result<T, String> {
     let response =
-        response.map_err(|error| format!("could not reach Neoism Agent: {error}"))?;
+        response.map_err(|error| format!("could not reach Neoism: {error}"))?;
     let status = response.status();
     let body = response.text().await.map_err(|error| error.to_string())?;
     if !status.is_success() {
@@ -646,7 +650,7 @@ fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| body.trim().to_string());
-    format!("Neoism Agent returned {status}: {message}")
+    format!("Neoism returned {status}: {message}")
 }
 
 #[cfg(test)]
@@ -659,5 +663,11 @@ mod tests {
         assert!(Cli::try_parse_from(["neoism", "auth", "logout", "openai"]).is_ok());
         assert!(Cli::try_parse_from(["neoism", "mcp", "auth", "supabase"]).is_ok());
         assert!(Cli::try_parse_from(["neoism", "mcp", "auth", "list"]).is_ok());
+    }
+
+    #[test]
+    fn builds_current_mcp_auth_route() {
+        assert_eq!(mcp_auth_path("webflow"), "/mcp/webflow/auth");
+        assert_eq!(mcp_auth_path("company tools"), "/mcp/company%20tools/auth");
     }
 }

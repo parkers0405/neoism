@@ -570,7 +570,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Workspace,
     },
     Command {
-        title: "Neoism Agent",
+        title: "Neoism",
         shortcut: "Alt+A",
         action: PaletteAction::OpenNeoismAgent,
         service: CommandService::Agent,

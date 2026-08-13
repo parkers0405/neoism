@@ -830,65 +830,6 @@ pub(super) fn format_queue(value: Option<&Value>) -> String {
     lines.join("\n")
 }
 
-pub(super) fn format_mcp_status(value: Option<&Value>) -> String {
-    let Some(value) = value else {
-        return "no MCP status".to_string();
-    };
-    let Some(servers) = value.as_object() else {
-        return "malformed MCP status".to_string();
-    };
-    if servers.is_empty() {
-        return "no MCP servers configured".to_string();
-    }
-
-    let mut connected = 0;
-    let mut ready = 0;
-    let mut disabled = 0;
-    let mut needs_auth = 0;
-    let mut failed = 0;
-    let mut lines = Vec::new();
-
-    for (name, status) in servers {
-        let (label, detail) = mcp_status_label(status);
-        match label {
-            "connected" => connected += 1,
-            "ready" => ready += 1,
-            "disabled" => disabled += 1,
-            "needs auth" | "needs registration" => needs_auth += 1,
-            _ => failed += 1,
-        }
-        let mut line = format!("{name} - {label}");
-        if let Some(detail) = detail.filter(|detail| !detail.trim().is_empty()) {
-            line.push_str(" - ");
-            line.push_str(&detail);
-        }
-        lines.push(line);
-    }
-
-    let mut summary = Vec::new();
-    if connected > 0 {
-        summary.push(format!("{connected} connected"));
-    }
-    if ready > 0 {
-        summary.push(format!("{ready} ready"));
-    }
-    if disabled > 0 {
-        summary.push(format!("{disabled} disabled"));
-    }
-    if needs_auth > 0 {
-        summary.push(format!("{needs_auth} auth needed"));
-    }
-    if failed > 0 {
-        summary.push(format!("{failed} failed"));
-    }
-    if summary.is_empty() {
-        summary.push("0 configured".to_string());
-    }
-
-    lines.insert(0, summary.join(", "));
-    lines.join("\n")
-}
-
 pub(super) fn format_permissions(
     value: Option<&Value>,
     session_id: Option<&str>,
@@ -945,37 +886,6 @@ pub(super) fn format_questions(
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn mcp_status_label(status: &Value) -> (&'static str, Option<String>) {
-    let status_type = status
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    match status_type {
-        "connected" => ("connected", None),
-        "disabled" => ("disabled", None),
-        "needs_auth" => ("needs auth", None),
-        "needs_client_registration" => (
-            "needs registration",
-            status
-                .get("error")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        ),
-        "failed" => {
-            let error = status
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if error == "MCP client runtime is not connected yet" {
-                ("ready", None)
-            } else {
-                ("failed", Some(error.to_string()))
-            }
-        }
-        _ => ("unknown", Some(status.to_string())),
-    }
 }
 
 pub(super) fn question_count(item: &Value) -> usize {
@@ -1243,9 +1153,16 @@ fn http_request(
         .map_err(|error| format!("failed to write Neoism Agent request: {error}"))?;
 
     let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .map_err(|error| format!("failed to read Neoism Agent response: {error}"))?;
+    stream.read_to_end(&mut response).map_err(|error| {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            "Neoism request timed out waiting for the server response".to_string()
+        } else {
+            format!("failed to read Neoism response: {error}")
+        }
+    })?;
     let header_end = find_header_end(&response)
         .ok_or_else(|| "Neoism Agent returned a malformed HTTP response".to_string())?;
     let headers = String::from_utf8_lossy(&response[..header_end]);

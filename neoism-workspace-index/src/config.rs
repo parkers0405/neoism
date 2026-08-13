@@ -17,7 +17,7 @@ pub const PROJECT_METADATA_FILE: &str = "project.json";
 /// Pre-JSON vault metadata file, read once to upgrade in place.
 const PROJECT_METADATA_FILE_LEGACY: &str = "project.toml";
 const DEFAULT_NOTES_WORKSPACE_ID: &str = "neoism-notes-default-v1";
-const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v4";
+const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v5";
 
 const REPLACED_WELCOME_PATHS: &[&str] = &[
     "Getting Started.md",

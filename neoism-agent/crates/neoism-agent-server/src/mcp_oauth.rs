@@ -64,20 +64,30 @@ pub(crate) async fn auth_start(
     };
     let oauth = usable_oauth_config(oauth)
         .ok_or_else(|| anyhow!("MCP server {name} does not support OAuth"))?;
+    let redirect_uri = redirect_uri(name, oauth);
+    let mut existing = auth_store.get(name)?.unwrap_or_default();
+    if existing
+        .oauth_redirect_uri
+        .as_deref()
+        .is_some_and(|stored| stored != redirect_uri)
+    {
+        existing.client_info = None;
+        existing.tokens = None;
+        auth_store.set(name, existing)?;
+    }
     let needs_registration = configured_client_id(oauth).is_none()
         && stored_client_info(name, url, auth_store)?.is_none();
     let endpoints = oauth_endpoints(url, oauth, true, false, needs_registration).await;
     let client =
         oauth_client_credentials(name, url, oauth, &endpoints, auth_store, true).await?;
     let authorization_url = endpoints.authorization_url;
-    let redirect_uri = redirect_uri(name, oauth);
     let state = Id::ascending(IdKind::Entry).to_string();
     let code_verifier = random_oauth_string(64);
     let code_challenge = pkce_challenge(&code_verifier);
     let mut params = vec![
         ("response_type", "code".to_string()),
         ("client_id", client.client_id.clone()),
-        ("redirect_uri", redirect_uri),
+        ("redirect_uri", redirect_uri.clone()),
         ("state", state.clone()),
         ("code_challenge", code_challenge),
         ("code_challenge_method", "S256".to_string()),
@@ -92,6 +102,7 @@ pub(crate) async fn auth_start(
     entry.code_verifier = Some(code_verifier);
     entry.oauth_state = Some(state.clone());
     entry.oauth_directory = Some(directory.to_string());
+    entry.oauth_redirect_uri = Some(redirect_uri.clone());
     entry.server_url = Some(url.clone());
     auth_store.set(name, entry)?;
 
@@ -134,7 +145,10 @@ pub(crate) async fn auth_callback(
     let client =
         oauth_client_credentials(name, url, oauth, &endpoints, auth_store, false).await?;
     let token_url = endpoints.token_url;
-    let redirect_uri = redirect_uri(name, oauth);
+    let redirect_uri = entry
+        .oauth_redirect_uri
+        .clone()
+        .unwrap_or_else(|| redirect_uri(name, oauth));
     let mut params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code.to_string()),
@@ -176,6 +190,7 @@ pub(crate) async fn auth_callback(
     entry.code_verifier = None;
     entry.oauth_state = None;
     entry.oauth_directory = None;
+    entry.oauth_redirect_uri = None;
     entry.server_url = Some(url.clone());
     auth_store.set(name, entry)?;
 
@@ -450,10 +465,16 @@ pub(super) fn bearer_token_for_url(
 }
 
 fn redirect_uri(name: &str, oauth: &McpOAuthConfig) -> String {
-    oauth
-        .redirect_uri
-        .clone()
-        .unwrap_or_else(|| format!("http://127.0.0.1:4096/mcp/{name}/auth/callback"))
+    oauth.redirect_uri.clone().unwrap_or_else(|| {
+        let server = std::env::var("NEOISM_SERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:4096".to_string());
+        format!("{}/mcp/{name}/auth/callback", server.trim_end_matches('/'))
+    })
+}
+
+#[cfg(test)]
+pub(super) fn redirect_uri_for_test(name: &str, oauth: &McpOAuthConfig) -> String {
+    redirect_uri(name, oauth)
 }
 
 fn append_query(base: &str, params: &[(&str, String)]) -> String {

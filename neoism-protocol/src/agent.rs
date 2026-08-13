@@ -246,10 +246,35 @@ pub enum AgentClientMessage {
         #[serde(default)]
         directory: Option<String>,
     },
-    /// Request MCP server status for a workspace. Reply is a generic
-    /// [`AgentServerMessage::CommandOutput`] because the desktop pane
-    /// already formats this as human-readable command output.
+    /// Request MCP server status for the inline picker.
     ShowMcp {
+        #[serde(default)]
+        directory: Option<String>,
+    },
+    /// Start an MCP server's OAuth flow.
+    McpOauthAuthorize {
+        name: String,
+        #[serde(default)]
+        directory: Option<String>,
+    },
+    McpSetEnabled {
+        name: String,
+        enabled: bool,
+        #[serde(default)]
+        directory: Option<String>,
+    },
+    McpConnect {
+        name: String,
+        #[serde(default)]
+        directory: Option<String>,
+    },
+    McpDisconnect {
+        name: String,
+        #[serde(default)]
+        directory: Option<String>,
+    },
+    McpRemoveAuth {
+        name: String,
         #[serde(default)]
         directory: Option<String>,
     },
@@ -351,7 +376,9 @@ pub enum AgentServerMessage {
     /// Emitted exactly once after `spawn` when the daemon couldn't
     /// initialise (typically missing `NEOISM_AGENT_API_KEY`). The
     /// chrome pane paints this verbatim as an inline error banner.
-    Disabled { reason: String },
+    Disabled {
+        reason: String,
+    },
     /// SSE `message_start`: a new role-typed message is about to
     /// stream. Followed by zero-or-more [`AgentServerMessage::ContentDelta`]
     /// and a terminating [`AgentServerMessage::MessageEnd`].
@@ -382,7 +409,9 @@ pub enum AgentServerMessage {
         args: serde_json::Value,
     },
     /// Out-of-band failure (HTTP non-200, parse error, network).
-    Error { message: String },
+    Error {
+        message: String,
+    },
 
     // -- Session lifecycle --------------------------------------------
     /// Acknowledge a [`AgentClientMessage::CreateThread`] with the
@@ -401,12 +430,18 @@ pub enum AgentServerMessage {
     /// Acknowledge a [`AgentClientMessage::SwitchThread`]. Following
     /// this message the daemon's event stream is bound to the new
     /// session.
-    ThreadSwitched { session_id: String },
+    ThreadSwitched {
+        session_id: String,
+    },
     /// Acknowledge a [`AgentClientMessage::DeleteThread`].
-    ThreadDeleted { session_id: String },
+    ThreadDeleted {
+        session_id: String,
+    },
     /// Reply to [`AgentClientMessage::ListThreads`]. `threads` is
     /// sorted newest-first.
-    ThreadList { threads: Vec<ThreadSummary> },
+    ThreadList {
+        threads: Vec<ThreadSummary>,
+    },
     /// Streaming history page. Emitted in response to
     /// [`AgentClientMessage::GetHistory`]; `next_cursor` is the
     /// opaque token to feed back for the following page (`None`
@@ -436,10 +471,15 @@ pub enum AgentServerMessage {
     },
     /// One part of a message was removed (e.g. a streamed tool block
     /// the model interrupted). Maps to `message.part.removed`.
-    PartRemoved { session_id: String, part_id: String },
+    PartRemoved {
+        session_id: String,
+        part_id: String,
+    },
     /// Session has gone idle — no in-flight turn. The chrome flips
     /// the streaming-state indicator back to `Idle`.
-    SessionIdle { session_id: String },
+    SessionIdle {
+        session_id: String,
+    },
     /// Session emitted a non-fatal status line (badges like
     /// "Pondering", "Compacting", subagent counts).
     StreamingState {
@@ -548,7 +588,9 @@ pub enum AgentServerMessage {
         context_limit: Option<u64>,
     },
     /// Reply to [`AgentClientMessage::ListProviders`].
-    ProviderCatalog { providers: Vec<ProviderInfo> },
+    ProviderCatalog {
+        providers: Vec<ProviderInfo>,
+    },
     /// Reply to [`AgentClientMessage::GetConfigDefaults`].
     ConfigDefaults {
         #[serde(default)]
@@ -563,13 +605,20 @@ pub enum AgentServerMessage {
         sidebar_visible: Option<bool>,
     },
     /// Reply to [`AgentClientMessage::ListAgents`].
-    AgentCatalog { agents: Vec<AgentInfo> },
+    AgentCatalog {
+        agents: Vec<AgentInfo>,
+    },
     /// Reply to [`AgentClientMessage::ListSkills`].
-    SkillCatalog { skills: Vec<SkillInfo> },
+    SkillCatalog {
+        skills: Vec<SkillInfo>,
+    },
     /// Running token-usage stats for the session (input/output/cache
     /// counts + cost). Emitted on every `step-finish` from the agent
     /// server.
-    UsageUpdate { session_id: String, usage: Usage },
+    UsageUpdate {
+        session_id: String,
+        usage: Usage,
+    },
     /// Todo list snapshot for the session.
     TodoUpdate {
         session_id: String,
@@ -630,10 +679,33 @@ pub enum AgentServerMessage {
     },
     /// A `/connect` mutation (store key / disconnect / OAuth callback)
     /// succeeded. `provider` is the provider id it targeted.
-    ConnectFinished { provider: String },
+    ConnectFinished {
+        provider: String,
+    },
     /// A `/connect` mutation failed. `provider` is the provider id it
     /// targeted; `error` is the human-readable reason.
-    ConnectFailed { provider: String, error: String },
+    ConnectFailed {
+        provider: String,
+        error: String,
+    },
+
+    /// Workspace MCP status object returned by `GET /mcp`.
+    McpCatalog {
+        status: serde_json::Value,
+    },
+    /// Authorization URL returned by `POST /mcp/:name/auth`.
+    McpOauthUrl {
+        name: String,
+        url: String,
+    },
+    /// MCP catalog/auth operation failed.
+    McpFailed {
+        name: Option<String>,
+        error: String,
+    },
+    McpChanged {
+        name: String,
+    },
 
     // -- Maintenance --------------------------------------------------
     /// Reply to [`AgentClientMessage::Ping`].

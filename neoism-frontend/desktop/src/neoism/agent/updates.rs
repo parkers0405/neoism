@@ -192,8 +192,8 @@ pub(super) fn start_session_event_stream(
         })
     {
         let _ = tx.send(AgentSessionUpdate::System {
-            title: "Neoism Agent".to_string(),
-            body: format!("failed to start Neoism Agent event thread: {error}"),
+            title: "Neoism".to_string(),
+            body: format!("failed to start Neoism event thread: {error}"),
         });
     }
 
@@ -248,7 +248,7 @@ fn run_event_stream(
                         }
                         Err(error) if !stop.load(Ordering::Relaxed) => {
                             let _ = tx.send(AgentSessionUpdate::System {
-                                title: "Neoism Agent".to_string(),
+                                title: "Neoism".to_string(),
                                 body: error,
                             });
                         }
@@ -266,7 +266,7 @@ fn run_event_stream(
             }
             Err(error) if !connected_once && !stop.load(Ordering::Relaxed) => {
                 let _ = tx.send(AgentSessionUpdate::System {
-                    title: "Neoism Agent".to_string(),
+                    title: "Neoism".to_string(),
                     body: error,
                 });
                 connected_once = true;
@@ -354,7 +354,7 @@ fn read_event_stream(
                 ) => {}
             Err(error) => {
                 let _ = tx.send(AgentSessionUpdate::System {
-                    title: "Neoism Agent".to_string(),
+                    title: "Neoism".to_string(),
                     body: format!("event stream failed: {error}"),
                 });
                 break;

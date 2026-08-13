@@ -7,9 +7,12 @@ impl NeoismAgentPane {
         self.input_attachments
             .iter()
             .filter_map(|attachment| match attachment {
-                NeoismAgentInputAttachment::File { filename, url, mime, .. }
-                    if mime.starts_with("image/") =>
-                {
+                NeoismAgentInputAttachment::File {
+                    filename,
+                    url,
+                    mime,
+                    ..
+                } if mime.starts_with("image/") => {
                     Some(neoism_ui::panels::agent_pane::state::NeoismAgentImage {
                         filename: filename.clone(),
                         url: url.clone(),
@@ -371,7 +374,7 @@ impl NeoismAgentPane {
         let options = fetch_agent_options(&self.server, self.directory.as_deref())
             .unwrap_or_else(|error| {
                 vec![NeoismAgentPickerOption::new(
-                    "Neoism Agent server not reachable",
+                    "Neoism server not reachable",
                     &error,
                     "offline",
                     "",
@@ -392,7 +395,7 @@ impl NeoismAgentPane {
     pub fn open_model_picker(&mut self) {
         let options = fetch_model_options(&self.server).unwrap_or_else(|error| {
             vec![NeoismAgentPickerOption::new(
-                "Neoism Agent server not reachable",
+                "Neoism server not reachable",
                 &error,
                 "offline",
                 "",
@@ -432,7 +435,7 @@ impl NeoismAgentPane {
         if self.model.trim().is_empty() {
             return NeoismAgentPickerOption::new(
                 "server default",
-                "Use Neoism Agent default",
+                "Use Neoism default",
                 "selected",
                 "",
             );
@@ -798,6 +801,10 @@ impl NeoismAgentPane {
                 }
                 NeoismAgentPickerKind::Connect => {
                     self.close_connect();
+                    return;
+                }
+                NeoismAgentPickerKind::McpActions => {
+                    self.show_mcp();
                     return;
                 }
                 _ => {}

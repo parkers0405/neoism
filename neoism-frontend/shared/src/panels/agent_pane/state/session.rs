@@ -47,6 +47,60 @@ impl NeoismAgentPane {
                 self.remember_model_option(&option);
                 self.apply_model(option.value)
             }
+            NeoismAgentPickerKind::Mcp => {
+                self.open_mcp_actions(&option.value);
+            }
+            NeoismAgentPickerKind::McpActions => {
+                let value =
+                    serde_json::from_str::<Value>(&option.value).unwrap_or_default();
+                let name = value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let directory = self.directory.clone();
+                match value.get("action").and_then(Value::as_str) {
+                    Some("enable") => {
+                        self.push_outbound(OutboundAgentCommand::McpSetEnabled {
+                            name,
+                            enabled: true,
+                            directory,
+                        })
+                    }
+                    Some("disable") => {
+                        self.push_outbound(OutboundAgentCommand::McpSetEnabled {
+                            name,
+                            enabled: false,
+                            directory,
+                        })
+                    }
+                    Some("connect") => {
+                        self.push_outbound(OutboundAgentCommand::McpConnect {
+                            name,
+                            directory,
+                        })
+                    }
+                    Some("disconnect") => {
+                        self.push_outbound(OutboundAgentCommand::McpDisconnect {
+                            name,
+                            directory,
+                        })
+                    }
+                    Some("authenticate") => {
+                        self.push_outbound(OutboundAgentCommand::McpOauthAuthorize {
+                            name,
+                            directory,
+                        })
+                    }
+                    Some("logout") => {
+                        self.push_outbound(OutboundAgentCommand::McpRemoveAuth {
+                            name,
+                            directory,
+                        })
+                    }
+                    _ => {}
+                }
+            }
             NeoismAgentPickerKind::Thinking => self.apply_thinking(option.value),
             NeoismAgentPickerKind::Session | NeoismAgentPickerKind::Subagent => {
                 self.switch_session(option.value);
@@ -419,7 +473,7 @@ impl NeoismAgentPane {
 
     /// Reset to a fresh conversation — the `/new` slash behaviour.
     /// Hosts also call this when the user explicitly re-invokes
-    /// "Neoism Agent" while a conversation is already showing.
+    /// "Neoism" while a conversation is already showing.
     pub fn start_new_conversation(&mut self) {
         self.session_id = None;
         self.parent_session_id = None;
@@ -499,6 +553,7 @@ impl NeoismAgentPane {
                 }
             }
             "/connect" => self.open_connect_picker(),
+            "/mcp" | "/mcps" => self.open_mcp_picker(),
             "/think" | "/reasoning" => {
                 if let Some(value) = args_vec.first() {
                     self.apply_thinking((*value).to_string());

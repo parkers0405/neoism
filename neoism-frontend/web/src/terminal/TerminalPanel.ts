@@ -2699,7 +2699,7 @@ export class TerminalPanel {
               title: tab.title,
               detail:
                 tab.path ??
-                (tab.kind === "neoism-agent" ? "Neoism Agent" : "Terminal"),
+                (tab.kind === "neoism-agent" ? "Neoism" : "Terminal"),
               tab_index,
             })),
           ),
@@ -3746,7 +3746,7 @@ export class TerminalPanel {
       }
     } else {
       this.bufferTabs.push({
-        title: "Neoism Agent",
+        title: "Neoism",
         kind: "neoism-agent",
         neoismAgentRouteId: this.neoismAgentRouteId,
       });

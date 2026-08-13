@@ -17,6 +17,10 @@ pub enum NeoismAgentPickerKind {
     Slash,
     Agent,
     Model,
+    /// Workspace MCP servers and their connection/authentication state.
+    Mcp,
+    /// `/mcp` stage 2 - actions for one selected MCP server.
+    McpActions,
     FileMention,
     SkillMention,
     Thinking,

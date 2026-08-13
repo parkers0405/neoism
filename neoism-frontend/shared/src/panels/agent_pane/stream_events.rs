@@ -698,7 +698,7 @@ pub fn classify_session_event(
         // discard that event while preserving real provider/runtime errors.
         "session.error" if is_session_interruption(properties) => Vec::new(),
         "session.error" => vec![SessionEventUpdate::System {
-            title: "Neoism Agent".to_string(),
+            title: "Neoism".to_string(),
             body: session_error_message(properties),
         }],
         _ => Vec::new(),
@@ -1404,7 +1404,7 @@ mod tests {
         assert_eq!(
             updates,
             vec![SessionEventUpdate::System {
-                title: "Neoism Agent".to_string(),
+                title: "Neoism".to_string(),
                 body: "provider exploded".to_string(),
             }]
         );

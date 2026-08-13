@@ -53,14 +53,32 @@ where
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum McpOAuthSetting {
     Disabled(bool),
     Config(McpOAuthConfig),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+impl<'de> Deserialize<'de> for McpOAuthSetting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Value::deserialize(deserializer)? {
+            Value::Bool(false) => Ok(Self::Disabled(false)),
+            Value::Bool(true) => Ok(Self::Config(McpOAuthConfig::default())),
+            Value::Object(value) => serde_json::from_value(Value::Object(value))
+                .map(Self::Config)
+                .map_err(serde::de::Error::custom),
+            value => Err(serde::de::Error::custom(format!(
+                "MCP OAuth must be a boolean or object, got {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpOAuthConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,6 +105,17 @@ pub enum McpStatus {
     Failed { error: String },
     NeedsAuth,
     NeedsClientRegistration { error: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCatalogEntry {
+    pub status: McpStatus,
+    pub enabled: bool,
+    pub runtime_connected: bool,
+    pub oauth_capable: bool,
+    pub has_credentials: bool,
+    pub config_writable: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -252,6 +281,14 @@ mod tests {
             config.mcp["remote-example"],
             McpConfig::Remote { .. }
         ));
+    }
+
+    #[test]
+    fn oauth_true_enables_default_discovery_config() {
+        let enabled: McpOAuthSetting = serde_json::from_value(json!(true)).unwrap();
+        let disabled: McpOAuthSetting = serde_json::from_value(json!(false)).unwrap();
+        assert!(matches!(enabled, McpOAuthSetting::Config(_)));
+        assert!(matches!(disabled, McpOAuthSetting::Disabled(false)));
     }
 
     #[test]

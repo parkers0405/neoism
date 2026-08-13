@@ -34,7 +34,11 @@ pub fn next_prompt_message_id() -> String {
         .unwrap_or_default()
         .as_millis() as u64;
     let sequence = NEXT_PROMPT_ID.fetch_add(1, Ordering::Relaxed);
-    format!("msg_{:012x}{:014x}", millis & 0x0000_ffff_ffff_ffff, sequence)
+    format!(
+        "msg_{:012x}{:014x}",
+        millis & 0x0000_ffff_ffff_ffff,
+        sequence
+    )
 }
 
 /// A single user-initiated request that needs IO to actually happen.
@@ -209,9 +213,32 @@ pub enum OutboundAgentCommand {
         directory: Option<String>,
     },
 
-    /// User asked for the workspace MCP server status. The host fetches
-    /// `/mcp` (optionally scoped to `directory`) and reports it.
-    ShowMcp {
+    /// Refresh the inline MCP picker from `GET /mcp`.
+    RefreshMcp {
+        directory: Option<String>,
+    },
+
+    /// Start OAuth for an MCP server via `POST /mcp/:name/auth`.
+    McpOauthAuthorize {
+        name: String,
+        directory: Option<String>,
+    },
+
+    McpSetEnabled {
+        name: String,
+        enabled: bool,
+        directory: Option<String>,
+    },
+    McpConnect {
+        name: String,
+        directory: Option<String>,
+    },
+    McpDisconnect {
+        name: String,
+        directory: Option<String>,
+    },
+    McpRemoveAuth {
+        name: String,
         directory: Option<String>,
     },
 
@@ -375,8 +402,12 @@ mod tests {
             thinking: Some("high".to_string()),
         };
         let _ = OutboundAgentCommand::ShowSkills { directory: None };
-        let _ = OutboundAgentCommand::ShowMcp {
+        let _ = OutboundAgentCommand::RefreshMcp {
             directory: Some("/tmp/project".to_string()),
+        };
+        let _ = OutboundAgentCommand::McpOauthAuthorize {
+            name: "webflow".to_string(),
+            directory: None,
         };
         let _ = OutboundAgentCommand::ShowPermissions {
             session_id: "sess-1".to_string(),

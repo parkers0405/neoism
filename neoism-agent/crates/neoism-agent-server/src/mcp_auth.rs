@@ -49,6 +49,8 @@ pub(crate) struct McpAuthEntry {
     pub(crate) oauth_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) oauth_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) oauth_redirect_uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) server_url: Option<String>,
 }
@@ -291,6 +293,7 @@ mod tests {
                     code_verifier: Some("verifier".to_string()),
                     oauth_state: Some("state".to_string()),
                     oauth_directory: Some("/tmp/project".to_string()),
+                    oauth_redirect_uri: None,
                     server_url: Some("https://example.com/mcp".to_string()),
                 },
             )
@@ -421,6 +424,7 @@ mod tests {
                     code_verifier: None,
                     oauth_state: None,
                     oauth_directory: None,
+                    oauth_redirect_uri: None,
                     server_url: Some("https://example.com/mcp".to_string()),
                 },
             )

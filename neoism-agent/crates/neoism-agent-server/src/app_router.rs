@@ -1,4 +1,4 @@
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer};
@@ -31,8 +31,8 @@ use crate::lsp_routes::{
 };
 use crate::mcp_routes::{
     mcp_add, mcp_auth_authenticate, mcp_auth_callback, mcp_auth_callback_get,
-    mcp_auth_remove, mcp_auth_start, mcp_connect, mcp_disconnect, mcp_prompts,
-    mcp_resources, mcp_status, mcp_tool_call, mcp_tools,
+    mcp_auth_remove, mcp_auth_start, mcp_catalog, mcp_config_patch, mcp_connect,
+    mcp_disconnect, mcp_prompts, mcp_resources, mcp_status, mcp_tool_call, mcp_tools,
 };
 use crate::openapi::openapi_doc;
 use crate::permission_runtime::session_permission_respond;
@@ -325,6 +325,7 @@ pub fn app(state: AppState) -> Router {
             post(session_permission_respond),
         )
         .route("/mcp", get(mcp_status).post(mcp_add))
+        .route("/mcp/catalog", get(mcp_catalog))
         .route(
             "/mcp/:name/auth",
             post(mcp_auth_start).delete(mcp_auth_remove),
@@ -336,6 +337,7 @@ pub fn app(state: AppState) -> Router {
         .route("/mcp/:name/auth/authenticate", post(mcp_auth_authenticate))
         .route("/mcp/:name/connect", post(mcp_connect))
         .route("/mcp/:name/disconnect", post(mcp_disconnect))
+        .route("/mcp/:name/config", patch(mcp_config_patch))
         .route("/mcp/:name/tools", get(mcp_tools))
         .route("/mcp/:name/tools/:tool_name", post(mcp_tool_call))
         .route("/mcp/:name/resources", get(mcp_resources))

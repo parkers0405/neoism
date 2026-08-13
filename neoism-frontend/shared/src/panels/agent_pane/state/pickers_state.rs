@@ -28,6 +28,53 @@ impl NeoismAgentPane {
         ));
     }
 
+    pub fn open_mcp_picker(&mut self) {
+        self.push_outbound(OutboundAgentCommand::RefreshMcp {
+            directory: self.directory.clone(),
+        });
+        let mut picker = NeoismAgentPicker::new(
+            NeoismAgentPickerKind::Mcp,
+            "MCP servers",
+            Vec::new(),
+            0,
+        );
+        picker.loading = true;
+        self.picker = Some(picker);
+    }
+
+    pub fn set_mcp_status(&mut self, status: Value) {
+        let options = mcp_options_from_status(&status);
+        if let Some(picker) = self
+            .picker
+            .as_mut()
+            .filter(|picker| picker.kind == NeoismAgentPickerKind::Mcp)
+        {
+            picker.loading = false;
+            picker.replace_options(options);
+        }
+    }
+
+    pub fn open_mcp_actions(&mut self, value: &str) {
+        let Ok(entry) = serde_json::from_str::<Value>(value) else {
+            return;
+        };
+        let name = entry.get("name").and_then(Value::as_str).unwrap_or("MCP");
+        self.picker = Some(NeoismAgentPicker::new(
+            NeoismAgentPickerKind::McpActions,
+            &format!("{name} actions"),
+            mcp_action_options(&entry),
+            0,
+        ));
+    }
+
+    pub fn apply_mcp_oauth_url(&mut self, name: String, url: String) {
+        let link = format!("[{url}]({url})");
+        self.system_message(
+            name,
+            format!("Authorize this MCP server in your browser:\n\n{link}"),
+        );
+    }
+
     pub fn open_thinking_picker(&mut self) {
         let mut options = vec![
             NeoismAgentPickerOption::new(
@@ -209,6 +256,10 @@ impl NeoismAgentPane {
                     self.close_connect();
                     return;
                 }
+                NeoismAgentPickerKind::McpActions => {
+                    self.open_mcp_picker();
+                    return;
+                }
                 _ => {}
             }
         }
@@ -257,7 +308,7 @@ impl NeoismAgentPane {
         if self.model.trim().is_empty() {
             return NeoismAgentPickerOption::new(
                 "server default",
-                "Use Neoism Agent default",
+                "Use Neoism default",
                 "selected",
                 "",
             );
@@ -308,7 +359,7 @@ impl NeoismAgentPane {
         if refreshing {
             return vec![NeoismAgentPickerOption::new(
                 "Loading sessions...",
-                "Fetching from Neoism Agent",
+                "Fetching from Neoism",
                 "loading",
                 "",
             )];
@@ -438,5 +489,243 @@ impl NeoismAgentPane {
 
     pub fn session_id_str(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+}
+
+pub fn mcp_options_from_status(status: &Value) -> Vec<NeoismAgentPickerOption> {
+    let Some(servers) = status.as_object() else {
+        return Vec::new();
+    };
+    servers
+        .iter()
+        .map(|(name, entry)| {
+            let state = entry.get("status").filter(|status| status.is_object()).unwrap_or(entry);
+            let oauth_capable = entry
+                .get("oauthCapable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let status = state
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("failed");
+            let error = state
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let (description, footer) = match status {
+                "connected" => ("Available to Neoism".to_string(), "connected"),
+                "disabled" if oauth_capable => (
+                    "Click to authenticate with OAuth".to_string(),
+                    "needs auth",
+                ),
+                "disabled" => ("Disabled in configuration".to_string(), "disabled"),
+                "needs_auth" => {
+                    ("Click to authenticate with OAuth".to_string(), "needs auth")
+                }
+                "needs_client_registration" => (
+                    if error.is_empty() {
+                        "Click to register and authenticate".to_string()
+                    } else {
+                        error.to_string()
+                    },
+                    "needs registration",
+                ),
+                "failed" if error == "MCP client runtime is not connected yet" && oauth_capable => {
+                    ("OAuth configured; click to authenticate again".to_string(), "ready")
+                }
+                "failed" if error == "MCP client runtime is not connected yet" => {
+                    ("Ready to connect".to_string(), "ready")
+                }
+                _ => (error.to_string(), "failed"),
+            };
+            let value = json!({
+                "name": name,
+                "enabled": entry.get("enabled").and_then(Value::as_bool).unwrap_or(status != "disabled"),
+                "connected": entry.get("runtimeConnected").and_then(Value::as_bool).unwrap_or(status == "connected"),
+                "oauthCapable": oauth_capable,
+                "hasCredentials": entry.get("hasCredentials").and_then(Value::as_bool).unwrap_or(false),
+                "configWritable": entry.get("configWritable").and_then(Value::as_bool).unwrap_or(true),
+            });
+            NeoismAgentPickerOption::new(name, &description, footer, &value.to_string())
+        })
+        .collect()
+}
+
+pub fn mcp_action_options(entry: &Value) -> Vec<NeoismAgentPickerOption> {
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let enabled = entry
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let connected = entry
+        .get("connected")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let oauth = entry
+        .get("oauthCapable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let credentials = entry
+        .get("hasCredentials")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let writable = entry
+        .get("configWritable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let action = |title: &str, description: &str, footer: &str, action: &str| {
+        NeoismAgentPickerOption::new(
+            title,
+            description,
+            footer,
+            &json!({ "name": name, "action": action }).to_string(),
+        )
+    };
+    let mut options = Vec::new();
+    if writable {
+        options.push(if enabled {
+            action(
+                "Disable",
+                "Persist enabled: false and stop the runtime",
+                "config",
+                "disable",
+            )
+        } else {
+            action(
+                "Enable",
+                "Persist enabled: true in the owning config",
+                "config",
+                "enable",
+            )
+        });
+    }
+    if enabled {
+        options.push(if connected {
+            action(
+                "Disconnect",
+                "Stop this MCP runtime without disabling it",
+                "runtime",
+                "disconnect",
+            )
+        } else if oauth && !credentials {
+            action(
+                "Connect",
+                "Authenticate with OAuth and connect this MCP",
+                "OAuth",
+                "authenticate",
+            )
+        } else {
+            action(
+                "Connect",
+                "Start this MCP runtime now",
+                "runtime",
+                "connect",
+            )
+        });
+    }
+    if oauth && credentials {
+        options.push(action(
+            "Reauthenticate",
+            "Open the MCP OAuth flow again",
+            "OAuth",
+            "authenticate",
+        ));
+    }
+    if credentials {
+        options.push(action(
+            "Log out",
+            "Remove saved OAuth credentials",
+            "OAuth",
+            "logout",
+        ));
+    }
+    options
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+
+    #[test]
+    fn maps_mcp_statuses_to_actionable_picker_rows() {
+        let rows = mcp_options_from_status(&json!({
+            "connected": { "status": { "status": "connected" }, "oauthCapable": false },
+            "oauth": { "status": { "status": "needs_auth" }, "oauthCapable": true },
+            "registration": { "status": { "status": "needs_client_registration", "error": "register" }, "oauthCapable": true },
+            "broken": { "status": { "status": "failed", "error": "boom" }, "oauthCapable": false },
+            "off": { "status": { "status": "disabled" }, "oauthCapable": false },
+            "disabled_oauth": { "status": { "status": "disabled" }, "oauthCapable": true }
+        }));
+        let row = |name: &str| rows.iter().find(|row| row.title == name).unwrap();
+        assert_eq!(row("connected").footer, "connected");
+        assert_eq!(row("oauth").footer, "needs auth");
+        assert_eq!(row("registration").footer, "needs registration");
+        assert_eq!(row("broken").footer, "failed");
+        assert_eq!(row("off").footer, "disabled");
+        assert_eq!(row("disabled_oauth").footer, "needs auth");
+    }
+
+    #[test]
+    fn mcp_picker_opens_actions_then_runs_selected_action() {
+        let mut pane = NeoismAgentPane::default();
+        pane.directory = Some("/tmp/project".to_string());
+        pane.picker = Some(NeoismAgentPicker::new(
+            NeoismAgentPickerKind::Mcp,
+            "MCP servers",
+            vec![NeoismAgentPickerOption::new(
+                "webflow",
+                "Click to authenticate with OAuth",
+                "needs auth",
+                &json!({
+                    "name": "webflow",
+                    "enabled": false,
+                    "connected": false,
+                    "oauthCapable": true,
+                    "hasCredentials": false,
+                    "configWritable": true
+                })
+                .to_string(),
+            )],
+            0,
+        ));
+        assert!(pane.commit_picker());
+        assert_eq!(
+            pane.picker.as_ref().map(|picker| picker.kind),
+            Some(NeoismAgentPickerKind::McpActions)
+        );
+        let actions = pane.picker.as_ref().unwrap().options();
+        assert_eq!(
+            actions
+                .iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Enable"]
+        );
+        assert!(pane.commit_picker());
+        let commands = pane.drain_pending_outbound();
+        assert!(matches!(
+            commands.as_slice(),
+            [OutboundAgentCommand::McpSetEnabled { name, enabled: true, directory }]
+                if name == "webflow" && directory.as_deref() == Some("/tmp/project")
+        ));
+    }
+
+    #[test]
+    fn oauth_connect_starts_authentication_until_credentials_exist() {
+        let actions = mcp_action_options(&json!({
+            "name": "webflow",
+            "enabled": true,
+            "connected": false,
+            "oauthCapable": true,
+            "hasCredentials": false,
+            "configWritable": true
+        }));
+        let connect = actions.iter().find(|row| row.title == "Connect").unwrap();
+        let value: Value = serde_json::from_str(&connect.value).unwrap();
+        assert_eq!(value["action"], "authenticate");
+        assert_eq!(connect.footer, "OAuth");
     }
 }

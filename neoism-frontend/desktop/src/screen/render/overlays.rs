@@ -104,6 +104,7 @@ impl Screen<'_> {
             .as_ref()
             .and_then(|agent| agent.cursor_rect())
             .is_some();
+        let agent_surface_active = self.context_manager.current().neoism_agent.is_some();
         let markdown_cursor_available = self
             .context_manager
             .current()
@@ -166,6 +167,7 @@ impl Screen<'_> {
             git_diff_panel_focused: self.renderer.git_diff_panel.is_focused(),
             search_active: self.renderer.search.is_active(),
             modal_owns_editor_focus: self.renderer.modal.owns_editor_focus(),
+            agent_surface_active,
             agent_input_cursor_available,
             markdown_cursor_available,
             code_cursor_available,

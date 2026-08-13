@@ -332,20 +332,28 @@ impl NeoismAgentPane {
         };
         self.active_subagent_ids.clear();
         self.active_subagent_started_at.clear();
-        if let Some(status) = statuses.get(session_id) {
+        let active_status = statuses
+            .get(session_id)
+            .filter(|status| matches!(status.kind.as_str(), "busy" | "retry"));
+        if let Some(status) = active_status {
             self.queued_prompt_count = status.queue_count;
             self.queued_prompt_preview = status.preview.clone();
-            if matches!(status.kind.as_str(), "busy" | "retry") {
-                self.refresh_streaming_from_tail();
-                if !self.is_streaming() {
-                    self.note_streaming(NeoismAgentStreamingState::Thinking, None);
-                }
-                if let Some(started_at) = status.started_at {
-                    let started = instant_from_epoch_millis(started_at);
-                    self.streaming_started_at = Some(started);
-                    self.streaming_state_changed_at = Some(started);
-                }
+            self.refresh_streaming_from_tail();
+            if !self.is_streaming() {
+                self.note_streaming(NeoismAgentStreamingState::Thinking, None);
             }
+            if let Some(started_at) = status.started_at {
+                let started = instant_from_epoch_millis(started_at);
+                self.streaming_started_at = Some(started);
+                self.streaming_state_changed_at = Some(started);
+            }
+        } else {
+            // Runtime status is authoritative. Idle sessions are omitted from
+            // the map, so explicitly settle any optimistic activity retained
+            // across a dropped event stream or history refresh.
+            self.queued_prompt_count = 0;
+            self.queued_prompt_preview = None;
+            self.note_streaming(NeoismAgentStreamingState::Idle, None);
         }
 
         for entry in self.side_panel.subagents().to_vec() {
@@ -649,12 +657,20 @@ impl NeoismAgentPane {
 
     pub(crate) fn sync_subagent_waiting_clock(&mut self) {
         if self.active_subagent_count() > 0 {
-            self.subagent_waiting_started_at = self
-                .side_panel
-                .active_child_started_at(self.session_id.as_deref())
-                .map(instant_from_epoch_millis)
-                .or(self.subagent_waiting_started_at)
-                .or_else(|| Some(Instant::now()));
+            // This clock represents the *displayed waiting state*, not the
+            // latest child part/tool. Part updates carry newer `started_at`
+            // values, so replacing the clock on every refresh restarts both
+            // the elapsed timer and the label animation while the same child
+            // is still running. Latch it until the active-child count reaches
+            // zero; a genuinely new waiting period will then start fresh.
+            if self.subagent_waiting_started_at.is_none() {
+                self.subagent_waiting_started_at = Some(
+                    self.side_panel
+                        .active_child_started_at(self.session_id.as_deref())
+                        .map(instant_from_epoch_millis)
+                        .unwrap_or_else(Instant::now),
+                );
+            }
         } else {
             self.subagent_waiting_started_at = None;
         }
@@ -667,6 +683,39 @@ impl NeoismAgentPane {
     pub(crate) fn suppress_streaming_after_abort(&self) -> bool {
         self.abort_requested_at
             .is_some_and(|requested| requested.elapsed() <= ABORT_STREAM_SUPPRESSION)
+    }
+
+    /// Settle the local activity label when the conversation currently being
+    /// viewed is the child whose authoritative lifecycle just terminated.
+    /// Parent sessions finish through `SessionIdle`; viewed children finish
+    /// through `SubagentStatus` / `SubagentCompleted` on the root stream.
+    pub(crate) fn reconcile_viewed_subagent_runtime(
+        &mut self,
+        session_id: &str,
+        status: BranchStatus,
+    ) -> bool {
+        if self.session_id.as_deref() != Some(session_id)
+            || !matches!(status, BranchStatus::Completed | BranchStatus::Stopped)
+        {
+            return false;
+        }
+        let had_activity = self.streaming_state != NeoismAgentStreamingState::Idle
+            || self.streaming_started_at.is_some()
+            || self.streaming_state_changed_at.is_some()
+            || self.streaming_tool_label.is_some();
+        self.note_streaming(NeoismAgentStreamingState::Idle, None);
+        self.abort_requested_at = None;
+        had_activity
+    }
+
+    /// A terminal child lifecycle is latched in the side panel. Continue to
+    /// ingest any late transcript part, but do not let it resurrect the viewed
+    /// child's Crafting/Tinkering label after completion.
+    pub(crate) fn child_part_can_drive_streaming(&self, session_id: &str) -> bool {
+        !self
+            .side_panel
+            .branch_activity(session_id)
+            .is_some_and(|activity| activity.terminal_locked)
     }
 
     pub(crate) fn refresh_streaming_from_tail(&mut self) {

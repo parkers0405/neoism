@@ -542,7 +542,7 @@ fn append_estimated_rows<P>(
 /// Cheap off-screen height estimate. Deliberately conservative (under-counts
 /// rich content like code/diffs/images) so the exact region only ever grows —
 /// visible rows are always exactly measured; this feeds the scrollbar only.
-fn estimate_message_height<M>(message: &M, width: f32, s: f32) -> f32
+pub(super) fn estimate_message_height<M>(message: &M, width: f32, s: f32) -> f32
 where
     M: AgentTimelineMessage,
 {
@@ -550,15 +550,28 @@ where
         return 48.0 * s;
     }
     let text = message.text();
+    if message.kind() == AgentTimelineMessageKind::User {
+        // `render_user_message` and exact card measurement deliberately cap
+        // prompts at six lines. The old lazy estimate counted the complete
+        // underlying paste, so an estimated user row could be a viewport tall
+        // while its bubble drew only six lines, producing a giant empty area.
+        let chars_per_line = ((width / (7.0 * s)) as usize).max(24);
+        let lines = text
+            .split('\n')
+            .map(|line| line.chars().count().div_ceil(chars_per_line).max(1))
+            .sum::<usize>()
+            .clamp(1, USER_MESSAGE_MAX_LINES);
+        let image_h = if message.images().is_empty() {
+            0.0
+        } else {
+            164.0 * s
+        };
+        return 24.0 * s + image_h + lines as f32 * 19.0 * s;
+    }
     let base = 34.0 * s;
     if text.trim().is_empty() {
-        // Mirror the eager path, which skips empty text-kinds (0 height) but
-        // still renders an (empty) user row.
-        return if message.kind() == AgentTimelineMessageKind::User {
-            base
-        } else {
-            0.0
-        };
+        // Mirror the eager path, which skips empty non-user text kinds.
+        return 0.0;
     }
     let line_h = 20.0 * s;
     let chars_per_line = ((width / (7.0 * s)) as usize).max(24);

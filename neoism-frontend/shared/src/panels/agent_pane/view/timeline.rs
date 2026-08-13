@@ -22,7 +22,7 @@ use super::user_input::{
     render_streaming_status_row, streaming_status_line_count,
     streaming_status_primary_line_count,
 };
-use super::{DEPTH, ORDER_CARET, STREAMING_STATUS_LINE_H};
+use super::{DEPTH, ORDER_CARET, STREAMING_STATUS_LINE_H, USER_MESSAGE_MAX_LINES};
 use crate::primitives::ide_theme::IdeTheme;
 use crate::widgets::scrollbar;
 

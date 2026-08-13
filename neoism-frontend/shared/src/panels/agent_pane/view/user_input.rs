@@ -3,18 +3,19 @@ use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::input_controller::{visual_row_index, InputWrapRow};
 use crate::panels::agent_pane::state::{
-    NeoismAgentImage, NeoismAgentPane, NeoismAgentPendingPermission, NeoismAgentPermissionChoice,
-    NeoismAgentStreamingState,
+    NeoismAgentImage, NeoismAgentPane, NeoismAgentPendingPermission,
+    NeoismAgentPermissionChoice, NeoismAgentStreamingState,
 };
 
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped, opts_with_clip,
     wrap_text,
 };
+use super::markdown::AgentMarkdownPane;
 use super::wordmark::{format_elapsed, hsl_to_u8_simple};
 use super::{
     DEPTH, INPUT_HELP_STRIP_H, INPUT_LINE_H, MAX_INPUT_LINES, ORDER_CARET, ORDER_PANEL,
-    ORDER_TEXT, STREAMING_STATUS_LINE_H,
+    ORDER_TEXT, STREAMING_STATUS_LINE_H, USER_MESSAGE_MAX_LINES,
 };
 use crate::panels::file_tree::FRAME_STROKE;
 use crate::primitives::ide_theme::IdeTheme;
@@ -573,8 +574,9 @@ pub fn user_message_orb_identity(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render_user_message(
+pub fn render_user_message<P: AgentMarkdownPane>(
     sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
     x: f32,
     y: f32,
     w: f32,
@@ -657,7 +659,36 @@ pub fn render_user_message(
         );
         line_y += 164.0 * s;
     }
-    for line in wrap_text(sugarloaf, text, text_w, &opts, 6) {
+    let suppress_interactions = pane.suppress_markdown_interactions();
+    for line in wrap_text(sugarloaf, text, text_w, &opts, USER_MESSAGE_MAX_LINES) {
+        if !suppress_interactions {
+            // User bubbles belong to the same transcript selection surface as
+            // assistant Markdown and tool output. Previously these rows were
+            // only painted, so a downward drag commonly appeared to stop as
+            // soon as it crossed the next user prompt.
+            let line_w = sugarloaf.text_mut().measure(&line, &opts).max(12.0);
+            let line_index = pane.register_selectable_line(
+                &line,
+                [text_x, line_y - 3.0 * s, line_w, opts.font_size + 8.0 * s],
+            );
+            if let Some((sel_left, sel_right)) =
+                pane.selectable_line_highlight(line_index)
+            {
+                draw_rounded_rect_clipped(
+                    sugarloaf,
+                    [
+                        sel_left - 2.0,
+                        line_y - 3.0 * s,
+                        (sel_right - sel_left + 4.0).max(2.0),
+                        opts.font_size + 8.0 * s,
+                    ],
+                    theme.f32_alpha(theme.accent, 0.22),
+                    4.0,
+                    ORDER_PANEL + 2,
+                    viewport_clip,
+                );
+            }
+        }
         draw_agent_prompt_text(
             sugarloaf,
             text_x,

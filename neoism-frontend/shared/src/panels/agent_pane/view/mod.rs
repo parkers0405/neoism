@@ -46,6 +46,10 @@ pub(super) const HOME_INPUT_MIN_H: f32 = 106.0;
 pub(super) const CHAT_INPUT_MIN_H: f32 = 98.0;
 pub(super) const INPUT_LINE_H: f32 = 22.0;
 pub(super) const MAX_INPUT_LINES: usize = 5;
+/// User bubbles intentionally show a compact prompt preview. Measurement,
+/// rendering, and the lazy timeline estimator must all share this cap or a
+/// large pasted prompt reserves a tall blank row beneath its visible lines.
+pub(super) const USER_MESSAGE_MAX_LINES: usize = 6;
 /// Help/status strip painted immediately below the composer island.
 /// Chat layout reserves this much bottom space so the strip never gets
 /// clipped by the pane edge.

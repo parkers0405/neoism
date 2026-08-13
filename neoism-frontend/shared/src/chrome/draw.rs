@@ -512,6 +512,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 || self.git_diff_panel.is_focused(),
             search_active: self.search_overlay.is_active(),
             modal_owns_editor_focus: false,
+            agent_surface_active: agent_tab_active,
             agent_input_cursor_available,
             markdown_cursor_available,
             // Web has no native code pane yet; the desktop feeds this.

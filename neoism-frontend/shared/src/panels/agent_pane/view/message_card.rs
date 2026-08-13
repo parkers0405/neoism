@@ -27,7 +27,7 @@ use super::tool_message::{
     TODO_ROW_HEIGHT,
 };
 use super::user_input::{render_user_message, user_message_orb_identity};
-use super::{ORDER_PANEL, ORDER_TEXT};
+use super::{ORDER_PANEL, ORDER_TEXT, USER_MESSAGE_MAX_LINES};
 use crate::primitives::ide_theme::IdeTheme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +165,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn render_user_message(
         sugarloaf: &mut Sugarloaf,
+        pane: &mut P,
         x: f32,
         y: f32,
         w: f32,
@@ -181,6 +182,7 @@ where
     ) -> f32 {
         render_user_message(
             sugarloaf,
+            pane,
             x,
             y,
             w,
@@ -422,6 +424,44 @@ impl AgentMessageCardDelegate<NeoismAgentPane, NeoismAgentMessage>
 }
 
 #[allow(clippy::too_many_arguments)]
+fn draw_selectable_plain_line<P: AgentMarkdownPane>(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
+    x: f32,
+    y: f32,
+    text: &str,
+    opts: &DrawOpts,
+    theme: &IdeTheme,
+    s: f32,
+    viewport_clip: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+) {
+    if !pane.suppress_markdown_interactions() {
+        let line_w = sugarloaf.text_mut().measure(text, opts).max(12.0);
+        let line_index = pane.register_selectable_line(
+            text,
+            [x, y - 3.0 * s, line_w, opts.font_size + 8.0 * s],
+        );
+        if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(line_index) {
+            draw_rounded_rect_clipped(
+                sugarloaf,
+                [
+                    sel_left - 2.0,
+                    y - 3.0 * s,
+                    (sel_right - sel_left + 4.0).max(2.0),
+                    opts.font_size + 8.0 * s,
+                ],
+                theme.f32_alpha(theme.accent, 0.22),
+                4.0,
+                ORDER_PANEL + 2,
+                viewport_clip,
+            );
+        }
+    }
+    draw_text_clipped(sugarloaf, x, y, text, opts, occlusion_rects);
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_message_card(
     sugarloaf: &mut Sugarloaf,
     x: f32,
@@ -521,12 +561,16 @@ where
             8,
         );
         for (index, line) in lines.iter().enumerate() {
-            draw_text_clipped(
+            draw_selectable_plain_line(
                 sugarloaf,
+                pane,
                 x + 18.0 * s,
                 y + 2.0 * s + index as f32 * 19.0 * s,
                 line,
                 &notice_opts,
+                theme,
+                s,
+                viewport_clip,
                 occlusion_rects,
             );
         }
@@ -570,6 +614,7 @@ where
             );
             return D::render_user_message(
                 sugarloaf,
+                pane,
                 x,
                 y,
                 w,
@@ -792,12 +837,16 @@ where
             &body_opts,
             8,
         ) {
-            draw_text_clipped(
+            draw_selectable_plain_line(
                 sugarloaf,
+                pane,
                 body_x,
                 line_y,
                 &line,
                 &body_opts,
+                theme,
+                s,
+                viewport_clip,
                 occlusion_rects,
             );
             line_y += 20.0 * s;
@@ -906,9 +955,13 @@ where
                 &display_text,
                 (width - 56.0 * s).max(80.0 * s),
                 &user_opts,
-                6,
+                USER_MESSAGE_MAX_LINES,
             );
-            let image_h = if message.images().is_empty() { 0.0 } else { 164.0 * s };
+            let image_h = if message.images().is_empty() {
+                0.0
+            } else {
+                164.0 * s
+            };
             24.0 * s + image_h + lines.len().max(1) as f32 * 19.0 * s
         }
         AgentMessageCardKind::Tool
@@ -1032,16 +1085,11 @@ fn user_message_display_text(text: &str, images: &[NeoismAgentImage]) -> String 
         };
         let end = start + relative_end + 1;
         let label = display[start + 1..end - 1].trim().to_ascii_lowercase();
-        let attachment_anchor = label
-            .strip_prefix("image")
-            .is_some_and(|suffix| {
-                suffix.is_empty()
-                    || suffix.starts_with(':')
-                    || suffix
-                        .chars()
-                        .next()
-                        .is_some_and(|ch| ch.is_ascii_digit())
-            });
+        let attachment_anchor = label.strip_prefix("image").is_some_and(|suffix| {
+            suffix.is_empty()
+                || suffix.starts_with(':')
+                || suffix.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        });
         if attachment_anchor {
             display.replace_range(start..end, "");
         } else {

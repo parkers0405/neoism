@@ -45,6 +45,43 @@ fn idle_clears_status_but_keeps_trace_until_session_reset() {
 }
 
 #[test]
+fn viewed_subagent_terminal_status_clears_and_latches_activity() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child-1".to_string());
+    pane.parent_session_id = Some("parent".to_string());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
+
+    assert!(pane.reconcile_viewed_subagent_runtime("child-1", BranchStatus::Completed));
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert!(!pane.child_part_can_drive_streaming("child-1"));
+}
+
+#[test]
+fn active_subagent_part_updates_do_not_restart_waiting_clock() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel
+        .set_subagents(vec![NeoismAgentSessionEntry::new(
+            "child-1", "child", "explore",
+        )
+        .with_runtime_status(Some("running".to_string()))]);
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
+    pane.sync_subagent_waiting_clock();
+    let original = pane.subagent_waiting_started_at;
+
+    assert!(pane.note_subagent_part_activity(
+        "child-1".to_string(),
+        BranchStatus::Active,
+        Some("read".to_string()),
+        Some(1),
+    ));
+    pane.sync_subagent_waiting_clock();
+
+    assert_eq!(pane.subagent_waiting_started_at, original);
+}
+
+#[test]
 fn retry_status_includes_a_compact_provider_reason() {
     let mut pane = NeoismAgentPane::default();
     pane.note_streaming(
@@ -1293,6 +1330,38 @@ fn streamed_final_part_inserts_after_existing_reasoning() {
     assert_eq!(pane.messages[0].kind, NeoismAgentMessageKind::Reasoning);
     assert_eq!(pane.messages[1].kind, NeoismAgentMessageKind::Assistant);
     assert_eq!(pane.messages[1].text, "final");
+}
+
+#[test]
+fn delayed_reasoning_end_uses_its_assistant_message_group_order() {
+    let mut pane = NeoismAgentPane::default();
+    pane.remember_live_part_parent("text-1", Some("assistant-message-1"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("final answer").with_id("text-1"),
+    );
+    pane.upsert_part_message(
+        NeoismAgentMessage::tool(
+            "Bash(echo ok)",
+            "",
+            "completed",
+            "bash",
+            NeoismAgentOutputKind::Text,
+            "",
+            Vec::new(),
+        )
+        .with_id("tool-1"),
+    );
+    pane.remember_live_part_parent("tool-1", Some("assistant-message-1"));
+    pane.remember_live_part_parent("reason-1", Some("assistant-message-1"));
+
+    pane.upsert_part_message(
+        NeoismAgentMessage::reasoning("Clarifying task ID reuse and results")
+            .with_id("reason-1"),
+    );
+
+    assert_eq!(pane.messages[0].id, "tool-1");
+    assert_eq!(pane.messages[1].id, "reason-1");
+    assert_eq!(pane.messages[2].id, "text-1");
 }
 
 #[test]

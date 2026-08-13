@@ -340,12 +340,19 @@ impl NeoismAgentPane {
 
     pub(in crate::panels::agent_pane::state) fn sync_subagent_waiting_clock(&mut self) {
         if self.active_subagent_count() > 0 {
-            self.subagent_waiting_started_at = self
-                .side_panel
-                .active_child_started_at(self.session_id.as_deref())
-                .map(instant_from_epoch_millis)
-                .or(self.subagent_waiting_started_at)
-                .or_else(|| Some(Instant::now()));
+            // Keep one clock for one continuous "sub-agents working" state.
+            // Child part/tool updates have their own newer `started_at`
+            // values; adopting each one made the aggregate timer and label
+            // animation visibly restart even though no state transition had
+            // occurred.
+            if self.subagent_waiting_started_at.is_none() {
+                self.subagent_waiting_started_at = Some(
+                    self.side_panel
+                        .active_child_started_at(self.session_id.as_deref())
+                        .map(instant_from_epoch_millis)
+                        .unwrap_or_else(Instant::now),
+                );
+            }
         } else {
             self.subagent_waiting_started_at = None;
         }

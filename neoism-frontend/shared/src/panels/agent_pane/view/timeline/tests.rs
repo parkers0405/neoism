@@ -1,7 +1,8 @@
 use super::layout::{
-    from_state_cache, into_state_cache, prepared_message_tool_diff_sections,
-    timeline_message_visibility, timeline_row_range_for_source_range,
-    timeline_row_range_intersects_viewport, visible_timeline_row_range,
+    estimate_message_height, from_state_cache, into_state_cache,
+    prepared_message_tool_diff_sections, timeline_message_visibility,
+    timeline_row_range_for_source_range, timeline_row_range_intersects_viewport,
+    visible_timeline_row_range,
 };
 use super::read_group::read_tool_group_at;
 
@@ -56,6 +57,17 @@ fn text_message(
         author: None,
         images: Vec::new(),
     }
+}
+
+#[test]
+fn lazy_user_height_obeys_the_rendered_six_line_cap() {
+    let long_paste = (0..200)
+        .map(|index| format!("command line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message = text_message("user", NeoismAgentMessageKind::User, &long_paste);
+
+    assert_eq!(estimate_message_height(&message, 900.0, 1.0), 138.0);
 }
 
 #[test]

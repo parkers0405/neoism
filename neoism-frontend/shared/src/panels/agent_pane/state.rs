@@ -506,7 +506,10 @@ impl NeoismAgentPane {
             .iter()
             .filter_map(|attachment| match attachment {
                 NeoismAgentInputAttachment::File {
-                    filename, url, mime, ..
+                    filename,
+                    url,
+                    mime,
+                    ..
                 } if mime.starts_with("image/") => Some(NeoismAgentImage {
                     filename: filename.clone(),
                     url: url.clone(),
@@ -1363,9 +1366,9 @@ impl NeoismAgentPane {
 
     /// Record a session-idle transition. Mirrors `SessionIdle`.
     pub fn note_session_idle(&mut self) {
-        if self.is_streaming() {
-            self.note_streaming(NeoismAgentStreamingState::Idle, None);
-        }
+        // Clear unconditionally: an interrupted/reconnected stream can retain
+        // a non-idle enum even when its local start clock was never restored.
+        self.note_streaming(NeoismAgentStreamingState::Idle, None);
         self.abort_requested_at = None;
     }
 
@@ -1440,6 +1443,14 @@ impl NeoismAgentPane {
             started_at,
         );
         self.note_subagent_runtime(session_id.clone(), status, started_at);
+        if self.session_id.as_deref() == Some(session_id.as_str())
+            && matches!(status, BranchStatus::Completed | BranchStatus::Stopped)
+        {
+            // The root conversation receives `SessionIdle`; a viewed child
+            // instead terminates through its SubagentUpdate lifecycle.
+            self.note_streaming(NeoismAgentStreamingState::Idle, None);
+            self.abort_requested_at = None;
+        }
         if matches!(
             status,
             BranchStatus::Active | BranchStatus::WaitingPermission

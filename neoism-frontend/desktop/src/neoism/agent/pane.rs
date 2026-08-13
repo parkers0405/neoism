@@ -686,6 +686,10 @@ pub struct NeoismAgentPane {
     timeline_layout_cache: RefCell<Option<TimelineLayoutCache>>,
     timeline_dirty_message_ids: BTreeSet<String>,
     timeline_dirty_message_indices: BTreeSet<usize>,
+    /// Live SSE parts are flattened into timeline rows, but the provider
+    /// groups them under an assistant message. Preserve that relationship so
+    /// a delayed reasoning-end event can use the same order as final history.
+    live_part_parent_ids: HashMap<String, String>,
     /// First source row whose trace was observed live during this visit to the
     /// session. It is cleared on session navigation, never persisted.
     timeline_live_trace_start: Option<usize>,
@@ -890,6 +894,7 @@ impl Default for NeoismAgentPane {
             timeline_layout_cache: RefCell::new(None),
             timeline_dirty_message_ids: BTreeSet::new(),
             timeline_dirty_message_indices: BTreeSet::new(),
+            live_part_parent_ids: HashMap::new(),
             timeline_live_trace_start: None,
             timeline_live_trace_anchor: None,
             timeline_history: AgentTimelineHistoryState::default(),

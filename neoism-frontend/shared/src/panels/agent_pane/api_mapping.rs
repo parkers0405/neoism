@@ -1209,6 +1209,35 @@ mod tests {
     }
 
     #[test]
+    fn slash_heavy_multiline_bash_command_stays_a_bounded_title_preview() {
+        let command = concat!(
+            "f=/tmp/neoism-donkey-116-lab/plugins/",
+            "NeoismDonkeyDisconnectDupeIntegrationHarness/integration-result.txt\n",
+            "if test -f \"$f\" && grep -q occupied-refusal \"$f\"; then cat \"$f\"; fi"
+        );
+        let state = json!({ "input": { "command": command } });
+
+        let title = tool_title("bash", &state);
+
+        assert_eq!(
+            title,
+            format!(
+                "Bash({})",
+                truncate_line(command, TOOL_TITLE_TARGET_MAX_CHARS)
+            )
+        );
+        assert!(!title.contains('\n'));
+        assert!(!title.starts_with("Bash(NeoismDonkeyDisconnectDupeIntegrationHarness/"));
+    }
+
+    #[test]
+    fn tool_filesystem_targets_still_use_compact_paths() {
+        let state = json!({ "input": { "path": "/repo/src/panels/agent.rs" } });
+
+        assert_eq!(tool_title("read", &state), "Read(panels/agent.rs)");
+    }
+
+    #[test]
     fn assistant_reasoning_parts_render_before_final_text_on_refresh() {
         let message = json!({
             "info": { "id": "msg-reasoning", "role": "assistant" },
@@ -1616,6 +1645,8 @@ fn format_cost_micros(micros: u64) -> String {
     }
 }
 
+const TOOL_TITLE_TARGET_MAX_CHARS: usize = 96;
+
 fn tool_title(tool: &str, state: &Value) -> String {
     let name = tool_name(tool);
     let input = state.get("input").unwrap_or(&Value::Null);
@@ -1623,12 +1654,34 @@ fn tool_title(tool: &str, state: &Value) -> String {
         .get("path")
         .or_else(|| input.get("filePath"))
         .or_else(|| input.get("file_path"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    if let Some(path) = path {
+        return format!(
+            "{name}({})",
+            truncate_line(&short_path(path), TOOL_TITLE_TARGET_MAX_CHARS)
+        );
+    }
+
+    // A shell command is not a filesystem path. Passing it through
+    // `short_path` made every slash a path separator and retained an enormous
+    // tail after the final two slashes. Multiline commands could consequently
+    // consume the four-row title cap and make the body look vertically cut
+    // off. Keep the useful OpenCode-style `Bash(command)` label, but normalize
+    // it to a bounded single-line preview.
+    let inline_target = input
+        .get("command")
         .or_else(|| input.get("pattern"))
-        .or_else(|| input.get("command"))
         .or_else(|| input.get("q"))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
-    path.map(|path| format!("{name}({})", short_path(path)))
+    inline_target
+        .map(|target| {
+            format!(
+                "{name}({})",
+                truncate_line(target, TOOL_TITLE_TARGET_MAX_CHARS)
+            )
+        })
         .unwrap_or(name)
 }
 

@@ -13,7 +13,8 @@ use neoism_ui::panels::agent_pane::stream_events::{
 };
 
 use super::api::{
-    fetch_session_messages_page, open_event_stream, part_block, EventStreamConnection,
+    fetch_session_messages_page, fetch_session_statuses, open_event_stream, part_block,
+    EventStreamConnection,
 };
 use super::pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentPendingPermission,
@@ -35,7 +36,10 @@ pub(super) enum AgentSessionUpdate {
         kind: Option<String>,
         delta: String,
     },
-    PartUpdated(NeoismAgentMessage),
+    PartUpdated {
+        message: NeoismAgentMessage,
+        parent_message_id: Option<String>,
+    },
     PartRemoved(String),
     ChildPartDelta {
         session_id: String,
@@ -47,6 +51,7 @@ pub(super) enum AgentSessionUpdate {
     ChildPartUpdated {
         session_id: String,
         message: NeoismAgentMessage,
+        parent_message_id: Option<String>,
     },
     ChildPartRemoved {
         session_id: String,
@@ -215,6 +220,22 @@ fn run_event_stream(
                     // events cannot slip between reconnect and reconciliation.
                     match fetch_session_messages_page(&server, &session_id, None, 80) {
                         Ok(page) => {
+                            // An idle session is absent from `/session/status`. Recover
+                            // the terminal signal as well as its transcript after a
+                            // reconnect; otherwise a dropped final `session.status`
+                            // event can leave Crafting/Tinkering painted forever.
+                            let session_is_idle = fetch_session_statuses(&server)
+                                .ok()
+                                .is_some_and(|statuses| {
+                                    statuses.get(&session_id).is_none_or(|status| {
+                                        !matches!(status.kind.as_str(), "busy" | "retry")
+                                    })
+                                });
+                            if session_is_idle
+                                && tx.send(AgentSessionUpdate::SessionIdle).is_err()
+                            {
+                                return;
+                            }
                             if tx
                                 .send(AgentSessionUpdate::Messages {
                                     messages: page.blocks,
@@ -372,11 +393,17 @@ fn send_event_updates(
                     if let Ok(page) =
                         fetch_session_messages_page(server, session_id, None, 80)
                     {
+                        // Settle the activity chrome before exposing the completed
+                        // response snapshot. Sending these in the opposite order
+                        // allowed one rendered frame with a final-response footer
+                        // and the previous Crafting/Tinkering label simultaneously.
+                        tx.send(AgentSessionUpdate::SessionIdle)?;
                         tx.send(AgentSessionUpdate::Messages {
                             messages: page.blocks,
                             oldest_cursor: page.oldest_cursor,
                         })?;
                         state.mark_idle_messages_refreshed();
+                        continue;
                     }
                 }
                 tx.send(AgentSessionUpdate::SessionIdle)?;
@@ -394,7 +421,10 @@ fn send_event_updates(
             })?,
             SessionEventUpdate::PartUpdated(part) => {
                 if let Some(message) = part_block(&part) {
-                    tx.send(AgentSessionUpdate::PartUpdated(message))?;
+                    tx.send(AgentSessionUpdate::PartUpdated {
+                        message,
+                        parent_message_id: part_parent_message_id(&part),
+                    })?;
                 }
             }
             SessionEventUpdate::PartRemoved(part_id) => {
@@ -418,6 +448,7 @@ fn send_event_updates(
                     tx.send(AgentSessionUpdate::ChildPartUpdated {
                         session_id,
                         message,
+                        parent_message_id: part_parent_message_id(&part),
                     })?;
                 }
             }
@@ -535,6 +566,15 @@ fn send_event_updates(
         }
     }
     Ok(())
+}
+
+fn part_parent_message_id(part: &Value) -> Option<String> {
+    part.get("messageID")
+        .or_else(|| part.get("messageId"))
+        .or_else(|| part.get("message_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn with_compaction_usage(

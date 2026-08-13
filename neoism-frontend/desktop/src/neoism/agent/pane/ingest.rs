@@ -124,12 +124,15 @@ impl NeoismAgentPane {
                     // history refreshes as completion.
                 }
                 AgentSessionUpdate::SessionIdle => {
-                    if stream_is_active && self.is_streaming() {
-                        self.note_streaming(NeoismAgentStreamingState::Idle, None);
-                        changed = true;
-                    }
                     if stream_is_active {
+                        let had_root_activity = self.streaming_state
+                            != NeoismAgentStreamingState::Idle
+                            || self.streaming_started_at.is_some()
+                            || self.streaming_state_changed_at.is_some()
+                            || self.streaming_tool_label.is_some();
+                        self.note_streaming(NeoismAgentStreamingState::Idle, None);
                         self.abort_requested_at = None;
+                        changed |= had_root_activity;
                     }
                 }
                 AgentSessionUpdate::System { title, body } => {
@@ -207,6 +210,7 @@ impl NeoismAgentPane {
                         branch_status,
                         started_at,
                     );
+                    self.reconcile_viewed_subagent_runtime(&session_id, branch_status);
                     if matches!(
                         branch_status,
                         BranchStatus::Active | BranchStatus::WaitingPermission
@@ -284,6 +288,7 @@ impl NeoismAgentPane {
                         self.upsert_live_subagent_entry(&task_id, title, agent);
                         let branch_status = branch_status_from_runtime(&status);
                         self.note_subagent_runtime(task_id.clone(), branch_status, None);
+                        self.reconcile_viewed_subagent_runtime(&task_id, branch_status);
                         self.set_task_message_status(&task_id, status.as_str());
                     }
                     self.sync_subagent_waiting_clock();
@@ -340,6 +345,14 @@ impl NeoismAgentPane {
                 } => {
                     delta_updates += 1;
                     delta_bytes += delta.len();
+                    self.remember_live_part_parent(
+                        part_id.as_deref().unwrap_or_default(),
+                        message_id.as_deref(),
+                    );
+                    let reasoning_part_id =
+                        matches!(kind.as_deref(), Some("reasoning" | "thinking"))
+                            .then(|| part_id.clone())
+                            .flatten();
                     if stream_is_active {
                         self.apply_part_delta(message_id, part_id, kind, &delta);
                         if !self.suppress_streaming_after_abort() {
@@ -356,23 +369,50 @@ impl NeoismAgentPane {
                             kind.as_deref(),
                             &delta,
                         );
+                        if let Some(reasoning_part_id) = reasoning_part_id.as_deref() {
+                            normalize_cached_live_reasoning_order(
+                                &mut cached.messages,
+                                &self.live_part_parent_ids,
+                                reasoning_part_id,
+                            );
+                        }
                     }
                     changed = true;
                 }
-                AgentSessionUpdate::PartUpdated(message) => {
+                AgentSessionUpdate::PartUpdated {
+                    message,
+                    parent_message_id,
+                } => {
+                    let part_id = message.id.clone();
+                    let is_reasoning = message.kind == NeoismAgentMessageKind::Reasoning;
                     if stream_is_active {
                         let kind = message.kind;
                         let title = message.title.clone();
+                        self.remember_live_part_parent(
+                            &message.id,
+                            parent_message_id.as_deref(),
+                        );
                         self.upsert_part_message(message);
                         if !self.suppress_streaming_after_abort() {
                             self.note_streaming_from_part(kind, &title);
                         }
                     } else {
+                        self.remember_live_part_parent(
+                            &message.id,
+                            parent_message_id.as_deref(),
+                        );
                         let cached = self
                             .session_cache
                             .entry(stream_session_id.clone())
                             .or_insert_with(CachedAgentSession::live_only);
                         upsert_cached_part_message(&mut cached.messages, message);
+                        if is_reasoning {
+                            normalize_cached_live_reasoning_order(
+                                &mut cached.messages,
+                                &self.live_part_parent_ids,
+                                &part_id,
+                            );
+                        }
                     }
                     changed = true;
                 }
@@ -384,6 +424,7 @@ impl NeoismAgentPane {
                     {
                         cached.messages.retain(|message| message.id != part_id);
                     }
+                    self.live_part_parent_ids.remove(&part_id);
                     changed = true;
                 }
                 AgentSessionUpdate::ChildPartDelta {
@@ -395,9 +436,19 @@ impl NeoismAgentPane {
                 } => {
                     delta_updates += 1;
                     delta_bytes += delta.len();
+                    self.remember_live_part_parent(
+                        part_id.as_deref().unwrap_or_default(),
+                        message_id.as_deref(),
+                    );
+                    let reasoning_part_id =
+                        matches!(kind.as_deref(), Some("reasoning" | "thinking"))
+                            .then(|| part_id.clone())
+                            .flatten();
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        let can_drive_streaming =
+                            self.child_part_can_drive_streaming(&session_id);
                         self.apply_part_delta(message_id, part_id, kind, &delta);
-                        if !self.suppress_streaming_after_abort() {
+                        if can_drive_streaming && !self.suppress_streaming_after_abort() {
                             self.refresh_streaming_from_tail();
                         }
                     } else {
@@ -411,18 +462,34 @@ impl NeoismAgentPane {
                             kind.as_deref(),
                             &delta,
                         );
+                        if let Some(reasoning_part_id) = reasoning_part_id.as_deref() {
+                            normalize_cached_live_reasoning_order(
+                                &mut cached.messages,
+                                &self.live_part_parent_ids,
+                                reasoning_part_id,
+                            );
+                        }
                     }
                     changed = true;
                 }
                 AgentSessionUpdate::ChildPartUpdated {
                     session_id,
                     message,
+                    parent_message_id,
                 } => {
+                    let part_id = message.id.clone();
+                    let is_reasoning = message.kind == NeoismAgentMessageKind::Reasoning;
+                    self.remember_live_part_parent(
+                        &message.id,
+                        parent_message_id.as_deref(),
+                    );
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        let can_drive_streaming =
+                            self.child_part_can_drive_streaming(&session_id);
                         let kind = message.kind;
                         let title = message.title.clone();
                         self.upsert_part_message(message);
-                        if !self.suppress_streaming_after_abort() {
+                        if can_drive_streaming && !self.suppress_streaming_after_abort() {
                             self.note_streaming_from_part(kind, &title);
                         }
                     } else {
@@ -431,6 +498,13 @@ impl NeoismAgentPane {
                             .entry(session_id)
                             .or_insert_with(CachedAgentSession::live_only);
                         upsert_cached_part_message(&mut cached.messages, message);
+                        if is_reasoning {
+                            normalize_cached_live_reasoning_order(
+                                &mut cached.messages,
+                                &self.live_part_parent_ids,
+                                &part_id,
+                            );
+                        }
                     }
                     changed = true;
                 }
@@ -443,6 +517,7 @@ impl NeoismAgentPane {
                     } else if let Some(cached) = self.session_cache.get_mut(&session_id) {
                         cached.messages.retain(|message| message.id != part_id);
                     }
+                    self.live_part_parent_ids.remove(&part_id);
                     changed = true;
                 }
                 AgentSessionUpdate::CompactionStarted { id, reason } => {
@@ -1482,6 +1557,13 @@ impl NeoismAgentPane {
         if delta.is_empty() {
             return;
         }
+        if let (Some(part_id), Some(message_id)) = (
+            part_id.as_deref().filter(|id| !id.is_empty()),
+            message_id.as_deref().filter(|id| !id.is_empty()),
+        ) {
+            self.live_part_parent_ids
+                .insert(part_id.to_string(), message_id.to_string());
+        }
         if matches!(kind.as_deref(), Some("reasoning" | "thinking")) {
             self.retain_current_turn_trace();
         }
@@ -1493,6 +1575,9 @@ impl NeoismAgentPane {
             {
                 self.messages[index].text.push_str(delta);
                 self.mark_timeline_message_dirty_at(index);
+                if self.messages[index].kind == NeoismAgentMessageKind::Reasoning {
+                    self.move_previous_assistant_after_reasoning(index);
+                }
                 return;
             }
         }
@@ -1504,6 +1589,9 @@ impl NeoismAgentPane {
             {
                 self.messages[index].text.push_str(delta);
                 self.mark_timeline_message_dirty_at(index);
+                if self.messages[index].kind == NeoismAgentMessageKind::Reasoning {
+                    self.move_previous_assistant_after_reasoning(index);
+                }
                 return;
             }
             let message = match kind.as_deref() {
@@ -1626,14 +1714,29 @@ impl NeoismAgentPane {
         self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
     }
 
-    /// See the shared `state.rs` twin for the full rationale. A reasoning
-    /// part only pulls back an *empty* assistant placeholder (a provider
-    /// that opens the turn with a blank text part before streaming its
-    /// thinking). A non-empty assistant part is a completed/streaming
-    /// answer; the stream is chronological, so it keeps its slot — moving
-    /// it here is the "finished answer drops below a later thinking block"
-    /// bug. Insertion order wins for finished text.
+    /// Keep live order consistent with hydrated history. When SSE supplied
+    /// the parent assistant-message ids, a delayed reasoning-end event moves
+    /// only that same response's answer; unrelated/older answers remain
+    /// chronological. Older event shapes without grouping retain the narrow
+    /// empty-placeholder fallback.
     pub(crate) fn move_previous_assistant_after_reasoning(&mut self, index: usize) {
+        let reasoning_id = self
+            .messages
+            .get(index)
+            .map(|message| message.id.clone())
+            .unwrap_or_default();
+        if self.live_part_parent_ids.contains_key(&reasoning_id) {
+            if move_grouped_assistant_after_reasoning(
+                &mut self.messages,
+                &self.live_part_parent_ids,
+                &reasoning_id,
+            ) {
+                self.invalidate_timeline_layout();
+            } else {
+                self.mark_timeline_message_and_next_dirty_at(index);
+            }
+            return;
+        }
         let turn_start = self.messages[..index]
             .iter()
             .rposition(|message| message.kind == NeoismAgentMessageKind::User)
@@ -1662,8 +1765,67 @@ impl NeoismAgentPane {
         }
         let before = self.messages.len();
         self.messages.retain(|message| message.id != part_id);
+        self.live_part_parent_ids.remove(part_id);
         if self.messages.len() != before {
             self.invalidate_timeline_layout();
         }
     }
+
+    pub(crate) fn remember_live_part_parent(
+        &mut self,
+        part_id: &str,
+        parent_id: Option<&str>,
+    ) {
+        if !part_id.is_empty() {
+            if let Some(parent_id) = parent_id.filter(|id| !id.is_empty()) {
+                self.live_part_parent_ids
+                    .insert(part_id.to_string(), parent_id.to_string());
+            }
+        }
+    }
+}
+
+fn move_grouped_assistant_after_reasoning(
+    messages: &mut Vec<NeoismAgentMessage>,
+    parent_ids: &HashMap<String, String>,
+    reasoning_id: &str,
+) -> bool {
+    let Some(parent_id) = parent_ids.get(reasoning_id) else {
+        return false;
+    };
+    let Some(reasoning_index) = messages.iter().position(|message| {
+        message.id == reasoning_id && message.kind == NeoismAgentMessageKind::Reasoning
+    }) else {
+        return false;
+    };
+    let turn_start = messages[..reasoning_index]
+        .iter()
+        .rposition(|message| message.kind == NeoismAgentMessageKind::User)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let Some(assistant_index) = messages[turn_start..reasoning_index]
+        .iter()
+        .rposition(|message| {
+            message.kind == NeoismAgentMessageKind::Assistant
+                && parent_ids.get(&message.id) == Some(parent_id)
+        })
+        .map(|index| turn_start + index)
+    else {
+        return false;
+    };
+    let assistant = messages.remove(assistant_index);
+    let reasoning_index = messages
+        .iter()
+        .position(|message| message.id == reasoning_id)
+        .unwrap_or_else(|| messages.len().saturating_sub(1));
+    messages.insert(reasoning_index + 1, assistant);
+    true
+}
+
+fn normalize_cached_live_reasoning_order(
+    messages: &mut Vec<NeoismAgentMessage>,
+    parent_ids: &HashMap<String, String>,
+    reasoning_id: &str,
+) {
+    let _ = move_grouped_assistant_after_reasoning(messages, parent_ids, reasoning_id);
 }

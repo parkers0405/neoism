@@ -298,6 +298,11 @@ pub struct TrailCursorOverlayState {
     pub git_diff_panel_focused: bool,
     pub search_active: bool,
     pub modal_owns_editor_focus: bool,
+    /// A Neoism Agent conversation is the active content surface. This is
+    /// distinct from `agent_input_cursor_available`: sub-agent conversations
+    /// intentionally hide their read-only composer caret, but must still own
+    /// cursor focus so we do not fall through to the parked terminal cursor.
+    pub agent_surface_active: bool,
     pub agent_input_cursor_available: bool,
     pub markdown_cursor_available: bool,
     /// Focused code pane published a caret rect this frame.
@@ -336,6 +341,8 @@ pub fn trail_cursor_overlay_target(
         Some(Target::SuppressedByInputOverlay)
     } else if state.agent_input_cursor_available {
         Some(Target::AgentInput)
+    } else if state.agent_surface_active {
+        Some(Target::SuppressedByInputOverlay)
     } else if state.code_cursor_available {
         Some(Target::Code)
     } else if state.markdown_cursor_available {
@@ -849,6 +856,21 @@ mod tests {
             agent_input_cursor_available: true,
             markdown_cursor_available: true,
             terminal_block_input_active: true,
+            trail_cursor_enabled: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            trail_cursor_overlay_target(state),
+            Some(TrailCursorOverlayTarget::SuppressedByInputOverlay)
+        );
+    }
+
+    #[test]
+    fn agent_surface_without_composer_caret_suppresses_terminal_fallback() {
+        let state = TrailCursorOverlayState {
+            agent_surface_active: true,
+            agent_input_cursor_available: false,
             trail_cursor_enabled: true,
             ..Default::default()
         };

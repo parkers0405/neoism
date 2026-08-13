@@ -594,6 +594,38 @@ fn idle_streaming_state_clears_status_label() {
 }
 
 #[test]
+fn session_idle_clears_a_partially_restored_streaming_state() {
+    let mut pane = NeoismAgentPane::default();
+    pane.streaming_state = NeoismAgentStreamingState::Generating;
+    pane.streaming_started_at = None;
+
+    pane.note_session_idle();
+
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert_eq!(pane.streaming_label(), "");
+}
+
+#[test]
+fn viewed_subagent_completion_clears_its_activity_label() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child-1".to_string());
+    pane.parent_session_id = Some("parent".to_string());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+
+    pane.note_subagent_event(
+        "child-1".to_string(),
+        BranchStatus::Completed,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert_eq!(pane.streaming_label(), "");
+}
+
+#[test]
 fn stale_idle_snapshot_keeps_streamed_assistant_text_by_id() {
     let mut pane = NeoismAgentPane::default();
     pane.messages = vec![
@@ -1282,6 +1314,30 @@ fn completed_subagents_do_not_leave_composer_status_stuck() {
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
     assert!(!pane.has_status_activity());
     assert_eq!(pane.streaming_state_changed_elapsed(), None);
+}
+
+#[test]
+fn active_subagent_part_updates_do_not_restart_waiting_clock() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel
+        .set_subagents(vec![NeoismAgentSessionEntry::new(
+            "child-1", "child", "explore",
+        )
+        .with_runtime_status(Some("running".to_string()))]);
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
+    pane.sync_subagent_waiting_clock();
+    let original = pane.subagent_waiting_started_at;
+
+    assert!(pane.note_subagent_part_activity(
+        "child-1".to_string(),
+        BranchStatus::Active,
+        Some("read".to_string()),
+        Some(1),
+    ));
+    pane.sync_subagent_waiting_clock();
+
+    assert_eq!(pane.subagent_waiting_started_at, original);
 }
 
 #[test]

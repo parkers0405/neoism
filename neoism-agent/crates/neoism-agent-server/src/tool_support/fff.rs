@@ -19,7 +19,8 @@ use super::{process, ToolContext, ToolExecutionResult};
 
 const DEFAULT_FFF_TIMEOUT_MS: u64 = 45_000;
 const MAX_FFF_TIMEOUT_MS: u64 = 300_000;
-const DEFAULT_EXCLUDES: &[&str] = &[
+pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
+    ".git",
     ".claude/worktrees",
     ".codex",
     ".neoism/cache",
@@ -89,7 +90,20 @@ fn glob_tool_sync(
     if query_text.is_empty() {
         return glob_directory_fallback(&context, &path, limit, offset, timeout_ms);
     }
-    let (items, total_matched) = with_picker(&path, |picker| {
+    if super::streaming_search::root_requires_fallback(&path) {
+        return super::streaming_search::glob(super::streaming_search::GlobRequest {
+            context: &context,
+            path: &path,
+            query: &query_text,
+            limit,
+            offset,
+            timeout_ms: fallback_timeout_ms(timeout_ms),
+            fallback_reason: "FFF indexing is disabled for home and filesystem roots"
+                .to_string(),
+        });
+    }
+    let fff_started = Instant::now();
+    let search = with_picker(&path, |picker| {
         let parser = QueryParser::default();
         let mut results = picker.fuzzy_search(
             &parser.parse(&query_text),
@@ -140,7 +154,24 @@ fn glob_tool_sync(
             })
             .collect::<Vec<_>>();
         (items, results.total_matched)
-    })?;
+    });
+    let (items, total_matched) = match search {
+        Ok(result) => result,
+        Err(error) => {
+            let remaining = timeout_ms
+                .saturating_sub(fff_started.elapsed().as_millis() as u64)
+                .max(1);
+            return super::streaming_search::glob(super::streaming_search::GlobRequest {
+                context: &context,
+                path: &path,
+                query: &query_text,
+                limit,
+                offset,
+                timeout_ms: fallback_timeout_ms(remaining),
+                fallback_reason: error.to_string(),
+            });
+        }
+    };
     let mut output = items
         .iter()
         .map(|item| {
@@ -301,13 +332,30 @@ fn grep_tool_sync(
     // search on abort rather than only when the outer select! fires.
     let grep_budget_ms = timeout_ms.saturating_sub(2_000).max(500);
     let abort = context.cancel.clone();
-    let (
-        mut items,
-        files_with_matches,
-        total_files_searched,
-        next_file_offset,
-        used_mode,
-    ) = with_picker(&root, |picker| {
+    let fallback_patterns = alternation.clone().unwrap_or_else(|| vec![pattern.clone()]);
+    let fallback_mode = if alternation.is_some() {
+        GrepMode::PlainText
+    } else {
+        mode
+    };
+    if super::streaming_search::root_requires_fallback(&root) {
+        return super::streaming_search::grep(super::streaming_search::GrepRequest {
+            context: &context,
+            path: &path,
+            patterns: &fallback_patterns,
+            include: include.as_deref(),
+            exclude: &exclude,
+            context_lines,
+            case_sensitive,
+            mode: fallback_mode,
+            limit,
+            timeout_ms: fallback_timeout_ms(timeout_ms),
+            fallback_reason: "FFF indexing is disabled for home and filesystem roots"
+                .to_string(),
+        });
+    }
+    let fff_started = Instant::now();
+    let search = with_picker(&root, |picker| {
         let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
         let options = |grep_mode: GrepMode| GrepSearchOptions {
             page_limit: limit,
@@ -357,7 +405,34 @@ fn grep_tool_sync(
             results.next_file_offset,
             used_mode,
         )
-    })?;
+    });
+    let (
+        mut items,
+        files_with_matches,
+        total_files_searched,
+        next_file_offset,
+        used_mode,
+    ) = match search {
+        Ok(result) => result,
+        Err(error) => {
+            let remaining = timeout_ms
+                .saturating_sub(fff_started.elapsed().as_millis() as u64)
+                .max(1);
+            return super::streaming_search::grep(super::streaming_search::GrepRequest {
+                context: &context,
+                path: &path,
+                patterns: &fallback_patterns,
+                include: include.as_deref(),
+                exclude: &exclude,
+                context_lines,
+                case_sensitive,
+                mode: fallback_mode,
+                limit,
+                timeout_ms: fallback_timeout_ms(remaining),
+                fallback_reason: error.to_string(),
+            });
+        }
+    };
     let overflowed_limit = items.len() > limit;
     items.truncate(limit);
     let output = render_grep_output("Grep", &items, files_with_matches, limit);
@@ -412,29 +487,69 @@ fn multi_grep_tool_sync(
     // the single-pattern grep path.
     let grep_budget_ms = timeout_ms.saturating_sub(2_000).max(500);
     let abort = context.cancel.clone();
+    if super::streaming_search::root_requires_fallback(&root) {
+        return super::streaming_search::grep(super::streaming_search::GrepRequest {
+            context: &context,
+            path: &path,
+            patterns: &patterns,
+            include: include.as_deref(),
+            exclude: &exclude,
+            context_lines,
+            case_sensitive: false,
+            mode: GrepMode::PlainText,
+            limit,
+            timeout_ms: fallback_timeout_ms(timeout_ms),
+            fallback_reason: "FFF indexing is disabled for home and filesystem roots"
+                .to_string(),
+        });
+    }
+    let fff_started = Instant::now();
+    let search = with_picker(&root, |picker| {
+        let results = picker.multi_grep(
+            &refs,
+            &query.constraints,
+            &GrepSearchOptions {
+                page_limit: limit,
+                before_context: context_lines,
+                after_context: context_lines,
+                classify_definitions: true,
+                trim_whitespace: false,
+                time_budget_ms: grep_budget_ms,
+                abort_signal: abort.clone(),
+                ..Default::default()
+            },
+        );
+        (
+            grep_items(picker, &results),
+            results.files_with_matches,
+            results.total_files_searched,
+            results.next_file_offset,
+        )
+    });
     let (mut items, files_with_matches, total_files_searched, next_file_offset) =
-        with_picker(&root, |picker| {
-            let results = picker.multi_grep(
-                &refs,
-                &query.constraints,
-                &GrepSearchOptions {
-                    page_limit: limit,
-                    before_context: context_lines,
-                    after_context: context_lines,
-                    classify_definitions: true,
-                    trim_whitespace: false,
-                    time_budget_ms: grep_budget_ms,
-                    abort_signal: abort.clone(),
-                    ..Default::default()
-                },
-            );
-            (
-                grep_items(picker, &results),
-                results.files_with_matches,
-                results.total_files_searched,
-                results.next_file_offset,
-            )
-        })?;
+        match search {
+            Ok(result) => result,
+            Err(error) => {
+                let remaining = timeout_ms
+                    .saturating_sub(fff_started.elapsed().as_millis() as u64)
+                    .max(1);
+                return super::streaming_search::grep(
+                    super::streaming_search::GrepRequest {
+                        context: &context,
+                        path: &path,
+                        patterns: &patterns,
+                        include: include.as_deref(),
+                        exclude: &exclude,
+                        context_lines,
+                        case_sensitive: false,
+                        mode: GrepMode::PlainText,
+                        limit,
+                        timeout_ms: fallback_timeout_ms(remaining),
+                        fallback_reason: error.to_string(),
+                    },
+                );
+            }
+        };
     let overflowed_limit = items.len() > limit;
     items.truncate(limit);
     let output = render_grep_output("Grep", &items, files_with_matches, limit);
@@ -516,6 +631,13 @@ fn fff_timeout_ms(arguments: &Value) -> u64 {
         .map(|timeout| timeout as u64)
         .unwrap_or(DEFAULT_FFF_TIMEOUT_MS)
         .clamp(1_000, MAX_FFF_TIMEOUT_MS)
+}
+
+fn fallback_timeout_ms(outer_timeout_ms: u64) -> u64 {
+    // The fallback runs inside the same spawn_blocking/timeout envelope as
+    // FFF. Finish slightly before that outer deadline so partial results win
+    // the race instead of being replaced by a generic timeout error.
+    outer_timeout_ms.saturating_sub(500).max(1)
 }
 
 fn with_picker<T>(

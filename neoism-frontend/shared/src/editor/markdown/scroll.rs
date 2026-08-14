@@ -4,6 +4,15 @@ use super::helpers::*;
 use super::types::*;
 
 impl MarkdownPane {
+    /// Hand scrolling owns the viewport until cursor navigation resumes. Once
+    /// it does, discard any wheel/trackpad momentum so an in-flight inertial
+    /// tick cannot immediately pull the caret back out of view.
+    pub(crate) fn stop_scroll_momentum(&mut self) {
+        self.scroll_velocity_px_s = 0.0;
+        self.scroll_velocity_moves_cursor = false;
+        self.scroll_last_tick_at = None;
+    }
+
     pub fn restore_scroll_position(&mut self, scroll_y: f32) {
         let scroll_y = scroll_y.max(0.0);
         self.scroll_y = scroll_y;
@@ -228,12 +237,16 @@ impl MarkdownPane {
         viewport_height: f32,
         margin: Option<f32>,
     ) -> bool {
-        let Some([_, y, _, h]) = self.cursor_rect else {
-            return false;
-        };
         if !self.follow_cursor {
             return false;
         }
+        // Do this before checking `cursor_rect`: a virtualized caret can be
+        // outside the current draw set on this frame, but keyboard navigation
+        // has still taken viewport ownership back from the trackpad.
+        self.stop_scroll_momentum();
+        let Some([_, y, _, h]) = self.cursor_rect else {
+            return false;
+        };
         self.follow_cursor = false;
         let before = self.target_scroll_y;
         // `cursor_rect.y` is the caret's on-screen position relative to the

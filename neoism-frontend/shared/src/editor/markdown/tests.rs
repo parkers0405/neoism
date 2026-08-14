@@ -327,40 +327,77 @@ mod tests {
     }
 
     #[test]
-    fn normal_navigation_reaches_revealed_heading_marker() {
-        // Live Preview: the cursor's line shows raw `### `, so normal-mode
-        // navigation can reach the marker columns.
+    fn normal_append_crosses_hidden_inline_closing_markers() {
+        for (source, cursor, expected) in [
+            ("**bold** tail", "**bol".len(), "**bold**".len()),
+            ("`code` tail", "`cod".len(), "`code`".len()),
+            (
+                "[[docs/Guide.md|Label]] tail",
+                "[[docs/Guide.md|Labe".len(),
+                "[[docs/Guide.md|Label]]".len(),
+            ),
+        ] {
+            let mut pane = pane_for_test();
+            pane.lines = vec![source.to_string()];
+            pane.cursor_line = 0;
+            pane.cursor_col = cursor;
+            pane.mode = MarkdownMode::Normal;
+
+            pane.enter_append();
+
+            assert_eq!(pane.cursor_col, expected, "source: {source}");
+            assert_eq!(pane.mode, MarkdownMode::Insert);
+        }
+    }
+
+    #[test]
+    fn normal_insert_maps_styled_heading_body_to_raw_source() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["## Heading".to_string()];
+        pane.cursor_line = 0;
+        pane.cursor_col = 0;
+        pane.mode = MarkdownMode::Normal;
+
+        pane.enter_insert();
+
+        assert_eq!(pane.cursor_col, "## ".len());
+        assert_eq!(pane.mode, MarkdownMode::Insert);
+    }
+
+    #[test]
+    fn normal_navigation_skips_hidden_heading_marker() {
         let mut pane = pane_for_test();
         pane.lines = vec!["### Heading".to_string()];
         pane.cursor_col = 0;
 
         pane.enter_normal();
-        assert_eq!(pane.cursor_col, 0);
+        assert_eq!(pane.cursor_col, "### ".len());
 
         pane.move_left();
-        assert_eq!(pane.cursor_col, 0);
+        assert_eq!(pane.cursor_col, "### ".len());
 
         pane.move_right();
-        assert_eq!(pane.cursor_col, 1);
+        assert_eq!(pane.cursor_col, "### H".len());
         pane.move_line_start();
-        assert_eq!(pane.cursor_col, 0);
+        assert_eq!(pane.cursor_col, "### ".len());
     }
 
     #[test]
-    fn normal_navigation_reaches_revealed_markdown_line_suffixes() {
+    fn normal_navigation_skips_hidden_markdown_line_syntax() {
         let mut pane = pane_for_test();
         pane.lines = vec!["### Heading ###".to_string(), "- item   ".to_string()];
         pane.cursor_col = pane.lines[0].len();
 
-        // The revealed cursor line keeps its trailing `###` reachable
-        // (trailing whitespace is still trimmed).
+        // Styled Normal mode hides both the heading prefix and optional
+        // trailing hashes.
         pane.enter_normal();
-        assert_eq!(pane.cursor_col, "### Heading ###".len());
+        assert_eq!(pane.cursor_col, "### Heading".len());
 
-        // Stepping onto the next line lands at its raw start (revealed).
+        // Stepping onto the next line lands at the body after its hidden list
+        // marker, while trailing whitespace remains unreachable.
         pane.move_right();
         assert_eq!(pane.cursor_line, 1);
-        assert_eq!(pane.cursor_col, 0);
+        assert_eq!(pane.cursor_col, "- ".len());
 
         pane.move_line_end();
         assert_eq!(pane.cursor_col, "- item".len());
@@ -492,10 +529,9 @@ mod tests {
     }
 
     #[test]
-    fn vertical_motion_from_revealed_cursor_line_uses_raw_columns() {
-        // Obsidian Live Preview: the cursor's own line renders RAW, so its
-        // visual column includes the markup (`**`). Moving down preserves that
-        // raw column — col 4 (`**bo`) lands at col 4 (`plai`) on the next line.
+    fn vertical_motion_from_styled_normal_line_uses_rendered_columns() {
+        // Vim Normal hides the `**`, so the source position after `bo` is
+        // rendered column 2 and must land at column 2 on the next line.
         let mut pane = pane_for_test();
         pane.lines = vec!["**bold** tail".to_string(), "plain tail".to_string()];
         pane.cursor_line = 0;
@@ -504,13 +540,14 @@ mod tests {
         pane.move_down();
 
         assert_eq!(pane.cursor_line, 1);
-        assert_eq!(pane.cursor_col, "plai".len());
+        assert_eq!(pane.cursor_col, "pl".len());
     }
 
     #[test]
-    fn vertical_motion_from_revealed_cursor_line_clamps_long_raw_column() {
-        // The revealed cursor line shows the full wiki-link source, so its raw
-        // column can exceed a shorter target line and clamps to that line's end.
+    fn vertical_motion_from_styled_wiki_link_uses_label_column() {
+        // Vim Normal renders only the wiki-link label. A source caret after
+        // `La` therefore carries rendered column 2, not the long target path's
+        // raw source column.
         let mut pane = pane_for_test();
         pane.lines = vec![
             "[[docs/Guide.md|Label]] tail".to_string(),
@@ -522,7 +559,7 @@ mod tests {
         pane.move_down();
 
         assert_eq!(pane.cursor_line, 1);
-        assert_eq!(pane.cursor_col, "plain text".len());
+        assert_eq!(pane.cursor_col, "pl".len());
     }
 
     #[test]
@@ -629,6 +666,44 @@ mod tests {
         assert!(pane.tick_scroll());
         assert!(pane.target_scroll_y > first_target);
         assert_eq!(pane.cursor_line, 0);
+    }
+
+    #[test]
+    fn arrow_navigation_reclaims_viewport_from_trackpad_momentum() {
+        let mut pane = pane_for_test();
+        pane.lines = (0..80).map(|line| format!("line {line}")).collect();
+        pane.set_content_height(3200.0, 400.0);
+
+        pane.scroll_pixels(-80.0, 400.0);
+        assert!(pane.scroll_velocity_px_s > 0.0);
+        pane.move_down();
+        assert!(pane.follow_cursor);
+
+        // The virtual renderer may not have a caret rectangle until after it
+        // reveals the cursor's source row. Cursor-follow must still stop the
+        // old trackpad gesture immediately.
+        assert!(!pane.scroll_cursor_into_view(0.0, 400.0));
+        assert_eq!(pane.scroll_velocity_px_s, 0.0);
+        assert!(!pane.scroll_velocity_moves_cursor);
+        assert!(pane.scroll_last_tick_at.is_none());
+        assert!(pane.follow_cursor);
+    }
+
+    #[test]
+    fn line_jump_stops_trackpad_momentum_and_follows_cursor() {
+        let mut pane = pane_for_test();
+        pane.lines = (0..80).map(|line| format!("line {line}")).collect();
+        pane.set_content_height(3200.0, 400.0);
+
+        pane.scroll_pixels(-80.0, 400.0);
+        assert!(pane.scroll_velocity_px_s > 0.0);
+        pane.jump_to_line(60);
+
+        assert_eq!(pane.cursor_line, 59);
+        assert!(pane.follow_cursor);
+        assert_eq!(pane.scroll_velocity_px_s, 0.0);
+        assert!(!pane.scroll_velocity_moves_cursor);
+        assert!(pane.scroll_last_tick_at.is_none());
     }
 
     #[test]
@@ -799,6 +874,7 @@ mod tests {
         let mut pane = pane_for_test();
         pane.lines = vec!["- [x] item".to_string()];
         pane.cursor_col = "- [x".len();
+        pane.mode = MarkdownMode::Insert;
 
         pane.backspace();
         assert_eq!(pane.lines, vec!["- [] item".to_string()]);
@@ -807,6 +883,7 @@ mod tests {
         let mut pane = pane_for_test();
         pane.lines = vec!["  - item".to_string()];
         pane.cursor_col = "  - ".len();
+        pane.mode = MarkdownMode::Insert;
 
         pane.backspace();
         assert_eq!(pane.lines, vec!["  -item".to_string()]);
@@ -2400,6 +2477,7 @@ mod tests {
         );
         pane.cursor_line = 0;
         pane.cursor_col = "- [ ] ".len();
+        pane.mode = MarkdownMode::Insert;
 
         pane.move_down();
         assert_eq!(pane.cursor_col, "- [ ] alpha beta ".len());
@@ -2554,6 +2632,7 @@ mod tests {
         pane.lines = vec!["#   hello".to_string()];
         pane.cursor_line = 0;
         pane.cursor_col = "# ".len();
+        pane.mode = MarkdownMode::Insert;
 
         pane.insert_text(" ");
 
@@ -2572,6 +2651,7 @@ mod tests {
         pane.lines = vec![">   hello".to_string()];
         pane.cursor_line = 0;
         pane.cursor_col = "> ".len();
+        pane.mode = MarkdownMode::Insert;
 
         pane.insert_text(" ");
 
@@ -2585,11 +2665,12 @@ mod tests {
     }
 
     #[test]
-    fn arrow_keys_walk_into_revealed_markers() {
+    fn insert_arrow_keys_walk_into_revealed_markers() {
         let mut pane = pane_for_test();
         pane.lines = vec!["### head".to_string(), "- item".to_string()];
         pane.cursor_line = 0;
         pane.cursor_col = "### ".len();
+        pane.mode = MarkdownMode::Insert;
 
         // Left steps through the revealed `### ` all the way to col 0.
         for expected in (0.."### ".len()).rev() {

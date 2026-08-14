@@ -400,16 +400,15 @@ fn compact_session_queues_outbound_command_for_runtime() {
 }
 
 #[test]
-fn submit_prompt_queues_session_and_send_prompt_for_runtime() {
+fn submit_prompt_queues_send_prompt_for_runtime() {
     let mut pane = NeoismAgentPane::default();
     pane.insert_text("ship it");
 
     assert!(pane.submit());
 
     let drained = pane.drain_pending_outbound();
-    assert_eq!(drained.len(), 2);
-    assert!(matches!(drained[0], OutboundAgentCommand::EnsureSession));
-    match &drained[1] {
+    assert_eq!(drained.len(), 1);
+    match &drained[0] {
         OutboundAgentCommand::SendPrompt {
             text,
             agent,
@@ -431,6 +430,49 @@ fn submit_prompt_queues_session_and_send_prompt_for_runtime() {
     }
     assert_eq!(pane.messages[0].text, "ship it");
     assert!(pane.is_streaming());
+}
+
+#[test]
+fn prompt_dispatch_is_off_thread_and_serialized() {
+    let mut pane = NeoismAgentPane::default();
+    pane.server = "invalid://agent-server".to_string();
+    pane.session_id = Some("sess-1".to_string());
+
+    pane.insert_text("first");
+    assert!(pane.submit());
+    assert!(pane.drain_outbound_commands());
+    assert!(pane.prompt_dispatch_in_flight);
+    assert!(pane.pending_prompt_dispatches.is_empty());
+
+    // A second send must wait behind the first worker instead of issuing a
+    // concurrent POST that could overtake it at the backend.
+    pane.insert_text("second");
+    assert!(pane.submit());
+    assert!(pane.drain_outbound_commands());
+    assert!(pane.prompt_dispatch_in_flight);
+    assert_eq!(pane.pending_prompt_dispatches.len(), 1);
+}
+
+#[test]
+fn completed_prompt_does_not_attach_to_a_replaced_draft() {
+    let mut pane = NeoismAgentPane::default();
+    let original_draft_id = pane.prompt_draft_id;
+    pane.prompt_dispatch_in_flight = true;
+
+    pane.create_new_session();
+    pane.background_sender()
+        .send(NeoismAgentBackgroundUpdate::PromptDispatched {
+            origin_session_id: None,
+            origin_draft_id: original_draft_id,
+            session_id: "old-draft-session".to_string(),
+            transcript_echo: Some("old prompt".to_string()),
+            event_stream: None,
+        })
+        .unwrap();
+
+    assert!(pane.drain_background_updates());
+    assert_eq!(pane.session_id, None);
+    assert!(pane.pending_user_prompts.is_empty());
 }
 
 #[test]

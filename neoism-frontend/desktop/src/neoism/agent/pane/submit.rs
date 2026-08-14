@@ -106,7 +106,6 @@ impl NeoismAgentPane {
                 self.prompt_echo_aliases.remove(0);
             }
         }
-        let prompt = text.clone();
         let was_streaming = self.is_streaming();
         if !was_streaming {
             let mut message = NeoismAgentMessage::user(text);
@@ -120,7 +119,10 @@ impl NeoismAgentPane {
         if !was_streaming {
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
-        let send_result = self.send_prompt(&prompt, !was_streaming);
+        // `expanded` may contain a large paste. Reuse the expansion already
+        // computed for echo canonicalization instead of rebuilding it during
+        // send on the event thread.
+        let send_result = self.send_prepared_prompt(expanded, !was_streaming);
         self.input_attachments.clear();
         match send_result {
             Ok(()) => {}
@@ -403,7 +405,7 @@ impl NeoismAgentPane {
         // real history file via `submit()`); the store is unit-tested on its
         // own.
         #[cfg(not(test))]
-        crate::neoism::agent::prompt_history::append(text);
+        crate::neoism::agent::prompt_history::append_async(text);
     }
 
     pub(crate) fn update_picker_query(&mut self, text: &str) {

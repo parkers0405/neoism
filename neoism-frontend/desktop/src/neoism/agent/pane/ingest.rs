@@ -615,7 +615,7 @@ impl NeoismAgentPane {
                     delivery,
                     transcript_echo,
                 } => {
-                    if let Err(error) = self.execute_send_prompt_command(
+                    self.queue_send_prompt_command(
                         message_id,
                         text,
                         parts,
@@ -625,10 +625,7 @@ impl NeoismAgentPane {
                         thinking,
                         delivery,
                         transcript_echo,
-                    ) {
-                        self.system_message("Prompt failed", error);
-                        self.note_streaming(NeoismAgentStreamingState::Idle, None);
-                    }
+                    );
                     changed = true;
                 }
                 OutboundAgentCommand::ApplyConfigDefaults => {
@@ -922,6 +919,64 @@ impl NeoismAgentPane {
         let mut changed = false;
         loop {
             match self.background_rx.try_recv() {
+                Ok(NeoismAgentBackgroundUpdate::PromptDispatched {
+                    origin_session_id,
+                    origin_draft_id,
+                    session_id,
+                    transcript_echo,
+                    event_stream,
+                }) => {
+                    self.prompt_dispatch_in_flight = false;
+                    let is_active_origin = self.session_id == origin_session_id
+                        && (origin_session_id.is_some()
+                            || self.prompt_draft_id == origin_draft_id);
+                    if origin_session_id.is_none() {
+                        for pending in &mut self.pending_prompt_dispatches {
+                            if pending.origin_session_id.is_none()
+                                && pending.origin_draft_id == origin_draft_id
+                            {
+                                pending.origin_session_id = Some(session_id.clone());
+                            }
+                        }
+                    }
+                    if is_active_origin {
+                        if origin_session_id.is_none() {
+                            self.session_id = Some(session_id.clone());
+                            self.parent_session_id = None;
+                            self.session_tree_root_id = Some(session_id.clone());
+                            self.side_panel
+                                .set_viewed_session_id(Some(session_id.clone()));
+                        }
+                        if let Some(event_stream) = event_stream {
+                            self.event_stream = Some(event_stream);
+                        } else {
+                            self.start_session_updates(&session_id);
+                        }
+                        if let Some(echo) = transcript_echo {
+                            self.remember_pending_user_prompt(&echo);
+                        }
+                    }
+                    self.start_next_prompt_dispatch();
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::PromptDispatchFailed {
+                    origin_session_id,
+                    origin_draft_id,
+                    error,
+                }) => {
+                    self.prompt_dispatch_in_flight = false;
+                    let is_active_origin = self.session_id == origin_session_id
+                        && (origin_session_id.is_some()
+                            || self.prompt_draft_id == origin_draft_id);
+                    if is_active_origin {
+                        self.system_message("Prompt failed", error);
+                    }
+                    self.start_next_prompt_dispatch();
+                    if is_active_origin && !self.prompt_dispatch_in_flight {
+                        self.note_streaming(NeoismAgentStreamingState::Idle, None);
+                    }
+                    changed = true;
+                }
                 Ok(NeoismAgentBackgroundUpdate::CompactFinished) => {
                     if self.is_streaming() {
                         self.note_streaming(NeoismAgentStreamingState::Idle, None);

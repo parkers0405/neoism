@@ -23,7 +23,10 @@ use crate::{mcp_docs, mcp_memory, mcp_notes};
 #[cfg(test)]
 use mcp_oauth::origin;
 pub(crate) use mcp_oauth::{auth_callback, auth_start, authenticate_status};
-use mcp_oauth::{remote_auth_status_async, usable_oauth_config, valid_tokens_for_url};
+use mcp_oauth::{
+    refresh_oauth_tokens, remote_auth_status_async, usable_oauth_config,
+    valid_tokens_for_url,
+};
 use mcp_runtime::runtime_manager;
 #[cfg(test)]
 use mcp_transport::parse_http_rpc_response;
@@ -416,15 +419,22 @@ pub(crate) async fn call_tool_with_state(
     if client == mcp_docs::DOCS_MCP_ID {
         return mcp_docs::call_tool(tool, arguments);
     }
-    ensure_connected_with_state(directory, client, auth_store, state).await?;
+    ensure_connected_with_state(directory, client, auth_store, state.clone()).await?;
+    let retry_arguments = arguments.clone();
     let result = runtime_manager()
         .call_tool(directory, client, tool, arguments)
         .await;
     if let Err(error) = &result {
-        if invalidate_remote_credentials_after_auth_error(
+        if refresh_remote_credentials_after_auth_error(
             directory, client, auth_store, error,
-        )? {
+        )
+        .await?
+        {
             let _ = runtime_manager().disconnect(directory, client).await;
+            ensure_connected_with_state(directory, client, auth_store, state).await?;
+            return runtime_manager()
+                .call_tool(directory, client, tool, retry_arguments)
+                .await;
         }
     }
     result
@@ -484,7 +494,7 @@ async fn ensure_connected_with_state(
     }
 }
 
-fn invalidate_remote_credentials_after_auth_error(
+async fn refresh_remote_credentials_after_auth_error(
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
@@ -497,18 +507,21 @@ fn invalidate_remote_credentials_after_auth_error(
     let Some(McpConfig::Remote { url, oauth, .. }) = config.get(name) else {
         return Ok(false);
     };
-    if usable_oauth_config(oauth).is_none() {
+    let Some(oauth) = usable_oauth_config(oauth) else {
         return Ok(false);
+    };
+    let refreshed = refresh_oauth_tokens(name, url, oauth, auth_store).await?;
+    if !refreshed {
+        let _ = auth_store.clear_tokens(name, Some(url));
     }
-    let cleared = auth_store.clear_tokens(name, Some(url))?;
-    tracing::warn!(
+    tracing::info!(
         mcp = name,
         url,
-        cleared,
+        refreshed,
         error = %error,
-        "remote MCP tool call rejected stored credentials; credentials invalidated"
+        "remote MCP tool call rejected its access token; attempted OAuth refresh"
     );
-    Ok(cleared)
+    Ok(refreshed)
 }
 
 fn looks_like_http_auth_error(error: &anyhow::Error) -> bool {

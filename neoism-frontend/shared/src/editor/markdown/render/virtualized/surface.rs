@@ -238,6 +238,9 @@ pub(super) fn render_virtual(
     if !prepare_surface(pane, body_content_w, y + pad_top, viewport_h) {
         return false;
     }
+    if pane.pending_reveal_line.is_some() || pane.follow_cursor {
+        pane.stop_scroll_momentum();
+    }
     // Click-to-jump (outline rows, roster dots): center the target line
     // with a GLIDE — compute the destination scroll via the reveal, then
     // restore the current position (pane AND surface, so this frame doesn't
@@ -1025,21 +1028,22 @@ fn reveal_virtual_cursor_source(pane: &mut MarkdownPane) {
     let line = pane
         .cursor_line
         .min(state.line_starts.len().saturating_sub(1));
-    // A visible virtual node can span many source lines. In a short embedded
-    // editor, repeated newlines may leave the node visible while the exact
-    // caret line is already below the clip. Embedded panes therefore reveal
-    // the cursor's source range precisely instead of accepting node visibility.
-    if !pane.embedded && cursor_line_is_in_visible_virtual_node(state, line) {
-        state.pending_measure_anchor = None;
-        return;
-    }
-    reveal_virtual_line(pane, line, VirtualRevealAlign::Nearest);
+    reveal_virtual_position(pane, line, pane.cursor_col, VirtualRevealAlign::Nearest);
 }
 
 /// Scroll the virtual surface so `line` (0-based) is in view with the
 /// requested alignment. Shared by follow-cursor reveal (`Nearest`) and
 /// the Wave 7G roster click-to-jump (`Center`).
 fn reveal_virtual_line(pane: &mut MarkdownPane, line: usize, align: VirtualRevealAlign) {
+    reveal_virtual_position(pane, line, 0, align);
+}
+
+fn reveal_virtual_position(
+    pane: &mut MarkdownPane,
+    line: usize,
+    column: usize,
+    align: VirtualRevealAlign,
+) {
     let state = &mut pane.virtual_render;
     if state.line_starts.is_empty() {
         return;
@@ -1063,15 +1067,84 @@ fn reveal_virtual_line(pane: &mut MarkdownPane, line: usize, align: VirtualRevea
         .max(start + 1)
         .min(state.source.len().max(start + 1));
     let source = markdown_node_source(&state.source_id);
-    let target = VirtualRevealTarget::new(
-        source,
-        NodeSourceRange::new(start as u64, end as u64),
-        align,
-    );
-    if state
+    let range = NodeSourceRange::new(start as u64, end as u64);
+    let Some(found) = state
         .surface
-        .apply(VirtualSurfaceCommand::RevealSource(target))
-        .is_err()
+        .source_matches(VirtualSourceQuery::new(source, range))
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+
+    // A Markdown node may contain many source lines (paragraphs, quotes,
+    // tables, code blocks). Revealing the node bounds is insufficient when the
+    // node is taller than the viewport: the node can be visible while the
+    // caret's row is not. Resolve an approximate row inside the measured node;
+    // once drawn, `scroll_cursor_into_view` makes the final pixel adjustment
+    // from the real caret rectangle.
+    let (node_range, node_line_count) = state
+        .surface
+        .nodes()
+        .get(found.index)
+        .and_then(|node| node.content.as_ref())
+        .map(|content| (content.range, (content.line_count as usize).max(1)))
+        .unwrap_or((found.source_range, 1));
+    let visual_rows = state
+        .surface
+        .layouts()
+        .get(found.index)
+        .map(|layout| layout.visual_line_count as usize)
+        .filter(|count| *count > 0)
+        .unwrap_or(node_line_count)
+        .max(1);
+    let target_byte = start.saturating_add(
+        column.min(pane.lines.get(line).map(String::len).unwrap_or_default()),
+    ) as u64;
+    let byte_offset = target_byte
+        .saturating_sub(node_range.start)
+        .min(node_range.len().saturating_sub(1));
+    let row = if node_range.len() <= 1 {
+        0
+    } else {
+        ((byte_offset as f64 / node_range.len() as f64) * visual_rows as f64)
+            .floor()
+            .min((visual_rows - 1) as f64) as usize
+    };
+    let row_height = (found.bounds.height / visual_rows as f32).max(1.0);
+    let row_top = found.bounds.y + row_height * row as f32;
+    let row_bottom = (row_top + row_height).min(found.bounds.bottom());
+    let viewport = state.surface.viewport();
+    let before = state.surface.scroll().scroll_y;
+    let viewport_bottom = before + viewport.height;
+    let next = match align {
+        VirtualRevealAlign::Start => row_top,
+        VirtualRevealAlign::Center => {
+            row_top - (viewport.height - row_height).max(0.0) * 0.5
+        }
+        VirtualRevealAlign::End => row_bottom - viewport.height,
+        VirtualRevealAlign::Nearest => {
+            if row_top >= before && row_bottom <= viewport_bottom {
+                before
+            } else if row_top < before {
+                row_top
+            } else {
+                row_bottom - viewport.height
+            }
+        }
+    }
+    .clamp(
+        0.0,
+        (state.surface.content_height() - viewport.height).max(0.0),
+    );
+    if (next - before).abs() > f32::EPSILON
+        && state
+            .surface
+            .apply(VirtualSurfaceCommand::SetScroll(VirtualScroll {
+                scroll_y: next,
+                velocity_y: 0.0,
+            }))
+            .is_err()
     {
         return;
     }
@@ -1090,24 +1163,6 @@ fn markdown_node_source(source_id: &str) -> NodeSource {
             namespace: source_id.to_string(),
         }
     }
-}
-
-fn cursor_line_is_in_visible_virtual_node(
-    state: &mut MarkdownVirtualRenderState,
-    line: usize,
-) -> bool {
-    let visible = state.surface.visible_set();
-    visible.nodes.into_iter().any(|visible_node| {
-        let Some(node) = state.surface.nodes().get(visible_node.index) else {
-            return false;
-        };
-        let Some(content) = node.content.as_ref() else {
-            return false;
-        };
-        let start = content.line_start as usize;
-        let end = start.saturating_add((content.line_count as usize).max(1));
-        line >= start && line < end
-    })
 }
 
 fn apply_virtual_surface_scroll_to_pane(pane: &mut MarkdownPane, surface_scroll_y: f32) {

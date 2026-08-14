@@ -126,7 +126,7 @@ pub(super) enum AgentSessionUpdate {
     },
 }
 
-pub(super) struct AgentSessionEventStream {
+pub(crate) struct AgentSessionEventStream {
     session_id: String,
     rx: Receiver<AgentSessionUpdate>,
     stop: Arc<AtomicBool>,

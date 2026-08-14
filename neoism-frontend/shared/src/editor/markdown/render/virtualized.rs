@@ -1,14 +1,14 @@
 use sugarloaf::text::DrawOpts;
 use sugarloaf::{
     DirtyKind, NodeId, NodeRevision, NodeSource, NodeSourceRange, VirtualMeasuredLayout,
-    VirtualNodeKind, VirtualRevealAlign, VirtualRevealTarget, VirtualScroll,
+    VirtualNodeKind, VirtualRevealAlign, VirtualScroll, VirtualSourceQuery,
     VirtualSourceRevision, VirtualSurfaceCommand, VirtualSurfaceConfig, VirtualViewport,
 };
 use sugarloaf::{Sugarloaf, VirtualBounds};
 use web_time::Instant;
 
 use crate::editor::markdown::helpers::{
-    block_handle_rect, is_divider, notebook_fenced_cell_index,
+    block_handle_rect, is_code_fence_line, is_divider, notebook_fenced_cell_index,
     notebook_markdown_cell_index, parse_markdown_list_marker, quote_marker_len,
     source_from_lines,
 };

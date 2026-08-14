@@ -411,6 +411,18 @@ pub enum NeoismAgentUiEvent {
 }
 
 pub(crate) enum NeoismAgentBackgroundUpdate {
+    PromptDispatched {
+        origin_session_id: Option<String>,
+        origin_draft_id: u64,
+        session_id: String,
+        transcript_echo: Option<String>,
+        event_stream: Option<AgentSessionEventStream>,
+    },
+    PromptDispatchFailed {
+        origin_session_id: Option<String>,
+        origin_draft_id: u64,
+        error: String,
+    },
     CompactFinished,
     CompactFailed(String),
     ConfigDefaultsLoaded(neoism_ui::panels::agent_pane::api_mapping::ConfigDefaults),
@@ -494,6 +506,22 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         provider_name: String,
         error: String,
     },
+}
+
+pub(crate) struct PendingPromptDispatch {
+    pub(crate) origin_session_id: Option<String>,
+    pub(crate) origin_draft_id: u64,
+    pub(crate) server: String,
+    pub(crate) directory: Option<String>,
+    pub(crate) message_id: String,
+    pub(crate) parts: Vec<Value>,
+    pub(crate) system: Option<String>,
+    pub(crate) agent: Option<String>,
+    pub(crate) model: String,
+    pub(crate) thinking: Option<String>,
+    pub(crate) delivery: neoism_protocol::agent::PromptDelivery,
+    pub(crate) author: Option<String>,
+    pub(crate) transcript_echo: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -720,6 +748,15 @@ pub struct NeoismAgentPane {
     pending_question: Option<NeoismAgentPendingQuestion>,
     pending_question_queue: VecDeque<NeoismAgentPendingQuestion>,
     pending_outbound: VecDeque<OutboundAgentCommand>,
+    /// Prompt admission performs socket I/O and may create a session. Keep it
+    /// serialized off the render thread so rapid sends retain their order and
+    /// a fresh draft cannot race itself into multiple backend sessions.
+    pub(super) pending_prompt_dispatches: VecDeque<PendingPromptDispatch>,
+    pub(super) prompt_dispatch_in_flight: bool,
+    /// Identity for the session-less composer. It changes on `/new` so a
+    /// delayed session-creation result cannot attach an older prompt to the
+    /// replacement draft merely because both have `session_id == None`.
+    pub(super) prompt_draft_id: u64,
     model_context_limit: Option<u64>,
     pub wordmark: NeoismWordmarkState,
     pub(super) side_panel: NeoismAgentSidePanel,
@@ -916,6 +953,9 @@ impl Default for NeoismAgentPane {
             pending_question: None,
             pending_question_queue: VecDeque::new(),
             pending_outbound: VecDeque::new(),
+            pending_prompt_dispatches: VecDeque::new(),
+            prompt_dispatch_in_flight: false,
+            prompt_draft_id: 0,
             model_context_limit: None,
             wordmark: NeoismWordmarkState::default(),
             side_panel: NeoismAgentSidePanel::default(),

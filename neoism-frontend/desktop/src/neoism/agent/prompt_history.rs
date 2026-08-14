@@ -15,6 +15,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
+use std::sync::{mpsc, OnceLock};
+#[cfg(not(test))]
+use std::thread;
 
 /// zsh's default `SAVEHIST`. Bounds both the file and a new pane's recall
 /// depth to the most recent 1000 prompts so a long-lived history can't grow
@@ -22,6 +26,8 @@ use std::path::{Path, PathBuf};
 pub const MAX_PROMPT_HISTORY: usize = 1000;
 
 const HISTORY_FILE: &str = "agent_prompt_history";
+#[cfg(not(test))]
+static HISTORY_WRITER: OnceLock<Option<mpsc::Sender<String>>> = OnceLock::new();
 
 /// Resolve the history file path. `NEOISM_AGENT_PROMPT_HISTORY_FILE`
 /// overrides it outright (handy for isolation / relocation); otherwise it
@@ -55,6 +61,39 @@ pub fn load() -> Vec<String> {
 pub fn append(text: &str) {
     if let Some(path) = path() {
         append_to(&path, text);
+    }
+}
+
+/// Queue a history write without performing filesystem I/O on the caller.
+/// A single process-wide writer preserves prompt ordering and avoids the
+/// lost-update race that one background thread per prompt would introduce.
+#[cfg(not(test))]
+pub fn append_async(text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let writer = HISTORY_WRITER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<String>();
+        match thread::Builder::new()
+            .name("neoism-agent-history".into())
+            .spawn(move || {
+                while let Ok(text) = rx.recv() {
+                    append(&text);
+                }
+            }) {
+            Ok(_) => Some(tx),
+            Err(error) => {
+                tracing::warn!(
+                    target: "neoism::agent_history",
+                    %error,
+                    "failed to start prompt-history writer"
+                );
+                None
+            }
+        }
+    });
+    if let Some(writer) = writer {
+        let _ = writer.send(text.to_string());
     }
 }
 

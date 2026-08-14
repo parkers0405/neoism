@@ -1,8 +1,13 @@
 use super::helpers::*;
+use super::source_map::InlineSourceMap;
 use super::types::*;
 
 impl MarkdownPane {
     pub fn enter_insert(&mut self) {
+        if self.mode != MarkdownMode::Insert {
+            self.clamp_cursor();
+            self.cursor_col = self.insert_col_from_normal(false);
+        }
         self.mode = MarkdownMode::Insert;
         self.vim.clear_pending();
         self.visual_anchor = None;
@@ -11,18 +16,44 @@ impl MarkdownPane {
 
     pub fn enter_append(&mut self) {
         self.clamp_cursor();
-        let end = self.visible_end_col(self.cursor_line);
-        if self.cursor_col < end {
-            self.cursor_col =
-                next_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
-            if self.cursor_col > end {
-                self.cursor_col = end;
-            }
-        }
+        self.cursor_col = self.insert_col_from_normal(true);
         self.mode = MarkdownMode::Insert;
         self.vim.clear_pending();
         self.visual_anchor = None;
         self.follow_cursor = true;
+    }
+
+    /// Translate the caret from Normal mode's rendered Markdown coordinates
+    /// into the raw source position revealed by Insert mode. In particular,
+    /// `a` advances one *visible* character and therefore crosses any closing
+    /// syntax attached to that character (`**`, backticks, `]]`, link URLs,
+    /// and similar) instead of landing inside the hidden delimiter.
+    fn insert_col_from_normal(&self, append: bool) -> usize {
+        let Some(line) = self.lines.get(self.cursor_line) else {
+            return 0;
+        };
+        let cursor = floor_char_boundary(line, self.cursor_col.min(line.len()));
+        if self.mode == MarkdownMode::Insert
+            || self.is_inside_code_block(self.cursor_line)
+            || is_code_fence_line(line)
+        {
+            return if append && cursor < line.len() {
+                next_char_boundary(line, cursor)
+            } else {
+                cursor
+            };
+        }
+
+        let marker_len = visible_marker_len(line).min(line.len());
+        let body = &line[marker_len..];
+        let map = InlineSourceMap::new(body);
+        let visible = map.visible_for_source(cursor.saturating_sub(marker_len));
+        let target = if append && visible < map.visible_len() {
+            visible + 1
+        } else {
+            visible
+        };
+        marker_len + map.source_for_visible(target)
     }
 
     pub fn enter_normal(&mut self) {
@@ -73,6 +104,7 @@ impl MarkdownPane {
         self.cursor_line = one_based.saturating_sub(1).min(self.lines.len() - 1);
         self.cursor_col = self.cursor_col.min(self.lines[self.cursor_line].len());
         self.clamp_cursor();
+        self.stop_scroll_momentum();
         self.follow_cursor = true;
         self.vim.clear_pending();
     }

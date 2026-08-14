@@ -43,6 +43,8 @@ pub(crate) mod process;
 mod registry;
 #[path = "tool_support/shell_scan.rs"]
 pub(crate) mod shell_scan;
+#[path = "tool_support/streaming_search.rs"]
+mod streaming_search;
 #[path = "tool_support/truncate.rs"]
 pub(crate) mod truncate;
 #[path = "tool_support/web.rs"]

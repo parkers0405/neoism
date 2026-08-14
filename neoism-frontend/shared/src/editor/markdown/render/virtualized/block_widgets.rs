@@ -372,6 +372,23 @@ fn draw_code_block(
             None,
         );
     }
+    // The opening fence lives in the card header, so the body loop below
+    // intentionally skips it. Give it the same explicit caret placement as
+    // inner code rows and the closing fence; otherwise Normal mode has hit
+    // geometry but no cursor rectangle and the block cursor disappears.
+    if let Some(fence_line) = local_lines.first().filter(|line| is_code_fence_line(line))
+    {
+        set_cursor_for_code_line(
+            sugarloaf,
+            pane,
+            item,
+            item.first_line,
+            fence_line,
+            x,
+            header_text_y,
+            &opts,
+        );
+    }
     // Copy button on the header's right edge, opposite the language label.
     // `copy_at` copies the inner code (lines between the fences).
     let code_end = item.first_line + local_lines.len().saturating_sub(1);

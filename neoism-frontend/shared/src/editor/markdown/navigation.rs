@@ -18,7 +18,7 @@ impl MarkdownPane {
         }
         if self.cursor_col > start {
             self.cursor_col =
-                prev_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
+                self.previous_rendered_col(self.cursor_line, self.cursor_col);
             if self.cursor_col < start {
                 self.cursor_col = start;
             }
@@ -43,8 +43,7 @@ impl MarkdownPane {
             self.cursor_col = start;
             self.follow_cursor = true;
         } else if self.cursor_col < end {
-            self.cursor_col =
-                next_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
+            self.cursor_col = self.next_rendered_col(self.cursor_line, self.cursor_col);
             if self.cursor_col > end {
                 self.cursor_col = end;
             }
@@ -279,7 +278,7 @@ impl MarkdownPane {
     /// Only applies when the registered wrap rows span the WHOLE raw line
     /// (`marker_len == 0`); body-relative rows are already aligned.
     fn reveal_row0_prefix_chars(&self, line_ix: usize, marker_len: usize) -> usize {
-        if self.cursor_line != line_ix || marker_len != 0 {
+        if !self.reveals_source_line(line_ix) || marker_len != 0 {
             return 0;
         }
         let Some(line) = self.lines.get(line_ix) else {
@@ -293,10 +292,49 @@ impl MarkdownPane {
             .unwrap_or(0)
     }
 
-    /// Lines whose drawn glyphs equal the buffer 1:1: the cursor's own line
-    /// (Live Preview raw reveal) and code-block lines (never cleaned).
+    /// Lines whose drawn glyphs equal the buffer 1:1: Insert mode's revealed
+    /// source line and code-block lines (never cleaned). Vim Normal keeps
+    /// Markdown syntax hidden, so its cursor line must use the source map.
     fn line_renders_verbatim(&self, line_ix: usize) -> bool {
-        self.cursor_line == line_ix || self.is_inside_code_block(line_ix)
+        self.reveals_source_line(line_ix) || self.is_inside_code_block(line_ix)
+    }
+
+    fn next_rendered_col(&self, line_ix: usize, col: usize) -> usize {
+        self.step_rendered_col(line_ix, col, true)
+    }
+
+    fn previous_rendered_col(&self, line_ix: usize, col: usize) -> usize {
+        self.step_rendered_col(line_ix, col, false)
+    }
+
+    /// Step across what Normal mode actually draws. Hidden Markdown syntax is
+    /// crossed as one boundary with its adjacent visible character, so `h`/`l`
+    /// never appear stuck on an invisible `**`, backtick, link target, etc.
+    fn step_rendered_col(&self, line_ix: usize, col: usize, forward: bool) -> usize {
+        let Some(line) = self.lines.get(line_ix) else {
+            return 0;
+        };
+        let col = floor_char_boundary(line, col.min(line.len()));
+        if self.line_renders_verbatim(line_ix)
+            || is_code_fence_line(line)
+            || is_divider(line.trim())
+        {
+            return if forward {
+                next_char_boundary(line, col)
+            } else {
+                prev_char_boundary(line, col)
+            };
+        }
+
+        let marker_len = visible_marker_len(line).min(line.len());
+        let map = InlineSourceMap::new(&line[marker_len..]);
+        let visible = map.visible_for_source(col.saturating_sub(marker_len));
+        let target = if forward {
+            (visible + 1).min(map.visible_len())
+        } else {
+            visible.saturating_sub(1)
+        };
+        marker_len + map.source_for_visible(target)
     }
 
     pub(super) fn visual_line_count(
@@ -479,7 +517,7 @@ impl MarkdownPane {
                 .count();
         }
         let marker_len = self.visible_start_col(line_ix).min(line.len());
-        let reveal = self.cursor_line == line_ix;
+        let reveal = self.line_renders_verbatim(line_ix);
         markdown_visible_chars_before_col(line, marker_len, self.cursor_col, reveal)
     }
 
@@ -492,7 +530,7 @@ impl MarkdownPane {
         } else {
             self.visible_start_col(line_ix).min(line.len())
         };
-        let reveal = self.cursor_line == line_ix;
+        let reveal = self.line_renders_verbatim(line_ix);
         let visible_len = markdown_visible_chars_after_marker(line, marker_len, reveal);
         self.cursor_line = line_ix;
         self.cursor_col = markdown_raw_col_for_visible_offset(
@@ -506,9 +544,9 @@ impl MarkdownPane {
     }
 
     pub(crate) fn visible_start_col(&self, line: usize) -> usize {
-        // Live Preview: the cursor's own line renders its raw markup, so the
-        // marker chars (`### `, `- `, `> `, …) are real, reachable columns.
-        if line == self.cursor_line {
+        // Insert mode reveals raw markup on the cursor line; Vim Normal keeps
+        // it styled, so block markers remain hidden and unreachable there.
+        if self.reveals_source_line(line) {
             return 0;
         }
         let Some(text) = self.lines.get(line) else {
@@ -538,9 +576,9 @@ impl MarkdownPane {
         if is_divider(text.trim_start()) {
             return start;
         }
-        // On the revealed (cursor) line trailing `##` heading closers are
-        // drawn raw, so they stay reachable too.
-        if line != self.cursor_line {
+        // Styled headings hide optional trailing `##`; a revealed Insert line
+        // draws them raw and allows the caret to reach them.
+        if !self.reveals_source_line(line) {
             if let Some(end) = heading_visible_end_col(text) {
                 return end.max(start).min(text.len());
             }

@@ -163,7 +163,7 @@ struct McpAuthRemove {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "status", rename_all = "snake_case")]
 enum McpStatus {
     Connected,
     Disabled,
@@ -352,7 +352,7 @@ async fn run_mcp(command: McpCommand) -> Result<(), String> {
 }
 
 async fn mcp_list(output: OutputArgs, auth_only: bool) -> Result<(), String> {
-    let status: BTreeMap<String, McpStatus> = get_json(&output.server, "/mcp").await?;
+    let status = mcp_status(&output.server).await?;
     if output.json {
         return print_json(&status);
     }
@@ -388,8 +388,7 @@ async fn mcp_authenticate(
 
     let deadline = Instant::now() + AUTH_TIMEOUT;
     loop {
-        let status: BTreeMap<String, McpStatus> =
-            get_json(&output.server, "/mcp").await?;
+        let status = mcp_status(&output.server).await?;
         match status.get(&name) {
             Some(McpStatus::Connected) => {
                 return print_result(
@@ -407,6 +406,25 @@ async fn mcp_authenticate(
             _ => tokio::time::sleep(POLL_INTERVAL).await,
         }
     }
+}
+
+async fn mcp_status(server: &str) -> Result<BTreeMap<String, McpStatus>, String> {
+    let entries: BTreeMap<String, Value> = get_json(server, "/mcp").await?;
+    Ok(entries
+        .into_iter()
+        .map(|(name, entry)| parse_mcp_status(entry).map(|status| (name, status)))
+        .collect::<Result<_, _>>()?)
+}
+
+fn parse_mcp_status(mut entry: Value) -> Result<McpStatus, String> {
+    if entry.get("status").is_some_and(Value::is_object) {
+        entry = entry
+            .get_mut("status")
+            .map(Value::take)
+            .unwrap_or(Value::Null);
+    }
+    serde_json::from_value(entry)
+        .map_err(|error| format!("invalid MCP status response: {error}"))
 }
 
 async fn mcp_logout(args: McpServerArgs) -> Result<(), String> {
@@ -669,5 +687,17 @@ mod tests {
     fn builds_current_mcp_auth_route() {
         assert_eq!(mcp_auth_path("webflow"), "/mcp/webflow/auth");
         assert_eq!(mcp_auth_path("company tools"), "/mcp/company%20tools/auth");
+    }
+
+    #[test]
+    fn parses_basic_and_catalog_mcp_status_shapes() {
+        let basic = parse_mcp_status(json!({ "status": "connected" })).unwrap();
+        let catalog = parse_mcp_status(json!({
+            "status": { "status": "needs_auth" },
+            "oauthCapable": true
+        }))
+        .unwrap();
+        assert!(matches!(basic, McpStatus::Connected));
+        assert!(matches!(catalog, McpStatus::NeedsAuth));
     }
 }

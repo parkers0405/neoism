@@ -15,11 +15,14 @@ fff-search.workspace = true
 futures-core.workspace = true
 futures.workspace = true
 git2.workspace = true
+globset.workspace = true
+ignore.workspace = true
 libc.workspace = true
 neoism-agent-core.workspace = true
 neoism-extensions.workspace = true
 neoism-workspace-index.workspace = true
 rand.workspace = true
+regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -31,9 +34,9 @@ turso.workspace = true
 tokio-stream.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+dirs = "6"
 
 [target.'cfg(windows)'.dependencies]
-dirs = "6"
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Security",

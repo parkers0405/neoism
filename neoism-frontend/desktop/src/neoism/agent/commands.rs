@@ -17,10 +17,11 @@ use super::api::{
 use super::pane::{
     merge_session_snapshot, CachedAgentSession, NeoismAgentBackgroundUpdate,
     NeoismAgentMessage, NeoismAgentMode, NeoismAgentNoticeLevel, NeoismAgentPane,
-    NeoismAgentStreamingState,
+    NeoismAgentStreamingState, PendingPromptDispatch,
 };
 use super::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
 use super::side_panel::SessionGoal;
+use super::updates::{start_session_event_stream, AgentSessionEventStream};
 
 impl NeoismAgentPane {
     pub(super) fn execute_slash_text(&mut self, text: &str) {
@@ -669,11 +670,19 @@ impl NeoismAgentPane {
             return Err("subagent sessions are view-only".to_string());
         }
         let prompt = self.expand_text_attachments(text);
+        self.send_prepared_prompt(prompt, transcript_echo)
+    }
+
+    pub(super) fn send_prepared_prompt(
+        &mut self,
+        prompt: String,
+        transcript_echo: bool,
+    ) -> Result<(), String> {
+        if self.is_subagent_session() {
+            return Err("subagent sessions are view-only".to_string());
+        }
         let parts = self.prompt_parts_for(&prompt);
         let system = self.prompt_system_for(&prompt);
-        if self.session_id.is_none() {
-            self.push_outbound(OutboundAgentCommand::EnsureSession);
-        }
         self.push_outbound(OutboundAgentCommand::SendPrompt {
             message_id: neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
             text: prompt,
@@ -688,7 +697,7 @@ impl NeoismAgentPane {
         Ok(())
     }
 
-    pub(super) fn execute_send_prompt_command(
+    pub(super) fn queue_send_prompt_command(
         &mut self,
         message_id: String,
         text: String,
@@ -699,11 +708,16 @@ impl NeoismAgentPane {
         thinking: Option<String>,
         delivery: neoism_protocol::agent::PromptDelivery,
         transcript_echo: bool,
-    ) -> Result<(), String> {
+    ) {
         if self.is_subagent_session() {
-            return Err("subagent sessions are view-only".to_string());
+            self.system_message("Prompt failed", "subagent sessions are view-only");
+            return;
         }
-        let session_id = self.ensure_session()?;
+        let origin_session_id = self.session_id.clone();
+        let origin_draft_id = self.prompt_draft_id;
+        if let Some(session_id) = origin_session_id.as_deref() {
+            self.start_session_updates(session_id);
+        }
         // Stamp who is sending this prompt so a shared/joined session
         // attributes the turn to the true sender: the host's agent-server
         // persists this on the user message and re-broadcasts it to every
@@ -712,36 +726,79 @@ impl NeoismAgentPane {
         // sender's own bubble still reads "You" — its optimistic echo carries
         // no author and the server echo is deduped onto it by text.
         let author = self.local_presence_name().map(str::to_string);
-        let body = json!({
-            "messageId": message_id,
-            "model": prompt_model_json(model.as_str(), thinking.as_deref()),
-            "agent": agent,
-            "noReply": false,
-            "system": system,
-            "tools": null,
-            "author": author,
-            "parts": parts,
-            "delivery": match delivery {
-                neoism_protocol::agent::PromptDelivery::Steer => "steer",
-                neoism_protocol::agent::PromptDelivery::Queue => "queue",
-            },
-        });
-        self.start_session_updates(&session_id);
-        api_request_json(
-            &self.server,
-            "POST",
-            &format!("/api/session/{session_id}/prompt"),
-            Some(&body),
-        )?;
-        if transcript_echo {
+        let transcript_echo = if transcript_echo {
             // Pending prompts must match the transcript echo, which uses
             // the compact composer form for pasted attachments.
-            let echo = self
-                .compact_user_prompt_text(&text)
-                .unwrap_or_else(|| text.clone());
-            self.remember_pending_user_prompt(&echo);
+            Some(
+                self.compact_user_prompt_text(&text)
+                    .unwrap_or_else(|| text.clone()),
+            )
+        } else {
+            None
+        };
+        self.pending_prompt_dispatches
+            .push_back(PendingPromptDispatch {
+                origin_session_id,
+                origin_draft_id,
+                server: self.server.clone(),
+                directory: self.directory.clone(),
+                message_id,
+                parts,
+                system,
+                agent,
+                model,
+                thinking,
+                delivery,
+                author,
+                transcript_echo,
+            });
+        self.start_next_prompt_dispatch();
+    }
+
+    pub(crate) fn start_next_prompt_dispatch(&mut self) {
+        if self.prompt_dispatch_in_flight {
+            return;
         }
-        Ok(())
+        let Some(request) = self.pending_prompt_dispatches.pop_front() else {
+            return;
+        };
+        self.prompt_dispatch_in_flight = true;
+        let tx = self.background_sender();
+        if let Err(error) = thread::Builder::new()
+            .name("neoism-agent-prompt".into())
+            .spawn(move || {
+                let origin_session_id = request.origin_session_id.clone();
+                let origin_draft_id = request.origin_draft_id;
+                let transcript_echo = request.transcript_echo.clone();
+                let update = match dispatch_prompt_request(request) {
+                    Ok((session_id, event_stream)) => {
+                        NeoismAgentBackgroundUpdate::PromptDispatched {
+                            origin_session_id,
+                            origin_draft_id,
+                            session_id,
+                            transcript_echo,
+                            event_stream,
+                        }
+                    }
+                    Err(error) => NeoismAgentBackgroundUpdate::PromptDispatchFailed {
+                        origin_session_id,
+                        origin_draft_id,
+                        error,
+                    },
+                };
+                let _ = tx.send(update);
+            })
+        {
+            self.prompt_dispatch_in_flight = false;
+            self.system_message(
+                "Prompt failed",
+                format!("failed to start prompt request: {error}"),
+            );
+            self.start_next_prompt_dispatch();
+            if !self.prompt_dispatch_in_flight {
+                self.note_streaming(NeoismAgentStreamingState::Idle, None);
+            }
+        }
     }
 
     pub(super) fn system_message(
@@ -1450,6 +1507,7 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn create_new_session(&mut self) {
+        self.prompt_draft_id = self.prompt_draft_id.wrapping_add(1);
         self.session_id = None;
         self.parent_session_id = None;
         self.side_panel.set_viewed_session_id(None);
@@ -1539,6 +1597,69 @@ impl NeoismAgentPane {
         self.side_panel.set_viewed_session_id(Some(id.clone()));
         Ok(id)
     }
+}
+
+fn dispatch_prompt_request(
+    request: PendingPromptDispatch,
+) -> Result<(String, Option<AgentSessionEventStream>), String> {
+    let (session_id, event_stream) = match request.origin_session_id.as_deref() {
+        Some(session_id) => (session_id.to_string(), None),
+        None => {
+            let session_id = create_prompt_session(&request)?;
+            // Subscribe before admitting the first prompt. The receiver can
+            // queue updates while this worker waits for the POST response, so
+            // a fast provider cannot emit the beginning of the turn before
+            // the pane knows which fresh session it belongs to.
+            let event_stream =
+                start_session_event_stream(request.server.clone(), session_id.clone());
+            (session_id, Some(event_stream))
+        }
+    };
+    let body = json!({
+        "messageId": request.message_id,
+        "model": prompt_model_json(request.model.as_str(), request.thinking.as_deref()),
+        "agent": request.agent,
+        "noReply": false,
+        "system": request.system,
+        "tools": null,
+        "author": request.author,
+        "parts": request.parts,
+        "delivery": match request.delivery {
+            neoism_protocol::agent::PromptDelivery::Steer => "steer",
+            neoism_protocol::agent::PromptDelivery::Queue => "queue",
+        },
+    });
+    api_request_json(
+        &request.server,
+        "POST",
+        &format!("/api/session/{session_id}/prompt"),
+        Some(&body),
+    )?;
+    Ok((session_id, event_stream))
+}
+
+fn create_prompt_session(request: &PendingPromptDispatch) -> Result<String, String> {
+    let path = request
+        .directory
+        .as_deref()
+        .map(|directory| format!("/session?directory={}", percent_encode(directory)))
+        .unwrap_or_else(|| "/session".to_string());
+    let body = json!({
+        "parentId": null,
+        "title": null,
+        "agent": request.agent.clone(),
+        "model": session_model_json(request.model.as_str(), request.thinking.as_deref()),
+        "permission": null,
+        "workspaceId": null,
+    });
+    let response = api_request_json(&request.server, "POST", &path, Some(&body))?
+        .ok_or_else(|| "server did not return session".to_string())?;
+    response
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "server did not return session id".to_string())
 }
 
 pub(super) fn slash_options() -> Vec<NeoismAgentPickerOption> {

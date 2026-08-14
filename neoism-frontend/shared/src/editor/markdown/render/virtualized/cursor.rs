@@ -21,13 +21,14 @@ fn set_cursor_for_item(
     let marker_len = marker_len.min(text_line.len());
     let col = pane.cursor_col.max(marker_len).min(text_line.len());
     let col = floor_char_boundary(text_line, col);
-    // No leading-whitespace skip here: this only runs for the cursor's own
-    // (raw-revealed) line, where the drawn rows preserve leading spaces —
-    // skipping them froze the caret while typing/indenting at line start.
+    // No leading-whitespace skip here: leading spaces remain part of the
+    // rendered row in both styled Normal mode and raw Insert mode.
     let body = text_line.get(marker_len..).unwrap_or_default();
-    // This only runs for the cursor's own line (guarded above), which renders
-    // raw under Live Preview — so the caret maps through an identity map.
-    let map = InlineSourceMap::identity(body);
+    let map = if pane.reveals_source_line(cursor_line) {
+        InlineSourceMap::identity(body)
+    } else {
+        InlineSourceMap::new(body)
+    };
     let col = col.max(marker_len);
     let text_y = y + local_line as f32 * line_h;
     if let Some((visual_line, row_prefix)) = pane.rendered_wrap_row_prefix_for_col(
@@ -170,9 +171,11 @@ fn set_cursor_for_source_line(
     let col = pane.cursor_col.max(marker_len).min(text_line.len());
     let col = floor_char_boundary(text_line, col);
     let body = text_line.get(marker_len..).unwrap_or_default();
-    // Cursor's own line (guarded above) renders raw under Live Preview — the
-    // caret maps through an identity map so raw col == drawn position.
-    let map = InlineSourceMap::identity(body);
+    let map = if pane.reveals_source_line(line_ix) {
+        InlineSourceMap::identity(body)
+    } else {
+        InlineSourceMap::new(body)
+    };
     let full = visible_markdown_prefix(body, &map, map.visible_len());
     let col = col.max(marker_len);
     if let Some((visual_line, row_prefix)) =
@@ -231,16 +234,21 @@ fn ensure_virtual_cursor_visible(pane: &mut MarkdownPane, clip: [f32; 4]) {
         return;
     };
     let marker_len = block.marker_len.min(line.len());
-    let Some((visual_line, visual_col)) = pane
-        .visual_position_for_col_from_wrap_rows(block.line, marker_len, pane.cursor_col)
-    else {
+    let Some((visual_line, visual_col)) = pane.visual_position_for_col_from_wrap_rows(
+        block.line,
+        marker_len,
+        pane.cursor_col,
+    ) else {
         return;
     };
     let Some(measured_x) = pane
         .block_wrap_hit_stops
         .get(&block.line)
         .and_then(|rows| rows.get(visual_line))
-        .and_then(|row| row.stops.get(visual_col.min(row.stops.len().saturating_sub(1))))
+        .and_then(|row| {
+            row.stops
+                .get(visual_col.min(row.stops.len().saturating_sub(1)))
+        })
         .copied()
     else {
         return;
@@ -309,8 +317,11 @@ fn set_cursor_for_trailing_empty_lines(
     // Only synthesize when everything from the anchor down to the cursor
     // really is blank — if there's content there, its own node draws the
     // caret (or the anchor isn't the document tail).
-    let all_blank = (end_line..=pane.cursor_line)
-        .all(|ix| pane.lines.get(ix).is_some_and(|line| line.trim().is_empty()));
+    let all_blank = (end_line..=pane.cursor_line).all(|ix| {
+        pane.lines
+            .get(ix)
+            .is_some_and(|line| line.trim().is_empty())
+    });
     if !all_blank {
         return;
     }
@@ -362,4 +373,3 @@ fn set_fallback_cursor_for_empty_virtual_markdown(
         Some(clip),
     );
 }
-

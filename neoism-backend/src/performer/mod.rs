@@ -8,8 +8,11 @@ use crate::event::RioEvent;
 use crate::event::{EventListener, Msg, WindowId};
 use corcovado::channel;
 use corcovado::{self, Events, PollOpt, Ready};
+use neoism_terminal_core::colors::term::TermColors;
+use neoism_terminal_core::colors::{ColorRgb, NamedColor};
 use neoism_terminal_core::crosswords::Crosswords;
 use neoism_terminal_core::handler;
+use neoism_terminal_core::TerminalEffect;
 use neoism_terminal_pty::PtySession;
 use std::sync::mpsc::TryRecvError;
 use std::sync::Arc;
@@ -56,6 +59,43 @@ fn bytes_text_for_log(bytes: &[u8]) -> String {
         out.push_str("...");
     }
     out
+}
+
+fn live_color_reply(
+    effect: &TerminalEffect,
+    colors: &TermColors,
+    default_foreground: ColorRgb,
+    default_background: ColorRgb,
+) -> Option<Vec<u8>> {
+    let TerminalEffect::ColorRequest {
+        prefix,
+        index,
+        terminator,
+    } = effect
+    else {
+        return None;
+    };
+    if !((prefix == "10" && *index == NamedColor::Foreground as usize)
+        || (prefix == "11" && *index == NamedColor::Background as usize))
+    {
+        return None;
+    }
+
+    let fallback = if *index == NamedColor::Foreground as usize {
+        default_foreground
+    } else {
+        default_background
+    };
+    let color = colors[*index]
+        .map(ColorRgb::from_color_arr)
+        .unwrap_or(fallback);
+    Some(
+        format!(
+            "\x1b]{};rgb:{1:02x}{1:02x}/{2:02x}{2:02x}/{3:02x}{3:02x}{4}",
+            prefix, color.r, color.g, color.b, terminator
+        )
+        .into_bytes(),
+    )
 }
 
 struct PeekableReceiver<T> {
@@ -107,6 +147,8 @@ pub struct Machine<U: EventListener> {
     event_proxy: U,
     window_id: WindowId,
     route_id: usize,
+    default_foreground: ColorRgb,
+    default_background: ColorRgb,
 }
 
 #[derive(Default)]
@@ -124,6 +166,8 @@ where
         event_proxy: U,
         window_id: WindowId,
         route_id: usize,
+        default_foreground: ColorRgb,
+        default_background: ColorRgb,
     ) -> Result<Machine<U>, Box<dyn std::error::Error>> {
         let (sender, receiver) = channel::channel();
         let poll = corcovado::Poll::new()?;
@@ -146,6 +190,8 @@ where
             event_proxy,
             window_id,
             route_id,
+            default_foreground,
+            default_background,
         })
     }
 
@@ -226,9 +272,32 @@ where
             state.parser.advance(&mut **terminal, &chunk);
 
             let drained_effects: Vec<_> = terminal.drain_effects().collect();
-            if !drained_effects.is_empty() {
+            let mut deferred_effects = Vec::with_capacity(drained_effects.len());
+            for effect in drained_effects {
+                let reply = live_color_reply(
+                    &effect,
+                    terminal.colors(),
+                    self.default_foreground,
+                    self.default_background,
+                );
+
+                if let Some(reply) = reply {
+                    if let Err(err) = self.pty.write_reply(&reply) {
+                        tracing::warn!(
+                            target: "neoism_backend::pty_input",
+                            route_id = self.route_id,
+                            error = %err,
+                            "failed to write live OSC color reply"
+                        );
+                        deferred_effects.push(effect);
+                    }
+                } else {
+                    deferred_effects.push(effect);
+                }
+            }
+            if !deferred_effects.is_empty() {
                 crate::effects_adapter::dispatch_terminal_effects(
-                    drained_effects,
+                    deferred_effects,
                     &self.event_proxy,
                     self.window_id,
                     self.route_id,
@@ -521,5 +590,51 @@ where
 
             (self, state)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_osc_11_reply_uses_background_fallback_and_preserves_terminator() {
+        let effect = TerminalEffect::ColorRequest {
+            prefix: "11".to_owned(),
+            index: NamedColor::Background as usize,
+            terminator: "\x1b\\".to_owned(),
+        };
+
+        let reply = live_color_reply(
+            &effect,
+            &TermColors::default(),
+            ColorRgb { r: 1, g: 2, b: 3 },
+            ColorRgb {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            },
+        );
+
+        assert_eq!(reply, Some(b"\x1b]11;rgb:1212/3434/5656\x1b\\".to_vec()));
+    }
+
+    #[test]
+    fn live_color_reply_leaves_other_color_queries_for_the_renderer() {
+        let effect = TerminalEffect::ColorRequest {
+            prefix: "12".to_owned(),
+            index: NamedColor::Cursor as usize,
+            terminator: "\x07".to_owned(),
+        };
+
+        assert_eq!(
+            live_color_reply(
+                &effect,
+                &TermColors::default(),
+                ColorRgb::default(),
+                ColorRgb::default(),
+            ),
+            None
+        );
     }
 }

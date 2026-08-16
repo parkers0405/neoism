@@ -48,6 +48,8 @@ pub struct ContextManagerConfig {
     /// renders, so workspace restore on startup was seeding restored
     /// panes with blinking permanently off.
     pub cursor_blinking: bool,
+    pub foreground: neoism_terminal_core::colors::ColorRgb,
+    pub background: neoism_terminal_core::colors::ColorRgb,
 }
 
 pub struct ContextManager<T: EventListener> {

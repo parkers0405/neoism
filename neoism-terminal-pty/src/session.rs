@@ -103,6 +103,15 @@ impl PtySession {
         }
     }
 
+    /// Write a terminal protocol reply before returning. Local sessions
+    /// acknowledge only after the PTY master accepted every byte.
+    pub fn write_reply(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match &mut self.inner {
+            PtyInner::Local(pty) => pty.write_reply(bytes),
+            PtyInner::Remote(pty) => pty.write(bytes),
+        }
+    }
+
     /// Set the PTY's window size (cols × rows).
     pub fn resize(&mut self, cols: u16, rows: u16) -> std::io::Result<()> {
         match &mut self.inner {

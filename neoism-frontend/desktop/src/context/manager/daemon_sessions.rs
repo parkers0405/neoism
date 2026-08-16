@@ -845,6 +845,8 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             event_proxy.clone(),
             window_id,
             route_id,
+            config.foreground,
+            config.background,
         )?;
         let channel = machine.channel();
         let io_thread = if config.spawn_performer {

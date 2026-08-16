@@ -1578,6 +1578,12 @@ impl Screen<'_> {
             scrollback_history_limit: config.terminal.scrollback_history_limit,
             ide_theme: config.appearance.theme.clone(),
             cursor_blinking: config.terminal.cursor.blinking,
+            foreground: neoism_terminal_core::colors::ColorRgb::from_color_arr(
+                config.appearance.colors.foreground,
+            ),
+            background: neoism_terminal_core::colors::ColorRgb::from_color_arr(
+                config.appearance.colors.background.0,
+            ),
         };
 
         // Create rich text with initial position accounting for island

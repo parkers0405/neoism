@@ -766,11 +766,11 @@ pub struct Screen<'screen> {
     /// join the returned relative path onto THIS vault root to open the
     /// new note — the generic tree-op path assumes the workspace root.
     pending_remote_notes_creates: HashMap<u64, PathBuf>,
-    /// In-flight files-plane note MOVES (spring-loaded drag) on a
-    /// served/joined workspace, by request id. The `Renamed` reply
+    /// In-flight files-plane note mutations on a served/joined workspace,
+    /// by request id. Rename/delete replies
     /// re-lists the notes sidebar (not the file tree) — the notes
     /// counterpart of `pending_remote_file_ops`.
-    pending_remote_notes_moves: std::collections::HashSet<u64>,
+    pending_remote_notes_mutations: std::collections::HashSet<u64>,
     /// Follow-the-terminal `ssh` file browsing. When a terminal pane
     /// enters an `ssh` session the tree flips onto a
     /// [`crate::daemon_client::ssh_files::SshFiles`] backend whose
@@ -1748,7 +1748,7 @@ impl Screen<'_> {
             pending_remote_git_status: HashMap::new(),
             pending_remote_notes_listing: std::collections::HashSet::new(),
             pending_remote_notes_creates: HashMap::new(),
-            pending_remote_notes_moves: std::collections::HashSet::new(),
+            pending_remote_notes_mutations: std::collections::HashSet::new(),
             ssh_files_tx,
             ssh_files_rx,
             ssh_files_next_id: 1,

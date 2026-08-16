@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
 
 use axum::extract::{Path, State};
@@ -113,6 +113,8 @@ pub(crate) async fn abort_session_run(state: &AppState, session_id: &str) -> boo
             ));
         }
     }
+
+    reconcile_parent_subtask_completions_for_child(state, session_id).await;
 
     cancelled.is_some() || coordinated.is_some() || was_busy
 }
@@ -349,12 +351,74 @@ async fn enqueue_parent_subtask_completion_prompts_if_ready(
     .await;
     crate::session_queue::publish_prompt_queue_status(state, parent_id, queue_len).await;
     if start_worker {
-        tokio::spawn(crate::session_queue::drain_prompt_queue(
+        crate::session_queue::spawn_drain_prompt_queue(
             state.clone(),
             parent_id.to_string(),
-        ));
+        );
     }
     Ok(())
+}
+
+/// Recheck the durable completion outbox after a child lifecycle transition.
+/// A completion can initially be held while a sibling is still active; an
+/// abort or late run teardown must give it another chance to reach the parent.
+pub(crate) async fn reconcile_parent_subtask_completions_for_child(
+    state: &AppState,
+    child_id: &str,
+) {
+    let parent_id = match state.inner.store.get_session(child_id).await {
+        Ok(Some(child)) => child.parent_id.map(|parent| parent.to_string()),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(session_id = %child_id, %error, "failed to load child while reconciling subtask completions");
+            return;
+        }
+    };
+    let Some(parent_id) = parent_id else {
+        return;
+    };
+    if let Err(error) =
+        enqueue_parent_subtask_completion_prompts_if_ready(state, &parent_id).await
+    {
+        tracing::warn!(session_id = %child_id, parent_id = %parent_id, %error, "failed to reconcile pending subtask completions");
+    }
+}
+
+/// Recover completion notifications that were persisted but not queued before
+/// a shutdown (or by an older build). This makes the completion outbox truly
+/// durable: reopening Neoism delivers the result instead of orphaning it.
+pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
+    let sessions = match state
+        .inner
+        .store
+        .list_sessions_with_extra_key(SUBTASK_COMPLETION_EXTRA_KEY)
+        .await
+    {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            tracing::warn!(%error, "failed to scan pending subtask completions at startup");
+            return;
+        }
+    };
+    let parent_ids = sessions
+        .into_iter()
+        .filter(|session| {
+            session
+                .extra
+                .get(SUBTASK_COMPLETION_EXTRA_KEY)
+                .and_then(|completion| completion.get("pending"))
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+        .filter_map(|session| session.parent_id.map(|parent| parent.to_string()))
+        .collect::<BTreeSet<_>>();
+    for parent_id in parent_ids {
+        if let Err(error) =
+            enqueue_parent_subtask_completion_prompts_if_ready(state, &parent_id).await
+        {
+            tracing::warn!(parent_id = %parent_id, %error, "failed to resume pending subtask completions");
+        }
+    }
 }
 
 async fn pending_parent_subtask_completions(
@@ -648,6 +712,7 @@ fn subtask_permission(
 mod tests {
     use super::*;
     use neoism_agent_core::{Id, IdKind};
+    use std::sync::{atomic::AtomicBool, Arc};
 
     fn test_child_session() -> SessionInfo {
         SessionInfo {
@@ -671,6 +736,209 @@ mod tests {
             permission: None,
             extra: BTreeMap::new(),
         }
+    }
+
+    fn queued_user_prompt(text: &str) -> PromptRequest {
+        PromptRequest {
+            message_id: Some(Id::ascending(IdKind::Message)),
+            model: None,
+            agent: None,
+            no_reply: true,
+            system: None,
+            tools: None,
+            author: None,
+            parts: vec![PromptPart::Text {
+                text: text.to_string(),
+            }],
+        }
+    }
+
+    async fn insert_session(state: &AppState, session: &SessionInfo) {
+        state.inner.store.insert_session(session).await.unwrap();
+    }
+
+    async fn hold_parent_run(state: &AppState, parent: &SessionInfo) {
+        let run = crate::state::SessionRun {
+            id: "parent-active-run".to_string(),
+            started_at: 1,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        state
+            .inner
+            .session_coordinator
+            .try_start_run(parent.id.as_str(), run.clone())
+            .await
+            .unwrap();
+        state
+            .inner
+            .runs
+            .write()
+            .await
+            .insert(parent.id.to_string(), run);
+    }
+
+    #[tokio::test]
+    async fn completed_subtask_queues_behind_user_message_while_parent_is_busy() {
+        let db_path = std::env::temp_dir().join(format!(
+            "neoism-agent-subtask-busy-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(db_path).await.unwrap();
+        let mut parent = test_child_session();
+        parent.parent_id = None;
+        let mut child = test_child_session();
+        child.parent_id = Some(parent.id.clone());
+        insert_session(&state, &parent).await;
+        insert_session(&state, &child).await;
+        hold_parent_run(&state, &parent).await;
+
+        crate::session_queue::enqueue_prompt_request_with_delivery(
+            &state,
+            parent.id.as_str(),
+            queued_user_prompt("new main-agent message"),
+            "steer",
+        )
+        .await
+        .unwrap();
+        publish_background_subtask_finished(
+            &state,
+            child.id.as_str(),
+            "completed",
+            "child result",
+        )
+        .await;
+
+        let queued = state
+            .inner
+            .store
+            .list_queued_prompt_entries(parent.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(
+            queued
+                .iter()
+                .map(|(_, delivery)| delivery.as_str())
+                .collect::<Vec<_>>(),
+            vec!["steer", "continue"]
+        );
+        let stored_child = state
+            .inner
+            .store
+            .get_session(child.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored_child.extra[SUBTASK_COMPLETION_EXTRA_KEY]["pending"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_last_active_sibling_releases_pending_completion() {
+        let db_path = std::env::temp_dir().join(format!(
+            "neoism-agent-subtask-abort-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(db_path).await.unwrap();
+        let mut parent = test_child_session();
+        parent.parent_id = None;
+        let mut completed_child = test_child_session();
+        completed_child.parent_id = Some(parent.id.clone());
+        let mut active_sibling = test_child_session();
+        active_sibling.parent_id = Some(parent.id.clone());
+        insert_session(&state, &parent).await;
+        insert_session(&state, &completed_child).await;
+        insert_session(&state, &active_sibling).await;
+        hold_parent_run(&state, &parent).await;
+        state.inner.runs.write().await.insert(
+            active_sibling.id.to_string(),
+            crate::state::SessionRun {
+                id: "sibling-active-run".to_string(),
+                started_at: 1,
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+
+        publish_background_subtask_finished(
+            &state,
+            completed_child.id.as_str(),
+            "completed",
+            "retained child result",
+        )
+        .await;
+        assert!(state
+            .inner
+            .store
+            .list_queued_prompt_entries(parent.id.as_str())
+            .await
+            .unwrap()
+            .is_empty());
+
+        abort_session_run(&state, active_sibling.id.as_str()).await;
+
+        let queued = state
+            .inner
+            .store
+            .list_queued_prompt_entries(parent.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].1, "continue");
+        let stored_child = state
+            .inner
+            .store
+            .get_session(completed_child.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored_child.extra[SUBTASK_COMPLETION_EXTRA_KEY]["pending"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_recovers_durable_pending_completion() {
+        let db_path = std::env::temp_dir().join(format!(
+            "neoism-agent-subtask-resume-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(db_path).await.unwrap();
+        let mut parent = test_child_session();
+        parent.parent_id = None;
+        let mut child = test_child_session();
+        child.parent_id = Some(parent.id.clone());
+        insert_session(&state, &parent).await;
+        insert_session(&state, &child).await;
+        hold_parent_run(&state, &parent).await;
+        mark_subtask_completion_pending(&state, child, "completed", "saved result")
+            .await
+            .unwrap();
+
+        resume_pending_subtask_completions(&state).await;
+
+        let queued = state
+            .inner
+            .store
+            .list_queued_prompt_entries(parent.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].1, "continue");
+        let stored_child = state
+            .inner
+            .store
+            .list_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|session| session.parent_id.as_ref() == Some(&parent.id))
+            .expect("stored child");
+        assert_eq!(
+            stored_child.extra[SUBTASK_COMPLETION_EXTRA_KEY]["pending"].as_bool(),
+            Some(false)
+        );
     }
 
     #[test]

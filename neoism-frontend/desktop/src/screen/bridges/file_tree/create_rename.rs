@@ -16,7 +16,7 @@ impl Screen<'_> {
 
     pub(crate) fn open_file_tree_rename_prompt_for_selection(&mut self) {
         if let Some(path) = self.selected_file_tree_path() {
-            self.open_file_tree_rename_prompt(path);
+            self.open_file_tree_rename_prompt(path, false);
         }
     }
 
@@ -82,7 +82,7 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    pub(crate) fn open_file_tree_rename_prompt(&mut self, path: PathBuf) {
+    pub(crate) fn open_file_tree_rename_prompt(&mut self, path: PathBuf, notes: bool) {
         use neoism_ui::widgets::modal::{
             ModalAction, ModalButton, ModalInputSpec, ModalSpec,
         };
@@ -107,6 +107,7 @@ impl Screen<'_> {
                     ModalAction::FileTreeRename {
                         path: path.display().to_string(),
                         name: String::new(),
+                        notes,
                     },
                 ),
                 ModalButton::new("Cancel", "Esc", ModalAction::Close),
@@ -219,8 +220,45 @@ impl Screen<'_> {
         }
     }
 
-    pub(crate) fn rename_file_tree_path(&mut self, path: PathBuf, name: String) {
+    pub(crate) fn rename_file_tree_path(
+        &mut self,
+        path: PathBuf,
+        name: String,
+        notes: bool,
+    ) {
         use neoism_ui::panels::notifications::NotificationLevel;
+
+        if notes && self.notes_sidebar_shows_shared_vault() {
+            let target =
+                match neoism_ui::panels::file_tree::rename_target_for_input(&path, &name)
+                {
+                    Ok(neoism_ui::panels::file_tree::RenameTarget::Noop) => {
+                        self.renderer.modal.close();
+                        return;
+                    }
+                    Ok(neoism_ui::panels::file_tree::RenameTarget::Target(target)) => {
+                        target
+                    }
+                    Err(message) => {
+                        self.file_tree_notify(message, NotificationLevel::Warn);
+                        return;
+                    }
+                };
+            if let Some(vault_root) = self.served_notes_vault_root() {
+                let relative = |value: &std::path::Path| {
+                    value
+                        .strip_prefix(&vault_root)
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| value.to_string_lossy().into_owned())
+                };
+                let from = relative(&path);
+                let to = relative(&target);
+                if self.send_remote_notes_move(vault_root, from, to) {
+                    self.renderer.modal.close();
+                }
+            }
+            return;
+        }
 
         // JOINED workspace: rename on the HOST (path math is pure, the
         // existence checks belong to the daemon there).
@@ -285,7 +323,22 @@ impl Screen<'_> {
                 self.renderer.modal.close();
                 self.rebind_current_epub_path(&path, target.clone());
                 let label = self.file_tree_display_path(&target);
-                self.refresh_file_tree_entries();
+                if notes {
+                    if let Some(pane) =
+                        self.context_manager.markdown_pane_mut_by_path(&path)
+                    {
+                        pane.path = target.clone();
+                        pane.title = target
+                            .file_stem()
+                            .map(|stem| stem.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                    }
+                    self.renderer.buffer_tabs.rename_path(&path, target.clone());
+                    self.renderer.notes_sidebar.refresh_notes();
+                    self.renderer.notes_sidebar.set_focused(true);
+                } else {
+                    self.refresh_file_tree_entries();
+                }
                 self.file_tree_notify(
                     format!("Renamed to `{label}`"),
                     NotificationLevel::Info,

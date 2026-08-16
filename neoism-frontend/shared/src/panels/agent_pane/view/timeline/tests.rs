@@ -154,6 +154,119 @@ fn location_notice_stays_visible_without_exposing_other_system_messages() {
 }
 
 #[test]
+fn live_boundary_reveals_only_the_current_turn_trace() {
+    let messages = vec![
+        text_message("u1", NeoismAgentMessageKind::User, "old question"),
+        text_message("r1", NeoismAgentMessageKind::Reasoning, "old thought"),
+        tool_message("t1", "read", "Read(old.rs)", "completed"),
+        text_message("a1", NeoismAgentMessageKind::Assistant, "Old answer."),
+        text_message("u2", NeoismAgentMessageKind::User, "new question"),
+        text_message("r2", NeoismAgentMessageKind::Reasoning, "new thought"),
+        tool_message("t2", "grep", "Grep(new)", "running"),
+        text_message("a2", NeoismAgentMessageKind::Assistant, "New answer."),
+    ];
+
+    assert_eq!(
+        timeline_message_visibility(&messages, Some(5)),
+        vec![true, false, false, true, true, true, true, true]
+    );
+}
+
+#[test]
+fn final_answer_remains_visible_when_a_settled_turn_ends_on_a_tool() {
+    let messages = vec![
+        text_message("u1", NeoismAgentMessageKind::User, "fix it"),
+        text_message("r1", NeoismAgentMessageKind::Reasoning, "planning"),
+        text_message("a1", NeoismAgentMessageKind::Assistant, "Implemented."),
+        tool_message("t1", "bash", "Bash(cargo test)", "completed"),
+    ];
+
+    assert_eq!(
+        timeline_message_visibility(&messages, None),
+        vec![true, false, true, false]
+    );
+}
+
+#[test]
+fn every_assistant_chunk_survives_settling_around_tools() {
+    let messages = vec![
+        text_message("u1", NeoismAgentMessageKind::User, "investigate"),
+        text_message(
+            "a-progress",
+            NeoismAgentMessageKind::Assistant,
+            "I am checking it.",
+        ),
+        tool_message("t1", "grep", "Grep(problem)", "completed"),
+        text_message(
+            "a-result",
+            NeoismAgentMessageKind::Assistant,
+            "The cause is fixed.",
+        ),
+        tool_message("t2", "bash", "Bash(cargo test)", "completed"),
+        text_message("a-final", NeoismAgentMessageKind::Assistant, "Tests pass."),
+    ];
+
+    assert_eq!(
+        timeline_message_visibility(&messages, None),
+        vec![true, true, false, true, false, true]
+    );
+}
+
+#[test]
+fn runtime_system_rows_stay_hidden_even_inside_the_live_window() {
+    let messages = vec![
+        text_message(
+            "msg_background_completion_job_1",
+            NeoismAgentMessageKind::System,
+            "Background shell task finished.",
+        ),
+        text_message(
+            "msg_subtask_completion_child_1",
+            NeoismAgentMessageKind::System,
+            "Subagent task finished.",
+        ),
+    ];
+
+    assert_eq!(
+        timeline_message_visibility(&messages, Some(0)),
+        vec![false, false]
+    );
+}
+
+#[test]
+fn subtasks_and_compaction_are_visible_live_and_hidden_after_reload() {
+    let messages = vec![
+        text_message("u1", NeoismAgentMessageKind::User, "work"),
+        text_message("subtask", NeoismAgentMessageKind::Subtask, "exploring"),
+        text_message("compact", NeoismAgentMessageKind::Compaction, "summary"),
+        text_message("answer", NeoismAgentMessageKind::Assistant, "Done."),
+    ];
+
+    assert_eq!(
+        timeline_message_visibility(&messages, Some(1)),
+        vec![true, true, true, true]
+    );
+    assert_eq!(
+        timeline_message_visibility(&messages, None),
+        vec![true, false, false, true]
+    );
+}
+
+#[test]
+fn stale_live_boundary_past_the_transcript_is_safely_treated_as_settled() {
+    let messages = vec![
+        text_message("u1", NeoismAgentMessageKind::User, "question"),
+        text_message("r1", NeoismAgentMessageKind::Reasoning, "thought"),
+        text_message("a1", NeoismAgentMessageKind::Assistant, "answer"),
+    ];
+
+    assert_eq!(
+        timeline_message_visibility(&messages, Some(usize::MAX)),
+        timeline_message_visibility(&messages, None)
+    );
+}
+
+#[test]
 fn live_read_tools_group_into_one_display_message() {
     let messages = vec![
         tool_message("read-a", "read", "Read(src/a.rs)", "completed"),

@@ -82,6 +82,71 @@ fn active_subagent_part_updates_do_not_restart_waiting_clock() {
 }
 
 #[test]
+fn failed_subagent_refresh_preserves_sidebar_and_footer_activity() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("parent", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "child", "explore")
+            .with_runtime_status(Some("running".to_string())),
+    ]);
+    assert_eq!(pane.active_subagent_count(), 1);
+
+    let generation = pane
+        .side_panel
+        .begin_subagent_refresh()
+        .expect("refresh generation");
+    pane.background_sender()
+        .send(NeoismAgentBackgroundUpdate::SidePanelSubagentsRefreshed {
+            session_id: "parent".to_string(),
+            generation,
+            result: Err("temporary transport failure".to_string()),
+        })
+        .unwrap();
+
+    pane.drain_background_updates();
+
+    assert_eq!(
+        pane.side_panel
+            .subagents()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["parent", "child"]
+    );
+    assert_eq!(pane.active_subagent_count(), 1);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
+}
+
+#[test]
+fn child_background_completion_stays_out_of_main_transcript() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "parent",
+        [AgentSessionUpdate::BackgroundTaskCompleted {
+            session_id: "child".to_string(),
+            job_id: "job-child".to_string(),
+            status: "completed".to_string(),
+        }],
+    ));
+
+    pane.drain_server_updates();
+
+    assert!(pane
+        .messages
+        .iter()
+        .all(|message| message.id != "background-task-job-child"));
+    assert!(pane.session_cache["child"]
+        .messages
+        .iter()
+        .any(|message| message.id == "background-task-job-child"));
+}
+
+#[test]
 fn retry_status_includes_a_compact_provider_reason() {
     let mut pane = NeoismAgentPane::default();
     pane.note_streaming(
@@ -921,6 +986,29 @@ fn child_hydration_merges_snapshot_without_losing_streamed_prefix() {
 
     assert_eq!(merged.len(), 2);
     assert_eq!(merged[1].text, "the streamed prefix");
+}
+
+#[test]
+fn runtime_completion_rehydrate_does_not_append_cached_part_at_bottom() {
+    let live = crate::neoism::agent::api::part_block(&json!({
+        "id": "prt-background-done",
+        "messageID": "msg_background_completion_job_123",
+        "type": "text",
+        "role": "user",
+        "text": "Background shell task finished.\njob_id: job_123\nstatus: completed"
+    }))
+    .expect("live runtime completion");
+    let snapshot = vec![NeoismAgentMessage::system(
+        "Background task",
+        "Background shell task finished.\njob_id: job_123\nstatus: completed",
+    )
+    .with_id("msg_background_completion_job_123")];
+
+    let merged = merge_session_snapshot(snapshot, vec![live]);
+
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].id, "msg_background_completion_job_123");
+    assert_eq!(merged[0].kind, NeoismAgentMessageKind::System);
 }
 
 #[test]

@@ -168,6 +168,98 @@ fn subagent_poll_keeps_running_while_active_and_stops_when_all_done() {
 }
 
 #[test]
+fn subagent_refresh_is_single_flight_and_rejects_stale_generations() {
+    let mut panel = NeoismAgentSidePanel::default();
+
+    let first = panel.begin_subagent_refresh().expect("first refresh");
+    assert!(
+        panel.begin_subagent_refresh().is_none(),
+        "an in-flight refresh must serialize later polls"
+    );
+
+    // A live tree event invalidates the worker that was already fetching.
+    panel.mark_subagent_tree_dirty();
+    let second = panel.begin_subagent_refresh().expect("replacement refresh");
+    assert_ne!(first, second);
+    assert!(
+        !panel.complete_subagent_refresh(first),
+        "the old worker must not complete the new generation"
+    );
+    assert!(panel.complete_subagent_refresh(second));
+}
+
+#[test]
+fn partial_poll_snapshot_preserves_omitted_active_subagent() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("main", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "child", "explore")
+            .with_runtime_status(Some("running".to_string())),
+    ]);
+    assert_eq!(panel.active_child_count(Some("main")), 1);
+
+    // A stale/partial snapshot knows only about the root. The live active
+    // child must remain visible and keep the footer count stable.
+    panel.set_subagents(vec![NeoismAgentSessionEntry::new(
+        "main",
+        "main session",
+        "return",
+    )]);
+    assert_eq!(
+        panel
+            .subagents()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["main", "child"]
+    );
+    assert_eq!(panel.active_child_count(Some("main")), 1);
+
+    // An authoritative terminal edge permits the next snapshot to remove it.
+    panel.set_branch_activity_status("child", BranchStatus::Completed);
+    panel.set_subagents(vec![NeoismAgentSessionEntry::new(
+        "main",
+        "main session",
+        "return",
+    )]);
+    assert_eq!(
+        panel
+            .subagents()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["main"]
+    );
+}
+
+#[test]
+fn stale_running_poll_cannot_resurrect_a_completed_subagent() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("main", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "child", "explore")
+            .with_runtime_status(Some("running".to_string())),
+    ]);
+    panel.set_branch_activity_status("child", BranchStatus::Completed);
+
+    // This snapshot began before the live completion event and still says
+    // running. It must not restart the footer timer or active count.
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("main", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "child", "explore")
+            .with_runtime_status(Some("running".to_string())),
+    ]);
+
+    assert_eq!(panel.active_child_count(Some("main")), 0);
+    assert_eq!(
+        panel
+            .branch_activity("child")
+            .map(|activity| activity.status),
+        Some(BranchStatus::Completed)
+    );
+}
+
+#[test]
 fn first_seen_completed_subagent_is_hidden_immediately() {
     // Entering chat with an already-finished child must NOT start a fresh
     // 7s window — the row is hidden/pruned right away (no reappearing

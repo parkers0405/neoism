@@ -428,12 +428,11 @@ impl Screen<'_> {
                 self.renderer.modal.close();
                 self.paste_file_tree_clipboard(PathBuf::from(dest_dir));
             }
-            ModalAction::FileTreePromptDelete { path } => {
-                self.confirm_delete_file_tree_path(PathBuf::from(path));
+            ModalAction::FileTreePromptDelete { path, notes } => {
+                self.confirm_delete_file_tree_path(PathBuf::from(path), notes);
             }
-            ModalAction::FileTreeDelete { path } => {
-                self.delete_file_tree_path(PathBuf::from(path));
-                self.renderer.notes_sidebar.refresh_notes();
+            ModalAction::FileTreeDelete { path, notes } => {
+                self.delete_file_tree_path(PathBuf::from(path), notes);
             }
             ModalAction::FileTreePromptNewFile { dir } => {
                 self.open_file_tree_new_file_prompt(PathBuf::from(dir));
@@ -444,8 +443,8 @@ impl Screen<'_> {
             ModalAction::FileTreePromptNewFolder { dir } => {
                 self.open_file_tree_new_folder_prompt(PathBuf::from(dir));
             }
-            ModalAction::FileTreePromptRename { path } => {
-                self.open_file_tree_rename_prompt(PathBuf::from(path));
+            ModalAction::FileTreePromptRename { path, notes } => {
+                self.open_file_tree_rename_prompt(PathBuf::from(path), notes);
             }
             ModalAction::FileTreeNewFile { dir, name } => {
                 self.create_file_tree_file(PathBuf::from(dir), name);
@@ -467,9 +466,8 @@ impl Screen<'_> {
                 self.create_file_tree_folder(PathBuf::from(dir), name);
                 self.renderer.notes_sidebar.refresh_notes();
             }
-            ModalAction::FileTreeRename { path, name } => {
-                self.rename_file_tree_path(PathBuf::from(path), name);
-                self.renderer.notes_sidebar.refresh_notes();
+            ModalAction::FileTreeRename { path, name, notes } => {
+                self.rename_file_tree_path(PathBuf::from(path), name, notes);
             }
             ModalAction::RenameTab {
                 index,

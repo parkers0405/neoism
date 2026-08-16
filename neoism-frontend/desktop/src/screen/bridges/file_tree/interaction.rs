@@ -506,6 +506,7 @@ impl Screen<'_> {
                 "r",
                 ModalAction::FileTreePromptRename {
                     path: path.display().to_string(),
+                    notes: false,
                 },
             ));
             buttons.push(ModalButton::new(
@@ -513,6 +514,7 @@ impl Screen<'_> {
                 "d",
                 ModalAction::FileTreePromptDelete {
                     path: path.display().to_string(),
+                    notes: false,
                 },
             ));
         }
@@ -610,14 +612,18 @@ impl Screen<'_> {
                 "Rename",
                 "r",
                 ContextMenuAction::Modal(
-                    ModalAction::FileTreePromptRename { path: path.clone() }.into(),
+                    ModalAction::FileTreePromptRename {
+                        path: path.clone(),
+                        notes: false,
+                    }
+                    .into(),
                 ),
             ));
             items.push(ContextMenuItem::new(
                 "Delete",
                 "d",
                 ContextMenuAction::Modal(
-                    ModalAction::FileTreePromptDelete { path }.into(),
+                    ModalAction::FileTreePromptDelete { path, notes: false }.into(),
                 ),
             ));
         }

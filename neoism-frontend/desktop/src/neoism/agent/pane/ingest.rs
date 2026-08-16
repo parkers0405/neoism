@@ -251,7 +251,11 @@ impl NeoismAgentPane {
                     self.sync_subagent_waiting_clock();
                     changed = true;
                 }
-                AgentSessionUpdate::BackgroundTaskCompleted { job_id, status } => {
+                AgentSessionUpdate::BackgroundTaskCompleted {
+                    session_id,
+                    job_id,
+                    status,
+                } => {
                     let text = format!(
                         "job_id: {job_id}\nstatus: {status}\nbackground shell task finished"
                     );
@@ -265,13 +269,13 @@ impl NeoismAgentPane {
                         Vec::new(),
                     )
                     .with_id(format!("background-task-{job_id}"));
-                    if stream_is_active {
+                    if self.session_id.as_deref() == Some(session_id.as_str()) {
                         self.upsert_part_message(message);
                         self.ensure_background_task_activity_clock();
                     } else {
                         let cached = self
                             .session_cache
-                            .entry(stream_session_id.clone())
+                            .entry(session_id)
                             .or_insert_with(CachedAgentSession::live_only);
                         upsert_cached_part_message(&mut cached.messages, message);
                     }
@@ -1026,9 +1030,21 @@ impl NeoismAgentPane {
                     self.side_panel.set_sessions(sessions);
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::SidePanelSubagentsRefreshed(
-                    subagents,
-                )) => {
+                Ok(NeoismAgentBackgroundUpdate::SidePanelSubagentsRefreshed {
+                    session_id,
+                    generation,
+                    result,
+                }) => {
+                    if !self.side_panel.complete_subagent_refresh(generation)
+                        || self.session_id.as_deref() != Some(session_id.as_str())
+                    {
+                        continue;
+                    }
+                    let Ok(subagents) = result else {
+                        // Preserve the last good sidebar snapshot and active
+                        // count. The normal cadence will retry this refresh.
+                        continue;
+                    };
                     let root_id = subagents.first().map(|root| root.id.clone());
                     if let Some(root_id) = root_id.as_ref() {
                         self.session_tree_root_id = Some(root_id.clone());

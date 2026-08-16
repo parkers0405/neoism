@@ -22,7 +22,7 @@
 //! analogue — same scroll/cursor primitives, same clamp/scrolloff
 //! pattern.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use web_time::Duration;
 use web_time::Instant;
 
@@ -454,6 +454,12 @@ pub struct NeoismAgentSidePanel {
     viewed_session_id: Option<String>,
     subagents_loaded: bool,
     last_subagents_refresh: Option<Instant>,
+    /// Only one branch-tree snapshot may be in flight at a time. The
+    /// generation invalidates an older worker when the viewed session or
+    /// live branch tree changes, preventing late snapshots from replacing
+    /// newer event-driven state.
+    subagent_refresh_in_flight: bool,
+    subagent_refresh_generation: u64,
     /// Per-session activity snapshot used to paint the indented
     /// connector + tool + status dot under each branch row. Keyed by
     /// session id so it survives sub-agent list reorderings.
@@ -541,6 +547,8 @@ impl Default for NeoismAgentSidePanel {
             viewed_session_id: None,
             subagents_loaded: false,
             last_subagents_refresh: None,
+            subagent_refresh_in_flight: false,
+            subagent_refresh_generation: 0,
             branch_activities: HashMap::new(),
             session_goal: None,
             last_goal_refresh: None,
@@ -1270,8 +1278,37 @@ impl NeoismAgentSidePanel {
         }
     }
 
-    pub fn set_subagents(&mut self, subagents: Vec<NeoismAgentSessionEntry>) {
+    pub fn set_subagents(&mut self, mut subagents: Vec<NeoismAgentSessionEntry>) {
         let was_subagents = matches!(self.mode, SidePanelMode::Subagents);
+        // A branch discovered by the live event stream is newer than a poll
+        // that started before that event. If such a poll omits an agent that
+        // is still authoritatively active, retain its last known row. This
+        // keeps both the sidebar and the footer's active count stable until a
+        // real terminal lifecycle event arrives.
+        let incoming_ids = subagents
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<HashSet<_>>();
+        let missing_active = self
+            .subagents
+            .iter()
+            .enumerate()
+            .filter(|(index, entry)| {
+                *index > 0
+                    && !incoming_ids.contains(&entry.id)
+                    && self
+                        .branch_activities
+                        .get(&entry.id)
+                        .is_some_and(|activity| {
+                            matches!(
+                                activity.status,
+                                BranchStatus::Active | BranchStatus::WaitingPermission
+                            )
+                        })
+            })
+            .map(|(_, entry)| entry.clone())
+            .collect::<Vec<_>>();
+        subagents.extend(missing_active);
         // Capture the id of the row the cursor was on so it survives a
         // re-fetch. The subagent list is rebuilt wholesale on every
         // refresh (and after a session switch invalidates it), so a raw
@@ -1316,7 +1353,7 @@ impl NeoismAgentSidePanel {
             })
             .collect::<Vec<_>>();
         for (id, status) in reconciled {
-            self.set_branch_activity_status(id, status);
+            self.reconcile_polled_branch_activity_status(id, status);
         }
         if was_subagents {
             // Restore the cursor onto the same logical branch it was on
@@ -1417,6 +1454,9 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn should_refresh_subagents(&self) -> bool {
+        if self.subagent_refresh_in_flight {
+            return false;
+        }
         let due = self
             .last_subagents_refresh
             .map(|last| Instant::now().saturating_duration_since(last).as_millis() >= 500)
@@ -1459,8 +1499,28 @@ impl NeoismAgentSidePanel {
             })
     }
 
-    pub fn mark_subagent_refresh_kicked(&mut self) {
+    /// Claim the next branch-tree refresh. Returns a generation token that
+    /// must accompany the result; `None` means another worker already owns
+    /// the refresh or the debounce has not elapsed.
+    pub fn begin_subagent_refresh(&mut self) -> Option<u64> {
+        if !self.should_refresh_subagents() {
+            return None;
+        }
+        self.subagent_refresh_generation =
+            self.subagent_refresh_generation.wrapping_add(1);
+        self.subagent_refresh_in_flight = true;
         self.last_subagents_refresh = Some(Instant::now());
+        Some(self.subagent_refresh_generation)
+    }
+
+    /// Release a refresh only when it is still the current generation.
+    /// Stale workers must not clear the in-flight flag of a newer request.
+    pub fn complete_subagent_refresh(&mut self, generation: u64) -> bool {
+        if generation != self.subagent_refresh_generation {
+            return false;
+        }
+        self.subagent_refresh_in_flight = false;
+        true
     }
 
     /// Force the next `should_refresh_*` to fire — used when the
@@ -1468,12 +1528,18 @@ impl NeoismAgentSidePanel {
     /// list reflects the new parent immediately rather than waiting
     /// for the debounce to tick down.
     pub fn invalidate_subagent_refresh(&mut self) {
+        self.subagent_refresh_generation =
+            self.subagent_refresh_generation.wrapping_add(1);
+        self.subagent_refresh_in_flight = false;
         self.last_subagents_refresh = None;
         self.subagents_loaded = false;
         self.subagents.clear();
     }
 
     pub fn mark_subagent_tree_dirty(&mut self) {
+        self.subagent_refresh_generation =
+            self.subagent_refresh_generation.wrapping_add(1);
+        self.subagent_refresh_in_flight = false;
         self.last_subagents_refresh = None;
         self.subagents_loaded = false;
     }
@@ -1505,6 +1571,26 @@ impl NeoismAgentSidePanel {
                 activity.terminal_locked = terminal;
                 activity
             });
+    }
+
+    /// Reconcile a periodic status snapshot without allowing an older poll
+    /// to undo a terminal lifecycle event that arrived live. A genuinely
+    /// restarted child emits a fresh live active event, which uses
+    /// `set_branch_activity_status` and intentionally clears the latch.
+    fn reconcile_polled_branch_activity_status(
+        &mut self,
+        session_id: impl Into<String>,
+        status: BranchStatus,
+    ) {
+        let session_id = session_id.into();
+        if matches!(
+            status,
+            BranchStatus::Active | BranchStatus::WaitingPermission
+        ) && self.branch_terminal_locked(&session_id)
+        {
+            return;
+        }
+        self.set_branch_activity_status(session_id, status);
     }
 
     pub fn set_branch_activity_started_at(

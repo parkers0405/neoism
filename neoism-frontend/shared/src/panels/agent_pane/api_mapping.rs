@@ -9,12 +9,24 @@ use super::state::{
 
 const SUBTASK_COMPLETION_SYSTEM_MARKER: &str =
     "Neoism runtime notification: background subagent completion.";
+const SUBTASK_COMPLETION_MESSAGE_PREFIX: &str = "msg_subtask_completion_";
 /// Marker the agent-server stamps on a background-job completion prompt's
 /// `info.system` (see `background_job.rs`). The prompt is injected with
 /// `role: "user"` so the model sees the captured output, but the human did
 /// NOT type it — so we render it as a system notice, never a user bubble.
 const BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER: &str =
     "Neoism runtime notification: background shell task completion.";
+const BACKGROUND_TASK_COMPLETION_MESSAGE_PREFIX: &str = "msg_background_completion_";
+
+fn is_background_task_completion(system: &str, message_id: &str) -> bool {
+    system.contains(BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER)
+        || message_id.starts_with(BACKGROUND_TASK_COMPLETION_MESSAGE_PREFIX)
+}
+
+fn is_subtask_completion(system: &str, message_id: &str) -> bool {
+    system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER)
+        || message_id.starts_with(SUBTASK_COMPLETION_MESSAGE_PREFIX)
+}
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct ConfigDefaults {
@@ -587,9 +599,9 @@ fn message_blocks_with_start(
             return Vec::new();
         }
         let system = info.get("system").and_then(Value::as_str).unwrap_or("");
-        let message = if system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER) {
+        let message = if is_subtask_completion(system, &id) {
             agent_message_system("Subagent", text)
-        } else if system.contains(BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER) {
+        } else if is_background_task_completion(system, &id) {
             // Injected as a user-role turn so the model sees the captured
             // output, but the user didn't send it — render as a system
             // notice (no user bubble / presence orb), matching how opencode
@@ -1159,6 +1171,59 @@ mod tests {
     }
 
     #[test]
+    fn background_completion_reserved_id_never_renders_as_a_user_message() {
+        let message = json!({
+            "info": {
+                "id": "msg_background_completion_job_123",
+                "role": "user"
+            },
+            "parts": [{
+                "id": "prt-background-done",
+                "type": "text",
+                "text": "Background shell task finished.\njob_id: job_123"
+            }]
+        });
+
+        let blocks = message_blocks(&message);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, NeoismAgentMessageKind::System);
+        assert_eq!(blocks[0].title, "Background task");
+    }
+
+    #[test]
+    fn live_background_completion_reserved_id_never_renders_as_a_user_message() {
+        let block = part_block(&json!({
+            "id": "prt-background-done",
+            "messageID": "msg_background_completion_job_123",
+            "type": "text",
+            "role": "user",
+            "text": "Background shell task finished.\njob_id: job_123"
+        }))
+        .expect("runtime completion block");
+
+        assert_eq!(block.kind, NeoismAgentMessageKind::System);
+        assert_eq!(block.title, "Background task");
+        assert_eq!(block.id, "msg_background_completion_job_123");
+    }
+
+    #[test]
+    fn markerless_subtask_completion_uses_reserved_message_identity() {
+        let block = part_block(&json!({
+            "id": "prt-subtask-done",
+            "messageID": "msg_subtask_completion_ses_child",
+            "type": "text",
+            "role": "user",
+            "text": "Subagent finished.\ntask_id: ses_child"
+        }))
+        .expect("runtime completion block");
+
+        assert_eq!(block.kind, NeoismAgentMessageKind::System);
+        assert_eq!(block.title, "Subagent");
+        assert_eq!(block.id, "msg_subtask_completion_ses_child");
+    }
+
+    #[test]
     fn assistant_parts_keep_server_order_for_finish_refresh() {
         let message = json!({
             "info": { "id": "msg-tools", "role": "assistant" },
@@ -1356,10 +1421,15 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
             // notice, not a user bubble, live. History reload does the same in
             // `message_blocks`.
             let system = part.get("system").and_then(Value::as_str).unwrap_or("");
+            let message_id = part
+                .get("messageID")
+                .or_else(|| part.get("messageId"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
             part.get("text").and_then(Value::as_str).map(|text| {
-                if system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER) {
+                if is_subtask_completion(system, message_id) {
                     agent_message_system("Subagent", text)
-                } else if system.contains(BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER) {
+                } else if is_background_task_completion(system, message_id) {
                     agent_message_system("Background task", text)
                 } else {
                     agent_message_user(text)
@@ -1445,7 +1515,9 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
     // id. Use that same identity for the live echo; otherwise a delayed
     // `part.updated` carries the child part id, misses the snapshot row, and
     // can append the prompt after an already-rendered assistant response.
-    message.id = if message.kind == NeoismAgentMessageKind::User {
+    let originated_as_user_part =
+        kind == "text" && part.get("role").and_then(Value::as_str) == Some("user");
+    message.id = if originated_as_user_part {
         part.get("messageID")
             .or_else(|| part.get("messageId"))
             .or_else(|| part.get("message_id"))

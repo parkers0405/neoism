@@ -340,7 +340,9 @@ pub(super) fn fetch_subagent_entries(
     server: &str,
     session_id: &str,
 ) -> Result<Vec<NeoismAgentSessionEntry>, String> {
-    let statuses = fetch_session_statuses(server).unwrap_or_default();
+    // A missing status map must not turn every live child into a terminal
+    // branch for one frame. Let the pane retain its last good tree and retry.
+    let statuses = fetch_session_statuses(server)?;
     let current =
         api_request_json(server, "GET", &format!("/session/{session_id}"), None)?
             .ok_or_else(|| {

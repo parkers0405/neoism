@@ -473,14 +473,14 @@ impl Screen<'_> {
             Key::Character(s) if s == "r" => {
                 self.renderer.notes_sidebar.clear_pending();
                 if let Some(path) = self.renderer.notes_sidebar.selected_note_path() {
-                    self.open_file_tree_rename_prompt(path);
+                    self.open_file_tree_rename_prompt(path, true);
                 }
                 true
             }
             Key::Character(s) if s == "d" => {
                 self.renderer.notes_sidebar.clear_pending();
                 if let Some(path) = self.renderer.notes_sidebar.selected_note_path() {
-                    self.confirm_delete_file_tree_path(path);
+                    self.confirm_delete_file_tree_path(path, true);
                 }
                 true
             }

@@ -142,9 +142,11 @@ pub enum ModalAction {
     },
     FileTreePromptDelete {
         path: String,
+        notes: bool,
     },
     FileTreeDelete {
         path: String,
+        notes: bool,
     },
     FileTreePromptNewFile {
         dir: String,
@@ -157,6 +159,7 @@ pub enum ModalAction {
     },
     FileTreePromptRename {
         path: String,
+        notes: bool,
     },
     FileTreeNewFile {
         dir: String,
@@ -188,6 +191,7 @@ pub enum ModalAction {
     FileTreeRename {
         path: String,
         name: String,
+        notes: bool,
     },
     /// Rename the buffer tab at `index` to `name` (filled from the modal
     /// input box via [`ModalAction::with_input`]). When
@@ -248,8 +252,12 @@ impl ModalAction {
             ModalAction::FileTreeNewFolder { dir, .. } => {
                 ModalAction::FileTreeNewFolder { dir, name: value }
             }
-            ModalAction::FileTreeRename { path, .. } => {
-                ModalAction::FileTreeRename { path, name: value }
+            ModalAction::FileTreeRename { path, notes, .. } => {
+                ModalAction::FileTreeRename {
+                    path,
+                    name: value,
+                    notes,
+                }
             }
             ModalAction::RenameTab {
                 index,

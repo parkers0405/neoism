@@ -123,10 +123,10 @@ impl Screen<'_> {
         let Some(path) = self.selected_file_tree_path() else {
             return;
         };
-        self.confirm_delete_file_tree_path(path);
+        self.confirm_delete_file_tree_path(path, false);
     }
 
-    pub(crate) fn confirm_delete_file_tree_path(&mut self, path: PathBuf) {
+    pub(crate) fn confirm_delete_file_tree_path(&mut self, path: PathBuf, notes: bool) {
         use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
 
         let label = self.file_tree_display_path(&path);
@@ -142,6 +142,7 @@ impl Screen<'_> {
                     "d",
                     ModalAction::FileTreeDelete {
                         path: path.display().to_string(),
+                        notes,
                     },
                 ),
                 ModalButton::new("Cancel", "Esc", ModalAction::Close),
@@ -152,10 +153,20 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    pub(crate) fn delete_file_tree_path(&mut self, path: PathBuf) {
+    pub(crate) fn delete_file_tree_path(&mut self, path: PathBuf, notes: bool) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
         self.renderer.modal.close();
+        if notes && self.notes_sidebar_shows_shared_vault() {
+            if let Some(vault_root) = self.served_notes_vault_root() {
+                let relative = path
+                    .strip_prefix(&vault_root)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+                let _ = self.send_remote_notes_delete(vault_root, relative);
+            }
+            return;
+        }
         // JOINED workspace: delete on the HOST.
         if self.renderer.file_tree.is_remote() {
             if let Some(rel) = self.remote_tree_rel(&path) {
@@ -167,7 +178,11 @@ impl Screen<'_> {
         }
         if !path.exists() {
             self.file_tree_notify("Path already deleted.", NotificationLevel::Warn);
-            self.refresh_file_tree_entries();
+            if notes {
+                self.renderer.notes_sidebar.refresh_notes();
+            } else {
+                self.refresh_file_tree_entries();
+            }
             return;
         }
         let label = self.file_tree_display_path(&path);
@@ -185,7 +200,12 @@ impl Screen<'_> {
                 // stale context isn't reused if the name is recreated
                 // (the markdown/draw pane caches its loaded content).
                 self.close_buffer_tabs_under_path(&path);
-                self.refresh_file_tree_entries();
+                if notes {
+                    self.renderer.notes_sidebar.refresh_notes();
+                    self.renderer.notes_sidebar.set_focused(true);
+                } else {
+                    self.refresh_file_tree_entries();
+                }
                 self.file_tree_notify(
                     format!("Deleted `{label}`"),
                     NotificationLevel::Info,

@@ -275,24 +275,27 @@ impl NeoismAgentPane {
         let Some(session_id) = self.session_id.clone() else {
             return;
         };
-        if !self.side_panel.should_refresh_subagents() {
+        let Some(generation) = self.side_panel.begin_subagent_refresh() else {
             return;
-        }
-        self.side_panel.mark_subagent_refresh_kicked();
+        };
         let server = self.server.clone();
         let tx = self.background_tx.clone();
-        std::thread::Builder::new()
+        let requested_session_id = session_id.clone();
+        if let Err(error) = std::thread::Builder::new()
             .name("neoism-agent-subagents".into())
             .spawn(move || {
-                let entries = match fetch_subagent_entries(&server, &session_id) {
-                    Ok(entries) => entries,
-                    Err(_) => Vec::new(),
-                };
-                let _ = tx.send(
-                    NeoismAgentBackgroundUpdate::SidePanelSubagentsRefreshed(entries),
-                );
+                let result = fetch_subagent_entries(&server, &requested_session_id);
+                let _ =
+                    tx.send(NeoismAgentBackgroundUpdate::SidePanelSubagentsRefreshed {
+                        session_id: requested_session_id,
+                        generation,
+                        result,
+                    });
             })
-            .ok();
+        {
+            self.side_panel.complete_subagent_refresh(generation);
+            tracing::warn!(%error, "failed to start subagent refresh worker");
+        }
     }
 
     /// Debounced background refetch of the session's persistent goal.

@@ -82,6 +82,10 @@ pub(crate) async fn finish_session_run(state: &AppState, session_id: &str, run_i
         .finish_run(run_id, "completed", None)
         .await;
     publish_idle_if_no_run(state, session_id).await;
+    crate::session_actions::reconcile_parent_subtask_completions_for_child(
+        state, session_id,
+    )
+    .await;
 }
 
 pub(crate) async fn publish_idle_if_no_run(state: &AppState, session_id: &str) {

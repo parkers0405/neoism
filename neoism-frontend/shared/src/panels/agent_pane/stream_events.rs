@@ -223,6 +223,7 @@ pub enum SessionEventUpdate {
         agent: Option<String>,
     },
     BackgroundTaskCompleted {
+        session_id: String,
         job_id: String,
         status: String,
     },
@@ -439,8 +440,11 @@ pub fn classify_session_event(
                 .unwrap_or_default()
         }
         "session.background_task.completed" => {
+            let owner_session_id =
+                source_session_id.unwrap_or_else(|| session_id.to_string());
             let job_id = properties
                 .get("jobId")
+                .or_else(|| properties.get("jobID"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
@@ -452,7 +456,11 @@ pub fn classify_session_event(
             if job_id.is_empty() {
                 Vec::new()
             } else {
-                vec![SessionEventUpdate::BackgroundTaskCompleted { job_id, status }]
+                vec![SessionEventUpdate::BackgroundTaskCompleted {
+                    session_id: owner_session_id,
+                    job_id,
+                    status,
+                }]
             }
         }
         "session.next.compaction.started" => {
@@ -1316,6 +1324,35 @@ mod tests {
                 && kind == "text"
                 && delta == "the prefix"
         ));
+    }
+
+    #[test]
+    fn background_completion_keeps_its_child_session_owner() {
+        let mut state = SessionEventUpdateState::default();
+        state.child_session_ids.insert("ses_child".to_string());
+
+        let updates = classify_session_event(
+            json!({
+                "type": "session.background_task.completed",
+                "properties": {
+                    "sessionID": "ses_child",
+                    "parentSessionID": "ses_child",
+                    "jobID": "job_child",
+                    "status": "completed"
+                }
+            }),
+            "ses_root",
+            &mut state,
+        );
+
+        assert_eq!(
+            updates,
+            vec![SessionEventUpdate::BackgroundTaskCompleted {
+                session_id: "ses_child".to_string(),
+                job_id: "job_child".to_string(),
+                status: "completed".to_string(),
+            }]
+        );
     }
 
     #[test]

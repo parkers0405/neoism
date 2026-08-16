@@ -1474,6 +1474,214 @@ fn virtual_timeline_measurements_are_not_rebuilt_on_plain_scroll() {
 }
 
 #[test]
+fn thousands_of_stream_deltas_coalesce_into_one_timeline_row() {
+    let mut pane = NeoismAgentPane::default();
+    let layout_epoch = pane.timeline_layout_epoch;
+
+    for _ in 0..4_096 {
+        pane.apply_part_delta(
+            Some("answer-part".to_string()),
+            Some("answer-part".to_string()),
+            Some("text".to_string()),
+            "x",
+        );
+    }
+
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.messages[0].id, "answer-part");
+    assert_eq!(pane.messages[0].text.len(), 4_096);
+    assert_eq!(pane.timeline_layout_epoch, layout_epoch);
+    let dirty = pane.take_timeline_dirty_marks();
+    assert_eq!(dirty.indices.into_iter().collect::<Vec<_>>(), vec![0]);
+}
+
+#[test]
+fn empty_stream_deltas_do_not_invalidate_or_create_timeline_rows() {
+    let mut pane = NeoismAgentPane::default();
+    let layout_epoch = pane.timeline_layout_epoch;
+    let content_revision = pane.timeline_content_revision;
+
+    pane.apply_part_delta(
+        Some("answer-part".to_string()),
+        Some("answer-part".to_string()),
+        Some("text".to_string()),
+        "",
+    );
+
+    assert!(pane.messages.is_empty());
+    assert_eq!(pane.timeline_layout_epoch, layout_epoch);
+    assert_eq!(pane.timeline_content_revision, content_revision);
+    assert!(pane.take_timeline_dirty_marks().indices.is_empty());
+}
+
+#[test]
+fn message_id_delta_updates_its_row_instead_of_the_latest_same_kind() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::assistant("first").with_id("answer-1"),
+        NeoismAgentMessage::assistant("second").with_id("answer-2"),
+    ];
+
+    pane.apply_part_delta(
+        Some("answer-1".to_string()),
+        None,
+        Some("text".to_string()),
+        " updated",
+    );
+
+    assert_eq!(pane.messages[0].text, "first updated");
+    assert_eq!(pane.messages[1].text, "second");
+    let dirty = pane.take_timeline_dirty_marks();
+    assert_eq!(dirty.indices.into_iter().collect::<Vec<_>>(), vec![0]);
+}
+
+#[test]
+fn finalizing_tool_patches_only_the_tool_and_its_spacing_neighbor() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::reasoning("plan").with_id("reason-1"),
+        NeoismAgentMessage::tool(
+            "Bash(cargo test)",
+            "",
+            "running",
+            "bash",
+            NeoismAgentOutputKind::Text,
+            "",
+            Vec::new(),
+        )
+        .with_id("tool-1"),
+        NeoismAgentMessage::assistant("waiting").with_id("answer-1"),
+    ];
+    let layout_epoch = pane.timeline_layout_epoch;
+
+    pane.finalize_tool_card(
+        "tool-1",
+        "completed",
+        Some("all tests passed".to_string()),
+        None,
+    );
+
+    assert_eq!(pane.messages[1].status, "completed");
+    assert_eq!(pane.messages[1].text, "all tests passed");
+    assert_eq!(pane.timeline_layout_epoch, layout_epoch);
+    let dirty = pane.take_timeline_dirty_marks();
+    assert_eq!(dirty.indices.into_iter().collect::<Vec<_>>(), vec![1, 2]);
+}
+
+#[test]
+fn removing_a_stream_part_forces_one_structural_rebuild_and_clears_patch_marks() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("question").with_id("user-1"),
+        NeoismAgentMessage::assistant("answer").with_id("answer-1"),
+    ];
+    pane.apply_part_delta(
+        Some("answer-1".to_string()),
+        None,
+        Some("text".to_string()),
+        " tail",
+    );
+    let layout_epoch = pane.timeline_layout_epoch;
+
+    pane.remove_part_message("answer-1");
+
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.timeline_layout_epoch, layout_epoch.wrapping_add(1));
+    assert!(pane.take_timeline_dirty_marks().indices.is_empty());
+}
+
+#[test]
+fn unchanged_virtual_timeline_sync_does_not_revise_any_nodes() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("stable-session".to_string());
+    pane.messages = vec![
+        NeoismAgentMessage::user("question").with_id("user-1"),
+        NeoismAgentMessage::reasoning("thought").with_id("reason-1"),
+        NeoismAgentMessage::assistant("answer").with_id("answer-1"),
+    ];
+    pane.sync_virtual_timeline([0.0, 0.0, 500.0, 200.0], 500.0, 0.0, 0.0, 1.0, &[]);
+    let revisions = pane
+        .virtual_timeline
+        .surface
+        .nodes()
+        .iter()
+        .map(|node| node.revision)
+        .collect::<Vec<_>>();
+    let transcript_revision = pane.virtual_timeline.revision;
+
+    pane.sync_virtual_timeline([0.0, 0.0, 500.0, 200.0], 500.0, 0.0, 40.0, 1.0, &[]);
+
+    assert_eq!(pane.virtual_timeline.revision, transcript_revision);
+    assert_eq!(
+        pane.virtual_timeline
+            .surface
+            .nodes()
+            .iter()
+            .map(|node| node.revision)
+            .collect::<Vec<_>>(),
+        revisions
+    );
+}
+
+#[test]
+fn complete_stream_lifecycle_rehydrates_without_duplicates_or_stale_text() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![NeoismAgentMessage::user("fix it").with_id("user-1")];
+    pane.note_streaming(NeoismAgentStreamingState::Thinking, None);
+    pane.apply_part_delta(
+        None,
+        Some("reason-1".to_string()),
+        Some("reasoning".to_string()),
+        "planning",
+    );
+    pane.upsert_tool_card(
+        "tool-1".to_string(),
+        "bash".to_string(),
+        "Bash(cargo test)".to_string(),
+        "running".to_string(),
+        String::new(),
+        NeoismAgentOutputKind::Text,
+        String::new(),
+    );
+    pane.finalize_tool_card(
+        "tool-1",
+        "completed",
+        Some("tests passed".to_string()),
+        None,
+    );
+    pane.apply_part_delta(
+        None,
+        Some("answer-1".to_string()),
+        Some("text".to_string()),
+        "Done.",
+    );
+    pane.note_session_idle();
+
+    let mut stale_snapshot = pane.messages.clone();
+    stale_snapshot
+        .iter_mut()
+        .find(|message| message.id == "answer-1")
+        .expect("answer")
+        .text
+        .clear();
+    let refreshed = pane.preserve_streamed_response_text(stale_snapshot);
+    pane.apply_history(refreshed);
+
+    assert_eq!(
+        pane.messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["user-1", "reason-1", "tool-1", "answer-1"]
+    );
+    assert_eq!(pane.messages[2].status, "completed");
+    assert_eq!(pane.messages[2].text, "tests passed");
+    assert_eq!(pane.messages[3].text, "Done.");
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert_eq!(pane.streaming_label(), "");
+}
+
+#[test]
 fn completed_answer_stays_above_later_streamed_reasoning() {
     // The model answers (non-empty text), *then* opens a fresh
     // thinking block. The finished answer must keep its slot above the

@@ -550,6 +550,7 @@ impl AppState {
             }
         });
         crate::session_queue::resume_prompt_queues(state.clone()).await?;
+        crate::session_actions::resume_pending_subtask_completions(&state).await;
         Ok(state)
     }
 
@@ -1628,6 +1629,25 @@ impl SessionStore {
             .fetch_all(
                 "SELECT info_json FROM sessions ORDER BY updated DESC",
                 Vec::new(),
+            )
+            .await?;
+        rows.into_iter()
+            .map(|row| decode_json(row.get_str("info_json")?))
+            .collect()
+    }
+
+    /// Decode only sessions carrying a particular flattened `extra` key.
+    /// Startup completion recovery uses this instead of parsing every stored
+    /// session (whose context snapshots can be several megabytes each).
+    pub(crate) async fn list_sessions_with_extra_key(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<Vec<SessionInfo>> {
+        let rows = self
+            .db
+            .fetch_all(
+                "SELECT info_json FROM sessions WHERE info_json LIKE ? ORDER BY updated DESC",
+                vec![text(format!("%\"{key}\"%"))],
             )
             .await?;
         rows.into_iter()

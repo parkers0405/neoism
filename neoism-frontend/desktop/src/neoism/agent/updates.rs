@@ -104,6 +104,7 @@ pub(super) enum AgentSessionUpdate {
         agent: Option<String>,
     },
     BackgroundTaskCompleted {
+        session_id: String,
         job_id: String,
         status: String,
     },
@@ -137,6 +138,23 @@ impl AgentSessionEventStream {
     #[cfg(test)]
     pub(super) fn connected_for_test(session_id: &str) -> Self {
         let (_tx, rx) = mpsc::channel();
+        Self {
+            session_id: session_id.to_string(),
+            rx,
+            stop: Arc::new(AtomicBool::new(false)),
+            disconnected: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_updates_for_test(
+        session_id: &str,
+        updates: impl IntoIterator<Item = AgentSessionUpdate>,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel();
+        for update in updates {
+            tx.send(update).expect("test event receiver");
+        }
         Self {
             session_id: session_id.to_string(),
             rx,
@@ -528,9 +546,15 @@ fn send_event_updates(
                 current_tool,
                 started_at,
             })?,
-            SessionEventUpdate::BackgroundTaskCompleted { job_id, status } => {
-                tx.send(AgentSessionUpdate::BackgroundTaskCompleted { job_id, status })?
-            }
+            SessionEventUpdate::BackgroundTaskCompleted {
+                session_id,
+                job_id,
+                status,
+            } => tx.send(AgentSessionUpdate::BackgroundTaskCompleted {
+                session_id,
+                job_id,
+                status,
+            })?,
             SessionEventUpdate::SubagentCompleted {
                 task_id,
                 status,

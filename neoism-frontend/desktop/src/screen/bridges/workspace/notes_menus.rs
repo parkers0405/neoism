@@ -304,6 +304,7 @@ impl Screen<'_> {
             ContextMenuAction::Modal(
                 ModalAction::FileTreePromptRename {
                     path: target_string.clone(),
+                    notes: true,
                 }
                 .into(),
             ),
@@ -314,6 +315,7 @@ impl Screen<'_> {
             ContextMenuAction::Modal(
                 ModalAction::FileTreePromptDelete {
                     path: target_string,
+                    notes: true,
                 }
                 .into(),
             ),

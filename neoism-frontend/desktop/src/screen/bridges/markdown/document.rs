@@ -90,7 +90,7 @@ impl Screen<'_> {
             return;
         }
         let remote = self.renderer.file_tree.is_remote();
-        self.rename_file_tree_path(old_path.clone(), file_name);
+        self.rename_file_tree_path(old_path.clone(), file_name, false);
         if remote {
             // The daemon performs the rename; its push refreshes panes.
             return;

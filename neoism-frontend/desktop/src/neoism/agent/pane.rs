@@ -431,7 +431,11 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         limit: Option<u64>,
     },
     SidePanelSessionsRefreshed(Vec<NeoismAgentSessionEntry>),
-    SidePanelSubagentsRefreshed(Vec<NeoismAgentSessionEntry>),
+    SidePanelSubagentsRefreshed {
+        session_id: String,
+        generation: u64,
+        result: Result<Vec<NeoismAgentSessionEntry>, String>,
+    },
     /// Semantic session-search results for `query`, fetched off-thread.
     /// `hits: None` means the server reports semantic search unavailable
     /// (no vector backend / no embeddings key) — stop asking this run.

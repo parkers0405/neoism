@@ -404,7 +404,7 @@ impl Screen<'_> {
     /// plane (the commit half of a spring-loaded notes-sidebar drag on a
     /// shared vault). Like [`Self::send_remote_notes_create`] the op is
     /// scoped to the VAULT root and its request id is recorded in
-    /// `pending_remote_notes_moves`, so the `Renamed` reply re-lists the
+    /// `pending_remote_notes_mutations`, so the `Renamed` reply re-lists the
     /// notes sidebar (not the file tree). `from`/`to` are vault-relative.
     /// Returns false when no daemon link is attached (caller runs local).
     pub(crate) fn send_remote_notes_move(
@@ -419,7 +419,7 @@ impl Screen<'_> {
             return false;
         };
         let request_id = handle.allocate_request_id();
-        self.pending_remote_notes_moves.insert(request_id);
+        self.pending_remote_notes_mutations.insert(request_id);
         runtime.spawn(async move {
             if let Err(error) = handle
                 .send_files_with_request_id(
@@ -434,6 +434,40 @@ impl Screen<'_> {
                     %error,
                     request_id,
                     "remote note move send failed"
+                );
+            }
+        });
+        true
+    }
+
+    /// Delete a note/folder in the host's linked vault, scoped to the vault
+    /// rather than the unrelated project-tree root.
+    pub(crate) fn send_remote_notes_delete(
+        &mut self,
+        vault_root: std::path::PathBuf,
+        path: String,
+    ) -> bool {
+        let Some((handle, runtime)) =
+            self.context_manager.daemon_link_handle_and_runtime()
+        else {
+            return false;
+        };
+        let request_id = handle.allocate_request_id();
+        self.pending_remote_notes_mutations.insert(request_id);
+        runtime.spawn(async move {
+            if let Err(error) = handle
+                .send_files_with_request_id(
+                    request_id,
+                    neoism_protocol::files::FilesClientMessage::Delete { path },
+                    Some(vault_root),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "neoism::remote_files",
+                    %error,
+                    request_id,
+                    "remote note delete send failed"
                 );
             }
         });
@@ -564,7 +598,7 @@ impl Screen<'_> {
         let own_op = self.pending_remote_file_ops.remove(&request_id);
         let notes_listing = self.pending_remote_notes_listing.remove(&request_id);
         let notes_create_vault = self.pending_remote_notes_creates.remove(&request_id);
-        let notes_move = self.pending_remote_notes_moves.remove(&request_id);
+        let notes_mutation = self.pending_remote_notes_mutations.remove(&request_id);
         match message {
             // A note just created in the host's linked vault: the reply
             // path is vault-relative, so join it onto the vault root (NOT
@@ -596,7 +630,7 @@ impl Screen<'_> {
             }
             // A note/folder was moved in the host's linked vault: re-list
             // the sidebar so the row lands in its new home.
-            FilesServerMessage::Renamed { to, .. } if notes_move => {
+            FilesServerMessage::Renamed { to, .. } if notes_mutation => {
                 self.file_tree_notify(
                     format!("Moved `{to}` in the shared vault"),
                     NotificationLevel::Info,
@@ -605,9 +639,21 @@ impl Screen<'_> {
                 self.mark_dirty();
                 true
             }
-            FilesServerMessage::Error { .. } if notes_move => {
+            FilesServerMessage::Deleted { path, .. } if notes_mutation => {
                 self.file_tree_notify(
-                    "Could not move the note on the host".to_string(),
+                    format!("Deleted `{path}` from the shared vault"),
+                    NotificationLevel::Info,
+                );
+                if let Some(root) = self.served_notes_vault_root() {
+                    self.close_buffer_tabs_under_path(&root.join(path));
+                }
+                self.request_remote_notes_listing();
+                self.mark_dirty();
+                true
+            }
+            FilesServerMessage::Error { .. } if notes_mutation => {
+                self.file_tree_notify(
+                    "Could not rename or delete the note on the host".to_string(),
                     NotificationLevel::Error,
                 );
                 self.mark_dirty();

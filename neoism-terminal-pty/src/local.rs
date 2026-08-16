@@ -25,7 +25,7 @@
 
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::{self, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::thread::{Builder, JoinHandle};
 
@@ -47,6 +47,10 @@ const READ_BUFFER_SIZE: usize = 0x10_0000;
 /// handle to the background reader thread.
 enum Command {
     Write(Vec<u8>),
+    WriteReply {
+        bytes: Vec<u8>,
+        completion: SyncSender<std::io::Result<usize>>,
+    },
     Resize(WinsizeBuilder),
     Shutdown,
 }
@@ -165,6 +169,24 @@ impl LocalPty {
                 std::io::Error::new(ErrorKind::BrokenPipe, "PTY worker is gone")
             })?;
         Ok(bytes.len())
+    }
+
+    pub(crate) fn write_reply(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let len = bytes.len();
+        let (completion, completed) = mpsc::sync_channel(1);
+        self.cmd_tx
+            .send(Command::WriteReply {
+                bytes: bytes.to_vec(),
+                completion,
+            })
+            .map_err(|_| {
+                std::io::Error::new(ErrorKind::BrokenPipe, "PTY worker is gone")
+            })?;
+
+        completed.recv().map_err(|_| {
+            std::io::Error::new(ErrorKind::BrokenPipe, "PTY worker dropped reply write")
+        })??;
+        Ok(len)
     }
 
     pub(crate) fn resize(&mut self, cols: u16, rows: u16) -> std::io::Result<()> {
@@ -311,9 +333,14 @@ fn reader_loop_impl(
     let mut events = Events::with_capacity(1024);
     let mut buf = vec![0u8; READ_BUFFER_SIZE];
     let mut shutting_down = false;
-    let mut pending_writes: std::collections::VecDeque<Vec<u8>> =
-        std::collections::VecDeque::new();
-    let mut current_write: Option<(Vec<u8>, usize)> = None;
+    struct PendingWrite {
+        bytes: Vec<u8>,
+        offset: usize,
+        completion: Option<SyncSender<std::io::Result<usize>>>,
+    }
+
+    let mut pending_writes = std::collections::VecDeque::<PendingWrite>::new();
+    let mut current_write: Option<PendingWrite> = None;
 
     'event_loop: loop {
         events.clear();
@@ -331,7 +358,20 @@ fn reader_loop_impl(
         // current poll iteration.
         loop {
             match cmd_rx.try_recv() {
-                Ok(Command::Write(bytes)) => pending_writes.push_back(bytes),
+                Ok(Command::Write(bytes)) => pending_writes.push_back(PendingWrite {
+                    bytes,
+                    offset: 0,
+                    completion: None,
+                }),
+                Ok(Command::WriteReply { bytes, completion }) => {
+                    // Terminal protocol replies must not sit behind queued
+                    // keyboard or paste input.
+                    pending_writes.push_front(PendingWrite {
+                        bytes,
+                        offset: 0,
+                        completion: Some(completion),
+                    });
+                }
                 Ok(Command::Resize(ws)) => {
                     let _ = pty.set_winsize(ws);
                 }
@@ -417,16 +457,19 @@ fn reader_loop_impl(
                 if event.readiness().is_writable() {
                     'write_loop: loop {
                         if current_write.is_none() {
-                            current_write = pending_writes.pop_front().map(|b| (b, 0));
+                            current_write = pending_writes.pop_front();
                         }
-                        let Some((bytes, ref mut offset)) = current_write.as_mut() else {
+                        let Some(write) = current_write.as_mut() else {
                             break 'write_loop;
                         };
-                        match pty.writer().write(&bytes[*offset..]) {
+                        match pty.writer().write(&write.bytes[write.offset..]) {
                             Ok(0) => break 'write_loop,
                             Ok(n) => {
-                                *offset += n;
-                                if *offset >= bytes.len() {
+                                write.offset += n;
+                                if write.offset >= write.bytes.len() {
+                                    if let Some(completion) = write.completion.take() {
+                                        let _ = completion.send(Ok(write.bytes.len()));
+                                    }
                                     current_write = None;
                                 }
                             }
@@ -434,6 +477,13 @@ fn reader_loop_impl(
                                 ErrorKind::Interrupted => continue,
                                 ErrorKind::WouldBlock => break 'write_loop,
                                 _ => {
+                                    if let Some(completion) = write.completion.take() {
+                                        let _ =
+                                            completion.send(Err(std::io::Error::new(
+                                                err.kind(),
+                                                err.to_string(),
+                                            )));
+                                    }
                                     error!(
                                         target: "neoism_terminal_pty",
                                         "PTY write error: {err}"
@@ -455,6 +505,23 @@ fn reader_loop_impl(
         if let Err(err) = pty.reregister(&poll, interest, poll_opts) {
             error!(target: "neoism_terminal_pty", "PTY reregister failed: {err}");
             break 'event_loop;
+        }
+    }
+
+    if let Some(mut write) = current_write {
+        if let Some(completion) = write.completion.take() {
+            let _ = completion.send(Err(std::io::Error::new(
+                ErrorKind::BrokenPipe,
+                "PTY closed before reply was written",
+            )));
+        }
+    }
+    for mut write in pending_writes {
+        if let Some(completion) = write.completion.take() {
+            let _ = completion.send(Err(std::io::Error::new(
+                ErrorKind::BrokenPipe,
+                "PTY closed before reply was written",
+            )));
         }
     }
 

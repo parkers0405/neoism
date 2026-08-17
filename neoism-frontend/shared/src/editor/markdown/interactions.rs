@@ -14,17 +14,17 @@ impl MarkdownPane {
         else {
             return false;
         };
-        self.toggle_task_on_line(task.line)
+        self.toggle_task_on_line(task.line, false)
     }
 
     /// Toggle the checkbox on the cursor's line. Used by Normal-mode Enter
     /// so a `- [ ]` / `- [x]` task can be checked/unchecked from the
     /// keyboard, mirroring the click hitbox.
     pub fn toggle_task_at_cursor(&mut self) -> bool {
-        self.toggle_task_on_line(self.cursor_line)
+        self.toggle_task_on_line(self.cursor_line, true)
     }
 
-    fn toggle_task_on_line(&mut self, line_ix: usize) -> bool {
+    fn toggle_task_on_line(&mut self, line_ix: usize, follow_cursor: bool) -> bool {
         let Some(line) = self.lines.get(line_ix) else {
             return false;
         };
@@ -49,7 +49,7 @@ impl MarkdownPane {
             self.lines[line_ix].replace_range(checkbox_ix..checkbox_ix + 1, next);
         }
         self.task_toggle_animations.insert(line_ix, Instant::now());
-        self.follow_cursor = true;
+        self.follow_cursor = follow_cursor;
         self.rebuild_blocks();
         self.commit_undo();
         true
@@ -877,7 +877,12 @@ impl MarkdownPane {
     /// the glyph under the pointer. Crucially, the lower bound is the current
     /// wrapped row's real visible start, so the first glyph on a continuation
     /// row never backs up into whitespace from the preceding row.
-    fn glyph_col_from_point(&self, block: MarkdownBlockRect, x: f32, y: f32) -> usize {
+    pub(super) fn glyph_col_from_point(
+        &self,
+        block: MarkdownBlockRect,
+        x: f32,
+        y: f32,
+    ) -> usize {
         let caret = self.cursor_col_from_point(block, x, y);
         let Some(line) = self.lines.get(block.line) else {
             return caret;
@@ -942,7 +947,7 @@ impl MarkdownPane {
         bounds.content_start + map.source_for_visible(visible_col).min(cell_source.len())
     }
 
-    fn glyph_col_from_table_cell_point(
+    pub(super) fn glyph_col_from_table_cell_point(
         &self,
         cell: MarkdownTableCellRect,
         x: f32,

@@ -1,7 +1,8 @@
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,14 @@ pub(super) enum AgentSessionUpdate {
         messages: Vec<NeoismAgentMessage>,
         oldest_cursor: Option<String>,
     },
+    ChildMessages {
+        session_id: String,
+        messages: Vec<NeoismAgentMessage>,
+        oldest_cursor: Option<String>,
+    },
+    /// The SSE transport reconnected. Consumers take one recovery snapshot
+    /// after this edge; there is no periodic active-state polling.
+    EventStreamReconnected,
     SessionIdle,
     PartDelta {
         message_id: Option<String>,
@@ -58,13 +67,16 @@ pub(super) enum AgentSessionUpdate {
         part_id: String,
     },
     CompactionStarted {
+        session_id: String,
         id: String,
         reason: String,
     },
     CompactionDelta {
+        session_id: String,
         delta: String,
     },
     CompactionEnded {
+        session_id: String,
         summary: String,
         kind: String,
     },
@@ -88,6 +100,11 @@ pub(super) enum AgentSessionUpdate {
         session_id: String,
         status: String,
         started_at: Option<u64>,
+        title: Option<String>,
+        agent: Option<String>,
+    },
+    SubagentMetadata {
+        session_id: String,
         title: Option<String>,
         agent: Option<String>,
     },
@@ -130,6 +147,8 @@ pub(super) enum AgentSessionUpdate {
 pub(crate) struct AgentSessionEventStream {
     session_id: String,
     rx: Receiver<AgentSessionUpdate>,
+    pending: Option<AgentSessionUpdate>,
+    known_child_session_ids: Arc<Mutex<HashSet<String>>>,
     stop: Arc<AtomicBool>,
     disconnected: bool,
 }
@@ -141,6 +160,8 @@ impl AgentSessionEventStream {
         Self {
             session_id: session_id.to_string(),
             rx,
+            pending: None,
+            known_child_session_ids: Arc::new(Mutex::new(HashSet::new())),
             stop: Arc::new(AtomicBool::new(false)),
             disconnected: false,
         }
@@ -158,6 +179,8 @@ impl AgentSessionEventStream {
         Self {
             session_id: session_id.to_string(),
             rx,
+            pending: None,
+            known_child_session_ids: Arc::new(Mutex::new(HashSet::new())),
             stop: Arc::new(AtomicBool::new(false)),
             disconnected: false,
         }
@@ -167,11 +190,29 @@ impl AgentSessionEventStream {
         &self.session_id
     }
 
-    pub(super) fn drain(&mut self) -> Vec<AgentSessionUpdate> {
-        let mut out = Vec::new();
-        loop {
+    pub(super) fn track_child_sessions(
+        &self,
+        session_ids: impl IntoIterator<Item = String>,
+    ) {
+        if let Ok(mut known) = self.known_child_session_ids.lock() {
+            known.extend(session_ids);
+        }
+    }
+
+    pub(super) fn drain(&mut self, limit: usize) -> (Vec<AgentSessionUpdate>, bool) {
+        let limit = limit.max(1);
+        let mut out = Vec::with_capacity(limit.min(64));
+        let mut received = 0usize;
+        if let Some(update) = self.pending.take() {
+            push_coalesced_update(&mut out, update);
+            received = 1;
+        }
+        while received < limit {
             match self.rx.try_recv() {
-                Ok(update) => out.push(update),
+                Ok(update) => {
+                    push_coalesced_update(&mut out, update);
+                    received += 1;
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.disconnected = true;
@@ -179,7 +220,22 @@ impl AgentSessionEventStream {
                 }
             }
         }
-        out
+        let has_more = if received >= limit {
+            match self.rx.try_recv() {
+                Ok(update) => {
+                    self.pending = Some(update);
+                    true
+                }
+                Err(TryRecvError::Empty) => false,
+                Err(TryRecvError::Disconnected) => {
+                    self.disconnected = true;
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        (out, has_more)
     }
 
     pub(super) fn is_disconnected(&self) -> bool {
@@ -200,13 +256,21 @@ pub(super) fn start_session_event_stream(
     let (tx, rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let stream_stop = stop.clone();
+    let known_child_session_ids = Arc::new(Mutex::new(HashSet::new()));
+    let stream_known_child_session_ids = known_child_session_ids.clone();
     let thread_session_id = session_id.clone();
     let thread_tx = tx.clone();
 
     if let Err(error) = thread::Builder::new()
         .name(format!("neoism-agent-events-{thread_session_id}"))
         .spawn(move || {
-            run_event_stream(server, thread_session_id, thread_tx, stream_stop);
+            run_event_stream(
+                server,
+                thread_session_id,
+                thread_tx,
+                stream_stop,
+                stream_known_child_session_ids,
+            );
         })
     {
         let _ = tx.send(AgentSessionUpdate::System {
@@ -218,8 +282,88 @@ pub(super) fn start_session_event_stream(
     AgentSessionEventStream {
         session_id,
         rx,
+        pending: None,
+        known_child_session_ids,
         stop,
         disconnected: false,
+    }
+}
+
+fn push_coalesced_update(out: &mut Vec<AgentSessionUpdate>, update: AgentSessionUpdate) {
+    match (out.last_mut(), update) {
+        (
+            Some(AgentSessionUpdate::PartDelta {
+                message_id,
+                part_id,
+                kind,
+                delta,
+            }),
+            AgentSessionUpdate::PartDelta {
+                message_id: next_message_id,
+                part_id: next_part_id,
+                kind: next_kind,
+                delta: next_delta,
+            },
+        ) if *message_id == next_message_id
+            && *part_id == next_part_id
+            && *kind == next_kind =>
+        {
+            delta.push_str(&next_delta);
+        }
+        (
+            Some(AgentSessionUpdate::ChildPartDelta {
+                session_id,
+                message_id,
+                part_id,
+                kind,
+                delta,
+            }),
+            AgentSessionUpdate::ChildPartDelta {
+                session_id: next_session_id,
+                message_id: next_message_id,
+                part_id: next_part_id,
+                kind: next_kind,
+                delta: next_delta,
+            },
+        ) if *session_id == next_session_id
+            && *message_id == next_message_id
+            && *part_id == next_part_id
+            && *kind == next_kind =>
+        {
+            delta.push_str(&next_delta);
+        }
+        (
+            Some(AgentSessionUpdate::PartUpdated {
+                message,
+                parent_message_id,
+            }),
+            AgentSessionUpdate::PartUpdated {
+                message: next_message,
+                parent_message_id: next_parent_message_id,
+            },
+        ) if message.id == next_message.id
+            && *parent_message_id == next_parent_message_id =>
+        {
+            *message = next_message;
+        }
+        (
+            Some(AgentSessionUpdate::ChildPartUpdated {
+                session_id,
+                message,
+                parent_message_id,
+            }),
+            AgentSessionUpdate::ChildPartUpdated {
+                session_id: next_session_id,
+                message: next_message,
+                parent_message_id: next_parent_message_id,
+            },
+        ) if *session_id == next_session_id
+            && message.id == next_message.id
+            && *parent_message_id == next_parent_message_id =>
+        {
+            *message = next_message;
+        }
+        (_, update) => out.push(update),
     }
 }
 
@@ -228,6 +372,7 @@ fn run_event_stream(
     session_id: String,
     tx: Sender<AgentSessionUpdate>,
     stop: Arc<AtomicBool>,
+    known_child_session_ids: Arc<Mutex<HashSet<String>>>,
 ) {
     let mut connected_once = false;
     while !stop.load(Ordering::Relaxed) {
@@ -236,15 +381,18 @@ fn run_event_stream(
                 if connected_once {
                     // The stream is subscribed before the snapshot is fetched, so live
                     // events cannot slip between reconnect and reconciliation.
+                    if tx.send(AgentSessionUpdate::EventStreamReconnected).is_err() {
+                        return;
+                    }
+                    let statuses = fetch_session_statuses(&server).ok();
                     match fetch_session_messages_page(&server, &session_id, None, 80) {
                         Ok(page) => {
                             // An idle session is absent from `/session/status`. Recover
                             // the terminal signal as well as its transcript after a
                             // reconnect; otherwise a dropped final `session.status`
                             // event can leave Crafting/Tinkering painted forever.
-                            let session_is_idle = fetch_session_statuses(&server)
-                                .ok()
-                                .is_some_and(|statuses| {
+                            let session_is_idle =
+                                statuses.as_ref().is_some_and(|statuses| {
                                     statuses.get(&session_id).is_none_or(|status| {
                                         !matches!(status.kind.as_str(), "busy" | "retry")
                                     })
@@ -272,6 +420,52 @@ fn run_event_stream(
                         }
                         Err(_) => return,
                     }
+                    let known_children = known_child_session_ids
+                        .lock()
+                        .map(|known| known.iter().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    for child_id in known_children {
+                        if let Some(statuses) = statuses.as_ref() {
+                            // `/session/status` is an active-run map, not a
+                            // lifecycle ledger. Omission is therefore
+                            // unknown—not completion. Treating it as
+                            // `completed` cleared the event-derived child set
+                            // for one frame on reconnect; the next live part
+                            // re-added it and made the footer visibly blink.
+                            // Only an explicit terminal event may finish a
+                            // child that was already known to be active.
+                            if let Some((status, started_at)) =
+                                reconnect_child_status(statuses, &child_id)
+                            {
+                                if tx
+                                    .send(AgentSessionUpdate::SubagentStatus {
+                                        session_id: child_id.clone(),
+                                        status,
+                                        started_at,
+                                        title: None,
+                                        agent: None,
+                                    })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                        if let Ok(page) =
+                            fetch_session_messages_page(&server, &child_id, None, 80)
+                        {
+                            if tx
+                                .send(AgentSessionUpdate::ChildMessages {
+                                    session_id: child_id,
+                                    messages: page.blocks,
+                                    oldest_cursor: page.oldest_cursor,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
                 }
                 connected_once = true;
                 read_event_stream(
@@ -280,6 +474,7 @@ fn run_event_stream(
                     session_id.clone(),
                     tx.clone(),
                     stop.clone(),
+                    known_child_session_ids.clone(),
                 );
             }
             Err(error) if !connected_once && !stop.load(Ordering::Relaxed) => {
@@ -296,6 +491,15 @@ fn run_event_stream(
             return;
         }
     }
+}
+
+fn reconnect_child_status(
+    statuses: &HashMap<String, super::api::SessionStatusSnapshot>,
+    child_id: &str,
+) -> Option<(String, Option<u64>)> {
+    statuses
+        .get(child_id)
+        .map(|status| (status.kind.clone(), status.started_at))
 }
 
 fn sleep_until_reconnect(stop: &AtomicBool) -> bool {
@@ -334,14 +538,26 @@ fn read_event_stream(
     session_id: String,
     tx: Sender<AgentSessionUpdate>,
     stop: Arc<AtomicBool>,
+    known_child_session_ids: Arc<Mutex<HashSet<String>>>,
 ) {
     let mut chunked = ChunkedDecoder::new(connection.chunked);
     let mut sse = SseDecoder::default();
     let mut state = SessionEventUpdateState::default();
+    if let Ok(known) = known_child_session_ids.lock() {
+        state.track_child_sessions(known.iter().cloned());
+    }
 
     if !connection.initial_body.is_empty() {
         for data in chunked.feed(&connection.initial_body) {
-            if process_sse_bytes(&mut sse, &data, &server, &session_id, &tx, &mut state) {
+            if process_sse_bytes(
+                &mut sse,
+                &data,
+                &server,
+                &session_id,
+                &tx,
+                &mut state,
+                &known_child_session_ids,
+            ) {
                 return;
             }
         }
@@ -360,6 +576,7 @@ fn read_event_stream(
                         &session_id,
                         &tx,
                         &mut state,
+                        &known_child_session_ids,
                     ) {
                         return;
                     }
@@ -388,10 +605,14 @@ fn process_sse_bytes(
     session_id: &str,
     tx: &Sender<AgentSessionUpdate>,
     state: &mut SessionEventUpdateState,
+    known_child_session_ids: &Arc<Mutex<HashSet<String>>>,
 ) -> bool {
     for event in sse.feed(bytes) {
         if send_event_updates(event, server, session_id, tx, state).is_err() {
             return true;
+        }
+        if let Ok(mut known) = known_child_session_ids.lock() {
+            known.extend(state.child_session_ids().iter().cloned());
         }
     }
     false
@@ -477,32 +698,53 @@ fn send_event_updates(
                 session_id,
                 part_id,
             })?,
-            SessionEventUpdate::CompactionStarted { id, reason } => {
-                tx.send(AgentSessionUpdate::CompactionStarted { id, reason })?;
+            SessionEventUpdate::CompactionStarted {
+                session_id,
+                id,
+                reason,
+            } => {
+                tx.send(AgentSessionUpdate::CompactionStarted {
+                    session_id,
+                    id,
+                    reason,
+                })?;
             }
-            SessionEventUpdate::CompactionDelta { delta } => {
-                tx.send(AgentSessionUpdate::CompactionDelta { delta })?;
+            SessionEventUpdate::CompactionDelta { session_id, delta } => {
+                tx.send(AgentSessionUpdate::CompactionDelta { session_id, delta })?;
             }
             SessionEventUpdate::CompactionEnded {
+                session_id: owner_session_id,
                 summary,
                 kind,
                 usage,
             } => {
                 if let Ok(page) =
-                    fetch_session_messages_page(server, session_id, None, 80)
+                    fetch_session_messages_page(server, &owner_session_id, None, 80)
                 {
                     let messages = if let Some(usage) = usage {
                         with_compaction_usage(page.blocks, usage.into())
                     } else {
                         page.blocks
                     };
-                    tx.send(AgentSessionUpdate::Messages {
-                        messages,
-                        oldest_cursor: page.oldest_cursor,
-                    })?;
-                    state.mark_idle_messages_refreshed();
+                    if owner_session_id == session_id {
+                        tx.send(AgentSessionUpdate::Messages {
+                            messages,
+                            oldest_cursor: page.oldest_cursor,
+                        })?;
+                        state.mark_idle_messages_refreshed();
+                    } else {
+                        tx.send(AgentSessionUpdate::ChildMessages {
+                            session_id: owner_session_id.clone(),
+                            messages,
+                            oldest_cursor: page.oldest_cursor,
+                        })?;
+                    }
                 }
-                tx.send(AgentSessionUpdate::CompactionEnded { summary, kind })?;
+                tx.send(AgentSessionUpdate::CompactionEnded {
+                    session_id: owner_session_id,
+                    summary,
+                    kind,
+                })?;
             }
             SessionEventUpdate::System { title, body } => {
                 tx.send(AgentSessionUpdate::System { title, body })?;
@@ -532,6 +774,15 @@ fn send_event_updates(
                 session_id,
                 status,
                 started_at,
+                title,
+                agent,
+            })?,
+            SessionEventUpdate::SubagentMetadata {
+                session_id,
+                title,
+                agent,
+            } => tx.send(AgentSessionUpdate::SubagentMetadata {
+                session_id,
                 title,
                 agent,
             })?,
@@ -629,5 +880,134 @@ fn desktop_permission_from_shared(
         patterns: permission.patterns,
         selected: permission.selected,
         responding: permission.responding,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_status_omission_is_unknown_not_completion() {
+        let statuses = HashMap::new();
+        assert_eq!(reconnect_child_status(&statuses, "active-child"), None);
+
+        let statuses = HashMap::from([(
+            "active-child".to_string(),
+            super::super::api::SessionStatusSnapshot {
+                kind: "busy".to_string(),
+                started_at: Some(42),
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(
+            reconnect_child_status(&statuses, "active-child"),
+            Some(("busy".to_string(), Some(42)))
+        );
+    }
+
+    #[test]
+    fn adjacent_part_deltas_are_coalesced_before_ui_ingest() {
+        let mut updates = Vec::new();
+        for delta in ["hello", " world"] {
+            push_coalesced_update(
+                &mut updates,
+                AgentSessionUpdate::PartDelta {
+                    message_id: Some("message".to_string()),
+                    part_id: Some("part".to_string()),
+                    kind: Some("text".to_string()),
+                    delta: delta.to_string(),
+                },
+            );
+        }
+
+        assert_eq!(updates.len(), 1);
+        match &updates[0] {
+            AgentSessionUpdate::PartDelta { delta, .. } => {
+                assert_eq!(delta, "hello world");
+            }
+            _ => panic!("expected part delta"),
+        }
+    }
+
+    #[test]
+    fn adjacent_part_updated_snapshots_keep_the_latest() {
+        let mut updates = Vec::new();
+        for body in ["partial", "complete"] {
+            let mut message = NeoismAgentMessage::tool(
+                "ApplyPatch",
+                body,
+                "running",
+                "apply_patch",
+                super::super::pane::NeoismAgentOutputKind::Text,
+                "",
+                Vec::new(),
+            );
+            message.id = "part".to_string();
+            message.detail = body.to_string();
+            push_coalesced_update(
+                &mut updates,
+                AgentSessionUpdate::PartUpdated {
+                    message,
+                    parent_message_id: Some("message".to_string()),
+                },
+            );
+        }
+
+        assert_eq!(updates.len(), 1);
+        match &updates[0] {
+            AgentSessionUpdate::PartUpdated { message, .. } => {
+                assert_eq!(message.text, "complete");
+                assert_eq!(message.detail, "complete");
+            }
+            _ => panic!("expected part updated"),
+        }
+    }
+
+    #[test]
+    fn stream_drain_is_bounded_and_reports_remaining_work() {
+        let mut stream = AgentSessionEventStream::with_updates_for_test(
+            "root",
+            [
+                AgentSessionUpdate::SessionIdle,
+                AgentSessionUpdate::System {
+                    title: "one".to_string(),
+                    body: "one".to_string(),
+                },
+                AgentSessionUpdate::System {
+                    title: "two".to_string(),
+                    body: "two".to_string(),
+                },
+            ],
+        );
+
+        let (first, has_more) = stream.drain(2);
+        let (second, still_has_more) = stream.drain(2);
+
+        assert_eq!(first.len(), 2);
+        assert!(has_more);
+        assert_eq!(second.len(), 1);
+        assert!(!still_has_more);
+    }
+
+    #[test]
+    fn coalescing_does_not_bypass_the_raw_update_budget() {
+        let mut stream = AgentSessionEventStream::with_updates_for_test(
+            "root",
+            (0..3).map(|_| AgentSessionUpdate::PartDelta {
+                message_id: Some("message".to_string()),
+                part_id: Some("part".to_string()),
+                kind: Some("text".to_string()),
+                delta: "x".to_string(),
+            }),
+        );
+
+        let (first, has_more) = stream.drain(2);
+        let (second, still_has_more) = stream.drain(2);
+
+        assert_eq!(first.len(), 1);
+        assert!(has_more);
+        assert_eq!(second.len(), 1);
+        assert!(!still_has_more);
     }
 }

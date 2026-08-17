@@ -347,10 +347,8 @@ async fn project_session_queue_updated(
             }
         }
         "pop" | "dequeue" => {
-            if let Some(delivery) = payload
-                .properties
-                .get("delivery")
-                .and_then(Value::as_str)
+            if let Some(delivery) =
+                payload.properties.get("delivery").and_then(Value::as_str)
             {
                 let _ = state
                     .inner
@@ -358,7 +356,11 @@ async fn project_session_queue_updated(
                     .pop_queued_prompt_with_delivery(&session_id, Some(delivery))
                     .await?;
             } else {
-                let _ = state.inner.store.pop_user_queued_prompt(&session_id).await?;
+                let _ = state
+                    .inner
+                    .store
+                    .pop_user_queued_prompt(&session_id)
+                    .await?;
             }
         }
         "clear" => {

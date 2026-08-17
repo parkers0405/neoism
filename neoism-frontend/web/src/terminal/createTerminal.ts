@@ -245,6 +245,11 @@ export interface TerminalAdapter {
     ): { handled: boolean; copy: string | null; link: string | null } | null;
     /** Position-aware wheel: picker / side panel / diff card / timeline. */
     agentScrollAt?(x: number, y: number, deltaPixels: number): boolean;
+    /** Axis-specific wheel for rendered Markdown code/table overflow. */
+    agentScrollHorizontalAt?(x: number, y: number, deltaPixels: number): boolean;
+    /** Direct pointer drag for the sticky code/table horizontal rail. */
+    agentDragMarkdownHorizontalScrollbar?(x: number): boolean;
+    agentEndMarkdownHorizontalScrollbarDrag?(): boolean;
     /** Center-modal click router: 0 = unhandled, 1 = row committed,
      *  2 = inside modal chrome/input (raise keyboard for the query). */
     modalPointerDown?(x: number, y: number): number;
@@ -895,6 +900,9 @@ interface ChromeBridgeInstance {
     agent_scroll_timeline(deltaPixels: number): boolean;
     agent_pointer_down?(x: number, y: number): unknown;
     agent_scroll_at?(x: number, y: number, deltaPixels: number): boolean;
+    agent_scroll_horizontal_at?(x: number, y: number, deltaPixels: number): boolean;
+    agent_drag_markdown_horizontal_scrollbar?(x: number): boolean;
+    agent_end_markdown_horizontal_scrollbar_drag?(): boolean;
     modal_pointer_down?(x: number, y: number): number;
     modal_scroll?(x: number, y: number, deltaPixels: number): boolean;
     terminal_seed_history?(entriesJson: string): void;
@@ -1769,6 +1777,15 @@ class ChromeAdapter implements TerminalAdapter {
     }
     agentScrollAt(x: number, y: number, deltaPixels: number): boolean {
         return this.inner.agent_scroll_at?.(x, y, deltaPixels) === true;
+    }
+    agentScrollHorizontalAt(x: number, y: number, deltaPixels: number): boolean {
+        return this.inner.agent_scroll_horizontal_at?.(x, y, deltaPixels) === true;
+    }
+    agentDragMarkdownHorizontalScrollbar(x: number): boolean {
+        return this.inner.agent_drag_markdown_horizontal_scrollbar?.(x) === true;
+    }
+    agentEndMarkdownHorizontalScrollbarDrag(): boolean {
+        return this.inner.agent_end_markdown_horizontal_scrollbar_drag?.() === true;
     }
     modalPointerDown(x: number, y: number): number {
         return this.inner.modal_pointer_down?.(x, y) ?? 0;

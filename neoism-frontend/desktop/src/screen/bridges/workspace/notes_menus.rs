@@ -206,6 +206,11 @@ impl Screen<'_> {
                 .as_ref()
                 .is_some_and(|root| root == &vaults_dir)
             && target.parent().is_some_and(|parent| parent == vaults_dir);
+        let local_vault = target
+            .is_dir()
+            .then(|| neo_workspace::notes_vault_for_path(&target).ok().flatten())
+            .flatten()
+            .filter(|_| !self.notes_sidebar_shows_shared_vault());
         let mut items = vec![
             ContextMenuItem::new(
                 "New Note",
@@ -239,7 +244,10 @@ impl Screen<'_> {
                 "Link Current Code Project",
                 "p",
                 ContextMenuAction::Modal(
-                    ModalAction::NotesVaultLinkCurrentWorkspace.into(),
+                    ModalAction::NotesVaultLinkCurrentWorkspace {
+                        notes_dir: Some(target.display().to_string()),
+                    }
+                    .into(),
                 ),
             ));
             items.push(ContextMenuItem::new(
@@ -261,27 +269,44 @@ impl Screen<'_> {
                 ));
             }
         }
-        if is_vault_folder {
-            if let Some(vault) = target.file_name().and_then(|name| name.to_str()) {
+        if let Some(vault) = local_vault {
+            let root_already_has_current_action = self
+                .renderer
+                .notes_sidebar
+                .workspace_path()
+                .as_ref()
+                .is_some_and(|root| root == &target);
+            if !root_already_has_current_action {
                 items.push(ContextMenuItem::new(
-                    "Link Project...",
-                    "l",
+                    "Link Current Code Project Here",
+                    "p",
                     ContextMenuAction::Modal(
-                        ModalAction::NotesVaultPromptLinkProject {
-                            vault: vault.to_string(),
+                        ModalAction::NotesVaultLinkCurrentWorkspace {
+                            notes_dir: Some(target.display().to_string()),
                         }
                         .into(),
                     ),
                 ));
+            }
+            items.push(ContextMenuItem::new(
+                "Link Another Project Here...",
+                "l",
+                ContextMenuAction::Modal(
+                    ModalAction::NotesVaultPromptLinkProject {
+                        vault: vault.name.clone(),
+                        notes_dir: Some(target.display().to_string()),
+                    }
+                    .into(),
+                ),
+            ));
+            if is_vault_folder {
                 #[cfg(feature = "remarkable")]
                 items.push(ContextMenuItem::new(
                     "Sync with reMarkable",
                     "r",
                     ContextMenuAction::Modal(
-                        ModalAction::NotesVaultShareWithRemarkable {
-                            vault: vault.to_string(),
-                        }
-                        .into(),
+                        ModalAction::NotesVaultShareWithRemarkable { vault: vault.name }
+                            .into(),
                     ),
                 ));
             }
@@ -299,15 +324,24 @@ impl Screen<'_> {
             ));
         }
         items.push(ContextMenuItem::new(
-            "Rename",
+            if is_vault_folder {
+                "Rename Vault"
+            } else {
+                "Rename"
+            },
             "r",
-            ContextMenuAction::Modal(
+            ContextMenuAction::Modal(if is_vault_folder {
+                ModalAction::NotesVaultPromptRename {
+                    vault: Some(target_string.clone()),
+                }
+                .into()
+            } else {
                 ModalAction::FileTreePromptRename {
                     path: target_string.clone(),
                     notes: true,
                 }
-                .into(),
-            ),
+                .into()
+            }),
         ));
         items.push(ContextMenuItem::new(
             "Delete",
@@ -339,19 +373,10 @@ impl Screen<'_> {
     fn local_vault_names(&self) -> Vec<String> {
         let vaults_dir = neo_workspace::notes_vaults_dir();
         let _ = std::fs::create_dir_all(&vaults_dir);
-        let mut vaults = std::fs::read_dir(&vaults_dir)
+        let mut vaults = neo_workspace::existing_notes_vaults()
+            .unwrap_or_default()
             .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let path = entry.path();
-                if !path.is_dir() {
-                    return None;
-                }
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_string)
-            })
+            .map(|vault| vault.name)
             .collect::<Vec<_>>();
         vaults.sort_by_key(|name| name.to_lowercase());
         vaults
@@ -450,6 +475,22 @@ impl Screen<'_> {
             "o",
             ContextMenuAction::Modal(ModalAction::NotesVaultOpenVaultsRoot.into()),
         ));
+        if let Some(current) =
+            self.renderer.notes_sidebar.workspace_path().filter(|path| {
+                path.parent() == Some(neo_workspace::notes_vaults_dir().as_path())
+            })
+        {
+            items.push(ContextMenuItem::new(
+                "Rename Current Vault",
+                "r",
+                ContextMenuAction::Modal(
+                    ModalAction::NotesVaultPromptRename {
+                        vault: Some(current.display().to_string()),
+                    }
+                    .into(),
+                ),
+            ));
+        }
         if items.is_empty() {
             self.renderer.notifications.push(
                 "No notes vault is active".to_string(),

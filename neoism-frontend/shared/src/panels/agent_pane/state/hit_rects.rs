@@ -4,6 +4,8 @@ impl NeoismAgentPane {
     pub fn clear_tool_hit_rects(&mut self) {
         self.tool_hit_rects.clear();
         self.diff_scroll_rects.clear();
+        self.markdown_horizontal_scroll_rects.clear();
+        self.markdown_horizontal_scrollbars.clear();
         self.link_hit_rects.clear();
         // Retain the Vec + String allocations; reset logical length only.
         self.selectable_lines_len = 0;
@@ -39,6 +41,151 @@ impl NeoismAgentPane {
             y,
             delta_pixels,
         )
+    }
+
+    pub fn register_markdown_horizontal_scroll_rect(
+        &mut self,
+        key: String,
+        rect: [f32; 4],
+        max_scroll: f32,
+    ) {
+        interaction_policy::register_diff_scroll_rect(
+            &mut self.markdown_horizontal_scroll_rects,
+            key,
+            rect,
+            max_scroll,
+        );
+    }
+
+    pub fn markdown_horizontal_scroll_offset(
+        &mut self,
+        key: &str,
+        max_scroll: f32,
+    ) -> f32 {
+        interaction_policy::diff_scroll_offset(
+            &mut self.markdown_horizontal_scroll_offsets,
+            key,
+            max_scroll,
+        )
+    }
+
+    /// `Some` means the pointer is over a horizontally-scrollable Markdown
+    /// block. The boolean reports whether its offset actually moved.
+    pub fn scroll_markdown_horizontal_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        delta_pixels: f32,
+    ) -> Option<bool> {
+        interaction_policy::scroll_diff_at(
+            &self.markdown_horizontal_scroll_rects,
+            &mut self.markdown_horizontal_scroll_offsets,
+            x,
+            y,
+            delta_pixels,
+        )
+    }
+
+    pub fn register_markdown_horizontal_scrollbar(
+        &mut self,
+        key: String,
+        track: [f32; 4],
+        thumb: [f32; 4],
+        max_scroll: f32,
+    ) {
+        interaction_policy::register_markdown_horizontal_scrollbar(
+            &mut self.markdown_horizontal_scrollbars,
+            key,
+            track,
+            thumb,
+            max_scroll,
+        );
+    }
+
+    pub fn begin_markdown_horizontal_scrollbar_drag(&mut self, x: f32, y: f32) -> bool {
+        let Some(drag) = interaction_policy::begin_markdown_horizontal_scrollbar_drag(
+            &self.markdown_horizontal_scrollbars,
+            &mut self.markdown_horizontal_scroll_offsets,
+            x,
+            y,
+        ) else {
+            return false;
+        };
+        self.markdown_horizontal_scrollbar_drag = Some(drag);
+        true
+    }
+
+    pub fn markdown_horizontal_scrollbar_dragging(&self) -> bool {
+        self.markdown_horizontal_scrollbar_drag.is_some()
+    }
+
+    pub fn markdown_horizontal_scrollbar_contains(&self, x: f32, y: f32) -> bool {
+        self.markdown_horizontal_scrollbars
+            .iter()
+            .rev()
+            .any(|(_, track, _, _)| interaction_policy::rect_contains(*track, x, y))
+    }
+
+    pub fn update_markdown_horizontal_scroll_hover(&mut self, x: f32, y: f32) -> bool {
+        let next = self
+            .markdown_horizontal_scroll_rects
+            .iter()
+            .rev()
+            .find(|(_, rect, _)| interaction_policy::rect_contains(*rect, x, y))
+            .map(|(key, _, _)| key.clone());
+        if self.markdown_horizontal_scroll_hover_key == next {
+            return false;
+        }
+        self.markdown_horizontal_scroll_hover_key = next;
+        true
+    }
+
+    pub fn markdown_horizontal_scrollbar_visible(&self, key: &str) -> bool {
+        self.markdown_horizontal_scroll_hover_key.as_deref() == Some(key)
+            || self
+                .markdown_horizontal_scrollbar_drag
+                .as_ref()
+                .is_some_and(|drag| drag.key == key)
+    }
+
+    pub fn mark_code_copied(&mut self, target: &str) {
+        self.copied_code_feedback = Some((target.to_string(), Instant::now()));
+    }
+
+    pub fn code_copy_feedback_progress(&self, target: &str) -> Option<f32> {
+        let (active_target, started_at) = self.copied_code_feedback.as_ref()?;
+        if active_target != target {
+            return None;
+        }
+        let elapsed = Instant::now().saturating_duration_since(*started_at);
+        (elapsed < CODE_COPY_FEEDBACK_ANIMATION).then(|| {
+            (elapsed.as_secs_f32() / CODE_COPY_FEEDBACK_ANIMATION.as_secs_f32())
+                .clamp(0.0, 1.0)
+        })
+    }
+
+    pub fn code_copy_feedback_is_animating(&self) -> bool {
+        self.copied_code_feedback
+            .as_ref()
+            .is_some_and(|(_, started_at)| {
+                Instant::now().saturating_duration_since(*started_at)
+                    < CODE_COPY_FEEDBACK_ANIMATION
+            })
+    }
+
+    pub fn drag_markdown_horizontal_scrollbar_to(&mut self, x: f32) -> bool {
+        let Some(drag) = self.markdown_horizontal_scrollbar_drag.as_ref() else {
+            return false;
+        };
+        interaction_policy::drag_markdown_horizontal_scrollbar(
+            drag,
+            &mut self.markdown_horizontal_scroll_offsets,
+            x,
+        )
+    }
+
+    pub fn end_markdown_horizontal_scrollbar_drag(&mut self) -> bool {
+        self.markdown_horizontal_scrollbar_drag.take().is_some()
     }
 
     pub fn clear_usage_chip_rect(&mut self) {

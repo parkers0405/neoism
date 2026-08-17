@@ -4,9 +4,13 @@ Neoism notes are ordinary Markdown files stored in vault folders. Neoism indexes
 
 ## Vaults and workspace links
 
-The Default vault lives under `~/Neoism/Vaults/Default` unless `NEOISM_NOTES_HOME` relocates the vault root. A code workspace can link to one vault through `.neoism/workspace.json`; the vault's `project.json` records associated code directories.
+The initial vault is named `Default` and lives under `~/Neoism/Vaults/Default` unless `NEOISM_NOTES_HOME` relocates the vault root. You can rename it like any other vault; Neoism tracks which vault is the default by stable identity rather than requiring that folder name.
 
-Use `Alt+N` to open the Notes sidebar. The sidebar shows the active/viewed vault hierarchy and opens notes in workspace buffers.
+A code workspace can link either to a whole vault or to any folder nested inside one. The workspace's `.neoism/workspace.json` caches the selection, while the owning vault's `project.json` records associated code directories and their relative notes folders. Existing links use the whole vault.
+
+Use `Alt+N` to open the Notes sidebar. For a linked project it opens the linked folder automatically; an unlinked directory opens the current default vault. Choosing another vault remains a viewing override and does not silently relink the code project.
+
+Right-click any vault folder to link the current or another code project there. From **Open Vaults Root**, dragging a standalone linked vault into a different vault offers to convert it into a nested project folder while preserving its code links.
 
 ## Links, headings, tags, and tasks
 

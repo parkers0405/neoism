@@ -391,6 +391,10 @@ impl Screen<'_> {
         if self.render_neoism_extensions_panels() {
             self.mark_dirty();
         }
+        let neoworld_animating = self.render_neoworld_panels();
+        if neoworld_animating {
+            self.mark_dirty();
+        }
         self.render_neoism_agent_panels();
 
         let (window_update, any_panel_dirty) = self.renderer.run(
@@ -402,7 +406,8 @@ impl Screen<'_> {
         frame_ctx.any_panel_dirty = any_panel_dirty;
 
         self.draw_overlays(&mut frame_ctx, animation_dt);
-        frame_ctx.has_animation |= markdown_panels_animating || code_panels_animating;
+        frame_ctx.has_animation |=
+            markdown_panels_animating || code_panels_animating || neoworld_animating;
 
         self.snapshot_panels(&mut frame_ctx);
         self.ensure_panel_grids(&frame_ctx);

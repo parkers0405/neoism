@@ -578,11 +578,11 @@ impl Screen<'_> {
             ModalAction::NotesVaultAdd { name } => {
                 self.add_notes_vault(name);
             }
-            ModalAction::NotesVaultPromptRename => {
-                self.open_notes_vault_rename_prompt();
+            ModalAction::NotesVaultPromptRename { vault } => {
+                self.open_notes_vault_rename_prompt(vault.map(PathBuf::from));
             }
-            ModalAction::NotesVaultRename { name } => {
-                self.rename_notes_vault(name);
+            ModalAction::NotesVaultRename { old_path, name } => {
+                self.rename_notes_vault(name, old_path.map(PathBuf::from));
             }
             ModalAction::NotesVaultSwitch { name } => {
                 self.switch_notes_vault(name);
@@ -593,14 +593,31 @@ impl Screen<'_> {
             ModalAction::NotesVaultOpenVaultsRoot => {
                 self.open_notes_vaults_root();
             }
-            ModalAction::NotesVaultLinkCurrentWorkspace => {
-                self.link_current_workspace_to_notes_vault();
+            ModalAction::NotesVaultLinkCurrentWorkspace { notes_dir } => {
+                self.link_current_workspace_to_notes_scope(notes_dir.map(PathBuf::from));
             }
-            ModalAction::NotesVaultPromptLinkProject { vault } => {
-                self.open_notes_vault_link_project_prompt(vault);
+            ModalAction::NotesVaultPromptLinkProject { vault, notes_dir } => {
+                self.open_notes_vault_link_project_prompt(
+                    vault,
+                    notes_dir.map(PathBuf::from),
+                );
             }
-            ModalAction::NotesVaultLinkProject { vault, path } => {
-                self.link_project_dir_to_notes_vault(vault, path);
+            ModalAction::NotesVaultLinkProject {
+                vault,
+                path,
+                notes_dir,
+            } => {
+                self.link_project_dir_to_notes_vault(
+                    vault,
+                    path,
+                    notes_dir.map(PathBuf::from),
+                );
+            }
+            ModalAction::NotesVaultConvert { source, dest_dir } => {
+                self.convert_notes_vault_to_scope(
+                    PathBuf::from(source),
+                    PathBuf::from(dest_dir),
+                );
             }
             ModalAction::NotesVaultShareWithRemarkable { vault } => {
                 self.share_vault_with_remarkable(vault);

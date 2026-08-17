@@ -253,12 +253,42 @@ impl Screen<'_> {
                 }
             }
             NotesDropOutcome::Move { source, dest_dir } => {
-                self.move_notes_sidebar_path(source, dest_dir);
+                if self.is_vault_conversion_drop(&source, &dest_dir) {
+                    self.open_convert_notes_vault_prompt(source, dest_dir);
+                } else {
+                    self.move_notes_sidebar_path(source, dest_dir);
+                }
             }
             NotesDropOutcome::Cancel => {}
         }
         self.mark_dirty();
         true
+    }
+
+    /// A top-level vault dropped into a different vault is not an ordinary
+    /// folder rename: its project metadata and stable identity must move too.
+    /// Detect that one gesture here so the host can ask for confirmation and
+    /// run the workspace-index conversion transaction.
+    fn is_vault_conversion_drop(&self, source: &Path, dest_dir: &Path) -> bool {
+        let vaults_root = neo_workspace::notes_vaults_dir();
+        if self.renderer.notes_sidebar.workspace_path().as_deref()
+            != Some(vaults_root.as_path())
+            || source.parent() != Some(vaults_root.as_path())
+            || dest_dir == vaults_root
+        {
+            return false;
+        }
+        let Some(source_vault) = neo_workspace::notes_vault_for_path(source)
+            .ok()
+            .flatten()
+            .filter(|vault| vault.path == source)
+        else {
+            return false;
+        };
+        neo_workspace::notes_vault_for_path(dest_dir)
+            .ok()
+            .flatten()
+            .is_some_and(|destination| destination.id != source_vault.id)
     }
 
     /// Move `source` (a page or folder) into `dest_dir` — the commit half
@@ -322,8 +352,8 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        match std::fs::rename(&source, &target) {
-            Ok(()) => {
+        match neo_workspace::move_notes_path_preserving_scopes(&source, &target) {
+            Ok(_) => {
                 self.rebind_current_epub_path(&source, target.clone());
                 // Reveal the destination folder so the moved item shows,
                 // re-list the panel, and keep the sidebar focused.
@@ -473,7 +503,15 @@ impl Screen<'_> {
             Key::Character(s) if s == "r" => {
                 self.renderer.notes_sidebar.clear_pending();
                 if let Some(path) = self.renderer.notes_sidebar.selected_note_path() {
-                    self.open_file_tree_rename_prompt(path, true);
+                    let vaults_root = neo_workspace::notes_vaults_dir();
+                    if self.renderer.notes_sidebar.workspace_path().as_deref()
+                        == Some(vaults_root.as_path())
+                        && path.parent() == Some(vaults_root.as_path())
+                    {
+                        self.open_notes_vault_rename_prompt(Some(path));
+                    } else {
+                        self.open_file_tree_rename_prompt(path, true);
+                    }
                 }
                 true
             }

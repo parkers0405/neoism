@@ -307,6 +307,9 @@ pub struct TrailCursorOverlayState {
     pub markdown_cursor_available: bool,
     /// Focused code pane published a caret rect this frame.
     pub code_cursor_available: bool,
+    /// Active content pane intentionally has no text caret. Without this,
+    /// trail-cursor rendering falls through to the parked terminal origin.
+    pub cursorless_surface_active: bool,
     pub terminal_block_input_active: bool,
     pub trail_cursor_enabled: bool,
 }
@@ -347,6 +350,8 @@ pub fn trail_cursor_overlay_target(
         Some(Target::Code)
     } else if state.markdown_cursor_available {
         Some(Target::Markdown)
+    } else if state.cursorless_surface_active {
+        Some(Target::SuppressedByInputOverlay)
     } else if state.trail_cursor_enabled && state.terminal_block_input_active {
         Some(Target::TerminalBlockInput)
     } else if state.trail_cursor_enabled {
@@ -537,6 +542,7 @@ pub enum ModalActionTag {
     NotesVaultLinkCurrentWorkspace,
     NotesVaultPromptLinkProject,
     NotesVaultLinkProject,
+    NotesVaultConvert,
     NotesVaultShareWithRemarkable,
 }
 
@@ -582,6 +588,7 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         | T::NotesVaultOpenVaultsRoot
         | T::NotesVaultLinkCurrentWorkspace
         | T::NotesVaultLinkProject
+        | T::NotesVaultConvert
         | T::NotesVaultShareWithRemarkable => D::CloseBeforeAction,
         T::RunEditorCommandWithInput | T::RenameTab => D::CloseAfterValidatedInput,
         T::FileTreePromptDelete
@@ -871,6 +878,20 @@ mod tests {
         let state = TrailCursorOverlayState {
             agent_surface_active: true,
             agent_input_cursor_available: false,
+            trail_cursor_enabled: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            trail_cursor_overlay_target(state),
+            Some(TrailCursorOverlayTarget::SuppressedByInputOverlay)
+        );
+    }
+
+    #[test]
+    fn cursorless_content_surface_suppresses_terminal_fallback() {
+        let state = TrailCursorOverlayState {
+            cursorless_surface_active: true,
             trail_cursor_enabled: true,
             ..Default::default()
         };

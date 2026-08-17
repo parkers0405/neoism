@@ -12,7 +12,7 @@ use super::draw::{
     wrap_text,
 };
 use super::markdown::AgentMarkdownPane;
-use super::wordmark::{format_elapsed, hsl_to_u8_simple};
+use super::wordmark::format_elapsed;
 use super::{
     DEPTH, INPUT_HELP_STRIP_H, INPUT_LINE_H, MAX_INPUT_LINES, ORDER_CARET, ORDER_PANEL,
     ORDER_TEXT, STREAMING_STATUS_LINE_H, USER_MESSAGE_MAX_LINES,
@@ -42,6 +42,150 @@ pub enum AgentStreamingStatus {
     WaitingSubagents,
     BackgroundTasks,
     Retrying,
+}
+
+fn streaming_status_accent(theme: &IdeTheme, state: AgentStreamingStatus) -> u32 {
+    let color = match state {
+        AgentStreamingStatus::Thinking => theme.magenta,
+        AgentStreamingStatus::Working => theme.yellow,
+        AgentStreamingStatus::Generating => theme.accent,
+        AgentStreamingStatus::Compacting => theme.green,
+        AgentStreamingStatus::WaitingSubagents => theme.yellow,
+        AgentStreamingStatus::BackgroundTasks => theme.red,
+        AgentStreamingStatus::Retrying => theme.yellow,
+        AgentStreamingStatus::Idle => theme.muted,
+    };
+    theme.readable_accent(color)
+}
+
+fn mix_status_color(from: [u8; 4], to: [u8; 4], amount: f32) -> [u8; 4] {
+    let amount = amount.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
+    [
+        mix(from[0], to[0]),
+        mix(from[1], to[1]),
+        mix(from[2], to[2]),
+        mix(from[3], to[3]),
+    ]
+}
+
+/// Animate within the selected theme's palette. The old implementation
+/// switched to fixed HSL hues (and pure white for Crafting) after resolving
+/// the theme token, so changing themes did not actually change this row.
+fn animated_streaming_status_color(
+    theme: &IdeTheme,
+    accent: u32,
+    live_phase: f32,
+    glyph_index: usize,
+    locked: bool,
+) -> [u8; 4] {
+    let wave_speed = if locked { 3.4 } else { 8.2 };
+    let glyph_offset = if locked { 0.62 } else { 0.91 };
+    let wave =
+        (live_phase * wave_speed + glyph_index as f32 * glyph_offset).sin() * 0.5 + 0.5;
+    let pulse = ((live_phase * 6.2) + glyph_index as f32 * 0.9).sin() * 0.5 + 0.5;
+    let amount = if locked {
+        0.06 + wave * 0.18 + pulse * 0.08
+    } else {
+        0.12 + wave * 0.34
+    };
+    mix_status_color(theme.u8(accent), theme.u8(theme.fg), amount)
+}
+
+fn themed_activity_scanner_color(
+    theme: &IdeTheme,
+    state: AgentStreamingStatus,
+    active: bool,
+    brightness: f32,
+    alpha: f32,
+) -> [u8; 4] {
+    let accent = streaming_status_accent(theme, state);
+    let bloom = if active {
+        0.10 + (brightness - 1.0).max(0.0) * 0.60
+    } else {
+        0.0
+    };
+    let mut color = mix_status_color(theme.u8(accent), theme.u8(theme.fg), bloom);
+    color[3] = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    color
+}
+
+#[cfg(test)]
+mod streaming_status_theme_tests {
+    use super::*;
+
+    #[test]
+    fn streaming_status_uses_the_selected_theme_roles() {
+        let theme = IdeTheme::pastel_dark();
+        assert_eq!(
+            streaming_status_accent(&theme, AgentStreamingStatus::Generating),
+            theme.readable_accent(theme.accent)
+        );
+        assert_eq!(
+            streaming_status_accent(&theme, AgentStreamingStatus::Thinking),
+            theme.readable_accent(theme.magenta)
+        );
+        assert_eq!(
+            streaming_status_accent(&theme, AgentStreamingStatus::WaitingSubagents),
+            theme.readable_accent(theme.yellow)
+        );
+    }
+
+    #[test]
+    fn animated_status_color_changes_with_the_theme() {
+        let mut first = IdeTheme::pastel_dark();
+        first.accent = 0x10_20_30;
+        first.fg = 0xa0_b0_c0;
+        let mut second = first;
+        second.accent = 0x90_20_10;
+        second.fg = 0xf0_e0_d0;
+
+        let first_color = animated_streaming_status_color(
+            &first,
+            streaming_status_accent(&first, AgentStreamingStatus::Generating),
+            1.25,
+            3,
+            true,
+        );
+        let second_color = animated_streaming_status_color(
+            &second,
+            streaming_status_accent(&second, AgentStreamingStatus::Generating),
+            1.25,
+            3,
+            true,
+        );
+
+        assert_ne!(first_color, second_color);
+        assert_ne!(first_color, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn help_strip_scanner_uses_the_selected_theme() {
+        let mut first = IdeTheme::pastel_dark();
+        first.yellow = 0x10_90_30;
+        first.fg = 0xd0_f0_d8;
+        let mut second = first;
+        second.yellow = 0x90_20_10;
+        second.fg = 0xf0_d8_d0;
+
+        let first_color = themed_activity_scanner_color(
+            &first,
+            AgentStreamingStatus::Working,
+            true,
+            1.15,
+            0.9,
+        );
+        let second_color = themed_activity_scanner_color(
+            &second,
+            AgentStreamingStatus::Working,
+            true,
+            1.15,
+            0.9,
+        );
+
+        assert_ne!(first_color, second_color);
+        assert_eq!(first_color[3], 230);
+    }
 }
 
 pub trait AgentPendingPermission: Clone {
@@ -1158,6 +1302,8 @@ fn render_input_help_strip(
             baseline_y,
             12.5 * s,
             scanner_seconds,
+            theme,
+            pane.streaming_state(),
             clip,
             occlusion_rects,
         );
@@ -1258,12 +1404,14 @@ fn draw_opencode_activity_scanner(
     y: f32,
     font_size: f32,
     now_seconds: f32,
+    theme: &IdeTheme,
+    state: AgentStreamingStatus,
     clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
     let base_opts = DrawOpts {
         font_size,
-        color: [255, 255, 255, 255],
+        color: theme.u8(streaming_status_accent(theme, state)),
         clip_rect: Some(clip),
         ..DrawOpts::default()
     };
@@ -1273,18 +1421,18 @@ fn draw_opencode_activity_scanner(
     let frame = opencode_scanner_frame(now_seconds);
 
     for (index, cell) in frame.into_iter().enumerate() {
-        let brightness = if cell.active { 1.0 } else { cell.brightness };
         let mut opts = base_opts;
-        let value = (255.0 * brightness).round() as u8;
-        opts.color = [
-            value,
-            value,
-            value,
-            (cell.alpha.clamp(0.0, 1.0) * 255.0) as u8,
-        ];
+        opts.color = themed_activity_scanner_color(
+            theme,
+            state,
+            cell.active,
+            cell.brightness,
+            cell.alpha,
+        );
         let glyph = if cell.active { "■" } else { "⬝" };
         let mut far_depth_opts = opts;
-        far_depth_opts.color = [12, 12, 16, opts.color[3].saturating_mul(2) / 3];
+        far_depth_opts.color = theme.u8(theme.bg);
+        far_depth_opts.color[3] = opts.color[3].saturating_mul(2) / 3;
         crate::primitives::draw_text_with_occlusion(
             sugarloaf,
             x + index as f32 * cell_w + 3.0,
@@ -1294,7 +1442,8 @@ fn draw_opencode_activity_scanner(
             occlusion_rects,
         );
         let mut near_depth_opts = opts;
-        near_depth_opts.color = [58, 58, 66, opts.color[3].saturating_mul(7) / 8];
+        near_depth_opts.color = theme.u8(theme.dim);
+        near_depth_opts.color[3] = opts.color[3].saturating_mul(7) / 8;
         crate::primitives::draw_text_with_occlusion(
             sugarloaf,
             x + index as f32 * cell_w + 1.5,
@@ -1343,17 +1492,8 @@ pub fn render_streaming_status_row(
         pane.clear_background_status_rect();
         return;
     }
-    let accent = match pane.streaming_state() {
-        AgentStreamingStatus::Thinking => theme.magenta,
-        AgentStreamingStatus::Working => theme.yellow,
-        AgentStreamingStatus::Generating => theme.accent,
-        AgentStreamingStatus::Compacting => theme.green,
-        AgentStreamingStatus::WaitingSubagents => theme.yellow,
-        AgentStreamingStatus::BackgroundTasks => theme.red,
-        AgentStreamingStatus::Retrying => theme.yellow,
-        AgentStreamingStatus::Idle => theme.muted,
-    };
     let state = pane.streaming_state();
+    let accent = streaming_status_accent(theme, state);
     let elapsed = pane.streaming_elapsed_seconds().unwrap_or(0.0);
     let transition = pane.streaming_state_changed_elapsed().unwrap_or(2.0);
     let live_phase = elapsed;
@@ -1439,33 +1579,8 @@ pub fn render_streaming_status_row(
                 let scramble_ix = (frame + ix * 5) % SCRAMBLE.len();
                 SCRAMBLE[scramble_ix] as char
             };
-            // Crafting samples the local profile's animated pixel-plasma field
-            // even after every letter locks. Other states retain their semantic
-            // color family; the transition into them uses the same profile field.
-            let color = if locked {
-                let wave = ((live_phase * 3.4) + ix as f32 * 0.62).sin() * 0.5 + 0.5;
-                let pulse = ((live_phase * 6.2) + ix as f32 * 0.9).sin() * 0.5 + 0.5;
-                let lightness = 0.52 + wave * 0.16 + pulse * 0.08;
-                if matches!(state, AgentStreamingStatus::Generating) {
-                    [255, 255, 255, 255]
-                } else {
-                    let base_hue = match state {
-                        AgentStreamingStatus::Thinking => 300.0,
-                        AgentStreamingStatus::Working => 52.0,
-                        AgentStreamingStatus::Compacting => 158.0,
-                        AgentStreamingStatus::WaitingSubagents => 48.0,
-                        AgentStreamingStatus::BackgroundTasks => 0.0,
-                        AgentStreamingStatus::Retrying => 30.0,
-                        _ => 0.0,
-                    };
-                    let hue = (base_hue + wave * 18.0 - 9.0).rem_euclid(360.0);
-                    hsl_to_u8_simple(hue, 0.65, lightness)
-                }
-            } else {
-                crate::cursor_style::rainbow_color_u8(
-                    crate::cursor_style::rainbow_now_seconds() + ix as f32 * 0.16,
-                )
-            };
+            let color =
+                animated_streaming_status_color(theme, accent, live_phase, ix, locked);
             trailing_color = color;
             opts.color = color;
             // Locked letters ride a travelling wave. Scrambling letters get
@@ -1487,7 +1602,7 @@ pub fn render_streaming_status_row(
             let glyph_x = cursor_x + sway_x;
             let glyph_y = line_y - lift_y;
             let mut far_depth_opts = opts;
-            far_depth_opts.color = [10, 10, 14, 210];
+            far_depth_opts.color = theme.u8_alpha(theme.bg, 210.0 / 255.0);
             crate::primitives::draw_text_with_occlusion(
                 sugarloaf,
                 glyph_x + 3.5 * s,
@@ -1497,7 +1612,7 @@ pub fn render_streaming_status_row(
                 occlusion_rects,
             );
             let mut near_depth_opts = opts;
-            near_depth_opts.color = [62, 62, 72, 240];
+            near_depth_opts.color = theme.u8_alpha(theme.dim, 240.0 / 255.0);
             crate::primitives::draw_text_with_occlusion(
                 sugarloaf,
                 glyph_x + 1.75 * s,
@@ -1548,7 +1663,8 @@ pub fn render_streaming_status_row(
         opts.color[3] = (alpha * 255.0).round() as u8;
         let dot_w = sugarloaf.text_mut().measure(".", &opts);
         let mut far_depth_opts = opts;
-        far_depth_opts.color = [10, 10, 14, opts.color[3].saturating_mul(5) / 6];
+        far_depth_opts.color = theme.u8(theme.bg);
+        far_depth_opts.color[3] = opts.color[3].saturating_mul(5) / 6;
         let _ = sugarloaf.text_mut().draw(
             cursor_x + drift + 3.0 * s,
             dot_floor_y - lift + 3.0 * s,
@@ -1556,7 +1672,8 @@ pub fn render_streaming_status_row(
             &far_depth_opts,
         );
         let mut near_depth_opts = opts;
-        near_depth_opts.color = [62, 62, 72, opts.color[3]];
+        near_depth_opts.color = theme.u8(theme.dim);
+        near_depth_opts.color[3] = opts.color[3];
         let _ = sugarloaf.text_mut().draw(
             cursor_x + drift + 1.5 * s,
             dot_floor_y - lift + 1.5 * s,

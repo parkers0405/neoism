@@ -64,15 +64,70 @@ pub(super) fn draw_spellcheck_underlines(
         if underline_y < clip_top || underline_y > clip_bottom {
             continue;
         }
-        let rect = [x, underline_y, word_w, 4.0];
-        if occlusions
-            .iter()
-            .any(|occlusion| rects_intersect(rect, *occlusion))
-        {
+        draw_spellcheck_squiggle_visible(
+            sugarloaf,
+            clip,
+            x,
+            underline_y,
+            word_w,
+            theme,
+            occlusions,
+        );
+    }
+}
+
+pub(super) fn draw_spellcheck_squiggle_visible(
+    sugarloaf: &mut Sugarloaf,
+    clip: [f32; 4],
+    x: f32,
+    y: f32,
+    w: f32,
+    theme: &IdeTheme,
+    occlusions: &[[f32; 4]],
+) {
+    let underline = [x, y, w, 4.0];
+    let visible = spellcheck_visible_spans(underline, occlusions);
+    for (start, end) in visible {
+        let start = start.max(clip[0]);
+        let end = end.min(clip[0] + clip[2]);
+        if end <= start {
             continue;
         }
-        draw_spellcheck_squiggle(sugarloaf, clip, x, underline_y, word_w, theme);
+        let segment_clip = [start, clip[1], end - start, clip[3]];
+        draw_spellcheck_squiggle(sugarloaf, segment_clip, x, y, w, theme);
     }
+}
+
+fn spellcheck_visible_spans(
+    underline: [f32; 4],
+    occlusions: &[[f32; 4]],
+) -> Vec<(f32, f32)> {
+    let mut visible = vec![(underline[0], underline[0] + underline[2])];
+    for cover in occlusions {
+        if !rects_intersect(underline, *cover) {
+            continue;
+        }
+        let cover_start = cover[0];
+        let cover_end = cover[0] + cover[2];
+        let mut next = Vec::with_capacity(visible.len() + 1);
+        for (start, end) in visible {
+            if cover_end <= start || cover_start >= end {
+                next.push((start, end));
+                continue;
+            }
+            if cover_start > start {
+                next.push((start, cover_start.min(end)));
+            }
+            if cover_end < end {
+                next.push((cover_end.max(start), end));
+            }
+        }
+        visible = next;
+        if visible.is_empty() {
+            return visible;
+        }
+    }
+    visible
 }
 
 pub(super) fn draw_spellcheck_squiggle(
@@ -103,6 +158,33 @@ pub(super) fn draw_spellcheck_squiggle(
         );
         high = !high;
         dx += 3.2;
+    }
+}
+
+#[cfg(test)]
+mod spellcheck_occlusion_tests {
+    use super::spellcheck_visible_spans;
+
+    #[test]
+    fn partial_overlay_only_clips_the_covered_squiggle_segment() {
+        assert_eq!(
+            spellcheck_visible_spans(
+                [10.0, 20.0, 100.0, 4.0],
+                &[[40.0, 18.0, 30.0, 20.0]],
+            ),
+            vec![(10.0, 40.0), (70.0, 110.0)]
+        );
+    }
+
+    #[test]
+    fn unrelated_overlay_does_not_clip_the_squiggle() {
+        assert_eq!(
+            spellcheck_visible_spans(
+                [10.0, 20.0, 100.0, 4.0],
+                &[[40.0, 50.0, 30.0, 20.0]],
+            ),
+            vec![(10.0, 110.0)]
+        );
     }
 }
 

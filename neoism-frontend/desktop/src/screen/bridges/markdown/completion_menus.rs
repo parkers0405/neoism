@@ -197,6 +197,7 @@ impl Screen<'_> {
         line: usize,
         start: usize,
         end: usize,
+        expected: &str,
         replacement: &str,
     ) -> bool {
         let Some(path) = self
@@ -206,7 +207,7 @@ impl Screen<'_> {
             .as_mut()
             .and_then(|markdown| {
                 markdown
-                    .replace_spelling_word(line, start, end, replacement)
+                    .replace_spelling_word(line, start, end, expected, replacement)
                     .then(|| markdown.path.clone())
             })
         else {
@@ -233,10 +234,7 @@ impl Screen<'_> {
         };
         let suggestions =
             crate::editor::markdown::render::spelling_suggestions(&target.word);
-        if suggestions.is_empty() {
-            return false;
-        }
-        let items = suggestions
+        let mut items = suggestions
             .into_iter()
             .map(|replacement| {
                 ContextMenuItem::new(
@@ -246,11 +244,29 @@ impl Screen<'_> {
                         line: target.line,
                         start: target.start,
                         end: target.end,
+                        expected: target.word.clone(),
                         replacement,
                     },
                 )
+                .with_preview("\u{f0eb}")
             })
             .collect::<Vec<_>>();
+        items.push(
+            ContextMenuItem::new(
+                "Ignore",
+                "Session",
+                ContextMenuAction::MarkdownSpellingIgnore(target.word.clone()),
+            )
+            .with_preview("\u{f05e}"),
+        );
+        items.push(
+            ContextMenuItem::new(
+                "Add to Dictionary",
+                "Global",
+                ContextMenuAction::MarkdownSpellingAddToDictionary(target.word.clone()),
+            )
+            .with_preview("\u{f02d}"),
+        );
         let scale_factor = self.sugarloaf.scale_factor();
         let size = self.sugarloaf.window_size();
         let menu_height = self.context_menu_logical_height();
@@ -343,7 +359,7 @@ impl Screen<'_> {
                 let page_sources: Vec<PathBuf> = doc_vault
                     .as_ref()
                     .map(|vault| {
-                        neo_workspace::vault_project_links(vault)
+                        neo_workspace::vault_project_links_for_note(vault, &doc_path)
                             .into_iter()
                             .map(|link| link.path)
                             .collect::<Vec<_>>()

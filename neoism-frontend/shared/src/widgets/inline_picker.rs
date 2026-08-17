@@ -687,3 +687,37 @@ pub fn render_limited(
         footer_h,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limited_picker_stays_below_pane_chrome_and_above_composer() {
+        let input = [100.0, 640.0, 700.0, 100.0];
+        let pane_content_top = 96.0;
+        let rows =
+            row_limit_for_space(input[1], pane_content_top, 1.0, false, DEFAULT_MAX_ROWS);
+        let card =
+            layout_limited(DEFAULT_MAX_ROWS, input, 1.0, false, rows, pane_content_top)
+                .expect("picker layout");
+
+        assert!(card[1] >= pane_content_top);
+        assert!(card[1] + card[3] + 6.0 <= input[1]);
+    }
+
+    #[test]
+    fn limited_picker_shrinks_instead_of_crossing_pane_tab_strip() {
+        let input = [20.0, 360.0, 420.0, 80.0];
+        let pane_content_top = 180.0;
+        let rows =
+            row_limit_for_space(input[1], pane_content_top, 1.0, true, DEFAULT_MAX_ROWS);
+        let card =
+            layout_limited(DEFAULT_MAX_ROWS, input, 1.0, true, rows, pane_content_top)
+                .expect("picker layout");
+
+        assert!(rows < DEFAULT_MAX_ROWS);
+        assert!(card[1] >= pane_content_top);
+        assert!(card[1] + card[3] + 6.0 <= input[1]);
+    }
+}

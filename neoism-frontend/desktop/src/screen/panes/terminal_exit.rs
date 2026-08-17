@@ -196,6 +196,9 @@ impl Screen<'_> {
                         ChromePageKind::Extensions => {
                             self.activate_neoism_extensions_page();
                         }
+                        ChromePageKind::NeoWorld => {
+                            self.activate_neoworld_page();
+                        }
                     }
                 }
                 neoism_ui::panels::buffer_tabs::BufferTabTarget::File(path) => {

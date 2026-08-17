@@ -145,16 +145,27 @@ fn shaders_modal_spec_lists_configured_shaders() {
 fn test_filtered_commands_empty_query() {
     let palette = CommandPalette::new();
     let filtered = palette.filtered_rows();
-    // `StopSharingCurrentWorkspace` is now generally visible (its old
-    // `!= Private` gate made it effectively unreachable), so it is no
-    // longer excluded here. `ShareCurrentWorkspace` stays visible in the
-    // default Private state, so it needs no special-casing either.
     let expected = COMMANDS
         .iter()
         .filter(|cmd| cmd.action != PaletteAction::ToggleAppearanceTheme)
         .filter(|cmd| command_visible_for_surface(&cmd.action, PaletteSurface::Terminal))
         .count();
     assert_eq!(filtered.len(), expected);
+}
+
+#[test]
+fn new_workspace_is_available_from_commands_and_workspace_picker() {
+    let command = COMMANDS
+        .iter()
+        .find(|command| command.title == "New Workspace")
+        .expect("New Workspace command");
+    assert_eq!(command.action, PaletteAction::CreateWorkspace);
+    assert!(command.shortcut.contains("Ctrl+Shift+W"));
+
+    let row = PaletteRow::WorkspaceCreate;
+    assert_eq!(row.title(), "+ New Workspace");
+    assert_eq!(row.shortcut(), "Ctrl+Shift+W");
+    assert_eq!(row.action(), Some(PaletteAction::CreateWorkspace));
 }
 
 #[test]
@@ -578,7 +589,7 @@ fn workspaces_group_under_their_host_headers() {
             ("Charlie", true),
             ("mac", false), // host header
             ("Bravo", true),
-            ("+", true),
+            ("+ New Workspace", true),
         ]
     );
 
@@ -700,7 +711,7 @@ fn workspaces_fuzzy_filters_across_hosts_and_titles() {
         .map(|(_, r)| r.title())
         .collect();
     // framework header kept (has Notes), mac header dropped (no match).
-    assert_eq!(titles, vec!["framework", "Notes", "+"]);
+    assert_eq!(titles, vec!["framework", "Notes", "+ New Workspace"]);
 
     // Query matching a HOST label keeps the whole group (all its
     // workspaces), even when the workspace titles don't match.
@@ -712,7 +723,7 @@ fn workspaces_fuzzy_filters_across_hosts_and_titles() {
         .iter()
         .map(|(_, r)| r.title())
         .collect();
-    assert_eq!(titles, vec!["macbook", "Editor", "+"]);
+    assert_eq!(titles, vec!["macbook", "Editor", "+ New Workspace"]);
 }
 
 #[test]
@@ -1003,6 +1014,20 @@ fn list_fonts_command_is_present_and_actionable() {
     assert_eq!(
         palette.get_selected_action(),
         Some(PaletteAction::ListFonts)
+    );
+}
+
+#[test]
+fn neoworld_command_opens_the_native_pet_page() {
+    let mut palette = CommandPalette::new();
+    palette.set_query("neoworld".to_string());
+    let filtered = palette.filtered_rows();
+    assert!(!filtered.is_empty());
+    assert_eq!(filtered[0].1.title(), "NeoWorld");
+    palette.selected_index = 0;
+    assert_eq!(
+        palette.get_selected_action(),
+        Some(PaletteAction::OpenNeoWorld)
     );
 }
 

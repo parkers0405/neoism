@@ -65,6 +65,7 @@ fn measured_card_equals_sum_of_block_heights() {
             lang: "rust".into(),
             lines: Rc::new(vec!["fn main() {}".into(); 20]),
             copy_target: String::new(),
+            content_width: 0.0,
         },
         AssistantMarkdownBlock::Stock(
             parse_stock_card(r#"{"symbol":"AAPL","price":297.2}"#).unwrap(),
@@ -105,6 +106,15 @@ fn heading_height_matches_drawn_line_advance() {
 }
 
 #[test]
+fn heading_wrap_and_draw_use_the_same_font_size() {
+    let s = 1.5;
+    assert_eq!(heading_font_size(1, s), 31.5);
+    assert_eq!(heading_font_size(2, s), 27.0);
+    assert_eq!(heading_font_size(3, s), 24.0);
+    assert_eq!(heading_font_size(6, s), 24.0);
+}
+
+#[test]
 fn visible_line_range_keeps_only_lines_near_clip() {
     assert_eq!(
         visible_line_range(100.0, 20.0, 10, [0.0, 140.0, 400.0, 40.0]),
@@ -129,6 +139,55 @@ fn table_height_grows_for_wrapped_cells() {
         measure_laid_out_table_height(&wrapped, 1.0)
             > measure_laid_out_table_height(&single, 1.0)
     );
+}
+
+#[test]
+fn wide_tables_keep_readable_wrapped_columns_and_overflow_horizontally() {
+    let viewport_w = 360.0;
+    let widths = resolve_table_column_widths(vec![120.0, 900.0, 460.0], viewport_w, 1.0);
+
+    assert_eq!(widths, vec![TABLE_MIN_COLUMN_W, TABLE_MAX_COLUMN_W, 460.0]);
+    assert!(widths.iter().sum::<f32>() > viewport_w);
+
+    // A table that genuinely fits still fills the available viewport rather
+    // than receiving an unnecessary scrollbar.
+    assert_eq!(
+        resolve_table_column_widths(vec![100.0], viewport_w, 1.0),
+        vec![viewport_w]
+    );
+
+    // The overflow range includes enough trailing room to reveal the entire
+    // closing rule instead of clipping it at the viewport boundary.
+    assert_eq!(table_scroll_content_width(1_300.0, 1_000.0, 1.0), 1_314.0);
+    assert_eq!(table_scroll_content_width(1_000.0, 1_000.0, 1.0), 1_000.0);
+}
+
+#[test]
+fn tall_table_scrollbar_sticks_to_the_visible_bottom_above_composer() {
+    // The table itself continues to y=900, but the timeline is clipped at
+    // y=500 by the fixed composer. The scrollbar must therefore live in the
+    // last 16px of the visible intersection, not at the unseen table bottom.
+    let visible = intersect_rect([20.0, 100.0, 600.0, 800.0], [0.0, 40.0, 800.0, 460.0])
+        .expect("table should intersect the timeline");
+    let track = sticky_markdown_horizontal_scrollbar_track(visible, 30.0, 580.0, 1.0)
+        .expect("visible table should expose its scrollbar");
+
+    assert_eq!(track, [30.0, 484.0, 580.0, 16.0]);
+}
+
+#[test]
+fn markdown_scrollbar_geometry_exposes_a_full_drag_target() {
+    let geometry = markdown_horizontal_scrollbar_geometry(
+        [30.0, 484.0, 580.0, 16.0],
+        580.0,
+        1_160.0,
+        290.0,
+        1.0,
+    )
+    .expect("overflow should produce scrollbar geometry");
+
+    assert_eq!(geometry.rail, [30.0, 489.5, 580.0, 5.0]);
+    assert_eq!(geometry.thumb, [175.0, 484.0, 290.0, 16.0]);
 }
 
 #[test]

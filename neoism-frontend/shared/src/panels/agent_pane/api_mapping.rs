@@ -857,6 +857,46 @@ mod tests {
     }
 
     #[test]
+    fn running_apply_patch_keeps_header_without_growing_detail() {
+        let part = json!({
+            "id": "prt-patch",
+            "type": "tool",
+            "tool": "apply_patch",
+            "state": {
+                "status": "running",
+                "input": {
+                    "patchText": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n"
+                }
+            }
+        });
+        let message = part_block(&part).expect("tool part");
+        assert_eq!(message.tool, "apply_patch");
+        assert_eq!(message.status, "running");
+        assert!(message.title.contains("ApplyPatch"));
+        assert!(message.detail.is_empty());
+    }
+
+    #[test]
+    fn completed_apply_patch_embeds_edit_detail() {
+        let part = json!({
+            "id": "prt-patch",
+            "type": "tool",
+            "tool": "apply_patch",
+            "state": {
+                "status": "completed",
+                "input": {
+                    "patchText": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n"
+                },
+                "metadata": {}
+            }
+        });
+        let message = part_block(&part).expect("tool part");
+        assert_eq!(message.status, "completed");
+        assert!(message.detail.contains("neoismToolDetail"));
+        assert!(message.detail.contains("patchText"));
+    }
+
+    #[test]
     fn provider_models_map_to_sorted_picker_options_and_context_limits() {
         let providers = json!({
             "providers": [
@@ -1116,8 +1156,13 @@ mod tests {
             .iter()
             .find(|block| block.text == "done")
             .expect("final answer");
+        let task = blocks
+            .iter()
+            .find(|block| block.tool == "task")
+            .expect("background task card");
 
         assert_eq!(answer.status, "Build · GPT-5.6 Sol · 3m 13s");
+        assert_eq!(task.status, "running");
     }
 
     #[test]
@@ -1400,6 +1445,25 @@ mod tests {
 
         assert_eq!(message.id, "part-user-1");
     }
+
+    #[test]
+    fn live_user_image_uses_parent_message_identity() {
+        let message = part_block(&json!({
+            "id": "part-image-1",
+            "messageID": "msg-user-1",
+            "type": "file",
+            "role": "user",
+            "mime": "image/png",
+            "filename": "clipboard.png",
+            "url": "data:image/png;base64,AA=="
+        }))
+        .expect("user image part");
+
+        assert_eq!(message.kind, NeoismAgentMessageKind::User);
+        assert_eq!(message.id, "msg-user-1");
+        assert_eq!(message.images.len(), 1);
+        assert_eq!(message.images[0].url, "data:image/png;base64,AA==");
+    }
 }
 
 pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
@@ -1512,11 +1576,13 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
         );
     }
     // History collapses a user turn into one row keyed by the parent message
-    // id. Use that same identity for the live echo; otherwise a delayed
-    // `part.updated` carries the child part id, misses the snapshot row, and
-    // can append the prompt after an already-rendered assistant response.
-    let originated_as_user_part =
-        kind == "text" && part.get("role").and_then(Value::as_str) == Some("user");
+    // id. The server broadcasts its text and image-file parts separately;
+    // both must carry that same identity or the image becomes a duplicate
+    // user card. Text also covers runtime/system notices injected as
+    // user-role turns. Non-image file notices remain independent cards.
+    let originated_as_user_part = part.get("role").and_then(Value::as_str)
+        == Some("user")
+        && (kind == "text" || message.kind == NeoismAgentMessageKind::User);
     message.id = if originated_as_user_part {
         part.get("messageID")
             .or_else(|| part.get("messageId"))
@@ -1613,7 +1679,11 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
             .unwrap_or_else(|| infer_lang_from_title(&tool_title(tool, state))),
         todos,
     );
-    message.detail = edit_tool_detail(tool, state).unwrap_or(output.content);
+    message.detail = if is_unsettled_edit_tool(tool, display_status) {
+        String::new()
+    } else {
+        edit_tool_detail(tool, state).unwrap_or(output.content)
+    };
     message.line_offset = output.line_offset;
     message
 }
@@ -2039,6 +2109,19 @@ fn is_edit_tool(tool: &str) -> bool {
         normalized.as_str(),
         "applypatch" | "patch" | "edit" | "write" | "multiedit"
     )
+}
+
+fn is_unsettled_edit_tool(tool: &str, status: &str) -> bool {
+    let normalized = tool
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(normalized.as_str(), "applypatch" | "patch")
+        && matches!(
+            status.trim().to_ascii_lowercase().as_str(),
+            "pending" | "running" | "streaming"
+        )
 }
 
 fn edit_tool_detail(tool: &str, state: &Value) -> Option<String> {

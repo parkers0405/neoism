@@ -651,15 +651,18 @@ impl Screen<'_> {
             .contexts_mut()
             .iter_mut()
         {
-            if !visible_nodes.contains(key) {
-                continue;
-            }
             let route_id = item.val.route_id;
             let Some(agent) = item.val.neoism_agent.as_mut() else {
                 continue;
             };
+            let is_visible = visible_nodes.contains(key);
             agent.set_local_presence_name(Some(local_presence_name.clone()));
-            if agent.drain_server_updates() {
+            let agent_changed = if is_visible {
+                agent.drain_server_updates()
+            } else {
+                agent.drain_live_session_updates()
+            };
+            if agent_changed {
                 agent_animating = true;
             }
             agent_ui_events.extend(
@@ -668,6 +671,12 @@ impl Screen<'_> {
                     .into_iter()
                     .map(|event| (route_id, event)),
             );
+            // Conversation stores stay live independently of which split/tab
+            // is painted. This prevents a hidden pane from accumulating an
+            // unbounded token backlog that must be replayed on activation.
+            if !is_visible {
+                continue;
+            }
             let mut rect = [
                 (scaled_margin.left + item.layout_rect[0]) / scale,
                 (scaled_margin.top + item.layout_rect[1]) / scale,
@@ -1218,6 +1227,19 @@ impl Screen<'_> {
             self.mark_dirty();
             return true;
         }
+        // Rendered Markdown tables and fenced code own their sticky
+        // horizontal rail. Give it priority over transcript selection and
+        // links, exactly like the timeline's vertical scrollbar below.
+        let markdown_scrollbar = self
+            .context_manager
+            .current_mut()
+            .neoism_agent
+            .as_mut()
+            .is_some_and(|agent| agent.begin_markdown_horizontal_scrollbar_drag(mx, my));
+        if markdown_scrollbar {
+            self.mark_dirty();
+            return true;
+        }
         // Scrollbar drag wins over selection / link targets so the user can
         // grab the thumb even when it sits over message content.
         let scrollbar = self
@@ -1248,6 +1270,7 @@ impl Screen<'_> {
                 let chars = text.chars().count();
                 clipboard.set(ClipboardType::Clipboard, text);
                 if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+                    agent.mark_code_copied(&link);
                     agent.push_copied_notice(chars);
                 }
                 self.mark_dirty();
@@ -1400,6 +1423,12 @@ impl Screen<'_> {
         let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() else {
             return false;
         };
+        if agent.markdown_horizontal_scrollbar_dragging() {
+            if agent.drag_markdown_horizontal_scrollbar_to(mx) {
+                self.mark_dirty();
+            }
+            return true;
+        }
         if agent.scrollbar_dragging() {
             if agent.drag_scrollbar_to(mx, my) {
                 self.mark_dirty();
@@ -1428,7 +1457,9 @@ impl Screen<'_> {
         let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() else {
             return false;
         };
-        if agent.update_link_hover_at(mx, my) {
+        let scrollbar_changed = agent.update_markdown_horizontal_scroll_hover(mx, my);
+        let link_changed = agent.update_link_hover_at(mx, my);
+        if scrollbar_changed || link_changed {
             self.mark_dirty();
             return true;
         }
@@ -1443,6 +1474,25 @@ impl Screen<'_> {
             .is_some_and(|agent| agent.link_hover_active())
     }
 
+    pub fn neoism_agent_markdown_scrollbar_hovered(&self) -> bool {
+        let scale = self.sugarloaf.scale_factor();
+        let mx = self.mouse.x as f32 / scale;
+        let my = self.mouse.y as f32 / scale;
+        self.context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
+            .is_some_and(|agent| agent.markdown_horizontal_scrollbar_contains(mx, my))
+    }
+
+    pub fn neoism_agent_markdown_scrollbar_dragging(&self) -> bool {
+        self.context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
+            .is_some_and(|agent| agent.markdown_horizontal_scrollbar_dragging())
+    }
+
     pub fn handle_neoism_agent_mouse_release(
         &mut self,
         clipboard: &mut Clipboard,
@@ -1453,8 +1503,9 @@ impl Screen<'_> {
                 return false;
             };
             let dragged = agent.end_scrollbar_drag();
+            let markdown_dragged = agent.end_markdown_horizontal_scrollbar_drag();
             let selection = agent.end_selection();
-            (dragged, selection)
+            (dragged || markdown_dragged, selection)
         };
         if let Some(text) = release.1 {
             let chars = text.chars().count();
@@ -1560,6 +1611,19 @@ impl Screen<'_> {
         _tab: neoism_ui::panels::buffer_tabs::BufferTab<crate::neoism::icon::AgentKind>,
         route_id: usize,
     ) {
+        // The dragged tab has already been removed from its strip. Remember
+        // which context backs the surviving active tab before reparenting the
+        // Agent route; if Agent was the pane's structural owner, the rebuilt
+        // tree promotes that survivor and the chrome maps must follow it.
+        let surviving_source_route = match source {
+            crate::host::StripRef::Pane(route) => self
+                .renderer
+                .pane_tabs
+                .get(&route)
+                .filter(|tabs| !tabs.tabs().is_empty())
+                .and_then(|tabs| self.pane_tab_context_route(route, tabs.active())),
+            crate::host::StripRef::Workspace => None,
+        };
         self.activate_remaining_tab_in_strip(source);
 
         match dest {
@@ -1620,6 +1684,8 @@ impl Screen<'_> {
         }
 
         if let crate::host::StripRef::Pane(src_route) = source {
+            let src_route =
+                self.rekey_promoted_pane_owner(src_route, surviving_source_route);
             let empty = self
                 .renderer
                 .pane_tabs

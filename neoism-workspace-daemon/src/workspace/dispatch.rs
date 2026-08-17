@@ -615,6 +615,9 @@ fn create_workspace_vault(
             None => neoism_workspace_index::init_workspace(&root)?,
         };
         notes_workspace.config.notes.workspace = vault_name;
+        // Selecting a new name intentionally supersedes the default vault id
+        // inherited from a freshly initialized workspace.
+        notes_workspace.config.notes.vault_id = None;
         neoism_workspace_index::ensure_notes_workspace(&notes_workspace)?;
         neoism_workspace_index::link_workspace_to_vault_project(
             &mut notes_workspace,

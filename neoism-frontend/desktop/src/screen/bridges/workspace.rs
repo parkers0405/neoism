@@ -92,5 +92,25 @@ fn notes_workspace_for_root_or_default(
 fn notes_sidebar_workspace_name(
     workspace: &neo_workspace::config::NeoismWorkspace,
 ) -> String {
-    workspace.config.notes.workspace.clone()
+    let scope = workspace.notes_scope_relative();
+    if scope == Path::new(".") {
+        workspace.config.notes.workspace.clone()
+    } else {
+        format!("{} / {}", workspace.config.notes.workspace, scope.display())
+    }
+}
+
+pub(crate) fn notes_sidebar_name_for_path(path: &Path) -> String {
+    if let Ok(Some(vault)) = neo_workspace::notes_vault_for_path(path) {
+        if let Ok(relative) = path.strip_prefix(&vault.path) {
+            if !relative.as_os_str().is_empty() {
+                return format!("{} / {}", vault.name, relative.display());
+            }
+        }
+        return vault.name;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Notes")
+        .to_string()
 }

@@ -8,8 +8,8 @@ Memory is not hidden model state. You can open, edit, link, search, and delete t
 
 | Scope | Use it for | Location |
 |---|---|---|
-| `project` | Architecture, bugs, feature status, project workflows, technical decisions | The linked project's vault `Memory/`, or the Default vault when no vault is linked |
-| `user` | Facts about the person: durable preferences, personal environment, recurring personal workflow | Default vault `Memory/Personal/` |
+| `project` | Architecture, bugs, feature status, project workflows, technical decisions | The linked project's notes folder `Memory/`, or the default vault when no folder is linked |
+| `user` | Facts about the person: durable preferences, personal environment, recurring personal workflow | The default vault's `Memory/Personal/` |
 | `auto` / `all` | Recall from both scopes | Both roots |
 
 Never store project facts in user memory merely because one user mentioned them.
@@ -78,6 +78,6 @@ Notes are user knowledge and documents. Memory is a compact agent recall layer i
 
 ## Cross-device behavior
 
-Because project memory is stored in a linked vault, it follows that vault's normal sync behavior. User memory lives in the Default vault. The Agent server reads the same files regardless of which attached Neoism client displays the session.
+Because project memory is stored in the linked vault folder, it follows that vault's normal sync behavior. User memory lives in whichever vault is currently designated as the default. The Agent server reads the same files regardless of which attached Neoism client displays the session.
 
 See [[Instructions]], [[Skills]], and [[Compaction]].

@@ -892,6 +892,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             neoism_agent: None,
             neoism_tags: None,
             neoism_extensions: None,
+            neoworld: None,
         })
     }
 }

@@ -432,33 +432,9 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Workspace,
     },
     Command {
-        title: "Share Current Workspace",
-        shortcut: "workspace share",
-        action: PaletteAction::ShareCurrentWorkspace,
-        service: CommandService::Workspace,
-    },
-    Command {
-        title: "Stop Sharing Current Workspace",
-        shortcut: "workspace private",
-        action: PaletteAction::StopSharingCurrentWorkspace,
-        service: CommandService::Workspace,
-    },
-    Command {
         title: "Leave Workspace",
         shortcut: "workspace leave",
         action: PaletteAction::LeaveWorkspace,
-        service: CommandService::Workspace,
-    },
-    Command {
-        title: "Send Current Workspace to Docker Sandbox",
-        shortcut: "workspace docker",
-        action: PaletteAction::SendCurrentWorkspaceToDockerSandbox,
-        service: CommandService::Workspace,
-    },
-    Command {
-        title: "Send Current Workspace to Cloud",
-        shortcut: "workspace cloud",
-        action: PaletteAction::SendCurrentWorkspaceToCloud,
         service: CommandService::Workspace,
     },
     Command {
@@ -574,6 +550,12 @@ pub(crate) const COMMANDS: &[Command] = &[
         shortcut: "Alt+A",
         action: PaletteAction::OpenNeoismAgent,
         service: CommandService::Agent,
+    },
+    Command {
+        title: "NeoWorld",
+        shortcut: "Alt+P",
+        action: PaletteAction::OpenNeoWorld,
+        service: CommandService::Neoism,
     },
     Command {
         title: "Claude",

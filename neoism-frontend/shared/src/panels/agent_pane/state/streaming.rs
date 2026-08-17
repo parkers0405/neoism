@@ -103,7 +103,10 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_state(&self) -> NeoismAgentStreamingState {
-        if !self.is_streaming() && self.active_subagent_count() > 0 {
+        // Active child lifecycle wins over transient parent part activity.
+        // Otherwise a brief parent Thinking/Crafting update hides and
+        // restarts the persistent "Sub-agents working" footer.
+        if self.active_subagent_count() > 0 {
             return NeoismAgentStreamingState::WaitingSubagents;
         }
         if !self.is_streaming() && self.running_background_task_count() > 0 {
@@ -129,7 +132,7 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {
-        if !self.is_streaming() && self.active_subagent_count() > 0 {
+        if self.active_subagent_count() > 0 {
             return self.subagent_waiting_started_at.map(|started| {
                 Instant::now()
                     .saturating_duration_since(started)
@@ -154,8 +157,18 @@ impl NeoismAgentPane {
         if self.is_subagent_session() {
             return 0;
         }
-        self.side_panel
-            .active_child_count(self.session_id.as_deref())
+        let sidebar_count = self
+            .side_panel
+            .active_child_count(self.session_id.as_deref());
+        let runtime_count = self
+            .active_subagent_ids
+            .iter()
+            .filter(|session_id| {
+                Some(session_id.as_str()) != self.session_id.as_deref()
+                    && !self.side_panel.branch_terminal_locked(session_id)
+            })
+            .count();
+        sidebar_count.max(runtime_count)
     }
 
     pub fn note_subagent_runtime(
@@ -214,6 +227,10 @@ impl NeoismAgentPane {
             status,
             BranchStatus::Active | BranchStatus::WaitingPermission
         ) {
+            // A child part delta can arrive before the parent task/status
+            // event. Create its row from the accepted live signal so both
+            // the sidebar and aggregate composer status remain continuous.
+            self.upsert_live_subagent_entry(&session_id, None, None);
             self.active_subagent_ids.insert(session_id.clone());
             if let Some(started_at) = started_at {
                 self.active_subagent_started_at
@@ -279,14 +296,26 @@ impl NeoismAgentPane {
                     .map(|status| (entry.id.clone(), status))
             })
             .collect::<HashMap<_, _>>();
+        let latched_statuses = active_task_ids
+            .iter()
+            .filter_map(|task_id| {
+                self.side_panel
+                    .branch_activity(task_id)
+                    .map(|activity| (task_id.clone(), activity.status))
+            })
+            .collect::<Vec<_>>();
+        for (task_id, status) in latched_statuses {
+            self.note_subagent_runtime(task_id, status, None);
+        }
         for (task_id, status) in &explicit_statuses {
-            if !active_task_ids.contains(task_id) {
-                self.note_subagent_runtime(
-                    task_id.clone(),
-                    branch_status_from_runtime(status),
-                    None,
-                );
-            }
+            // The poll is authoritative even when the child was previously
+            // active. Always mirror it into the runtime set so a completed
+            // child is removed instead of lingering until another live event.
+            self.note_subagent_runtime(
+                task_id.clone(),
+                branch_status_from_runtime(status),
+                None,
+            );
         }
         let task_updates = self
             .messages
@@ -444,7 +473,7 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_state_changed_elapsed(&self) -> Option<f32> {
-        if !self.is_streaming() && self.active_subagent_count() > 0 {
+        if self.active_subagent_count() > 0 {
             return self.subagent_waiting_started_at.map(|started| {
                 Instant::now()
                     .saturating_duration_since(started)

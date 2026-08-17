@@ -348,6 +348,12 @@ impl Renderer {
             chrome_top,
             sidebar_bottom,
         );
+        // Secondary pane strips are the same native tab surface as the
+        // workspace strip.  Keep them on the same icon-provider path so a
+        // moved Agent tab retains its PNG logo instead of falling back to the
+        // shared `n` glyph.  File/frontmatter icons continue to come directly
+        // from each BufferTab, just as they do in the workspace strip.
+        let icon_provider = super::run::AgentIconShim;
         for (route, x, y, w) in targets {
             let mut crumb_top = y;
             let show_crumbs = self
@@ -355,7 +361,16 @@ impl Renderer {
                 .get(&route)
                 .is_some_and(|tabs| tabs.active_shows_breadcrumbs());
             if let Some(tabs) = self.pane_tabs.get_mut(&route) {
-                tabs.render(sugarloaf, x, y, w, &self.theme, None, &occlusions);
+                tabs.render_with_icons(
+                    sugarloaf,
+                    x,
+                    y,
+                    w,
+                    &self.theme,
+                    self.last_agent,
+                    Some(&icon_provider),
+                    &occlusions,
+                );
                 crumb_top = y + tabs.height();
             }
             if show_crumbs {

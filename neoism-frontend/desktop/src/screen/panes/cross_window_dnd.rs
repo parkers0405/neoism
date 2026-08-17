@@ -533,7 +533,10 @@ impl Screen<'_> {
                         .context_manager
                         .stack_existing_route_on_workspace(route, &mut self.sugarloaf);
                 }
-                self.renderer.buffer_tabs.open_path(path.clone());
+                let ix = self.renderer.buffer_tabs.open_path(path.clone());
+                self.renderer
+                    .buffer_tabs
+                    .restore_presentation_from(ix, &tab);
                 self.renderer.file_tree.set_active_path(Some(path.clone()));
                 self.activate_code_path(path.clone());
             }
@@ -576,7 +579,8 @@ impl Screen<'_> {
                             tabs.set_scale(scale);
                             tabs
                         });
-                tabs.open_path(path.clone());
+                let ix = tabs.open_path(path.clone());
+                tabs.restore_presentation_from(ix, &tab);
                 let cwd = self.active_pane_workspace_root();
                 if let Some(crumbs) = self.renderer.pane_breadcrumbs.get_mut(&dest_route)
                 {
@@ -661,9 +665,12 @@ impl Screen<'_> {
             crate::neoism::icon::AgentKind,
         >,
                     path: std::path::PathBuf,
-                    kind: ReinsertTabKind| match kind {
-            ReinsertTabKind::Markdown => tabs.open_markdown(path),
-            ReinsertTabKind::Path => tabs.open_path(path),
+                    kind: ReinsertTabKind| {
+            let ix = match kind {
+                ReinsertTabKind::Markdown => tabs.open_markdown(path),
+                ReinsertTabKind::Path => tabs.open_path(path),
+            };
+            tabs.restore_presentation_from(ix, tab);
         };
         match plan.strip {
             neoism_ui::panels::buffer_tabs::StripKey::Workspace => {
@@ -786,10 +793,12 @@ impl Screen<'_> {
         tabs.set_scale(init.scale);
         match init.kind {
             ReinsertTabKind::Markdown => {
-                let _ = tabs.open_markdown(path.clone());
+                let ix = tabs.open_markdown(path.clone());
+                tabs.restore_presentation_from(ix, tab);
             }
             ReinsertTabKind::Path => {
-                let _ = tabs.open_path(path.clone());
+                let ix = tabs.open_path(path.clone());
+                tabs.restore_presentation_from(ix, tab);
             }
         }
         self.renderer.pane_tabs.insert(new_route, tabs);

@@ -97,10 +97,10 @@ fn finished_subagent_ignores_straggler_part_activity() {
 }
 
 #[test]
-fn poll_reconciliation_latches_terminal_for_finished_subagent() {
+fn snapshot_reconciliation_latches_terminal_for_finished_subagent() {
     // Regression (the bug prior attempts missed): the authoritative backend
-    // poll lands via `set_subagents`, NOT `set_branch_activity_status`. A
-    // finished child reported by the poll must latch `terminal_locked` so a
+    // snapshot lands via `set_subagents`, NOT `set_branch_activity_status`. A
+    // finished child reported by the snapshot must latch `terminal_locked` so a
     // straggler "responding" part delta can't drag the row back to
     // "working" — which is exactly how branches got stuck.
     let mut panel = NeoismAgentSidePanel::default();
@@ -114,7 +114,7 @@ fn poll_reconciliation_latches_terminal_for_finished_subagent() {
     );
     assert!(!panel.branch_terminal_locked("child"));
 
-    // The poll reports the child finished.
+    // The recovery snapshot reports the child finished.
     panel.set_subagents(vec![NeoismAgentSessionEntry::new(
         "child", "child", "explore",
     )
@@ -122,21 +122,24 @@ fn poll_reconciliation_latches_terminal_for_finished_subagent() {
 
     assert!(
         panel.branch_terminal_locked("child"),
-        "authoritative poll completion must latch terminal"
+        "authoritative snapshot completion must latch terminal"
     );
     assert_eq!(
         panel.branch_activity("child").unwrap().status,
         BranchStatus::Completed
     );
 
-    // A late straggler delta after the poll must be dropped.
+    // A late straggler delta after the snapshot must be dropped.
     let applied = panel.note_subagent_part_activity(
         "child",
         BranchStatus::Active,
         Some("responding".to_string()),
         None,
     );
-    assert!(!applied, "straggler after poll completion must be dropped");
+    assert!(
+        !applied,
+        "straggler after snapshot completion must be dropped"
+    );
     assert_eq!(
         panel.branch_activity("child").unwrap().status,
         BranchStatus::Completed
@@ -144,27 +147,41 @@ fn poll_reconciliation_latches_terminal_for_finished_subagent() {
 }
 
 #[test]
-fn subagent_poll_keeps_running_while_active_and_stops_when_all_done() {
-    // Regression: the poll was one-shot (`subagents_loaded` disabled it
-    // forever), so a sub-agent's status froze at first load. It must keep
-    // polling while any sub-agent is active, then stop once all terminal.
+fn subagent_snapshot_refreshes_only_when_invalidated_by_an_event() {
     let mut panel = NeoismAgentSidePanel::default();
 
-    // First load with a running child: poll must remain armed.
+    // Bootstrap performs exactly one snapshot.
+    assert!(panel.should_refresh_subagents());
+    let generation = panel.begin_subagent_refresh().expect("bootstrap refresh");
+    assert!(panel.complete_subagent_refresh(generation));
     panel.set_subagents(vec![NeoismAgentSessionEntry::new("a", "a", "explore")
         .with_runtime_status(Some("running".to_string()))]);
     assert!(
-        panel.should_refresh_subagents(),
-        "must keep polling while a sub-agent is active"
+        !panel.should_refresh_subagents(),
+        "active lifecycle must be event-driven, not periodically polled"
     );
 
-    // Child finishes: nothing left to poll for.
+    // A child/tree or reconnect event explicitly requests one recovery
+    // snapshot, then the gate closes again.
+    panel.mark_subagent_tree_dirty();
+    assert!(panel.should_refresh_subagents());
+    let generation = panel.begin_subagent_refresh().expect("event refresh");
+    assert!(panel.complete_subagent_refresh(generation));
     panel.set_subagents(vec![NeoismAgentSessionEntry::new("a", "a", "explore")
-        .with_runtime_status(Some("completed".to_string()))]);
-    assert!(
-        !panel.should_refresh_subagents(),
-        "polling stops once every sub-agent is terminal"
-    );
+        .with_runtime_status(Some("running".to_string()))]);
+    assert!(!panel.should_refresh_subagents());
+}
+
+#[test]
+fn failed_subagent_snapshot_waits_for_the_next_event() {
+    let mut panel = NeoismAgentSidePanel::default();
+    let generation = panel.begin_subagent_refresh().expect("bootstrap refresh");
+    assert!(panel.complete_subagent_refresh(generation));
+    panel.settle_failed_subagent_refresh();
+    assert!(!panel.should_refresh_subagents());
+
+    panel.mark_subagent_tree_dirty();
+    assert!(panel.should_refresh_subagents());
 }
 
 #[test]
@@ -189,7 +206,7 @@ fn subagent_refresh_is_single_flight_and_rejects_stale_generations() {
 }
 
 #[test]
-fn partial_poll_snapshot_preserves_omitted_active_subagent() {
+fn partial_recovery_snapshot_preserves_omitted_active_subagent() {
     let mut panel = NeoismAgentSidePanel::default();
     panel.set_subagents(vec![
         NeoismAgentSessionEntry::new("main", "main session", "return"),
@@ -233,7 +250,35 @@ fn partial_poll_snapshot_preserves_omitted_active_subagent() {
 }
 
 #[test]
-fn stale_running_poll_cannot_resurrect_a_completed_subagent() {
+fn status_omission_for_present_child_preserves_live_activity() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("main", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "child", "explore")
+            .with_runtime_status(Some("running".to_string())),
+    ]);
+
+    // `/session/status` is an active-run map and may omit an entry from one
+    // recovery response. Unknown must retain the last event-driven state.
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("main", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "child", "explore")
+            .with_runtime_status(None),
+    ]);
+
+    assert_eq!(panel.active_child_count(Some("main")), 1);
+    assert_eq!(
+        panel
+            .subagents()
+            .iter()
+            .find(|entry| entry.id == "child")
+            .and_then(|entry| entry.runtime_status.as_deref()),
+        Some("running")
+    );
+}
+
+#[test]
+fn stale_running_snapshot_cannot_resurrect_a_completed_subagent() {
     let mut panel = NeoismAgentSidePanel::default();
     panel.set_subagents(vec![
         NeoismAgentSessionEntry::new("main", "main session", "return"),

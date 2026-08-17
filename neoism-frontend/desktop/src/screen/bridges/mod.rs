@@ -10,6 +10,7 @@ pub mod file_tree;
 pub mod finder;
 pub mod git_diff;
 pub mod markdown;
+pub mod neoworld;
 pub mod notebook;
 pub mod palette;
 pub mod remarkable;

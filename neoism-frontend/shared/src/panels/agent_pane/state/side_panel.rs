@@ -135,6 +135,39 @@ impl NeoismAgentSessionEntry {
     }
 }
 
+fn generic_subagent_metadata(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "agent" | "subagent" | "sub-agent" | "sub agent" | "untitled" | "unknown"
+    )
+}
+
+fn preserve_specific_subagent_metadata(
+    incoming: &mut NeoismAgentSessionEntry,
+    previous: &NeoismAgentSessionEntry,
+) {
+    if generic_subagent_metadata(&incoming.title)
+        && !generic_subagent_metadata(&previous.title)
+    {
+        incoming.title = previous.title.clone();
+    }
+    if generic_subagent_metadata(&incoming.time_label)
+        && !generic_subagent_metadata(&previous.time_label)
+    {
+        incoming.time_label = previous.time_label.clone();
+    }
+    if incoming.agent_kind.is_none() {
+        incoming.agent_kind = previous.agent_kind;
+    }
+    // `/session/status` is an active-run map, not a complete lifecycle
+    // ledger. A child omitted from one recovery snapshot is therefore
+    // unknown, not newly completed. Keep the last event-authoritative state
+    // until an explicit terminal event says otherwise.
+    if incoming.runtime_status.is_none() {
+        incoming.runtime_status = previous.runtime_status.clone();
+    }
+}
+
 /// Which list the side panel is currently steering selection/scroll
 /// over. Set every frame by the renderer based on `pane.has_conversation()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,7 +248,7 @@ pub struct BranchActivity {
 impl BranchActivity {
     /// Build a fresh activity for `status`. A branch that is *first
     /// observed* already terminal (e.g. a sub-agent that finished before
-    /// the panel opened, or one re-listed by a later poll) gets NO
+    /// the panel opened, or one re-listed by a recovery snapshot) gets NO
     /// visibility window — `completed_at` stays `None`, which
     /// [`NeoismAgentSidePanel::subagent_hidden`] treats as "hide
     /// immediately". The 7s show-then-hide window is only started by a
@@ -247,8 +280,8 @@ impl BranchActivity {
         if terminal {
             // Stamp the show-then-hide window ONLY on the edge into a
             // terminal state (a genuine live completion the user is
-            // watching). A terminal→terminal re-apply (e.g. the poll
-            // re-reporting an already-finished child) must NOT restart the
+            // watching). A terminal→terminal re-apply (e.g. a recovery
+            // snapshot re-reporting an already-finished child) must NOT restart the
             // window — otherwise old completions keep flashing back.
             if !was_terminal {
                 self.completed_at = Some(Instant::now());
@@ -453,7 +486,6 @@ pub struct NeoismAgentSidePanel {
     /// children are not auto-hidden while the user is viewing them.
     viewed_session_id: Option<String>,
     subagents_loaded: bool,
-    last_subagents_refresh: Option<Instant>,
     /// Only one branch-tree snapshot may be in flight at a time. The
     /// generation invalidates an older worker when the viewed session or
     /// live branch tree changes, preventing late snapshots from replacing
@@ -546,7 +578,6 @@ impl Default for NeoismAgentSidePanel {
             subagents: Vec::new(),
             viewed_session_id: None,
             subagents_loaded: false,
-            last_subagents_refresh: None,
             subagent_refresh_in_flight: false,
             subagent_refresh_generation: 0,
             branch_activities: HashMap::new(),
@@ -1280,9 +1311,29 @@ impl NeoismAgentSidePanel {
 
     pub fn set_subagents(&mut self, mut subagents: Vec<NeoismAgentSessionEntry>) {
         let was_subagents = matches!(self.mode, SidePanelMode::Subagents);
-        // A branch discovered by the live event stream is newer than a poll
-        // that started before that event. If such a poll omits an agent that
-        // is still authoritatively active, retain its last known row. This
+        // Recovery snapshots can briefly know only that a child is a generic
+        // "subagent", while live task/status events already supplied its real
+        // title and agent. Refresh runtime/depth from the snapshot, but never let
+        // placeholder metadata downgrade a row the user has already seen.
+        for incoming in &mut subagents {
+            if let Some(previous) = self
+                .subagents
+                .iter()
+                .find(|previous| previous.id == incoming.id)
+            {
+                preserve_specific_subagent_metadata(incoming, previous);
+            } else if incoming.runtime_status.is_none() {
+                // On first bootstrap, children absent from the active-run map
+                // are historical/idle. Subsequent recovery snapshots retain
+                // the event-driven state above instead of repeating this
+                // inference and flickering an active child off.
+                incoming.runtime_status = Some("completed".to_string());
+            }
+        }
+        // A branch discovered by the live event stream is newer than a
+        // recovery snapshot that started before that event. If such a
+        // snapshot omits an agent that is still authoritatively active, retain
+        // its last known row. This
         // keeps both the sidebar and the footer's active count stable until a
         // real terminal lifecycle event arrives.
         let incoming_ids = subagents
@@ -1320,11 +1371,8 @@ impl NeoismAgentSidePanel {
             .subagents
             .get(self.selected)
             .map(|entry| entry.id.clone());
-        // Whether the set of rows actually changed. The poll now runs
-        // continuously while sub-agents are active, so a status-only
-        // refresh (same ids) must NOT reset the scroll/selection springs —
-        // otherwise the list would jump back to the top every 500ms and be
-        // un-scrollable.
+        // Whether the set of rows actually changed. A status-only recovery
+        // snapshot (same ids) must not reset scroll/selection springs.
         let ids_changed = self.subagents.len() != subagents.len()
             || self
                 .subagents
@@ -1333,13 +1381,8 @@ impl NeoismAgentSidePanel {
                 .any(|(old, new)| old.id != new.id);
         self.subagents = subagents;
         self.subagents_loaded = true;
-        // Reconcile each branch against the backend's authoritative status.
-        // This is a real lifecycle signal (the child's actual run state), so
-        // route it through `set_branch_activity_status`, which latches
-        // `terminal_locked` on a terminal status — otherwise a finished
-        // sub-agent's straggler "responding" part-delta resurrects the row
-        // to "working", which is exactly how branches got stuck. Collect
-        // first to avoid borrowing `self.subagents` while mutating
+        // Reconcile explicit statuses from a bootstrap/reconnect snapshot.
+        // Collect first to avoid borrowing `self.subagents` while mutating
         // `self.branch_activities`.
         let reconciled = self
             .subagents
@@ -1353,7 +1396,7 @@ impl NeoismAgentSidePanel {
             })
             .collect::<Vec<_>>();
         for (id, status) in reconciled {
-            self.reconcile_polled_branch_activity_status(id, status);
+            self.reconcile_snapshot_branch_activity_status(id, status);
         }
         if was_subagents {
             // Restore the cursor onto the same logical branch it was on
@@ -1408,14 +1451,19 @@ impl NeoismAgentSidePanel {
         let title = title.into();
         let time_label = time_label.into();
         if let Some(entry) = self.subagents.iter_mut().find(|entry| entry.id == id) {
-            if !title.trim().is_empty() {
+            if !title.trim().is_empty()
+                && (!generic_subagent_metadata(&title)
+                    || generic_subagent_metadata(&entry.title))
+            {
                 entry.title = title;
             }
-            if !time_label.trim().is_empty() {
+            if !time_label.trim().is_empty()
+                && (!generic_subagent_metadata(&time_label)
+                    || generic_subagent_metadata(&entry.time_label))
+            {
                 entry.time_label = time_label;
-                entry.agent_kind = entry
-                    .agent_kind
-                    .or_else(|| AgentKind::from_label(&entry.time_label));
+                entry.agent_kind =
+                    AgentKind::from_label(&entry.time_label).or(entry.agent_kind);
             }
             return false;
         }
@@ -1454,29 +1502,10 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn should_refresh_subagents(&self) -> bool {
-        if self.subagent_refresh_in_flight {
-            return false;
-        }
-        let due = self
-            .last_subagents_refresh
-            .map(|last| Instant::now().saturating_duration_since(last).as_millis() >= 500)
-            .unwrap_or(true);
-        if !due {
-            return false;
-        }
-        // The first load always fires. After that, keep polling on the
-        // cadence while any sub-agent could still change state — i.e. one
-        // is still active. This is the fix for branches that stayed frozen
-        // on "working": the poll used to be one-shot (`subagents_loaded`
-        // returned `false` forever), so finished sub-agents never updated.
-        // Once everything is terminal there's nothing left to fetch, so we
-        // stop until a live event marks a branch active again (a new/
-        // respawned sub-agent), which re-arms this.
-        !self.subagents_loaded || self.has_active_subagents()
+        !self.subagent_refresh_in_flight && !self.subagents_loaded
     }
 
-    /// Whether any tracked sub-agent is still active (so its status row can
-    /// still change and the poll should keep running).
+    /// Whether any tracked sub-agent is still active.
     fn has_active_subagents(&self) -> bool {
         let branch_active = self.branch_activities.values().any(|activity| {
             matches!(
@@ -1509,7 +1538,6 @@ impl NeoismAgentSidePanel {
         self.subagent_refresh_generation =
             self.subagent_refresh_generation.wrapping_add(1);
         self.subagent_refresh_in_flight = true;
-        self.last_subagents_refresh = Some(Instant::now());
         Some(self.subagent_refresh_generation)
     }
 
@@ -1523,6 +1551,27 @@ impl NeoismAgentSidePanel {
         true
     }
 
+    /// Stop retrying a failed event-triggered snapshot every render frame.
+    /// The last good rows remain authoritative; a later lifecycle event,
+    /// session switch, or event-stream reconnect will invalidate the tree and
+    /// request one new recovery snapshot.
+    pub fn settle_failed_subagent_refresh(&mut self) {
+        self.subagents_loaded = true;
+    }
+
+    /// Discard an in-flight snapshot after a newer live lifecycle/activity
+    /// event arrives. The refresh worker cannot be cancelled, but its
+    /// generation can be invalidated so an older snapshot never overwrites
+    /// the event-driven branch truth and flickers the footer/sidebar.
+    pub fn invalidate_inflight_subagent_refresh(&mut self) {
+        if !self.subagent_refresh_in_flight {
+            return;
+        }
+        self.subagent_refresh_generation =
+            self.subagent_refresh_generation.wrapping_add(1);
+        self.subagent_refresh_in_flight = false;
+    }
+
     /// Force the next `should_refresh_*` to fire — used when the
     /// session changes (e.g. user picks a different sub-agent) so the
     /// list reflects the new parent immediately rather than waiting
@@ -1531,7 +1580,6 @@ impl NeoismAgentSidePanel {
         self.subagent_refresh_generation =
             self.subagent_refresh_generation.wrapping_add(1);
         self.subagent_refresh_in_flight = false;
-        self.last_subagents_refresh = None;
         self.subagents_loaded = false;
         self.subagents.clear();
     }
@@ -1540,7 +1588,6 @@ impl NeoismAgentSidePanel {
         self.subagent_refresh_generation =
             self.subagent_refresh_generation.wrapping_add(1);
         self.subagent_refresh_in_flight = false;
-        self.last_subagents_refresh = None;
         self.subagents_loaded = false;
     }
 
@@ -1573,11 +1620,11 @@ impl NeoismAgentSidePanel {
             });
     }
 
-    /// Reconcile a periodic status snapshot without allowing an older poll
-    /// to undo a terminal lifecycle event that arrived live. A genuinely
+    /// Reconcile a bootstrap/reconnect status snapshot without allowing an
+    /// older snapshot to undo a terminal lifecycle event that arrived live. A genuinely
     /// restarted child emits a fresh live active event, which uses
     /// `set_branch_activity_status` and intentionally clears the latch.
-    fn reconcile_polled_branch_activity_status(
+    fn reconcile_snapshot_branch_activity_status(
         &mut self,
         session_id: impl Into<String>,
         status: BranchStatus,

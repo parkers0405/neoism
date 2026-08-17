@@ -105,6 +105,10 @@ impl Screen<'_> {
             .and_then(|agent| agent.cursor_rect())
             .is_some();
         let agent_surface_active = self.context_manager.current().neoism_agent.is_some();
+        let cursorless_surface_active = self.context_manager.current().neoworld.is_some()
+            || self.context_manager.current().neoism_extensions.is_some()
+            || self.context_manager.current().neoism_tags.is_some()
+            || self.context_manager.current().draw.is_some();
         let markdown_cursor_available = self
             .context_manager
             .current()
@@ -171,6 +175,7 @@ impl Screen<'_> {
             agent_input_cursor_available,
             markdown_cursor_available,
             code_cursor_available,
+            cursorless_surface_active,
             terminal_block_input_active,
             trail_cursor_enabled: self.renderer.trail_cursor_enabled && !markdown_active,
         });

@@ -84,8 +84,11 @@ pub enum ContextMenuAction {
         line: usize,
         start: usize,
         end: usize,
+        expected: String,
         replacement: String,
     },
+    MarkdownSpellingIgnore(String),
+    MarkdownSpellingAddToDictionary(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -314,6 +317,18 @@ impl ContextMenu {
 
     pub fn is_markdown_block_completion(&self) -> bool {
         self.is_visible() && self.mode == ContextMenuMode::MarkdownBlock
+    }
+
+    pub fn is_markdown_spelling(&self) -> bool {
+        self.is_visible()
+            && self.popover.content().items().iter().any(|item| {
+                matches!(
+                    item.action,
+                    ContextMenuAction::MarkdownSpellingReplace { .. }
+                        | ContextMenuAction::MarkdownSpellingIgnore(_)
+                        | ContextMenuAction::MarkdownSpellingAddToDictionary(_)
+                )
+            })
     }
 
     pub fn open(

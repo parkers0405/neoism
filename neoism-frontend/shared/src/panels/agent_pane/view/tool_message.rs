@@ -33,6 +33,38 @@ const TOOL_DIFF_CARD_VIEW_CACHE_LIMIT: usize = 2048;
 
 pub const TODO_ROW_HEIGHT: f32 = 28.0;
 
+pub(crate) fn is_edit_tool_name(tool: &str) -> bool {
+    let normalized = tool
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "applypatch" | "patch" | "edit" | "write" | "multiedit"
+    )
+}
+
+pub(crate) fn is_streaming_patch_tool_name(tool: &str) -> bool {
+    let normalized = tool
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(normalized.as_str(), "applypatch" | "patch")
+}
+
+fn is_unsettled_edit_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "pending" | "running" | "streaming"
+    )
+}
+
+pub(crate) fn is_unsettled_edit_tool(tool: &str, status: &str) -> bool {
+    is_streaming_patch_tool_name(tool) && is_unsettled_edit_status(status)
+}
+
 pub(super) fn wrap_todo_text(
     sugarloaf: &mut Sugarloaf,
     content: &str,
@@ -208,6 +240,13 @@ pub trait AgentToolMessage {
     fn status(&self) -> &str;
     fn tool(&self) -> &str;
     fn detail(&self) -> &str;
+
+    /// Growing apply_patch / edit snapshots rebuild a full highlighted card
+    /// on every `part.updated`. Keep those as a header until the tool
+    /// settles; finished permission cards still parse immediately.
+    fn defer_live_edit_diff(&self) -> bool {
+        is_unsettled_edit_tool(self.tool(), self.status())
+    }
     fn is_todos_output(&self) -> bool;
     fn todos(&self) -> &[Self::Todo];
 

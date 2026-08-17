@@ -17,7 +17,7 @@ use super::code_block::{
 };
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped,
-    draw_top_rounded_rect_clipped, measure_text_cached, opts_with_clip,
+    draw_top_rounded_rect_clipped, intersect_rect, measure_text_cached, opts_with_clip,
 };
 use super::{ORDER_PANEL, ORDER_TEXT};
 use crate::primitives::ide_theme::IdeTheme;
@@ -39,6 +39,11 @@ use mermaid::render_mermaid_block;
 const TABLE_CELL_LINE_H: f32 = 17.0;
 const TABLE_ROW_PAD_Y: f32 = 12.0;
 const TABLE_BLOCK_PAD_Y: f32 = 14.0;
+// Chat tables are data grids, not prose columns. Keep columns comfortably
+// readable and let the table viewport scroll instead of crushing every table
+// into the message width. Very long cells still wrap at the upper bound.
+const TABLE_MIN_COLUMN_W: f32 = 320.0;
+const TABLE_MAX_COLUMN_W: f32 = 520.0;
 /// List markers are intentionally hidden in agent prose, so their text must
 /// start on the same column as surrounding paragraphs and headings. Keeping
 /// the old marker gutter made bold list-item labels look detached from the
@@ -212,11 +217,15 @@ pub enum AssistantMarkdownBlock {
     },
     Bullet(Vec<String>),
     Quote(Vec<String>),
-    Table(Vec<Vec<String>>),
+    Table {
+        rows: Vec<Vec<String>>,
+        column_widths: Vec<f32>,
+    },
     Code {
         lang: String,
         lines: Rc<Vec<String>>,
         copy_target: String,
+        content_width: f32,
     },
     Mermaid {
         source: String,
@@ -250,6 +259,36 @@ pub trait AgentMarkdownPane {
     fn register_link_hit_rect(&mut self, target: String, rect: [f32; 4]);
     fn link_hovered(&self, target: &str) -> bool;
     fn mermaid_raw_mode(&self, key: u64) -> bool;
+    /// Return the persisted horizontal offset for a Markdown code/table
+    /// viewport, clamped to the content's current overflow.
+    fn markdown_horizontal_scroll_offset(&mut self, _key: &str, _max_scroll: f32) -> f32 {
+        0.0
+    }
+    /// Publish the visible viewport for the host's next wheel hit-test.
+    fn register_markdown_horizontal_scroll_rect(
+        &mut self,
+        _key: String,
+        _rect: [f32; 4],
+        _max_scroll: f32,
+    ) {
+    }
+    /// Publish the visible scrollbar rail and thumb for direct pointer
+    /// interaction. Unlike the block-wide wheel rect, this is the exact
+    /// sticky geometry painted in the current frame.
+    fn register_markdown_horizontal_scrollbar(
+        &mut self,
+        _key: String,
+        _track: [f32; 4],
+        _thumb: [f32; 4],
+        _max_scroll: f32,
+    ) {
+    }
+    fn markdown_horizontal_scrollbar_visible(&self, _key: &str) -> bool {
+        false
+    }
+    fn code_copy_feedback_progress(&self, _target: &str) -> Option<f32> {
+        None
+    }
     fn suppress_markdown_interactions(&self) -> bool {
         false
     }
@@ -297,6 +336,41 @@ impl AgentMarkdownPane for NeoismAgentPane {
         NeoismAgentPane::mermaid_raw_mode(self, key)
     }
 
+    fn markdown_horizontal_scroll_offset(&mut self, key: &str, max_scroll: f32) -> f32 {
+        NeoismAgentPane::markdown_horizontal_scroll_offset(self, key, max_scroll)
+    }
+
+    fn register_markdown_horizontal_scroll_rect(
+        &mut self,
+        key: String,
+        rect: [f32; 4],
+        max_scroll: f32,
+    ) {
+        NeoismAgentPane::register_markdown_horizontal_scroll_rect(
+            self, key, rect, max_scroll,
+        );
+    }
+
+    fn register_markdown_horizontal_scrollbar(
+        &mut self,
+        key: String,
+        track: [f32; 4],
+        thumb: [f32; 4],
+        max_scroll: f32,
+    ) {
+        NeoismAgentPane::register_markdown_horizontal_scrollbar(
+            self, key, track, thumb, max_scroll,
+        );
+    }
+
+    fn markdown_horizontal_scrollbar_visible(&self, key: &str) -> bool {
+        NeoismAgentPane::markdown_horizontal_scrollbar_visible(self, key)
+    }
+
+    fn code_copy_feedback_progress(&self, target: &str) -> Option<f32> {
+        NeoismAgentPane::code_copy_feedback_progress(self, target)
+    }
+
     fn suppress_markdown_interactions(&self) -> bool {
         NeoismAgentPane::suppress_markdown_interactions(self)
     }
@@ -306,26 +380,80 @@ fn table_column_count(rows: &[Vec<String>]) -> usize {
     rows.iter().map(Vec::len).max().unwrap_or(1).max(1)
 }
 
-fn table_cell_text_width(table_w: f32, cols: usize, s: f32) -> f32 {
-    let col_w = table_w / cols.max(1) as f32;
-    (col_w - 28.0 * s).max(24.0 * s)
+fn table_column_widths(
+    sugarloaf: &mut Sugarloaf,
+    rows: &[Vec<String>],
+    viewport_w: f32,
+    s: f32,
+    opts: &DrawOpts,
+) -> Vec<f32> {
+    let cols = table_column_count(rows);
+    let measured = (0..cols)
+        .map(|col| {
+            rows.iter()
+                .filter_map(|row| row.get(col))
+                .flat_map(|cell| cell.lines())
+                .map(|line| measure_markdown_inline_width(sugarloaf, line.trim(), opts))
+                .fold(0.0_f32, f32::max)
+                .mul_add(1.0, 28.0 * s)
+        })
+        .collect::<Vec<_>>();
+    resolve_table_column_widths(measured, viewport_w, s)
+}
+
+fn resolve_table_column_widths(measured: Vec<f32>, viewport_w: f32, s: f32) -> Vec<f32> {
+    let min_w = TABLE_MIN_COLUMN_W * s;
+    let max_w = TABLE_MAX_COLUMN_W * s;
+    let mut widths = measured
+        .into_iter()
+        .map(|width| width.clamp(min_w, max_w))
+        .collect::<Vec<_>>();
+    if widths.is_empty() {
+        return vec![viewport_w.max(min_w)];
+    }
+
+    // Small tables still fill their viewport cleanly. Once the intrinsic
+    // widths exceed it, preserve those widths and expose horizontal scroll.
+    let total = widths.iter().sum::<f32>();
+    if total < viewport_w {
+        let extra = (viewport_w - total) / widths.len() as f32;
+        for width in &mut widths {
+            *width += extra;
+        }
+    }
+    widths
 }
 
 fn table_row_height_for_lines(lines: usize, s: f32) -> f32 {
     TABLE_ROW_PAD_Y * 2.0 * s + lines.max(1) as f32 * TABLE_CELL_LINE_H * s
 }
 
+fn table_scroll_content_width(content_w: f32, viewport_w: f32, s: f32) -> f32 {
+    if content_w > viewport_w + 1.0 {
+        content_w + 14.0 * s
+    } else {
+        content_w
+    }
+}
+
 fn wrap_table_cells(
     sugarloaf: &mut Sugarloaf,
     cells: Vec<String>,
-    cell_w: f32,
+    column_widths: &[f32],
+    s: f32,
     opts: &DrawOpts,
 ) -> Vec<String> {
     cells
         .into_iter()
-        .map(|cell| {
+        .enumerate()
+        .map(|(col, cell)| {
+            let cell_w = column_widths
+                .get(col)
+                .copied()
+                .unwrap_or(TABLE_MIN_COLUMN_W * s);
+            let text_w = (cell_w - 28.0 * s).max(24.0 * s);
             cell.lines()
-                .flat_map(|line| wrap_inline_aware(sugarloaf, line.trim(), cell_w, opts))
+                .flat_map(|line| wrap_inline_aware(sugarloaf, line.trim(), text_w, opts))
                 .collect::<Vec<_>>()
                 .join("\n")
         })
@@ -343,13 +471,15 @@ fn flush_layout_table(
     if rows.is_empty() {
         return;
     }
-    let cols = table_column_count(rows);
-    let cell_w = table_cell_text_width(width, cols, s);
+    let column_widths = table_column_widths(sugarloaf, rows, width, s, opts);
     let rows = std::mem::take(rows)
         .into_iter()
-        .map(|row| wrap_table_cells(sugarloaf, row, cell_w, opts))
+        .map(|row| wrap_table_cells(sugarloaf, row, &column_widths, s, opts))
         .collect();
-    blocks.push(AssistantMarkdownBlock::Table(rows));
+    blocks.push(AssistantMarkdownBlock::Table {
+        rows,
+        column_widths,
+    });
 }
 
 fn push_layout_prose_block(
@@ -362,9 +492,15 @@ fn push_layout_prose_block(
     heading_opts: &DrawOpts,
 ) {
     if let Some((level, heading)) = markdown_heading(raw) {
+        // Headings render larger than paragraphs (H1 is 21px, H2 is 18px).
+        // Wrap with that exact draw size rather than the former shared 16px
+        // estimate; otherwise an H1 measured as fitting one line and then
+        // clipped at the pane edge when painted at 21px.
+        let mut heading_opts = *heading_opts;
+        heading_opts.font_size = heading_font_size(level, s);
         blocks.push(AssistantMarkdownBlock::Heading {
             level,
-            lines: wrap_inline_aware(sugarloaf, heading, width, heading_opts),
+            lines: wrap_inline_aware(sugarloaf, heading, width, &heading_opts),
         });
     } else if let Some(bullet) = markdown_bullet(raw) {
         blocks.push(AssistantMarkdownBlock::Bullet(wrap_inline_aware(
@@ -744,7 +880,9 @@ pub fn layout_assistant_markdown(
         let trimmed = raw.trim();
         if let Some(info) = md::fence_info(trimmed) {
             if let Some((lang, lines)) = code.take() {
-                blocks.push(markdown_code_or_stock_block(lang, lines));
+                blocks.push(markdown_code_or_stock_block_laid_out(
+                    sugarloaf, lang, lines, s,
+                ));
             } else {
                 flush_pending_table_header(
                     sugarloaf,
@@ -863,7 +1001,9 @@ pub fn layout_assistant_markdown(
     }
 
     if let Some((lang, lines)) = code.take() {
-        blocks.push(markdown_code_or_stock_block(lang, lines));
+        blocks.push(markdown_code_or_stock_block_laid_out(
+            sugarloaf, lang, lines, s,
+        ));
     }
 
     flush_pending_table_header(
@@ -1375,6 +1515,33 @@ fn ensure_line_break(output: &mut String) {
     }
 }
 
+fn markdown_code_or_stock_block_laid_out(
+    sugarloaf: &mut Sugarloaf,
+    lang: String,
+    lines: Vec<String>,
+    s: f32,
+) -> AssistantMarkdownBlock {
+    let mut block = markdown_code_or_stock_block(lang, lines);
+    let AssistantMarkdownBlock::Code {
+        lines,
+        content_width,
+        ..
+    } = &mut block
+    else {
+        return block;
+    };
+    let code_opts = DrawOpts {
+        font_size: 12.5 * s,
+        bold: true,
+        ..DrawOpts::default()
+    };
+    *content_width = lines
+        .iter()
+        .map(|line| measure_text_cached(sugarloaf, line, &code_opts))
+        .fold(0.0_f32, f32::max);
+    block
+}
+
 fn markdown_code_or_stock_block(
     lang: String,
     lines: Vec<String>,
@@ -1401,6 +1568,7 @@ fn markdown_code_or_stock_block(
         lang,
         lines: Rc::new(lines),
         copy_target,
+        content_width: 0.0,
     }
 }
 
@@ -1431,6 +1599,17 @@ fn heading_line_height(level: usize, s: f32) -> f32 {
     }
 }
 
+/// Font size used for both heading wrap measurement and drawing. Keeping
+/// this centralized prevents wide H1/H2 text from being measured with the
+/// smaller H3 face and then clipping when painted.
+fn heading_font_size(level: usize, s: f32) -> f32 {
+    match level {
+        1 => 21.0 * s,
+        2 => 18.0 * s,
+        _ => 16.0 * s,
+    }
+}
+
 /// Height of a single laid-out markdown block, excluding the 6*s inter-block
 /// gap. This is the ONE place block heights are defined: both
 /// [`measure_markdown_blocks`] (which sizes the message card) and
@@ -1452,7 +1631,9 @@ pub fn markdown_block_height<P: AgentMarkdownPane>(
         AssistantMarkdownBlock::Quote(lines) => {
             4.0 * s + lines.len().max(1) as f32 * 19.0 * s
         }
-        AssistantMarkdownBlock::Table(rows) => measure_laid_out_table_height(rows, s),
+        AssistantMarkdownBlock::Table { rows, .. } => {
+            measure_laid_out_table_height(rows, s)
+        }
         AssistantMarkdownBlock::Code { lines, .. } => {
             let line_count = lines.len().max(1) as f32;
             (MARKDOWN_CODE_HEADER_H
@@ -1504,6 +1685,7 @@ pub fn measure_markdown_blocks<P: AgentMarkdownPane>(
 pub fn render_markdown_blocks<P: AgentMarkdownPane>(
     sugarloaf: &mut Sugarloaf,
     blocks: &[AssistantMarkdownBlock],
+    scroll_namespace: &str,
     x: f32,
     y: f32,
     w: f32,
@@ -1593,7 +1775,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
         );
     }
 
-    for block in blocks {
+    for (block_index, block) in blocks.iter().enumerate() {
         let block_h = markdown_block_height(block, w, pane, s);
         let block_top = cursor_y;
         let next_cursor = block_top + block_h + 6.0 * s;
@@ -1627,11 +1809,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                 }
             }
             AssistantMarkdownBlock::Heading { level, lines } => {
-                let font_size = match level {
-                    1 => 21.0 * s,
-                    2 => 18.0 * s,
-                    _ => 16.0 * s,
-                };
+                let font_size = heading_font_size(*level, s);
                 let Some(heading_opts) = opts_with_clip(
                     DrawOpts {
                         font_size,
@@ -1723,7 +1901,10 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                 lang,
                 lines,
                 copy_target,
+                content_width,
             } => {
+                let scroll_key =
+                    format!("markdown:{scroll_namespace}:code:{block_index}");
                 render_markdown_code_block(
                     sugarloaf,
                     pane,
@@ -1734,15 +1915,23 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                     lang,
                     lines,
                     copy_target,
+                    *content_width,
+                    &scroll_key,
                     theme,
                     s,
                     body_muted,
                     suppress_interactions,
+                    mouse,
                     viewport_clip,
                     occlusion_rects,
                 );
             }
-            AssistantMarkdownBlock::Table(rows) => {
+            AssistantMarkdownBlock::Table {
+                rows,
+                column_widths,
+            } => {
+                let scroll_key =
+                    format!("markdown:{scroll_namespace}:table:{block_index}");
                 render_markdown_table(
                     sugarloaf,
                     pane,
@@ -1751,9 +1940,12 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                     (w - 30.0 * s).max(80.0 * s),
                     block_h,
                     rows,
+                    column_widths,
+                    &scroll_key,
                     theme,
                     s,
                     suppress_interactions,
+                    mouse,
                     viewport_clip,
                     occlusion_rects,
                 );
@@ -1857,10 +2049,13 @@ pub(super) fn render_markdown_code_block(
     lang: &str,
     lines: &Rc<Vec<String>>,
     copy_target: &str,
+    content_width: f32,
+    scroll_key: &str,
     theme: &IdeTheme,
     s: f32,
     body_muted: bool,
     suppress_interactions: bool,
+    mouse: Option<(f32, f32)>,
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) {
@@ -1891,6 +2086,7 @@ pub(super) fn render_markdown_code_block(
     }
     let radius = 10.0 * s;
     let border_w = 1.0_f32.max(s);
+    let visible_block_clip = intersect_rect([x, y, w, h], viewport_clip);
     draw_rounded_rect_clipped(
         sugarloaf,
         [x, y, w, h],
@@ -1959,10 +2155,25 @@ pub(super) fn render_markdown_code_block(
             &header_opts,
             occlusion_rects,
         );
-        let copy_hovered = !suppress_interactions && pane.link_hovered(copy_target);
-        let copy_label = if copy_hovered { "Copy code" } else { "Copy" };
+        let copy_feedback = pane.code_copy_feedback_progress(copy_target);
+        let copy_label = if copy_feedback.is_some() {
+            "✓ Copied"
+        } else {
+            "Copy"
+        };
         let mut copy_opts = header_opts;
-        copy_opts.color = theme.u8(theme.muted);
+        copy_opts.color = if let Some(progress) = copy_feedback {
+            // Quick brighten, gentle settle, then hand back to the regular
+            // label. The pane animation clock keeps this updating smoothly.
+            let pulse = if progress < 0.18 {
+                0.68 + progress / 0.18 * 0.32
+            } else {
+                1.0 - (progress - 0.18) / 0.82 * 0.18
+            };
+            theme.u8_alpha(theme.green, pulse)
+        } else {
+            theme.u8(theme.muted)
+        };
         copy_opts.bold = false;
         let copy_w = measure_text_cached(sugarloaf, copy_label, &copy_opts);
         let copy_x = (x + w - copy_w - 14.0 * s).max(x + 14.0 * s);
@@ -2000,17 +2211,38 @@ pub(super) fn render_markdown_code_block(
     let gutter_pad_r = 10.0 * s;
     let num_text_w = (digits as f32) * 7.8 * s;
     let code_left_pad = gutter_pad_l + num_text_w + gutter_pad_r;
+    let code_viewport_w = (w - code_left_pad - 12.0 * s).max(0.0);
+    let max_scroll = (content_width + 8.0 * s - code_viewport_w).max(0.0);
+    let horizontal_scroll =
+        pane.markdown_horizontal_scroll_offset(scroll_key, max_scroll);
+    let Some(code_clip) = intersect_rect(
+        [
+            x + code_left_pad,
+            body_top,
+            code_viewport_w,
+            (h - header_h).max(0.0),
+        ],
+        viewport_clip,
+    ) else {
+        return;
+    };
+    if max_scroll > 1.0 && !suppress_interactions {
+        if let Some(body_hit_rect) =
+            intersect_rect([x, body_top, w, (h - header_h).max(0.0)], viewport_clip)
+        {
+            pane.register_markdown_horizontal_scroll_rect(
+                scroll_key.to_string(),
+                body_hit_rect,
+                max_scroll,
+            );
+        }
+    }
     let Some(opts) = opts_with_clip(
         DrawOpts {
             font_size: 12.5 * s,
             color: theme.u8(if body_muted { theme.muted } else { theme.fg }),
             bold: true,
-            clip_rect: Some([
-                x + code_left_pad,
-                body_top,
-                (w - code_left_pad - 12.0 * s).max(0.0),
-                (h - header_h).max(0.0),
-            ]),
+            clip_rect: Some(code_clip),
             ..DrawOpts::default()
         },
         viewport_clip,
@@ -2070,7 +2302,7 @@ pub(super) fn render_markdown_code_block(
         );
         render_code_line_text(
             sugarloaf,
-            x + code_left_pad,
+            x + code_left_pad - horizontal_scroll,
             line_y,
             line,
             lang_id,
@@ -2078,6 +2310,178 @@ pub(super) fn render_markdown_code_block(
             &opts,
             theme,
             occlusion_rects,
+        );
+    }
+    if max_scroll > 1.0 {
+        let scrollbar_visible = pane.markdown_horizontal_scrollbar_visible(scroll_key)
+            || mouse.is_some_and(|(mx, my)| {
+                visible_block_clip.is_some_and(|rect| {
+                    mx >= rect[0]
+                        && mx <= rect[0] + rect[2]
+                        && my >= rect[1]
+                        && my <= rect[1] + rect[3]
+                })
+            });
+        let track = sticky_markdown_horizontal_scrollbar_track(
+            code_clip,
+            x + code_left_pad,
+            code_viewport_w,
+            s,
+        );
+        render_markdown_horizontal_scrollbar(
+            sugarloaf,
+            pane,
+            scroll_key,
+            track,
+            code_viewport_w,
+            code_viewport_w + max_scroll,
+            horizontal_scroll,
+            mouse,
+            scrollbar_visible,
+            suppress_interactions,
+            theme,
+            s,
+            viewport_clip,
+        );
+    }
+}
+
+const MARKDOWN_HORIZONTAL_SCROLLBAR_H: f32 = 16.0;
+
+fn sticky_markdown_horizontal_scrollbar_track(
+    visible_block: [f32; 4],
+    x: f32,
+    width: f32,
+    s: f32,
+) -> Option<[f32; 4]> {
+    let height = MARKDOWN_HORIZONTAL_SCROLLBAR_H * s;
+    (visible_block[2] > 1.0 && visible_block[3] >= height).then_some([
+        x,
+        visible_block[1] + visible_block[3] - height,
+        width.max(1.0),
+        height,
+    ])
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MarkdownHorizontalScrollbarGeometry {
+    track: [f32; 4],
+    thumb: [f32; 4],
+    rail: [f32; 4],
+}
+
+fn markdown_horizontal_scrollbar_geometry(
+    track: [f32; 4],
+    viewport_w: f32,
+    content_w: f32,
+    offset: f32,
+    s: f32,
+) -> Option<MarkdownHorizontalScrollbarGeometry> {
+    if track[2] <= 1.0 || content_w <= viewport_w + 1.0 {
+        return None;
+    }
+    let rail_h = 5.0 * s;
+    let rail_y = track[1] + (track[3] - rail_h) * 0.5;
+    let thumb_w =
+        (track[2] * (viewport_w / content_w)).clamp((30.0 * s).min(track[2]), track[2]);
+    let max_scroll = (content_w - viewport_w).max(1.0);
+    let thumb_x =
+        track[0] + (track[2] - thumb_w).max(0.0) * (offset / max_scroll).clamp(0.0, 1.0);
+    Some(MarkdownHorizontalScrollbarGeometry {
+        track,
+        thumb: [thumb_x, track[1], thumb_w, track[3]],
+        rail: [track[0], rail_y, track[2], rail_h],
+    })
+}
+
+/// A theme-aware hover scrollbar shared by fenced code and tables. It sticks
+/// to the bottom of the block's visible intersection, so long content remains
+/// controllable above the fixed composer without permanently covering text.
+#[allow(clippy::too_many_arguments)]
+fn render_markdown_horizontal_scrollbar<P: AgentMarkdownPane>(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
+    scroll_key: &str,
+    track: Option<[f32; 4]>,
+    viewport_w: f32,
+    content_w: f32,
+    offset: f32,
+    mouse: Option<(f32, f32)>,
+    visible: bool,
+    suppress_interactions: bool,
+    theme: &IdeTheme,
+    s: f32,
+    viewport_clip: [f32; 4],
+) {
+    if !visible {
+        return;
+    }
+    let Some(track) = track else {
+        return;
+    };
+    let Some(geometry) =
+        markdown_horizontal_scrollbar_geometry(track, viewport_w, content_w, offset, s)
+    else {
+        return;
+    };
+    let track = geometry.track;
+    let hovered = mouse.is_some_and(|(mx, my)| {
+        mx >= track[0]
+            && mx <= track[0] + track[2]
+            && my >= track[1]
+            && my <= track[1] + track[3]
+    });
+    // Keep the resting control visually transparent: an opaque footer here
+    // masks table rules and the code card's rounded bottom border. On hover,
+    // expose only a tightly inset grab surface inside the block.
+    if hovered {
+        draw_rounded_rect_clipped(
+            sugarloaf,
+            [
+                track[0],
+                track[1] + 2.0 * s,
+                track[2],
+                (track[3] - 4.0 * s).max(1.0),
+            ],
+            theme.f32_alpha(theme.panel_bg(), 0.94),
+            4.0 * s,
+            ORDER_PANEL + 4,
+            viewport_clip,
+        );
+    }
+    if hovered {
+        draw_rounded_rect_clipped(
+            sugarloaf,
+            geometry.rail,
+            theme.f32_alpha(theme.border, 0.72),
+            geometry.rail[3] * 0.5,
+            ORDER_PANEL + 5,
+            viewport_clip,
+        );
+    }
+    let visual_thumb = [
+        geometry.thumb[0],
+        geometry.rail[1],
+        geometry.thumb[2],
+        geometry.rail[3],
+    ];
+    draw_rounded_rect_clipped(
+        sugarloaf,
+        visual_thumb,
+        theme.f32_alpha(
+            if hovered { theme.accent } else { theme.fg },
+            if hovered { 0.96 } else { 0.78 },
+        ),
+        geometry.rail[3] * 0.5,
+        ORDER_PANEL + 6,
+        viewport_clip,
+    );
+    if !suppress_interactions {
+        pane.register_markdown_horizontal_scrollbar(
+            scroll_key.to_string(),
+            geometry.track,
+            geometry.thumb,
+            (content_w - viewport_w).max(0.0),
         );
     }
 }
@@ -2319,9 +2723,12 @@ fn render_markdown_table<P: AgentMarkdownPane>(
     w: f32,
     h: f32,
     rows: &[Vec<String>],
+    column_widths: &[f32],
+    scroll_key: &str,
     theme: &IdeTheme,
     s: f32,
     suppress_interactions: bool,
+    mouse: Option<(f32, f32)>,
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) {
@@ -2331,30 +2738,55 @@ fn render_markdown_table<P: AgentMarkdownPane>(
     let cols = table_column_count(rows);
     let row_heights = laid_out_table_row_heights(rows, s);
     let table_h = row_heights.iter().sum::<f32>().min(h);
-    let col_w = w / cols as f32;
+    let content_w = column_widths.iter().copied().sum::<f32>();
+    // When a table overflows, include a small terminal reveal margin. At the
+    // far-right stop this leaves the last cell text and closing rule wholly
+    // visible instead of pinning the rule to the clip boundary.
+    let scroll_content_w = table_scroll_content_width(content_w, w, s);
+    let max_scroll = (scroll_content_w - w).max(0.0);
+    let horizontal_scroll =
+        pane.markdown_horizontal_scroll_offset(scroll_key, max_scroll);
+    let content_x = x - horizontal_scroll;
+    let Some(table_clip) = intersect_rect([x, y, w, h], viewport_clip) else {
+        return;
+    };
+    if max_scroll > 1.0 && !suppress_interactions {
+        pane.register_markdown_horizontal_scroll_rect(
+            scroll_key.to_string(),
+            table_clip,
+            max_scroll,
+        );
+    }
     let border = theme.f32(theme.fg);
+    let border_w = 1.0 * s;
     draw_rect_clipped(
         sugarloaf,
-        [x, y, w, 1.0 * s],
+        [content_x, y, content_w, border_w],
         border,
         ORDER_TEXT,
-        viewport_clip,
+        table_clip,
     );
     draw_rect_clipped(
         sugarloaf,
-        [x, y + table_h, w, 1.0 * s],
+        [content_x, y + table_h, content_w, border_w],
         border,
         ORDER_TEXT,
-        viewport_clip,
+        table_clip,
     );
     for col in 0..=cols {
-        let cx = x + col as f32 * col_w;
+        let mut cx = content_x + column_widths.iter().take(col).sum::<f32>();
+        // At maximum horizontal scroll the logical right edge lands exactly
+        // on the clip rect's exclusive boundary. Pull the final one-pixel
+        // rule inward so the table visibly closes instead of looking cut off.
+        if col == cols {
+            cx -= border_w;
+        }
         draw_rect_clipped(
             sugarloaf,
-            [cx, y, 1.0 * s, table_h],
+            [cx, y, border_w, table_h],
             border,
             ORDER_TEXT,
-            viewport_clip,
+            table_clip,
         );
     }
     let Some(cell_opts) = opts_with_clip(
@@ -2363,7 +2795,7 @@ fn render_markdown_table<P: AgentMarkdownPane>(
             color: theme.u8(theme.fg),
             ..DrawOpts::default()
         },
-        viewport_clip,
+        table_clip,
     ) else {
         return;
     };
@@ -2378,10 +2810,10 @@ fn render_markdown_table<P: AgentMarkdownPane>(
         }
         draw_rect_clipped(
             sugarloaf,
-            [x, row_y, w, 1.0 * s],
+            [content_x, row_y, content_w, border_w],
             border,
             ORDER_TEXT,
-            viewport_clip,
+            table_clip,
         );
         let mut opts = cell_opts;
         if row_ix == 0 {
@@ -2393,6 +2825,7 @@ fn render_markdown_table<P: AgentMarkdownPane>(
             if md::looks_like_file_ref(cell) {
                 cell_opts.color = theme.u8(theme.readable_accent(theme.blue));
             }
+            let column_x = content_x + column_widths.iter().take(col).sum::<f32>();
             for (line_ix, line) in table_cell_lines(cell).iter().enumerate() {
                 let line_y =
                     row_y + TABLE_ROW_PAD_Y * s + line_ix as f32 * TABLE_CELL_LINE_H * s;
@@ -2402,18 +2835,48 @@ fn render_markdown_table<P: AgentMarkdownPane>(
                 draw_markdown_inline_line(
                     sugarloaf,
                     pane,
-                    x + col as f32 * col_w + 14.0 * s,
+                    column_x + 14.0 * s,
                     line_y,
                     line,
                     &cell_opts,
                     theme,
                     suppress_interactions,
-                    viewport_clip,
+                    table_clip,
                     occlusion_rects,
                 );
             }
         }
         row_y += row_h;
+    }
+    if max_scroll > 1.0 {
+        let scrollbar_visible = pane.markdown_horizontal_scrollbar_visible(scroll_key)
+            || mouse.is_some_and(|(mx, my)| {
+                mx >= table_clip[0]
+                    && mx <= table_clip[0] + table_clip[2]
+                    && my >= table_clip[1]
+                    && my <= table_clip[1] + table_clip[3]
+            });
+        let track = sticky_markdown_horizontal_scrollbar_track(
+            table_clip,
+            x + 1.0 * s,
+            (w - 2.0 * s).max(1.0),
+            s,
+        );
+        render_markdown_horizontal_scrollbar(
+            sugarloaf,
+            pane,
+            scroll_key,
+            track,
+            w,
+            scroll_content_w,
+            horizontal_scroll,
+            mouse,
+            scrollbar_visible,
+            suppress_interactions,
+            theme,
+            s,
+            viewport_clip,
+        );
     }
 }
 

@@ -32,15 +32,14 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    pub(crate) fn open_notes_vault_rename_prompt(&mut self) {
+    pub(crate) fn open_notes_vault_rename_prompt(&mut self, vault: Option<PathBuf>) {
         use neoism_ui::widgets::modal::{
             ModalAction, ModalButton, ModalInputSpec, ModalSpec,
         };
 
-        let current = self
-            .renderer
-            .notes_sidebar
-            .workspace_path()
+        let old_path = vault.or_else(|| self.renderer.notes_sidebar.workspace_path());
+        let current = old_path
+            .as_deref()
             .and_then(|path| {
                 path.file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -60,6 +59,7 @@ impl Screen<'_> {
                     "Rename",
                     "Enter",
                     ModalAction::NotesVaultRename {
+                        old_path: old_path.map(|path| path.display().to_string()),
                         name: String::new(),
                     },
                 ),
@@ -71,15 +71,26 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    pub(crate) fn open_notes_vault_link_project_prompt(&mut self, vault: String) {
+    pub(crate) fn open_notes_vault_link_project_prompt(
+        &mut self,
+        vault: String,
+        notes_dir: Option<PathBuf>,
+    ) {
         use neoism_ui::widgets::modal::{
             ModalAction, ModalButton, ModalInputSpec, ModalSpec,
         };
 
         self.renderer.modal.open(ModalSpec {
             title: format!("Link Project to {vault}"),
-            body: "Enter a code project directory to link to this vault.".to_string(),
-            meta: "Example: ~/projects/neoism".to_string(),
+            body: match notes_dir.as_ref() {
+                Some(dir) => format!(
+                    "Enter a code project directory to link to {}.",
+                    dir.display()
+                ),
+                None => format!("Enter a code project directory to link to {vault}."),
+            },
+            meta: "Alt+N and Neoism Agent will use this notes location for the project."
+                .to_string(),
             input: Some(ModalInputSpec {
                 value: String::new(),
                 placeholder: "~/projects/project-name".to_string(),
@@ -91,6 +102,7 @@ impl Screen<'_> {
                     ModalAction::NotesVaultLinkProject {
                         vault,
                         path: String::new(),
+                        notes_dir: notes_dir.map(|path| path.display().to_string()),
                     },
                 ),
                 ModalButton::new("Cancel", "Esc", ModalAction::Close),
@@ -194,7 +206,7 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    pub(crate) fn rename_notes_vault(&mut self, name: String) {
+    pub(crate) fn rename_notes_vault(&mut self, name: String, old_path: Option<PathBuf>) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
         let name = sanitize_notes_vault_name(&name);
@@ -206,7 +218,9 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        let Some(old_dir) = self.renderer.notes_sidebar.workspace_path() else {
+        let Some(old_dir) =
+            old_path.or_else(|| self.renderer.notes_sidebar.workspace_path())
+        else {
             self.renderer.notifications.push(
                 "No vault is currently open".to_string(),
                 NotificationLevel::Warn,
@@ -223,22 +237,22 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        let new_dir = neo_workspace::vault_notes_workspace(&name).notes_workspace_dir();
-        let result = if old_dir == new_dir {
-            Ok(())
-        } else if new_dir.exists() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("vault already exists: {}", new_dir.display()),
-            ))
-        } else {
-            std::fs::rename(&old_dir, &new_dir)
-        };
-        match result {
-            Ok(()) => self
-                .renderer
-                .notes_sidebar
-                .set_workspace(name, Some(new_dir)),
+        let was_viewing_vault = self.renderer.notes_sidebar.workspace_path().as_deref()
+            == Some(old_dir.as_path());
+        match neo_workspace::rename_notes_vault(&old_dir, &name) {
+            Ok(vault) => {
+                for path in self.workspace_notes_vaults.values_mut() {
+                    if let Ok(relative) = path.strip_prefix(&old_dir) {
+                        *path = vault.path.join(relative);
+                    }
+                }
+                if was_viewing_vault {
+                    self.renderer
+                        .notes_sidebar
+                        .set_workspace(vault.name, Some(vault.path));
+                }
+                self.renderer.notes_sidebar.refresh_notes();
+            }
             Err(err) => self.renderer.notifications.push(
                 format!("Could not rename vault: {err}"),
                 NotificationLevel::Error,
@@ -271,6 +285,13 @@ impl Screen<'_> {
     }
 
     pub(crate) fn link_current_workspace_to_notes_vault(&mut self) {
+        self.link_current_workspace_to_notes_scope(None);
+    }
+
+    pub(crate) fn link_current_workspace_to_notes_scope(
+        &mut self,
+        notes_dir: Option<PathBuf>,
+    ) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
         // A joined workspace lives on the peer daemon. Creating its vault
@@ -333,7 +354,28 @@ impl Screen<'_> {
                 return;
             }
         };
-        match neo_workspace::link_workspace_to_vault_project(&mut workspace, &root) {
+        let notes_dir =
+            notes_dir.or_else(|| self.renderer.notes_sidebar.workspace_path());
+        let result = match notes_dir {
+            Some(notes_dir)
+                if neo_workspace::notes_vault_for_path(&notes_dir)
+                    .ok()
+                    .flatten()
+                    .is_some() =>
+            {
+                neo_workspace::link_code_dir_to_notes_scope(
+                    &mut workspace,
+                    &root,
+                    notes_dir,
+                )
+            }
+            Some(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "select a vault or a folder inside a vault first",
+            )),
+            None => neo_workspace::link_workspace_to_vault_project(&mut workspace, &root),
+        };
+        match result {
             Ok(project_dir) => {
                 let sidebar_workspace = active_notes_workspace_for_root(&root)
                     .unwrap_or_else(|| workspace.clone());
@@ -359,6 +401,7 @@ impl Screen<'_> {
         &mut self,
         vault: String,
         path: String,
+        notes_dir: Option<PathBuf>,
     ) {
         use neoism_ui::panels::notifications::NotificationLevel;
 
@@ -406,14 +449,27 @@ impl Screen<'_> {
             }
         };
         workspace.config.notes.workspace = vault.clone();
-        match neo_workspace::link_code_dir_to_workspace_vault(
-            &mut workspace,
-            &project_root,
-        ) {
+        workspace.config.notes.vault_id = neo_workspace::notes_vault_by_name(&vault)
+            .ok()
+            .flatten()
+            .map(|vault| vault.id);
+        let result = match notes_dir {
+            Some(notes_dir) => neo_workspace::link_code_dir_to_notes_scope(
+                &mut workspace,
+                &project_root,
+                notes_dir,
+            ),
+            None => neo_workspace::link_code_dir_to_workspace_vault(
+                &mut workspace,
+                &project_root,
+            ),
+        };
+        match result {
             Ok(vault_dir) => {
-                self.renderer
-                    .notes_sidebar
-                    .set_workspace(vault, Some(vault_dir.clone()));
+                self.renderer.notes_sidebar.set_workspace(
+                    notes_sidebar_name_for_path(&vault_dir),
+                    Some(vault_dir.clone()),
+                );
                 self.renderer.notes_sidebar.refresh_notes();
                 self.renderer.notifications.push(
                     format!(
@@ -426,6 +482,78 @@ impl Screen<'_> {
             }
             Err(err) => self.renderer.notifications.push(
                 format!("Could not link project to vault: {err}"),
+                NotificationLevel::Error,
+            ),
+        }
+        self.mark_dirty();
+    }
+
+    pub(crate) fn open_convert_notes_vault_prompt(
+        &mut self,
+        source: PathBuf,
+        dest_dir: PathBuf,
+    ) {
+        use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
+
+        let source_name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Vault".to_string());
+        let destination = dest_dir.join(&source_name);
+        self.renderer.modal.open(ModalSpec {
+            title: "Convert Vault to Project Folder?".to_string(),
+            body: format!(
+                "Move `{source_name}` to `{}` and keep its code project links attached?",
+                destination.display()
+            ),
+            meta: "It will stop being a standalone vault. Alt+N and Neoism Agent will use the new nested folder."
+                .to_string(),
+            input: None,
+            buttons: vec![
+                ModalButton::new(
+                    "Move and Convert",
+                    "Enter",
+                    ModalAction::NotesVaultConvert {
+                        source: source.display().to_string(),
+                        dest_dir: dest_dir.display().to_string(),
+                    },
+                ),
+                ModalButton::new("Cancel", "Esc", ModalAction::Close),
+            ],
+            busy: false,
+            blocking: true,
+        });
+        self.mark_dirty();
+    }
+
+    pub(crate) fn convert_notes_vault_to_scope(
+        &mut self,
+        source: PathBuf,
+        dest_dir: PathBuf,
+    ) {
+        use neoism_ui::panels::notifications::NotificationLevel;
+
+        match neo_workspace::convert_vault_to_nested_scope(&source, &dest_dir) {
+            Ok(converted) => {
+                for path in self.workspace_notes_vaults.values_mut() {
+                    if let Ok(relative) = path.strip_prefix(&source) {
+                        *path = converted.scope_dir.join(relative);
+                    }
+                }
+                self.renderer.notes_sidebar.refresh_notes();
+                self.renderer.notifications.push(
+                    format!(
+                        "Moved {} into {} and preserved {} project link{}",
+                        converted.source_vault_name,
+                        converted.destination_vault.name,
+                        converted.links_moved,
+                        if converted.links_moved == 1 { "" } else { "s" }
+                    ),
+                    NotificationLevel::Info,
+                );
+            }
+            Err(error) => self.renderer.notifications.push(
+                format!("Could not convert vault: {error}"),
                 NotificationLevel::Error,
             ),
         }

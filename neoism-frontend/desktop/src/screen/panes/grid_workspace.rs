@@ -530,10 +530,9 @@ impl Screen<'_> {
             if incoming.workspace_path().is_none() {
                 if let Some(path) = self.workspace_notes_vaults.get(&id).cloned() {
                     incoming.set_workspace(
-                        path.file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("Notes")
-                            .to_string(),
+                        crate::screen::bridges::workspace::notes_sidebar_name_for_path(
+                            &path,
+                        ),
                         Some(path),
                     );
                 }
@@ -731,6 +730,9 @@ impl Screen<'_> {
                 match page.kind {
                     ChromePageKind::Extensions => {
                         self.activate_neoism_extensions_page();
+                    }
+                    ChromePageKind::NeoWorld => {
+                        self.activate_neoworld_page();
                     }
                 }
                 self.reapply_chrome_layout();

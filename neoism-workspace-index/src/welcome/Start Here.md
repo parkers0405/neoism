@@ -59,4 +59,4 @@ Begin with [[Neoism Agent/The Neoism Agent|The Neoism Agent]], then use the focu
 
 ## Editable introduction, immutable reference
 
-The `Welcome/` folder is an editable handbook seeded into the Default vault. Neoism also bundles an immutable copy exposed through the built-in Neoism Docs MCP, so deleting or changing a Welcome note does not remove the authoritative documentation available to agents.
+The `Welcome/` folder is an editable handbook seeded into your default vault (initially named `Default`). Neoism also bundles an immutable copy exposed through the built-in Neoism Docs MCP, so deleting or changing a Welcome note does not remove the authoritative documentation available to agents.

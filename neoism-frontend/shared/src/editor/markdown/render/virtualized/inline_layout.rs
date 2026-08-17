@@ -408,6 +408,20 @@ fn draw_inline_wrapped_lines(
                     clip_bottom,
                     occlusions,
                 );
+                if inline_style_is_spellcheckable(&run.style) {
+                    draw_virtual_spellcheck_underlines(
+                        sugarloaf,
+                        &run.text,
+                        run_x,
+                        line_y,
+                        &run_opts,
+                        theme,
+                        clip,
+                        clip_top,
+                        clip_bottom,
+                        occlusions,
+                    );
+                }
                 match &run.style {
                     InlineRunStyle::Strike => {
                         draw_rect_clipped(
@@ -467,6 +481,52 @@ fn draw_inline_wrapped_lines(
                 };
             }
         }
+    }
+}
+
+fn inline_style_is_spellcheckable(style: &InlineRunStyle) -> bool {
+    matches!(
+        style,
+        InlineRunStyle::Normal | InlineRunStyle::Bold | InlineRunStyle::Italic
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_virtual_spellcheck_underlines(
+    sugarloaf: &mut Sugarloaf,
+    text: &str,
+    x: f32,
+    y: f32,
+    opts: &DrawOpts,
+    theme: &IdeTheme,
+    clip: [f32; 4],
+    clip_top: f32,
+    clip_bottom: f32,
+    occlusions: &[[f32; 4]],
+) {
+    if spellcheck_dictionary().is_none() || text.is_empty() {
+        return;
+    }
+    let underline_y = y + line_height(opts) - 2.6;
+    if underline_y < clip_top || underline_y > clip_bottom {
+        return;
+    }
+    for word in spellcheck_words(text) {
+        if !is_misspelled_word(word.text) {
+            continue;
+        }
+        let prefix = text.get(..word.start).unwrap_or_default();
+        let word_x = x + sugarloaf.text_mut().measure(prefix, opts);
+        let word_w = sugarloaf.text_mut().measure(word.text, opts);
+        draw_spellcheck_squiggle_visible(
+            sugarloaf,
+            clip,
+            word_x,
+            underline_y,
+            word_w,
+            theme,
+            occlusions,
+        );
     }
 }
 
@@ -1069,5 +1129,17 @@ mod inline_layout_tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "* note and ** partial");
         assert_eq!(runs[0].style, InlineRunStyle::Normal);
+    }
+
+    #[test]
+    fn virtual_spellcheck_styles_include_prose_and_exclude_non_prose() {
+        assert!(inline_style_is_spellcheckable(&InlineRunStyle::Normal));
+        assert!(inline_style_is_spellcheckable(&InlineRunStyle::Bold));
+        assert!(inline_style_is_spellcheckable(&InlineRunStyle::Italic));
+        assert!(!inline_style_is_spellcheckable(&InlineRunStyle::Code));
+        assert!(!inline_style_is_spellcheckable(&InlineRunStyle::Link(
+            "target".to_string()
+        )));
+        assert!(!inline_style_is_spellcheckable(&InlineRunStyle::Tag));
     }
 }

@@ -86,6 +86,7 @@ pub(super) fn render_virtual(
     let clip = [x, y, w, h];
     let bottom = y + h;
 
+    let cursor_was_drawn = pane.cursor_rect.is_some();
     pane.begin_block_layout();
     pane.set_cursor_rect(None);
 
@@ -258,8 +259,25 @@ pub(super) fn render_virtual(
                 velocity_y: pane.scroll_velocity_px_s,
             }));
     }
-    if pane.follow_cursor {
+    if should_reveal_virtual_cursor(pane.follow_cursor, cursor_was_drawn) {
+        let current = pane.scroll_y;
+        let previous_target = pane.target_scroll_y;
+        let animation_velocity = pane.scroll_animation_velocity_px_s;
+        let animation_tick = pane.scroll_animation_last_tick_at;
         reveal_virtual_cursor_source(pane);
+        let revealed = pane.scroll_y;
+        pane.scroll_y = current;
+        pane.target_scroll_y =
+            cursor_reveal_glide_target(current, previous_target, revealed);
+        pane.scroll_animation_velocity_px_s = animation_velocity;
+        pane.scroll_animation_last_tick_at = animation_tick;
+        let _ = pane
+            .virtual_render
+            .surface
+            .apply(VirtualSurfaceCommand::SetScroll(VirtualScroll {
+                scroll_y: current.max(0.0),
+                velocity_y: pane.scroll_velocity_px_s,
+            }));
     }
 
     let mut items = collect_visible_items(pane);
@@ -1031,6 +1049,39 @@ fn reveal_virtual_cursor_source(pane: &mut MarkdownPane) {
     reveal_virtual_position(pane, line, pane.cursor_col, VirtualRevealAlign::Nearest);
 }
 
+fn cursor_reveal_glide_target(current: f32, previous_target: f32, revealed: f32) -> f32 {
+    if (revealed - current).abs() > 0.5 {
+        revealed
+    } else {
+        previous_target
+    }
+}
+
+fn should_reveal_virtual_cursor(follow_cursor: bool, cursor_was_drawn: bool) -> bool {
+    follow_cursor && !cursor_was_drawn
+}
+
+#[cfg(test)]
+mod cursor_reveal_glide_tests {
+    use super::{cursor_reveal_glide_target, should_reveal_virtual_cursor};
+
+    #[test]
+    fn visible_cursor_does_not_cancel_an_in_flight_scroll_target() {
+        assert_eq!(cursor_reveal_glide_target(100.0, 124.0, 100.0), 124.0);
+    }
+
+    #[test]
+    fn offscreen_cursor_reveal_becomes_a_new_animated_target() {
+        assert_eq!(cursor_reveal_glide_target(100.0, 124.0, 180.0), 180.0);
+    }
+
+    #[test]
+    fn visible_single_line_move_does_not_override_scrolloff_spring() {
+        assert!(!should_reveal_virtual_cursor(true, true));
+        assert!(should_reveal_virtual_cursor(true, false));
+    }
+}
+
 /// Scroll the virtual surface so `line` (0-based) is in view with the
 /// requested alignment. Shared by follow-cursor reveal (`Nearest`) and
 /// the Wave 7G roster click-to-jump (`Center`).
@@ -1180,6 +1231,8 @@ fn apply_virtual_surface_scroll_to_pane(pane: &mut MarkdownPane, surface_scroll_
 
     pane.scroll_y = scroll_y;
     pane.target_scroll_y = scroll_y;
+    pane.scroll_animation_velocity_px_s = 0.0;
+    pane.scroll_animation_last_tick_at = None;
     let _ = pane
         .virtual_render
         .surface

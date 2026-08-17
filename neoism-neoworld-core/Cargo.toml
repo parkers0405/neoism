@@ -1,0 +1,10 @@
+[package]
+name = "neoism-neoworld-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic, portable NeoWorld pet simulation."
+
+[lib]
+path = "src/lib.rs"

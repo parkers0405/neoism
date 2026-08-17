@@ -1,8 +1,8 @@
 use crate::panels::agent_pane::state::NeoismAgentPane;
 
 use super::{
-    CHAT_INPUT_MIN_H, HOME_INPUT_MIN_H, INPUT_HELP_STRIP_H, INPUT_IMAGE_RAIL_H, INPUT_LINE_H,
-    MAX_INPUT_LINES,
+    CHAT_INPUT_MIN_H, HOME_INPUT_MIN_H, INPUT_HELP_STRIP_H, INPUT_IMAGE_RAIL_H,
+    INPUT_LINE_H, MAX_INPUT_LINES,
 };
 
 /// Horizontal padding applied to both the chat timeline and the input

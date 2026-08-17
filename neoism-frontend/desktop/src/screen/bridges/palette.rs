@@ -273,10 +273,6 @@ impl Screen<'_> {
     pub(crate) fn open_command_palette(&mut self) {
         let surface = self.active_command_palette_surface();
         self.renderer.command_palette.set_surface(surface);
-        self.renderer.command_palette.set_workspace_visibility(
-            self.context_manager
-                .workspace_visibility_for_index(self.context_manager.current_index()),
-        );
         self.renderer.command_palette.set_enabled(true);
         self.mark_dirty();
     }
@@ -1080,44 +1076,6 @@ impl Screen<'_> {
             PaletteAction::CreateWorkspace => {
                 self.create_tab(clipboard);
             }
-            PaletteAction::ShareCurrentWorkspace => {
-                if let Some(workspace_id) = self.current_workspace_id() {
-                    // Sharing DECLARES the current directory as the hosted
-                    // root so guests join into it. The per-frame terminal
-                    // cwd-follow is deliberately gated to LOCAL-only updates
-                    // (set_active_workspace_root, force_tree_refresh=false), so
-                    // without an explicit push here the daemon keeps the
-                    // CreateHostWorkspace default (config.working_dir — usually
-                    // unset, so the daemon falls back to the host's home root)
-                    // and every guest lands in the host's home instead of the
-                    // shared dir. Only for a workspace we OWN — never
-                    // re-declare a joined one (would steal it from its owner).
-                    if self
-                        .context_manager
-                        .current_adopted_workspace_id()
-                        .is_none()
-                    {
-                        if let Some(root) = self.active_pane_workspace_root() {
-                            self.context_manager
-                                .set_daemon_workspace_root(workspace_id.clone(), root);
-                        }
-                    }
-                    self.context_manager.send_workspace_request(
-                        neoism_protocol::workspace::WorkspaceClientMessage::ShareWorkspace {
-                            workspace_id,
-                        },
-                    );
-                }
-            }
-            PaletteAction::StopSharingCurrentWorkspace => {
-                if let Some(workspace_id) = self.current_workspace_id() {
-                    self.context_manager.send_workspace_request(
-                        neoism_protocol::workspace::WorkspaceClientMessage::StopSharingWorkspace {
-                            workspace_id,
-                        },
-                    );
-                }
-            }
             PaletteAction::LeaveWorkspace => {
                 // Only meaningful in a JOINED workspace: detach from
                 // the host's sessions and close the tab (close_tab's
@@ -1136,26 +1094,11 @@ impl Screen<'_> {
                     );
                 }
             }
-            PaletteAction::SendCurrentWorkspaceToDockerSandbox => {
-                if let Some(workspace_id) = self.current_workspace_id() {
-                    self.context_manager.send_workspace_request(
-                        neoism_protocol::workspace::WorkspaceClientMessage::SendWorkspaceToDockerSandbox {
-                            workspace_id,
-                        },
-                    );
-                }
-            }
-            PaletteAction::SendCurrentWorkspaceToCloud => {
-                if let Some(workspace_id) = self.current_workspace_id() {
-                    self.context_manager.send_workspace_request(
-                        neoism_protocol::workspace::WorkspaceClientMessage::SendWorkspaceToCloud {
-                            workspace_id,
-                        },
-                    );
-                }
-            }
             PaletteAction::OpenNeoismAgent => {
                 self.open_neoism_agent_tab();
+            }
+            PaletteAction::OpenNeoWorld => {
+                self.open_neoworld_page();
             }
             PaletteAction::RunClaude => {
                 self.start_agent(crate::neoism::icon::AgentKind::Claude);

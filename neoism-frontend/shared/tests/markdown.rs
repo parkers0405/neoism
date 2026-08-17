@@ -126,6 +126,20 @@ fn spellcheck_primitives_do_not_panic_without_dictionary() {
 }
 
 #[test]
+fn spelling_replacement_rejects_a_stale_diagnostic_range() {
+    let path = temp_md_path("stale-spelling-action");
+    let mut pane = MarkdownPane::load(path.clone());
+    pane.enter_insert();
+    pane.insert_text("A mispalled word");
+
+    assert!(!pane.replace_spelling_word(0, 2, 11, "different", "misspelled"));
+    assert_eq!(pane.lines[0], "A mispalled word");
+    assert!(pane.replace_spelling_word(0, 2, 11, "mispalled", "misspelled"));
+    assert_eq!(pane.lines[0], "A misspelled word");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn markdown_state_saves_and_round_trips_through_disk() {
     let path = temp_md_path("save");
     let mut pane = MarkdownPane::load(path.clone());

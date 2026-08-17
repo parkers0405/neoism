@@ -685,6 +685,12 @@ where
     if message.kind() != AgentTimelineMessageKind::Tool {
         return None;
     }
+    if crate::panels::agent_pane::view::tool_message::is_unsettled_edit_tool(
+        message.tool(),
+        message.status(),
+    ) {
+        return None;
+    }
     cached_edit_diff_sections_for_parts(
         message.id(),
         message.title(),

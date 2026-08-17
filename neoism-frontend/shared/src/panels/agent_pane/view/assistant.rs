@@ -40,7 +40,6 @@ pub fn render_assistant_text_with<P: AgentMarkdownPane>(
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    let _ = body_id;
     // One render path for every message size. `render_markdown_blocks` culls
     // off-screen blocks itself and advances by exact per-block heights, so a
     // huge message costs the same as a small one without a second
@@ -74,6 +73,7 @@ pub fn render_assistant_text_with<P: AgentMarkdownPane>(
     render_markdown_blocks(
         sugarloaf,
         blocks,
+        body_id,
         x + pad_left,
         y,
         (w - pad_left).max(80.0 * s),
@@ -242,9 +242,13 @@ where
     render_markdown_blocks(
         sugarloaf,
         blocks,
+        AgentToolMessage::id(message),
         body_x,
         body_y,
-        body_w,
+        // `render_markdown_blocks` reserves its standard 30px right inset
+        // for rich blocks. Pass that inset back here so the final code/table
+        // viewport exactly matches the `body_w` used during layout.
+        body_w + 30.0 * s,
         body_h,
         pane,
         theme,

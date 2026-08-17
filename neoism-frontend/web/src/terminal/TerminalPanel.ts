@@ -5598,6 +5598,14 @@ export class TerminalPanel {
     if (event.pointerType === "touch") return;
     if (this.updateBufferTabDrag(event)) return;
     this.updateCustomCursorFromPointer(event, true);
+    if (this.activeSurface() === "agent") {
+      const { x } = this.canvasLogicalPoint(event);
+      if (this.wasmAdapter?.agentDragMarkdownHorizontalScrollbar?.(x)) {
+        event.preventDefault();
+        this.scheduleDraw();
+        return;
+      }
+    }
     if (this.wasmAdapter?.splashMouseMove) {
       const { x, y } = this.canvasLogicalPoint(event);
       this.wasmAdapter.splashMouseMove(x, y);
@@ -5720,6 +5728,11 @@ export class TerminalPanel {
     if (event.pointerType === "touch") return;
     if (this.endBufferTabDrag(event)) return;
     this.updateCustomCursorFromPointer(event, true);
+    if (this.wasmAdapter?.agentEndMarkdownHorizontalScrollbarDrag?.()) {
+      event.preventDefault();
+      this.scheduleDraw();
+      return;
+    }
     this.forwardChromeEvent(fromPointerUpEvent(event, this.canvas));
   }
 
@@ -6684,6 +6697,24 @@ export class TerminalPanel {
     if (this.activeSurface() !== "agent") return false;
     const adapter = this.wasmAdapter;
     if (!adapter?.agentScrollTimeline) return false;
+    // Sideways trackpad input, plus Shift+wheel, belongs only to rendered
+    // Markdown code/table viewports. Keep it separate from the vertical
+    // route so merely hovering an overflowing block never traps chat scroll.
+    const horizontalPixels = (() => {
+      const dx = wheelDeltaXPixels(event);
+      const dy = wheelDeltaYPixels(event);
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) >= 0.5) return dx;
+      if (event.shiftKey && Math.abs(dy) >= 0.5) return dy;
+      return 0;
+    })();
+    if (horizontalPixels !== 0 && adapter.agentScrollHorizontalAt) {
+      const { x, y } = this.canvasLogicalPoint(event);
+      if (adapter.agentScrollHorizontalAt(x, y, horizontalPixels)) {
+        this.scheduleDraw();
+        return true;
+      }
+    }
+
     // The shared timeline uses the desktop (winit) sign convention:
     // positive delta scrolls UP into history, one wheel notch = 42px
     // (`agent_timeline_scroll_pixels`). DOM deltaY is positive when
@@ -7185,6 +7216,17 @@ function wheelDeltaYPixels(event: WheelEvent): number {
       return event.deltaY * window.innerHeight;
     default:
       return event.deltaY;
+  }
+}
+
+function wheelDeltaXPixels(event: WheelEvent): number {
+  switch (event.deltaMode) {
+    case WheelEvent.DOM_DELTA_LINE:
+      return event.deltaX * 48;
+    case WheelEvent.DOM_DELTA_PAGE:
+      return event.deltaX * window.innerWidth;
+    default:
+      return event.deltaX;
   }
 }
 

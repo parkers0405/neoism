@@ -426,6 +426,9 @@ impl NeoismAgentPane {
         if self.wordmark_click_is_animating() {
             return Some("wordmark");
         }
+        if self.code_copy_feedback_is_animating() {
+            return Some("code_copy_feedback");
+        }
         if !self.has_conversation() {
             return Some("agent_home_wordmark");
         }

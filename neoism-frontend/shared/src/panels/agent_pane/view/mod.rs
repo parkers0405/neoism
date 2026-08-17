@@ -35,7 +35,6 @@ pub(super) const LETTER_SHIMMER_AMP: f32 = 0.025;
 pub(super) const LETTER_SHIMMER_PERIOD: f32 = 3.4;
 
 pub(super) const DEPTH: f32 = 0.0;
-pub(super) const ORDER_BG: u8 = 18;
 pub(super) const ORDER_PANEL: u8 = 19;
 pub(super) const ORDER_TEXT: u8 = 20;
 pub(super) const ORDER_CARET: u8 = 21;
@@ -175,7 +174,7 @@ pub fn render_agent_pane_with<P, D, I>(
     I: side_panel::AgentSidePanelIconHost,
 {
     let render_started = web_time::Instant::now();
-    let [x, y, w, h] = rect;
+    let [_, _, w, h] = rect;
     if w <= 8.0 || h <= 8.0 {
         return;
     }
@@ -235,35 +234,37 @@ pub fn render_agent_pane_with<P, D, I>(
             prompt_visual_rows,
         )
     };
-    // The pre-chat composer sits around the pane midpoint, leaving much
-    // less safe vertical room than the bottom-docked chat composer. Give
-    // its picker a compact five-row window and clamp it below this pane's
-    // chrome boundary. Its horizontal edges still match the composer
-    // exactly, just like the full-chat picker.
+    // Every inline picker is pane-owned. `main_rect[1]` is the content edge
+    // after the workspace strip and any pane-local tab strip have been
+    // carved out, so it is the only safe top boundary in both home and chat
+    // mode. The old chat-mode `8*s` window-global clamp let `/models` and
+    // every other slash picker paint over whichever tab chrome happened to
+    // be above a split. Derive the row window from the actual space as well;
+    // clamping only the y coordinate would still leave an over-tall card.
     let picker_input_rect = input_rect;
-    let picker_min_y = if has_conversation {
-        8.0 * chrome_scale
-    } else {
-        main_rect[1] + 12.0 * chrome_scale
-    };
+    let picker_min_y = main_rect[1] + 12.0 * chrome_scale;
     let picker_has_footer = pane.picker_has_session_footer();
-    let picker_max_rows = if has_conversation {
+    let preferred_picker_rows = if has_conversation {
         crate::widgets::inline_picker::DEFAULT_MAX_ROWS
     } else {
-        crate::widgets::inline_picker::row_limit_for_space(
-            picker_input_rect[1],
-            picker_min_y,
-            chrome_scale,
-            picker_has_footer,
-            5,
-        )
+        5
     };
+    let picker_max_rows = crate::widgets::inline_picker::row_limit_for_space(
+        picker_input_rect[1],
+        picker_min_y,
+        chrome_scale,
+        picker_has_footer,
+        preferred_picker_rows,
+    );
     // The inline picker is a real late Sugarloaf overlay. Do not reserve its
     // predicted column in the normal text pass: doing so erases timeline text
     // above and outside the actual rounded menu surface.
     let local_occlusions = occlusion_rects.to_vec();
     clear_overlays(sugarloaf);
-    sugarloaf.rect(None, x, y, w, h, theme.f32(theme.bg), DEPTH, ORDER_BG);
+    // The pane body has no material of its own. The Sugarloaf clear color
+    // supplies the normal theme background, while a configured window image
+    // or Mash Up Pack wallpaper can show through. Cards, bubbles, composer,
+    // and side-panel surfaces still paint their own theme materials below.
     // The "NEOISM" home page and the chat timeline render immediately —
     // no body skeleton. First-load shimmer belongs on the recent-sessions
     // TREE (date/name rows) in the side panel, handled there by

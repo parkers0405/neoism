@@ -454,6 +454,7 @@ impl<A: Copy> BufferTabs<A> {
                 // the hamburger menu's Extensions entry.
                 let glyph = match page.kind {
                     ChromePageKind::Extensions => "\u{f12e}",
+                    ChromePageKind::NeoWorld => "\u{f1b0}",
                 };
                 (glyph, theme.u8(theme.accent))
             } else if is_terminal {

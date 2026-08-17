@@ -35,7 +35,7 @@ Notes support familiar wiki-style navigation:
 - `#tags` are indexed for discovery;
 - `- [ ]` and `- [x]` remain plain Markdown tasks.
 
-Neoism can link the current workspace to a notes vault. The relationship is recorded in `.neoism/workspace.json`, while the vault's `project.json` records associated code directories for project-aware page completion. Your note content itself stays as Markdown.
+Neoism can link the current workspace to a whole notes vault or to a folder inside one. The relationship is cached in `.neoism/workspace.json`, while the vault's `project.json` records associated code directories and their nested note scopes for Alt+N, Agent notes, memory, and project-aware page completion. Your note content itself stays as Markdown.
 
 Drawings use Neoism's `.neodraw` format and can be embedded from Markdown with a fenced `draw` block that references the drawing file.
 

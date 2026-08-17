@@ -129,7 +129,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Shader { entry } => entry.title.as_str(),
             PaletteRow::Buffer { entry } => entry.title.as_str(),
             PaletteRow::WorkspaceHost { label, .. } => label,
-            PaletteRow::WorkspaceCreate => "+",
+            PaletteRow::WorkspaceCreate => "+ New Workspace",
             PaletteRow::Workspace { entry } => entry.title.as_str(),
             PaletteRow::Server { entry } => entry.name.as_str(),
             PaletteRow::ServerAdd => "+ Add server",
@@ -166,7 +166,7 @@ impl<'a> PaletteRow<'a> {
             // right (non-local only). Local hosts keep the slot empty so
             // the row reads as plain "⌂ local".
             PaletteRow::WorkspaceHost { daemon_url, .. } => daemon_url.unwrap_or(""),
-            PaletteRow::WorkspaceCreate => "",
+            PaletteRow::WorkspaceCreate => "Ctrl+Shift+W",
             PaletteRow::Workspace { entry } => entry.detail.as_str(),
             PaletteRow::Server { entry } => entry.address.as_str(),
             PaletteRow::ServerAdd => "",

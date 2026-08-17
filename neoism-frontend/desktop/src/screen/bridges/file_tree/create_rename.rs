@@ -316,7 +316,12 @@ impl Screen<'_> {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::rename(&path, &target)
+            if notes {
+                neoism_workspace_index::move_notes_path_preserving_scopes(&path, &target)
+                    .map(|_| ())
+            } else {
+                fs::rename(&path, &target)
+            }
         })();
         match result {
             Ok(()) => {

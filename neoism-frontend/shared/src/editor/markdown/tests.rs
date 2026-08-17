@@ -46,9 +46,11 @@ mod tests {
             cursor_scroll_remainder: 0.0,
             scroll_viewport_height: 0.0,
             scroll_velocity_px_s: 0.0,
+            scroll_animation_velocity_px_s: 0.0,
             scroll_velocity_moves_cursor: false,
             remote_cursors: Vec::new(),
             scroll_last_tick_at: None,
+            scroll_animation_last_tick_at: None,
             content_height: 0.0,
             block_rects: Vec::new(),
             notebook_image_preview_dimensions: HashMap::new(),
@@ -733,29 +735,33 @@ mod tests {
     }
 
     #[test]
-    fn cursor_scroll_injects_inertial_target_motion() {
+    fn keyboard_cursor_scroll_has_an_exact_animated_target() {
         let mut pane = pane_for_test();
         pane.lines = (0..80).map(|line| format!("line {line}")).collect();
         pane.set_content_height(3200.0, 400.0);
 
         pane.scroll_cursor_by_content_pixels(120.0, 400.0);
-        let first_target = pane.target_scroll_y;
-
+        assert_eq!(pane.target_scroll_y, 120.0);
+        assert_eq!(pane.scroll_velocity_px_s, 0.0);
         assert!(pane.tick_scroll());
-        assert!(pane.target_scroll_y > first_target);
+
+        assert!(pane.scroll_y > 0.0);
+        assert!(pane.scroll_y < pane.target_scroll_y);
+        assert_eq!(pane.target_scroll_y, 120.0);
     }
 
     #[test]
-    fn cursor_scroll_velocity_compounds_across_small_wheel_deltas() {
+    fn repeated_keyboard_line_scrolls_accumulate_destinations_without_inertia() {
         let mut pane = pane_for_test();
         pane.lines = (0..80).map(|line| format!("line {line}")).collect();
         pane.set_content_height(3200.0, 400.0);
 
-        pane.scroll_cursor_by_content_pixels(4.0, 400.0);
-        let first_velocity = pane.scroll_velocity_px_s;
-        pane.scroll_cursor_by_content_pixels(4.0, 400.0);
+        pane.scroll_cursor_by_lines(1, 400.0);
+        let first_target = pane.target_scroll_y;
+        pane.scroll_cursor_by_lines(1, 400.0);
 
-        assert!(pane.scroll_velocity_px_s > first_velocity);
+        assert!(pane.target_scroll_y > first_target);
+        assert_eq!(pane.scroll_velocity_px_s, 0.0);
     }
 
     #[test]
@@ -940,6 +946,47 @@ mod tests {
         pane.move_down();
         assert_eq!(pane.cursor_line, 1);
         assert_eq!(pane.cursor_col, 0);
+    }
+
+    #[test]
+    fn wrapped_continuation_hit_targets_the_glyph_word_under_pointer() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["alpha mispalled omega".to_string()];
+        pane.register_block_rect(
+            0,
+            [0.0, 0.0, 200.0, 48.0],
+            [-30.0, 0.0, 20.0, 48.0],
+            0.0,
+            0.0,
+            0,
+            10.0,
+            20.0,
+            200.0,
+            None,
+        );
+        pane.register_block_wrap_hit_stops(
+            0,
+            hit_rows(&[
+                (0, &[0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+                (
+                    6,
+                    &[
+                        0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0,
+                        110.0, 120.0, 130.0, 140.0, 150.0, 160.0,
+                    ],
+                ),
+            ]),
+        );
+        let block = pane.block_rects[0];
+
+        let col = pane.glyph_col_from_point(block, 45.0, 25.0);
+        let bounds = word_bounds_at(&pane.lines[0], col);
+
+        assert_eq!(bounds, Some((6, 15)));
+        assert_eq!(
+            &pane.lines[0][bounds.unwrap().0..bounds.unwrap().1],
+            "mispalled"
+        );
     }
 
     #[test]
@@ -1255,11 +1302,18 @@ mod tests {
     fn task_checkbox_hitbox_toggles_source() {
         let mut pane = pane_for_test();
         pane.lines = vec!["- [ ] todo".to_string()];
+        pane.cursor_line = 0;
+        pane.cursor_col = 3;
+        pane.scroll_y = 240.0;
+        pane.target_scroll_y = 280.0;
         pane.register_task_rect(0, [0.0, 0.0, 20.0, 20.0]);
 
         assert!(pane.toggle_task_at(10.0, 10.0));
         assert_eq!(pane.lines, vec!["- [x] todo".to_string()]);
         assert!(pane.task_toggle_progress(0).is_some());
+        assert_eq!((pane.cursor_line, pane.cursor_col), (0, 3));
+        assert_eq!((pane.scroll_y, pane.target_scroll_y), (240.0, 280.0));
+        assert!(!pane.follow_cursor);
 
         pane.register_task_rect(0, [0.0, 0.0, 20.0, 20.0]);
         assert!(pane.toggle_task_at(10.0, 10.0));

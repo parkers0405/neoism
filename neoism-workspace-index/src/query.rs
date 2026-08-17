@@ -140,7 +140,8 @@ impl NoteGraph {
             .flatten()
             .or_else(|| load_workspace(root).ok().flatten())
             .filter(|workspace| workspace.config.notes.enabled)
-            .unwrap_or_else(default_notes_workspace);
+            .unwrap_or_else(default_notes_workspace)
+            .as_vault_workspace();
         let graph = Self { workspace };
         graph.ensure_indexed()?;
         Ok(graph)

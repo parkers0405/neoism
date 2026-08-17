@@ -291,6 +291,11 @@ impl NeoismAgentPane {
         let goal = value
             .and_then(|value| value.get("goal"))
             .and_then(SessionGoal::from_json);
+        if let Some(session_id) = self.session_id.clone() {
+            let version = goal.as_ref().map(|goal| goal.updated).unwrap_or(0);
+            self.session_goal_cache
+                .insert(session_id, (goal.clone(), version));
+        }
         match goal {
             Some(goal) => {
                 let version = goal.updated;
@@ -491,11 +496,18 @@ impl NeoismAgentPane {
         if session_id.is_empty() {
             return;
         }
-        self.push_outbound(OutboundAgentCommand::SwitchSession { session_id });
+        // Session selection is local state. Execute it in the input event so
+        // the very next paint sees the target instead of waiting for the
+        // outbound-command drain on that paint.
+        self.execute_switch_session_command(session_id);
     }
 
     pub(super) fn execute_switch_session_command(&mut self, session_id: String) {
         if session_id.is_empty() {
+            return;
+        }
+        if self.session_id.as_deref() == Some(session_id.as_str()) {
+            self.pending_session_switch = None;
             return;
         }
         if self
@@ -514,6 +526,8 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn ensure_session_preloaded(&mut self, session_id: String, force: bool) {
+        const MAX_CONCURRENT_PRELOADS: usize = 2;
+        const MAX_QUEUED_PRELOADS: usize = 10;
         if session_id.is_empty() {
             return;
         }
@@ -525,6 +539,49 @@ impl NeoismAgentPane {
         {
             return;
         }
+        if self.session_preloads_in_flight.contains(&session_id) {
+            if force {
+                self.session_preloads_force_pending.insert(session_id);
+            }
+            return;
+        }
+        if let Some(index) = self
+            .session_preload_queue
+            .iter()
+            .position(|(queued, _)| queued == &session_id)
+        {
+            let (_, was_force) = self
+                .session_preload_queue
+                .remove(index)
+                .expect("queued preload index");
+            let request = (session_id.clone(), force || was_force);
+            if self.pending_session_switch.as_deref() == Some(session_id.as_str())
+                || force
+            {
+                self.session_preload_queue.push_front(request);
+            } else {
+                self.session_preload_queue.push_back(request);
+            }
+            return;
+        }
+        if self.session_preloads_in_flight.len() >= MAX_CONCURRENT_PRELOADS {
+            let request = (session_id.clone(), force);
+            if self.pending_session_switch.as_deref() == Some(session_id.as_str())
+                || force
+            {
+                if self.session_preload_queue.len() >= MAX_QUEUED_PRELOADS {
+                    self.session_preload_queue.pop_back();
+                }
+                self.session_preload_queue.push_front(request);
+            } else if self.session_preload_queue.len() < MAX_QUEUED_PRELOADS {
+                self.session_preload_queue.push_back(request);
+            }
+            return;
+        }
+        self.start_session_preload(session_id);
+    }
+
+    fn start_session_preload(&mut self, session_id: String) {
         if !self.session_preloads_in_flight.insert(session_id.clone()) {
             return;
         }
@@ -571,6 +628,25 @@ impl NeoismAgentPane {
                     format!("failed to preload session: {error}"),
                 );
             }
+            self.start_queued_session_preloads();
+        }
+    }
+
+    pub(crate) fn start_queued_session_preloads(&mut self) {
+        const MAX_CONCURRENT_PRELOADS: usize = 2;
+        while self.session_preloads_in_flight.len() < MAX_CONCURRENT_PRELOADS {
+            let Some((session_id, force)) = self.session_preload_queue.pop_front() else {
+                break;
+            };
+            if !force
+                && self
+                    .session_cache
+                    .get(&session_id)
+                    .is_some_and(|cached| cached.hydrated)
+            {
+                continue;
+            }
+            self.start_session_preload(session_id);
         }
     }
 
@@ -585,22 +661,46 @@ impl NeoismAgentPane {
             parent_id: self.parent_session_id.clone(),
             directory: self.directory.clone(),
         };
-        let live = self
+        let cached_live = self
             .session_cache
             .remove(&session_id)
             .map(|cached| cached.messages)
             .unwrap_or_default();
+        let messages = std::mem::take(&mut self.messages);
+        let messages = if cached_live.is_empty() {
+            messages
+        } else {
+            merge_session_snapshot(messages, cached_live)
+        };
+        let timeline_history = std::mem::take(&mut self.timeline_history);
+        let timeline_layout_cache = self.timeline_layout_cache.replace(None);
+        let runtime = self.take_session_runtime_ui();
         self.session_cache.insert(
             session_id,
             CachedAgentSession {
                 state,
-                messages: merge_session_snapshot(self.messages.clone(), live),
-                timeline_history: self.timeline_history.clone(),
+                messages,
+                pending_user_prompts: std::mem::take(&mut self.pending_user_prompts),
+                prompt_echo_aliases: std::mem::take(&mut self.prompt_echo_aliases),
+                timeline_history,
                 timeline_scroll_px: self.timeline_scroll_px,
                 timeline_follow_bottom: self.timeline_follow_bottom,
+                timeline_content_height_px: self.timeline_content_height_px,
+                timeline_layout_epoch: self.timeline_layout_epoch,
+                timeline_layout_cache,
+                timeline_dirty_message_ids: std::mem::take(
+                    &mut self.timeline_dirty_message_ids,
+                ),
+                timeline_dirty_message_indices: std::mem::take(
+                    &mut self.timeline_dirty_message_indices,
+                ),
+                runtime,
+                model_context_limit: self.model_context_limit,
                 hydrated: true,
+                last_access: Instant::now(),
             },
         );
+        self.trim_session_cache();
     }
 
     pub(crate) fn activate_cached_session(&mut self, session_id: &str) {
@@ -608,7 +708,7 @@ impl NeoismAgentPane {
             self.pending_session_switch = None;
             return;
         }
-        let Some(cached) = self.session_cache.get(session_id).cloned() else {
+        let Some(cached) = self.session_cache.remove(session_id) else {
             return;
         };
         self.cache_current_session();
@@ -618,21 +718,27 @@ impl NeoismAgentPane {
         } else if self.session_tree_root_id.is_none() {
             self.session_tree_root_id = state.parent_id.clone();
         }
-        self.clear_pending_user_prompts();
         self.session_id = Some(session_id.to_string());
         self.parent_session_id = state.parent_id.clone();
         self.side_panel
             .set_viewed_session_id(Some(session_id.to_string()));
         self.input.clear();
         self.close_picker();
-        self.reset_session_runtime_ui();
+        self.reset_timeline_navigation_for_session_switch();
         self.timeline_history = cached.timeline_history;
         self.timeline_scroll_px = cached.timeline_scroll_px;
         self.timeline_follow_bottom = cached.timeline_follow_bottom;
+        self.timeline_content_height_px = cached.timeline_content_height_px;
         self.side_panel.set_show_home_override(false);
         self.side_panel.invalidate_subagent_refresh();
         self.side_panel.reset_session_goal();
-        self.side_panel.invalidate_goal_refresh();
+        if let Some((goal, version)) = self.session_goal_cache.get(session_id).cloned() {
+            if goal.is_some() {
+                self.side_panel.set_session_goal(goal, version);
+            }
+        } else {
+            self.side_panel.invalidate_goal_refresh();
+        }
         if let Some(directory) = state.directory {
             self.directory = Some(directory);
             self.invalidate_skill_options();
@@ -644,15 +750,26 @@ impl NeoismAgentPane {
             self.model = model;
         }
         self.thinking = state.thinking;
-        self.execute_refresh_model_context_limit_command();
+        self.model_context_limit = cached.model_context_limit;
+        if self.model_context_limit.is_none() && !self.model.is_empty() {
+            self.execute_refresh_model_context_limit_command();
+        }
         if self.is_subagent_session() {
             self.clear_composer();
             self.set_cursor_rect(None);
             self.close_picker();
         }
         self.messages = cached.messages;
-        self.invalidate_timeline_layout();
-        self.hydrate_runtime_status_for_session(session_id);
+        self.pending_user_prompts = cached.pending_user_prompts;
+        self.prompt_echo_aliases = cached.prompt_echo_aliases;
+        self.timeline_layout_epoch = cached.timeline_layout_epoch;
+        *self.timeline_layout_cache.borrow_mut() = cached.timeline_layout_cache;
+        self.timeline_dirty_message_ids = cached.timeline_dirty_message_ids;
+        self.timeline_dirty_message_indices = cached.timeline_dirty_message_indices;
+        self.restore_session_runtime_ui(cached.runtime);
+        if !self.runtime_hydrated_sessions.contains(session_id) {
+            self.hydrate_runtime_status_for_session(session_id);
+        }
         let stream_session_id = self
             .session_tree_root_id
             .clone()

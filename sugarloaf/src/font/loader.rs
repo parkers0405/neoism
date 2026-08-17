@@ -111,31 +111,6 @@ impl Stretch {
             Stretch::UltraExpanded => 200,
         }
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn from_font_kit(fk_stretch: font_kit::properties::Stretch) -> Self {
-        use font_kit::properties::Stretch as FKS;
-        let val = fk_stretch.0;
-        if val <= FKS::ULTRA_CONDENSED.0 {
-            Stretch::UltraCondensed
-        } else if val <= FKS::EXTRA_CONDENSED.0 {
-            Stretch::ExtraCondensed
-        } else if val <= FKS::CONDENSED.0 {
-            Stretch::Condensed
-        } else if val <= FKS::SEMI_CONDENSED.0 {
-            Stretch::SemiCondensed
-        } else if val <= FKS::NORMAL.0 {
-            Stretch::Normal
-        } else if val <= FKS::SEMI_EXPANDED.0 {
-            Stretch::SemiExpanded
-        } else if val <= FKS::EXPANDED.0 {
-            Stretch::Expanded
-        } else if val <= FKS::EXTRA_EXPANDED.0 {
-            Stretch::ExtraExpanded
-        } else {
-            Stretch::UltraExpanded
-        }
-    }
 }
 
 /// Font style
@@ -147,24 +122,85 @@ pub enum Style {
     Oblique,
 }
 
-impl Style {
-    #[cfg(not(target_arch = "wasm32"))]
-    fn from_font_kit(fk_style: font_kit::properties::Style) -> Self {
-        use font_kit::properties::Style as FKStyle;
-        match fk_style {
-            FKStyle::Normal => Style::Normal,
-            FKStyle::Italic => Style::Italic,
-            FKStyle::Oblique => Style::Oblique,
-        }
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
 struct FontCandidate {
     handle: font_kit::handle::Handle,
     weight: Weight,
     stretch: Stretch,
     style: Style,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+struct NamedFontCandidate {
+    family: String,
+    candidate: FontCandidate,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn candidate_from_data(
+    handle: font_kit::handle::Handle,
+    data: &[u8],
+    font_index: u32,
+) -> Option<FontCandidate> {
+    let face = ttf_parser::Face::parse(data, font_index).ok()?;
+    let stretch = match face.width() {
+        ttf_parser::Width::UltraCondensed => Stretch::UltraCondensed,
+        ttf_parser::Width::ExtraCondensed => Stretch::ExtraCondensed,
+        ttf_parser::Width::Condensed => Stretch::Condensed,
+        ttf_parser::Width::SemiCondensed => Stretch::SemiCondensed,
+        ttf_parser::Width::Normal => Stretch::Normal,
+        ttf_parser::Width::SemiExpanded => Stretch::SemiExpanded,
+        ttf_parser::Width::Expanded => Stretch::Expanded,
+        ttf_parser::Width::ExtraExpanded => Stretch::ExtraExpanded,
+        ttf_parser::Width::UltraExpanded => Stretch::UltraExpanded,
+    };
+    let style = if face.is_oblique() {
+        Style::Oblique
+    } else if face.is_italic() {
+        Style::Italic
+    } else {
+        Style::Normal
+    };
+
+    Some(FontCandidate {
+        handle,
+        weight: Weight(face.weight().to_number()),
+        stretch,
+        style,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn candidate_from_handle(handle: &font_kit::handle::Handle) -> Option<FontCandidate> {
+    match handle {
+        font_kit::handle::Handle::Path { path, font_index } => {
+            let data = std::fs::read(path).ok()?;
+            candidate_from_data(handle.clone(), &data, *font_index)
+        }
+        font_kit::handle::Handle::Memory { bytes, font_index } => {
+            candidate_from_data(handle.clone(), bytes, *font_index)
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn family_name(face: &ttf_parser::Face<'_>) -> Option<String> {
+    face.names()
+        .into_iter()
+        .find(|name| {
+            name.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY && name.is_unicode()
+        })
+        .and_then(|name| name.to_string())
+        .or_else(|| {
+            face.names()
+                .into_iter()
+                .find(|name| {
+                    name.name_id == ttf_parser::name_id::FAMILY && name.is_unicode()
+                })
+                .and_then(|name| name.to_string())
+        })
 }
 
 /// CSS-spec compliant font matching algorithm
@@ -306,7 +342,7 @@ pub struct Database {
     #[cfg(not(target_arch = "wasm32"))]
     system_source: SystemSource,
     #[cfg(not(target_arch = "wasm32"))]
-    additional_sources: Vec<font_kit::sources::mem::MemSource>,
+    additional_fonts: Vec<NamedFontCandidate>,
 }
 
 impl Database {
@@ -315,7 +351,7 @@ impl Database {
             #[cfg(not(target_arch = "wasm32"))]
             system_source: SystemSource::new(),
             #[cfg(not(target_arch = "wasm32"))]
-            additional_sources: Vec::new(),
+            additional_fonts: Vec::new(),
         }
     }
 
@@ -324,8 +360,6 @@ impl Database {
         use font_kit::handle::Handle;
         use walkdir::WalkDir;
 
-        // Scan directory for font files
-        let mut fonts = Vec::new();
         for entry in WalkDir::new(path.as_ref())
             .into_iter()
             .filter_map(|e| e.ok())
@@ -339,19 +373,30 @@ impl Database {
                         || ext_lower == "ttc"
                         || ext_lower == "otc"
                     {
-                        // Create handle - font data will be loaded lazily when needed
-                        fonts.push(Handle::from_path(path.to_path_buf(), 0));
+                        let Ok(data) = std::fs::read(path) else {
+                            continue;
+                        };
+                        let face_count =
+                            ttf_parser::fonts_in_collection(&data).unwrap_or(1);
+                        for font_index in 0..face_count {
+                            let Ok(face) = ttf_parser::Face::parse(&data, font_index)
+                            else {
+                                continue;
+                            };
+                            let Some(family) = family_name(&face) else {
+                                continue;
+                            };
+                            let handle =
+                                Handle::from_path(path.to_path_buf(), font_index);
+                            if let Some(candidate) =
+                                candidate_from_data(handle, &data, font_index)
+                            {
+                                self.additional_fonts
+                                    .push(NamedFontCandidate { family, candidate });
+                            }
+                        }
                     }
                 }
-            }
-        }
-
-        // Create memory source from handles (stores paths, not data)
-        if !fonts.is_empty() {
-            if let Ok(mem_source) =
-                font_kit::sources::mem::MemSource::from_fonts(fonts.into_iter())
-            {
-                self.additional_sources.push(mem_source);
             }
         }
     }
@@ -402,45 +447,11 @@ impl Database {
             // Step 1: collect all font faces from additional sources (user directories)
             tracing::debug!(
                 "checking {} additional sources",
-                self.additional_sources.len()
+                self.additional_fonts.len()
             );
-            for (idx, additional_source) in self.additional_sources.iter().enumerate() {
-                if candidates.is_empty() {
-                    tracing::debug!(
-                        "additional source {}: trying case-insensitive match",
-                        idx
-                    );
-                    if let Ok(families) = additional_source.all_families() {
-                        tracing::debug!(
-                            "additional source {}: has {} families",
-                            idx,
-                            families.len()
-                        );
-                        for system_family_name in families {
-                            if system_family_name.to_lowercase() == family_name_lower {
-                                if let Ok(family_handle) = additional_source
-                                    .select_family_by_name(&system_family_name)
-                                {
-                                    for handle in family_handle.fonts() {
-                                        if let Ok(font) = handle.load() {
-                                            let props = font.properties();
-                                            tracing::debug!("found candidate: weight={}, stretch={:?}, style={:?}",
-                                                props.weight.0, props.stretch, props.style);
-                                            candidates.push(FontCandidate {
-                                                handle: handle.clone(),
-                                                weight: Weight(props.weight.0 as u16),
-                                                stretch: Stretch::from_font_kit(
-                                                    props.stretch,
-                                                ),
-                                                style: Style::from_font_kit(props.style),
-                                            });
-                                        }
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
+            for font in &self.additional_fonts {
+                if font.family.to_lowercase() == family_name_lower {
+                    candidates.push(font.candidate.clone());
                 }
             }
 
@@ -460,18 +471,9 @@ impl Database {
                                 .select_family_by_name(&system_family_name)
                             {
                                 for handle in family_handle.fonts() {
-                                    if let Ok(font) = handle.load() {
-                                        let props = font.properties();
-                                        tracing::debug!("    Found system candidate: weight={}, stretch={:?}, style={:?}",
-                                            props.weight.0, props.stretch, props.style);
-                                        candidates.push(FontCandidate {
-                                            handle: handle.clone(),
-                                            weight: Weight(props.weight.0 as u16),
-                                            stretch: Stretch::from_font_kit(
-                                                props.stretch,
-                                            ),
-                                            style: Style::from_font_kit(props.style),
-                                        });
+                                    if let Some(candidate) = candidate_from_handle(handle)
+                                    {
+                                        candidates.push(candidate);
                                     }
                                 }
                             }
@@ -692,4 +694,28 @@ fn find_font_path_from_data(data: &[u8]) -> Option<PathBuf> {
         target_name
     );
     None
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use font_kit::handle::Handle;
+
+    #[test]
+    fn parses_font_metadata_without_freetype() {
+        let data = include_bytes!("../../resources/test-fonts/OpenSans-Italic.ttf");
+        let handle = Handle::from_memory(std::sync::Arc::new(data.to_vec()), 0);
+        let candidate = candidate_from_data(handle, data, 0).expect("valid test font");
+        let face = ttf_parser::Face::parse(data, 0).expect("valid test font");
+
+        assert_eq!(candidate.style, Style::Italic);
+        assert_eq!(candidate.weight, Weight(400));
+        assert_eq!(family_name(&face).as_deref(), Some("Open Sans"));
+    }
+
+    #[test]
+    fn rejects_invalid_font_data_without_panicking() {
+        let handle = Handle::from_memory(std::sync::Arc::new(vec![0; 16]), 0);
+        assert!(candidate_from_data(handle, &[0; 16], 0).is_none());
+    }
 }

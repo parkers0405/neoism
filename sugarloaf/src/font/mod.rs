@@ -1321,11 +1321,12 @@ impl FontData {
     #[inline]
     pub fn from_data(
         data: SharedData,
+        font_index: u32,
         path: PathBuf,
         evictable: bool,
         font_spec: &SugarloafFont,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let font = FontRef::from_index(&data, 0)
+        let font = FontRef::from_index(&data, font_index as usize)
             .ok_or_else(|| format!("Failed to load font from path: {:?}", path))?;
         let (offset, key) = (font.offset, font.key);
 
@@ -1343,8 +1344,8 @@ impl FontData {
         let stretch = attributes.stretch();
         let synth = attributes.synthesize(attributes);
         let is_emoji = has_color_tables(&font);
-        let postscript_name = parse_postscript_name(&data);
-        let family_name = parse_family_name(&data);
+        let postscript_name = parse_postscript_name(&data, font_index);
+        let family_name = parse_family_name(&data, font_index);
 
         let data = (!evictable).then_some(data);
 
@@ -1481,8 +1482,8 @@ impl FontData {
         let stretch = attributes.stretch();
         let synth = attributes.synthesize(attributes);
         let is_emoji = has_color_tables(&font);
-        let postscript_name = parse_postscript_name(data);
-        let family_name = parse_family_name(data);
+        let postscript_name = parse_postscript_name(data, 0);
+        let family_name = parse_family_name(data, 0);
 
         #[cfg(target_os = "macos")]
         let handle = crate::font::macos::FontHandle::from_static_bytes(data);
@@ -1522,8 +1523,8 @@ impl FontData {
         let synth = attributes.synthesize(attributes);
         let is_emoji = has_color_tables(&font);
 
-        let postscript_name = parse_postscript_name(data);
-        let family_name = parse_family_name(data);
+        let postscript_name = parse_postscript_name(data, 0);
+        let family_name = parse_family_name(data, 0);
         Ok(Self {
             data: Some(SharedData::new(data.to_vec())),
             offset,
@@ -1579,8 +1580,8 @@ impl FontData {
         let stretch = attributes.stretch();
         let synth = attributes.synthesize(attributes);
         let is_emoji = has_color_tables(&font);
-        let postscript_name = parse_postscript_name(&data);
-        let family_name = parse_family_name(&data);
+        let postscript_name = parse_postscript_name(&data, 0);
+        let family_name = parse_family_name(&data, 0);
 
         Ok(Self {
             data: Some(data),
@@ -1608,8 +1609,8 @@ impl FontData {
 /// PS name is missing — a font without a usable name can't participate
 /// in the cascade-mapping anyway, so `None` is fine.
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_postscript_name(data: &[u8]) -> Option<String> {
-    let face = ttf_parser::Face::parse(data, 0).ok()?;
+fn parse_postscript_name(data: &[u8], font_index: u32) -> Option<String> {
+    let face = ttf_parser::Face::parse(data, font_index).ok()?;
     face.names()
         .into_iter()
         .find(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME && n.is_unicode())
@@ -1629,7 +1630,7 @@ fn parse_postscript_name(data: &[u8]) -> Option<String> {
 /// implementation gives when the `name` table is missing — callers
 /// already handle that case.
 #[cfg(target_arch = "wasm32")]
-fn parse_postscript_name(_data: &[u8]) -> Option<String> {
+fn parse_postscript_name(_data: &[u8], _font_index: u32) -> Option<String> {
     None
 }
 
@@ -1640,8 +1641,8 @@ fn parse_postscript_name(_data: &[u8]) -> Option<String> {
 /// `FontData.family_name` so `font_id_for_family` can resolve a
 /// config-style family name back to an already-loaded font id.
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_family_name(data: &[u8]) -> Option<String> {
-    let face = ttf_parser::Face::parse(data, 0).ok()?;
+fn parse_family_name(data: &[u8], font_index: u32) -> Option<String> {
+    let face = ttf_parser::Face::parse(data, font_index).ok()?;
     face.names()
         .into_iter()
         .find(|n| n.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY && n.is_unicode())
@@ -1657,7 +1658,7 @@ fn parse_family_name(data: &[u8]) -> Option<String> {
 /// Wasm stub, mirroring [`parse_postscript_name`]'s: no `ttf-parser`
 /// on the web build, and family resolution simply reports "not loaded".
 #[cfg(target_arch = "wasm32")]
-fn parse_family_name(_data: &[u8]) -> Option<String> {
+fn parse_family_name(_data: &[u8], _font_index: u32) -> Option<String> {
     None
 }
 
@@ -1789,13 +1790,14 @@ fn find_font(
         match db.query(&query) {
             Some(id) => {
                 match db.face_source(id) {
-                    Some((crate::font::loader::Source::File(ref path), _index)) => {
+                    Some((crate::font::loader::Source::File(ref path), index)) => {
                         // File source - load from path
                         if let Some(font_data_arc) =
                             load_from_font_source(&path.to_path_buf())
                         {
                             match FontData::from_data(
                                 font_data_arc,
+                                index,
                                 path.to_path_buf(),
                                 evictable,
                                 &font_spec,
@@ -1817,7 +1819,7 @@ fn find_font(
                             }
                         }
                     }
-                    Some((crate::font::loader::Source::Binary(font_data), _index)) => {
+                    Some((crate::font::loader::Source::Binary(font_data), index)) => {
                         // Binary source - use data directly
                         tracing::debug!(
                             "Using binary font data, {} bytes",
@@ -1826,6 +1828,7 @@ fn find_font(
                         // Convert Arc<Vec<u8>> to SharedData
                         match FontData::from_data(
                             font_data,
+                            index,
                             std::path::PathBuf::from(&family),
                             evictable,
                             &font_spec,

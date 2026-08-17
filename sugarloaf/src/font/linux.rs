@@ -12,7 +12,6 @@ use std::sync::OnceLock;
 // its `[lib]` name is `fontconfig_sys`. Constants (FC_FAMILY, FC_CHARSET,
 // …) live in a `constants` submodule rather than the crate root, so we
 // pull them in explicitly.
-use font_kit::handle::Handle;
 use font_kit::source::SystemSource;
 use fontconfig_sys as fc;
 use fontconfig_sys::constants::{
@@ -190,14 +189,16 @@ fn discover_color_emoji(ch: char) -> Option<(PathBuf, u32)> {
             continue;
         };
         for handle in family.fonts() {
-            let Ok(font) = handle.load() else {
-                continue;
-            };
-            if !font.glyph_for_char(ch).is_some() {
-                continue;
-            }
-            if let Handle::Path { path, font_index } = handle {
-                return Some((path.clone(), *font_index));
+            if let font_kit::handle::Handle::Path { path, font_index } = handle {
+                let Ok(data) = std::fs::read(path) else {
+                    continue;
+                };
+                let Ok(face) = ttf_parser::Face::parse(&data, *font_index) else {
+                    continue;
+                };
+                if face.glyph_index(ch).is_some() {
+                    return Some((path.clone(), *font_index));
+                }
             }
         }
     }

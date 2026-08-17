@@ -21,6 +21,9 @@ Neoism combines a native desktop app, a shared Rust UI, a Rust/WASM web renderer
 
 ## Install
 
+Download the latest platform release from [GitHub Releases](https://github.com/parkers0405/neoism/releases/latest), or use
+the platform installer below.
+
 ### Linux and macOS
 
 ```sh
@@ -29,9 +32,16 @@ curl -fsSL https://raw.githubusercontent.com/parkers0405/neoism/main/scripts/ins
 
 ### Windows
 
+Download and open [`Neoism-x86_64.msi`](https://github.com/parkers0405/neoism/releases/latest/download/Neoism-x86_64.msi), or install it from PowerShell:
+
 ```powershell
 irm https://raw.githubusercontent.com/parkers0405/neoism/main/install.ps1 | iex
 ```
+
+The per-user installer requires no administrator rights and installs Neoism to
+`%LOCALAPPDATA%\Programs\Neoism`. Windows Installer owns upgrades, PATH, Start
+Menu integration, file associations, repair, and uninstall; user data remains
+under AppData when Neoism is uninstalled.
 
 Prebuilt releases install `neoism`, `neoism-workspace-daemon`, and `neoism-agent`. Neoism expects `nvim` and `ripgrep` on `PATH`.
 
@@ -42,20 +52,23 @@ neoism update
 ```
 
 If an older Neoism release cannot complete its update check, re-run the
-installer to bootstrap onto the latest release without using the old updater:
+platform installer to bootstrap onto the latest release without using the old updater:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/parkers0405/neoism/main/scripts/install.sh | bash
 ```
 
+On Windows, re-run the PowerShell installer shown above.
+
 Close all running Neoism windows before reopening the newly installed version.
 
-Build the full stack from source with:
+Build and run Neoism from source with:
 
 ```sh
 git clone https://github.com/parkers0405/neoism.git
 cd neoism
-./install.sh
+cargo build --bin neoism
+./target/debug/neoism
 ```
 
 ## Documentation
@@ -75,20 +88,5 @@ Documentation ships inside Neoism instead of living in a separate website. Open 
 | `neoism-terminal-core` | Terminal parser, grid, selections, and effects model |
 | `sugarloaf` | Native and web GPU rendering |
 | `neoism-protocol` | Wire types shared by clients and the daemon |
-
-## Development
-
-Run an isolated development instance without touching your installed Neoism state:
-
-```sh
-make dev-isolated
-```
-
-Useful checks:
-
-```sh
-cargo check --workspace
-cd neoism-frontend/web && npm run typecheck
-```
 
 Neoism is open source under the [MIT License](LICENSE). Its terminal core and GPU renderer descend from [Rio](https://github.com/raphamorim/rio), which descends from Alacritty. The editor, agent runtime, workspace daemon, sync layer, notebooks, drawings, and Neoism UI are first-party. See [NOTICE](NOTICE) for attribution.

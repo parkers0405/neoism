@@ -851,78 +851,72 @@ fn run_self_update_command() -> Result<bool, Box<dyn std::error::Error>> {
 }
 
 #[cfg(windows)]
-fn run_windows_update_helper() -> Result<bool, Box<dyn std::error::Error>> {
-    use std::time::{Duration, Instant};
+fn stage_windows_msi_update(
+    msi: &std::path::Path,
+    temp_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::windows::process::CommandExt;
 
-    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if args.first().and_then(|arg| arg.to_str()) != Some("--windows-update-helper") {
-        return Ok(false);
-    }
-    if args.len() != 3 {
-        return Err("invalid Windows update helper arguments".into());
-    }
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const HELPER: &str = r#"param(
+  [Parameter(Mandatory = $true)][int]$UpdaterPid,
+  [Parameter(Mandatory = $true)][string]$MsiPath,
+  [Parameter(Mandatory = $true)][string]$TempDir
+)
+$ErrorActionPreference = 'Stop'
+$log = Join-Path $env:TEMP 'neoism-update.log'
+try {
+  $deadline = [DateTime]::UtcNow.AddMinutes(2)
+  while (Get-Process -Id $UpdaterPid -ErrorAction SilentlyContinue) {
+    if ([DateTime]::UtcNow -ge $deadline) { throw 'timed out waiting for the updater to exit' }
+    Start-Sleep -Milliseconds 250
+  }
+  foreach ($name in @('neoism', 'neoism-workspace-daemon', 'neoism-agent')) {
+    Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  }
+  foreach ($image in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe')) {
+    & taskkill.exe /F /IM $image 2>$null | Out-Null
+  }
+  Start-Sleep -Milliseconds 500
+  $arguments = @('/i', ('"' + $MsiPath + '"'), '/passive', '/norestart')
+  $installer = Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -Wait -PassThru
+  if ($installer.ExitCode -notin @(0, 3010, 1641)) {
+    throw "Windows Installer exited with code $($installer.ExitCode)"
+  }
+  "$(Get-Date -Format o) Neoism MSI update completed with code $($installer.ExitCode)" | Set-Content $log
+  Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+} catch {
+  "$(Get-Date -Format o) Neoism MSI update failed: $($_.Exception.Message)" | Set-Content $log
+  exit 1
+}
+"#;
 
-    let install_dir = std::path::PathBuf::from(&args[1]);
-    let extracted_dir = std::path::PathBuf::from(&args[2]);
-    let deadline = Instant::now() + Duration::from_secs(600);
-    const BINS: [&str; 3] = [
-        "neoism.exe",
-        "neoism-workspace-daemon.exe",
-        "neoism-agent.exe",
-    ];
-
-    let helper_pid = std::process::id().to_string();
-    let _ = std::process::Command::new("powershell.exe")
+    let helper = temp_dir.join("finish-update.ps1");
+    std::fs::write(&helper, HELPER)?;
+    std::process::Command::new("powershell.exe")
         .args([
+            "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
-            "-Command",
-            &format!(
-                "Get-Process -Name neoism -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {helper_pid} }} | Stop-Process -Force"
-            ),
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
         ])
-        .status();
-    for bin in ["neoism-workspace-daemon.exe", "neoism-agent.exe"] {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/IM", bin])
-            .status();
-    }
-    std::thread::sleep(Duration::from_millis(500));
-
-    for bin in BINS {
-        let src = extracted_dir.join(bin);
-        if !src.exists() {
-            return Err(format!("`{bin}` missing from staged Windows update").into());
-        }
-        let dst = install_dir.join(bin);
-        let old = install_dir.join(format!("{bin}.old"));
-        let new = install_dir.join(format!(".{bin}.new"));
-        loop {
-            let _ = std::fs::remove_file(&new);
-            if std::fs::copy(&src, &new).is_ok() {
-                let _ = std::fs::remove_file(&old);
-                if (!dst.exists() || std::fs::rename(&dst, &old).is_ok())
-                    && std::fs::rename(&new, &dst).is_ok()
-                {
-                    let _ = std::fs::remove_file(&old);
-                    break;
-                }
-            }
-            if old.exists() && !dst.exists() {
-                let _ = std::fs::rename(&old, &dst);
-            }
-            if Instant::now() >= deadline {
-                return Err(
-                    format!("timed out waiting to replace {}", dst.display()).into()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    }
-    if let Some(temp_dir) = extracted_dir.parent() {
-        let _ = std::fs::remove_dir_all(temp_dir);
-    }
-    Ok(true)
+        .arg(&helper)
+        .arg("-UpdaterPid")
+        .arg(std::process::id().to_string())
+        .arg("-MsiPath")
+        .arg(msi)
+        .arg("-TempDir")
+        .arg(temp_dir)
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1158,7 +1152,7 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("Updating {current} → {latest}…");
 
     #[cfg(windows)]
-    let asset = format!("neoism-{goos}-{goarch}.zip");
+    let asset = format!("Neoism-{goarch}.msi");
     #[cfg(not(windows))]
     let asset = format!("neoism-{goos}-{goarch}.tar.gz");
     let url = format!("https://github.com/{repo}/releases/download/{latest}/{asset}");
@@ -1177,8 +1171,48 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(windows)]
     {
-        let file = std::fs::File::open(&archive)?;
-        zip::ZipArchive::new(file)?.extract(&tmp)?;
+        use sha2::{Digest, Sha256};
+
+        let checksum_url = format!("{url}.sha256");
+        let checksum_path = tmp.join(format!("{asset}.sha256"));
+        let checksum_download = std::process::Command::new("curl")
+            .args(["-fsSL", "-o"])
+            .arg(&checksum_path)
+            .arg(&checksum_url)
+            .status()?;
+        if !checksum_download.success() {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(format!("checksum download failed: {checksum_url}").into());
+        }
+        let expected = std::fs::read_to_string(&checksum_path)?
+            .split_whitespace()
+            .next()
+            .ok_or("release checksum is empty")?
+            .to_ascii_lowercase();
+        if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err("release checksum is not a 64-character SHA-256 value".into());
+        }
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut std::fs::File::open(&archive)?, &mut hasher)?;
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != expected {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(format!(
+                "checksum mismatch for {asset}: expected {expected}, got {actual}"
+            )
+            .into());
+        }
+        stage_windows_msi_update(&archive, &tmp)?;
+        println!(
+            "Neoism {latest} is staged. Closing Neoism, its daemon, and its agent to finish the Windows update."
+        );
+        println!(
+            "  • Windows Installer will upgrade all three executables transactionally."
+        );
+        println!("  • Update status is written to %TEMP%\\neoism-update.log.");
+        return Ok(());
     }
     #[cfg(not(windows))]
     {
@@ -1195,30 +1229,16 @@ fn self_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Swap the binaries next to the running exe, atomically (stage in the
-    // same dir → same filesystem → rename works even over the running bin).
+    // same dir -> same filesystem -> rename works even over the running bin).
+    #[cfg(not(windows))]
     let exe = std::env::current_exe()?;
+    #[cfg(not(windows))]
     let dir = exe
         .parent()
         .ok_or("cannot resolve install directory")?
         .to_path_buf();
+    #[cfg(not(windows))]
     let extracted = tmp.join(format!("neoism-{goos}-{goarch}"));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        std::process::Command::new(extracted.join("neoism.exe"))
-            .arg("--windows-update-helper")
-            .arg(&dir)
-            .arg(&extracted)
-            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-            .spawn()?;
-        println!(
-            "Neoism {latest} is staged. Closing Neoism to finish the Windows update."
-        );
-        return Ok(());
-    }
 
     #[cfg(target_os = "macos")]
     let installed_app = exe
@@ -1316,11 +1336,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     configure_debug_service_isolation()?;
-
-    #[cfg(windows)]
-    if run_windows_update_helper()? {
-        return Ok(());
-    }
 
     #[cfg(target_os = "macos")]
     if run_macos_update_helper()? {

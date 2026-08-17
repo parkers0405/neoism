@@ -18,6 +18,9 @@ name: Release Neoism
 #   APPLE_ID                  Apple ID email of the developer account
 #   APPLE_TEAM_ID             10-char team id (developer.apple.com → Membership)
 #   APPLE_APP_SPECIFIC_PASSWORD  from appleid.apple.com → App-Specific Passwords
+# Windows Authenticode signing activates when these repo secrets exist:
+#   WINDOWS_SIGN_PFX          base64 of the code-signing .pfx
+#   WINDOWS_SIGN_PFX_PASSWORD the .pfx export password
 
 on:
   push:
@@ -73,6 +76,7 @@ jobs:
       # Secrets aren't allowed in step-level `if:` directly; this job-level
       # indirection is the documented pattern.
       HAVE_MAC_SIGNING: ${{ secrets.MACOS_SIGN_P12 != '' }}
+      HAVE_WINDOWS_SIGNING: ${{ secrets.WINDOWS_SIGN_PFX != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -84,10 +88,8 @@ jobs:
           # (aarch64 mac runner + x86_64-apple-darwin target) if Intel macs
           # ever matter.
           # - { runner: macos-13,      goos: darwin, goarch: x86_64,  target: x86_64-apple-darwin }
-          # Windows: full parity wave 2026-07-27 (embedded daemon over
-          # loopback TCP, ConPTY end-to-end, LSP spawn, bootstrap +
-          # associations); runtime-smoked under Wine/Proton (daemon boot,
-          # ConPTY round-trips, GUI renders on real GPUs).
+          # Windows ships as a per-user WiX MSI. The installer owns the three
+          # binaries, PATH, shortcuts, associations, upgrades, and uninstall.
           - { runner: windows-latest, goos: windows, goarch: x86_64,  target: x86_64-pc-windows-msvc }
           # linux-aarch64 dropped for now: `ubuntu-24.04-arm` isn't free on a
           # private repo. Re-add via cross-compile or a paid/public runner.
@@ -118,7 +120,151 @@ jobs:
         shell: bash
         run: |
           env -u CI cargo build --release --locked --target ${{ matrix.target }} \
-            -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
+           -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
+
+      - name: Install WiX Toolset
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet tool install --global wix --version 4.0.6
+          wix extension add --global WixToolset.UI.wixext/4.0.6
+
+      - name: Sign Windows executables (Authenticode)
+        if: matrix.goos == 'windows' && env.HAVE_WINDOWS_SIGNING == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_SIGN_PFX: ${{ secrets.WINDOWS_SIGN_PFX }}
+          WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pfx = Join-Path $env:RUNNER_TEMP "neoism-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_SIGN_PFX))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          if (-not $signtool) { throw "signtool.exe was not found" }
+          $bin = "target/${{ matrix.target }}/release"
+          foreach ($file in @("$bin/neoism.exe", "$bin/neoism-workspace-daemon.exe", "$bin/neoism-agent.exe")) {
+            & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+              /f $pfx /p $env:WINDOWS_SIGN_PFX_PASSWORD $file
+            if ($LASTEXITCODE -ne 0) { throw "failed to sign $file" }
+            if ((Get-AuthenticodeSignature $file).Status -ne "Valid") { throw "invalid signature: $file" }
+          }
+
+      - name: Build Neoism Windows MSI
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object { $_.name -eq "neoism" }).version
+          $bin = (Resolve-Path "target/${{ matrix.target }}/release").Path
+          $fixtureBin = Join-Path $env:RUNNER_TEMP "neoism-upgrade-fixture"
+          New-Item -ItemType Directory -Force $fixtureBin | Out-Null
+          Copy-Item "$bin\neoism.exe", "$bin\neoism-workspace-daemon.exe", "$bin\neoism-agent.exe" $fixtureBin
+          [IO.File]::AppendAllText((Join-Path $fixtureBin "neoism.exe"), "neoism-upgrade-fixture")
+          wix build misc/windows/neoism.wxs `
+            -arch x64 `
+            -ext WixToolset.UI.wixext `
+            -d "Version=0.0.1" `
+            -d "BinaryDir=$fixtureBin" `
+            -o Neoism-upgrade-fixture.msi
+          wix build misc/windows/neoism.wxs `
+            -arch x64 `
+            -ext WixToolset.UI.wixext `
+            -d "Version=$version" `
+            -d "BinaryDir=$bin" `
+            -o Neoism-x86_64.msi
+
+      - name: Sign and hash Windows MSI
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_SIGN_PFX: ${{ secrets.WINDOWS_SIGN_PFX }}
+          WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGN_PFX)) {
+            $pfx = Join-Path $env:RUNNER_TEMP "neoism-signing.pfx"
+            $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+              Sort-Object FullName -Descending | Select-Object -First 1).FullName
+            & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+              /f $pfx /p $env:WINDOWS_SIGN_PFX_PASSWORD Neoism-x86_64.msi
+            if ($LASTEXITCODE -ne 0) { throw "failed to sign Neoism-x86_64.msi" }
+            if ((Get-AuthenticodeSignature Neoism-x86_64.msi).Status -ne "Valid") {
+              throw "the MSI Authenticode signature is invalid"
+            }
+          }
+          $hash = Get-FileHash Neoism-x86_64.msi -Algorithm SHA256
+          "$($hash.Hash.ToLower())  Neoism-x86_64.msi" |
+            Set-Content -NoNewline Neoism-x86_64.msi.sha256
+
+      - name: Parse installer bootstrap with Windows PowerShell 5.1
+        if: matrix.goos == 'windows'
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "install.ps1"), [ref]$tokens, [ref]$errors)
+          if ($errors.Count -ne 0) { $errors | Format-List; throw "install.ps1 has parse errors" }
+
+      - name: Smoke-test Windows install, upgrade, and uninstall
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Invoke-Msi([string]$arguments) {
+            $process = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
+            if ($process.ExitCode -notin @(0, 3010, 1641)) {
+              throw "msiexec failed with code $($process.ExitCode): $arguments"
+            }
+          }
+          $fixture = (Resolve-Path "Neoism-upgrade-fixture.msi").Path
+          $installer = (Resolve-Path "Neoism-x86_64.msi").Path
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\Neoism"
+          $userData = Join-Path $env:LOCALAPPDATA "neoism\installer-preserve-test"
+          New-Item -ItemType Directory -Force (Split-Path $userData) | Out-Null
+          Set-Content $userData "preserve"
+
+          Invoke-Msi "/i `"$fixture`" /qn /norestart"
+          $fixtureHash = (Get-FileHash (Join-Path $installDir "neoism.exe") -Algorithm SHA256).Hash
+          Invoke-Msi "/i `"$installer`" /qn /norestart"
+
+          foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe")) {
+            if (-not (Test-Path (Join-Path $installDir $binary))) { throw "$binary was not installed" }
+          }
+          $version = (& (Join-Path $installDir "neoism.exe") --version | Out-String).Trim()
+          if ($version -notmatch "neoism") { throw "installed executable did not report its version" }
+          $appPath = (Get-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\neoism.exe").GetValue('')
+          if ($appPath -ne (Join-Path $installDir "neoism.exe")) { throw "App Paths registration is wrong" }
+          $registeredVersion = (Get-ItemProperty "HKCU:\Software\Neoism").InstalledVersion
+          $expectedVersion = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object { $_.name -eq "neoism" }).version
+          if ($registeredVersion -ne $expectedVersion) { throw "MSI major upgrade did not replace the fixture" }
+          $installedHash = (Get-FileHash (Join-Path $installDir "neoism.exe") -Algorithm SHA256).Hash
+          if ($installedHash -eq $fixtureHash) { throw "MSI major upgrade did not replace neoism.exe" }
+          $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Neoism\Neoism.lnk"
+          if (-not (Test-Path $shortcut)) { throw "Start Menu shortcut was not installed" }
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          if (($userPath -split ';').TrimEnd('\') -notcontains $installDir.TrimEnd('\')) {
+            throw "Neoism install directory was not added to the user PATH"
+          }
+
+          Invoke-Msi "/x `"$installer`" /qn /norestart"
+          if (Test-Path (Join-Path $installDir "neoism.exe")) { throw "Neoism remained after uninstall" }
+          if (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\neoism.exe") { throw "App Paths registration remained after uninstall" }
+          if (Test-Path $shortcut) { throw "Start Menu shortcut remained after uninstall" }
+          if (Test-Path "HKCU:\Software\Classes\Directory\Background\shell\Open Neoism here") { throw "context menu remained after uninstall" }
+          if (Test-Path "HKCU:\Software\Neoism\Capabilities") { throw "Default Apps capabilities remained after uninstall" }
+          $registeredApp = Get-ItemProperty "HKCU:\Software\RegisteredApplications" -Name "Neoism" -ErrorAction SilentlyContinue
+          if ($null -ne $registeredApp) { throw "RegisteredApplications entry remained after uninstall" }
+          $userPathAfter = [Environment]::GetEnvironmentVariable("Path", "User")
+          if (($userPathAfter -split ';').TrimEnd('\') -contains $installDir.TrimEnd('\')) {
+            throw "Neoism install directory remained on the user PATH after uninstall"
+          }
+          if (-not (Test-Path $userData)) { throw "uninstall removed Neoism user data" }
+          Remove-Item $userData -Force
 
       - name: Audit macOS runtime dependencies
         if: matrix.goos == 'darwin'
@@ -248,19 +394,6 @@ jobs:
           # Hash LAST — stapling rewrites the dmg.
           shasum -a 256 "$OUT.dmg" > "$OUT.dmg.sha256"
 
-      - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip
-        if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $out = "neoism-${{ matrix.goos }}-${{ matrix.goarch }}"
-          New-Item -ItemType Directory -Force -Path "stage/$out" | Out-Null
-          $bin = "target/${{ matrix.target }}/release"
-          Copy-Item "$bin/neoism.exe", "$bin/neoism-workspace-daemon.exe", "$bin/neoism-agent.exe" "stage/$out/"
-          Compress-Archive -Path "stage/$out" -DestinationPath "$out.zip" -Force
-          $hash = Get-FileHash "$out.zip" -Algorithm SHA256
-          "$($hash.Hash.ToLower())  $out.zip" | Set-Content -NoNewline "$out.zip.sha256"
-
       # Publishes the built binaries to this repo's GitHub Releases, where the
       # curl|bash installer and `neoism update` fetch them. Uses the built-in
       # GITHUB_TOKEN (contents:write on the current repo) — no PAT needed.
@@ -307,8 +440,8 @@ jobs:
           name: ${{ github.ref_name }}
           draft: true
           files: |
-            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip
-            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip.sha256
+            Neoism-x86_64.msi
+            Neoism-x86_64.msi.sha256
           fail_on_unmatched_files: true
 
       - name: Upload Unix build artifact (dry runs)
@@ -327,8 +460,8 @@ jobs:
         with:
           name: neoism-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
-            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip
-            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip.sha256
+            Neoism-x86_64.msi
+            Neoism-x86_64.msi.sha256
 
   # Flip the dist release public only once EVERY leg has uploaded its
   # assets — closes the per-leg publish race where `neoism update` saw

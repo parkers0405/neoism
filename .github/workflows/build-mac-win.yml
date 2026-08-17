@@ -45,7 +45,46 @@ jobs:
         shell: bash
         run: |
           env -u CI cargo build --release --locked --target ${{ matrix.target }} \
-            -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
+           -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
+
+      - name: Install WiX Toolset
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet tool install --global wix --version 4.0.6
+          wix extension add --global WixToolset.UI.wixext/4.0.6
+
+      - name: Build Neoism Windows MSI
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object { $_.name -eq "neoism" }).version
+          $bin = (Resolve-Path "target/${{ matrix.target }}/release").Path
+          wix build misc/windows/neoism.wxs `
+            -arch x64 -ext WixToolset.UI.wixext `
+            -d "Version=$version" -d "BinaryDir=$bin" `
+            -o Neoism-x86_64.msi
+          $hash = Get-FileHash Neoism-x86_64.msi -Algorithm SHA256
+          "$($hash.Hash.ToLower())  Neoism-x86_64.msi" |
+            Set-Content -NoNewline Neoism-x86_64.msi.sha256
+
+      - name: Smoke-test Windows installer
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = (Resolve-Path "Neoism-x86_64.msi").Path
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\Neoism"
+          $install = Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /qn /norestart" -Wait -PassThru
+          if ($install.ExitCode -notin @(0, 3010, 1641)) { throw "install failed: $($install.ExitCode)" }
+          foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe")) {
+            if (-not (Test-Path (Join-Path $installDir $binary))) { throw "$binary was not installed" }
+          }
+          $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$installer`" /qn /norestart" -Wait -PassThru
+          if ($uninstall.ExitCode -notin @(0, 3010, 1641)) { throw "uninstall failed: $($uninstall.ExitCode)" }
 
       - name: Audit macOS runtime dependencies
         if: matrix.goos == 'darwin'
@@ -92,7 +131,7 @@ jobs:
 
       # Package + upload what release-neoism.yml would ship so a dispatch
       # run yields a downloadable production artifact, not just a compile
-      # check: tar.gz on mac (same as releases), zip on Windows.
+      # check: tar.gz on mac (same as releases), MSI on Windows.
       - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
         if: matrix.goos != 'windows'
         shell: bash
@@ -123,19 +162,6 @@ jobs:
           if command -v sha256sum >/dev/null; then sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256";
           else shasum -a 256 "$OUT.tar.gz" > "$OUT.tar.gz.sha256"; fi
 
-      - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip
-        if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $out = "neoism-${{ matrix.goos }}-${{ matrix.goarch }}"
-          New-Item -ItemType Directory -Path "stage/$out" -Force | Out-Null
-          $bin = "target/${{ matrix.target }}/release"
-          Copy-Item "$bin/neoism.exe", "$bin/neoism-workspace-daemon.exe", "$bin/neoism-agent.exe" "stage/$out/"
-          Compress-Archive -Path "stage/$out" -DestinationPath "$out.zip"
-          (Get-FileHash "$out.zip" -Algorithm SHA256).Hash.ToLower() + "  $out.zip" `
-            | Out-File -FilePath "$out.zip.sha256" -Encoding ascii
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -143,5 +169,5 @@ jobs:
           path: |
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
             neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
-            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip
-            neoism-${{ matrix.goos }}-${{ matrix.goarch }}.zip.sha256
+            Neoism-x86_64.msi
+            Neoism-x86_64.msi.sha256

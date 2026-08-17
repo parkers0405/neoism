@@ -1,59 +1,146 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
-   <Package
-      Name="Neoism"
-      UpgradeCode="d0a67e9a-ead8-458d-81af-2211ff538d0c"
-      Language="1033"
-      Codepage="1252"
-      Version="{{ .Version }}"
-      Manufacturer="Neoism contributors"
-      InstallerVersion="200">
+  <Package
+    Name="Neoism"
+    UpgradeCode="d0a67e9a-ead8-458d-81af-2211ff538d0c"
+    Language="1033"
+    Codepage="1252"
+    Version="$(var.Version)"
+    Manufacturer="Neoism contributors"
+    Scope="perUser"
+    InstallerVersion="500">
 
-      <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
-      <WixVariable Id="WixUILicenseRtf" Value=".\misc\windows\License.rtf" />
-      <Icon Id="NeoismIcon" SourceFile=".\misc\windows\neoism.ico" />
-      <Property Id="APPRODUCTICON" Value="NeoismIcon" />
-      <MediaTemplate EmbedCab="yes" />
-      <ui:WixUI Id="WixUI_Minimal" />
-      <Feature Id="ProductFeature" Title="ConsoleApp" Level="1">
-         <ComponentRef Id="NeoismExe" />
-         <ComponentRef Id="NeoismShortcut" />
-         <ComponentRef Id="ModifyPathEnv" />
-         <ComponentRef Id="ContextMenu" />
-      </Feature>
-      <!-- Application binaries -->
-      <DirectoryRef Id="NeoismProgramFiles">
-         <Component Id="NeoismExe">
-             <File Id="NeoismExeFile" Source="{{ .Binary }}.exe" Name="neoism.exe" KeyPath="yes" />
-         </Component>
-      </DirectoryRef>
-      <DirectoryRef Id="NeoismProgramMenu">
-         <!-- Application shortcut -->
-         <Component Id="NeoismShortcut" Guid="ce3f92be-0586-40b9-a6c8-ba3a3d589611">
-             <Shortcut Id="NeoismShortcutFile" Name="Neoism" Description="A hardware-accelerated terminal-first editor workspace" Target="[NeoismProgramFiles]neoism.exe" Icon="NeoismIcon" />
-             <RemoveFolder Id="NeoismProgramMenu" On="uninstall" />
-             <RegistryValue Root="HKCU" Key="Software\Microsoft\Neoism" Name="installed" Type="integer" Value="1" KeyPath="yes" />
-         </Component>
-      </DirectoryRef>
-      <DirectoryRef Id="NeoismProgramFiles">
-         <!-- Add to PATH -->
-         <Component Id="ModifyPathEnv" Guid="38015f32-365c-42ca-b4b9-dd1ef19b421d" KeyPath="yes">
-            <Environment Id="PathEnv" Value="[NeoismProgramFiles]" Name="PATH" Permanent="no" Part="first" Action="set" System="yes" />
-         </Component>
-      </DirectoryRef>
-      <StandardDirectory Id="ProgramFiles64Folder">
-          <Directory Id="NeoismProgramFiles" Name="Neoism" />
-      </StandardDirectory>
-      <StandardDirectory Id="ProgramMenuFolder">
-          <Directory Id="NeoismProgramMenu" Name="Neoism" />
-      </StandardDirectory>
-      <!-- Add context menu -->
-      <Component Id="ContextMenu" Guid="cb9dfbaf-7569-4d1c-8275-f2bff7126bdd" Directory="TARGETDIR">
-          <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\Open Neoism here\command">
-             <RegistryValue Type="string" Value='[NeoismProgramFiles]neoism.exe --working-dir "%v"' KeyPath="yes" />
-          </RegistryKey>
-          <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\Open Neoism here">
-             <RegistryValue Type="string" Name="Icon" Value="[NeoismProgramFiles]neoism.exe" />
-          </RegistryKey>
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      Schedule="afterInstallInitialize"
+      DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Icon Id="NeoismIcon" SourceFile="misc\windows\neoism.ico" />
+    <Property Id="ARPPRODUCTICON" Value="NeoismIcon" />
+    <WixVariable Id="WixUILicenseRtf" Value="misc\windows\License.rtf" />
+    <ui:WixUI Id="WixUI_Minimal" />
+
+    <Feature Id="ProductFeature" Title="Neoism" Level="1">
+      <ComponentRef Id="NeoismExe" />
+      <ComponentRef Id="WorkspaceDaemonExe" />
+      <ComponentRef Id="AgentExe" />
+      <ComponentRef Id="InstallRegistration" />
+      <ComponentRef Id="UserPath" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="ContextMenu" />
+    </Feature>
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Neoism" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="NeoismProgramMenu" Name="Neoism" />
+    </StandardDirectory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="NeoismExe" Guid="ea0f472f-482d-46e4-80fc-b572c3b9ef18" Bitness="always64">
+        <File Id="NeoismExeFile" Source="$(var.BinaryDir)\neoism.exe" Name="neoism.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Neoism\Components" Name="NeoismExe" Type="integer" Value="1" KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
       </Component>
-   </Package>
+      <Component Id="WorkspaceDaemonExe" Guid="d838ad2b-1b23-4365-8294-6a8dd4d24649" Bitness="always64">
+        <File Id="WorkspaceDaemonExeFile" Source="$(var.BinaryDir)\neoism-workspace-daemon.exe" Name="neoism-workspace-daemon.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Neoism\Components" Name="WorkspaceDaemonExe" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="AgentExe" Guid="6ff55ead-ec4f-4dc4-8bc5-aa36fe1d24d6" Bitness="always64">
+        <File Id="AgentExeFile" Source="$(var.BinaryDir)\neoism-agent.exe" Name="neoism-agent.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Neoism\Components" Name="AgentExe" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <Component Id="UserPath" Guid="39eee899-4a06-438e-9e95-061d4f46a3f5" Bitness="always64">
+        <Environment Id="NeoismUserPath" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last" Permanent="no" System="no" />
+        <RegistryValue Root="HKCU" Key="Software\Neoism" Name="PathRegistered" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <Component Id="InstallRegistration" Guid="77e601ba-5a7b-4dd9-a3e0-21b0a57170cf" Bitness="always64">
+        <RegistryKey Root="HKCU" Key="Software\Neoism">
+          <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" />
+          <RegistryValue Name="InstalledVersion" Type="string" Value="[ProductVersion]" KeyPath="yes" />
+        </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\neoism.exe">
+          <RegistryValue Type="string" Value="[INSTALLFOLDER]neoism.exe" />
+          <RegistryValue Name="Path" Type="string" Value="[INSTALLFOLDER]" />
+        </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\Classes\Neoism.Document">
+          <RegistryValue Type="string" Value="Neoism Document" />
+          <RegistryKey Key="DefaultIcon">
+            <RegistryValue Type="string" Value="[INSTALLFOLDER]neoism.exe,0" />
+          </RegistryKey>
+          <RegistryKey Key="shell\open\command">
+            <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]neoism.exe&quot; &quot;%1&quot;" />
+          </RegistryKey>
+        </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\Neoism\Capabilities">
+          <RegistryValue Name="ApplicationName" Type="string" Value="Neoism" />
+          <RegistryValue Name="ApplicationDescription" Type="string" Value="Terminal, code editor, and notes workspace" />
+          <RegistryKey Key="FileAssociations">
+            <RegistryValue Name=".md" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".markdown" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".json" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".jsonc" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".toml" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".yaml" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".yml" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".rs" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".py" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".js" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".jsx" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".ts" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".tsx" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".go" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".c" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".h" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".cpp" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".hpp" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".cs" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".java" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".rb" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".php" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".sh" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".ps1" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".lua" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".html" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".css" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".scss" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".sql" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".txt" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".log" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".ipynb" Type="string" Value="Neoism.Document" />
+            <RegistryValue Name=".neodraw" Type="string" Value="Neoism.Document" />
+          </RegistryKey>
+        </RegistryKey>
+        <RegistryValue Root="HKCU" Key="Software\RegisteredApplications" Name="Neoism" Type="string" Value="Software\Neoism\Capabilities" />
+      </Component>
+
+      <Component Id="ContextMenu" Guid="8fea0178-afb0-4b78-8cb7-ecf17b4dc412" Bitness="always64">
+        <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\Open Neoism here">
+          <RegistryValue Type="string" Value="Open Neoism here" KeyPath="yes" />
+          <RegistryValue Name="Icon" Type="string" Value="[INSTALLFOLDER]neoism.exe" />
+          <RegistryKey Key="command">
+            <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]neoism.exe&quot; --working-dir &quot;%V&quot;" />
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="NeoismProgramMenu">
+      <Component Id="StartMenuShortcut" Guid="55bfe706-7a8f-471b-b9c3-055483f3af8d" Bitness="always64">
+        <Shortcut
+          Id="NeoismStartMenuShortcut"
+          Name="Neoism"
+          Description="A hardware-accelerated terminal-first editor workspace"
+          Target="[INSTALLFOLDER]neoism.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="NeoismIcon" />
+        <RemoveFolder Id="RemoveNeoismProgramMenu" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Neoism" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Package>
 </Wix>

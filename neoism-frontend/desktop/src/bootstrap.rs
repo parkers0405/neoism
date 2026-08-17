@@ -1,21 +1,16 @@
-//! First-run bootstrap: make a bare tarball install self-sufficient.
+//! First-run bootstrap for Unix tarball installs.
 //!
 //! On every launch a background thread checks for and installs anything a
 //! `./install.sh` run would have set up that a plain binary drop is missing:
 //!   - the Linux desktop launcher + icons (with MIME declarations for
 //!     Open With / default-app pickers)
-//!   - the Windows Start Menu shortcut, user `PATH`, `App Paths`
-//!     registration, and Default Apps / Open With file associations
-//!
 //! Everything is idempotent (cheap stat checks on repeat launches) and
 //! best-effort: failures are logged and never block or fail the launch.
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::Path;
-#[cfg(windows)]
-use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 const DESKTOP_ENTRY: &str = include_str!("../../../misc/neoism.desktop");
@@ -36,16 +31,10 @@ pub fn spawn() {
     if cfg!(debug_assertions) {
         return;
     }
-    #[cfg(windows)]
-    let windows_exe = install_windows_stack();
+    #[cfg(target_os = "linux")]
     std::thread::Builder::new()
         .name("neoism-bootstrap".into())
-        .spawn(move || {
-            #[cfg(target_os = "linux")]
-            install_desktop_entry();
-            #[cfg(windows)]
-            install_start_menu_shortcut(windows_exe);
-        })
+        .spawn(install_desktop_entry)
         .ok();
 }
 
@@ -131,235 +120,4 @@ fn write_if_dir_creatable(path: &Path, contents: &[u8]) -> bool {
             false
         }
     }
-}
-
-//  Start Menu shortcut + App Paths + file associations (Windows)
-
-/// `dwCreationFlags` bit that keeps the helper `powershell` invocation from
-/// flashing a console window.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-/// Extensions mapped to the `Neoism.Document` ProgID via the Default Apps
-/// `Capabilities\FileAssociations` registration. Keep in sync with the same
-/// list in `install.ps1`.
-#[cfg(windows)]
-const ASSOC_EXTENSIONS: &[&str] = &[
-    ".md",
-    ".markdown",
-    ".json",
-    ".jsonc",
-    ".toml",
-    ".yaml",
-    ".yml",
-    ".rs",
-    ".py",
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".go",
-    ".c",
-    ".h",
-    ".cpp",
-    ".hpp",
-    ".cs",
-    ".java",
-    ".rb",
-    ".php",
-    ".sh",
-    ".ps1",
-    ".lua",
-    ".html",
-    ".css",
-    ".scss",
-    ".sql",
-    ".txt",
-    ".log",
-    ".ipynb",
-    ".neodraw",
-];
-
-/// PowerShell run by [`install_start_menu_shortcut`]. `@EXE@` / `@LNK@` /
-/// `@HOME@` / `@EXTS@` are substituted with single-quoted values before
-/// launch, and newlines are collapsed to spaces. Every registry write is
-/// compare-before-set, so repeat runs are no-ops and an exe relocation
-/// refreshes every path-bearing value. No literal double quotes anywhere:
-/// powershell.exe re-parses its command line and would eat them, so the
-/// shell\open\command value builds its quotes from `[char]34`.
-///
-/// UserChoice per-extension defaults are deliberately NOT written — Windows
-/// protects them with a hash; registering Capabilities is what makes Neoism
-/// appear in Settings -> Default Apps and Open With.
-#[cfg(windows)]
-const WINDOWS_SETUP_SCRIPT: &str = r##"$ErrorActionPreference = 'Stop';
-$exe = @EXE@;
-$bin = Split-Path -Parent $exe;
-$q = [string][char]34;
-function Set-RegValue([string]$Path, [string]$Name, [string]$Value) {
-  if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null };
-  $query = $Name;
-  if ($Name -eq '(default)') { $query = '' };
-  if (((Get-Item $Path).GetValue($query)) -ne $Value) { Set-ItemProperty -Path $Path -Name $Name -Value $Value }
-};
-function Normalize-PathEntry([string]$Value) {
-  return [Environment]::ExpandEnvironmentVariables($Value).Trim().Trim([char]34).TrimEnd([char]92)
-};
-$envKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment');
-try {
-  $rawPath = [string]$envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);
-  $target = Normalize-PathEntry $bin;
-  $present = $false;
-  foreach ($entry in ($rawPath -split ';')) { if ((Normalize-PathEntry $entry) -ieq $target) { $present = $true; break } };
-  if (-not $present) {
-    $nextPath = if ([string]::IsNullOrWhiteSpace($rawPath)) { $bin } else { $rawPath.TrimEnd(';') + ';' + $bin };
-    $envKey.SetValue('Path', $nextPath, [Microsoft.Win32.RegistryValueKind]::ExpandString);
-    $signature = '[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);';
-    $native = Add-Type -MemberDefinition $signature -Name 'EnvBroadcast' -Namespace 'NeoismBootstrap' -PassThru;
-    $result = [UIntPtr]::Zero;
-    [void]$native::SendMessageTimeout([IntPtr]0xFFFF, 0x001A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
-  }
-} finally { $envKey.Close() };
-$shell = New-Object -ComObject WScript.Shell;
-$shortcut = $shell.CreateShortcut(@LNK@);
-if ($shortcut.TargetPath -ne $exe) { $shortcut.TargetPath = $exe; $shortcut.WorkingDirectory = @HOME@; $shortcut.Save() };
-Set-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\neoism.exe' '(default)' $exe;
-$doc = 'HKCU:\Software\Classes\Neoism.Document';
-Set-RegValue $doc '(default)' 'Neoism Document';
-Set-RegValue ($doc + '\DefaultIcon') '(default)' ($exe + ',0');
-Set-RegValue ($doc + '\shell\open\command') '(default)' ($q + $exe + $q + ' ' + $q + '%1' + $q);
-$caps = 'HKCU:\Software\Neoism\Capabilities';
-Set-RegValue $caps 'ApplicationName' 'Neoism';
-Set-RegValue $caps 'ApplicationDescription' 'Terminal, code editor, and notes workspace';
-foreach ($ext in @(@EXTS@)) { Set-RegValue ($caps + '\FileAssociations') $ext 'Neoism.Document' };
-Set-RegValue 'HKCU:\Software\RegisteredApplications' 'Neoism' 'Software\Neoism\Capabilities'"##;
-
-#[cfg(windows)]
-fn install_windows_stack() -> Option<PathBuf> {
-    let source_exe = std::env::current_exe().ok()?;
-    let source_dir = source_exe.parent()?;
-    let install_dir = dirs::data_local_dir()?.join("Programs").join("Neoism");
-    let install_exe = install_dir.join("neoism.exe");
-
-    let mut installed = source_dir == install_dir;
-    if source_dir != install_dir && fs::create_dir_all(&install_dir).is_ok() {
-        installed = true;
-        for name in [
-            "neoism.exe",
-            "neoism-workspace-daemon.exe",
-            "neoism-agent.exe",
-        ] {
-            let source = source_dir.join(name);
-            let destination = install_dir.join(name);
-            if !source.is_file() {
-                installed = false;
-                continue;
-            }
-            if let Err(err) = fs::copy(&source, &destination) {
-                installed = false;
-                tracing::warn!(
-                    %err,
-                    source = %source.display(),
-                    destination = %destination.display(),
-                    "bootstrap: failed to seed Windows installation"
-                );
-            }
-        }
-    }
-
-    let target = if installed && install_exe.exists() {
-        install_exe
-    } else {
-        source_exe
-    };
-    if let Some(bin) = target.parent() {
-        let current = std::env::var_os("PATH").unwrap_or_default();
-        let bin = bin.to_string_lossy();
-        let present = std::env::split_paths(&current)
-            .any(|entry| entry.to_string_lossy().eq_ignore_ascii_case(&bin));
-        if !present {
-            let mut paths = vec![PathBuf::from(bin.as_ref())];
-            paths.extend(std::env::split_paths(&current));
-            if let Ok(path) = std::env::join_paths(paths) {
-                std::env::set_var("PATH", path);
-            }
-        }
-    }
-    Some(target)
-}
-
-#[cfg(windows)]
-fn install_start_menu_shortcut(exe: Option<PathBuf>) {
-    use std::os::windows::process::CommandExt;
-
-    let Some(exe) = exe else {
-        return;
-    };
-    let exe = exe.display().to_string();
-    // dirs::config_dir() is %APPDATA% (FOLDERID_RoamingAppData), which hosts
-    // the per-user Start Menu.
-    let Some(appdata) = dirs::config_dir() else {
-        return;
-    };
-    let lnk: PathBuf =
-        appdata.join("Microsoft\\Windows\\Start Menu\\Programs\\Neoism.lnk");
-    let home = dirs::home_dir()
-        .map(|home| home.display().to_string())
-        .unwrap_or_default();
-
-    // WScript.Shell's CreateShortcut loads an existing .lnk, so this re-points
-    // a stale shortcut after an app relocation and no-ops when the target
-    // already matches (never clobbering other user-tuned properties). The
-    // App Paths handles Win+R while the user PATH makes `neoism` available in
-    // new PowerShell/cmd sessions. The document registration puts Neoism into
-    // Open With / Default Apps for code and text files.
-    let extensions = ASSOC_EXTENSIONS
-        .iter()
-        .map(|ext| ps_single_quote(ext))
-        .collect::<Vec<_>>()
-        .join(",");
-    let script = WINDOWS_SETUP_SCRIPT
-        .replace("@EXE@", &ps_single_quote(&exe))
-        .replace("@LNK@", &ps_single_quote(&lnk.display().to_string()))
-        .replace("@HOME@", &ps_single_quote(&home))
-        .replace("@EXTS@", &extensions)
-        .replace("\r\n", " ")
-        .replace('\n', " ");
-
-    let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command"])
-        .arg(&script)
-        // `creation_flags` REPLACES any previously-set flags (Command exposes
-        // no getter), so this must stay the only flag-setting site for this
-        // command.
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    match status {
-        Ok(status) if status.success() => {
-            tracing::info!(
-                "bootstrap: installed Start Menu shortcut, user PATH, App Paths, and file associations"
-            );
-        }
-        Ok(status) => {
-            tracing::warn!(
-                %status,
-                "bootstrap: PowerShell failed to install Start Menu shortcut + associations"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                %err,
-                "bootstrap: powershell unavailable; skipped Start Menu shortcut + associations"
-            );
-        }
-    }
-}
-
-/// Quote `value` as a PowerShell single-quoted string literal.
-#[cfg(windows)]
-fn ps_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }

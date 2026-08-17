@@ -9,6 +9,9 @@ struct ParsedDiffRow {
 }
 
 fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSection>> {
+    if message.defer_live_edit_diff() {
+        return None;
+    }
     if !is_edit_tool_message(message) && !looks_like_patch(message.detail()) {
         return None;
     }
@@ -85,6 +88,9 @@ pub fn cached_edit_diff_sections_for_parts(
     tool: &str,
     detail: &str,
 ) -> Option<CachedToolDiffSections> {
+    if is_unsettled_edit_tool(tool, status) {
+        return None;
+    }
     let key = EditDiffCacheKey {
         id: hash_value(&id),
         title: hash_value(&title),
@@ -123,16 +129,7 @@ pub(crate) fn hash_value<T: Hash>(value: &T) -> u64 {
 }
 
 fn is_edit_tool_message(message: &impl AgentToolMessage) -> bool {
-    let normalized = message
-        .tool()
-        .chars()
-        .filter(|ch| *ch != '_' && *ch != '-')
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    matches!(
-        normalized.as_str(),
-        "applypatch" | "patch" | "edit" | "write" | "multiedit"
-    )
+    is_edit_tool_name(message.tool())
 }
 
 fn looks_like_patch(raw: &str) -> bool {

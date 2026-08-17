@@ -163,21 +163,52 @@ impl NeoismAgentPane {
         {
             return;
         }
-        // The agent-server echoes user-prompt parts to every attached
-        // client so other devices see the prompt live. On the SENDING
-        // device the prompt is already in the timeline as the
-        // optimistic local copy (pushed with an empty id at submit
-        // time) — adopt the server id onto that copy instead of
-        // appending a duplicate bubble.
+        // Text and image fragments are broadcast independently. Fold both
+        // into the optimistic local card, including the image-first ordering
+        // where a server-id row already exists before text arrives.
         if message.kind == NeoismAgentMessageKind::User && !message.id.is_empty() {
-            if let Some(index) = self.messages.iter().position(|existing| {
-                existing.kind == NeoismAgentMessageKind::User
-                    && existing.id.is_empty()
-                    && existing.text.trim() == message.text.trim()
-            }) {
-                self.messages[index].id = message.id;
-                self.mark_timeline_message_dirty_at(index);
-                return;
+            let optimistic_index = (!message.text.trim().is_empty())
+                .then(|| {
+                    self.messages.iter().rposition(|existing| {
+                        existing.kind == NeoismAgentMessageKind::User
+                            && existing.id.is_empty()
+                            && existing.text.trim() == message.text.trim()
+                    })
+                })
+                .flatten();
+            let server_index = self
+                .messages
+                .iter()
+                .position(|existing| existing.id == message.id);
+            match (optimistic_index, server_index) {
+                (Some(optimistic_index), Some(server_index))
+                    if optimistic_index != server_index =>
+                {
+                    let server_fragment = self.messages.remove(server_index);
+                    let optimistic_index = optimistic_index
+                        .saturating_sub(usize::from(server_index < optimistic_index));
+                    let merged = merge_part_message(
+                        self.messages[optimistic_index].clone(),
+                        server_fragment,
+                    );
+                    self.messages[optimistic_index] = merge_part_message(merged, message);
+                    self.rebase_current_turn_trace();
+                    self.invalidate_timeline_layout();
+                    return;
+                }
+                (Some(index), _) => {
+                    self.messages[index] =
+                        merge_part_message(self.messages[index].clone(), message);
+                    self.mark_timeline_message_and_next_dirty_at(index);
+                    return;
+                }
+                (None, Some(index)) => {
+                    self.messages[index] =
+                        merge_part_message(self.messages[index].clone(), message);
+                    self.mark_timeline_message_and_next_dirty_at(index);
+                    return;
+                }
+                (None, None) => {}
             }
         }
         if !message.id.is_empty() {

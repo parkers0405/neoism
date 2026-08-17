@@ -353,6 +353,9 @@ impl ChromeBridge {
                 neoism_ui::panels::TopBarAction::OpenExtensions => {
                     "open_extensions".to_string()
                 }
+                neoism_ui::panels::TopBarAction::OpenNeoWorld => {
+                    "open_neoworld".to_string()
+                }
                 neoism_ui::panels::TopBarAction::TogglePanel => {
                     "toggle_panel".to_string()
                 }

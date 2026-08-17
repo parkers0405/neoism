@@ -17,6 +17,7 @@ use neoism_backend::event::EventListener;
 use neoism_terminal_core::crosswords::Crosswords;
 use neoism_terminal_core::selection::SelectionRange;
 use neoism_ui::editor::code::CodePane;
+use neoism_ui::panels::NeoWorldPane;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -96,6 +97,9 @@ pub struct Context<T: EventListener> {
     /// Rust-rendered Extensions browser surface. Mutually exclusive
     /// with terminal/markdown/agent/tags content.
     pub neoism_extensions: Option<NeoismExtensionsPane>,
+    /// Native NeoWorld room. The pet service outlives this view; closing the
+    /// tab only removes the rendered room.
+    pub neoworld: Option<NeoWorldPane>,
 }
 
 impl<T: neoism_backend::event::EventListener> Drop for Context<T> {
@@ -120,6 +124,7 @@ impl<T: neoism_backend::event::EventListener> Drop for Context<T> {
             && self.neoism_agent.is_none()
             && self.neoism_tags.is_none()
             && self.neoism_extensions.is_none()
+            && self.neoworld.is_none()
         {
             neoism_terminal_pty::kill_pid(self.shell_pid as i32);
         }

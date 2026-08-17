@@ -111,18 +111,15 @@ pub enum PaletteAction {
     /// auto-join it — the create half of the Create/Join pair.
     CreateServer,
     CreateWorkspace,
-    ShareCurrentWorkspace,
-    StopSharingCurrentWorkspace,
     /// Leave a JOINED (adopted-from-another-host) workspace: detach
     /// from the host's sessions — never killing them — close the tab,
     /// and re-dial the home daemon when it was the last joined one.
     LeaveWorkspace,
-    SendCurrentWorkspaceToDockerSandbox,
-    SendCurrentWorkspaceToCloud,
     /// Open a fresh terminal tab and launch one of the agent CLIs in
     /// it. If the binary isn't on PATH the dispatcher first opens the
     /// install modal and runs the install in the background.
     OpenNeoismAgent,
+    OpenNeoWorld,
     RunClaude,
     RunCodex,
     RunOpenCode,
@@ -588,12 +585,9 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::AddServer
         | PaletteAction::CreateServer
         | PaletteAction::CreateWorkspace
-        | PaletteAction::ShareCurrentWorkspace
-        | PaletteAction::StopSharingCurrentWorkspace
         | PaletteAction::LeaveWorkspace
-        | PaletteAction::SendCurrentWorkspaceToDockerSandbox
-        | PaletteAction::SendCurrentWorkspaceToCloud
         | PaletteAction::OpenNeoismAgent
+        | PaletteAction::OpenNeoWorld
         | PaletteAction::RunClaude
         | PaletteAction::RunCodex
         | PaletteAction::RunOpenCode

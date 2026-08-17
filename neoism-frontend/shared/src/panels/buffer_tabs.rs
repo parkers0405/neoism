@@ -232,12 +232,14 @@ pub struct BufferTab<A> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChromePageKind {
     Extensions,
+    NeoWorld,
 }
 
 impl ChromePageKind {
     pub fn title(self) -> &'static str {
         match self {
             ChromePageKind::Extensions => "Extensions",
+            ChromePageKind::NeoWorld => "NeoWorld",
         }
     }
 }

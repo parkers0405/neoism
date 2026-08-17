@@ -760,7 +760,11 @@ impl Screen<'_> {
     /// Resolve one tab to the context route inside its pane stack while the
     /// old pane owner still exists. The route is retained across close so the
     /// rebuilt layout can tell us which surviving context was promoted.
-    fn pane_tab_context_route(&self, strip_route: usize, ix: usize) -> Option<usize> {
+    pub(crate) fn pane_tab_context_route(
+        &self,
+        strip_route: usize,
+        ix: usize,
+    ) -> Option<usize> {
         let tab = self.renderer.pane_tabs.get(&strip_route)?.tabs().get(ix)?;
         if let Some(route) = tab.terminal_route_id {
             return Some(route);
@@ -785,19 +789,15 @@ impl Screen<'_> {
     /// to become the new visual owner, move both chrome maps to that promoted
     /// route before activation/render. Returns the route that now owns the
     /// strip.
-    fn rekey_promoted_pane_owner(
+    pub(crate) fn rekey_promoted_pane_owner(
         &mut self,
         old_owner_route: usize,
         surviving_context_route: Option<usize>,
     ) -> usize {
-        if self
-            .context_manager
-            .current_grid()
-            .node_by_route_id(old_owner_route)
-            .is_some()
-        {
-            return old_owner_route;
-        }
+        // The old route can still exist after a move (for example, an Agent
+        // route moved from a pane stack back into the workspace).  Existence
+        // therefore does not mean it still owns the source pane. Resolve the
+        // owner from the surviving tab's context in the rebuilt tree.
         let Some(new_owner_route) = surviving_context_route.and_then(|route| {
             self.context_manager
                 .current_grid()

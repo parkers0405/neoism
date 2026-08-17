@@ -28,8 +28,10 @@ pub use helpers::{
 pub use links::{markdown_contact_value, markdown_link_open_action};
 pub use source_map::InlineSourceMap;
 pub use spellcheck::{
-    bounded_levenshtein, is_misspelled_word, normalized_spellcheck_word,
-    spellcheck_dictionary, spellcheck_words, spelling_suggestions, SpellcheckWord,
+    add_spelling_word_to_dictionary, bounded_levenshtein,
+    global_spellcheck_dictionary_path, ignore_spelling_word, is_misspelled_word,
+    normalized_spellcheck_word, spellcheck_dictionary, spellcheck_words,
+    spelling_suggestions, SpellcheckWord,
 };
 pub use types::*;
 

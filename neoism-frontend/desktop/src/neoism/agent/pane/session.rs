@@ -36,6 +36,9 @@ impl NeoismAgentPane {
         if self.wordmark_click_is_animating() {
             return Some("wordmark");
         }
+        if self.code_copy_feedback_is_animating() {
+            return Some("code_copy_feedback");
+        }
         if !self.has_conversation() {
             return Some("agent_home_wordmark");
         }
@@ -249,7 +252,7 @@ impl NeoismAgentPane {
             return false;
         };
         if Some(entry.id.as_str()) == self.session_id.as_deref() {
-            return false;
+            return self.pending_session_switch.take().is_some();
         }
         self.switch_session(entry.id);
         true
@@ -265,8 +268,9 @@ impl NeoismAgentPane {
             .unwrap_or(false)
     }
 
-    /// Background refresh of the sub-agent / sibling-session list for
-    /// the active session. Mirrors `maybe_refresh_side_panel_sessions`.
+    /// Take one sub-agent tree snapshot after bootstrap, a lifecycle edge, or
+    /// an event-stream reconnect. Live status is driven by SSE events; this
+    /// method does not establish a periodic polling cadence.
     pub fn maybe_refresh_side_panel_subagents(&mut self) {
         // The goal lives on the same per-session refresh cadence as the
         // branch list (both render in chat mode); piggyback here so the
@@ -294,6 +298,7 @@ impl NeoismAgentPane {
             })
         {
             self.side_panel.complete_subagent_refresh(generation);
+            self.side_panel.settle_failed_subagent_refresh();
             tracing::warn!(%error, "failed to start subagent refresh worker");
         }
     }
@@ -324,15 +329,44 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn hydrate_runtime_status_for_session(&mut self, session_id: &str) {
+        let session_id = session_id.to_string();
+        self.runtime_status_request_generation =
+            self.runtime_status_request_generation.wrapping_add(1);
+        let request_generation = self.runtime_status_request_generation;
+        let runtime_revision = self.session_runtime_revision(&session_id);
+        self.runtime_status_requests
+            .insert(session_id.clone(), request_generation);
+        let server = self.server.clone();
+        let tx = self.background_sender();
+        let worker_session_id = session_id.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("neoism-agent-runtime-{session_id}"))
+            .spawn(move || {
+                let result = fetch_session_statuses(&server);
+                let _ =
+                    tx.send(NeoismAgentBackgroundUpdate::SessionRuntimeStatusRefreshed {
+                        session_id: worker_session_id,
+                        request_generation,
+                        runtime_revision,
+                        result,
+                    });
+            })
+        {
+            self.runtime_status_requests.remove(&session_id);
+            tracing::warn!(%error, "failed to start agent runtime refresh worker");
+        }
+    }
+
+    pub(crate) fn apply_runtime_status_for_session(
+        &mut self,
+        session_id: &str,
+        statuses: &HashMap<String, super::super::api::SessionStatusSnapshot>,
+    ) {
         // Background shell jobs are not part of the runtime-status response.
         // Do not resurrect an uncollected historical tool record as live work
         // when reopening a session.
         self.background_tasks_started_at = None;
         self.background_task_details_expanded = false;
-        let Ok(statuses) = fetch_session_statuses(&self.server) else {
-            self.sync_subagent_waiting_clock();
-            return;
-        };
         self.active_subagent_ids.clear();
         self.active_subagent_started_at.clear();
         let active_status = statuses
@@ -393,6 +427,64 @@ impl NeoismAgentPane {
         }
         self.reconcile_task_message_statuses();
         self.sync_subagent_waiting_clock();
+        self.runtime_hydrated_sessions
+            .insert(session_id.to_string());
+    }
+
+    pub(crate) fn session_runtime_revision(&self, session_id: &str) -> u64 {
+        self.session_runtime_revisions
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn note_session_runtime_event(&mut self, session_id: &str) {
+        let revision = self
+            .session_runtime_revisions
+            .entry(session_id.to_string())
+            .or_default();
+        *revision = revision.wrapping_add(1);
+        self.runtime_hydrated_sessions
+            .insert(session_id.to_string());
+    }
+
+    pub(crate) fn note_session_branch_runtime(
+        &mut self,
+        session_id: &str,
+        status: BranchStatus,
+        started_at: Option<u64>,
+    ) {
+        self.note_session_runtime_event(session_id);
+        let active = self.session_id.as_deref() == Some(session_id);
+        if active {
+            if matches!(status, BranchStatus::Completed | BranchStatus::Stopped) {
+                self.note_streaming(NeoismAgentStreamingState::Idle, None);
+                self.abort_requested_at = None;
+            } else if !self.is_streaming() {
+                self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+                if let Some(started_at) = started_at {
+                    let started = instant_from_epoch_millis(started_at);
+                    self.streaming_started_at = Some(started);
+                    self.streaming_state_changed_at = Some(started);
+                }
+            }
+            return;
+        }
+        let runtime = &mut self
+            .session_cache
+            .entry(session_id.to_string())
+            .or_insert_with(CachedAgentSession::live_only)
+            .runtime;
+        if matches!(status, BranchStatus::Completed | BranchStatus::Stopped) {
+            runtime.note_streaming(NeoismAgentStreamingState::Idle, None);
+        } else if !runtime.is_streaming() {
+            runtime.note_streaming(NeoismAgentStreamingState::Thinking, None);
+            if let Some(started_at) = started_at {
+                let started = instant_from_epoch_millis(started_at);
+                runtime.streaming_started_at = Some(started);
+                runtime.streaming_state_changed_at = Some(started);
+            }
+        }
     }
 
     /// Switch to the side-panel-highlighted sub-agent (or back to the
@@ -403,7 +495,7 @@ impl NeoismAgentPane {
             return false;
         };
         if Some(entry.id.as_str()) == self.session_id.as_deref() {
-            return false;
+            return self.pending_session_switch.take().is_some();
         }
         self.switch_session(entry.id);
         true
@@ -437,7 +529,12 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_state(&self) -> NeoismAgentStreamingState {
-        if !self.is_streaming() && self.active_subagent_count() > 0 {
+        // The child lifecycle is event-authoritative and must remain visible
+        // for its entire active interval. Parent bookkeeping can briefly emit
+        // Thinking/Crafting while it ingests a child part or completion probe;
+        // allowing that transient state to win made the footer disappear and
+        // re-animate even though the same child never stopped.
+        if self.active_subagent_count() > 0 {
             return NeoismAgentStreamingState::WaitingSubagents;
         }
         if !self.is_streaming() && self.running_background_task_count() > 0 {
@@ -463,7 +560,7 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {
-        if !self.is_streaming() && self.active_subagent_count() > 0 {
+        if self.active_subagent_count() > 0 {
             return self
                 .subagent_waiting_started_at
                 .map(|started| started.elapsed().as_secs_f32());
@@ -484,8 +581,18 @@ impl NeoismAgentPane {
         if self.is_subagent_session() {
             return 0;
         }
-        self.side_panel
-            .active_child_count(self.session_id.as_deref())
+        let sidebar_count = self
+            .side_panel
+            .active_child_count(self.session_id.as_deref());
+        let runtime_count = self
+            .active_subagent_ids
+            .iter()
+            .filter(|session_id| {
+                Some(session_id.as_str()) != self.session_id.as_deref()
+                    && !self.side_panel.branch_terminal_locked(session_id)
+            })
+            .count();
+        sidebar_count.max(runtime_count)
     }
 
     pub(crate) fn note_subagent_runtime(
@@ -541,6 +648,10 @@ impl NeoismAgentPane {
             status,
             BranchStatus::Active | BranchStatus::WaitingPermission
         ) {
+            // A child part delta can arrive before the parent task/status
+            // event. Create its row from the accepted live signal so both
+            // the sidebar and aggregate composer status remain continuous.
+            self.upsert_live_subagent_entry(&session_id, None, None);
             self.active_subagent_ids.insert(session_id.clone());
             if let Some(started_at) = started_at {
                 self.active_subagent_started_at
@@ -610,23 +721,56 @@ impl NeoismAgentPane {
 
     pub(crate) fn reconcile_task_message_statuses(&mut self) {
         let active_task_ids = self.active_subagent_ids.clone();
-        let explicit_statuses = self
+        // `set_subagents` has already reconciled the recovery snapshot with
+        // newer live lifecycle edges and terminal locks. Mirror that
+        // effective branch state into task cards/runtime bookkeeping instead
+        // of replaying the raw snapshot and resurrecting a completed child.
+        let mut reconciled_statuses = self
             .side_panel
             .subagents()
             .iter()
             .filter_map(|entry| {
-                task_message_status_from_runtime(entry.runtime_status.as_deref()?)
-                    .map(|status| (entry.id.clone(), status))
+                let status = self
+                    .side_panel
+                    .branch_activity(&entry.id)
+                    .and_then(|activity| {
+                        task_message_status_from_branch(activity.status).or_else(|| {
+                            matches!(activity.status, BranchStatus::Active)
+                                .then_some("running")
+                        })
+                    })
+                    .or_else(|| {
+                        entry
+                            .runtime_status
+                            .as_deref()
+                            .and_then(task_message_status_from_runtime)
+                    })?;
+                Some((entry.id.clone(), status))
             })
             .collect::<HashMap<_, _>>();
-        for (task_id, status) in &explicit_statuses {
-            if !active_task_ids.contains(task_id) {
-                self.note_subagent_runtime(
-                    task_id.clone(),
-                    branch_status_from_runtime(status),
-                    None,
-                );
-            }
+        for task_id in &active_task_ids {
+            reconciled_statuses
+                .entry(task_id.clone())
+                .or_insert_with(|| {
+                    self.side_panel
+                        .branch_activity(task_id)
+                        .and_then(|activity| {
+                            task_message_status_from_branch(activity.status).or_else(
+                                || {
+                                    matches!(activity.status, BranchStatus::Active)
+                                        .then_some("running")
+                                },
+                            )
+                        })
+                        .unwrap_or("running")
+                });
+        }
+        for (task_id, status) in &reconciled_statuses {
+            self.note_subagent_runtime(
+                task_id.clone(),
+                branch_status_from_runtime(status),
+                None,
+            );
         }
         let task_updates = self
             .messages
@@ -637,7 +781,7 @@ impl NeoismAgentPane {
             })
             .filter_map(|(index, message)| {
                 let task_id = task_id_from_task_message(message)?;
-                let status = explicit_statuses
+                let status = reconciled_statuses
                     .get(&task_id)
                     .copied()
                     .or_else(|| {
@@ -791,7 +935,7 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_state_changed_elapsed(&self) -> Option<f32> {
-        if !self.is_streaming() && self.active_subagent_count() > 0 {
+        if self.active_subagent_count() > 0 {
             return self
                 .subagent_waiting_started_at
                 .map(|started| started.elapsed().as_secs_f32());

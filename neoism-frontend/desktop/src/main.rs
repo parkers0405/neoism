@@ -27,6 +27,7 @@ mod ipc;
 mod layout;
 mod mashup;
 mod neoism;
+mod neoworld_runtime;
 mod notebook_runtime;
 #[cfg(windows)]
 mod panic;

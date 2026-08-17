@@ -138,6 +138,13 @@ impl SessionEventUpdateState {
     pub fn mark_idle_messages_refreshed(&mut self) {
         self.idle_messages_refreshed = true;
     }
+
+    pub fn track_child_sessions(
+        &mut self,
+        session_ids: impl IntoIterator<Item = String>,
+    ) {
+        self.child_session_ids.extend(session_ids);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,13 +180,16 @@ pub enum SessionEventUpdate {
         part_id: String,
     },
     CompactionStarted {
+        session_id: String,
         id: String,
         reason: String,
     },
     CompactionDelta {
+        session_id: String,
         delta: String,
     },
     CompactionEnded {
+        session_id: String,
         summary: String,
         kind: String,
         usage: Option<NeoismAgentUsage>,
@@ -207,6 +217,13 @@ pub enum SessionEventUpdate {
         session_id: String,
         status: String,
         started_at: Option<u64>,
+        title: Option<String>,
+        agent: Option<String>,
+    },
+    /// Metadata is intentionally separate from lifecycle. A title-only
+    /// `session.updated` event must not imply that a child is active.
+    SubagentMetadata {
+        session_id: String,
         title: Option<String>,
         agent: Option<String>,
     },
@@ -295,21 +312,42 @@ pub fn classify_session_event(
             if is_child_event {
                 if let Some(child_id) = source_session_id {
                     let info = properties.get("info").unwrap_or(properties);
-                    out.push(SessionEventUpdate::SubagentStatus {
-                        session_id: child_id,
-                        status: session_runtime_status(info),
-                        started_at: info
-                            .get("time")
-                            .and_then(|time| {
-                                time.get("created").or_else(|| time.get("updated"))
-                            })
-                            .and_then(Value::as_u64),
-                        title: info
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        agent: session_agent_label(info),
-                    });
+                    // `session.updated` is primarily a metadata event. Only
+                    // treat it as lifecycle when the payload explicitly
+                    // carries a status; defaulting a title-only update to
+                    // active resurrected completed children and made the
+                    // aggregate footer blink. A newly-created child is active
+                    // by definition until its explicit status edge arrives.
+                    let status = if event_type == "session.created" {
+                        Some(session_runtime_status(info))
+                    } else {
+                        explicit_session_runtime_status(info)
+                    };
+                    let title = info
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let agent = session_agent_label(info);
+                    if let Some(status) = status {
+                        out.push(SessionEventUpdate::SubagentStatus {
+                            session_id: child_id,
+                            status,
+                            started_at: info
+                                .get("time")
+                                .and_then(|time| {
+                                    time.get("created").or_else(|| time.get("updated"))
+                                })
+                                .and_then(Value::as_u64),
+                            title,
+                            agent,
+                        });
+                    } else if title.is_some() || agent.is_some() {
+                        out.push(SessionEventUpdate::SubagentMetadata {
+                            session_id: child_id,
+                            title,
+                            agent,
+                        });
+                    }
                 }
             } else if let Some(info) = properties.get("info") {
                 // Main session updated — surface its persistent goal so the
@@ -465,6 +503,9 @@ pub fn classify_session_event(
         }
         "session.next.compaction.started" => {
             vec![SessionEventUpdate::CompactionStarted {
+                session_id: source_session_id
+                    .clone()
+                    .unwrap_or_else(|| session_id.to_string()),
                 id: event
                     .get("id")
                     .and_then(Value::as_str)
@@ -486,6 +527,9 @@ pub fn classify_session_event(
                 Vec::new()
             } else {
                 vec![SessionEventUpdate::CompactionDelta {
+                    session_id: source_session_id
+                        .clone()
+                        .unwrap_or_else(|| session_id.to_string()),
                     delta: delta.to_string(),
                 }]
             }
@@ -514,6 +558,9 @@ pub fn classify_session_event(
                 .unwrap_or("model")
                 .to_string();
             vec![SessionEventUpdate::CompactionEnded {
+                session_id: source_session_id
+                    .clone()
+                    .unwrap_or_else(|| session_id.to_string()),
                 usage: compaction_usage_from_summary(&summary, &kind),
                 summary,
                 kind,
@@ -533,6 +580,9 @@ pub fn classify_session_event(
                 .unwrap_or("model")
                 .to_string();
             vec![SessionEventUpdate::CompactionEnded {
+                session_id: source_session_id
+                    .clone()
+                    .unwrap_or_else(|| session_id.to_string()),
                 usage: compaction_usage_from_summary(&summary, &kind),
                 summary,
                 kind,
@@ -1044,19 +1094,22 @@ pub fn event_child_session_id(value: &Value) -> Option<String> {
         .or_else(|| value.get("part").and_then(event_child_session_id))
 }
 
-pub fn session_runtime_status(info: &Value) -> String {
+fn explicit_session_runtime_status(info: &Value) -> Option<String> {
     info.get("externalAgent")
         .and_then(|external| external.get("status"))
         .and_then(Value::as_str)
+        .or_else(|| info.get("status").and_then(Value::as_str))
         .map(|status| match status {
             "created" | "running" => "active",
             "failed" | "error" | "stopped" => "stopped",
             "completed" => "completed",
             other => other,
         })
-        .or_else(|| info.get("status").and_then(Value::as_str))
-        .unwrap_or("active")
-        .to_string()
+        .map(str::to_string)
+}
+
+pub fn session_runtime_status(info: &Value) -> String {
+    explicit_session_runtime_status(info).unwrap_or_else(|| "active".to_string())
 }
 
 pub fn session_agent_label(info: &Value) -> Option<String> {
@@ -1185,6 +1238,33 @@ mod tests {
     }
 
     #[test]
+    fn seeded_child_survives_relationless_delta_after_reconnect() {
+        let mut state = SessionEventUpdateState::default();
+        state.track_child_sessions(["ses_child".to_string()]);
+        let updates = classify_session_event(
+            json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionId": "ses_child",
+                    "messageID": "msg_child",
+                    "partID": "part_child",
+                    "partType": "text",
+                    "field": "text",
+                    "delta": "still live"
+                }
+            }),
+            "ses_root",
+            &mut state,
+        );
+
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            SessionEventUpdate::ChildPartDelta { session_id, delta, .. }
+                if session_id == "ses_child" && delta == "still live"
+        )));
+    }
+
+    #[test]
     fn subagent_activity_summarizes_tool_title() {
         let part = json!({
             "type": "tool",
@@ -1269,6 +1349,57 @@ mod tests {
             matches!(&updates[1], SessionEventUpdate::PartUpdated(part) if part["id"] == "part_task")
         );
         assert!(state.child_session_ids().contains("ses_child"));
+    }
+
+    #[test]
+    fn child_metadata_update_does_not_resurrect_completed_subagent() {
+        let event = json!({
+            "type": "session.updated",
+            "properties": {
+                "info": {
+                    "sessionID": "ses_child",
+                    "parentID": "ses_root",
+                    "title": "A better title",
+                    "time": { "updated": 20 }
+                }
+            }
+        });
+        let mut state = SessionEventUpdateState::default();
+
+        assert!(matches!(
+            classify_session_event(event, "ses_root", &mut state).as_slice(),
+            [SessionEventUpdate::SubagentMetadata {
+                session_id,
+                title: Some(title),
+                agent: None,
+            }] if session_id == "ses_child" && title == "A better title"
+        ));
+        assert!(state.child_session_ids().contains("ses_child"));
+    }
+
+    #[test]
+    fn child_update_with_explicit_status_emits_lifecycle_edge() {
+        let event = json!({
+            "type": "session.updated",
+            "properties": {
+                "info": {
+                    "sessionID": "ses_child",
+                    "parentID": "ses_root",
+                    "externalAgent": { "status": "completed" },
+                    "time": { "updated": 21 }
+                }
+            }
+        });
+        let mut state = SessionEventUpdateState::default();
+
+        assert!(matches!(
+            classify_session_event(event, "ses_root", &mut state).as_slice(),
+            [SessionEventUpdate::SubagentStatus {
+                session_id,
+                status,
+                ..
+            }] if session_id == "ses_child" && status == "completed"
+        ));
     }
 
     #[test]
@@ -1468,6 +1599,7 @@ mod tests {
         assert_eq!(
             updates,
             vec![SessionEventUpdate::CompactionEnded {
+                session_id: "ses_root".to_string(),
                 summary: "real summary".to_string(),
                 kind: "model".to_string(),
                 usage: Some(NeoismAgentUsage {

@@ -55,6 +55,10 @@ impl Screen<'_> {
                 self.open_extensions_page();
                 true
             }
+            Some(TopBarAction::OpenNeoWorld) => {
+                self.open_neoworld_page();
+                true
+            }
             Some(TopBarAction::OpenSearch) => {
                 self.open_finder_files();
                 true

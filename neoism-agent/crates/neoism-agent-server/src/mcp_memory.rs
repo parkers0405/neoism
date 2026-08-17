@@ -13,7 +13,7 @@ const USER_MEMORY_DIR: &str = "Memory/Personal";
 /// vault). Reads fall back here while the new `Memory/Personal` folder is
 /// missing; write paths migrate its files forward on first touch.
 const LEGACY_USER_MEMORY_DIR: &str = "Personal/Memory";
-const SCOPE_DESCRIPTION: &str = "Scope: default to 'project' — the working dir's linked vault Memory/ folder, or the Default vault's Memory/ folder when the dir is not linked to a vault. Use 'user' (Default/Memory/Personal) ONLY for facts about the user themselves, never for project/codebase facts. 'auto' searches both (use for recall); 'all' is the same as auto.";
+const SCOPE_DESCRIPTION: &str = "Scope: default to 'project' — the working dir's linked notes folder Memory/, or the user's default vault Memory/ when the dir is not linked. Use 'user' (the default vault's Memory/Personal) ONLY for facts about the user themselves, never for project/codebase facts. 'auto' searches both (use for recall); 'all' is the same as auto.";
 
 pub(crate) fn tools() -> Vec<McpToolInfo> {
     vec![
@@ -495,19 +495,14 @@ fn project_root(cwd: &Path) -> anyhow::Result<MemoryRoot> {
     // Golden rule: project memory goes to the vault the code dir is explicitly
     // LINKED to — a `[[links]]` entry in a vault's `project.toml`, resolved by
     // `linked_project_for_code_dir`. If NO vault links this dir, use the
-    // DEFAULT vault. We deliberately do NOT fall back to `load_workspace(cwd)`
+    // user's designated default vault. We deliberately do NOT fall back to
+    // `load_workspace(cwd)`
     // (a `.neoism/workspace.toml` sitting IN the dir): the home dir's config
     // declares `workspace = "Neoism"`, so every agent running from `~` (the
     // default for most sessions) was funneling unrelated work — e.g. Minecraft
     // features — into the Neoism vault. A dir-local config is not a vault link.
     let workspace = neoism_workspace_index::linked_project_for_code_dir(cwd)?
-        .unwrap_or_else(|| neoism_workspace_index::config::NeoismWorkspace {
-            root: cwd.to_path_buf(),
-            // `WorkspaceConfig::new` defaults `notes.workspace` to
-            // `DEFAULT_NOTES_WORKSPACE` ("Default"), so this resolves to the
-            // Default vault's Memory folder.
-            config: neoism_workspace_index::config::WorkspaceConfig::new(cwd),
-        });
+        .unwrap_or_else(neoism_workspace_index::default_notes_workspace);
     let path = workspace.notes_workspace_dir().join(PROJECT_MEMORY_DIR);
     Ok(MemoryRoot {
         scope: "project",
@@ -517,18 +512,13 @@ fn project_root(cwd: &Path) -> anyhow::Result<MemoryRoot> {
     })
 }
 
-fn user_root(cwd: &Path) -> anyhow::Result<MemoryRoot> {
-    let mut config = neoism_workspace_index::config::WorkspaceConfig::new(cwd);
-    config.notes.workspace =
-        neoism_workspace_index::config::DEFAULT_NOTES_WORKSPACE.to_string();
-    let workspace = neoism_workspace_index::config::NeoismWorkspace {
-        root: cwd.to_path_buf(),
-        config,
-    };
+fn user_root(_cwd: &Path) -> anyhow::Result<MemoryRoot> {
+    let workspace = neoism_workspace_index::default_notes_workspace();
     let path = workspace.notes_workspace_dir().join(USER_MEMORY_DIR);
+    let label = format!("{}/Memory/Personal", workspace.config.notes.workspace);
     Ok(MemoryRoot {
         scope: "user",
-        label: "Default/Memory/Personal".to_string(),
+        label,
         path,
         workspace,
     })

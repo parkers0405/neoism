@@ -1581,7 +1581,7 @@ impl Renderer {
 /// The shared buffer-tabs panel calls this once per tab per frame at the
 /// pixel rect it wants the agent logo painted at; the native fork
 /// uploads + pushes the corresponding `GraphicOverlay`.
-struct AgentIconShim;
+pub(super) struct AgentIconShim;
 
 impl neoism_ui::panels::buffer_tabs::AgentIconProvider<crate::neoism::icon::AgentKind>
     for AgentIconShim

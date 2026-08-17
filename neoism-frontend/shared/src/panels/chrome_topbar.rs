@@ -94,6 +94,7 @@ pub enum TopBarAction {
     StartWebServer,
     OpenThemes,
     OpenExtensions,
+    OpenNeoWorld,
     /// Magnifying-glass button beside the hamburger — opens the finder.
     OpenSearch,
     /// Hamburger → About — opens the version/commit modal.

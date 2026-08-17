@@ -145,20 +145,32 @@ impl MarkdownPane {
     }
 
     pub fn spelling_word_at(&self, x: f32, y: f32) -> Option<MarkdownMisspelling> {
-        let block = self
-            .block_rects
+        let (line_ix, col) = if let Some(cell) = self
+            .table_cell_rects
             .iter()
-            .find(|block| point_in_rect(x, y, block.rect))
-            .copied()?;
-        if self.is_inside_code_block(block.line) {
+            .rev()
+            .find(|cell| point_in_rect(x, y, cell.rect))
+            .cloned()
+        {
+            let line = cell.line;
+            (line, self.glyph_col_from_table_cell_point(cell, x, y))
+        } else {
+            let block = self
+                .block_rects
+                .iter()
+                .rev()
+                .find(|block| point_in_rect(x, y, block.rect))
+                .copied()?;
+            (block.line, self.glyph_col_from_point(block, x, y))
+        };
+        if self.is_inside_code_block(line_ix) {
             return None;
         }
-        let line = self.lines.get(block.line)?;
-        let col = self.cursor_col_from_point(block, x, y);
+        let line = self.lines.get(line_ix)?;
         let (start, end) = word_bounds_at(line, col)?;
         let word = line.get(start..end)?.to_string();
         super::spellcheck::is_misspelled_word(&word).then_some(MarkdownMisspelling {
-            line: block.line,
+            line: line_ix,
             start,
             end,
             word,
@@ -170,6 +182,7 @@ impl MarkdownPane {
         line: usize,
         start: usize,
         end: usize,
+        expected: &str,
         replacement: &str,
     ) -> bool {
         let Some(source) = self.lines.get(line) else {
@@ -179,6 +192,7 @@ impl MarkdownPane {
             || end > source.len()
             || !source.is_char_boundary(start)
             || !source.is_char_boundary(end)
+            || source.get(start..end) != Some(expected)
         {
             return false;
         }

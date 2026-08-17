@@ -266,7 +266,8 @@ pub(crate) async fn clear_session_prompt_queue(
         .clear_queued_prompts(session_id)
         .await
         .unwrap_or(0);
-    publish_prompt_queue_changed(state, session_id, "clear-all", None, None, removed).await;
+    publish_prompt_queue_changed(state, session_id, "clear-all", None, None, removed)
+        .await;
     publish_prompt_queue_status(state, session_id, 0).await;
     removed
 }
@@ -301,9 +302,9 @@ pub(crate) async fn queued_prompt_preview(
         .await
         .ok()
         .and_then(|queue| {
-            queue
-                .into_iter()
-                .find_map(|(request, delivery)| (delivery != "continue").then_some(request))
+            queue.into_iter().find_map(|(request, delivery)| {
+                (delivery != "continue").then_some(request)
+            })
         })
         .as_ref()
         .and_then(queued_prompt_text)

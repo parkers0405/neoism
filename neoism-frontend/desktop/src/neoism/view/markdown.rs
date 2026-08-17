@@ -45,6 +45,41 @@ impl AgentMarkdownPane for NeoismAgentPane {
         NeoismAgentPane::mermaid_raw_mode(self, key)
     }
 
+    fn markdown_horizontal_scroll_offset(&mut self, key: &str, max_scroll: f32) -> f32 {
+        NeoismAgentPane::markdown_horizontal_scroll_offset(self, key, max_scroll)
+    }
+
+    fn register_markdown_horizontal_scroll_rect(
+        &mut self,
+        key: String,
+        rect: [f32; 4],
+        max_scroll: f32,
+    ) {
+        NeoismAgentPane::register_markdown_horizontal_scroll_rect(
+            self, key, rect, max_scroll,
+        );
+    }
+
+    fn register_markdown_horizontal_scrollbar(
+        &mut self,
+        key: String,
+        track: [f32; 4],
+        thumb: [f32; 4],
+        max_scroll: f32,
+    ) {
+        NeoismAgentPane::register_markdown_horizontal_scrollbar(
+            self, key, track, thumb, max_scroll,
+        );
+    }
+
+    fn markdown_horizontal_scrollbar_visible(&self, key: &str) -> bool {
+        NeoismAgentPane::markdown_horizontal_scrollbar_visible(self, key)
+    }
+
+    fn code_copy_feedback_progress(&self, target: &str) -> Option<f32> {
+        NeoismAgentPane::code_copy_feedback_progress(self, target)
+    }
+
     fn suppress_markdown_interactions(&self) -> bool {
         NeoismAgentPane::suppress_markdown_interactions(self)
     }

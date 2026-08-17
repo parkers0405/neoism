@@ -176,13 +176,9 @@ impl Screen<'_> {
             if let Some(path) = self.current_workspace_id().and_then(|workspace| {
                 self.workspace_notes_vaults.get(&workspace).cloned()
             }) {
-                self.renderer.notes_sidebar.set_workspace(
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("Notes")
-                        .to_string(),
-                    Some(path),
-                );
+                self.renderer
+                    .notes_sidebar
+                    .set_workspace(notes_sidebar_name_for_path(&path), Some(path));
             }
         }
         // Resolve linked/default only the first time this workspace opens its

@@ -340,9 +340,6 @@ pub(super) fn fetch_subagent_entries(
     server: &str,
     session_id: &str,
 ) -> Result<Vec<NeoismAgentSessionEntry>, String> {
-    // A missing status map must not turn every live child into a terminal
-    // branch for one frame. Let the pane retain its last good tree and retry.
-    let statuses = fetch_session_statuses(server)?;
     let current =
         api_request_json(server, "GET", &format!("/session/{session_id}"), None)?
             .ok_or_else(|| {
@@ -362,8 +359,39 @@ pub(super) fn fetch_subagent_entries(
     )];
     let mut visited = HashSet::new();
     visited.insert(root_id.clone());
-    collect_subagent_entries(server, &root_id, &statuses, 1, &mut entries, &mut visited)?;
+    // Discover the tree first and take the runtime snapshot LAST. Taking
+    // `/session/status` before `/children` created a split snapshot: a child
+    // launched between those requests appeared in the tree but not the older
+    // status map, so we mislabeled it completed and terminal-locked the live
+    // row. The final status read is a barrier: every child returned above
+    // existed before this authoritative runtime snapshot was captured.
+    collect_subagent_entries(
+        server,
+        &root_id,
+        &HashMap::new(),
+        1,
+        &mut entries,
+        &mut visited,
+    )?;
+    // A missing status map must not turn every live child into a terminal
+    // branch for one frame. Let the pane retain its last good tree and retry.
+    let statuses = fetch_session_statuses(server)?;
+    apply_subagent_runtime_snapshot(&mut entries, &statuses);
     Ok(entries)
+}
+
+fn apply_subagent_runtime_snapshot(
+    entries: &mut [NeoismAgentSessionEntry],
+    statuses: &HashMap<String, SessionStatusSnapshot>,
+) {
+    for entry in entries.iter_mut().skip(1) {
+        if let Some(status) = statuses
+            .get(&entry.id)
+            .and_then(|status| normalize_explicit_runtime_status(&status.kind))
+        {
+            entry.runtime_status = Some(status.to_string());
+        }
+    }
 }
 
 fn fetch_root_session(server: &str, mut session: Value) -> Result<Value, String> {
@@ -501,13 +529,6 @@ fn session_explicit_runtime_status(
                 .or_else(|| session.get("status").and_then(Value::as_str))
                 .and_then(normalize_explicit_runtime_status)
         })
-        // A child session that exists but is neither in the running-status map
-        // nor carries an explicit running status has finished its run — a
-        // native sub-agent is simply dropped from the runs map when it
-        // completes (no "idle" status lingers). Report it completed so the
-        // side panel terminalizes the branch instead of leaving it stuck on
-        // its last "working" delta.
-        .or(Some("completed"))
         .map(str::to_string)
 }
 
@@ -523,8 +544,49 @@ fn normalize_explicit_runtime_status(status: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
+mod subagent_runtime_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn final_runtime_snapshot_promotes_new_tree_child_to_running() {
+        // Tree discovery initially has no matching status. The status
+        // snapshot captured after discovery must promote the child before the
+        // recovery snapshot is delivered to the pane.
+        let mut entries = vec![
+            NeoismAgentSessionEntry::new("root", "main session", "return"),
+            NeoismAgentSessionEntry::new("child", "child", "explore")
+                .with_runtime_status(None),
+        ];
+        let statuses = HashMap::from([(
+            "child".to_string(),
+            SessionStatusSnapshot {
+                kind: "busy".to_string(),
+                ..SessionStatusSnapshot::default()
+            },
+        )]);
+
+        apply_subagent_runtime_snapshot(&mut entries, &statuses);
+
+        assert_eq!(entries[1].runtime_status.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn missing_active_status_is_unknown_not_completed() {
+        let session = serde_json::json!({
+            "id": "child",
+            "title": "child"
+        });
+
+        assert_eq!(
+            session_explicit_runtime_status(&session, &HashMap::new()),
+            None
+        );
+    }
+}
+
 #[derive(Clone, Debug, Default)]
-pub(super) struct SessionStatusSnapshot {
+pub(crate) struct SessionStatusSnapshot {
     pub kind: String,
     pub started_at: Option<u64>,
     pub queue_count: usize,

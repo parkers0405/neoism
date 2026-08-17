@@ -3,6 +3,20 @@ use std::collections::HashMap;
 pub type HitRect = (String, [f32; 4]);
 pub type DiffScrollRect = (String, [f32; 4], f32);
 
+/// Frame-local geometry for a rendered Markdown horizontal scrollbar.
+/// The larger `track` is the pointer target; `thumb` is the current handle.
+pub type MarkdownHorizontalScrollbar = (String, [f32; 4], [f32; 4], f32);
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkdownHorizontalScrollbarDrag {
+    pub key: String,
+    pub track_x: f32,
+    pub track_width: f32,
+    pub thumb_width: f32,
+    pub grab_offset_x: f32,
+    pub max_scroll: f32,
+}
+
 pub fn rect_contains(rect: [f32; 4], x: f32, y: f32) -> bool {
     x >= rect[0] && x <= rect[0] + rect[2] && y >= rect[1] && y <= rect[1] + rect[3]
 }
@@ -65,6 +79,79 @@ pub fn scroll_diff_at(
     }
     *offset = next;
     Some(true)
+}
+
+pub fn register_markdown_horizontal_scrollbar(
+    scrollbars: &mut Vec<MarkdownHorizontalScrollbar>,
+    key: String,
+    track: [f32; 4],
+    thumb: [f32; 4],
+    max_scroll: f32,
+) {
+    if !key.is_empty()
+        && max_scroll > 1.0
+        && track[2] > 1.0
+        && track[3] > 1.0
+        && thumb[2] > 0.0
+    {
+        scrollbars.push((key, track, thumb, max_scroll));
+    }
+}
+
+fn horizontal_scrollbar_offset_for_pointer(
+    drag: &MarkdownHorizontalScrollbarDrag,
+    pointer_x: f32,
+) -> f32 {
+    let travel = (drag.track_width - drag.thumb_width).max(0.0);
+    if travel <= f32::EPSILON {
+        return 0.0;
+    }
+    let thumb_x = (pointer_x - drag.track_x - drag.grab_offset_x).clamp(0.0, travel);
+    thumb_x / travel * drag.max_scroll
+}
+
+/// Start dragging a Markdown scrollbar. Clicking the rail outside the thumb
+/// performs the familiar jump-to-position and then keeps the thumb grabbed.
+pub fn begin_markdown_horizontal_scrollbar_drag(
+    scrollbars: &[MarkdownHorizontalScrollbar],
+    offsets: &mut HashMap<String, f32>,
+    x: f32,
+    y: f32,
+) -> Option<MarkdownHorizontalScrollbarDrag> {
+    let (key, track, thumb, max_scroll) = scrollbars
+        .iter()
+        .rev()
+        .find(|(_, track, _, _)| rect_contains(*track, x, y))?;
+    let grab_offset_x = if rect_contains(*thumb, x, y) {
+        (x - thumb[0]).clamp(0.0, thumb[2])
+    } else {
+        thumb[2] * 0.5
+    };
+    let drag = MarkdownHorizontalScrollbarDrag {
+        key: key.clone(),
+        track_x: track[0],
+        track_width: track[2],
+        thumb_width: thumb[2],
+        grab_offset_x,
+        max_scroll: *max_scroll,
+    };
+    let next = horizontal_scrollbar_offset_for_pointer(&drag, x);
+    offsets.insert(key.clone(), next);
+    Some(drag)
+}
+
+pub fn drag_markdown_horizontal_scrollbar(
+    drag: &MarkdownHorizontalScrollbarDrag,
+    offsets: &mut HashMap<String, f32>,
+    pointer_x: f32,
+) -> bool {
+    let next = horizontal_scrollbar_offset_for_pointer(drag, pointer_x);
+    let offset = offsets.entry(drag.key.clone()).or_insert(0.0);
+    if (next - *offset).abs() < f32::EPSILON {
+        return false;
+    }
+    *offset = next;
+    true
 }
 
 pub fn update_hover_target(current: &mut Option<String>, next: Option<String>) -> bool {
@@ -133,6 +220,46 @@ mod tests {
             scroll_diff_at(&rects, &mut offsets, 100.0, 100.0, 1.0),
             None
         );
+    }
+
+    #[test]
+    fn markdown_scrollbar_thumb_and_track_are_draggable() {
+        let scrollbars = vec![(
+            "table".to_string(),
+            [20.0, 100.0, 300.0, 16.0],
+            [20.0, 100.0, 100.0, 16.0],
+            200.0,
+        )];
+        let mut offsets = HashMap::new();
+
+        let drag = begin_markdown_horizontal_scrollbar_drag(
+            &scrollbars,
+            &mut offsets,
+            50.0,
+            108.0,
+        )
+        .expect("thumb hit should begin a drag");
+        assert_eq!(offsets.get("table"), Some(&0.0));
+        assert!(drag_markdown_horizontal_scrollbar(
+            &drag,
+            &mut offsets,
+            150.0
+        ));
+        assert_eq!(offsets.get("table"), Some(&100.0));
+
+        let track_drag = begin_markdown_horizontal_scrollbar_drag(
+            &scrollbars,
+            &mut offsets,
+            300.0,
+            108.0,
+        )
+        .expect("track hit should jump and begin a drag");
+        assert_eq!(offsets.get("table"), Some(&200.0));
+        assert!(!drag_markdown_horizontal_scrollbar(
+            &track_drag,
+            &mut offsets,
+            400.0
+        ));
     }
 
     #[test]

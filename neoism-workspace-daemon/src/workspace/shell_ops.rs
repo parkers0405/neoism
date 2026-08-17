@@ -6,9 +6,9 @@ use super::*;
 
 /// Resolve the notes vault a note created from `root` should land in,
 /// mirroring the desktop's `notes_workspace_for_root_or_default`: an
-/// explicitly linked project vault wins, then a directory-local
-/// workspace config, and otherwise the global Default vault
-/// (`~/Neoism/Vaults/Default`). Never initializes `root` itself.
+/// explicitly linked project scope wins, then a directory-local workspace
+/// config, and otherwise the user's designated default vault. Never
+/// initializes `root` itself.
 fn notes_workspace_for_root(
     root: &Path,
 ) -> neoism_workspace_index::config::NeoismWorkspace {

@@ -94,11 +94,12 @@ pub struct WorkspaceSummary {
     pub main_session_id: Option<String>,
     #[serde(default)]
     pub root_dir: Option<PathBuf>,
-    /// The single notes vault the host has LINKED to this workspace's
+    /// The single notes scope the host has LINKED to this workspace's
     /// code dir (`linked_project_for_code_dir(root_dir)` resolved on the
     /// host, where the vaults physically live). `Some` is the exact,
-    /// scoped vault directory — e.g. `~/Neoism/Vaults/MyProject`, never
-    /// the `Neoism/Vaults` parent — that a guest lists notes from over
+    /// scoped directory — e.g. `~/Neoism/Vaults/Personal/Projects/MyProject`
+    /// (or the vault root for a whole-vault link), never the `Neoism/Vaults`
+    /// parent — that a guest lists notes from over
     /// the daemon files plane. `None` when the host linked no vault; the
     /// guest then shows the "no linked vault" empty state instead of
     /// falling back to the host's other vaults. Advertised by the daemon

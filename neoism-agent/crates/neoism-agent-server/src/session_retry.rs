@@ -86,6 +86,13 @@ pub(crate) fn retryable_error(error: &anyhow::Error) -> bool {
                     || error.is_connect()
                     || error.is_request()
                     || error.is_body()
+                    // Reqwest classifies failures while decoding a response
+                    // body separately from raw body I/O. A network change can
+                    // truncate an encoded streaming response and surface as
+                    // `Kind::Decode` ("error decoding response body"). Treat
+                    // that like the other transient transport failures so the
+                    // provider step is reset and safely re-streamed.
+                    || error.is_decode()
             })
     })
 }
@@ -189,6 +196,39 @@ mod tests {
             inner.context("failed to send OpenAI OAuth Responses streaming request");
 
         assert!(retryable_error(&error));
+    }
+
+    #[tokio::test]
+    async fn retryable_error_accepts_reqwest_response_decode_failures() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let address = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept test request");
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.expect("read test request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1\r\nconnection: close\r\n\r\n{",
+                )
+                .await
+                .expect("write malformed JSON response");
+        });
+
+        let response = reqwest::get(format!("http://{address}"))
+            .await
+            .expect("receive test response");
+        let decode_error = response
+            .json::<serde_json::Value>()
+            .await
+            .expect_err("malformed JSON must fail response decoding");
+        assert!(decode_error.is_decode());
+        assert!(retryable_error(&anyhow::Error::new(decode_error)));
+
+        server.await.expect("test HTTP server task");
     }
 
     #[test]

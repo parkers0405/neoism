@@ -109,7 +109,9 @@ impl Screen<'_> {
                 | Key::Named(NamedKey::Enter) => {}
                 _ => return false,
             }
-        } else if self.renderer.context_menu.is_markdown_link_completion() {
+        } else if self.renderer.context_menu.is_markdown_link_completion()
+            || self.renderer.context_menu.is_markdown_spelling()
+        {
             match &key.logical_key {
                 Key::Named(NamedKey::Escape)
                 | Key::Named(NamedKey::ArrowDown)
@@ -223,10 +225,32 @@ impl Screen<'_> {
                 line,
                 start,
                 end,
+                expected,
                 replacement,
             } => {
-                self.apply_markdown_spelling_replacement(line, start, end, &replacement);
+                self.apply_markdown_spelling_replacement(
+                    line,
+                    start,
+                    end,
+                    &expected,
+                    &replacement,
+                );
             }
+            neoism_ui::panels::context_menu::ContextMenuAction::MarkdownSpellingIgnore(word) => {
+                neoism_ui::editor::markdown::ignore_spelling_word(&word);
+            }
+            neoism_ui::panels::context_menu::ContextMenuAction::MarkdownSpellingAddToDictionary(
+                word,
+            ) => match neoism_ui::editor::markdown::add_spelling_word_to_dictionary(&word) {
+                Ok(_) => self.renderer.notifications.push(
+                    format!("Added `{word}` to the global dictionary"),
+                    neoism_ui::panels::notifications::NotificationLevel::Info,
+                ),
+                Err(error) => self.renderer.notifications.push(
+                    format!("Could not update dictionary: {error}"),
+                    neoism_ui::panels::notifications::NotificationLevel::Error,
+                ),
+            },
         }
     }
 

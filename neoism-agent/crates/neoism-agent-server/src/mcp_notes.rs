@@ -140,17 +140,10 @@ fn workspaces_for_scope(
 fn all_vault_workspaces(
 ) -> anyhow::Result<Vec<neoism_workspace_index::config::NeoismWorkspace>> {
     let mut workspaces = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(neoism_workspace_index::notes_vaults_dir()) {
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            workspaces.push(neoism_workspace_index::config::vault_notes_workspace(name));
-        }
+    for vault in neoism_workspace_index::existing_notes_vaults()? {
+        workspaces.push(neoism_workspace_index::config::vault_notes_workspace(
+            &vault.name,
+        ));
     }
     if workspaces.is_empty() {
         workspaces.push(neoism_workspace_index::default_notes_workspace());

@@ -207,8 +207,37 @@ pub fn apply_task_message_status(
     *status_field = normalized.to_string();
     rewrite_task_status_marker(text, normalized);
     rewrite_task_status_marker(detail, normalized);
+    rewrite_stale_task_running_explanation(text, normalized);
+    rewrite_stale_task_running_explanation(detail, normalized);
 
     *status_field != before_status || *text != before_text || *detail != before_detail
+}
+
+fn rewrite_stale_task_running_explanation(field: &mut String, normalized: &str) {
+    if !matches!(normalized, "completed" | "error") {
+        return;
+    }
+
+    let Some(start) = field
+        .lines()
+        .scan(0usize, |offset, line| {
+            let line_start = *offset;
+            *offset += line.len() + 1;
+            Some((line_start, line))
+        })
+        .find_map(|(line_start, line)| {
+            let lower = line.to_ascii_lowercase();
+            (lower.contains("subagent is running")
+                || lower.contains("subagent is still running"))
+            .then_some(line_start)
+        })
+    else {
+        return;
+    };
+
+    field.truncate(start);
+    *field = field.trim_end().to_string();
+    field.push_str("\n\nThe subagent is no longer running.");
 }
 
 fn rewrite_task_status_marker(field: &mut String, normalized: &str) {
@@ -380,7 +409,7 @@ mod tests {
     #[test]
     fn task_status_policy_rewrites_known_status_markers() {
         let mut status = "running".to_string();
-        let mut text = "task_id: child-1\nstatus: running".to_string();
+        let mut text = "task_id: child-1\nstatus: running\n\nThe subagent is running in the background and the user can still message the main session.".to_string();
         let mut detail = "status: stopped\nother".to_string();
 
         assert!(apply_task_message_status(
@@ -392,6 +421,8 @@ mod tests {
 
         assert_eq!(status, "completed");
         assert!(text.contains("status: completed"));
+        assert!(!text.contains("running in the background"));
+        assert!(text.contains("The subagent is no longer running."));
         assert!(detail.contains("status: completed"));
     }
 }

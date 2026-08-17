@@ -2,25 +2,34 @@ use super::*;
 
 impl NeoismAgentPane {
     pub fn drain_server_updates(&mut self) -> bool {
+        self.drain_server_updates_inner(true)
+    }
+
+    pub fn drain_live_session_updates(&mut self) -> bool {
+        self.drain_server_updates_inner(false)
+    }
+
+    fn drain_server_updates_inner(&mut self, include_outbound: bool) -> bool {
+        const MAX_STREAM_UPDATES_PER_FRAME: usize = 512;
         let started = crate::neoism::agent::perf::now();
         let messages_before = self.messages.len();
         let mut drained_updates = 0usize;
         let mut delta_updates = 0usize;
         let mut delta_bytes = 0usize;
-        let mut changed = self.drain_outbound_commands();
+        let mut changed = include_outbound && self.drain_outbound_commands();
         changed |= self.drain_background_updates();
         let Some(event_stream) = self.event_stream.as_mut() else {
             return changed;
         };
         let stream_session_id = event_stream.session_id().to_string();
-        let updates = event_stream.drain();
+        let (updates, stream_has_more) = event_stream.drain(MAX_STREAM_UPDATES_PER_FRAME);
         let stream_is_active =
             self.session_id.as_deref() == Some(stream_session_id.as_str());
         for update in updates {
             drained_updates += 1;
             match update {
                 AgentSessionUpdate::Messages {
-                    messages,
+                    mut messages,
                     oldest_cursor,
                 } => {
                     if !stream_is_active {
@@ -28,12 +37,17 @@ impl NeoismAgentPane {
                             .session_cache
                             .entry(stream_session_id.clone())
                             .or_insert_with(CachedAgentSession::live_only);
-                        cached.messages = merge_session_snapshot(
-                            messages,
-                            std::mem::take(&mut cached.messages),
+                        let mut live = std::mem::take(&mut cached.messages);
+                        reconcile_cached_pending_user_prompts(
+                            &mut messages,
+                            &mut live,
+                            &mut cached.pending_user_prompts,
+                            &cached.prompt_echo_aliases,
                         );
+                        cached.messages = merge_session_snapshot(messages, live);
                         cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
                         cached.hydrated = true;
+                        cached.invalidate_timeline_layout();
                         changed = true;
                         continue;
                     }
@@ -123,7 +137,53 @@ impl NeoismAgentPane {
                     // lets us finish the turn without treating ordinary
                     // history refreshes as completion.
                 }
+                AgentSessionUpdate::ChildMessages {
+                    session_id,
+                    mut messages,
+                    oldest_cursor,
+                } => {
+                    if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        messages = self.compact_inbound_user_texts(messages);
+                        messages = self.merge_pending_user_prompts(messages);
+                        messages = self.preserve_streamed_response_text(messages);
+                        self.messages = merge_session_snapshot(
+                            messages,
+                            std::mem::take(&mut self.messages),
+                        );
+                        if self.timeline_history.oldest_loaded_cursor.is_none() {
+                            self.timeline_history.oldest_loaded_cursor = oldest_cursor;
+                        }
+                        self.rebase_current_turn_trace();
+                        self.invalidate_timeline_layout();
+                    } else {
+                        let cached = self
+                            .session_cache
+                            .entry(session_id)
+                            .or_insert_with(CachedAgentSession::live_only);
+                        let mut live = std::mem::take(&mut cached.messages);
+                        reconcile_cached_pending_user_prompts(
+                            &mut messages,
+                            &mut live,
+                            &mut cached.pending_user_prompts,
+                            &cached.prompt_echo_aliases,
+                        );
+                        cached.messages = merge_session_snapshot(messages, live);
+                        cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
+                        cached.hydrated = true;
+                        cached.invalidate_timeline_layout();
+                    }
+                    changed = true;
+                }
+                AgentSessionUpdate::EventStreamReconnected => {
+                    // OpenCode-style recovery: lifecycle is event-driven
+                    // during a healthy stream. A reconnect edge requests one
+                    // tree/status snapshot to cover anything missed while the
+                    // transport was down; it does not start a timer loop.
+                    self.side_panel.mark_subagent_tree_dirty();
+                    changed = true;
+                }
                 AgentSessionUpdate::SessionIdle => {
+                    self.note_session_runtime_event(&stream_session_id);
                     if stream_is_active {
                         let had_root_activity = self.streaming_state
                             != NeoismAgentStreamingState::Idle
@@ -133,6 +193,12 @@ impl NeoismAgentPane {
                         self.note_streaming(NeoismAgentStreamingState::Idle, None);
                         self.abort_requested_at = None;
                         changed |= had_root_activity;
+                    } else if let Some(cached) =
+                        self.session_cache.get_mut(&stream_session_id)
+                    {
+                        cached
+                            .runtime
+                            .note_streaming(NeoismAgentStreamingState::Idle, None);
                     }
                 }
                 AgentSessionUpdate::System { title, body } => {
@@ -140,7 +206,18 @@ impl NeoismAgentPane {
                     changed = true;
                 }
                 AgentSessionUpdate::Retrying { attempt, message } => {
+                    self.note_session_runtime_event(&stream_session_id);
                     if !stream_is_active {
+                        let cached = self
+                            .session_cache
+                            .entry(stream_session_id.clone())
+                            .or_insert_with(CachedAgentSession::live_only);
+                        let _ = attempt;
+                        cached.runtime.note_streaming(
+                            NeoismAgentStreamingState::Retrying,
+                            message.filter(|message| !message.is_empty()),
+                        );
+                        changed = true;
                         continue;
                     }
                     // Recoverable provider error: the server is backing off and
@@ -157,7 +234,14 @@ impl NeoismAgentPane {
                     preview,
                     started_at,
                 } => {
+                    self.note_session_runtime_event(&stream_session_id);
                     if !stream_is_active {
+                        self.session_cache
+                            .entry(stream_session_id.clone())
+                            .or_insert_with(CachedAgentSession::live_only)
+                            .runtime
+                            .apply_queue_status(count, preview, started_at);
+                        changed = true;
                         continue;
                     }
                     let decision = status_policy::queue_status_decision(
@@ -187,8 +271,25 @@ impl NeoismAgentPane {
                     }
                 }
                 AgentSessionUpdate::DequeuedPrompt { text } => {
+                    self.note_session_runtime_event(&stream_session_id);
                     if stream_is_active {
                         changed |= self.insert_dequeued_user_prompt(text);
+                    } else {
+                        let cached = self
+                            .session_cache
+                            .entry(stream_session_id.clone())
+                            .or_insert_with(CachedAgentSession::live_only);
+                        cached.runtime.consume_dequeued_prompt(&text);
+                        if !text.trim().is_empty()
+                            && !cached.messages.iter().any(|message| {
+                                message.kind == NeoismAgentMessageKind::User
+                                    && message.text.trim() == text.trim()
+                            })
+                        {
+                            cached.messages.push(NeoismAgentMessage::user(text));
+                            cached.invalidate_timeline_layout();
+                        }
+                        changed = true;
                     }
                 }
                 AgentSessionUpdate::SubagentStatus {
@@ -198,6 +299,11 @@ impl NeoismAgentPane {
                     title,
                     agent,
                 } => {
+                    // This lifecycle event is newer than any tree/status
+                    // snapshot already in flight. Do not let that older snapshot
+                    // overwrite the live child and make the sidebar/footer
+                    // disappear for a frame.
+                    self.side_panel.invalidate_inflight_subagent_refresh();
                     let refresh_completed = matches!(
                         branch_status_from_runtime(&status),
                         BranchStatus::Completed | BranchStatus::Stopped
@@ -205,6 +311,11 @@ impl NeoismAgentPane {
                     self.ensure_session_preloaded(session_id.clone(), refresh_completed);
                     self.upsert_live_subagent_entry(&session_id, title, agent);
                     let branch_status = branch_status_from_runtime(&status);
+                    self.note_session_branch_runtime(
+                        &session_id,
+                        branch_status,
+                        started_at,
+                    );
                     self.note_subagent_runtime(
                         session_id.clone(),
                         branch_status,
@@ -222,12 +333,31 @@ impl NeoismAgentPane {
                     self.sync_subagent_waiting_clock();
                     changed = true;
                 }
+                AgentSessionUpdate::SubagentMetadata {
+                    session_id,
+                    title,
+                    agent,
+                } => {
+                    // Metadata is not a lifecycle edge. Update a row that is
+                    // already tracked, but never recreate a pruned completed
+                    // child or alter the aggregate working state.
+                    let tracked = self
+                        .side_panel
+                        .subagents()
+                        .iter()
+                        .any(|entry| entry.id == session_id);
+                    if tracked {
+                        self.upsert_live_subagent_entry(&session_id, title, agent);
+                        changed = true;
+                    }
+                }
                 AgentSessionUpdate::SubagentActivity {
                     session_id,
                     status,
                     current_tool,
                     started_at,
                 } => {
+                    self.side_panel.invalidate_inflight_subagent_refresh();
                     let branch_status = branch_status_from_runtime(&status);
                     // Part-level activity is subordinate to the child's
                     // authoritative lifecycle: a straggler "responding"
@@ -240,6 +370,13 @@ impl NeoismAgentPane {
                         current_tool,
                         started_at,
                     );
+                    if applied {
+                        self.note_session_branch_runtime(
+                            &session_id,
+                            branch_status,
+                            started_at,
+                        );
+                    }
                     if applied
                         && matches!(
                             branch_status,
@@ -256,6 +393,7 @@ impl NeoismAgentPane {
                     job_id,
                     status,
                 } => {
+                    self.note_session_runtime_event(&session_id);
                     let text = format!(
                         "job_id: {job_id}\nstatus: {status}\nbackground shell task finished"
                     );
@@ -278,6 +416,12 @@ impl NeoismAgentPane {
                             .entry(session_id)
                             .or_insert_with(CachedAgentSession::live_only);
                         upsert_cached_part_message(&mut cached.messages, message);
+                        cached.runtime.running_background_task_count =
+                            running_background_task_count(&cached.messages);
+                        if cached.runtime.running_background_task_count == 0 {
+                            cached.runtime.background_tasks_started_at = None;
+                        }
+                        cached.invalidate_timeline_layout();
                     }
                     changed = true;
                 }
@@ -287,10 +431,12 @@ impl NeoismAgentPane {
                     title,
                     agent,
                 } => {
+                    self.side_panel.invalidate_inflight_subagent_refresh();
                     if !task_id.is_empty() {
                         self.ensure_session_preloaded(task_id.clone(), true);
                         self.upsert_live_subagent_entry(&task_id, title, agent);
                         let branch_status = branch_status_from_runtime(&status);
+                        self.note_session_branch_runtime(&task_id, branch_status, None);
                         self.note_subagent_runtime(task_id.clone(), branch_status, None);
                         self.reconcile_viewed_subagent_runtime(&task_id, branch_status);
                         self.set_task_message_status(&task_id, status.as_str());
@@ -329,6 +475,8 @@ impl NeoismAgentPane {
                     }
                 }
                 AgentSessionUpdate::GoalUpdated { goal, version } => {
+                    self.session_goal_cache
+                        .insert(stream_session_id.clone(), (goal.clone(), version));
                     if !stream_is_active {
                         continue;
                     }
@@ -349,6 +497,7 @@ impl NeoismAgentPane {
                 } => {
                     delta_updates += 1;
                     delta_bytes += delta.len();
+                    self.note_session_runtime_event(&stream_session_id);
                     self.remember_live_part_parent(
                         part_id.as_deref().unwrap_or_default(),
                         message_id.as_deref(),
@@ -380,6 +529,8 @@ impl NeoismAgentPane {
                                 reasoning_part_id,
                             );
                         }
+                        cached.runtime.refresh_streaming_from_tail(&cached.messages);
+                        cached.invalidate_timeline_layout();
                     }
                     changed = true;
                 }
@@ -387,6 +538,7 @@ impl NeoismAgentPane {
                     message,
                     parent_message_id,
                 } => {
+                    self.note_session_runtime_event(&stream_session_id);
                     let part_id = message.id.clone();
                     let is_reasoning = message.kind == NeoismAgentMessageKind::Reasoning;
                     if stream_is_active {
@@ -417,6 +569,8 @@ impl NeoismAgentPane {
                                 &part_id,
                             );
                         }
+                        cached.runtime.refresh_streaming_from_tail(&cached.messages);
+                        cached.invalidate_timeline_layout();
                     }
                     changed = true;
                 }
@@ -427,6 +581,7 @@ impl NeoismAgentPane {
                         self.session_cache.get_mut(&stream_session_id)
                     {
                         cached.messages.retain(|message| message.id != part_id);
+                        cached.invalidate_timeline_layout();
                     }
                     self.live_part_parent_ids.remove(&part_id);
                     changed = true;
@@ -440,6 +595,9 @@ impl NeoismAgentPane {
                 } => {
                     delta_updates += 1;
                     delta_bytes += delta.len();
+                    self.note_session_runtime_event(&session_id);
+                    let can_drive_streaming =
+                        self.child_part_can_drive_streaming(&session_id);
                     self.remember_live_part_parent(
                         part_id.as_deref().unwrap_or_default(),
                         message_id.as_deref(),
@@ -449,8 +607,6 @@ impl NeoismAgentPane {
                             .then(|| part_id.clone())
                             .flatten();
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
-                        let can_drive_streaming =
-                            self.child_part_can_drive_streaming(&session_id);
                         self.apply_part_delta(message_id, part_id, kind, &delta);
                         if can_drive_streaming && !self.suppress_streaming_after_abort() {
                             self.refresh_streaming_from_tail();
@@ -473,6 +629,10 @@ impl NeoismAgentPane {
                                 reasoning_part_id,
                             );
                         }
+                        if can_drive_streaming {
+                            cached.runtime.refresh_streaming_from_tail(&cached.messages);
+                        }
+                        cached.invalidate_timeline_layout();
                     }
                     changed = true;
                 }
@@ -481,6 +641,9 @@ impl NeoismAgentPane {
                     message,
                     parent_message_id,
                 } => {
+                    self.note_session_runtime_event(&session_id);
+                    let can_drive_streaming =
+                        self.child_part_can_drive_streaming(&session_id);
                     let part_id = message.id.clone();
                     let is_reasoning = message.kind == NeoismAgentMessageKind::Reasoning;
                     self.remember_live_part_parent(
@@ -488,8 +651,6 @@ impl NeoismAgentPane {
                         parent_message_id.as_deref(),
                     );
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
-                        let can_drive_streaming =
-                            self.child_part_can_drive_streaming(&session_id);
                         let kind = message.kind;
                         let title = message.title.clone();
                         self.upsert_part_message(message);
@@ -509,6 +670,10 @@ impl NeoismAgentPane {
                                 &part_id,
                             );
                         }
+                        if can_drive_streaming {
+                            cached.runtime.refresh_streaming_from_tail(&cached.messages);
+                        }
+                        cached.invalidate_timeline_layout();
                     }
                     changed = true;
                 }
@@ -520,27 +685,53 @@ impl NeoismAgentPane {
                         self.remove_part_message(&part_id);
                     } else if let Some(cached) = self.session_cache.get_mut(&session_id) {
                         cached.messages.retain(|message| message.id != part_id);
+                        cached.invalidate_timeline_layout();
                     }
                     self.live_part_parent_ids.remove(&part_id);
                     changed = true;
                 }
-                AgentSessionUpdate::CompactionStarted { id, reason } => {
-                    if !stream_is_active {
+                AgentSessionUpdate::CompactionStarted {
+                    session_id,
+                    id,
+                    reason,
+                } => {
+                    self.note_session_runtime_event(&session_id);
+                    if self.session_id.as_deref() != Some(session_id.as_str()) {
+                        let _ = (id, reason);
+                        self.session_cache
+                            .entry(session_id)
+                            .or_insert_with(CachedAgentSession::live_only)
+                            .runtime
+                            .note_streaming(NeoismAgentStreamingState::Compacting, None);
+                        changed = true;
                         continue;
                     }
                     self.start_compaction_message(id, reason);
                     self.note_streaming(NeoismAgentStreamingState::Compacting, None);
                     changed = true;
                 }
-                AgentSessionUpdate::CompactionDelta { delta } => {
-                    if !stream_is_active {
+                AgentSessionUpdate::CompactionDelta { session_id, delta } => {
+                    if self.session_id.as_deref() != Some(session_id.as_str()) {
+                        let _ = delta;
                         continue;
                     }
                     self.apply_compaction_delta(&delta);
                     changed = true;
                 }
-                AgentSessionUpdate::CompactionEnded { summary, kind } => {
-                    if !stream_is_active {
+                AgentSessionUpdate::CompactionEnded {
+                    session_id,
+                    summary,
+                    kind,
+                } => {
+                    self.note_session_runtime_event(&session_id);
+                    if self.session_id.as_deref() != Some(session_id.as_str()) {
+                        let _ = (summary, kind);
+                        self.session_cache
+                            .entry(session_id)
+                            .or_insert_with(CachedAgentSession::live_only)
+                            .runtime
+                            .note_streaming(NeoismAgentStreamingState::Idle, None);
+                        changed = true;
                         continue;
                     }
                     self.finish_compaction_message(&summary, &kind);
@@ -571,7 +762,8 @@ impl NeoismAgentPane {
                 "agent event stream drained"
             );
         }
-        changed
+        self.trim_session_cache();
+        changed || stream_has_more
     }
 
     pub(crate) fn drain_outbound_commands(&mut self) -> bool {
@@ -920,8 +1112,14 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn drain_background_updates(&mut self) -> bool {
+        const MAX_BACKGROUND_UPDATES_PER_FRAME: usize = 64;
         let mut changed = false;
+        let mut remaining = MAX_BACKGROUND_UPDATES_PER_FRAME;
         loop {
+            if remaining == 0 {
+                return true;
+            }
+            remaining -= 1;
             match self.background_rx.try_recv() {
                 Ok(NeoismAgentBackgroundUpdate::PromptDispatched {
                     origin_session_id,
@@ -959,6 +1157,23 @@ impl NeoismAgentPane {
                         if let Some(echo) = transcript_echo {
                             self.remember_pending_user_prompt(&echo);
                         }
+                    } else {
+                        let cache_session_id = origin_session_id
+                            .clone()
+                            .unwrap_or_else(|| session_id.clone());
+                        let cached = self
+                            .session_cache
+                            .entry(cache_session_id)
+                            .or_insert_with(CachedAgentSession::live_only);
+                        if origin_session_id.is_none() {
+                            cached.state.parent_id = None;
+                        }
+                        if let Some(echo) = transcript_echo {
+                            cached.pending_user_prompts.push(echo);
+                        }
+                        cached
+                            .runtime
+                            .note_streaming(NeoismAgentStreamingState::Generating, None);
                     }
                     self.start_next_prompt_dispatch();
                     changed = true;
@@ -974,6 +1189,18 @@ impl NeoismAgentPane {
                             || self.prompt_draft_id == origin_draft_id);
                     if is_active_origin {
                         self.system_message("Prompt failed", error);
+                    } else if let Some(origin_session_id) = origin_session_id.as_ref() {
+                        let cached = self
+                            .session_cache
+                            .entry(origin_session_id.clone())
+                            .or_insert_with(CachedAgentSession::live_only);
+                        cached
+                            .runtime
+                            .note_streaming(NeoismAgentStreamingState::Idle, None);
+                        cached
+                            .messages
+                            .push(NeoismAgentMessage::system("Prompt failed", error));
+                        cached.invalidate_timeline_layout();
                     }
                     self.start_next_prompt_dispatch();
                     if is_active_origin && !self.prompt_dispatch_in_flight {
@@ -1042,7 +1269,9 @@ impl NeoismAgentPane {
                     }
                     let Ok(subagents) = result else {
                         // Preserve the last good sidebar snapshot and active
-                        // count. The normal cadence will retry this refresh.
+                        // count. Avoid a request on every render frame; the
+                        // next lifecycle/session/reconnect edge will retry.
+                        self.side_panel.settle_failed_subagent_refresh();
                         continue;
                     };
                     let root_id = subagents.first().map(|root| root.id.clone());
@@ -1055,6 +1284,9 @@ impl NeoismAgentPane {
                         .map(|entry| entry.id.clone())
                         .collect::<Vec<_>>();
                     self.side_panel.set_subagents(subagents);
+                    if let Some(stream) = self.event_stream.as_ref() {
+                        stream.track_child_sessions(preload_ids.iter().cloned());
+                    }
                     // A restored/nested child may initially be subscribed to
                     // itself or its immediate parent. Once the tree lookup
                     // resolves the actual root, move the one global stream to
@@ -1102,6 +1334,8 @@ impl NeoismAgentPane {
                         // millis; `None` (no goal found) is unversioned (0) so
                         // it can't clear a goal a live event just set.
                         let version = goal.as_ref().map(|goal| goal.updated).unwrap_or(0);
+                        self.session_goal_cache
+                            .insert(session_id.clone(), (goal.clone(), version));
                         self.side_panel.set_session_goal(goal, version);
                         changed = true;
                     }
@@ -1109,54 +1343,65 @@ impl NeoismAgentPane {
                 Ok(NeoismAgentBackgroundUpdate::SessionPreloaded {
                     session_id,
                     state,
-                    messages,
+                    mut messages,
                     oldest_cursor,
                 }) => {
                     self.session_preloads_in_flight.remove(&session_id);
+                    let force_again =
+                        self.session_preloads_force_pending.remove(&session_id);
                     let active = self.session_id.as_deref() == Some(session_id.as_str());
-                    let cached = self.session_cache.remove(&session_id);
-                    let cached_live = cached
-                        .as_ref()
-                        .map(|cached| cached.messages.clone())
-                        .unwrap_or_default();
+                    let mut cached = self
+                        .session_cache
+                        .remove(&session_id)
+                        .unwrap_or_else(CachedAgentSession::live_only);
+                    let mut cached_live = std::mem::take(&mut cached.messages);
+                    reconcile_cached_pending_user_prompts(
+                        &mut messages,
+                        &mut cached_live,
+                        &mut cached.pending_user_prompts,
+                        &cached.prompt_echo_aliases,
+                    );
+                    if active {
+                        messages = self.compact_inbound_user_texts(messages);
+                        messages = self.merge_pending_user_prompts(messages);
+                        messages = self.preserve_streamed_response_text(messages);
+                    }
                     let live = if active {
-                        merge_session_snapshot(self.messages.clone(), cached_live)
+                        let active_messages = std::mem::take(&mut self.messages);
+                        if cached_live.is_empty() {
+                            active_messages
+                        } else {
+                            merge_session_snapshot(active_messages, cached_live)
+                        }
                     } else {
                         cached_live
                     };
                     let merged = merge_session_snapshot(messages, live);
-                    let mut timeline_history = cached
-                        .as_ref()
-                        .map(|cached| cached.timeline_history.clone())
-                        .unwrap_or_default();
+                    let mut timeline_history =
+                        std::mem::take(&mut cached.timeline_history);
                     timeline_history.oldest_loaded_cursor = oldest_cursor;
-                    self.session_cache.insert(
-                        session_id.clone(),
-                        CachedAgentSession {
-                            state,
-                            messages: merged.clone(),
-                            timeline_history: timeline_history.clone(),
-                            timeline_scroll_px: cached
-                                .as_ref()
-                                .map(|cached| cached.timeline_scroll_px)
-                                .unwrap_or_default(),
-                            timeline_follow_bottom: cached
-                                .as_ref()
-                                .map(|cached| cached.timeline_follow_bottom)
-                                .unwrap_or(true),
-                            hydrated: true,
-                        },
-                    );
                     if active {
                         self.messages = merged;
                         self.timeline_history = timeline_history;
                         self.rebase_current_turn_trace();
                         self.invalidate_timeline_layout();
+                    } else {
+                        cached.state = state;
+                        cached.messages = merged;
+                        cached.timeline_history = timeline_history;
+                        cached.hydrated = true;
+                        cached.invalidate_timeline_layout();
+                        self.session_cache.insert(session_id.clone(), cached);
+                        self.trim_session_cache();
                     }
                     if self.pending_session_switch.as_deref() == Some(session_id.as_str())
                     {
                         self.activate_cached_session(&session_id);
                     }
+                    if force_again {
+                        self.ensure_session_preloaded(session_id, true);
+                    }
+                    self.start_queued_session_preloads();
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::SessionPreloadFailed {
@@ -1164,10 +1409,36 @@ impl NeoismAgentPane {
                     error,
                 }) => {
                     self.session_preloads_in_flight.remove(&session_id);
+                    self.session_preloads_force_pending.remove(&session_id);
                     if self.pending_session_switch.as_deref() == Some(session_id.as_str())
                     {
                         self.pending_session_switch = None;
                         self.system_message("Session", error);
+                        changed = true;
+                    }
+                    self.start_queued_session_preloads();
+                }
+                Ok(NeoismAgentBackgroundUpdate::SessionRuntimeStatusRefreshed {
+                    session_id,
+                    request_generation,
+                    runtime_revision,
+                    result,
+                }) => {
+                    let is_latest = self
+                        .runtime_status_requests
+                        .get(&session_id)
+                        .is_some_and(|generation| *generation == request_generation);
+                    if is_latest {
+                        self.runtime_status_requests.remove(&session_id);
+                    }
+                    if !is_latest
+                        || self.session_id.as_deref() != Some(session_id.as_str())
+                        || self.session_runtime_revision(&session_id) != runtime_revision
+                    {
+                        continue;
+                    }
+                    if let Ok(statuses) = result {
+                        self.apply_runtime_status_for_session(&session_id, &statuses);
                         changed = true;
                     }
                 }
@@ -1407,6 +1678,13 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn start_session_updates(&mut self, session_id: &str) {
+        let known_child_session_ids = self
+            .side_panel
+            .subagents()
+            .iter()
+            .map(|entry| entry.id.clone())
+            .filter(|child_id| child_id != session_id)
+            .collect::<Vec<_>>();
         let previous_session_id = self
             .event_stream
             .as_ref()
@@ -1414,6 +1692,9 @@ impl NeoismAgentPane {
         if self.event_stream.as_ref().is_some_and(|stream| {
             stream.session_id() == session_id && !stream.is_disconnected()
         }) {
+            if let Some(stream) = self.event_stream.as_ref() {
+                stream.track_child_sessions(known_child_session_ids);
+            }
             if crate::neoism::agent::perf::enabled() {
                 tracing::info!(
                     target: "neoism::agent_ui_perf",
@@ -1424,10 +1705,10 @@ impl NeoismAgentPane {
             }
             return;
         }
-        self.event_stream = Some(start_session_event_stream(
-            self.server.clone(),
-            session_id.to_string(),
-        ));
+        let event_stream =
+            start_session_event_stream(self.server.clone(), session_id.to_string());
+        event_stream.track_child_sessions(known_child_session_ids);
+        self.event_stream = Some(event_stream);
         if crate::neoism::agent::perf::enabled() {
             tracing::info!(
                 target: "neoism::agent_ui_perf",
@@ -1538,20 +1819,105 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn reset_session_runtime_ui(&mut self) {
-        self.queued_prompt_count = 0;
-        self.queued_prompt_preview = None;
-        self.streaming_state = NeoismAgentStreamingState::Idle;
-        self.streaming_started_at = None;
-        self.streaming_state_changed_at = None;
-        self.streaming_tool_label = None;
-        self.subagent_waiting_started_at = None;
-        self.active_subagent_ids.clear();
-        self.active_subagent_started_at.clear();
+        self.restore_session_runtime_ui(CachedAgentRuntime::default());
         self.pending_permission = None;
         self.pending_permission_queue.clear();
+        self.pending_question = None;
+        self.pending_question_queue.clear();
         self.permission_choice_hit_rects.clear();
         self.timeline_live_trace_start = None;
         self.timeline_live_trace_anchor = None;
+    }
+
+    pub(crate) fn reset_timeline_navigation_for_session_switch(&mut self) {
+        self.timeline_velocity_px_s = 0.0;
+        self.timeline_last_tick_at = None;
+        self.timeline_wheel_target_px = None;
+        self.timeline_last_scroll_at = None;
+        self.pending_timeline_anchor = None;
+        self.timeline_view_anchor = None;
+        self.pending_timeline_prepend_height_px = None;
+        self.pending_timeline_prepend_delta_px = None;
+        self.pending_timeline_prepend_count = None;
+        self.scrollbar_drag = None;
+        self.selection_anchor = None;
+        self.selection_focus = None;
+        self.timeline_live_trace_start = None;
+        self.timeline_live_trace_anchor = None;
+    }
+
+    pub(crate) fn trim_session_cache(&mut self) {
+        const MAX_CACHED_SESSIONS: usize = 40;
+        if self.session_cache.len() <= MAX_CACHED_SESSIONS {
+            return;
+        }
+        let mut pinned = self.active_subagent_ids.clone();
+        pinned.extend(self.session_preloads_in_flight.iter().cloned());
+        pinned.extend(
+            self.session_preload_queue
+                .iter()
+                .map(|(session_id, _)| session_id.clone()),
+        );
+        pinned.extend(self.pending_session_switch.iter().cloned());
+        pinned.extend(self.session_tree_root_id.iter().cloned());
+        pinned.extend(self.session_id.iter().cloned());
+        while self.session_cache.len() > MAX_CACHED_SESSIONS {
+            let Some(candidate) = self
+                .session_cache
+                .iter()
+                .filter(|(session_id, _)| !pinned.contains(*session_id))
+                .min_by_key(|(_, cached)| cached.last_access)
+                .map(|(session_id, _)| session_id.clone())
+            else {
+                break;
+            };
+            self.session_cache.remove(&candidate);
+            self.runtime_hydrated_sessions.remove(&candidate);
+            self.session_runtime_revisions.remove(&candidate);
+            self.runtime_status_requests.remove(&candidate);
+            self.session_goal_cache.remove(&candidate);
+        }
+    }
+
+    pub(crate) fn take_session_runtime_ui(&mut self) -> CachedAgentRuntime {
+        CachedAgentRuntime {
+            queued_prompt_count: std::mem::take(&mut self.queued_prompt_count),
+            queued_prompt_preview: self.queued_prompt_preview.take(),
+            streaming_state: std::mem::replace(
+                &mut self.streaming_state,
+                NeoismAgentStreamingState::Idle,
+            ),
+            streaming_started_at: self.streaming_started_at.take(),
+            streaming_state_changed_at: self.streaming_state_changed_at.take(),
+            streaming_tool_label: self.streaming_tool_label.take(),
+            subagent_waiting_started_at: self.subagent_waiting_started_at.take(),
+            background_tasks_started_at: self.background_tasks_started_at.take(),
+            running_background_task_count: std::mem::take(
+                &mut self.running_background_task_count,
+            ),
+            active_subagent_ids: std::mem::take(&mut self.active_subagent_ids),
+            active_subagent_started_at: std::mem::take(
+                &mut self.active_subagent_started_at,
+            ),
+            abort_requested_at: self.abort_requested_at.take(),
+        }
+    }
+
+    pub(crate) fn restore_session_runtime_ui(&mut self, runtime: CachedAgentRuntime) {
+        self.queued_prompt_count = runtime.queued_prompt_count;
+        self.queued_prompt_preview = runtime.queued_prompt_preview;
+        self.streaming_state = runtime.streaming_state;
+        self.streaming_started_at = runtime.streaming_started_at;
+        self.streaming_state_changed_at = runtime.streaming_state_changed_at;
+        self.streaming_tool_label = runtime.streaming_tool_label;
+        self.subagent_waiting_started_at = runtime.subagent_waiting_started_at;
+        self.background_tasks_started_at = runtime.background_tasks_started_at;
+        self.running_background_task_count = runtime.running_background_task_count;
+        self.active_subagent_ids = runtime.active_subagent_ids;
+        self.active_subagent_started_at = runtime.active_subagent_started_at;
+        self.abort_requested_at = runtime.abort_requested_at;
+        self.permission_choice_hit_rects.clear();
+        self.question_option_hit_rects.clear();
     }
 
     pub(crate) fn merge_pending_user_prompts(
@@ -1721,25 +2087,54 @@ impl NeoismAgentPane {
             if let Some(echo) = self.compact_user_prompt_text(&message.text) {
                 message.text = echo;
             }
-            // Adopt the server's user part into the locally-echoed
-            // bubble instead of appending a duplicate: the local echo
-            // has no id yet, so match by (canonicalized) text.
-            if !message.id.is_empty()
-                && !self
+            // Text and image fragments are broadcast independently. Fold
+            // both into the optimistic local card, including the image-first
+            // ordering where a server-id row already exists by the time text
+            // arrives.
+            if !message.id.is_empty() {
+                let optimistic_index = (!message.text.trim().is_empty())
+                    .then(|| {
+                        self.messages.iter().rposition(|existing| {
+                            existing.kind == NeoismAgentMessageKind::User
+                                && existing.id.is_empty()
+                                && existing.text.trim() == message.text.trim()
+                        })
+                    })
+                    .flatten();
+                let server_index = self
                     .messages
                     .iter()
-                    .any(|existing| existing.id == message.id)
-            {
-                if let Some(index) = self.messages.iter().rposition(|existing| {
-                    existing.kind == NeoismAgentMessageKind::User
-                        && existing.id.is_empty()
-                        && existing.text.trim() == message.text.trim()
-                }) {
-                    let merged =
-                        merge_part_message(self.messages[index].clone(), message);
-                    self.messages[index] = merged;
-                    self.mark_timeline_message_and_next_dirty_at(index);
-                    return;
+                    .position(|existing| existing.id == message.id);
+                match (optimistic_index, server_index) {
+                    (Some(optimistic_index), Some(server_index))
+                        if optimistic_index != server_index =>
+                    {
+                        let server_fragment = self.messages.remove(server_index);
+                        let optimistic_index = optimistic_index
+                            .saturating_sub(usize::from(server_index < optimistic_index));
+                        let merged = merge_part_message(
+                            self.messages[optimistic_index].clone(),
+                            server_fragment,
+                        );
+                        self.messages[optimistic_index] =
+                            merge_part_message(merged, message);
+                        self.rebase_current_turn_trace();
+                        self.invalidate_timeline_layout();
+                        return;
+                    }
+                    (Some(index), _) => {
+                        self.messages[index] =
+                            merge_part_message(self.messages[index].clone(), message);
+                        self.mark_timeline_message_and_next_dirty_at(index);
+                        return;
+                    }
+                    (None, Some(index)) => {
+                        self.messages[index] =
+                            merge_part_message(self.messages[index].clone(), message);
+                        self.mark_timeline_message_and_next_dirty_at(index);
+                        return;
+                    }
+                    (None, None) => {}
                 }
             }
         }

@@ -195,6 +195,25 @@ impl<A> BufferTabs<A> {
         }
     }
 
+    /// Restore presentation-only state after a tab is recreated in another
+    /// strip. Identity/routing fields belong to the destination's `open_*`
+    /// call; the user-facing title, dirty marker, and resolved note icon must
+    /// travel with the tab instead of being re-derived from only its path.
+    pub fn restore_presentation_from(
+        &mut self,
+        ix: usize,
+        source: &BufferTab<A>,
+    ) -> bool {
+        let Some(tab) = self.tabs.get_mut(ix) else {
+            return false;
+        };
+        tab.title.clone_from(&source.title);
+        tab.modified = source.modified;
+        tab.custom_icon.clone_from(&source.custom_icon);
+        self.layout.clear();
+        true
+    }
+
     /// The agent session id backing the tab at `ix`, if this is an
     /// agent tab whose title should be published at the daemon level on
     /// rename. Terminal-agent tabs key off `terminal_route_id`; native

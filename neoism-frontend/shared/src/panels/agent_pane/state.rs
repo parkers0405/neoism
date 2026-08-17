@@ -74,6 +74,7 @@ const MAX_INLINE_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const ABORT_STREAM_SUPPRESSION: Duration = Duration::from_secs(5);
 const TOOL_EXPAND_ANIMATION: Duration = Duration::from_millis(190);
 const WORDMARK_CLICK_ANIMATION: Duration = Duration::from_millis(460);
+const CODE_COPY_FEEDBACK_ANIMATION: Duration = Duration::from_millis(1_400);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NeoismAgentMode {
@@ -590,6 +591,15 @@ pub struct NeoismAgentPane {
     tool_hit_rects: Vec<(String, [f32; 4])>,
     diff_scroll_rects: Vec<(String, [f32; 4], f32)>,
     diff_scroll_offsets: HashMap<String, f32>,
+    /// Per-block horizontal viewports for rendered Markdown code and tables.
+    /// Geometry is rebuilt every frame; offsets persist by message/block key.
+    markdown_horizontal_scroll_rects: Vec<(String, [f32; 4], f32)>,
+    markdown_horizontal_scroll_offsets: HashMap<String, f32>,
+    markdown_horizontal_scrollbars: Vec<interaction_policy::MarkdownHorizontalScrollbar>,
+    markdown_horizontal_scrollbar_drag:
+        Option<interaction_policy::MarkdownHorizontalScrollbarDrag>,
+    markdown_horizontal_scroll_hover_key: Option<String>,
+    copied_code_feedback: Option<(String, Instant)>,
     permission_choice_hit_rects: Vec<(NeoismAgentPermissionChoice, [f32; 4])>,
     question_option_hit_rects: Vec<(usize, [f32; 4])>,
     /// Rect of the prompt-picker card (permission / question) drawn last
@@ -859,7 +869,13 @@ fn virtual_agent_markdown(message: &NeoismAgentMessage) -> String {
     if !message.text.trim().is_empty() {
         out.push_str(message.text.trim_end());
     }
-    if !message.detail.trim().is_empty() && message.detail.trim() != message.text.trim() {
+    if !message.detail.trim().is_empty()
+        && message.detail.trim() != message.text.trim()
+        && !crate::panels::agent_pane::view::tool_message::is_unsettled_edit_tool(
+            &message.tool,
+            &message.status,
+        )
+    {
         if !out.is_empty() {
             out.push_str("\n\n");
         }
@@ -935,6 +951,12 @@ impl Default for NeoismAgentPane {
             tool_hit_rects: Vec::new(),
             diff_scroll_rects: Vec::new(),
             diff_scroll_offsets: HashMap::new(),
+            markdown_horizontal_scroll_rects: Vec::new(),
+            markdown_horizontal_scroll_offsets: HashMap::new(),
+            markdown_horizontal_scrollbars: Vec::new(),
+            markdown_horizontal_scrollbar_drag: None,
+            markdown_horizontal_scroll_hover_key: None,
+            copied_code_feedback: None,
             permission_choice_hit_rects: Vec::new(),
             question_option_hit_rects: Vec::new(),
             prompt_picker_rect: None,

@@ -16,7 +16,8 @@
 //! continues to resolve.
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::io;
+use std::sync::{OnceLock, RwLock};
 
 const SPELLCHECK_DICT_PATHS: &[&str] = &[
     "/usr/share/dict/words",
@@ -26,6 +27,13 @@ const SPELLCHECK_DICT_PATHS: &[&str] = &[
 ];
 
 static SPELLCHECK_DICTIONARY: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+static SPELLCHECK_OVERRIDES: OnceLock<RwLock<SpellcheckOverrides>> = OnceLock::new();
+
+#[derive(Default)]
+struct SpellcheckOverrides {
+    dictionary: HashSet<String>,
+    ignored: HashSet<String>,
+}
 
 #[derive(Clone, Copy)]
 pub struct SpellcheckWord<'a> {
@@ -72,7 +80,7 @@ pub fn is_misspelled_word(word: &str) -> bool {
     let Some(dictionary) = spellcheck_dictionary() else {
         return false;
     };
-    !dictionary.contains(&normalized)
+    !dictionary.contains(&normalized) && !spellcheck_override_contains(&normalized)
 }
 
 pub fn normalized_spellcheck_word(word: &str) -> Option<String> {
@@ -114,7 +122,7 @@ pub fn spelling_suggestions(word: &str) -> Vec<String> {
     let Some(dictionary) = spellcheck_dictionary() else {
         return Vec::new();
     };
-    if dictionary.contains(&normalized) {
+    if dictionary.contains(&normalized) || spellcheck_override_contains(&normalized) {
         return Vec::new();
     }
     let first = normalized.chars().next();
@@ -151,6 +159,89 @@ pub fn spelling_suggestions(word: &str) -> Vec<String> {
         .take(5)
         .map(|(_, _, _, suggestion)| match_spelling_case(word, suggestion))
         .collect()
+}
+
+pub fn ignore_spelling_word(word: &str) -> bool {
+    let Some(normalized) = normalized_spellcheck_word(word) else {
+        return false;
+    };
+    spellcheck_overrides()
+        .write()
+        .is_ok_and(|mut overrides| overrides.ignored.insert(normalized))
+}
+
+pub fn add_spelling_word_to_dictionary(word: &str) -> io::Result<bool> {
+    let Some(normalized) = normalized_spellcheck_word(word) else {
+        return Ok(false);
+    };
+    let Some(path) = global_spellcheck_dictionary_path() else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "global Neoism config directory is unavailable",
+        ));
+    };
+    add_spelling_word_to_dictionary_at(&path, &normalized)
+}
+
+fn add_spelling_word_to_dictionary_at(
+    path: &std::path::Path,
+    normalized: &str,
+) -> io::Result<bool> {
+    use std::io::Write;
+
+    let mut overrides = spellcheck_overrides()
+        .write()
+        .map_err(|_| io::Error::other("spellcheck dictionary lock poisoned"))?;
+    if overrides.dictionary.contains(normalized) {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{normalized}")?;
+    overrides.dictionary.insert(normalized.to_string());
+    overrides.ignored.remove(normalized);
+    Ok(true)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn global_spellcheck_dictionary_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|base| base.join("neoism").join("dictionary.txt"))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn global_spellcheck_dictionary_path() -> Option<std::path::PathBuf> {
+    None
+}
+
+fn spellcheck_override_contains(word: &str) -> bool {
+    spellcheck_overrides().read().is_ok_and(|overrides| {
+        overrides.dictionary.contains(word) || overrides.ignored.contains(word)
+    })
+}
+
+fn spellcheck_overrides() -> &'static RwLock<SpellcheckOverrides> {
+    SPELLCHECK_OVERRIDES.get_or_init(|| RwLock::new(load_spellcheck_overrides()))
+}
+
+fn load_spellcheck_overrides() -> SpellcheckOverrides {
+    let dictionary = global_spellcheck_dictionary_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|source| {
+            source
+                .lines()
+                .filter_map(|line| normalized_spellcheck_word(line.trim()))
+                .collect()
+        })
+        .unwrap_or_default();
+    SpellcheckOverrides {
+        dictionary,
+        ignored: HashSet::new(),
+    }
 }
 
 fn match_spelling_case(original: &str, suggestion: &str) -> String {
@@ -205,4 +296,21 @@ fn load_spellcheck_dictionary() -> Option<HashSet<String>> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_dictionary_write_is_deduplicated_and_normalized() {
+        let dir = tempfile::tempdir().expect("temporary dictionary directory");
+        let path = dir.path().join("dictionary.txt");
+        let word = format!("neoismcustomword{}", std::process::id());
+
+        assert!(add_spelling_word_to_dictionary_at(&path, &word).unwrap());
+        assert!(!add_spelling_word_to_dictionary_at(&path, &word).unwrap());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), format!("{word}\n"));
+        assert!(spellcheck_override_contains(&word));
+    }
 }

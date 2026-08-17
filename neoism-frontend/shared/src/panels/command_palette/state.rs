@@ -104,8 +104,6 @@ pub struct CommandPalette {
     pub(super) pop_on_open: bool,
     pub(super) top_anchor: f32,
     pub(super) surface: PaletteSurface,
-    pub(super) workspace_visibility:
-        crate::panels::context_menu::WorkspaceChromeVisibility,
     /// In-progress workspace→host drag (5D-drag), or `None` when no drag
     /// is armed. Only ever populated in `Workspaces` mode.
     pub(super) workspace_drag: Option<WorkspaceDrag>,
@@ -169,8 +167,6 @@ impl Default for CommandPalette {
             pop_on_open: false,
             top_anchor: super::PALETTE_MARGIN_TOP,
             surface: PaletteSurface::Terminal,
-            workspace_visibility:
-                crate::panels::context_menu::WorkspaceChromeVisibility::Private,
             workspace_drag: None,
             workspace_peer_hosts: Vec::new(),
             workspace_move: None,
@@ -205,13 +201,6 @@ impl CommandPalette {
 
     pub fn set_surface(&mut self, surface: PaletteSurface) {
         self.surface = surface;
-    }
-
-    pub fn set_workspace_visibility(
-        &mut self,
-        visibility: crate::panels::context_menu::WorkspaceChromeVisibility,
-    ) {
-        self.workspace_visibility = visibility;
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {

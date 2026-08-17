@@ -14,7 +14,7 @@ use crate::editor::markdown::render::draw::{
     intersect_rect, line_height, markdown_font, md_font_id, point_in_rect, wrap_lines,
 };
 use crate::editor::markdown::render::inline::{
-    clean_inline_with_active_link, draw_inline_links_for_line,
+    clean_inline_with_active_link, draw_inline_links_for_line, draw_spellcheck_underlines,
 };
 use crate::primitives::ide_theme::IdeTheme;
 use crate::primitives::look::scrollbar_style;
@@ -1109,6 +1109,20 @@ pub(super) fn render_table_row(
                     clip_top,
                     clip_bottom,
                     text_occlusions,
+                );
+                draw_spellcheck_underlines(
+                    sugarloaf,
+                    cell_x + 16.0,
+                    text_y,
+                    line_h,
+                    wrap_width,
+                    &clipped_opts,
+                    theme,
+                    clip,
+                    clip_top,
+                    clip_bottom,
+                    text_occlusions,
+                    &rendered,
                 );
                 text_y += line_h;
             }

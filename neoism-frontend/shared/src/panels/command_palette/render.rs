@@ -1073,12 +1073,7 @@ impl CommandPalette {
             };
             let title =
                 truncate_to_fit(&display_title, title_budget, sugarloaf, &title_opts);
-            if matches!(
-                row,
-                PaletteRow::WorkspaceCreate
-                    | PaletteRow::ServerAdd
-                    | PaletteRow::ServerCreate
-            ) {
+            if matches!(row, PaletteRow::ServerAdd | PaletteRow::ServerCreate) {
                 let plus_w = sugarloaf.overlay_text_mut().measure(&title, &title_opts);
                 sugarloaf.overlay_text_mut().draw(
                     input_x + (input_width - plus_w) / 2.0,

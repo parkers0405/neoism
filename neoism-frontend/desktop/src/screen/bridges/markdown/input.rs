@@ -830,6 +830,12 @@ impl Screen<'_> {
                     Key::Character("u") => {
                         Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::CharU)
                     }
+                    Key::Character("e") => {
+                        Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::CharE)
+                    }
+                    Key::Character("y") => {
+                        Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::CharY)
+                    }
                     Key::Character("r") => {
                         Some(neoism_ui::editor::markdown::bridge_policy::MarkdownCtrlKeyKind::CharR)
                     }
@@ -876,6 +882,12 @@ impl Screen<'_> {
                     Some(MarkdownCtrlAction::ScrollCursorUpHalfPage) => {
                         markdown
                             .scroll_cursor_by_content_pixels(-(viewport * 0.5), viewport);
+                    }
+                    Some(MarkdownCtrlAction::ScrollCursorDownLine) => {
+                        markdown.scroll_cursor_by_lines(1, viewport);
+                    }
+                    Some(MarkdownCtrlAction::ScrollCursorUpLine) => {
+                        markdown.scroll_cursor_by_lines(-1, viewport);
                     }
                     Some(MarkdownCtrlAction::MoveTableRowUp) => {
                         handled = markdown.move_table_row_fast(false);
@@ -1651,7 +1663,10 @@ impl Screen<'_> {
                         .context_manager
                         .stack_existing_route_on_workspace(route, &mut self.sugarloaf);
                 }
-                self.renderer.buffer_tabs.open_markdown(path.clone());
+                let ix = self.renderer.buffer_tabs.open_markdown(path.clone());
+                self.renderer
+                    .buffer_tabs
+                    .restore_presentation_from(ix, &tab);
                 self.renderer.file_tree.set_active_path(Some(path.clone()));
                 self.activate_rich_document_path(path.clone());
             }
@@ -1695,7 +1710,8 @@ impl Screen<'_> {
                             tabs.set_scale(scale);
                             tabs
                         });
-                tabs.open_markdown(path.clone());
+                let ix = tabs.open_markdown(path.clone());
+                tabs.restore_presentation_from(ix, &tab);
                 let cwd = self.active_pane_workspace_root();
                 if let Some(crumbs) = self.renderer.pane_breadcrumbs.get_mut(&dest_route)
                 {
@@ -1940,7 +1956,8 @@ impl Screen<'_> {
             crate::neoism::icon::AgentKind,
         >::new();
         tabs.set_scale(self.renderer.chrome_scale());
-        tabs.open_markdown(path.clone());
+        let ix = tabs.open_markdown(path.clone());
+        tabs.restore_presentation_from(ix, tab);
         self.renderer.pane_tabs.insert(markdown_route, tabs);
         let mut crumbs = neoism_ui::panels::breadcrumbs::Breadcrumbs::new();
         crumbs.set_scale(self.renderer.chrome_scale());

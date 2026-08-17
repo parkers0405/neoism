@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ use super::api::{
     fetch_model_context_limit, fetch_model_options, fetch_session_entries,
     fetch_session_goal, fetch_session_options, fetch_session_statuses,
     fetch_skill_options, fetch_subagent_entries, fetch_subagent_options,
-    neoism_agent_server, rename_session, set_session_pinned,
+    neoism_agent_server, rename_session, set_session_pinned, SessionStatusSnapshot,
 };
 use super::commands::slash_options;
 use super::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
@@ -47,6 +47,7 @@ const MAX_INLINE_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const ABORT_STREAM_SUPPRESSION: Duration = Duration::from_secs(5);
 const TOOL_EXPAND_ANIMATION: Duration = Duration::from_millis(190);
 const WORDMARK_CLICK_ANIMATION: Duration = Duration::from_millis(460);
+const CODE_COPY_FEEDBACK_ANIMATION: Duration = Duration::from_millis(1_400);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NeoismAgentMode {
@@ -227,14 +228,23 @@ pub(super) struct AgentTimelineHistoryState {
     pub last_requested_session_id: Option<String>,
 }
 
-#[derive(Clone, Debug)]
 pub(super) struct CachedAgentSession {
     pub state: SessionState,
     pub messages: Vec<NeoismAgentMessage>,
+    pub pending_user_prompts: Vec<String>,
+    pub prompt_echo_aliases: Vec<(String, String)>,
     pub timeline_history: AgentTimelineHistoryState,
     pub timeline_scroll_px: f32,
     pub timeline_follow_bottom: bool,
+    pub timeline_content_height_px: f32,
+    pub timeline_layout_epoch: u64,
+    pub timeline_layout_cache: Option<TimelineLayoutCache>,
+    pub timeline_dirty_message_ids: BTreeSet<String>,
+    pub timeline_dirty_message_indices: BTreeSet<usize>,
+    pub runtime: CachedAgentRuntime,
+    pub model_context_limit: Option<u64>,
     pub hydrated: bool,
+    pub last_access: Instant,
 }
 
 impl CachedAgentSession {
@@ -242,10 +252,156 @@ impl CachedAgentSession {
         Self {
             state: SessionState::default(),
             messages: Vec::new(),
+            pending_user_prompts: Vec::new(),
+            prompt_echo_aliases: Vec::new(),
             timeline_history: AgentTimelineHistoryState::default(),
             timeline_scroll_px: 0.0,
             timeline_follow_bottom: true,
+            timeline_content_height_px: 0.0,
+            timeline_layout_epoch: 0,
+            timeline_layout_cache: None,
+            timeline_dirty_message_ids: BTreeSet::new(),
+            timeline_dirty_message_indices: BTreeSet::new(),
+            runtime: CachedAgentRuntime::default(),
+            model_context_limit: None,
             hydrated: false,
+            last_access: Instant::now(),
+        }
+    }
+
+    pub(super) fn invalidate_timeline_layout(&mut self) {
+        self.last_access = Instant::now();
+        self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
+        self.timeline_layout_cache = None;
+        self.timeline_dirty_message_ids.clear();
+        self.timeline_dirty_message_indices.clear();
+    }
+}
+
+pub(crate) struct CachedAgentRuntime {
+    queued_prompt_count: usize,
+    queued_prompt_preview: Option<String>,
+    streaming_state: NeoismAgentStreamingState,
+    streaming_started_at: Option<Instant>,
+    streaming_state_changed_at: Option<Instant>,
+    streaming_tool_label: Option<String>,
+    subagent_waiting_started_at: Option<Instant>,
+    background_tasks_started_at: Option<Instant>,
+    running_background_task_count: usize,
+    active_subagent_ids: BTreeSet<String>,
+    active_subagent_started_at: HashMap<String, u64>,
+    abort_requested_at: Option<Instant>,
+}
+
+impl Default for CachedAgentRuntime {
+    fn default() -> Self {
+        Self {
+            queued_prompt_count: 0,
+            queued_prompt_preview: None,
+            streaming_state: NeoismAgentStreamingState::Idle,
+            streaming_started_at: None,
+            streaming_state_changed_at: None,
+            streaming_tool_label: None,
+            subagent_waiting_started_at: None,
+            background_tasks_started_at: None,
+            running_background_task_count: 0,
+            active_subagent_ids: BTreeSet::new(),
+            active_subagent_started_at: HashMap::new(),
+            abort_requested_at: None,
+        }
+    }
+}
+
+impl CachedAgentRuntime {
+    pub(super) fn is_streaming(&self) -> bool {
+        self.streaming_state != NeoismAgentStreamingState::Idle
+            && self.streaming_started_at.is_some()
+    }
+
+    pub(super) fn note_streaming(
+        &mut self,
+        state: NeoismAgentStreamingState,
+        tool: Option<String>,
+    ) {
+        if state == NeoismAgentStreamingState::Idle {
+            self.streaming_state = state;
+            self.streaming_started_at = None;
+            self.streaming_state_changed_at = None;
+            self.streaming_tool_label = None;
+            self.abort_requested_at = None;
+            return;
+        }
+        if self.streaming_started_at.is_none() {
+            self.streaming_started_at = Some(Instant::now());
+        }
+        if self.streaming_state != state || self.streaming_state_changed_at.is_none() {
+            self.streaming_state_changed_at = Some(Instant::now());
+        }
+        self.streaming_state = state;
+        self.streaming_tool_label = tool;
+    }
+
+    pub(super) fn refresh_streaming_from_tail(
+        &mut self,
+        messages: &[NeoismAgentMessage],
+    ) {
+        let Some(tail) = messages.last() else {
+            return;
+        };
+        let (state, tool) = match tail.kind {
+            NeoismAgentMessageKind::Reasoning => {
+                (NeoismAgentStreamingState::Thinking, None)
+            }
+            NeoismAgentMessageKind::Tool | NeoismAgentMessageKind::Subtask => (
+                NeoismAgentStreamingState::Working,
+                (!tail.title.is_empty()).then(|| tail.title.clone()),
+            ),
+            NeoismAgentMessageKind::Assistant => {
+                (NeoismAgentStreamingState::Generating, None)
+            }
+            NeoismAgentMessageKind::User
+            | NeoismAgentMessageKind::System
+            | NeoismAgentMessageKind::Compaction => return,
+        };
+        self.note_streaming(state, tool);
+    }
+
+    pub(super) fn apply_queue_status(
+        &mut self,
+        count: usize,
+        preview: Option<String>,
+        started_at: Option<u64>,
+    ) {
+        let decision = status_policy::queue_status_decision(
+            count,
+            preview,
+            started_at,
+            self.is_streaming(),
+        );
+        self.queued_prompt_count = decision.count;
+        self.queued_prompt_preview = decision.preview;
+        if decision.should_enter_thinking {
+            self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+        }
+        if let Some(started_at) = decision.started_at {
+            let started = instant_from_epoch_millis(started_at);
+            self.streaming_started_at = Some(started);
+            self.streaming_state_changed_at.get_or_insert(started);
+        }
+    }
+
+    pub(super) fn consume_dequeued_prompt(&mut self, text: &str) {
+        if self.queued_prompt_count > 0 {
+            self.queued_prompt_count -= 1;
+        }
+        if self
+            .queued_prompt_preview
+            .as_deref()
+            .is_some_and(|preview| {
+                self.queued_prompt_count == 0 || preview.trim() == text.trim()
+            })
+        {
+            self.queued_prompt_preview = None;
         }
     }
 }
@@ -464,6 +620,12 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         session_id: String,
         error: String,
     },
+    SessionRuntimeStatusRefreshed {
+        session_id: String,
+        request_generation: u64,
+        runtime_revision: u64,
+        result: Result<HashMap<String, SessionStatusSnapshot>, String>,
+    },
     /// An older history page, fetched off the UI thread. `messages` is in
     /// ascending (oldest-first) order, ready to prepend. `raw_count` is the
     /// number of stored messages the server returned (vs expanded blocks),
@@ -602,8 +764,15 @@ pub struct NeoismAgentPane {
     /// matching OpenCode's route-over-global-store model.
     pub(super) session_cache: HashMap<String, CachedAgentSession>,
     pub(super) session_preloads_in_flight: BTreeSet<String>,
+    pub(super) session_preload_queue: VecDeque<(String, bool)>,
+    pub(super) session_preloads_force_pending: BTreeSet<String>,
     pub(super) pending_session_switch: Option<String>,
     pub(super) session_tree_root_id: Option<String>,
+    pub(super) runtime_status_request_generation: u64,
+    pub(super) runtime_status_requests: HashMap<String, u64>,
+    pub(super) session_runtime_revisions: HashMap<String, u64>,
+    pub(super) runtime_hydrated_sessions: BTreeSet<String>,
+    pub(super) session_goal_cache: HashMap<String, (Option<SessionGoal>, u64)>,
     background_tx: Sender<NeoismAgentBackgroundUpdate>,
     background_rx: Receiver<NeoismAgentBackgroundUpdate>,
     /// Semantic session-search coalescing: at most one fetch in flight; a
@@ -638,11 +807,11 @@ pub struct NeoismAgentPane {
     input_goal_x: Option<f32>,
     input_attachments: Vec<NeoismAgentInputAttachment>,
     ui_events: Vec<NeoismAgentUiEvent>,
-    pending_user_prompts: Vec<String>,
+    pub(super) pending_user_prompts: Vec<String>,
     /// `(expanded, composer echo)` pairs for prompts sent with paste
     /// attachments: the server echoes the expanded text back, the
     /// transcript shows the compact `[pasted N lines]` form.
-    prompt_echo_aliases: Vec<(String, String)>,
+    pub(super) prompt_echo_aliases: Vec<(String, String)>,
     queued_prompt_count: usize,
     queued_prompt_preview: Option<String>,
     sent_history: Vec<String>,
@@ -656,6 +825,15 @@ pub struct NeoismAgentPane {
     tool_hit_rects: Vec<(String, [f32; 4])>,
     diff_scroll_rects: Vec<(String, [f32; 4], f32)>,
     diff_scroll_offsets: HashMap<String, f32>,
+    /// Rendered Markdown code/table horizontal viewports. Hit geometry is
+    /// frame-local while offsets persist by stable message/block key.
+    markdown_horizontal_scroll_rects: Vec<(String, [f32; 4], f32)>,
+    markdown_horizontal_scroll_offsets: HashMap<String, f32>,
+    markdown_horizontal_scrollbars: Vec<interaction_policy::MarkdownHorizontalScrollbar>,
+    markdown_horizontal_scrollbar_drag:
+        Option<interaction_policy::MarkdownHorizontalScrollbarDrag>,
+    markdown_horizontal_scroll_hover_key: Option<String>,
+    copied_code_feedback: Option<(String, Instant)>,
     permission_choice_hit_rects: Vec<(NeoismAgentPermissionChoice, [f32; 4])>,
     question_option_hit_rects: Vec<(usize, [f32; 4])>,
     /// Rect of the prompt-picker card (permission / question) drawn last
@@ -684,7 +862,7 @@ pub struct NeoismAgentPane {
     selection_focus: Option<SelectionPoint>,
     pub(super) timeline_scroll_px: f32,
     pub(super) timeline_follow_bottom: bool,
-    timeline_content_height_px: f32,
+    pub(super) timeline_content_height_px: f32,
     timeline_viewport_height_px: f32,
     timeline_viewport_rect: Option<[f32; 4]>,
     pending_timeline_anchor: Option<TimelineAnchor>,
@@ -714,10 +892,10 @@ pub struct NeoismAgentPane {
     markdown_blocks_cache:
         RefCell<HashMap<MarkdownBlocksKey, (CachedMarkdownBlocks, u64)>>,
     markdown_blocks_tick: std::cell::Cell<u64>,
-    timeline_layout_epoch: u64,
-    timeline_layout_cache: RefCell<Option<TimelineLayoutCache>>,
-    timeline_dirty_message_ids: BTreeSet<String>,
-    timeline_dirty_message_indices: BTreeSet<usize>,
+    pub(super) timeline_layout_epoch: u64,
+    pub(super) timeline_layout_cache: RefCell<Option<TimelineLayoutCache>>,
+    pub(super) timeline_dirty_message_ids: BTreeSet<String>,
+    pub(super) timeline_dirty_message_indices: BTreeSet<usize>,
     /// Live SSE parts are flattened into timeline rows, but the provider
     /// groups them under an assistant message. Preserve that relationship so
     /// a delayed reasoning-end event can use the same order as final history.
@@ -761,7 +939,7 @@ pub struct NeoismAgentPane {
     /// delayed session-creation result cannot attach an older prompt to the
     /// replacement draft merely because both have `session_id == None`.
     pub(super) prompt_draft_id: u64,
-    model_context_limit: Option<u64>,
+    pub(super) model_context_limit: Option<u64>,
     pub wordmark: NeoismWordmarkState,
     pub(super) side_panel: NeoismAgentSidePanel,
     perf_frame: AgentPanePerfFrame,
@@ -865,8 +1043,15 @@ impl Default for NeoismAgentPane {
             event_stream: None,
             session_cache: HashMap::new(),
             session_preloads_in_flight: BTreeSet::new(),
+            session_preload_queue: VecDeque::new(),
+            session_preloads_force_pending: BTreeSet::new(),
             pending_session_switch: None,
             session_tree_root_id: None,
+            runtime_status_request_generation: 0,
+            runtime_status_requests: HashMap::new(),
+            session_runtime_revisions: HashMap::new(),
+            runtime_hydrated_sessions: BTreeSet::new(),
+            session_goal_cache: HashMap::new(),
             background_tx,
             background_rx,
             semantic_in_flight: false,
@@ -898,6 +1083,12 @@ impl Default for NeoismAgentPane {
             tool_hit_rects: Vec::new(),
             diff_scroll_rects: Vec::new(),
             diff_scroll_offsets: HashMap::new(),
+            markdown_horizontal_scroll_rects: Vec::new(),
+            markdown_horizontal_scroll_offsets: HashMap::new(),
+            markdown_horizontal_scrollbars: Vec::new(),
+            markdown_horizontal_scrollbar_drag: None,
+            markdown_horizontal_scroll_hover_key: None,
+            copied_code_feedback: None,
             permission_choice_hit_rects: Vec::new(),
             question_option_hit_rects: Vec::new(),
             prompt_picker_rect: None,
@@ -1239,26 +1430,78 @@ pub(super) fn merge_session_snapshot(
     snapshot: Vec<NeoismAgentMessage>,
     live: Vec<NeoismAgentMessage>,
 ) -> Vec<NeoismAgentMessage> {
+    let mut live = live.into_iter().map(Some).collect::<Vec<_>>();
+    let live_indices = live
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            session_message_identity(message.as_ref()?).map(|identity| (identity, index))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::with_capacity(snapshot.len().saturating_add(live.len()));
     let mut merged = Vec::with_capacity(snapshot.len().max(live.len()));
     for incoming in snapshot {
-        if let Some(existing) = live
-            .iter()
-            .find(|existing| same_streamed_part_identity(existing, &incoming))
-        {
-            merged.push(merge_part_message(existing.clone(), incoming));
-        } else {
-            merged.push(incoming);
+        let identity = session_message_identity(&incoming);
+        let existing = identity
+            .as_ref()
+            .and_then(|identity| live_indices.get(identity))
+            .and_then(|index| live[*index].take());
+        if let Some(identity) = identity {
+            seen.insert(identity);
         }
+        merged.push(match existing {
+            Some(existing) => merge_part_message(existing, incoming),
+            None => incoming,
+        });
     }
-    for message in live {
-        if !merged
-            .iter()
-            .any(|existing| same_streamed_part_identity(existing, &message))
+    for message in live.into_iter().flatten() {
+        if session_message_identity(&message).is_none_or(|identity| seen.insert(identity))
         {
             merged.push(message);
         }
     }
     merged
+}
+
+pub(super) fn reconcile_cached_pending_user_prompts(
+    snapshot: &mut [NeoismAgentMessage],
+    live: &mut Vec<NeoismAgentMessage>,
+    pending: &mut Vec<String>,
+    aliases: &[(String, String)],
+) {
+    for message in snapshot
+        .iter_mut()
+        .filter(|message| message.kind == NeoismAgentMessageKind::User)
+    {
+        if let Some((_, echo)) = aliases
+            .iter()
+            .rev()
+            .find(|(expanded, _)| expanded.trim() == message.text.trim())
+        {
+            message.text = echo.clone();
+        }
+    }
+    pending.retain(|prompt| {
+        let resolved = snapshot.iter().any(|message| {
+            message.kind == NeoismAgentMessageKind::User
+                && message.text.trim() == prompt.trim()
+        });
+        if resolved {
+            live.retain(|message| {
+                !(message.kind == NeoismAgentMessageKind::User
+                    && message.id.is_empty()
+                    && message.text.trim() == prompt.trim())
+            });
+        }
+        !resolved
+    });
+}
+
+fn session_message_identity(message: &NeoismAgentMessage) -> Option<String> {
+    if !message.id.is_empty() {
+        return Some(format!("id:{}", message.id));
+    }
+    task_id_from_task_message(message).map(|task_id| format!("task:{task_id}"))
 }
 
 pub(super) fn upsert_cached_part_message(
@@ -1345,9 +1588,37 @@ fn rewrite_task_status_markers(field: &mut String, status: &str) {
     ] {
         if field.contains(marker) {
             *field = field.replace(marker, &format!("status: {status}"));
-            return;
+            break;
         }
     }
+    rewrite_stale_task_running_explanation(field, status);
+}
+
+fn rewrite_stale_task_running_explanation(field: &mut String, status: &str) {
+    if !matches!(status, "completed" | "error") {
+        return;
+    }
+
+    let Some(start) = field
+        .lines()
+        .scan(0usize, |offset, line| {
+            let line_start = *offset;
+            *offset += line.len() + 1;
+            Some((line_start, line))
+        })
+        .find_map(|(line_start, line)| {
+            let lower = line.to_ascii_lowercase();
+            (lower.contains("subagent is running")
+                || lower.contains("subagent is still running"))
+            .then_some(line_start)
+        })
+    else {
+        return;
+    };
+
+    field.truncate(start);
+    *field = field.trim_end().to_string();
+    field.push_str("\n\nThe subagent is no longer running.");
 }
 
 fn same_nonempty_id(a: &NeoismAgentMessage, b: &NeoismAgentMessage) -> bool {
@@ -1576,6 +1847,19 @@ fn hash_agent_message_text_for_measure(text: &str) -> u64 {
     bytes[..bytes.len().min(4096)].hash(&mut hasher);
     bytes[bytes.len().saturating_sub(8192)..].hash(&mut hasher);
     hasher.finish()
+}
+
+fn is_unsettled_edit_tool(tool: &str, status: &str) -> bool {
+    let normalized = tool
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(normalized.as_str(), "applypatch" | "patch")
+        && matches!(
+            status.trim().to_ascii_lowercase().as_str(),
+            "pending" | "running" | "streaming"
+        )
 }
 
 fn f32_measure_bucket(value: f32) -> i32 {

@@ -28,12 +28,17 @@ fn image_bytes(url: &str) -> Option<Vec<u8>> {
     STANDARD.decode(payload).ok()
 }
 
-fn register_image(sugarloaf: &mut Sugarloaf, image: &NeoismAgentImage) -> Option<(u32, f32)> {
+fn register_image(
+    sugarloaf: &mut Sugarloaf,
+    image: &NeoismAgentImage,
+) -> Option<(u32, f32)> {
     let id = image_id(image);
     if let Some(entry) = sugarloaf.image_data.get(&id) {
         return Some((id, entry.width / entry.height.max(1.0)));
     }
-    let decoded = image_rs::load_from_memory(&image_bytes(&image.url)?).ok()?.to_rgba8();
+    let decoded = image_rs::load_from_memory(&image_bytes(&image.url)?)
+        .ok()?
+        .to_rgba8();
     let (width, height) = decoded.dimensions();
     sugarloaf.image_data.insert(
         id,
@@ -75,7 +80,12 @@ pub fn render_image_strip(
         }
         draw_rounded_rect_clipped(
             sugarloaf,
-            [thumb_x - 2.0 * s, y - 2.0 * s, size + 4.0 * s, size + 4.0 * s],
+            [
+                thumb_x - 2.0 * s,
+                y - 2.0 * s,
+                size + 4.0 * s,
+                size + 4.0 * s,
+            ],
             theme.f32_alpha(theme.border, 0.9),
             13.0 * s,
             ORDER_PANEL + 2,

@@ -149,6 +149,32 @@ impl Screen<'_> {
                 .map(|layout| layout.dimensions.height.round().max(1.0))
                 .unwrap_or(24.0)
         };
+        // Horizontal Markdown overflow is intentionally axis-specific: a
+        // sideways trackpad gesture (or Shift+wheel) moves the code/table
+        // viewport, while an ordinary vertical wheel keeps scrolling chat.
+        let shift_scroll = self.modifiers.state().shift_key();
+        let markdown_horizontal_pixels = match delta {
+            neoism_window::event::MouseScrollDelta::LineDelta(x, y) => {
+                if x.abs() > 0.01 {
+                    -*x * 48.0
+                } else if shift_scroll {
+                    -*y * 48.0
+                } else {
+                    0.0
+                }
+            }
+            neoism_window::event::MouseScrollDelta::PixelDelta(pos) => {
+                let x = pos.x as f32;
+                let y = pos.y as f32;
+                if x.abs() > y.abs() && x.abs() > 0.5 {
+                    -x
+                } else if shift_scroll && y.abs() > 0.5 {
+                    -y
+                } else {
+                    0.0
+                }
+            }
+        };
         if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
             if agent.picker_contains_point(mouse_x, mouse_y) {
                 let pixels = Self::vertical_overlay_scroll_pixels(delta, 34.0);
@@ -165,6 +191,20 @@ impl Screen<'_> {
                 return true;
             }
             if agent.timeline_contains_point(mouse_x, mouse_y) {
+                if markdown_horizontal_pixels.abs() > 0.01 {
+                    if let Some(scrolled) = agent.scroll_markdown_horizontal_at(
+                        mouse_x,
+                        mouse_y,
+                        markdown_horizontal_pixels,
+                    ) {
+                        if scrolled {
+                            self.mark_dirty();
+                        }
+                        // Consume at either edge too; a horizontal gesture
+                        // must never leak into the vertical chat timeline.
+                        return true;
+                    }
+                }
                 // The agent timeline gets a punchier scroll than other
                 // overlays so a single touchpad swipe travels farther and
                 // wheel notches feel responsive. Kinetic decay in

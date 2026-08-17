@@ -9,6 +9,24 @@ use neoism_ui::session_layout::geometry::{
 use neoism_ui::session_layout::tree::{SessionTreeLeafId, SessionTreeNode};
 use neoism_ui::session_layout::SplitAxis;
 
+fn separator_geometry(
+    axis: SplitAxis,
+    rect: [f32; 4],
+    border_width: f32,
+) -> ([f32; 2], [f32; 2]) {
+    let [x, y, w, h] = rect;
+    match axis {
+        SplitAxis::Horizontal => {
+            let center = x + w / 2.0;
+            ([center - border_width / 2.0, y], [border_width, h])
+        }
+        SplitAxis::Vertical => {
+            let center = y + h / 2.0;
+            ([x, center - border_width / 2.0], [w, border_width])
+        }
+    }
+}
+
 impl<T: EventListener> ContextGrid<T> {
     fn border_content_rect(&self) -> Rect {
         let w =
@@ -162,31 +180,17 @@ impl<T: EventListener> ContextGrid<T> {
         }
         let border_width = self.border_config.width;
         let color = self.border_config.color;
-        let mx = self.scaled_margin.left;
-        let my = self.scaled_margin.top;
         let solved = self.solve_for_borders(0.0);
         let mut separators = Vec::new();
         for div in &solved.dividers {
             let r = div.rect;
-            match div.axis {
-                // Horizontal split → vertical separator at the gap center.
-                SplitAxis::Horizontal => {
-                    let center = r.x + r.w / 2.0 + mx;
-                    separators.push(create_border(
-                        color,
-                        [center - border_width / 2.0, r.y + my],
-                        [border_width, r.h],
-                    ));
-                }
-                SplitAxis::Vertical => {
-                    let center = r.y + r.h / 2.0 + my;
-                    separators.push(create_border(
-                        color,
-                        [r.x + mx, center - border_width / 2.0],
-                        [r.w, border_width],
-                    ));
-                }
-            }
+            // Keep border objects in grid-local physical coordinates. The
+            // renderer adds `scaled_margin` exactly once while converting
+            // them to window-logical coordinates. Adding it here as well
+            // displaced separators into pane content.
+            let (position, size) =
+                separator_geometry(div.axis, [r.x, r.y, r.w, r.h], border_width);
+            separators.push(create_border(color, position, size));
         }
         separators
     }
@@ -242,5 +246,23 @@ impl<T: EventListener> ContextGrid<T> {
     pub fn move_divider_right(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
         let step = self.divider_step(amount, true);
         self.nudge_divider(SplitAxis::Horizontal, step, sugarloaf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::separator_geometry;
+    use neoism_ui::session_layout::SplitAxis;
+
+    #[test]
+    fn separator_geometry_stays_grid_local_until_render() {
+        assert_eq!(
+            separator_geometry(SplitAxis::Horizontal, [396.0, 20.0, 8.0, 600.0], 2.0,),
+            ([399.0, 20.0], [2.0, 600.0])
+        );
+        assert_eq!(
+            separator_geometry(SplitAxis::Vertical, [12.0, 296.0, 900.0, 8.0], 2.0,),
+            ([12.0, 299.0], [900.0, 2.0])
+        );
     }
 }

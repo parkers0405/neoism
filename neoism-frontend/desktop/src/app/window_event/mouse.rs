@@ -314,6 +314,10 @@ impl Application<'_> {
                 if route.window.screen.handle_neoism_tags_mouse_press(button) {
                     route.request_redraw();
                     return;
+                } else if route.window.screen.handle_neoworld_pointer_down(button) {
+                    route.window.set_cursor(CursorIcon::Grabbing);
+                    route.request_redraw();
+                    return;
                 } else if route.window.screen.handle_extensions_click(button) {
                     route.request_redraw();
                     return;
@@ -477,6 +481,14 @@ impl Application<'_> {
                 // dragging" state from a plain click is also
                 // cleared. Real reorders short-circuit the
                 // rest of the release path.
+                if button == MouseButton::Left
+                    && route.window.screen.handle_neoworld_pointer_up(button)
+                {
+                    route.window.set_cursor(CursorIcon::Default);
+                    route.request_redraw();
+                    return;
+                }
+
                 if button == MouseButton::Left
                     && route.window.screen.handle_draw_mouse_release()
                 {
@@ -848,8 +860,27 @@ impl Application<'_> {
         }
 
         if route.window.screen.handle_neoism_agent_drag_move() {
-            route.window.set_cursor(CursorIcon::Text);
+            route.window.set_cursor(
+                if route
+                    .window
+                    .screen
+                    .neoism_agent_markdown_scrollbar_dragging()
+                {
+                    CursorIcon::Grabbing
+                } else {
+                    CursorIcon::Text
+                },
+            );
             route.request_redraw();
+            return;
+        }
+
+        if route
+            .window
+            .screen
+            .neoism_agent_markdown_scrollbar_hovered()
+        {
+            route.window.set_cursor(CursorIcon::Grab);
             return;
         }
 
@@ -939,6 +970,12 @@ impl Application<'_> {
                     CursorIcon::Default
                 },
             );
+            return;
+        }
+
+        if route.window.screen.handle_neoworld_pointer_move() {
+            route.window.set_cursor(CursorIcon::Grabbing);
+            route.request_redraw();
             return;
         }
 

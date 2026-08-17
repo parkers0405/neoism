@@ -1,0 +1,20 @@
+[package]
+name = "neoism-neoworld"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Turso-backed persistence and host services for NeoWorld."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+neoism-neoworld-core = { workspace = true }
+tokio = { workspace = true }
+turso = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

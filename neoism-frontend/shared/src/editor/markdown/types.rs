@@ -16,7 +16,6 @@ use crate::editor::notebook::NotebookCellAction;
 
 use super::vim::VimState;
 
-pub(super) const SCROLL_SETTLE_FACTOR: f32 = 0.24;
 pub(super) const SCROLL_EPSILON: f32 = 0.35;
 pub(super) const SCROLL_CURSOR_LINE_HEIGHT: f32 = 42.0;
 pub(super) const LIST_INDENT: &str = "  ";
@@ -555,8 +554,10 @@ pub struct MarkdownPane {
     pub(super) cursor_scroll_remainder: f32,
     pub(super) scroll_viewport_height: f32,
     pub(super) scroll_velocity_px_s: f32,
+    pub(super) scroll_animation_velocity_px_s: f32,
     pub(super) scroll_velocity_moves_cursor: bool,
     pub(super) scroll_last_tick_at: Option<Instant>,
+    pub(super) scroll_animation_last_tick_at: Option<Instant>,
     pub(super) content_height: f32,
     pub(super) block_rects: Vec<MarkdownBlockRect>,
     pub(super) notebook_image_preview_dimensions: HashMap<usize, (u32, u32)>,

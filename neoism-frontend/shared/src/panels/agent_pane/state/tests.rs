@@ -43,6 +43,49 @@ fn runtime_task_message_status_policy_maps_known_statuses() {
 }
 
 #[test]
+fn generic_live_subagent_update_cannot_replace_specific_title() {
+    let mut pane = NeoismAgentPane::default();
+    pane.side_panel
+        .upsert_subagent("child", "Review web desktop parity", "explore");
+    pane.side_panel
+        .upsert_subagent("child", "subagent", "subagent");
+
+    let child = pane
+        .side_panel
+        .subagents()
+        .iter()
+        .find(|entry| entry.id == "child")
+        .expect("child row");
+    assert_eq!(child.title, "Review web desktop parity");
+    assert_eq!(child.time_label, "explore");
+}
+
+#[test]
+fn generic_polled_subagent_metadata_cannot_replace_specific_title() {
+    let mut pane = NeoismAgentPane::default();
+    pane.side_panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("root", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "Audit markdown interactions", "explore")
+            .with_runtime_status(Some("running".to_string())),
+    ]);
+    pane.side_panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("root", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "subagent", "agent")
+            .with_runtime_status(Some("blocked".to_string())),
+    ]);
+
+    let child = pane
+        .side_panel
+        .subagents()
+        .iter()
+        .find(|entry| entry.id == "child")
+        .expect("child row");
+    assert_eq!(child.title, "Audit markdown interactions");
+    assert_eq!(child.time_label, "explore");
+    assert_eq!(child.runtime_status.as_deref(), Some("blocked"));
+}
+
+#[test]
 fn pending_outbound_starts_empty() {
     let mut pane = NeoismAgentPane::default();
     assert!(!pane.has_pending_outbound());
@@ -594,6 +637,24 @@ fn idle_streaming_state_clears_status_label() {
 }
 
 #[test]
+fn active_subagent_footer_wins_over_transient_parent_streaming() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
+    pane.sync_subagent_waiting_clock();
+    let original_clock = pane.subagent_waiting_started_at;
+
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
+    assert_eq!(pane.streaming_label(), "Sub-agents working");
+    assert_eq!(pane.subagent_waiting_started_at, original_clock);
+}
+
+#[test]
 fn session_idle_clears_a_partially_restored_streaming_state() {
     let mut pane = NeoismAgentPane::default();
     pane.streaming_state = NeoismAgentStreamingState::Generating;
@@ -796,6 +857,59 @@ fn stale_active_subagent_id_does_not_revert_completed_task_to_running() {
 
     assert_eq!(pane.messages[0].status, "completed");
     assert!(pane.messages[0].detail.contains("status: completed"));
+    assert!(!pane.active_subagent_ids.contains("child-1"));
+}
+
+#[test]
+fn runtime_child_keeps_waiting_status_before_sidebar_hydrates() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, Some(1));
+    pane.sync_subagent_waiting_clock();
+
+    assert_eq!(pane.active_subagent_count(), 1);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
+
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
+    pane.sync_subagent_waiting_clock();
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+}
+
+#[test]
+fn part_activity_hydrates_missing_row_but_terminal_straggler_does_not() {
+    let mut live = NeoismAgentPane::default();
+    live.session_id = Some("parent".to_string());
+    assert!(live.note_subagent_part_activity(
+        "child-1".to_string(),
+        BranchStatus::Active,
+        Some("responding".to_string()),
+        Some(1),
+    ));
+    assert!(live
+        .side_panel
+        .subagents()
+        .iter()
+        .any(|entry| entry.id == "child-1"));
+
+    let mut completed = NeoismAgentPane::default();
+    completed.session_id = Some("parent".to_string());
+    completed.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
+    assert!(!completed.note_subagent_part_activity(
+        "child-1".to_string(),
+        BranchStatus::Active,
+        Some("responding".to_string()),
+        Some(2),
+    ));
+    assert!(!completed
+        .side_panel
+        .subagents()
+        .iter()
+        .any(|entry| entry.id == "child-1"));
 }
 
 #[test]
@@ -1197,6 +1311,40 @@ fn delayed_live_user_echo_does_not_move_prompt_after_long_response() {
     assert_eq!(pane.messages[0].kind, NeoismAgentMessageKind::User);
     assert_eq!(pane.messages[0].id, "msg-user-1");
     assert_eq!(pane.messages[1].kind, NeoismAgentMessageKind::Assistant);
+}
+
+#[test]
+fn streamed_user_image_and_text_merge_in_either_order() {
+    for image_first in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        let image = NeoismAgentImage {
+            filename: "clipboard.png".to_string(),
+            url: "data:image/png;base64,AA==".to_string(),
+            mime: "image/png".to_string(),
+        };
+        let mut optimistic = NeoismAgentMessage::user("[image1] inspect this");
+        optimistic.images.push(image.clone());
+        pane.messages.push(optimistic);
+
+        let mut text_part = NeoismAgentMessage::user("[image1] inspect this");
+        text_part.id = "msg-user-1".to_string();
+        let mut image_part = NeoismAgentMessage::user("");
+        image_part.id = "msg-user-1".to_string();
+        image_part.images.push(image.clone());
+
+        if image_first {
+            pane.upsert_part_message(image_part);
+            pane.upsert_part_message(text_part);
+        } else {
+            pane.upsert_part_message(text_part);
+            pane.upsert_part_message(image_part);
+        }
+
+        assert_eq!(pane.messages.len(), 1, "image_first={image_first}");
+        assert_eq!(pane.messages[0].id, "msg-user-1");
+        assert_eq!(pane.messages[0].text, "[image1] inspect this");
+        assert_eq!(pane.messages[0].images, vec![image]);
+    }
 }
 
 #[test]
@@ -1935,6 +2083,88 @@ fn diff_file_toggle_does_not_move_or_reanchor_the_timeline() {
     assert!(pane.pending_timeline_anchor.is_none());
     assert!(pane.timeline_view_anchor.is_none());
     assert!(!pane.tool_expand_animating("tool-1"));
+}
+
+#[test]
+fn markdown_horizontal_scroll_is_block_local_and_geometry_is_frame_local() {
+    let mut pane = NeoismAgentPane::default();
+    pane.register_markdown_horizontal_scroll_rect(
+        "markdown:message-1:code:0".to_string(),
+        [20.0, 100.0, 300.0, 120.0],
+        240.0,
+    );
+    pane.register_markdown_horizontal_scroll_rect(
+        "markdown:message-1:table:1".to_string(),
+        [20.0, 240.0, 300.0, 120.0],
+        400.0,
+    );
+
+    assert!(pane.update_markdown_horizontal_scroll_hover(40.0, 140.0));
+    assert!(pane.markdown_horizontal_scrollbar_visible("markdown:message-1:code:0"));
+    assert!(pane.update_markdown_horizontal_scroll_hover(800.0, 800.0));
+    assert!(!pane.markdown_horizontal_scrollbar_visible("markdown:message-1:code:0"));
+
+    assert_eq!(
+        pane.scroll_markdown_horizontal_at(40.0, 140.0, 75.0),
+        Some(true)
+    );
+    assert_eq!(
+        pane.markdown_horizontal_scroll_offset("markdown:message-1:code:0", 240.0),
+        75.0
+    );
+    assert_eq!(
+        pane.markdown_horizontal_scroll_offset("markdown:message-1:table:1", 400.0),
+        0.0
+    );
+
+    // Render-start clearing removes stale hit targets but deliberately keeps
+    // the content offset, which is restored when that block is drawn again.
+    pane.clear_tool_hit_rects();
+    assert_eq!(pane.scroll_markdown_horizontal_at(40.0, 140.0, 20.0), None);
+    assert_eq!(
+        pane.markdown_horizontal_scroll_offset("markdown:message-1:code:0", 240.0),
+        75.0
+    );
+
+    pane.register_markdown_horizontal_scrollbar(
+        "markdown:message-1:code:0".to_string(),
+        [20.0, 200.0, 300.0, 16.0],
+        [20.0, 200.0, 100.0, 16.0],
+        240.0,
+    );
+    assert!(pane.begin_markdown_horizontal_scrollbar_drag(50.0, 208.0));
+    // Frame-local geometry may be rebuilt while the pointer remains down;
+    // the captured drag itself must survive that redraw.
+    pane.clear_tool_hit_rects();
+    assert!(pane.markdown_horizontal_scrollbar_dragging());
+    assert!(pane.drag_markdown_horizontal_scrollbar_to(150.0));
+    assert!(
+        pane.markdown_horizontal_scroll_offset("markdown:message-1:code:0", 240.0) > 75.0
+    );
+    assert!(pane.end_markdown_horizontal_scrollbar_drag());
+}
+
+#[test]
+fn code_copy_feedback_animates_then_hands_back_to_copy_label() {
+    let mut pane = NeoismAgentPane::default();
+    pane.mark_code_copied("neoism-copy-ref://code-1");
+
+    assert!(pane
+        .code_copy_feedback_progress("neoism-copy-ref://code-1")
+        .is_some());
+    assert!(pane
+        .code_copy_feedback_progress("neoism-copy-ref://other")
+        .is_none());
+    assert_eq!(pane.animation_reason(), Some("code_copy_feedback"));
+
+    pane.copied_code_feedback = Some((
+        "neoism-copy-ref://code-1".to_string(),
+        Instant::now() - CODE_COPY_FEEDBACK_ANIMATION - Duration::from_millis(1),
+    ));
+    assert!(pane
+        .code_copy_feedback_progress("neoism-copy-ref://code-1")
+        .is_none());
+    assert_ne!(pane.animation_reason(), Some("code_copy_feedback"));
 }
 
 #[test]

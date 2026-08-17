@@ -211,8 +211,11 @@ pub enum ModalAction {
     NotesVaultAdd {
         name: String,
     },
-    NotesVaultPromptRename,
+    NotesVaultPromptRename {
+        vault: Option<String>,
+    },
     NotesVaultRename {
+        old_path: Option<String>,
         name: String,
     },
     NotesVaultSwitch {
@@ -222,13 +225,23 @@ pub enum ModalAction {
     /// joined workspace (the one linked-vault section of the selector).
     NotesVaultSwitchShared,
     NotesVaultOpenVaultsRoot,
-    NotesVaultLinkCurrentWorkspace,
+    NotesVaultLinkCurrentWorkspace {
+        /// Optional absolute folder inside a vault. `None` uses the notes
+        /// sidebar's current root (the whole vault for legacy callers).
+        notes_dir: Option<String>,
+    },
     NotesVaultPromptLinkProject {
         vault: String,
+        notes_dir: Option<String>,
     },
     NotesVaultLinkProject {
         vault: String,
         path: String,
+        notes_dir: Option<String>,
+    },
+    NotesVaultConvert {
+        source: String,
+        dest_dir: String,
     },
     /// Render every note in `vault` to a reMarkable document bundle and
     /// push it to the tablet (a "Neoism" folder of writable pages).
@@ -271,12 +284,19 @@ impl ModalAction {
             ModalAction::NotesVaultAdd { .. } => {
                 ModalAction::NotesVaultAdd { name: value }
             }
-            ModalAction::NotesVaultRename { .. } => {
-                ModalAction::NotesVaultRename { name: value }
+            ModalAction::NotesVaultRename { old_path, .. } => {
+                ModalAction::NotesVaultRename {
+                    old_path,
+                    name: value,
+                }
             }
-            ModalAction::NotesVaultLinkProject { vault, .. } => {
-                ModalAction::NotesVaultLinkProject { vault, path: value }
-            }
+            ModalAction::NotesVaultLinkProject {
+                vault, notes_dir, ..
+            } => ModalAction::NotesVaultLinkProject {
+                vault,
+                path: value,
+                notes_dir,
+            },
             ModalAction::RunEditorCommandWithInput { command, .. } => {
                 ModalAction::RunEditorCommandWithInput { command, value }
             }

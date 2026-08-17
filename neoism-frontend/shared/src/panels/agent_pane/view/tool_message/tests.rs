@@ -1,5 +1,6 @@
-use super::diff::snapshot_section_from_text;
+use super::diff::{cached_edit_diff_sections, snapshot_section_from_text};
 use super::*;
+use crate::panels::agent_pane::state::{NeoismAgentMessage, NeoismAgentOutputKind};
 
 #[test]
 fn snapshot_diff_pairs_replacement_rows_by_line_number() {
@@ -21,4 +22,34 @@ fn snapshot_diff_pairs_replacement_rows_by_line_number() {
     assert_eq!(rows[remove_one + 2].line_number, Some(3));
     assert_eq!(rows[remove_one + 3].kind, DiffLineKind::Add);
     assert_eq!(rows[remove_one + 3].line_number, Some(3));
+}
+
+fn apply_patch_message(status: &str, detail: &str) -> NeoismAgentMessage {
+    let mut message = NeoismAgentMessage::tool(
+        "ApplyPatch(src/lib.rs)",
+        "applying patch",
+        status,
+        "apply_patch",
+        NeoismAgentOutputKind::Text,
+        "rust",
+        Vec::new(),
+    );
+    message.id = "tool-1".to_string();
+    message.detail = detail.to_string();
+    message
+}
+
+#[test]
+fn running_apply_patch_skips_live_diff_parse() {
+    let detail = r#"{"neoismToolDetail":"edit","tool":"apply_patch","input":{"patchText":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n"},"metadata":null}"#;
+    assert!(cached_edit_diff_sections(&apply_patch_message("running", detail)).is_none());
+    assert!(cached_edit_diff_sections(&apply_patch_message("pending", detail)).is_none());
+}
+
+#[test]
+fn completed_apply_patch_parses_diff_card() {
+    let detail = r#"{"neoismToolDetail":"edit","tool":"apply_patch","input":{"patchText":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n"},"metadata":null}"#;
+    let sections = cached_edit_diff_sections(&apply_patch_message("completed", detail))
+        .expect("settled apply_patch should parse");
+    assert!(!sections.is_empty());
 }

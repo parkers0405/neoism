@@ -18,8 +18,10 @@ impl MarkdownPane {
         self.scroll_y = scroll_y;
         self.target_scroll_y = scroll_y;
         self.scroll_velocity_px_s = 0.0;
+        self.scroll_animation_velocity_px_s = 0.0;
         self.scroll_velocity_moves_cursor = false;
         self.scroll_last_tick_at = None;
+        self.scroll_animation_last_tick_at = None;
         self.follow_cursor = false;
     }
 
@@ -77,17 +79,21 @@ impl MarkdownPane {
         let applied = self.target_scroll_y - before;
         if applied.abs() > f32::EPSILON {
             self.move_cursor_with_scroll(applied);
-            let injected = delta_pixels * 7.0;
-            self.scroll_velocity_px_s =
-                (self.scroll_velocity_px_s + injected).clamp(-2800.0, 2800.0);
-            self.scroll_velocity_moves_cursor = true;
-            self.scroll_last_tick_at.get_or_insert_with(Instant::now);
-        } else {
-            self.scroll_velocity_px_s = 0.0;
-            self.scroll_velocity_moves_cursor = false;
-            self.scroll_last_tick_at = None;
         }
+        // Keyboard scrolling has an exact destination. Pointer-style inertia
+        // here compounded Ctrl+D/U repeats and kept moving after key release;
+        // the normal target settle below still provides the smooth glide.
+        self.scroll_velocity_px_s = 0.0;
+        self.scroll_velocity_moves_cursor = false;
+        self.scroll_last_tick_at = None;
         self.follow_cursor = false;
+    }
+
+    pub fn scroll_cursor_by_lines(&mut self, lines: i32, viewport_height: f32) {
+        self.scroll_cursor_by_content_pixels(
+            lines as f32 * SCROLL_CURSOR_LINE_HEIGHT,
+            viewport_height,
+        );
     }
 
     /// Move a paged, read-only viewport and report whether content moved.
@@ -112,7 +118,9 @@ impl MarkdownPane {
     pub fn snap_scroll_to_target(&mut self) {
         self.scroll_y = self.target_scroll_y;
         self.scroll_velocity_px_s = 0.0;
+        self.scroll_animation_velocity_px_s = 0.0;
         self.scroll_last_tick_at = None;
+        self.scroll_animation_last_tick_at = None;
     }
 
     pub fn scroll_to_top(&mut self) {
@@ -175,18 +183,53 @@ impl MarkdownPane {
 
         let inertial_scroll = self.tick_inertial_scroll();
         let delta = self.target_scroll_y - self.scroll_y;
-        if delta.abs() <= SCROLL_EPSILON {
+        let animating = delta.abs() > SCROLL_EPSILON
+            || self.scroll_animation_velocity_px_s.abs() > 1.0;
+        if !animating {
             if self.scroll_y != self.target_scroll_y {
                 self.scroll_y = self.target_scroll_y;
-                return true;
             }
+            self.scroll_animation_velocity_px_s = 0.0;
+            self.scroll_animation_last_tick_at = None;
             return inertial_scroll
                 || animating_tasks
                 || animating_yanks
                 || animating_change_flash
                 || reveal_pending;
         }
-        self.scroll_y += delta * SCROLL_SETTLE_FACTOR;
+
+        // Same critically damped spring as code panes: movement accelerates
+        // from rest, carries through repeated targets, and settles without the
+        // "push the viewport by a fraction" feel of exponential interpolation.
+        let dt = self
+            .scroll_animation_last_tick_at
+            .replace(now)
+            .map(|at| now.saturating_duration_since(at).as_secs_f32().min(0.05))
+            .unwrap_or(1.0 / 60.0);
+        let max_travel = self.scroll_viewport_height.max(1.0) * 1.25;
+        if delta.abs() > max_travel {
+            self.scroll_y = self.target_scroll_y - max_travel * delta.signum();
+            self.scroll_animation_velocity_px_s = 0.0;
+        }
+        const OMEGA: f32 = 16.0;
+        const MAX_SUBSTEP: f32 = 1.0 / 240.0;
+        let mut remaining = dt;
+        while remaining > 0.0 {
+            let step = remaining.min(MAX_SUBSTEP);
+            let delta = self.target_scroll_y - self.scroll_y;
+            let accel =
+                OMEGA * OMEGA * delta - 2.0 * OMEGA * self.scroll_animation_velocity_px_s;
+            self.scroll_animation_velocity_px_s += accel * step;
+            self.scroll_y += self.scroll_animation_velocity_px_s * step;
+            remaining -= step;
+        }
+        if (self.target_scroll_y - self.scroll_y).abs() < SCROLL_EPSILON
+            && self.scroll_animation_velocity_px_s.abs() < 30.0
+        {
+            self.scroll_y = self.target_scroll_y;
+            self.scroll_animation_velocity_px_s = 0.0;
+            self.scroll_animation_last_tick_at = None;
+        }
         true
     }
 
@@ -347,7 +390,9 @@ impl MarkdownPane {
         self.target_scroll_y = next;
         self.cursor_scroll_remainder = 0.0;
         self.scroll_velocity_px_s = 0.0;
+        self.scroll_animation_velocity_px_s = 0.0;
         self.scroll_last_tick_at = None;
+        self.scroll_animation_last_tick_at = None;
         self.follow_cursor = false;
         (next - before).abs() > 0.01
     }

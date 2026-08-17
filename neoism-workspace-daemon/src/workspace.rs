@@ -345,11 +345,11 @@ fn declare_workspace_dir(root_dir: Option<PathBuf>) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap_or(dir)
 }
 
-/// Resolve the ONE notes vault the host has linked to a workspace's code
+/// Resolve the ONE notes scope the host has linked to a workspace's code
 /// dir, for advertising over `WorkspaceSummary::linked_vault_dir`. The
 /// vaults physically live on THIS (host) machine's disk, so the daemon —
 /// which always runs on the host — is the authority. Returns the exact,
-/// scoped vault directory (`~/Neoism/Vaults/{name}`), never the
+/// scoped vault/folder directory (`~/Neoism/Vaults/{name}/...`), never the
 /// `Neoism/Vaults` parent, and only when it exists on disk (the files
 /// plane requires an existing directory to serve). `None` when the code
 /// dir is linked to no vault, so a guest shows the empty state rather

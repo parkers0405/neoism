@@ -77,14 +77,15 @@ fn modal_action_policy_tag(
         A::ServerFormSubmit => Tag::ServerFormSubmit,
         A::ServerRemoveConfirm { .. } => Tag::ServerRemoveConfirm,
         A::NotesVaultAdd { .. } => Tag::NotesVaultAdd,
-        A::NotesVaultPromptRename => Tag::NotesVaultPromptRename,
+        A::NotesVaultPromptRename { .. } => Tag::NotesVaultPromptRename,
         A::NotesVaultRename { .. } => Tag::NotesVaultRename,
         A::NotesVaultSwitch { .. } => Tag::NotesVaultSwitch,
         A::NotesVaultSwitchShared => Tag::NotesVaultSwitchShared,
         A::NotesVaultOpenVaultsRoot => Tag::NotesVaultOpenVaultsRoot,
-        A::NotesVaultLinkCurrentWorkspace => Tag::NotesVaultLinkCurrentWorkspace,
+        A::NotesVaultLinkCurrentWorkspace { .. } => Tag::NotesVaultLinkCurrentWorkspace,
         A::NotesVaultPromptLinkProject { .. } => Tag::NotesVaultPromptLinkProject,
         A::NotesVaultLinkProject { .. } => Tag::NotesVaultLinkProject,
+        A::NotesVaultConvert { .. } => Tag::NotesVaultConvert,
         A::NotesVaultShareWithRemarkable { .. } => Tag::NotesVaultShareWithRemarkable,
     }
 }

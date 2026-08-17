@@ -60,28 +60,71 @@ pub fn cell_bg(
     renderer: &Renderer,
     term_colors: &TermColors,
 ) -> [u8; 4] {
-    let color = match sq.content_tag() {
+    let (color, is_default_background) = match sq.content_tag() {
         ContentTag::BgRgb => {
             let (r, g, b) = sq.bg_rgb();
             return [r, g, b, 255];
         }
         ContentTag::BgPalette => {
             let idx = sq.bg_palette_index() as usize;
-            renderer.color(idx, term_colors)
+            (renderer.color(idx, term_colors), false)
         }
         ContentTag::Codepoint => {
             let style = style_set.get(sq.style_id());
             if style.flags.contains(StyleFlags::INVERSE) {
-                renderer.compute_color(&style.fg, style.flags, term_colors)
+                (
+                    renderer.compute_color(&style.fg, style.flags, term_colors),
+                    false,
+                )
             } else {
-                renderer.compute_bg_color(&style, term_colors)
+                // The window clear pass already owns the terminal's default
+                // background. Emitting that same color as an opaque cell
+                // hides window transparency and background images. Only an
+                // explicit ANSI background should produce a cell fill.
+                let is_default = matches!(
+                    style.bg,
+                    neoism_terminal_core::colors::AnsiColor::Named(
+                        neoism_terminal_core::colors::NamedColor::Background
+                    )
+                );
+                (renderer.compute_bg_color(&style, term_colors), is_default)
             }
         }
     };
-    normalized_to_u8(color)
+    resolved_cell_background(color, is_default_background)
+}
+
+#[inline]
+fn resolved_cell_background(color: [f32; 4], is_default_background: bool) -> [u8; 4] {
+    if is_default_background {
+        [0, 0, 0, 0]
+    } else {
+        normalized_to_u8(color)
+    }
 }
 
 #[inline]
 pub(super) fn normalized_to_u8(c: [f32; 4]) -> [u8; 4] {
     neoism_ui::terminal_grid_emit::rgba_f32_to_u8(c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolved_cell_background;
+
+    #[test]
+    fn default_background_leaves_the_window_surface_visible() {
+        assert_eq!(
+            resolved_cell_background([0.10, 0.20, 0.30, 1.0], true),
+            [0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn explicit_background_remains_an_opaque_cell_fill() {
+        assert_eq!(
+            resolved_cell_background([0.10, 0.20, 0.30, 1.0], false),
+            [25, 51, 76, 255]
+        );
+    }
 }

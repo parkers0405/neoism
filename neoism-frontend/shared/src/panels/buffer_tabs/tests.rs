@@ -809,6 +809,25 @@ fn note_custom_icon_follows_its_buffer_tab_and_rename() {
 }
 
 #[test]
+fn recreated_split_tab_restores_custom_presentation() {
+    let path = PathBuf::from("/vault/Tasks.md");
+    let mut source = BufferTabs::<()>::new();
+    let source_ix = source.open_markdown(path.clone());
+    source.set_title(source_ix, "My tasks");
+    source.set_modified(&path, true);
+    source.set_path_icon(&path, Some("\u{1f4a1}".to_string()));
+    let moved = source.tabs()[source_ix].clone();
+
+    let mut destination = BufferTabs::<()>::new();
+    let dest_ix = destination.open_markdown(path);
+    assert!(destination.restore_presentation_from(dest_ix, &moved));
+    let restored = &destination.tabs()[dest_ix];
+    assert_eq!(restored.title, "My tasks");
+    assert!(restored.modified);
+    assert_eq!(restored.custom_icon.as_deref(), Some("\u{1f4a1}"));
+}
+
+#[test]
 fn hit_test_reports_new_tab_inside_plus_rect() {
     let mut tabs = BufferTabs::<()>::new();
     tabs.set_tabs(vec![terminal("Terminal 1", None)], 0);

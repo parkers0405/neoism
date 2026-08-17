@@ -84,6 +84,7 @@ pub fn create_dead_context<T: neoism_backend::event::EventListener>(
         neoism_agent: None,
         neoism_tags: None,
         neoism_extensions: None,
+        neoworld: None,
     }
 }
 
@@ -212,6 +213,22 @@ pub fn create_neoism_extensions_context<T: neoism_backend::event::EventListener>
         create_dead_context(event_proxy, window_id, route_id, rich_text_id, dimension);
     context.neoism_extensions =
         Some(crate::workspace::extensions::NeoismExtensionsPane::new());
+    context
+}
+
+pub fn create_neoworld_context<T: neoism_backend::event::EventListener>(
+    event_proxy: T,
+    window_id: WindowId,
+    rich_text_id: usize,
+    dimension: ContextDimension,
+) -> Context<T> {
+    let route_id = ROUTE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mut context =
+        create_dead_context(event_proxy, window_id, route_id, rich_text_id, dimension);
+    context.neoworld = Some(match crate::neoworld_runtime::initial_pet() {
+        Some(pet) => neoism_ui::panels::NeoWorldPane::new(pet.state, pet.name),
+        None => neoism_ui::panels::NeoWorldPane::preview(),
+    });
     context
 }
 

@@ -202,6 +202,8 @@ mod tests {
                 notes: NotesConfig {
                     enabled: true,
                     workspace: notes_root.display().to_string(),
+                    vault_id: None,
+                    scope: PathBuf::from("."),
                     ignore: Vec::new(),
                 },
             },

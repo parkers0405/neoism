@@ -32,6 +32,7 @@ pub mod custom_cursor;
 pub mod editor_scroll;
 pub mod git_branch;
 pub mod minimap;
+pub mod neoworld;
 pub mod notes_sidebar;
 pub mod notifications;
 pub mod pane_grid;
@@ -67,6 +68,7 @@ pub use extensions_page::{
 pub use file_tree::{FileTree, TreeNode};
 pub use finder::{Finder, FinderMode};
 pub use git_diff::{DiffFile, DiffHunk, DiffLine, GitDiff};
+pub use neoworld::NeoWorldPane;
 pub use notes_sidebar::NotesSidebar;
 pub use pairings_settings::{PairingRow, PairingsSettings, PairingsSettingsAction};
 pub use settings_page::{NeoismSettingsPane, PointerOutcome, SettingsAction};

@@ -349,6 +349,8 @@ pub(crate) fn session_leaf_spec_for_context<T: EventListener>(
         SessionLeafKind::Custom("tags".to_string())
     } else if context.neoism_extensions.is_some() {
         SessionLeafKind::Custom("extensions".to_string())
+    } else if context.neoworld.is_some() {
+        SessionLeafKind::Custom("neoworld".to_string())
     } else {
         SessionLeafKind::Terminal
     };

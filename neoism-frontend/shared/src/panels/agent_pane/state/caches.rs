@@ -50,7 +50,15 @@ impl NeoismAgentPane {
             lang: hash_value(&message.lang),
             line_offset: message.line_offset,
             todos: hash_value(&message.todos),
-            detail: hash_value(&message.detail),
+            detail:
+                if crate::panels::agent_pane::view::tool_message::is_unsettled_edit_tool(
+                    &message.tool,
+                    &message.status,
+                ) {
+                    0
+                } else {
+                    hash_value(&message.detail)
+                },
             images: hash_value(&message.images),
             selected_tool_group_child: 0,
         }

@@ -13,10 +13,11 @@ use crate::editor::markdown::helpers::{
     source_from_lines,
 };
 use crate::editor::markdown::{
-    source_map::InlineSourceMap, MarkdownListMarker, MarkdownListMarkerKind,
-    MarkdownOutlineEntry, MarkdownPane, MarkdownPendingLineEdit,
-    MarkdownVirtualMeasureKey, MarkdownVirtualMeasurement, MarkdownVirtualRenderState,
-    MarkdownWrapHitRow, MarkdownWrapRow, CURSOR_REVEAL_FAST_REPEAT,
+    is_misspelled_word, source_map::InlineSourceMap, spellcheck_dictionary,
+    spellcheck_words, MarkdownListMarker, MarkdownListMarkerKind, MarkdownOutlineEntry,
+    MarkdownPane, MarkdownPendingLineEdit, MarkdownVirtualMeasureKey,
+    MarkdownVirtualMeasurement, MarkdownVirtualRenderState, MarkdownWrapHitRow,
+    MarkdownWrapRow, CURSOR_REVEAL_FAST_REPEAT,
 };
 use crate::editor::neodraw::{render_scene, Camera, Vec2};
 use crate::primitives::ide_theme::IdeTheme;
@@ -42,7 +43,9 @@ use super::illuminated::{
     draw_illuminated_inline, illuminated_inline_metrics, parse_illuminate_token,
     IlluminatedToken,
 };
-use super::inline::{clean_inline_with_active_link, markdown_link_label};
+use super::inline::{
+    clean_inline_with_active_link, draw_spellcheck_squiggle_visible, markdown_link_label,
+};
 use super::scrollbar::draw_markdown_scrollbar;
 use super::table::{measure_table, parse_table, render_table_with_source_base};
 use super::types::{

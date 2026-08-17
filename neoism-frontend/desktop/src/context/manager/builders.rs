@@ -3,7 +3,7 @@ use crate::context::factories::{
     create_code_context, create_draw_context, create_epub_context,
     create_markdown_context, create_neoism_agent_context,
     create_neoism_extensions_context, create_neoism_tags_context,
-    create_notebook_context, process_open_url,
+    create_neoworld_context, create_notebook_context, process_open_url,
 };
 use crate::event::RioEvent;
 use crate::layout::ContextGrid;
@@ -489,6 +489,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         })
     }
 
+    pub(crate) fn neoworld_node(&self) -> Option<(usize, taffy::NodeId)> {
+        self.contexts.get(self.current_index).and_then(|grid| {
+            grid.contexts().iter().find_map(|(node, item)| {
+                item.context()
+                    .neoworld
+                    .as_ref()
+                    .map(|_| (item.context().route_id, *node))
+            })
+        })
+    }
+
     pub fn remove_markdown_by_path(
         &mut self,
         path: &std::path::Path,
@@ -857,6 +868,30 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     ) -> bool {
         let dimension = self.current_grid().grid_dimension();
         let new_context = create_neoism_extensions_context(
+            self.event_proxy.clone(),
+            self.window_id,
+            rich_text_id,
+            dimension,
+        );
+        let new_route_id = new_context.route_id;
+        if self.contexts[self.current_index]
+            .add_stacked_context(new_context, sugarloaf)
+            .is_some()
+        {
+            self.current_route = new_route_id;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn add_stacked_neoworld(
+        &mut self,
+        rich_text_id: usize,
+        sugarloaf: &mut Sugarloaf,
+    ) -> bool {
+        let dimension = self.current_grid().grid_dimension();
+        let new_context = create_neoworld_context(
             self.event_proxy.clone(),
             self.window_id,
             rich_text_id,

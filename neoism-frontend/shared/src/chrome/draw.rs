@@ -517,6 +517,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             markdown_cursor_available,
             // Web has no native code pane yet; the desktop feeds this.
             code_cursor_available: false,
+            cursorless_surface_active: false,
             terminal_block_input_active,
             trail_cursor_enabled: !markdown_active,
         }) {

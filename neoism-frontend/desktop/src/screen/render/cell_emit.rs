@@ -62,6 +62,15 @@ impl Screen<'_> {
                 continue;
             };
 
+            // A visible/dismissing splash is transparent chrome over the
+            // window background. Omit its resident terminal grid from this
+            // frame instead of covering shell output with an opaque pane-sized
+            // quad. The grid remains intact and resumes without a rebuild when
+            // the splash finishes dismissing.
+            if *route_id == current_route && self.renderer.terminal_splash_animating {
+                continue;
+            }
+
             let cols = p.cols as usize;
             let terminal_pixel_offset_y = {
                 let offset = p.terminal_scroll_offset_y;

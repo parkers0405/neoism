@@ -736,7 +736,8 @@ impl ChromeBridge {
         if let Some(session_id) = self.agent_state.session_id.clone() {
             self.send_agent_envelope(&AgentClientMessage::SubmitPrompt {
                 session_id,
-                message_id: neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
+                message_id:
+                    neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
                 text,
                 attachments,
                 mode,
@@ -746,7 +747,8 @@ impl ChromeBridge {
             });
         } else {
             self.agent_state.pending_prompt = Some(PendingAgentPrompt {
-                message_id: neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
+                message_id:
+                    neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
                 text,
                 attachments,
                 mode,
@@ -1032,6 +1034,10 @@ impl ChromeBridge {
                 result.handled = true;
                 break 'chain;
             }
+            if pane.begin_markdown_horizontal_scrollbar_drag(x, y) {
+                result.handled = true;
+                break 'chain;
+            }
             if let Some(link) = pane.link_at(x, y) {
                 if let Some(key) =
                         neoism_ui::panels::agent_pane::view::markdown::mermaid_toggle_key_from_link_target(&link)
@@ -1041,6 +1047,7 @@ impl ChromeBridge {
                         neoism_ui::panels::agent_pane::view::markdown::copied_code_from_link_target(&link)
                     {
                         let chars = text.chars().count();
+                        pane.mark_code_copied(&link);
                         pane.push_copied_notice(chars);
                         result.copy = Some(text);
                     } else {
@@ -1092,6 +1099,45 @@ impl ChromeBridge {
             return pane.scroll_timeline_pixels(delta_pixels);
         }
         false
+    }
+
+    /// Horizontal wheel/trackpad routing for rendered Markdown code blocks
+    /// and tables. Kept separate from `agent_scroll_at` so a normal vertical
+    /// wheel never gets captured by an overflow block.
+    pub fn agent_scroll_horizontal_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        delta_pixels: f32,
+    ) -> bool {
+        let Some(pane) = self.chrome.agent_pane_mut() else {
+            return false;
+        };
+        if !pane.timeline_contains_point(x, y) {
+            return false;
+        }
+        pane.scroll_markdown_horizontal_at(x, y, delta_pixels)
+            .is_some()
+    }
+
+    /// Continue a direct mouse drag of a rendered Markdown code/table
+    /// horizontal scrollbar. A true result means the active drag owns the
+    /// pointer even when it is already clamped at an edge.
+    pub fn agent_drag_markdown_horizontal_scrollbar(&mut self, x: f32) -> bool {
+        let Some(pane) = self.chrome.agent_pane_mut() else {
+            return false;
+        };
+        if !pane.markdown_horizontal_scrollbar_dragging() {
+            return false;
+        }
+        pane.drag_markdown_horizontal_scrollbar_to(x);
+        true
+    }
+
+    pub fn agent_end_markdown_horizontal_scrollbar_drag(&mut self) -> bool {
+        self.chrome
+            .agent_pane_mut()
+            .is_some_and(|pane| pane.end_markdown_horizontal_scrollbar_drag())
     }
 
     /// Touch-drag routing over the agent pane. Returns which

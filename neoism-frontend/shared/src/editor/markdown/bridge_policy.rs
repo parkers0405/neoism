@@ -470,6 +470,10 @@ pub enum MarkdownCtrlAction {
     ScrollCursorDownHalfPage,
     /// Ctrl+U — scroll cursor up by half-page.
     ScrollCursorUpHalfPage,
+    /// Ctrl+E — scroll cursor down by one line.
+    ScrollCursorDownLine,
+    /// Ctrl+Y — scroll cursor up by one line.
+    ScrollCursorUpLine,
     /// Ctrl+ArrowUp — move table row fast (up).
     MoveTableRowUp,
     /// Ctrl+ArrowDown — move table row fast (down).
@@ -499,6 +503,8 @@ pub enum MarkdownCtrlAction {
 pub enum MarkdownCtrlKeyKind {
     CharD,
     CharU,
+    CharE,
+    CharY,
     CharR,
     CharV,
     CharO,
@@ -519,6 +525,8 @@ pub fn markdown_ctrl_action(
     Some(match key {
         MarkdownCtrlKeyKind::CharD => MarkdownCtrlAction::ScrollCursorDownHalfPage,
         MarkdownCtrlKeyKind::CharU => MarkdownCtrlAction::ScrollCursorUpHalfPage,
+        MarkdownCtrlKeyKind::CharE => MarkdownCtrlAction::ScrollCursorDownLine,
+        MarkdownCtrlKeyKind::CharY => MarkdownCtrlAction::ScrollCursorUpLine,
         MarkdownCtrlKeyKind::ArrowUp => MarkdownCtrlAction::MoveTableRowUp,
         MarkdownCtrlKeyKind::ArrowDown => MarkdownCtrlAction::MoveTableRowDown,
         MarkdownCtrlKeyKind::ArrowLeft => MarkdownCtrlAction::MoveTableCellPrev,
@@ -934,6 +942,14 @@ mod tests {
         assert_eq!(
             markdown_ctrl_action(ctrl, MarkdownCtrlKeyKind::CharD),
             Some(MarkdownCtrlAction::ScrollCursorDownHalfPage)
+        );
+        assert_eq!(
+            markdown_ctrl_action(ctrl, MarkdownCtrlKeyKind::CharE),
+            Some(MarkdownCtrlAction::ScrollCursorDownLine)
+        );
+        assert_eq!(
+            markdown_ctrl_action(ctrl, MarkdownCtrlKeyKind::CharY),
+            Some(MarkdownCtrlAction::ScrollCursorUpLine)
         );
         assert_eq!(
             markdown_ctrl_action(ctrl, MarkdownCtrlKeyKind::ArrowUp),

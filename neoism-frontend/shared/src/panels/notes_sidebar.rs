@@ -2258,7 +2258,7 @@ fn should_skip_note_entry(root: &Path, path: &Path) -> bool {
     // `project.toml` at the vault ROOT is vault metadata (code-project
     // links), not a note — hidden like dotfiles. A user's own
     // project.toml in a subfolder still shows.
-    if name == "project.toml" && path.parent() == Some(root) {
+    if matches!(name, "project.toml" | "project.json") && path.parent() == Some(root) {
         return true;
     }
     name.starts_with('.') || matches!(name, "target" | "node_modules")

@@ -302,6 +302,38 @@ fn stale_running_snapshot_cannot_resurrect_a_completed_subagent() {
             .map(|activity| activity.status),
         Some(BranchStatus::Completed)
     );
+    assert_eq!(
+        panel
+            .subagents()
+            .iter()
+            .find(|entry| entry.id == "child")
+            .and_then(|entry| entry.runtime_status.as_deref()),
+        Some("completed"),
+        "the visible row must retain the live terminal edge too"
+    );
+}
+
+#[test]
+fn live_completion_updates_parent_sidebar_without_opening_child() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("parent", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "Review changes", "explore")
+            .with_runtime_status(Some("running".to_string())),
+    ]);
+
+    // This is the lifecycle edge the parent stream receives at the same time
+    // its inline Task card becomes completed. No child navigation or recovery
+    // snapshot should be needed for the Branches row to catch up.
+    panel.set_branch_activity_status("child", BranchStatus::Completed);
+
+    let child = panel
+        .subagents()
+        .iter()
+        .find(|entry| entry.id == "child")
+        .expect("child remains visible for the completion grace window");
+    assert_eq!(child.runtime_status.as_deref(), Some("completed"));
+    assert_eq!(panel.active_child_count(Some("parent")), 0);
 }
 
 #[test]

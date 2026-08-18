@@ -214,6 +214,15 @@ impl BranchStatus {
             _ => None,
         }
     }
+
+    fn runtime_status(self) -> &'static str {
+        match self {
+            Self::Active => "running",
+            Self::WaitingPermission => "blocked",
+            Self::Completed => "completed",
+            Self::Stopped => "error",
+        }
+    }
 }
 
 /// Per-branch (per-session) snapshot the side panel renders under each
@@ -1606,9 +1615,10 @@ impl NeoismAgentSidePanel {
         session_id: impl Into<String>,
         status: BranchStatus,
     ) {
+        let session_id = session_id.into();
         let terminal = matches!(status, BranchStatus::Completed | BranchStatus::Stopped);
         self.branch_activities
-            .entry(session_id.into())
+            .entry(session_id.clone())
             .and_modify(|activity| {
                 activity.transition_status(status);
                 activity.terminal_locked = terminal;
@@ -1618,6 +1628,20 @@ impl NeoismAgentSidePanel {
                 activity.terminal_locked = terminal;
                 activity
             });
+
+        // The sidebar row and its BranchActivity used to be two independent
+        // lifecycle stores. A live completion updated BranchActivity (and the
+        // parent Task card), while the already-rendered row could retain its
+        // snapshot-era `runtime_status: running` until opening the child
+        // forced another snapshot. Keep the visible row on the same
+        // authoritative edge so completion paints immediately in the parent.
+        if let Some(entry) = self
+            .subagents
+            .iter_mut()
+            .find(|entry| entry.id == session_id)
+        {
+            entry.runtime_status = Some(status.runtime_status().to_string());
+        }
     }
 
     /// Reconcile a bootstrap/reconnect status snapshot without allowing an
@@ -1635,6 +1659,25 @@ impl NeoismAgentSidePanel {
             BranchStatus::Active | BranchStatus::WaitingPermission
         ) && self.branch_terminal_locked(&session_id)
         {
+            // `self.subagents` was rebuilt from this snapshot before status
+            // reconciliation. Restore the live terminal value onto the row as
+            // well as retaining it in BranchActivity; otherwise rendering
+            // still sees the stale `running` snapshot even though the active
+            // count correctly says the child is finished.
+            if let Some(locked_status) = self
+                .branch_activities
+                .get(&session_id)
+                .map(|activity| activity.status)
+            {
+                if let Some(entry) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|entry| entry.id == session_id)
+                {
+                    entry.runtime_status =
+                        Some(locked_status.runtime_status().to_string());
+                }
+            }
             return;
         }
         self.set_branch_activity_status(session_id, status);

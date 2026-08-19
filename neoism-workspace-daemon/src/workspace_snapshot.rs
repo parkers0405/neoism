@@ -35,7 +35,6 @@
 //! Keeping everything on the `git` CLI also means one consistent failure mode.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -176,7 +175,7 @@ fn capture_untracked(repo: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
 /// repo with no commits) or a non-repo path — both mean "no base to diff
 /// against", and capture then treats every file as untracked.
 fn head_commit(repo: &Path) -> Result<Option<String>> {
-    let output = Command::new("git")
+    let output = crate::hidden_std_command("git")
         .arg("-C")
         .arg(repo)
         .args(["rev-parse", "HEAD"])
@@ -222,7 +221,7 @@ fn apply_tracked_patch(repo: &Path, patch: &str, report: &mut ApplyReport) {
         return;
     }
 
-    let child = Command::new("git")
+    let child = crate::hidden_std_command("git")
         .arg("-C")
         .arg(repo)
         .args(["apply", "--reject", "--whitespace=nowarn"])
@@ -343,7 +342,7 @@ fn write_untracked(
 fn git<const N: usize>(repo: &Path, args: [&str; N]) -> Result<Vec<u8>> {
     repo.to_str()
         .ok_or_else(|| SnapshotError::NonUtf8Path(repo.to_path_buf()))?;
-    let output = Command::new("git")
+    let output = crate::hidden_std_command("git")
         .arg("-C")
         .arg(repo)
         .args(args)

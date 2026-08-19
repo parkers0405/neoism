@@ -45,6 +45,8 @@ pub(super) fn host_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     if let Ok(path) = std::env::join_paths(unique) {
         command.env("PATH", path);
     }
+    #[cfg(windows)]
+    crate::windows_process::hide_tokio_command(&mut command);
     command
 }
 

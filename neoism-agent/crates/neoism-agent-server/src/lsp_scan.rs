@@ -213,15 +213,16 @@ where
 }
 
 fn cargo_workspace_root_uncached(manifest: &Path) -> Option<PathBuf> {
-    let output = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    command
         .arg("metadata")
         .arg("--no-deps")
         .arg("--format-version")
         .arg("1")
         .arg("--manifest-path")
-        .arg(manifest)
-        .output()
-        .ok()?;
+        .arg(manifest);
+    crate::tool::process::set_new_process_group_std(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }

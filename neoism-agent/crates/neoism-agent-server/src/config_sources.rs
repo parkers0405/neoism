@@ -128,11 +128,12 @@ pub(super) fn entry_name(root: &Path, file: &Path) -> String {
 }
 
 pub(super) fn worktree_root(directory: &Path) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    command
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(directory)
-        .output()
-        .ok()?;
+        .current_dir(directory);
+    crate::tool::process::set_new_process_group_std(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }

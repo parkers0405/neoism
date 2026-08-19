@@ -1478,15 +1478,33 @@ pub(crate) fn stop_hosted_daemon(spec: &crate::server_registry::HostedServerSpec
 #[cfg(not(unix))]
 pub(crate) fn stop_hosted_daemon(spec: &crate::server_registry::HostedServerSpec) {
     let needle = format!(":{}", spec.port);
-    if let Ok(output) = std::process::Command::new("netstat").arg("-ano").output() {
+    if let Ok(output) = {
+        let mut command = std::process::Command::new("netstat");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+            );
+        }
+        command.arg("-ano").output()
+    } {
         let text = String::from_utf8_lossy(&output.stdout);
         for line in text.lines() {
             let upper = line.to_uppercase();
             if line.contains(&needle) && upper.contains("LISTENING") {
                 if let Some(pid) = line.split_whitespace().last() {
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/PID", pid, "/F"])
-                        .status();
+                    let mut command = std::process::Command::new("taskkill");
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::process::CommandExt;
+                        command.creation_flags(
+                            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                                | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+                        );
+                    }
+                    let _ = command.args(["/PID", pid, "/F"]).status();
                 }
             }
         }
@@ -1517,7 +1535,9 @@ fn detach_hosted_daemon(command: &mut std::process::Command) {
     // flag site on this Command, so combining both here is correct.
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    command.creation_flags(
+        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | 0x0800_0000,
+    );
 }
 
 #[cfg(not(any(unix, windows)))]

@@ -56,6 +56,14 @@ pub(crate) fn command_for_language(
             "No notebook executor for `{language}` yet (supported: python, sh, bash, zsh, fish)"
         ));
     };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+        );
+    }
     Ok(command)
 }
 

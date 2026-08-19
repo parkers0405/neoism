@@ -560,6 +560,7 @@ fn local_command_for_language(language: &str) -> Result<StdCommand, String> {
             "No notebook executor for `{language}` yet (supported: python, sh, bash, zsh, fish)"
         ));
     };
+    configure_local_process_interrupt(&mut command);
     Ok(command)
 }
 
@@ -601,8 +602,10 @@ fn configure_local_process_interrupt(command: &mut StdCommand) {
     // child without tearing down our own group. `creation_flags` REPLACES any
     // previously-set flags (Command exposes no getter), so this must stay the
     // only flag-setting site for local notebook commands.
-    command
-        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    command.creation_flags(
+        windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP
+            | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+    );
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1164,6 +1167,7 @@ fn validate_python_kernel_program(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    configure_local_process_interrupt(&mut command);
     match command.output() {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => {

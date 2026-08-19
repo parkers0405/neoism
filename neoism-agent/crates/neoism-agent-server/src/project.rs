@@ -107,7 +107,7 @@ fn project_name(path: &Path) -> String {
 }
 
 fn canonicalize_lossy(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::windows_process::canonicalize_path_lossy(path)
 }
 
 fn path_text(path: &Path) -> String {
@@ -115,11 +115,10 @@ fn path_text(path: &Path) -> String {
 }
 
 fn git_output(directory: &Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(directory)
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new("git");
+    command.args(args).current_dir(directory);
+    crate::tool::process::set_new_process_group_std(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -187,7 +186,7 @@ mod tests {
     }
 
     fn run_git(directory: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
+        let output = crate::windows_process::std_command("git")
             .args(args)
             .current_dir(directory)
             .output()

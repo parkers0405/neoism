@@ -84,7 +84,12 @@ fn cli_candidates() -> &'static [&'static str] {
 pub fn discover_peers_blocking() -> TailnetPeersResponse {
     let mut last_failure: Option<String> = None;
     for cli in cli_candidates() {
-        let output = match Command::new(cli).arg("status").arg("--json").output() {
+        let output = match {
+            let mut command = Command::new(cli);
+            #[cfg(windows)]
+            crate::hide_std_command(&mut command);
+            command.arg("status").arg("--json").output()
+        } {
             Ok(out) => out,
             Err(error) => {
                 // Binary not found, permission denied, etc. — try the

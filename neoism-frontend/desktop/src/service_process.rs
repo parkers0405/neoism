@@ -34,7 +34,10 @@ fn spawn(arguments: &[&str]) -> io::Result<ServiceProcess> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+        );
     }
     Ok(ServiceProcess {
         child: command.spawn()?,

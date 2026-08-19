@@ -13,14 +13,14 @@ pub(crate) fn background_command(program: &str) -> Command {
         {
             let mut command = Command::new(executable);
             command
-                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .creation_flags(crate::windows_process::HIDDEN_CONSOLE)
                 .arg("--neoism-internal-background-command")
                 .arg(program);
             return command;
         }
 
         let mut command = Command::new(program);
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        crate::windows_process::hide_std_command(&mut command);
         command
     }
 

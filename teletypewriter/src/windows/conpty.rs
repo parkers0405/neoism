@@ -16,7 +16,7 @@ use windows_sys::{s, w};
 
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
-    EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     STARTUPINFOW,
 };
@@ -224,7 +224,7 @@ pub fn new(
             ptr::null_mut(),
             ptr::null_mut(),
             false as i32,
-            EXTENDED_STARTUPINFO_PRESENT,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
             ptr::null_mut(),
             cwd.as_ref().map_or_else(ptr::null, |s| s.as_ptr()),
             &mut startup_info_ex.StartupInfo as *mut STARTUPINFOW,

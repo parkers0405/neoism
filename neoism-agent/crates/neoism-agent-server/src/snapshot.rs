@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::Context;
 use base64::engine::general_purpose::STANDARD;
@@ -525,7 +524,7 @@ fn git_status_states(root: &Path) -> Option<BTreeMap<String, FileState>> {
     // with large untracked trees). New files under a fresh untracked dir
     // surface as the dir and are gracefully skipped by the snapshot rather
     // than dragging every bash call.
-    let output = Command::new("git")
+    let output = crate::windows_process::std_command("git")
         .args([
             "--no-optional-locks",
             "status",
@@ -570,7 +569,7 @@ fn git_status_paths(output: &[u8]) -> Vec<String> {
 }
 
 fn git_head_state(root: &Path, path: &str) -> Option<FileState> {
-    let output = Command::new("git")
+    let output = crate::windows_process::std_command("git")
         .args(["show", &format!("HEAD:{path}")])
         .current_dir(root)
         .output()

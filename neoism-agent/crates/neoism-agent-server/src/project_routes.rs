@@ -37,13 +37,12 @@ pub(crate) async fn project_init_git(
     headers: HeaderMap,
 ) -> Result<Json<ProjectInfo>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    let output = std::process::Command::new("git")
-        .arg("init")
-        .current_dir(&directory)
-        .output()
-        .map_err(|error| {
-            ApiError::internal(format!("failed to run git init: {error}"))
-        })?;
+    let mut command = std::process::Command::new("git");
+    command.arg("init").current_dir(&directory);
+    crate::tool::process::set_new_process_group_std(&mut command);
+    let output = command.output().map_err(|error| {
+        ApiError::internal(format!("failed to run git init: {error}"))
+    })?;
     if !output.status.success() {
         return Err(ApiError::bad_request(
             String::from_utf8_lossy(&output.stderr).to_string(),

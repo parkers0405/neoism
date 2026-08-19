@@ -82,10 +82,7 @@ pub(crate) fn set_new_process_group(command: &mut Command) {
     // `creation_flags` REPLACES any previously-set flags (Command exposes
     // no getter), so this must stay the only flag-setting site for
     // commands routed through here.
-    command.creation_flags(
-        windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP
-            | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
-    );
+    crate::windows_process::hide_tokio_command(command);
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -109,11 +106,7 @@ pub(crate) fn set_new_process_group_std(command: &mut std::process::Command) {
 
 #[cfg(windows)]
 pub(crate) fn set_new_process_group_std(command: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(
-        windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP
-            | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
-    );
+    crate::windows_process::hide_std_command(command);
 }
 
 #[cfg(not(any(unix, windows)))]

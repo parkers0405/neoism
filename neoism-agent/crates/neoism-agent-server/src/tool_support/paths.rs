@@ -8,7 +8,7 @@ pub(super) fn existing_project_path(
     context: &ToolContext,
     raw: &str,
 ) -> anyhow::Result<PathBuf> {
-    let base = context.cwd.canonicalize().with_context(|| {
+    let base = crate::windows_process::canonicalize_path(&context.cwd).with_context(|| {
         format!(
             "failed to resolve project directory {}",
             context.cwd.display()
@@ -19,8 +19,7 @@ pub(super) fn existing_project_path(
     } else {
         base.join(raw)
     };
-    let path = candidate
-        .canonicalize()
+    let path = crate::windows_process::canonicalize_path(&candidate)
         .with_context(|| format!("failed to resolve path {}", candidate.display()))?;
     if !path.starts_with(&base) {
         context.ensure_explicit_allowed(
@@ -35,7 +34,7 @@ pub(super) fn project_path_for_write(
     context: &ToolContext,
     raw: &str,
 ) -> anyhow::Result<PathBuf> {
-    let base = context.cwd.canonicalize().with_context(|| {
+    let base = crate::windows_process::canonicalize_path(&context.cwd).with_context(|| {
         format!(
             "failed to resolve project directory {}",
             context.cwd.display()
@@ -53,7 +52,7 @@ pub(super) fn project_path_for_write(
             anyhow::anyhow!("path {} has no existing ancestor", candidate.display())
         })?;
     }
-    let ancestor = ancestor.canonicalize().with_context(|| {
+    let ancestor = crate::windows_process::canonicalize_path(ancestor).with_context(|| {
         format!("failed to resolve existing ancestor {}", ancestor.display())
     })?;
     if !ancestor.is_dir() && ancestor != candidate {
@@ -86,8 +85,7 @@ pub(super) fn project_path_for_write(
 }
 
 pub(super) fn directory_entries(path: &Path) -> anyhow::Result<Vec<String>> {
-    let root = path
-        .canonicalize()
+    let root = crate::windows_process::canonicalize_path(path)
         .with_context(|| format!("failed to resolve {}", path.display()))?;
     let mut entries = std::fs::read_dir(&root)
         .with_context(|| format!("failed to list {}", path.display()))?
@@ -96,7 +94,7 @@ pub(super) fn directory_entries(path: &Path) -> anyhow::Result<Vec<String>> {
                 Ok(entry) => entry,
                 Err(error) => return Some(Err(error)),
             };
-            let resolved = match entry.path().canonicalize() {
+            let resolved = match crate::windows_process::canonicalize_path(&entry.path()) {
                 Ok(resolved) if resolved.starts_with(&root) => resolved,
                 Ok(_) | Err(_) => return None,
             };
@@ -143,7 +141,7 @@ fn normalize_absolute_path(path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 pub(super) fn display_path(cwd: &Path, path: &Path) -> String {
-    path.strip_prefix(cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf()))
+    path.strip_prefix(crate::windows_process::canonicalize_path_lossy(cwd))
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()

@@ -277,13 +277,15 @@ fn run_formatter(cwd: &Path, path: &Path, formatter: &FormatterCommand) -> bool 
         return false;
     };
     let file = path.display().to_string();
-    let status = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args.iter().map(|arg| arg.replace("$FILE", &file)))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::null());
+    crate::tool::process::set_new_process_group_std(&mut command);
+    let status = command.status();
     match status {
         Ok(status) if status.success() => true,
         Ok(status) => {

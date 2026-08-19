@@ -69,6 +69,14 @@ fn install_npm_global(spec: &AgentInstallSpec, package: &str) -> Result<String, 
         "Install Node.js/npm first, then retry the install from Neoism.",
     )?;
     let mut cmd = Command::new("npm");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+        );
+    }
     cmd.arg("install").arg("-g").arg(package);
     run_command(&mut cmd, &format!("npm install -g {package}"))?;
     Ok(format!(
@@ -90,10 +98,21 @@ fn install_via_shell_pipe(spec: &AgentInstallSpec, url: &str) -> Result<String, 
         "bash",
         "bash is required to run the upstream installer script.",
     )?;
-    let curl_out = Command::new("curl")
-        .args(["-fsSL", url])
-        .output()
-        .map_err(|err| format!("curl failed: {err}"))?;
+    let curl_out = {
+        let mut command = Command::new("curl");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+            );
+        }
+        command
+            .args(["-fsSL", url])
+            .output()
+            .map_err(|err| format!("curl failed: {err}"))?
+    };
     if !curl_out.status.success() {
         return Err(format!(
             "curl could not fetch {url}: {}",
@@ -101,12 +120,23 @@ fn install_via_shell_pipe(spec: &AgentInstallSpec, url: &str) -> Result<String, 
         ));
     }
     use std::io::Write;
-    let mut child = Command::new("bash")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("bash spawn failed: {err}"))?;
+    let mut child = {
+        let mut command = Command::new("bash");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+            );
+        }
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("bash spawn failed: {err}"))?
+    };
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(&curl_out.stdout)

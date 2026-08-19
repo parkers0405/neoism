@@ -25,7 +25,6 @@
 //! rather than being bundled.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -230,7 +229,7 @@ pub fn derive_git_url(
 /// the contract to one name keeps the error message ("promote requires a git
 /// remote") unambiguous.
 pub fn git_origin_url(repo: &Path) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::hidden_std_command("git")
         .arg("-C")
         .arg(repo)
         .args(["remote", "get-url", "origin"])
@@ -334,7 +333,7 @@ pub fn find_matching_local_repo(
 /// out the same branch. Falls back to `None` (the target then uses the remote
 /// default branch) on a detached HEAD / unborn branch / git error.
 pub fn current_branch(repo: &Path) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::hidden_std_command("git")
         .arg("-C")
         .arg(repo)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -358,7 +357,7 @@ pub fn current_branch(repo: &Path) -> Option<String> {
 ///
 /// Blocking (shells out to `git push`); call from `spawn_blocking`.
 pub fn push_branch(repo: &Path, remote: &str, branch: &str) -> Result<(), PromoteError> {
-    let output = Command::new("git")
+    let output = crate::hidden_std_command("git")
         .arg("-C")
         .arg(repo)
         .args(["push", remote, branch])

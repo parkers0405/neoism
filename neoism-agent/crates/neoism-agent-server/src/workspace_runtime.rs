@@ -84,7 +84,7 @@ fn refresh_plugins(runtime: &WorkspaceRuntime) {
 
 fn canonical_location(directory: &str) -> PathBuf {
     let path = Path::new(directory);
-    std::fs::canonicalize(path).unwrap_or_else(|_| {
+    crate::windows_process::canonicalize_path(path).unwrap_or_else(|_| {
         if path.is_absolute() {
             path.to_path_buf()
         } else {

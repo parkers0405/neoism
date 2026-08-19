@@ -429,6 +429,60 @@ impl PaneGrid {
         self.drag = Drag::None;
     }
 
+    /// True while a divider resize drag is in progress.
+    pub fn is_divider_dragging(&self) -> bool {
+        matches!(self.drag, Drag::Divider { .. })
+    }
+
+    /// True while a surface drag (drag-to-split) is in progress.
+    pub fn is_surface_dragging(&self) -> bool {
+        matches!(self.drag, Drag::Surface { .. })
+    }
+
+    /// The solved band rect of the divider currently being dragged,
+    /// so hosts can paint it in its active style.
+    pub fn active_divider_rect(&self) -> Option<Rect> {
+        let Drag::Divider {
+            split_path, gap, ..
+        } = &self.drag
+        else {
+            return None;
+        };
+        self.solved
+            .dividers
+            .iter()
+            .find(|d| &d.split_path == split_path && d.gap == *gap)
+            .map(|d| d.rect)
+    }
+
+    /// Finish the in-progress drag on pointer release. A divider drag
+    /// simply ends (ratios were applied incrementally); a surface drag
+    /// commits through [`PaneGrid::drop_surface`]. Returns true when
+    /// the tree changed.
+    pub fn end_drag(&mut self) -> bool {
+        match self.drag {
+            Drag::Divider { .. } => {
+                self.drag = Drag::None;
+                false
+            }
+            Drag::Surface { .. } => self.drop_surface(),
+            Drag::None => false,
+        }
+    }
+
+    /// Begin a preview-only surface drag for a surface that is not
+    /// (yet) a pane leaf — e.g. a buffer tab being torn out of a
+    /// pane's tab strip. Drop-zone hover previews render exactly like
+    /// a real surface drag, but releasing commits nothing here
+    /// ([`PaneGrid::drop_surface`] fails to detach the sentinel and
+    /// returns false); the host applies its own split/adopt op instead.
+    pub fn begin_foreign_surface_drag(&mut self) {
+        self.drag = Drag::Surface {
+            leaf: SessionTreeLeafId(u64::MAX),
+            hover: None,
+        };
+    }
+
     fn reattach_as_tab(
         &mut self,
         target: SessionTreeLeafId,

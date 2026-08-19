@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
 use web_time::Instant;
@@ -549,8 +548,15 @@ impl GitDiffPanel {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = root;
             let _ = id;
+            // With a JS-backed provider installed, `collect_files` fires
+            // the daemon request and returns immediately — the reply
+            // lands through `host_set_files` & co. Without one (legacy
+            // hosts) the daemon-push path still owns the data, so leave
+            // `loading` set for the host to clear.
+            if let Some(io) = self.io.clone() {
+                let _ = io.collect_files(&root);
+            }
         }
     }
 
@@ -588,6 +594,26 @@ impl GitDiffPanel {
         if let Ok(mut data) = self.data.lock() {
             data.loading = false;
             data.error = Some(message);
+        }
+    }
+
+    /// Host push (web): the local branch list for the dropdown —
+    /// mirrors the native `load_branches` thread's store-back. Clears
+    /// `loading` because the wasm branch fetch raises it as a
+    /// keep-alive for the redraw loop.
+    pub fn host_set_branches(&mut self, branches: Vec<String>) {
+        if let Ok(mut data) = self.data.lock() {
+            data.branches = branches;
+            data.loading = false;
+        }
+    }
+
+    /// Host push (web): the current branch label — e.g. after a daemon
+    /// checkout completed, mirroring the native `switch_branch`
+    /// thread's `data.branch = Some(target)`.
+    pub fn host_set_branch(&mut self, branch: Option<String>) {
+        if let Ok(mut data) = self.data.lock() {
+            data.branch = branch;
         }
     }
 
@@ -652,18 +678,13 @@ impl GitDiffPanel {
         let Some((path, is_staged)) = target else {
             return;
         };
-        #[cfg(not(target_arch = "wasm32"))]
-        self.spawn_mutation(move |io, root| {
+        self.run_mutation(move |io, root| {
             if is_staged {
                 io.unstage(root, &path)
             } else {
                 io.stage(root, &path)
             }
         });
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = (path, is_staged);
-        }
     }
 
     /// Toggle stage/unstage for the currently-selected file.
@@ -688,17 +709,12 @@ impl GitDiffPanel {
         if paths.is_empty() {
             return;
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        self.spawn_mutation(move |io, root| {
+        self.run_mutation(move |io, root| {
             for p in &paths {
                 io.stage(root, p)?;
             }
             Ok(())
         });
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = paths;
-        }
     }
 
     /// True when there is at least one file and *every* file is already
@@ -741,17 +757,12 @@ impl GitDiffPanel {
         if paths.is_empty() {
             return;
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        self.spawn_mutation(move |io, root| {
+        self.run_mutation(move |io, root| {
             for p in &paths {
                 io.unstage(root, p)?;
             }
             Ok(())
         });
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = paths;
-        }
     }
 
     // ── Focus sections (Alt+Up/Down) ─────────────────────────────────
@@ -949,6 +960,24 @@ impl GitDiffPanel {
                 }
             });
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // JS-backed provider: fires the daemon request; the list
+            // lands back through `host_set_branches`. `loading` doubles
+            // as the redraw keep-alive so the reply paints without a
+            // user event (it has no visual effect while files exist).
+            let Some(io) = self.io.clone() else {
+                return;
+            };
+            let Some(root) = self.data.lock().ok().and_then(|d| d.repo_root.clone())
+            else {
+                return;
+            };
+            if let Ok(mut data) = self.data.lock() {
+                data.loading = true;
+            }
+            let _ = io.list_branches(&root);
+        }
     }
 
     /// Check out `branch`, closing the dropdown and refreshing the file
@@ -1006,7 +1035,19 @@ impl GitDiffPanel {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = branch;
+            // Skip a no-op switch to the branch we're already on, then
+            // queue the checkout through the JS-backed provider. The
+            // refreshed file list + new branch label land back via the
+            // `ChangedFiles` host push.
+            let same = self
+                .data
+                .lock()
+                .ok()
+                .is_some_and(|d| d.branch.as_deref() == Some(branch.as_str()));
+            if same {
+                return;
+            }
+            self.run_mutation(move |io, root| io.checkout(root, &branch));
         }
     }
 
@@ -1024,23 +1065,22 @@ impl GitDiffPanel {
         // reset the selection to avoid pointing past the new list.
         self.selected = 0;
         self.file_scroll = 0.0;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.spawn_mutation(move |io, root| io.commit(root, &message));
-            self.commit_input.clear();
-            self.commit_focused = false;
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = message;
-        }
+        self.run_mutation(move |io, root| io.commit(root, &message));
+        self.commit_input.clear();
+        self.commit_focused = false;
     }
 
-    /// Run a mutating git op on a background thread, then re-collect the
-    /// file list (bypassing the refresh debounce) so the staged state +
-    /// diff update. Native-only; wasm has no `GitDiffIo` provider.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn spawn_mutation<F>(&mut self, op: F)
+    /// Run a mutating git op through the installed `GitDiffIo`
+    /// provider, then refresh the file list (bypassing the refresh
+    /// debounce) so the staged state + diff update.
+    ///
+    /// Native: runs on a background thread and re-collects the list
+    /// itself. Wasm: runs synchronously — the JS-backed provider just
+    /// queues the daemon request and returns immediately, and the
+    /// refreshed list (staged bits, branch, error) lands back through
+    /// the `host_set_*` push path; `loading` stays raised meanwhile as
+    /// the redraw keep-alive.
+    fn run_mutation<F>(&mut self, op: F)
     where
         F: FnOnce(
                 &Arc<dyn super::state::GitDiffIo>,
@@ -1066,27 +1106,40 @@ impl GitDiffPanel {
             data.last_refresh = Some(Instant::now());
             (root, data.refresh_id)
         };
-        let arc = Arc::clone(&self.data);
-        std::thread::spawn(move || {
-            let result = op(&io, &root);
-            let files = io.collect_files(&root);
-            let first_diff = files
-                .first()
-                .map(|f| (f.path.clone(), super::parse::load_diff(&root, f)));
-            let Ok(mut data) = arc.lock() else { return };
-            if data.refresh_id != id {
-                return;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let arc = Arc::clone(&self.data);
+            std::thread::spawn(move || {
+                let result = op(&io, &root);
+                let files = io.collect_files(&root);
+                let first_diff = files
+                    .first()
+                    .map(|f| (f.path.clone(), super::parse::load_diff(&root, f)));
+                let Ok(mut data) = arc.lock() else { return };
+                if data.refresh_id != id {
+                    return;
+                }
+                data.loading = false;
+                if let Err(e) = result {
+                    data.error = Some(e);
+                }
+                data.files = files;
+                data.diffs.clear();
+                if let Some((path, diff)) = first_diff {
+                    data.diffs.insert(path, diff);
+                }
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = id;
+            if let Err(e) = op(&io, &root) {
+                if let Ok(mut data) = self.data.lock() {
+                    data.loading = false;
+                    data.error = Some(e);
+                }
             }
-            data.loading = false;
-            if let Err(e) = result {
-                data.error = Some(e);
-            }
-            data.files = files;
-            data.diffs.clear();
-            if let Some((path, diff)) = first_diff {
-                data.diffs.insert(path, diff);
-            }
-        });
+        }
     }
 
     pub fn active_rect(&self) -> Option<[f32; 4]> {

@@ -86,6 +86,14 @@ pub(crate) async fn finish_session_run(state: &AppState, session_id: &str, run_i
         state, session_id,
     )
     .await;
+    // This session may also be a PARENT with held child completions —
+    // its own turn ending is exactly when a queued "subagent finished"
+    // notification can finally go out. Without this, a completion held
+    // for any reason at last-child-finish time strands forever.
+    crate::session_actions::reconcile_pending_subtask_completions_for_parent(
+        state, session_id,
+    )
+    .await;
 }
 
 pub(crate) async fn publish_idle_if_no_run(state: &AppState, session_id: &str) {

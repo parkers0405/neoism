@@ -2299,9 +2299,9 @@ mod tests {
 
     #[test]
     fn test_single_capability_requests() {
-        // Test terminal name
+        // Test terminal name ("neoism" hex-encoded)
         let response = process_xtgettcap_request(b"544E"); // "TN"
-        assert_eq!(response, "\x1bP1+r544E=72696F\x1b\\");
+        assert_eq!(response, "\x1bP1+r544E=6E656F69736D\x1b\\");
 
         // Test colors capability
         let response = process_xtgettcap_request(b"436F"); // "Co"

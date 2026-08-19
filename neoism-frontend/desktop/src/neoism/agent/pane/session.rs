@@ -66,6 +66,12 @@ impl NeoismAgentPane {
         if self.streaming_state != NeoismAgentStreamingState::Idle {
             return Some("streaming");
         }
+        // A transient idle gap keeps the last status label on screen
+        // through the display grace hold; keep frames coming so it can
+        // expire (and erase) without waiting for the next input event.
+        if self.side_panel.held_status_display().is_some() {
+            return Some("streaming_status_hold");
+        }
         // Only an on-screen side panel drives the render loop. A pane
         // that has never been laid out (fresh/backgrounded) must not
         // spin redraws off its still-unloaded sessions skeleton — the
@@ -510,6 +516,11 @@ impl NeoismAgentPane {
         self.is_streaming()
             || self.active_subagent_count() > 0
             || self.running_background_task_count() > 0
+            // The grace hold counts as activity so the status row's
+            // reserved height (see shared `view/timeline/render.rs`)
+            // doesn't collapse-and-return around a transient idle
+            // reading — that one-frame reflow was the visible "bounce".
+            || self.side_panel.held_status_display().is_some()
     }
 
     pub fn running_background_task_count(&self) -> usize {
@@ -528,19 +539,46 @@ impl NeoismAgentPane {
         }
     }
 
-    pub fn streaming_state(&self) -> NeoismAgentStreamingState {
-        // The child lifecycle is event-authoritative and must remain visible
-        // for its entire active interval. Parent bookkeeping can briefly emit
-        // Thinking/Crafting while it ingests a child part or completion probe;
-        // allowing that transient state to win made the footer disappear and
-        // re-animate even though the same child never stopped.
+    /// Raw, hold-free status derivation. The viewed session's own live
+    /// run always wins: while the main agent is Pondering/Crafting (or
+    /// the user just sent a prompt), the footer shows that verb even
+    /// though children are still running in the background.
+    /// "Sub-agents working" is the *aggregate idle* state — the viewed
+    /// session has stopped streaming while ≥1 child keeps working.
+    /// Viewing a child makes that child's own streaming state the
+    /// "main" one for the label (`active_subagent_count` is already 0
+    /// for subagent sessions).
+    fn raw_streaming_status(&self) -> NeoismAgentStreamingState {
+        if self.is_streaming() {
+            return self.streaming_state;
+        }
         if self.active_subagent_count() > 0 {
             return NeoismAgentStreamingState::WaitingSubagents;
         }
-        if !self.is_streaming() && self.running_background_task_count() > 0 {
+        if self.running_background_task_count() > 0 {
             return NeoismAgentStreamingState::BackgroundTasks;
         }
         self.streaming_state
+    }
+
+    /// Display status with hysteresis — mirrors the shared pane's
+    /// `streaming_state`: a raw Idle reading only clears the label
+    /// after idle has persisted for the side panel's
+    /// `STATUS_LABEL_GRACE`; transient gaps between events keep the
+    /// last shown status so the label never blinks out mid-run.
+    pub fn streaming_state(&self) -> NeoismAgentStreamingState {
+        let raw = self.raw_streaming_status();
+        if raw != NeoismAgentStreamingState::Idle {
+            self.side_panel.note_status_display(
+                shared_streaming_state(raw),
+                self.raw_streaming_elapsed_seconds(),
+            );
+            return raw;
+        }
+        if let Some(held) = self.side_panel.held_status_display() {
+            return desktop_streaming_state(held);
+        }
+        NeoismAgentStreamingState::Idle
     }
 
     pub fn streaming_label(&self) -> String {
@@ -560,21 +598,54 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {
+        // Display clock: raw clocks while active, then the held clock so
+        // the timer/animation phase stays continuous through a transient
+        // idle gap instead of snapping to zero.
+        self.raw_streaming_elapsed_seconds()
+            .or_else(|| self.side_panel.held_status_elapsed_seconds())
+    }
+
+    fn raw_streaming_elapsed_seconds(&self) -> Option<f32> {
+        // Clock precedence mirrors `raw_streaming_status`: the viewed
+        // session's own run clock while it streams, then the aggregate
+        // sub-agents / background-tasks clocks once it has stopped.
+        if self.is_streaming() {
+            return self
+                .streaming_started_at
+                .map(|started| started.elapsed().as_secs_f32());
+        }
         if self.active_subagent_count() > 0 {
             return self
                 .subagent_waiting_started_at
                 .map(|started| started.elapsed().as_secs_f32());
         }
-        if !self.is_streaming() && self.running_background_task_count() > 0 {
+        if self.running_background_task_count() > 0 {
             return self
                 .background_tasks_started_at
                 .map(|started| started.elapsed().as_secs_f32());
         }
-        if !self.has_status_activity() {
-            return None;
+        None
+    }
+
+    /// Whether `session_id` belongs to the conversation family the side
+    /// panel currently tracks: the viewed session, its parent, or any
+    /// row of the subagent roster (whose first entry is the family
+    /// root). Session switches within one family keep the parent-keyed
+    /// roster alive — a subagent transcript is an *extension* of the
+    /// main chat, so entering a child must not clear the sidebar's
+    /// names/statuses of its siblings. Mirrors the shared pane's
+    /// `session_family_contains`.
+    pub(crate) fn session_family_contains(&self, session_id: &str) -> bool {
+        if session_id.is_empty() {
+            return false;
         }
-        self.streaming_started_at
-            .map(|started| started.elapsed().as_secs_f32())
+        self.session_id.as_deref() == Some(session_id)
+            || self.parent_session_id.as_deref() == Some(session_id)
+            || self
+                .side_panel
+                .subagents()
+                .iter()
+                .any(|entry| entry.id == session_id)
     }
 
     pub(crate) fn active_subagent_count(&self) -> usize {
@@ -935,17 +1006,60 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_state_changed_elapsed(&self) -> Option<f32> {
+        // Mirrors `streaming_state` precedence so label scramble
+        // animations restart on the same edges the displayed word does.
+        if self.is_streaming() {
+            return self
+                .streaming_state_changed_at
+                .map(|t| t.elapsed().as_secs_f32());
+        }
         if self.active_subagent_count() > 0 {
             return self
                 .subagent_waiting_started_at
                 .map(|started| started.elapsed().as_secs_f32());
         }
-        if !self.is_streaming() && self.running_background_task_count() > 0 {
+        if self.running_background_task_count() > 0 {
             return self
                 .background_tasks_started_at
                 .map(|started| started.elapsed().as_secs_f32());
         }
         self.streaming_state_changed_at
             .map(|t| t.elapsed().as_secs_f32())
+    }
+}
+
+/// Desktop ↔ shared streaming-state conversion for the side panel's
+/// status display hold (the hold stores the shared enum so one grace
+/// mechanism serves both hosts). The two enums are variant-for-variant
+/// identical.
+fn shared_streaming_state(
+    state: NeoismAgentStreamingState,
+) -> neoism_ui::panels::agent_pane::state::NeoismAgentStreamingState {
+    use neoism_ui::panels::agent_pane::state::NeoismAgentStreamingState as Shared;
+    match state {
+        NeoismAgentStreamingState::Idle => Shared::Idle,
+        NeoismAgentStreamingState::Thinking => Shared::Thinking,
+        NeoismAgentStreamingState::Working => Shared::Working,
+        NeoismAgentStreamingState::Generating => Shared::Generating,
+        NeoismAgentStreamingState::Compacting => Shared::Compacting,
+        NeoismAgentStreamingState::WaitingSubagents => Shared::WaitingSubagents,
+        NeoismAgentStreamingState::BackgroundTasks => Shared::BackgroundTasks,
+        NeoismAgentStreamingState::Retrying => Shared::Retrying,
+    }
+}
+
+fn desktop_streaming_state(
+    state: neoism_ui::panels::agent_pane::state::NeoismAgentStreamingState,
+) -> NeoismAgentStreamingState {
+    use neoism_ui::panels::agent_pane::state::NeoismAgentStreamingState as Shared;
+    match state {
+        Shared::Idle => NeoismAgentStreamingState::Idle,
+        Shared::Thinking => NeoismAgentStreamingState::Thinking,
+        Shared::Working => NeoismAgentStreamingState::Working,
+        Shared::Generating => NeoismAgentStreamingState::Generating,
+        Shared::Compacting => NeoismAgentStreamingState::Compacting,
+        Shared::WaitingSubagents => NeoismAgentStreamingState::WaitingSubagents,
+        Shared::BackgroundTasks => NeoismAgentStreamingState::BackgroundTasks,
+        Shared::Retrying => NeoismAgentStreamingState::Retrying,
     }
 }

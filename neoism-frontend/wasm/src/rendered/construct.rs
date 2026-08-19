@@ -153,6 +153,9 @@ impl ChromeBridge {
             pending_finder_open_intents: Vec::new(),
             pending_palette_intents: Vec::new(),
             agent_state: AgentBridgeState::default(),
+            pane_terminals: std::collections::HashMap::new(),
+            pending_pane_tab_intents: Vec::new(),
+            tab_drag_begin_ix: None,
             cached_diagnostics: Vec::new(),
             editor_surfaces: Vec::new(),
             workspace_island: Island::new(

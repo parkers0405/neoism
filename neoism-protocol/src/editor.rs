@@ -149,6 +149,56 @@ pub enum EditorClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_id: Option<String>,
     },
+    /// Position-explicit LSP query from a native-editor client that owns
+    /// its buffer (web CodePane / desktop remote-joined pane). Unlike
+    /// `LspAction` (which resolved against the embedded nvim cursor),
+    /// the client sends the query position itself: `line` is 0-based,
+    /// `character` is a 0-based UTF-8 BYTE column (the engine facade's
+    /// coordinate contract). The daemon resolves the query against the
+    /// text last synced for `path` via `OpenBuffer`, so callers must
+    /// keep the buffer synced before querying. Results are 0-based on
+    /// the wire regardless of the engine's 1-based display outputs.
+    LspQueryAt {
+        seq: u64,
+        action: EditorLspAction,
+        path: PathBuf,
+        line: u32,
+        character: u32,
+        /// Action payload: rename new-name, completion trigger char.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        /// Files the client has open in live buffers. For edit-shaped
+        /// results (rename/format), the daemon returns typed edits for
+        /// these files (the client applies them to its buffers) and
+        /// patches every other touched file directly on disk.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        open_paths: Vec<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
+    /// Apply one code action from an `LspQueryAt { action: CodeActions }`
+    /// result, seq-tokened and open-path-aware like `LspQueryAt` (the
+    /// legacy `ApplyLspCodeAction` predates the native editor and kept
+    /// the nvim-era shape). Replied with `LspQueryResult`.
+    ApplyLspCodeActionAt {
+        seq: u64,
+        action: EditorLspCodeAction,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        open_paths: Vec<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
+    /// Native-editor save notification: the buffer for `path` was just
+    /// written (host-side file write or daemon single-writer save).
+    /// The daemon forwards `textDocument/didSave` to the workspace
+    /// language servers so save-triggered slow-lane diagnostics
+    /// (rust-analyzer's cargo-check lane) fire for web/native saves
+    /// exactly like daemon-side `:w` saves. Fire-and-forget: no reply.
+    DidSave {
+        path: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
     /// Detach + terminate the embedded nvim session.
     Close,
 }
@@ -167,6 +217,13 @@ pub enum EditorLspAction {
     CodeActions,
     Rename,
     ToggleInlayHints,
+    /// Completion at an explicit position (native-editor `LspQueryAt`
+    /// path; the nvim-era `LspComplete` resolved the cursor itself).
+    Completion,
+    /// Signature help at an explicit position (native-editor
+    /// `LspQueryAt` path). Result rides `LspHoverResult` as one
+    /// synthetic hover, matching the desktop card surface.
+    SignatureHelp,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -219,6 +276,41 @@ pub struct EditorLspCodeAction {
     pub disabled_reason: Option<String>,
     /// Original LSP `CodeAction | Command`; only the daemon interprets it.
     pub payload: serde_json::Value,
+}
+
+/// One find-references hit with its line text preloaded, so clients can
+/// render a ready-made references list without reading files back.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EditorLspReference {
+    /// Path relative to the query's workspace root (absolute when the
+    /// hit falls outside the root).
+    pub path: String,
+    /// 1-based line (finder row convention).
+    pub line: u32,
+    /// 0-based UTF-8 byte column.
+    pub column: u32,
+    /// Trimmed text of the hit's line (from the live buffer when
+    /// synced, else disk).
+    pub text: String,
+}
+
+/// One text edit in 0-based (line, UTF-8 byte column) coordinates —
+/// the engine facade already converted the server's encoding.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EditorLspTextEdit {
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub new_text: String,
+}
+
+/// A file's worth of workspace-edit text edits, for the client to apply
+/// to its open buffer (the daemon patches non-open files on disk).
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EditorLspFileEdit {
+    pub path: PathBuf,
+    pub edits: Vec<EditorLspTextEdit>,
 }
 
 /// One completion candidate for the editor popup.
@@ -501,6 +593,43 @@ pub enum EditorServerMessage {
         #[serde(default)]
         code_actions: Vec<EditorLspCodeAction>,
     },
+    /// Result of an `LspQueryAt` / `ApplyLspCodeActionAt`. `seq` echoes
+    /// the request so superseded replies are dropped; only the fields the
+    /// echoed `action` produces are populated. Positions inside
+    /// `locations` are 0-based (line + UTF-8 byte column) — the daemon
+    /// normalizes the engine's 1-based display outputs before shipping.
+    LspQueryResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+        seq: u64,
+        action: EditorLspAction,
+        /// Workspace root the daemon resolved the query against —
+        /// reference paths are relative to it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<PathBuf>,
+        /// Definition targets (0-based line/character).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        locations: Vec<EditorLspLocation>,
+        /// References with preloaded line text (1-based `line`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        references: Vec<EditorLspReference>,
+        /// Selectable code actions (action == CodeActions).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        code_actions: Vec<EditorLspCodeAction>,
+        /// Typed edits for the request's `open_paths` files — the client
+        /// applies these to its live buffers (format/rename/action).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        edits: Vec<EditorLspFileEdit>,
+        /// Files the daemon already patched on disk.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        applied_files: Vec<PathBuf>,
+        /// A server-side command ran as part of applying the action.
+        #[serde(default)]
+        ran_command: bool,
+        /// Display title (applied code action) / status summary.
+        #[serde(default)]
+        title: String,
+    },
     /// Completion items for the active cursor, answering an
     /// `EditorClientMessage::LspComplete`. `seq` echoes the request so the
     /// client drops superseded responses. `replace_prefix` is the identifier
@@ -628,7 +757,10 @@ impl EditorClientMessage {
             | EditorClientMessage::LspComplete { surface_id, .. }
             | EditorClientMessage::ApplyLspCompletion { surface_id, .. }
             | EditorClientMessage::CancelLspCompletion { surface_id }
-            | EditorClientMessage::LspHoverAt { surface_id, .. } => surface_id.as_deref(),
+            | EditorClientMessage::LspQueryAt { surface_id, .. }
+            | EditorClientMessage::ApplyLspCodeActionAt { surface_id, .. }
+            | EditorClientMessage::LspHoverAt { surface_id, .. }
+            | EditorClientMessage::DidSave { surface_id, .. } => surface_id.as_deref(),
             EditorClientMessage::Close => None,
         }
     }
@@ -850,7 +982,52 @@ mod tests {
         roundtrip_client(&EditorClientMessage::CancelLspCompletion {
             surface_id: Some("pane:7".into()),
         });
+        roundtrip_client(&EditorClientMessage::LspQueryAt {
+            seq: 7,
+            action: EditorLspAction::Rename,
+            path: "src/lib.rs".into(),
+            line: 12,
+            character: 4,
+            text: Some("new_name".into()),
+            open_paths: vec!["src/lib.rs".into()],
+            surface_id: Some("pane:7".into()),
+        });
         roundtrip_client(&EditorClientMessage::Close);
+    }
+
+    #[test]
+    fn lsp_query_result_roundtrip() {
+        roundtrip_server(&EditorServerMessage::LspQueryResult {
+            surface_id: Some("pane:7".into()),
+            seq: 9,
+            action: EditorLspAction::References,
+            root: Some("/workspace".into()),
+            locations: vec![EditorLspLocation {
+                uri: "/workspace/src/lib.rs".into(),
+                line: 3,
+                character: 8,
+            }],
+            references: vec![EditorLspReference {
+                path: "src/lib.rs".into(),
+                line: 4,
+                column: 8,
+                text: "fn shared() {}".into(),
+            }],
+            code_actions: Vec::new(),
+            edits: vec![EditorLspFileEdit {
+                path: "/workspace/src/lib.rs".into(),
+                edits: vec![EditorLspTextEdit {
+                    start_line: 0,
+                    start_col: 0,
+                    end_line: 0,
+                    end_col: 2,
+                    new_text: "pub".into(),
+                }],
+            }],
+            applied_files: vec!["/workspace/src/other.rs".into()],
+            ran_command: false,
+            title: "Rename".into(),
+        });
     }
 
     #[test]

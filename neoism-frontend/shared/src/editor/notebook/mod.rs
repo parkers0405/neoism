@@ -262,6 +262,23 @@ impl NotebookPane {
         self.document.to_json()
     }
 
+    /// Host-side save support for shells without a local filesystem
+    /// (web): fold the rendered markdown back into the document and
+    /// return the JSON the host should persist. Pair with
+    /// [`NotebookPane::mark_saved_json`] once the write lands.
+    pub fn prepare_save_json(&mut self) -> Result<String, String> {
+        self.sync_from_rendered_markdown();
+        self.to_json()
+    }
+
+    /// Record a successful host-side write of `json` (the string from
+    /// [`NotebookPane::prepare_save_json`]) so `is_dirty()` reads
+    /// clean — the wasm twin of the fs write in [`NotebookPane::save`].
+    pub fn mark_saved_json(&mut self, json: String) {
+        self.saved_json = json;
+        self.error = None;
+    }
+
     pub fn rebuild_markdown(&mut self) {
         let rendered = self.document.render_markdown_with_status(
             &self.running_cells,

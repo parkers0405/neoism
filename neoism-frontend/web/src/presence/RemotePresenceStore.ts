@@ -1,21 +1,126 @@
 // Wave 7F — INBOUND side of the web presence plane.
 //
-// TypeScript mirror of the shared Rust `RemotePresenceStore`
-// (`neoism-frontend/shared/src/editor/crdt/remote_presence.rs`): feed
-// it every `CrdtServerMessage` the daemon pushes; it keeps a
-// per-buffer map of remote peer cursors/selections that render code
-// (markdown DOM overlay) can query cheaply. It
-// deliberately stops at queryable state — drawing carets is the
-// renderer's job.
+// Thin adapter over the SHARED RUST `RemotePresenceStore`
+// (`neoism-frontend/shared/src/editor/crdt/remote_presence.rs`),
+// reached through the wasm `PresenceStoreBridge` exported from
+// `wasm/src/rendered/input_policy.rs`. The hand-mirrored TypeScript
+// store this file used to contain is gone — upserts, removes,
+// snapshot replaces, local-peer filtering, change detection and TTL
+// pruning all run in the exact Rust the desktop fork runs.
+//
+// The wasm bundle loads asynchronously after the panel constructs, so
+// the adapter buffers inbound presence messages until the bridge
+// exists and replays them in arrival order; queries return empty in
+// that window (nothing renders before the wasm renderer is up, so
+// there is nothing to draw presence onto). A served bundle predating
+// the export degrades to an inert store with a one-shot console
+// warning.
 
 import type {
   CrdtPeerPresence,
   CrdtServerMessage,
 } from "../workspace/types";
+import {
+  wasmInputPolicy,
+  type WasmInputPolicyModule,
+  type WasmPresenceStoreInstance,
+} from "../terminal/createTerminal";
+
+/** Bound on the pre-wasm replay buffer. Presence traffic is tiny and
+ *  self-superseding (newer upserts/snapshots replace older ones), so
+ *  dropping the oldest entries under pressure is lossless in practice. */
+const MAX_QUEUED_MESSAGES = 256;
+
+/** Per-buffer avatar peer feed — the `set_presence_index` wire shape. */
+export interface AvatarPeersByBufferEntry {
+  buffer_id: string;
+  peers: Array<{
+    peer_id: string;
+    display_name: string;
+    color: [number, number, number];
+    rainbow: boolean;
+  }>;
+}
+
+let warnedMissingExport = false;
+function warnMissingExport(): void {
+  if (warnedMissingExport) return;
+  warnedMissingExport = true;
+  if (typeof console !== "undefined") {
+    console.warn(
+      "[neoism] served wasm bundle predates the shared presence-store " +
+        "export; remote cursors are disabled until the bundle is rebuilt " +
+        "(npm run build:wasm).",
+    );
+  }
+}
+
+function isPresenceMessage(message: CrdtServerMessage): boolean {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    ("Presence" in message || "PresenceSnapshot" in message)
+  );
+}
 
 export class RemotePresenceStore {
+  private wasm: WasmPresenceStoreInstance | null = null;
   private localPeerId: string | null = null;
-  private readonly channels = new Map<string, Map<string, CrdtPeerPresence>>();
+  /** Presence messages received before the wasm bridge existed,
+   *  replayed in arrival order the moment it does. */
+  private queued: CrdtServerMessage[] = [];
+  /** True when a queue replay changed store state; folded into the
+   *  next boolean-returning call so the host's redraw gating still
+   *  fires for peers that arrived during the load window. */
+  private replayDirty = false;
+
+  /** Test seam: a fake input-policy module, or a getter for one (so
+   *  tests can model the bundle arriving late). Production resolves
+   *  the live wasm module lazily on every call. */
+  constructor(
+    private readonly bindings?:
+      | WasmInputPolicyModule
+      | (() => WasmInputPolicyModule | null)
+      | null,
+  ) {}
+
+  private module(): WasmInputPolicyModule | null {
+    if (typeof this.bindings === "function") return this.bindings();
+    return this.bindings ?? wasmInputPolicy();
+  }
+
+  /** The Rust store, created lazily once the wasm bundle is loaded;
+   *  creation applies the pending local-peer id and replays the
+   *  buffered messages. */
+  private store(): WasmPresenceStoreInstance | null {
+    if (this.wasm) return this.wasm;
+    const mod = this.module();
+    if (!mod) return null; // Bundle still loading.
+    const Klass = mod.PresenceStoreBridge;
+    if (!Klass) {
+      warnMissingExport();
+      return null;
+    }
+    const store = new Klass();
+    this.wasm = store;
+    if (this.localPeerId !== null) {
+      store.set_local_peer_id(this.localPeerId);
+    }
+    const queued = this.queued.splice(0);
+    for (const message of queued) {
+      if (store.apply_server_message(message)) {
+        this.replayDirty = true;
+      }
+    }
+    return store;
+  }
+
+  /** Consume the replay-changed flag into a boolean result. */
+  private takeReplayDirty(): boolean {
+    const dirty = this.replayDirty;
+    this.replayDirty = false;
+    return dirty;
+  }
 
   /**
    * Defensive self-filter: even though the daemon never echoes a
@@ -25,21 +130,31 @@ export class RemotePresenceStore {
    */
   setLocalPeerId(peerId: string): void {
     this.localPeerId = peerId;
+    this.wasm?.set_local_peer_id(peerId);
   }
 
   /** Remote cursors for one buffer — the renderer's per-frame read.
    * Already excludes the local peer. */
   cursorsFor(bufferId: string): CrdtPeerPresence[] {
-    const channel = this.channels.get(bufferId);
-    if (!channel) return [];
-    return Array.from(channel.values()).filter(
-      (presence) => presence.peer_id !== this.localPeerId,
-    );
+    const cursors = this.store()?.cursors_for(bufferId);
+    return Array.isArray(cursors) ? (cursors as CrdtPeerPresence[]) : [];
   }
 
   /** True when `bufferId` has at least one REMOTE cursor. */
   hasRemoteCursors(bufferId: string): boolean {
-    return this.cursorsFor(bufferId).length > 0;
+    return this.store()?.has_remote_cursors(bufferId) ?? false;
+  }
+
+  /**
+   * Per-buffer avatar peers — `{buffer_id, peers}` for every buffer
+   * holding at least one REMOTE peer, peers sorted by `peer_id` for a
+   * stable cluster order. Hosts feed this to the wasm file tree's
+   * presence index (`set_presence_index`) once per presence CHANGE —
+   * never per frame.
+   */
+  avatarPeersByBuffer(): AvatarPeersByBufferEntry[] {
+    const entries = this.store()?.avatar_peers_by_buffer();
+    return Array.isArray(entries) ? (entries as AvatarPeersByBufferEntry[]) : [];
   }
 
   /**
@@ -48,23 +163,18 @@ export class RemotePresenceStore {
    * Non-presence CRDT traffic returns `false` untouched.
    */
   applyServerMessage(message: CrdtServerMessage): boolean {
-    if ("Presence" in message) {
-      const update = message.Presence.update;
-      if ("Upsert" in update) {
-        const presence = update.Upsert;
-        if (presence.peer_id === this.localPeerId) return false;
-        return this.upsert(presence);
+    if (!isPresenceMessage(message)) return false;
+    const store = this.store();
+    if (!store) {
+      // Bundle still loading: buffer for replay (bounded).
+      this.queued.push(message);
+      if (this.queued.length > MAX_QUEUED_MESSAGES) {
+        this.queued.splice(0, this.queued.length - MAX_QUEUED_MESSAGES);
       }
-      return this.remove(update.Remove.buffer_id, update.Remove.peer_id);
+      return false;
     }
-    if ("PresenceSnapshot" in message) {
-      const { buffer_id, peers } = message.PresenceSnapshot;
-      return this.replaceBuffer(
-        buffer_id,
-        peers.filter((presence) => presence.peer_id !== this.localPeerId),
-      );
-    }
-    return false;
+    const changed = store.apply_server_message(message);
+    return this.takeReplayDirty() || changed;
   }
 
   /**
@@ -73,102 +183,22 @@ export class RemotePresenceStore {
    * in a lagged broadcast). Returns `true` when anything fell out.
    */
   pruneStale(nowMs: number, ttlMs: number): boolean {
-    let changed = false;
-    for (const [bufferId, channel] of this.channels) {
-      for (const [peerId, presence] of channel) {
-        if (nowMs - presence.updated_at_ms > ttlMs) {
-          channel.delete(peerId);
-          changed = true;
-        }
-      }
-      if (channel.size === 0) this.channels.delete(bufferId);
-    }
-    return changed;
+    const store = this.store();
+    if (!store) return false;
+    const changed = store.prune_stale(nowMs, ttlMs);
+    return this.takeReplayDirty() || changed;
   }
 
   /** Drop every remote cursor (e.g. on daemon reconnect, before the
    * fresh `RequestPresenceSnapshot` answers). */
   clear(): boolean {
-    const hadPeers = this.channels.size > 0;
-    this.channels.clear();
-    return hadPeers;
-  }
-
-  private upsert(presence: CrdtPeerPresence): boolean {
-    let channel = this.channels.get(presence.buffer_id);
-    if (!channel) {
-      channel = new Map();
-      this.channels.set(presence.buffer_id, channel);
+    this.queued = [];
+    const store = this.store();
+    if (!store) {
+      this.replayDirty = false;
+      return false;
     }
-    const existing = channel.get(presence.peer_id);
-    if (existing && samePresence(existing, presence)) return false;
-    channel.set(presence.peer_id, presence);
-    return true;
+    const changed = store.clear();
+    return this.takeReplayDirty() || changed;
   }
-
-  private remove(bufferId: string, peerId: string): boolean {
-    const channel = this.channels.get(bufferId);
-    if (!channel) return false;
-    const removed = channel.delete(peerId);
-    if (channel.size === 0) this.channels.delete(bufferId);
-    return removed;
-  }
-
-  private replaceBuffer(
-    bufferId: string,
-    peers: CrdtPeerPresence[],
-  ): boolean {
-    const next = new Map<string, CrdtPeerPresence>();
-    for (const presence of peers) {
-      next.set(presence.peer_id, presence);
-    }
-    const current = this.channels.get(bufferId);
-    const changed = current ? !sameChannel(current, next) : next.size > 0;
-    if (next.size === 0) {
-      this.channels.delete(bufferId);
-    } else {
-      this.channels.set(bufferId, next);
-    }
-    return changed;
-  }
-}
-
-function sameChannel(
-  a: Map<string, CrdtPeerPresence>,
-  b: Map<string, CrdtPeerPresence>,
-): boolean {
-  if (a.size !== b.size) return false;
-  for (const [peerId, presence] of a) {
-    const other = b.get(peerId);
-    if (!other || !samePresence(presence, other)) return false;
-  }
-  return true;
-}
-
-function samePresence(a: CrdtPeerPresence, b: CrdtPeerPresence): boolean {
-  return (
-    a.buffer_id === b.buffer_id &&
-    a.peer_id === b.peer_id &&
-    a.display_name === b.display_name &&
-    a.updated_at_ms === b.updated_at_ms &&
-    a.color.r === b.color.r &&
-    a.color.g === b.color.g &&
-    a.color.b === b.color.b &&
-    a.cursor.line === b.cursor.line &&
-    a.cursor.column === b.cursor.column &&
-    (a.cursor.offset ?? null) === (b.cursor.offset ?? null) &&
-    sameSelection(a, b)
-  );
-}
-
-function sameSelection(a: CrdtPeerPresence, b: CrdtPeerPresence): boolean {
-  const sa = a.selection ?? null;
-  const sb = b.selection ?? null;
-  if (sa === null || sb === null) return sa === sb;
-  return (
-    sa.anchor.line === sb.anchor.line &&
-    sa.anchor.column === sb.anchor.column &&
-    sa.head.line === sb.head.line &&
-    sa.head.column === sb.head.column
-  );
 }

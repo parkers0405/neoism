@@ -415,6 +415,15 @@ pub struct Crosswords {
     tabs: TabStops,
     pub selection: Option<Selection>,
     pub colors: TermColors,
+    /// Host-seeded fallback palette used to answer OSC 4/10/11/12
+    /// color QUERIES (`…;?`) synchronously at parse time. `colors`
+    /// above only records runtime overrides the guest program set via
+    /// OSC — for a query on a slot with no override, the reply color
+    /// comes from this table (the host's resolved theme). Slots left
+    /// `None` fall back to the legacy deferred
+    /// [`crate::TerminalEffect::ColorRequest`] effect so un-seeded
+    /// hosts keep their historical behavior.
+    default_colors: TermColors,
     pub title: String,
     damage: TermDamageState,
     pub graphics: Graphics,
@@ -523,6 +532,7 @@ impl Crosswords {
             active_charset: CharsetIndex::default(),
             scroll_region,
             colors: term_colors,
+            default_colors: TermColors::default(),
             title: String::from(""),
             tabs: TabStops::new(cols),
             mode: Mode::SHOW_CURSOR
@@ -714,6 +724,17 @@ impl Crosswords {
     #[inline]
     pub fn colors(&self) -> &TermColors {
         &self.colors
+    }
+
+    /// Seed (or re-seed on theme change) the fallback palette used to
+    /// answer OSC color queries at parse time. See
+    /// [`Self::default_colors`](field). Seeding makes color-query
+    /// replies synchronous: the reply bytes are pushed as a
+    /// [`crate::TerminalEffect::PtyWrite`] during `Parser::advance`,
+    /// so the host writes them to the PTY in parse order instead of
+    /// bouncing the query through its event loop.
+    pub fn set_default_colors(&mut self, colors: TermColors) {
+        self.default_colors = colors;
     }
 
     /// Get queues to update graphic data. If both queues are empty, it returns
@@ -2491,11 +2512,38 @@ impl Handler for Crosswords {
             prefix, index
         );
 
-        self.push_effect(crate::TerminalEffect::ColorRequest {
-            prefix,
-            index,
-            terminator: terminator.to_owned(),
-        });
+        // OSC 4 carries an arbitrary parsed index — ignore slots past
+        // the palette (mirrors xterm) instead of indexing out of
+        // bounds further down any reply path.
+        if index >= crate::colors::term::COUNT {
+            debug!("ignoring color query for out-of-range index {}", index);
+            return;
+        }
+
+        // Answer at parse time whenever the color is knowable here:
+        // a guest OSC override wins, then the host-seeded theme
+        // fallback. The reply rides the PtyWrite effect so the host
+        // writes it straight to the PTY child — synchronously, in
+        // parse order, exactly once, and never into the grid. Only
+        // when neither source knows the color (un-seeded host) does
+        // the legacy deferred ColorRequest effect fire.
+        match self.colors[index].or(self.default_colors[index]) {
+            Some(color) => {
+                let reply = crate::colors::osc_color_reply(
+                    &prefix,
+                    crate::colors::ColorRgb::from_color_arr(color),
+                    terminator,
+                );
+                self.push_effect(crate::TerminalEffect::PtyWrite(reply.into_bytes()));
+            }
+            None => {
+                self.push_effect(crate::TerminalEffect::ColorRequest {
+                    prefix,
+                    index,
+                    terminator: terminator.to_owned(),
+                });
+            }
+        }
     }
 
     #[inline]

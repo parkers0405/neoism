@@ -53,7 +53,8 @@ export type ClientMessage =
   | { Workspace: WorkspaceEnvelope }
   | { Diagnostics: DiagnosticsEnvelope }
   | { CursorOverlay: CursorOverlayEnvelope }
-  | { Crdt: CrdtEnvelope };
+  | { Crdt: CrdtEnvelope }
+  | { Config: ConfigEnvelope };
 
 export interface PtyCreatedArgs {
   session_id: string;
@@ -93,7 +94,8 @@ export type ServerMessage =
   | { WorkspaceReply: WorkspaceReplyEnvelope }
   | { DiagnosticsReply: DiagnosticsReplyEnvelope }
   | { CursorOverlayReply: CursorOverlayReplyEnvelope }
-  | { CrdtReply: CrdtReplyEnvelope };
+  | { CrdtReply: CrdtReplyEnvelope }
+  | { ConfigReply: ConfigReplyEnvelope };
 
 // Files messages ------------------------------------------------------
 // Mirrors `neoism-protocol/src/files.rs`.
@@ -178,10 +180,49 @@ export interface CommitSummary {
   timestamp: number;
 }
 
+/** Mirror of the shared git panel's `FileStatus` — richer than
+ *  `GitFileStatus` (which predates the write surface: `Staged` and
+ *  `Mixed` don't exist there). */
+export type GitChangeStatus =
+  | "Modified"
+  | "Staged"
+  | "Mixed"
+  | "Added"
+  | "Deleted"
+  | "Renamed"
+  | "Untracked"
+  | "Conflict";
+
+/** One changed file with desktop `collect_files` parity: repo-relative
+ *  path, add/del line counts and the porcelain index-column staged bit. */
+export interface GitFileChange {
+  path: string;
+  status: GitChangeStatus;
+  additions: number;
+  deletions: number;
+  staged: boolean;
+}
+
+/** Raw per-file patch text (desktop `load_diff` parity — `git diff
+ *  HEAD`, so staged changes stay visible). */
+export interface GitFileDiff {
+  path: string;
+  patch: string;
+}
+
 export type GitClientMessage =
   | "Status"
   | { Diff: { path: string | null } }
-  | { Log: { max_count: number | null } };
+  | { Log: { max_count: number | null } }
+  // Web git-panel write parity (Pass 2) — mirrors the shared panel's
+  // `GitDiffIo` trait; mutations reply with a refreshed `ChangedFiles`.
+  | "ChangedFiles"
+  | { Stage: { path: string } }
+  | { Unstage: { path: string } }
+  | { Commit: { message: string } }
+  | "Branches"
+  | { Checkout: { branch: string } }
+  | { DiffFiles: { paths: string[] } };
 
 export type GitServerMessage =
   | { Status: { entries: GitStatusEntry[] } }
@@ -189,7 +230,16 @@ export type GitServerMessage =
   | { Log: { commits: CommitSummary[] } }
   | { Branch: { name: string | null } }
   | { Changes: { added: number; deleted: number } }
-  | { Error: { message: string } };
+  | { Error: { message: string } }
+  | {
+      ChangedFiles: {
+        files: GitFileChange[];
+        branch: string | null;
+        error: string | null;
+      };
+    }
+  | { Branches: { branches: string[] } }
+  | { FileDiffs: { diffs: GitFileDiff[] } };
 
 export interface GitEnvelope {
   request_id: number;
@@ -293,7 +343,9 @@ export type EditorLspAction =
   | "format"
   | "code_actions"
   | "rename"
-  | "toggle_inlay_hints";
+  | "toggle_inlay_hints"
+  | "completion"
+  | "signature_help";
 
 export interface EditorLspCodeAction {
   server_id: string;
@@ -321,8 +373,42 @@ export interface EditorLspCompletionItem {
   payload?: unknown;
 }
 
+/** One find-references hit with its line text preloaded. */
+export interface EditorLspReference {
+  path: string;
+  /** 1-based line. */
+  line: number;
+  /** 0-based UTF-8 byte column. */
+  column: number;
+  text: string;
+}
+
+/** One text edit in 0-based (line, UTF-8 byte column) coordinates. */
+export interface EditorLspTextEdit {
+  start_line: number;
+  start_col: number;
+  end_line: number;
+  end_col: number;
+  new_text: string;
+}
+
+/** A file's worth of workspace-edit text edits. */
+export interface EditorLspFileEdit {
+  path: string;
+  edits: EditorLspTextEdit[];
+}
+
 export type EditorClientMessage =
-  | { OpenBuffer: { path: string; surface_id?: string | null } }
+  | {
+      OpenBuffer: {
+        path: string;
+        /** Authoritative live buffer text (native-editor LSP sync). */
+        text?: string | null;
+        line?: number | null;
+        character?: number | null;
+        surface_id?: string | null;
+      };
+    }
   | { SendKeys: { bytes: number[]; surface_id?: string | null } }
   | {
       MouseInput: {
@@ -375,6 +461,41 @@ export type EditorClientMessage =
         grid: number;
         row: number;
         col: number;
+        surface_id?: string | null;
+      };
+    }
+  | {
+      /** Native-editor position-explicit LSP query: 0-based line +
+       *  0-based UTF-8 byte column, resolved against the text last
+       *  synced via OpenBuffer. */
+      LspQueryAt: {
+        seq: number;
+        action: EditorLspAction;
+        path: string;
+        line: number;
+        character: number;
+        text?: string | null;
+        open_paths?: string[];
+        surface_id?: string | null;
+      };
+    }
+  | {
+      /** Apply one code action from an LspQueryAt CodeActions result
+       *  (seq-tokened, open-path-aware). Replied with LspQueryResult. */
+      ApplyLspCodeActionAt: {
+        seq: number;
+        action: EditorLspCodeAction;
+        open_paths?: string[];
+        surface_id?: string | null;
+      };
+    }
+  | {
+      /** Native-editor save notification: `path` was just written —
+       *  the daemon forwards textDocument/didSave to the workspace
+       *  language servers (save-triggered slow-lane diagnostics).
+       *  Fire-and-forget: no reply. */
+      DidSave: {
+        path: string;
         surface_id?: string | null;
       };
     }
@@ -535,6 +656,24 @@ export type EditorServerMessage =
       };
     }
   | {
+      /** Result of LspQueryAt / ApplyLspCodeActionAt; only the fields
+       *  the echoed action produces are populated. Locations are
+       *  0-based (line + UTF-8 byte column). */
+      LspQueryResult: {
+        surface_id?: string | null;
+        seq: number;
+        action: EditorLspAction;
+        root?: string | null;
+        locations?: Array<{ uri: string; line: number; character: number }>;
+        references?: EditorLspReference[];
+        code_actions?: EditorLspCodeAction[];
+        edits?: EditorLspFileEdit[];
+        applied_files?: string[];
+        ran_command?: boolean;
+        title?: string;
+      };
+    }
+  | {
       LspCompletions: {
         surface_id?: string | null;
         seq: number;
@@ -679,6 +818,56 @@ export type CrdtServerMessage =
   | { CompactionStatus: unknown }
   | { Saved: { buffer_id: string; bytes_written: number } }
   | { Error: { buffer_id?: string | null; message: string } };
+
+// Config messages -----------------------------------------------------
+// Mirrors `neoism-protocol/src/config.rs` — generic get/set over the
+// daemon host's unified config.json + the read-only extensions
+// inventory (web Settings + Extensions pages).
+
+export type ConfigClientMessage =
+  | "GetConfig"
+  | "ListExtensions"
+  | { SetSetting: { key: string; value: unknown } }
+  | { SetKeybind: { action: string; key: string; with: string } };
+
+export type ExtensionStatusSummary =
+  | "not_installed"
+  | "built_in"
+  | "detected"
+  | "unavailable"
+  | "installed";
+
+export interface ExtensionSummary {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  downloads?: number | null;
+  categories?: string[];
+  languages?: string[];
+  status: ExtensionStatusSummary;
+  installed_version?: string | null;
+  repository_url?: string | null;
+  lsp_source?: string | null;
+}
+
+export type ConfigServerMessage =
+  | { Config: { value: unknown } }
+  | { SettingWritten: { key: string } }
+  | { KeybindWritten: { action: string } }
+  | { Extensions: { entries: ExtensionSummary[] } }
+  | { Error: { message: string } };
+
+export interface ConfigEnvelope {
+  request_id: number;
+  message: ConfigClientMessage;
+}
+
+export interface ConfigReplyEnvelope {
+  request_id: number;
+  message: ConfigServerMessage;
+}
 
 export interface CrdtEnvelope {
   request_id: number;
@@ -830,6 +1019,15 @@ export type AgentClientMessage =
   | { SwitchThread: { session_id: string } }
   | { DeleteThread: { session_id: string } }
   | {
+      AnswerQuestion: {
+        request_id: string;
+        session_id: string;
+        answers: string[][];
+      };
+    }
+  | { RejectQuestion: { request_id: string; session_id: string } }
+  | { SetPinned: { session_id: string; pinned: boolean } }
+  | {
       ListThreads: {
         directory?: string | null;
         limit?: number | null;
@@ -908,6 +1106,17 @@ export type AgentClientMessage =
 export type AgentServerMessage =
   // -- Original direct-proxy surface -------------------------------
   | { Disabled: { reason: string } }
+  | { QuestionAsked: { session_id: string; request: unknown } }
+  | { QuestionsUpdated: { session_id: string; requests: unknown[] } }
+  | { QuestionRemoved: { session_id: string; request_id: string } }
+  | { QuestionReplyFailed: { request_id: string; error: string } }
+  | {
+      ThreadUpdated: {
+        session_id: string;
+        title?: string | null;
+        pinned?: boolean | null;
+      };
+    }
   | { MessageStart: { session_id: string; role: Role; message_id: string } }
   | {
       ContentDelta: {
@@ -1837,6 +2046,12 @@ export function isCrdtReply(
   return Object.prototype.hasOwnProperty.call(msg, "CrdtReply");
 }
 
+export function isConfigReply(
+  msg: ServerMessage,
+): msg is { ConfigReply: ConfigReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "ConfigReply");
+}
+
 // Constructors --------------------------------------------------------
 
 export const ClientMessage = {
@@ -1878,5 +2093,8 @@ export const ClientMessage = {
   },
   crdt(envelope: CrdtEnvelope): ClientMessage {
     return { Crdt: envelope };
+  },
+  config(envelope: ConfigEnvelope): ClientMessage {
+    return { Config: envelope };
   },
 };

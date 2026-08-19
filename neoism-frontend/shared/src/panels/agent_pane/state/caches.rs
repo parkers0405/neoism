@@ -28,6 +28,26 @@ impl NeoismAgentPane {
         self.parent_session_id.is_some()
     }
 
+    /// Whether `session_id` belongs to the conversation family the side
+    /// panel currently tracks: the viewed session, its parent, or any
+    /// row of the subagent roster (whose first entry is the family
+    /// root). Session switches within one family keep the parent-keyed
+    /// roster alive — a subagent transcript is an *extension* of the
+    /// main chat, so entering a child must not clear the sidebar's
+    /// names/statuses of its siblings.
+    pub fn session_family_contains(&self, session_id: &str) -> bool {
+        if session_id.is_empty() {
+            return false;
+        }
+        self.session_id.as_deref() == Some(session_id)
+            || self.parent_session_id.as_deref() == Some(session_id)
+            || self
+                .side_panel
+                .subagents()
+                .iter()
+                .any(|entry| entry.id == session_id)
+    }
+
     pub(crate) fn timeline_measure_key(
         message: &NeoismAgentMessage,
         width: f32,

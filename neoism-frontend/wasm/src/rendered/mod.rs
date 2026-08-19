@@ -6,11 +6,23 @@ use neoism_terminal_core::crosswords::square::{
     CellFlags as SquareCellFlags, ContentTag, Square, Wide,
 };
 use neoism_terminal_core::crosswords::style::StyleFlags;
+use neoism_terminal_core::selection::SelectionRange;
 use neoism_ui::primitives::IdeTheme;
+use neoism_terminal_core::ansi::CursorShape as AnsiCursorShape;
+use neoism_ui::terminal_grid_emit::{
+    cell_in_row_sel, cursor_quads, cursor_render_style, cursor_thickness,
+    decoration_quads, decoration_thickness, is_terminal_run_breaker,
+    row_selection_for, underline_style_from_flags, CursorRenderInputs,
+    CursorRenderStyle, CursorSpriteStyle, DecorationStyle, RowSelection, SpriteQuad,
+};
+use neoism_ui::terminal_scroll_state::TerminalScroll;
 use sugarloaf::font::{FontData, FontLibrary, FontLibraryData, SymbolMap};
 use sugarloaf::layout::RootStyle;
 use sugarloaf::text::DrawOpts;
-use sugarloaf::{Color, Sugarloaf, SugarloafRenderer, SugarloafWindowSize};
+use sugarloaf::{
+    Attributes, Color, Stretch, Style as FontStyle, Sugarloaf, SugarloafRenderer,
+    SugarloafWindowSize, Weight,
+};
 
 // Bundled fonts. We ship the same Geist Mono faces the desktop
 // frontend's HTML chrome uses plus Symbols Nerd Font Mono for PUA
@@ -101,6 +113,129 @@ fn ansi_to_snapshot_color(color: AnsiColor) -> ColorIndex {
             g: rgb.g,
             b: rgb.b,
         },
+    }
+}
+
+/// Map a `CellSnapshot`'s decoration bits back onto core `StyleFlags`
+/// so the shared `underline_style_from_flags` precedence (desktop
+/// grid_emit) decides which decoration sprite a cell gets.
+#[inline]
+fn decoration_style_flags(flags: CellFlags) -> StyleFlags {
+    let mut out = StyleFlags::empty();
+    if flags.contains(CellFlags::UNDERLINE) {
+        out.insert(StyleFlags::UNDERLINE);
+    }
+    if flags.contains(CellFlags::DOUBLE_UNDERLINE) {
+        out.insert(StyleFlags::DOUBLE_UNDERLINE);
+    }
+    if flags.contains(CellFlags::UNDERCURL) {
+        out.insert(StyleFlags::UNDERCURL);
+    }
+    if flags.contains(CellFlags::DOTTED_UNDERLINE) {
+        out.insert(StyleFlags::DOTTED_UNDERLINE);
+    }
+    if flags.contains(CellFlags::DASHED_UNDERLINE) {
+        out.insert(StyleFlags::DASHED_UNDERLINE);
+    }
+    out
+}
+
+/// Key space for the sprite-quad cache: decoration styles use their
+/// discriminant directly, cursor sprites are offset so the two never
+/// collide (mirrors the desktop atlas' sentinel font_id ranges).
+const SPRITE_KIND_CURSOR_BASE: u32 = 0x100;
+
+type SpriteQuadCache =
+    std::collections::HashMap<(u32, u32, u32, u32), Rc<Vec<SpriteQuad>>>;
+
+/// Lookup-or-rasterize a sprite's quad list. The web renderer has no
+/// terminal glyph atlas, so decoration / cursor sprites from the
+/// shared rasterizers are decomposed once into solid quads (per
+/// (kind, cell_w_px, cell_h_px, thickness)) and drawn as rects.
+fn cached_sprite_quads(
+    cache: &mut SpriteQuadCache,
+    kind: u32,
+    cell_w: u32,
+    cell_h: u32,
+    thickness: u32,
+    build: impl FnOnce() -> Vec<SpriteQuad>,
+) -> Rc<Vec<SpriteQuad>> {
+    cache
+        .entry((kind, cell_w, cell_h, thickness))
+        .or_insert_with(|| Rc::new(build()))
+        .clone()
+}
+
+/// Emit one decoration sprite (underline family / strikethrough) as
+/// its cached quad decomposition — the web analogue of desktop
+/// `ensure_decoration_slot` + `CellText` emission (grid_emit/
+/// decoration.rs), sharing `rasterize_decoration` geometry.
+#[allow(clippy::too_many_arguments)]
+fn emit_decoration_quads(
+    s: &mut Sugarloaf<'static>,
+    cache: &mut SpriteQuadCache,
+    deco: DecorationStyle,
+    cell_w_px: u32,
+    cell_h_px: u32,
+    thickness: u32,
+    px_l: f32,
+    x: f32,
+    y: f32,
+    color: RgbTriple,
+) {
+    let quads = cached_sprite_quads(cache, deco as u32, cell_w_px, cell_h_px, thickness, || {
+        decoration_quads(deco, cell_w_px, cell_h_px, thickness)
+    });
+    for q in quads.iter() {
+        s.rect(
+            None,
+            x + q.x as f32 * px_l,
+            y + q.y as f32 * px_l,
+            q.w as f32 * px_l,
+            q.h as f32 * px_l,
+            rgb_to_f32(color),
+            0.02,
+            1,
+        );
+    }
+}
+
+/// Emit one cursor sprite as its cached quad decomposition — the web
+/// analogue of desktop `emit_cursor_sprite` (grid_emit/cursor.rs),
+/// sharing `cursor_thickness` + `rasterize_cursor` geometry.
+#[allow(clippy::too_many_arguments)]
+fn emit_cursor_sprite_quads(
+    s: &mut Sugarloaf<'static>,
+    cache: &mut SpriteQuadCache,
+    sprite: CursorSpriteStyle,
+    cell_w_px: u32,
+    cell_h_px: u32,
+    px_l: f32,
+    x: f32,
+    y: f32,
+    color: [f32; 4],
+    order: u8,
+) {
+    let thickness = cursor_thickness(cell_h_px);
+    let quads = cached_sprite_quads(
+        cache,
+        SPRITE_KIND_CURSOR_BASE + sprite as u32,
+        cell_w_px,
+        cell_h_px,
+        thickness,
+        || cursor_quads(sprite, cell_w_px, cell_h_px, thickness),
+    );
+    for q in quads.iter() {
+        s.rect(
+            None,
+            x + q.x as f32 * px_l,
+            y + q.y as f32 * px_l,
+            q.w as f32 * px_l,
+            q.h as f32 * px_l,
+            color,
+            0.04,
+            order,
+        );
     }
 }
 
@@ -208,6 +343,54 @@ fn rgb_from_u32(value: u32) -> ColorRgb {
     }
 }
 
+#[inline]
+fn rgb_triple_from_u32(value: u32) -> RgbTriple {
+    RgbTriple {
+        r: ((value >> 16) & 0xff) as u8,
+        g: ((value >> 8) & 0xff) as u8,
+        b: (value & 0xff) as u8,
+    }
+}
+
+/// Web mirror of the desktop `input::mouse::Mouse` fields the terminal
+/// grid needs: button state, the double/triple click chain, wheel
+/// accumulators for the PTY mouse-report branches, and queued report
+/// bytes the JS host drains into the PTY websocket. Lives on
+/// `RenderedTerminal` (not `ChromeBridge`) so the bridge constructor
+/// stays untouched.
+#[derive(Default)]
+pub(crate) struct TerminalPointerState {
+    pub(crate) left_pressed: bool,
+    pub(crate) middle_pressed: bool,
+    pub(crate) right_pressed: bool,
+    /// 0 = None, 1 = Click, 2 = DoubleClick, 3 = TripleClick — the
+    /// desktop `ClickState` chain with the same 300ms threshold
+    /// (desktop app/window_event/mouse.rs:54-74).
+    pub(crate) click_state: u8,
+    pub(crate) last_click_ms: f64,
+    pub(crate) last_button: u8,
+    pub(crate) last_x: f32,
+    pub(crate) last_y: f32,
+    /// True while a left-button selection drag is in progress.
+    pub(crate) selecting: bool,
+    /// Wheel accumulators for the mouse-mode / alternate-scroll PTY
+    /// branches (desktop `mouse.accumulated_scroll`).
+    pub(crate) accumulated_scroll_x: f64,
+    pub(crate) accumulated_scroll_y: f64,
+    /// Last cell a motion report was sent for — the desktop
+    /// `square_changed` dedupe gate.
+    pub(crate) last_report_cell: Option<(i32, usize)>,
+    /// visual-row → absolute-source-row map of the last frame when the
+    /// Warp-style block pipeline composed the window; `None` when the
+    /// raw-cells path painted. Mirrors desktop
+    /// `terminal_block_source_row_at_visual_row` for pointer mapping
+    /// (block chrome rows map to `None` and take no selection).
+    pub(crate) frame_sources: Option<Vec<Option<usize>>>,
+    /// Mouse-report bytes waiting for the JS host to forward to the
+    /// PTY (the web stand-in for desktop's `messenger.send_write`).
+    pub(crate) pending_pty: Vec<u8>,
+}
+
 fn seed_terminal_theme(terminal: &mut Terminal, theme: &IdeTheme) {
     let colors = &mut terminal.inner.colors;
     let mut set = |slot: NamedColor, value: u32| {
@@ -246,6 +429,14 @@ fn seed_terminal_theme(terminal: &mut Terminal, theme: &IdeTheme) {
     set_dim(NamedColor::DimMagenta, theme.magenta);
     set_dim(NamedColor::DimCyan, theme.cyan);
     set_dim(NamedColor::DimWhite, theme.white);
+
+    // Mirror the theme seed into the parse-time fallback palette so
+    // OSC 4/10/11/12 color queries are answered synchronously as
+    // PtyWrite bytes (drained via `take_pty_writes` /
+    // `flush_pty_outbox`) — and so an OSC 110/111 reset falls back to
+    // the theme instead of leaving the slot unanswerable.
+    let seeded = terminal.inner.colors;
+    terminal.inner.set_default_colors(seeded);
 }
 
 /// A canvas-bound terminal: Crosswords + the sugarloaf instance
@@ -266,6 +457,27 @@ pub struct RenderedTerminal {
     // clear color (via `set_background_color`). Mutated by
     // `set_ide_theme`; defaults to `pastel_dark`.
     ide_theme: IdeTheme,
+    /// Active terminal text selection, absolute-`Line` anchored (the
+    /// same `SelectionRange` desktop keeps in
+    /// `renderable_content.selection_range`, so it survives
+    /// scrollback movement). Painted by the draw paths; mutated by
+    /// the `ChromeBridge` pointer handlers in `terminal_input.rs`.
+    selection_range: Option<SelectionRange>,
+    /// Wheel notch accumulation + clamping for terminal scrollback —
+    /// the shared lift of desktop `terminal/scroll.rs`.
+    terminal_scroll: TerminalScroll,
+    /// Pointer / click-chain / mouse-report state for the grid.
+    pointer: TerminalPointerState,
+    /// Decoration / cursor sprite quads from the shared rasterizers
+    /// (`terminal_grid_emit`), decomposed for rect drawing. Keyed on
+    /// (kind, cell_w_px, cell_h_px, thickness) — invalidated
+    /// naturally when cell metrics or DPR change the key.
+    sprite_quads: SpriteQuadCache,
+    /// Whether this terminal surface has focus. Feeds the shared
+    /// `cursor_render_style` decision (unfocused = hollow block, like
+    /// desktop inactive panes). Defaults to `true`; the JS host can
+    /// mirror browser focus through `set_focused`.
+    focused: bool,
 }
 
 #[wasm_bindgen]
@@ -382,7 +594,19 @@ impl RenderedTerminal {
             cell_h: 16.0,
             font_library,
             ide_theme: initial_ide_theme,
+            selection_range: None,
+            terminal_scroll: TerminalScroll::new(),
+            pointer: TerminalPointerState::default(),
+            sprite_quads: SpriteQuadCache::default(),
+            focused: true,
         })
+    }
+
+    /// Mirror browser focus onto the cursor pipeline: an unfocused
+    /// surface renders the hollow block cursor, matching desktop
+    /// inactive panes (`cursor_render_style` handles the swap).
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
     }
 
     /// Feed PTY-emitted bytes through the parser into Crosswords.
@@ -435,171 +659,64 @@ impl RenderedTerminal {
         suppress_prompt_row: bool,
         suppress_cursor: bool,
     ) {
-        let snap = self.terminal.inner.snapshot();
-        let Some(s) = self.sugarloaf.as_mut() else {
-            return;
+        let display_offset = self.terminal.inner.display_offset();
+        let mut snap = self.terminal.inner.snapshot();
+
+        // The snapshot viewport is the LIVE screen (`Line(0..rows)`)
+        // and ignores `display_offset`; when the user has scrolled
+        // into history, re-read the offset-aware window so scrollback
+        // is actually visible. (Desktop's rich-text renderer always
+        // paints through offset-aware visible rows.)
+        let rows: Vec<Vec<CellSnapshot>> = if display_offset == 0 {
+            std::mem::take(&mut snap.viewport)
+        } else {
+            self.terminal
+                .inner
+                .visible_rows()
+                .iter()
+                .map(|row| {
+                    row.inner
+                        .iter()
+                        .map(|sq| square_to_cell_snapshot(&self.terminal.inner, sq))
+                        .collect()
+                })
+                .collect()
         };
 
-        // Framebuffer clear.
-        s.set_background_color(Some(rgb_to_sugar_color(snap.theme.default_bg)));
+        // Scrolling into history pushes the live cursor row down and
+        // off the window; only paint it while it's actually visible.
+        let cursor_visual_row = snap.cursor.row as i64 + display_offset as i64;
+        let cursor = (cursor_visual_row >= 0
+            && (cursor_visual_row as usize) < rows.len())
+        .then(|| CursorSnapshot {
+            row: cursor_visual_row as u16,
+            ..snap.cursor
+        });
 
-        let font_size = (self.cell_h * 0.875).clamp(8.0, 32.0);
-        let text_y_pad = ((self.cell_h - font_size) * 0.5).max(0.0);
-        let prompt_row = suppress_prompt_row.then_some(snap.cursor.row as usize);
-        for (row_idx, row) in snap.viewport.iter().enumerate() {
-            if prompt_row == Some(row_idx) {
-                continue;
-            }
+        let prompt_row = if suppress_prompt_row {
+            cursor.as_ref().map(|c| c.row as usize)
+        } else {
+            None
+        };
 
-            let row_y = origin_y + row_idx as f32 * self.cell_h;
-            let mut bg_start: Option<(usize, RgbTriple)> = None;
-            for (col_idx, cell) in row.iter().enumerate() {
-                let (_, bg) = cell_snapshot_colors(cell, &snap.theme);
-                let paints_bg = bg != snap.theme.default_bg;
-                match (bg_start, paints_bg) {
-                    (None, true) => bg_start = Some((col_idx, bg)),
-                    (Some((start, active_bg)), true) if active_bg != bg => {
-                        s.rect(
-                            None,
-                            origin_x + start as f32 * self.cell_w,
-                            row_y,
-                            (col_idx - start) as f32 * self.cell_w,
-                            self.cell_h,
-                            rgb_to_f32(active_bg),
-                            0.0,
-                            0,
-                        );
-                        bg_start = Some((col_idx, bg));
-                    }
-                    (Some((start, active_bg)), false) => {
-                        s.rect(
-                            None,
-                            origin_x + start as f32 * self.cell_w,
-                            row_y,
-                            (col_idx - start) as f32 * self.cell_w,
-                            self.cell_h,
-                            rgb_to_f32(active_bg),
-                            0.0,
-                            0,
-                        );
-                        bg_start = None;
-                    }
-                    _ => {}
-                }
-            }
-            if let Some((start, active_bg)) = bg_start {
-                s.rect(
-                    None,
-                    origin_x + start as f32 * self.cell_w,
-                    row_y,
-                    (row.len().saturating_sub(start)) as f32 * self.cell_w,
-                    self.cell_h,
-                    rgb_to_f32(active_bg),
-                    0.0,
-                    0,
-                );
-            }
+        let cols = snap.cols as usize;
+        let row_selections: Vec<Option<RowSelection>> = (0..rows.len())
+            .map(|y| {
+                row_selection_for(self.selection_range, y, cols, display_offset as i32)
+            })
+            .collect();
 
-            let mut text_run = String::new();
-            let mut run_start = 0usize;
-            let mut run_style: Option<(RgbTriple, bool, bool)> = None;
-            let flush_text_run =
-                |s: &mut Sugarloaf<'static>,
-                 text_run: &mut String,
-                 run_start: usize,
-                 run_style: Option<(RgbTriple, bool, bool)>| {
-                    if text_run.is_empty() {
-                        return;
-                    }
-                    let Some((fg, bold, italic)) = run_style else {
-                        text_run.clear();
-                        return;
-                    };
-                    let opts = DrawOpts {
-                        font_size,
-                        color: rgb_to_u8(fg),
-                        bold,
-                        italic,
-                        clip_rect,
-                        ..DrawOpts::default()
-                    };
-                    s.text_mut().draw(
-                        origin_x + run_start as f32 * self.cell_w,
-                        row_y + text_y_pad,
-                        text_run,
-                        &opts,
-                    );
-                    text_run.clear();
-                };
-
-            for (col_idx, cell) in row.iter().enumerate() {
-                if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) || cell.c == ' ' {
-                    flush_text_run(s, &mut text_run, run_start, run_style);
-                    run_style = None;
-                    continue;
-                }
-                let (fg, _) = cell_snapshot_colors(cell, &snap.theme);
-                let bold = cell.flags.contains(CellFlags::BOLD);
-                let italic = cell.flags.contains(CellFlags::ITALIC);
-                let style = (fg, bold, italic);
-                if run_style != Some(style) {
-                    flush_text_run(s, &mut text_run, run_start, run_style);
-                    run_start = col_idx;
-                    run_style = Some(style);
-                }
-                text_run.push(cell.c);
-            }
-            flush_text_run(s, &mut text_run, run_start, run_style);
-
-            for (col_idx, cell) in row.iter().enumerate() {
-                let underline = cell.flags.intersects(
-                    CellFlags::UNDERLINE
-                        | CellFlags::UNDERCURL
-                        | CellFlags::DOUBLE_UNDERLINE
-                        | CellFlags::DOTTED_UNDERLINE
-                        | CellFlags::DASHED_UNDERLINE,
-                );
-                if !underline {
-                    continue;
-                }
-                let (fg, _) = cell_snapshot_colors(cell, &snap.theme);
-                let underline_color = cell
-                    .underline_color
-                    .map(|color| resolve_snapshot_color(color, &snap.theme, fg))
-                    .unwrap_or(fg);
-                s.rect(
-                    None,
-                    origin_x + col_idx as f32 * self.cell_w,
-                    row_y + self.cell_h - 2.0,
-                    self.cell_w,
-                    1.0,
-                    rgb_to_f32(underline_color),
-                    0.02,
-                    1,
-                );
-            }
-        }
-
-        if snap.cursor.visible && !suppress_cursor {
-            let x = origin_x + snap.cursor.col as f32 * self.cell_w;
-            let y = origin_y + snap.cursor.row as f32 * self.cell_h;
-            let cur = rgb_to_f32(snap.theme.cursor);
-            let (w, h, y) = match snap.cursor.shape {
-                SnapshotCursorShape::Beam => {
-                    (2.0_f32.max(self.cell_w * 0.14), self.cell_h, y)
-                }
-                SnapshotCursorShape::Underline => (
-                    self.cell_w,
-                    2.0_f32.max(self.cell_h * 0.12),
-                    y + self.cell_h - 2.0,
-                ),
-                SnapshotCursorShape::Hidden => (0.0, 0.0, y),
-                SnapshotCursorShape::Block => (self.cell_w, self.cell_h, y),
-            };
-            if w > 0.0 && h > 0.0 {
-                s.rect(None, x, y, w, h, cur, 0.04, 2);
-            }
-        }
+        self.draw_cell_snapshot_rows_in(
+            &rows,
+            &snap.theme,
+            cursor,
+            origin_x,
+            origin_y,
+            clip_rect,
+            prompt_row,
+            suppress_cursor,
+            &row_selections,
+        );
     }
 
     pub(crate) fn draw_composed_rows_in(
@@ -631,6 +748,33 @@ impl RenderedTerminal {
             })
             .collect();
 
+        // Selection under the block pipeline: each display row knows
+        // its absolute source row, so translate through
+        // `abs - history_size` back into terminal `Line` space (the
+        // anchoring the shared `row_selection_for` expects) and skip
+        // injected block-chrome rows (`None` sources).
+        let history_size = self.terminal.inner.history_size();
+        let display_offset = self.terminal.inner.display_offset() as i32;
+        let cols = self.terminal.inner.columns();
+        let row_selections: Vec<Option<RowSelection>> = source_row_indices
+            .iter()
+            .map(|source| {
+                source.and_then(|abs| {
+                    let visual =
+                        abs as i64 - history_size as i64 + display_offset as i64;
+                    if visual < 0 {
+                        return None;
+                    }
+                    row_selection_for(
+                        self.selection_range,
+                        visual as usize,
+                        cols,
+                        display_offset,
+                    )
+                })
+            })
+            .collect();
+
         self.draw_cell_snapshot_rows_in(
             &cell_rows,
             &snap.theme,
@@ -643,9 +787,11 @@ impl RenderedTerminal {
             clip_rect,
             prompt_row,
             suppress_cursor,
+            &row_selections,
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_cell_snapshot_rows_in(
         &mut self,
         rows: &[Vec<CellSnapshot>],
@@ -656,19 +802,130 @@ impl RenderedTerminal {
         clip_rect: Option<[f32; 4]>,
         suppress_row: Option<usize>,
         suppress_cursor: bool,
+        row_selections: &[Option<RowSelection>],
     ) {
+        // Selection colors mirror desktop `host/state.rs`:
+        // selection_background = theme.hover, selection_foreground =
+        // theme.fg.
+        let sel_bg = self.ide_theme.f32(self.ide_theme.hover);
+        let sel_fg = rgb_triple_from_u32(self.ide_theme.fg);
+
         let Some(s) = self.sugarloaf.as_mut() else {
             return;
         };
 
         s.set_background_color(Some(rgb_to_sugar_color(theme.default_bg)));
 
-        let font_size = (self.cell_h * 0.875).clamp(8.0, 32.0);
+        let scale = s.get_scale().max(0.1);
+        let px_l = 1.0 / scale;
+
+        // Font-size calibration — desktop derives the cell width FROM
+        // the font advance (grid cell_w := advance at the configured
+        // size); the web grid fixes cell_w from the chrome layout, so
+        // invert the relation: pick the integer physical font size
+        // whose primary-face advance lands closest to one cell.
+        // `Text::draw` shapes at round(font_size * scale) physical px,
+        // hence the integer quantization here. Before calibration the
+        // grid drew 14px glyphs (8.4px advance) into 8px cells — every
+        // run drifted off-grid and overlapped its neighbor.
+        // `advance_err` is the leftover per-cell drift the chunked
+        // text pass below re-anchors away.
+        let attrs = Attributes::new(Stretch::NORMAL, Weight::NORMAL, FontStyle::Normal);
+        let probe = s.char_advance('M', attrs, 100.0);
+        let (font_size, advance_err) = if probe > 0.0 {
+            let k = probe / 100.0;
+            let ideal_phys = (self.cell_w * scale) / k;
+            let max_phys = (self.cell_h * scale).round().max(1.0);
+            let size_phys = ideal_phys.round().clamp(1.0, max_phys);
+            let font_size = (size_phys / scale).clamp(6.0, 64.0);
+            let advance = k * (font_size * scale).round() / scale;
+            (font_size, advance - self.cell_w)
+        } else {
+            // Advance probe failed (font metrics unavailable): fall
+            // back to the legacy height-derived size, treated as
+            // unbounded drift so the text pass anchors per cell.
+            ((self.cell_h * 0.875).clamp(8.0, 32.0), f32::MAX)
+        };
         let text_y_pad = ((self.cell_h - font_size) * 0.5).max(0.0);
+        // Cap text-chunk length so cumulative advance drift from the
+        // integer-px font size stays under half a physical pixel.
+        let chunk_limit: usize = if advance_err.abs() * 512.0 < 0.5 * px_l {
+            512
+        } else {
+            ((0.5 * px_l) / advance_err.abs()).floor().max(1.0) as usize
+        };
+
+        // Sprite metrics in physical px — the shared rasterizers run
+        // at device resolution like desktop's grid atlas. Quads come
+        // back in physical px and are divided by `scale` for `rect`
+        // (which re-multiplies by the same factor), so sprite edges
+        // land on exact device pixels.
+        let cell_w_px = (self.cell_w * scale).round().max(1.0) as u32;
+        let cell_h_px = (self.cell_h * scale).round().max(1.0) as u32;
+        let deco_thickness = decoration_thickness(font_size * scale);
+
+        // Cursor pipeline — the shared `cursor_render_style` decision
+        // with desktop's strict priority (preedit > visible > focus >
+        // blink > shape), then sprite geometry from the shared
+        // `rasterize_cursor` via `cursor_quads`. The blinking flag is
+        // read honestly from Crosswords (DEC mode 12 / DECSCUSR) but
+        // `blink_visible` is pinned true: the web frame loop is
+        // damage-gated (TerminalPanel.ts re-arms RAF only while
+        // `chrome.animations_active()`), so an off-phase frame could
+        // freeze the cursor invisible between damage events. Web
+        // ships a non-blinking cursor until a blink clock can join
+        // the chrome animation pump.
+        let cursor_style = if suppress_cursor {
+            None
+        } else {
+            cursor.as_ref().and_then(|c| {
+                cursor_render_style(CursorRenderInputs {
+                    visible: c.visible,
+                    focused: self.focused,
+                    blink_visible: true,
+                    blinking: self.terminal.inner.blinking_cursor,
+                    preedit: false,
+                    shape: match c.shape {
+                        SnapshotCursorShape::Block => AnsiCursorShape::Block,
+                        SnapshotCursorShape::Beam => AnsiCursorShape::Beam,
+                        SnapshotCursorShape::Underline => AnsiCursorShape::Underline,
+                        SnapshotCursorShape::Hidden => AnsiCursorShape::Hidden,
+                    },
+                })
+            })
+        };
+        let cursor_pos = cursor.as_ref().map(|c| (c.row as usize, c.col as usize));
+        let block_cursor_cell = matches!(cursor_style, Some(CursorRenderStyle::Block))
+            .then_some(cursor_pos)
+            .flatten();
+        let cursor_color = rgb_to_f32(theme.cursor);
+
+        // The focused block fill draws first: it joins the order-1
+        // batch ahead of the decoration quads appended below, so
+        // underlines paint over the block like desktop's bg-slot
+        // cursor (its glyph swap happens in the text pass).
+        if let (Some(style), Some((cur_row, cur_col))) = (cursor_style, cursor_pos) {
+            if style.sprite().is_block_slot() {
+                emit_cursor_sprite_quads(
+                    s,
+                    &mut self.sprite_quads,
+                    style.sprite(),
+                    cell_w_px,
+                    cell_h_px,
+                    px_l,
+                    origin_x + cur_col as f32 * self.cell_w,
+                    origin_y + cur_row as f32 * self.cell_h,
+                    cursor_color,
+                    1,
+                );
+            }
+        }
+
         for (row_idx, row) in rows.iter().enumerate() {
             if suppress_row == Some(row_idx) {
                 continue;
             }
+            let row_sel = row_selections.get(row_idx).copied().flatten();
 
             let row_y = origin_y + row_idx as f32 * self.cell_h;
             let mut bg_start: Option<(usize, RgbTriple)> = None;
@@ -719,108 +976,231 @@ impl RenderedTerminal {
                 );
             }
 
+            // Selection band paints over the per-cell backgrounds
+            // (same draw layer, later draw order) so selected cells
+            // read as one continuous highlight, like desktop's
+            // selection_background pass.
+            if let Some(sel) = row_sel {
+                let sel_x = origin_x + sel.lo as f32 * self.cell_w;
+                let sel_w =
+                    (sel.hi.saturating_sub(sel.lo) as f32 + 1.0) * self.cell_w;
+                s.rect(None, sel_x, row_y, sel_w, self.cell_h, sel_bg, 0.0, 0);
+            }
+
+            // Text pass — desktop `grid_emit/fg.rs` run model via the
+            // shared policy: runs break on `is_terminal_run_breaker`,
+            // style change, wide cells, and font-fallback boundaries
+            // (non-ASCII gets its own cell-anchored draw — the web
+            // approximation of desktop's font_id run breaks, since
+            // graphic ASCII always resolves to the primary face).
+            // Desktop then maps shaped clusters back onto cells
+            // (`glyph_cell_offsets_*` + `terminal_glyph_placement`);
+            // sugarloaf's wasm `Text` keeps shaping internal, so the
+            // web path gets the same placement invariant by
+            // construction instead: every chunk re-anchors at its
+            // exact cell x, the font size is advance-calibrated
+            // above, and `chunk_limit` bounds residual drift to under
+            // half a physical pixel. Ligatures form within a chunk;
+            // one spanning a chunk boundary falls back to component
+            // glyphs (documented residual vs desktop).
+            let cell_style = |cell: &CellSnapshot, col: usize| -> (RgbTriple, bool, bool) {
+                let (mut fg, _) = cell_snapshot_colors(cell, theme);
+                // Desktop `cell_fg_selected`: selected cells take the
+                // theme's selection foreground (theme.fg) unless
+                // ignore_selection_fg_color is set (default off).
+                if cell_in_row_sel(row_sel, col as u16) {
+                    fg = sel_fg;
+                }
+                // Desktop block-cursor fg swap (shared
+                // `block_cursor_uniforms`): the glyph under a focused
+                // block cursor paints in the panel background so it
+                // reads against the cursor's solid fill. Wins over the
+                // selection foreground, like the shader-side swap.
+                if block_cursor_cell == Some((row_idx, col)) {
+                    fg = theme.default_bg;
+                }
+                (
+                    fg,
+                    cell.flags.contains(CellFlags::BOLD),
+                    cell.flags.contains(CellFlags::ITALIC),
+                )
+            };
+
             let mut text_run = String::new();
-            let mut run_start = 0usize;
-            let mut run_style: Option<(RgbTriple, bool, bool)> = None;
-            let flush_text_run =
-                |s: &mut Sugarloaf<'static>,
-                 text_run: &mut String,
-                 run_start: usize,
-                 run_style: Option<(RgbTriple, bool, bool)>| {
-                    if text_run.is_empty() {
-                        return;
-                    }
-                    let Some((fg, bold, italic)) = run_style else {
-                        text_run.clear();
-                        return;
-                    };
-                    let opts = DrawOpts {
-                        font_size,
-                        color: rgb_to_u8(fg),
-                        bold,
-                        italic,
-                        clip_rect,
-                        ..DrawOpts::default()
-                    };
-                    s.text_mut().draw(
-                        origin_x + run_start as f32 * self.cell_w,
-                        row_y + text_y_pad,
-                        text_run,
-                        &opts,
-                    );
-                    text_run.clear();
-                };
-
-            for (col_idx, cell) in row.iter().enumerate() {
-                if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) || cell.c == ' ' {
-                    flush_text_run(s, &mut text_run, run_start, run_style);
-                    run_style = None;
+            let mut col_idx = 0usize;
+            while col_idx < row.len() {
+                let cell = &row[col_idx];
+                // Web snapshots fold bg-only squares into ' ' cells,
+                // so `is_bg_only = false` + the ' ' breaker covers
+                // desktop's `is_run_breaker(sq)` exactly.
+                if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER)
+                    || is_terminal_run_breaker(false, cell.c)
+                {
+                    col_idx += 1;
                     continue;
                 }
-                let (fg, _) = cell_snapshot_colors(cell, theme);
-                let bold = cell.flags.contains(CellFlags::BOLD);
-                let italic = cell.flags.contains(CellFlags::ITALIC);
-                let style = (fg, bold, italic);
-                if run_style != Some(style) {
-                    flush_text_run(s, &mut text_run, run_start, run_style);
-                    run_start = col_idx;
-                    run_style = Some(style);
-                }
+                let run_start = col_idx;
+                let style = cell_style(cell, col_idx);
+                let chainable = !cell.flags.contains(CellFlags::WIDE_CHAR)
+                    && cell.c.is_ascii_graphic();
+                text_run.clear();
                 text_run.push(cell.c);
-            }
-            flush_text_run(s, &mut text_run, run_start, run_style);
-
-            for (col_idx, cell) in row.iter().enumerate() {
-                let underline = cell.flags.intersects(
-                    CellFlags::UNDERLINE
-                        | CellFlags::UNDERCURL
-                        | CellFlags::DOUBLE_UNDERLINE
-                        | CellFlags::DOTTED_UNDERLINE
-                        | CellFlags::DASHED_UNDERLINE,
+                col_idx += 1;
+                if chainable {
+                    while col_idx < row.len() && (col_idx - run_start) < chunk_limit {
+                        let next = &row[col_idx];
+                        if next.flags.contains(CellFlags::WIDE_CHAR_SPACER)
+                            || is_terminal_run_breaker(false, next.c)
+                            || next.flags.contains(CellFlags::WIDE_CHAR)
+                            || !next.c.is_ascii_graphic()
+                            || cell_style(next, col_idx) != style
+                        {
+                            break;
+                        }
+                        text_run.push(next.c);
+                        col_idx += 1;
+                    }
+                }
+                let (fg, bold, italic) = style;
+                let opts = DrawOpts {
+                    font_size,
+                    color: rgb_to_u8(fg),
+                    bold,
+                    italic,
+                    clip_rect,
+                    ..DrawOpts::default()
+                };
+                s.text_mut().draw(
+                    origin_x + run_start as f32 * self.cell_w,
+                    row_y + text_y_pad,
+                    &text_run,
+                    &opts,
                 );
-                if !underline {
+            }
+
+            // Decoration pass — desktop `grid_emit/fg.rs` parity:
+            // per-cell sprites from the shared rasterizers
+            // (`underline_style_from_flags` precedence +
+            // `rasterize_decoration` geometry via `decoration_quads`).
+            // Emitted as solid quads because the web surface has no
+            // terminal glyph atlas. On this host every rect draws
+            // under every text glyph (the wgpu pass draws all quad
+            // batches, then all UI text), so underlines match
+            // desktop's under-glyph slot; strikethrough — drawn over
+            // glyphs on desktop — lands under the glyph ink here
+            // (residual, see draw order note above).
+            for (col_idx, cell) in row.iter().enumerate() {
+                let deco =
+                    underline_style_from_flags(decoration_style_flags(cell.flags));
+                let strike = cell.flags.contains(CellFlags::STRIKEOUT);
+                if deco.is_none() && !strike {
                     continue;
                 }
                 let (fg, _) = cell_snapshot_colors(cell, theme);
-                let underline_color = cell
-                    .underline_color
-                    .map(|color| resolve_snapshot_color(color, theme, fg))
-                    .unwrap_or(fg);
-                s.rect(
-                    None,
-                    origin_x + col_idx as f32 * self.cell_w,
-                    row_y + self.cell_h - 2.0,
-                    self.cell_w,
-                    1.0,
-                    rgb_to_f32(underline_color),
-                    0.02,
-                    1,
-                );
-            }
-        }
-
-        if let Some(cursor) = cursor.filter(|cursor| cursor.visible) {
-            if !suppress_cursor {
-                let x = origin_x + cursor.col as f32 * self.cell_w;
-                let y = origin_y + cursor.row as f32 * self.cell_h;
-                let cur = rgb_to_f32(theme.cursor);
-                let (w, h, y) = match cursor.shape {
-                    SnapshotCursorShape::Beam => {
-                        (2.0_f32.max(self.cell_w * 0.14), self.cell_h, y)
-                    }
-                    SnapshotCursorShape::Underline => (
-                        self.cell_w,
-                        2.0_f32.max(self.cell_h * 0.12),
-                        y + self.cell_h - 2.0,
-                    ),
-                    SnapshotCursorShape::Hidden => (0.0, 0.0, y),
-                    SnapshotCursorShape::Block => (self.cell_w, self.cell_h, y),
-                };
-                if w > 0.0 && h > 0.0 {
-                    s.rect(None, x, y, w, h, cur, 0.04, 2);
+                let in_sel = cell_in_row_sel(row_sel, col_idx as u16);
+                let cell_x = origin_x + col_idx as f32 * self.cell_w;
+                if let Some(deco) = deco {
+                    // SGR 58 underline color, unless the cell sits in
+                    // the selection — the selection foreground
+                    // overrides per-cell decoration color (desktop
+                    // `emit_underlines`).
+                    let color = if in_sel {
+                        sel_fg
+                    } else {
+                        cell.underline_color
+                            .map(|color| resolve_snapshot_color(color, theme, fg))
+                            .unwrap_or(fg)
+                    };
+                    emit_decoration_quads(
+                        s,
+                        &mut self.sprite_quads,
+                        deco,
+                        cell_w_px,
+                        cell_h_px,
+                        deco_thickness,
+                        px_l,
+                        cell_x,
+                        row_y,
+                        color,
+                    );
+                }
+                if strike {
+                    // Strikethrough always uses the cell fg — no SGR
+                    // for a separate strike color (desktop
+                    // `emit_strikethroughs`).
+                    let color = if in_sel { sel_fg } else { fg };
+                    emit_decoration_quads(
+                        s,
+                        &mut self.sprite_quads,
+                        DecorationStyle::Strikethrough,
+                        cell_w_px,
+                        cell_h_px,
+                        deco_thickness,
+                        px_l,
+                        cell_x,
+                        row_y,
+                        color,
+                    );
                 }
             }
         }
+
+        // Non-block cursor sprites (bar / underline / hollow) draw
+        // last at order 2 so they sit over decorations. Desktop puts
+        // them over glyph ink too (fg-slot sprites); on this host
+        // rects always draw under text, so glyph ink wins where they
+        // overlap — a 1-2px residual on the bar/underline shapes.
+        if let (Some(style), Some((cur_row, cur_col))) = (cursor_style, cursor_pos) {
+            if !style.sprite().is_block_slot() {
+                emit_cursor_sprite_quads(
+                    s,
+                    &mut self.sprite_quads,
+                    style.sprite(),
+                    cell_w_px,
+                    cell_h_px,
+                    px_l,
+                    origin_x + cur_col as f32 * self.cell_w,
+                    origin_y + cur_row as f32 * self.cell_h,
+                    cursor_color,
+                    2,
+                );
+            }
+        }
+    }
+
+    /// Paint another (host-owned, data-only) terminal's live screen
+    /// into a pane rect — the renderer for per-pane terminals while
+    /// the pane grid is split. Rows come from the pane terminal's
+    /// viewport snapshot through the SAME
+    /// `draw_cell_snapshot_rows_in` cell pipeline (selection-less; a
+    /// split pane has no scrollback view yet). `pane_focused` decides
+    /// whether the cursor renders solid or hollow, matching desktop
+    /// inactive panes.
+    pub(crate) fn draw_pane_terminal_cells_in(
+        &mut self,
+        terminal: &Terminal,
+        origin_x: f32,
+        origin_y: f32,
+        clip_rect: [f32; 4],
+        pane_focused: bool,
+    ) {
+        let mut snap = terminal.inner.snapshot();
+        let rows = std::mem::take(&mut snap.viewport);
+        let row_selections: Vec<Option<RowSelection>> = vec![None; rows.len()];
+        let was_focused = self.focused;
+        self.focused = pane_focused && was_focused;
+        self.draw_cell_snapshot_rows_in(
+            &rows,
+            &snap.theme,
+            Some(snap.cursor),
+            origin_x,
+            origin_y,
+            Some(clip_rect),
+            None,
+            false,
+            &row_selections,
+        );
+        self.focused = was_focused;
     }
 
     /// Present the queued draws (terminal cells + any chrome).
@@ -1146,20 +1526,18 @@ struct AgentPendingPermission {
 /// touching the wasm-bindgen surface.
 #[derive(Default)]
 struct AgentBridgeState {
-    /// Composer input text. JS pushes via `agent_set_input` and
-    /// reads via `agent_input`.
-    input: String,
-    /// Input history (submitted prompts, oldest-first). New entries
-    /// are appended on `agent_send_message`; `agent_history_step`
-    /// walks this with `history_cursor`.
-    history: Vec<String>,
-    /// Cursor into `history`. `None` = composer is at the live
-    /// edit slot (after the newest entry); `Some(i)` = the user is
-    /// viewing history entry `i`.
-    history_cursor: Option<usize>,
-    /// Saved live input while the cursor is walking history, so
-    /// stepping past the newest entry restores the user's draft.
-    history_pending_live: Option<String>,
+    // NB: the composer (input text, caret, Up-arrow recall) has NO
+    // bridge-side mirror — the shared `NeoismAgentPane` is the single
+    // source of truth and `agent_input` / `agent_set_input` /
+    // `agent_history_step` read and mutate it directly.
+    /// Persistence ledger of sent prompts, OLDEST first (the pane's
+    /// `sent_history` walk order). Write-through to localStorage on
+    /// every send; the web analogue of desktop's zsh-style
+    /// `prompt_history` file. Not consulted for live recall.
+    prompt_history: Vec<String>,
+    /// True once the localStorage ledger was loaded (or a JS-side
+    /// restore replaced it) this session.
+    prompt_history_loaded: bool,
     /// True while a daemon-side turn is in flight (between
     /// `MessageStart` and `MessageEnd`).
     streaming: bool,
@@ -1412,6 +1790,22 @@ pub struct ChromeBridge {
     /// Lives on the bridge so the web frontend can drive an
     /// `AgentPane`-equivalent without spawning a parallel store.
     agent_state: AgentBridgeState,
+    /// Per-pane data-only terminals for SPLIT terminal panes, keyed by
+    /// the pane grid's external id. While the grid is split every
+    /// visible terminal pane renders from its own pane-sized
+    /// Crosswords here (the full-rect `rendered` grid stands down);
+    /// TS feeds each one its session's PTY stream via
+    /// `feed_pane_terminal` and seeds new entries from its replay
+    /// buffers. Pruned by `prune_pane_terminals` as panes close.
+    pane_terminals: std::collections::HashMap<u64, Terminal>,
+    /// Per-pane tab-strip click intents (activate / close / new tab)
+    /// queued by `pane_grid_pointer_down` for the JS host to drain via
+    /// `drain_pane_tab_intents`.
+    pending_pane_tab_intents: Vec<PaneTabIntent>,
+    /// Index the in-progress workspace-strip tab drag started on —
+    /// pairs with the strip's own `DragState.current_ix` to report the
+    /// final `(from, to)` of a reorder release to the JS host.
+    tab_drag_begin_ix: Option<usize>,
     /// Last `set_diagnostics(...)` payload, decoded into the
     /// panel's `PopupItem` shape. `show_diagnostics_at(...)` reads
     /// this when opening the popover so the visible list reflects
@@ -1430,6 +1824,15 @@ pub struct ChromeBridge {
     pending_workspace_island_intents: Vec<WorkspaceIslandIntent>,
 }
 
+/// One queued per-pane tab-strip interaction. `kind` is
+/// `"activate" | "close" | "new_tab"`; `index` is strip-local.
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct PaneTabIntent {
+    pub(crate) external_id: u64,
+    pub(crate) kind: &'static str,
+    pub(crate) index: usize,
+}
+
 // ------------------------------------------------------------
 // Submodule wiring. The JS-visible `#[wasm_bindgen] impl ChromeBridge`
 // surface is split across the child modules below (moved verbatim from
@@ -1441,9 +1844,12 @@ mod agent;
 mod buffer_tabs_layout;
 mod catalog;
 mod chrome_bridge_core;
+mod chrome_pages;
 mod construct;
+mod editor_panes;
 mod file_tree_workspace;
 mod frame;
+mod input_policy;
 mod overlays;
 mod palettes_finder;
 mod panels;

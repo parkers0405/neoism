@@ -213,6 +213,43 @@ fn every_assistant_chunk_survives_settling_around_tools() {
 }
 
 #[test]
+fn background_completion_card_stays_visible_after_turn_settles() {
+    // The durable completion card (id `background-task-{job}`) is a
+    // transcript event: settling the turn or reloading the session must
+    // never declutter it. An ordinary background_task_result tool CALL
+    // (part-id identity — the model rereading retained output) keeps
+    // normal trace settling.
+    let messages = vec![
+        text_message("u1", NeoismAgentMessageKind::User, "start the build"),
+        tool_message(
+            "background-task-job-1",
+            "background_task_result",
+            "background_task_result",
+            "completed",
+        ),
+        tool_message(
+            "prt-reread-1",
+            "background_task_result",
+            "background_task_result",
+            "completed",
+        ),
+        text_message("a1", NeoismAgentMessageKind::Assistant, "It finished."),
+    ];
+
+    // Fully settled (reload / turn over): the completion card survives,
+    // the reread tool row hides like any other trace.
+    assert_eq!(
+        timeline_message_visibility(&messages, None),
+        vec![true, true, false, true]
+    );
+    // Live window: everything visible as before.
+    assert_eq!(
+        timeline_message_visibility(&messages, Some(1)),
+        vec![true; messages.len()]
+    );
+}
+
+#[test]
 fn runtime_system_rows_stay_hidden_even_inside_the_live_window() {
     let messages = vec![
         text_message(

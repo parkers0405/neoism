@@ -44,6 +44,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             _ => 1.0 / 60.0,
         };
         self.last_draw_time = Some(time);
+        // Re-derived below while a hosted editor pane paints; cleared
+        // here so switching to a terminal/agent tab stops the pump.
+        self.editor_pane_animating = false;
 
         // 1. Background strips: buffer tabs (top), status line (bottom).
         let layout = self.layout.clone();
@@ -111,9 +114,17 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         //    command submission into `dismiss_terminal_splash`, while
         //    desktop derives the same idea from terminal input state.
         let terminal_rect = layout.terminal;
+        // While the pane grid is split the ACTIVE surface paints into
+        // the focused pane's rect; unfocused panes render through
+        // `draw_unfocused_pane_surfaces` below.
+        let content_rect = self.focused_content_rect();
         if terminal_rect.w > 0.0 && terminal_rect.h > 0.0 {
             if self.is_terminal_tab_active() {
-                let wants_splash = !self.terminal_splash_dismissed;
+                // The splash wordmark is a whole-content flourish — it
+                // stands down while the grid is split so it can't paint
+                // across pane boundaries.
+                let wants_splash =
+                    !self.terminal_splash_dismissed && !self.pane_grid.is_split();
                 if wants_splash {
                     agent_pane_view::clear_overlays(sugarloaf);
                     // Terminal tab — paint the splash overlay on top of
@@ -178,12 +189,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 agent_pane_view::clear_overlays(sugarloaf);
                 self.splash_overlay.reset();
                 let theme = self.ide_theme;
+                // Backdrop for the ACTIVE surface only. While split the
+                // fill stays inside the focused pane's content rect —
+                // a full-rect fill at this order would paint over the
+                // secondary pane terminals' cell backgrounds.
                 sugarloaf.rect(
                     None,
-                    terminal_rect.x,
-                    terminal_rect.y,
-                    terminal_rect.w,
-                    terminal_rect.h,
+                    content_rect.x,
+                    content_rect.y,
+                    content_rect.w,
+                    content_rect.h,
                     theme.f32(theme.bg),
                     0.0,
                     1,
@@ -201,7 +216,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 let effective_offset =
                     (self.scroll_offset_px + self.scroll_spring.position).max(0.0);
 
-                if self.tab_lang == crate::syntax::Lang::Markdown {
+                if let Some(page) = self.active_chrome_page() {
+                    // Chrome helper page (Extensions / NeoWorld) —
+                    // paints over the theme-bg backdrop laid down
+                    // above, the same way desktop's context-grid pages
+                    // take over the pane body.
+                    let _ = effective_offset; // pages own their scroll
+                    self.draw_chrome_page_body(sugarloaf, page, terminal_rect);
+                } else if self.tab_lang == crate::syntax::Lang::Markdown {
                     if let Some(pane) = self.markdown_pane.as_mut() {
                         // The REAL renderer — same virtualized path as the
                         // desktop (Live Preview, caret, remote carets,
@@ -213,17 +235,17 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                                                   // caret visible (uses last frame's caret rect; the
                                                   // host's animation pump keeps frames flowing until
                                                   // the eased scroll settles).
-                        pane.scroll_cursor_into_view(terminal_rect.y, terminal_rect.h);
+                        pane.scroll_cursor_into_view(content_rect.y, content_rect.h);
                         pane.tick_scroll();
                         let chrome_scale = self.chrome_scale;
                         crate::editor::markdown::render::render(
                             sugarloaf,
                             pane,
                             [
-                                terminal_rect.x,
-                                terminal_rect.y,
-                                terminal_rect.w,
-                                terminal_rect.h,
+                                content_rect.x,
+                                content_rect.y,
+                                content_rect.w,
+                                content_rect.h,
                             ],
                             &theme,
                             None,
@@ -232,18 +254,87 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                             self.animation_phase,
                         );
                     }
+                } else if let Some(kind) = self.active_editor_pane_kind() {
+                    // Hosted native editor pane (code / notebook /
+                    // draw) — the desktop-parity surfaces. Renders the
+                    // SAME shared painters desktop uses; the legacy
+                    // read-only text loop below is now only the
+                    // fallback for tabs no pane claimed.
+                    let chrome_scale = self.chrome_scale;
+                    let rect = [
+                        content_rect.x,
+                        content_rect.y,
+                        content_rect.w,
+                        content_rect.h,
+                    ];
+                    match kind {
+                        crate::chrome::EditorPaneKind::Code => {
+                            let mouse =
+                                Some([self.last_pointer_pos.0, self.last_pointer_pos.1]);
+                            if let Some(pane) = self.code_pane.as_mut() {
+                                // The chrome trail cursor draws the
+                                // caret (desktop parity) — the pane
+                                // only publishes `cursor_rect`.
+                                pane.caret_drawn_by_host = true;
+                                let animating = crate::editor::code::render::render(
+                                    sugarloaf,
+                                    pane,
+                                    rect,
+                                    &theme,
+                                    &[],
+                                    chrome_scale,
+                                    mouse,
+                                );
+                                self.editor_pane_animating |= animating;
+                            }
+                        }
+                        crate::chrome::EditorPaneKind::Notebook => {
+                            let animation_phase = self.animation_phase;
+                            if let Some(pane) = self.notebook_pane.as_mut() {
+                                let markdown = &mut pane.markdown;
+                                let follow = markdown.scroll_cursor_into_view(
+                                    content_rect.y,
+                                    content_rect.h,
+                                );
+                                let ticking = markdown.tick_scroll();
+                                crate::editor::markdown::render::render(
+                                    sugarloaf,
+                                    markdown,
+                                    rect,
+                                    &theme,
+                                    None,
+                                    &[],
+                                    chrome_scale,
+                                    animation_phase,
+                                );
+                                self.editor_pane_animating |= follow || ticking;
+                            }
+                        }
+                        crate::chrome::EditorPaneKind::Draw => {
+                            if let Some(pane) = self.draw_pane.as_mut() {
+                                crate::editor::neodraw::render_pane(
+                                    sugarloaf, pane, rect, &theme,
+                                );
+                                let graph_animating = pane
+                                    .graph
+                                    .as_ref()
+                                    .is_some_and(|graph| graph.is_animating());
+                                self.editor_pane_animating |= graph_animating;
+                            }
+                        }
+                    }
                 } else if let Some(text) = self.tab_content.as_deref() {
                     let line_h = self.cell_h.max(14.0);
                     let pad_x = 16.0_f32;
                     let pad_y = 12.0_f32;
-                    let max_w = terminal_rect.w - pad_x * 2.0;
-                    let max_h = terminal_rect.h - pad_y * 2.0;
+                    let max_w = content_rect.w - pad_x * 2.0;
+                    let max_h = content_rect.h - pad_y * 2.0;
                     let opts = sugarloaf::text::DrawOpts {
                         font_size: 13.0,
                         color: theme.u8(theme.fg),
                         clip_rect: Some([
-                            terminal_rect.x + pad_x,
-                            terminal_rect.y + pad_y,
+                            content_rect.x + pad_x,
+                            content_rect.y + pad_y,
                             max_w.max(0.0),
                             max_h.max(0.0),
                         ]),
@@ -268,10 +359,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         .take(last_visible_excl.saturating_sub(first_visible))
                     {
                         let y =
-                            terminal_rect.y + pad_y + line_h * (i as f32) + line_h * 0.75
+                            content_rect.y + pad_y + line_h * (i as f32) + line_h * 0.75
                                 - effective_offset;
-                        if y < terminal_rect.y - line_h
-                            || y > terminal_rect.y + terminal_rect.h
+                        if y < content_rect.y - line_h
+                            || y > content_rect.y + content_rect.h
                         {
                             continue;
                         }
@@ -282,7 +373,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         // a single Plain span so this still degrades
                         // to one draw per line for unknown filetypes.
                         let spans = crate::syntax::highlight_line(line, lang);
-                        let mut x_cursor = terminal_rect.x + pad_x;
+                        let mut x_cursor = content_rect.x + pad_x;
                         for (tok, slice) in spans {
                             if slice.is_empty() {
                                 continue;
@@ -298,6 +389,23 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 }
             }
         }
+
+        // 3a. Unfocused pane surfaces: parked editor panes render live
+        //     into their pane rects; panes the host painted (secondary
+        //     terminal grids) are skipped; anything else gets an honest
+        //     labeled placeholder.
+        self.draw_unfocused_pane_surfaces(sugarloaf);
+
+        // 3a'. Per-pane tab strips + breadcrumbs on stacked panes
+        //      (desktop `pane_tabs` / `pane_breadcrumbs` parity).
+        self.draw_pane_tab_strips(sugarloaf);
+
+        // 3b. Pane-grid chrome: divider bands between split panes, the
+        //     focused-pane outline, and the live drag-to-split drop
+        //     preview. Painted over the pane surfaces but under the
+        //     composer / modals — the Rust twin of the deleted DOM
+        //     `.terminal-pane-layout-cell` overlay.
+        self.draw_pane_grid_overlay(sugarloaf);
 
         // 4. Sticky composer above the status line (still under modals).
         if let Some(rect) = layout.command_composer {
@@ -330,12 +438,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
         // 4b. Slim panels lifted in Wave 6F: breadcrumbs strip, toast
         //     notifications, completion popup, in-buffer search bar,
-        //     minimap rail, yank flash, cursor surfaces. These paint
-        //     over the terminal column / tab bar through the standard
+        //     minimap rail, yank flash, cursor surfaces. Most paint
+        //     over the terminal column / tab bar through the
         //     `Panel`-shaped `draw` adapter shims in
-        //     `panels::chrome_shim_more`. Data-driven panels (toasts
-        //     without queue, popup without snapshot, minimap without
-        //     route subscription) early-return without painting.
+        //     `panels::chrome_shim_more`; the minimap renders directly
+        //     through its per-route `render_pane` (desktop parity).
+        //     Data-driven panels (toasts without queue, popup without
+        //     snapshot, minimap without a fed snapshot) early-return
+        //     without painting.
         if let Some(rect) = layout.breadcrumbs {
             self.breadcrumbs.render_with_options(
                 sugarloaf,
@@ -371,14 +481,54 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             },
             &ctx,
         );
-        self.minimap.draw(
-            sugarloaf,
-            &PanelLayout {
-                bounds: layout.terminal,
-                scale: 1.0,
-            },
-            &ctx,
-        );
+        // Minimap rail — desktop parity with the per-route loop in
+        // `desktop/src/screen/render/cell_emit.rs`: `begin_frame()`
+        // resets the hit rects, then each visible pane paints the
+        // snapshot pushed for its route (`Minimap::apply_update`).
+        // Route ids come from the pane grid's host-bound external ids;
+        // a surface with no bound id (the common single-pane web case)
+        // falls back to the terminal rect + route 0, which is the route
+        // the web host feeds for the active editor surface.
+        self.minimap.begin_frame();
+        if self.minimap.is_enabled() {
+            let ide_theme = self.ide_theme;
+            let minimap_cell_h = self.cell_h.max(1.0);
+            let pane_routes: Vec<(u64, crate::layout::Rect)> = self
+                .pane_grid
+                .panes()
+                .iter()
+                .filter_map(|pane| pane.external_id.map(|id| (id, pane.rect)))
+                .collect();
+            if pane_routes.is_empty() {
+                let rows = (layout.terminal.h / minimap_cell_h).floor().max(1.0) as u32;
+                self.minimap.render_pane(
+                    sugarloaf,
+                    0,
+                    layout.terminal.x,
+                    layout.terminal.y,
+                    layout.terminal.w,
+                    layout.terminal.h,
+                    rows,
+                    0.0,
+                    ide_theme,
+                );
+            } else {
+                for (route_id, rect) in pane_routes {
+                    let rows = (rect.h / minimap_cell_h).floor().max(1.0) as u32;
+                    self.minimap.render_pane(
+                        sugarloaf,
+                        route_id as usize,
+                        rect.x,
+                        rect.y,
+                        rect.w,
+                        rect.h,
+                        rows,
+                        0.0,
+                        ide_theme,
+                    );
+                }
+            }
+        }
         self.yank_flash.draw(
             sugarloaf,
             &PanelLayout {
@@ -386,7 +536,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 scale: 1.0,
             },
             &ctx,
+            self.cell_w,
+            self.cell_h,
         );
+        // Code-pane LSP session hosting: pump the shared session layer
+        // (buffer sync, mouse-rest hover, diagnostics refold, popup
+        // dismissal) and feed its completion / code-action menu into
+        // the stored-popup slot the shim below paints from.
+        self.pump_code_lsp_layer(input_modal_active);
         self.completion_menu.draw(
             sugarloaf,
             &PanelLayout {
@@ -394,6 +551,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 scale: 1.0,
             },
             &ctx,
+            self.cell_w,
+            self.cell_h,
         );
         if self.context_menu.is_visible() {
             let window_w = [
@@ -476,13 +635,37 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 .as_ref()
                 .and_then(|pane| pane.cursor_rect())
                 .is_some();
-        let markdown_cursor_available = !self.is_terminal_tab_active()
+        // Hosted editor pane (code / notebook / draw) claim for the
+        // trail-cursor owner. Only counts while a non-terminal,
+        // non-agent tab is active — the same gate the render branch
+        // above uses.
+        let editor_pane_kind = if !self.is_terminal_tab_active() && !agent_tab_active {
+            self.active_editor_pane_kind()
+        } else {
+            None
+        };
+        let code_cursor_available = editor_pane_kind
+            == Some(crate::chrome::EditorPaneKind::Code)
+            && self
+                .code_pane
+                .as_ref()
+                .and_then(|pane| pane.cursor_rect)
+                .is_some();
+        let notebook_cursor_available = editor_pane_kind
+            == Some(crate::chrome::EditorPaneKind::Notebook)
+            && self
+                .notebook_pane
+                .as_ref()
+                .and_then(|pane| pane.markdown.cursor_rect)
+                .is_some();
+        let markdown_cursor_available = (!self.is_terminal_tab_active()
             && self.tab_lang == crate::syntax::Lang::Markdown
             && self
                 .markdown_pane
                 .as_ref()
                 .and_then(|pane| pane.cursor_rect)
-                .is_some();
+                .is_some())
+            || notebook_cursor_available;
         let markdown_active = !self.is_terminal_tab_active()
             && self.tab_lang == crate::syntax::Lang::Markdown;
         let terminal_block_input_active = self.is_terminal_tab_active()
@@ -515,11 +698,19 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             agent_surface_active: agent_tab_active,
             agent_input_cursor_available,
             markdown_cursor_available,
-            // Web has no native code pane yet; the desktop feeds this.
-            code_cursor_available: false,
-            cursorless_surface_active: false,
+            code_cursor_available,
+            // The draw pane is a cursorless surface — without this the
+            // trail falls through to the parked terminal origin. The
+            // chrome helper pages (Extensions / NeoWorld) are equally
+            // cursorless.
+            cursorless_surface_active: editor_pane_kind
+                == Some(crate::chrome::EditorPaneKind::Draw)
+                || self.active_chrome_page().is_some(),
             terminal_block_input_active,
-            trail_cursor_enabled: !markdown_active,
+            // Hosted editor panes draw content carets (or none) — the
+            // terminal-grid fallback must not park a cursor over them
+            // while the pane's first `cursor_rect` is still pending.
+            trail_cursor_enabled: !markdown_active && editor_pane_kind.is_none(),
         }) {
             Some(target)
                 if trail_cursor_overlay_draw_kind(target)
@@ -553,16 +744,41 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 }
             }
             Some(TrailCursorOverlayTarget::Markdown) => {
-                if let Some(pane) = self.markdown_pane.as_ref() {
-                    if let Some(rect) = pane.cursor_rect {
-                        self.draw_content_trail_cursor_rect(
-                            sugarloaf,
-                            rect,
-                            pane.cursor_shape(),
-                            dt,
-                            cursor_color,
-                        );
-                    }
+                // A `.md` tab's own pane wins; otherwise the notebook's
+                // inner markdown pane owns the caret (its
+                // `notebook_cursor_available` claim got us here).
+                let cursor = self
+                    .markdown_pane
+                    .as_ref()
+                    .filter(|_| markdown_active)
+                    .or_else(|| {
+                        self.notebook_pane.as_ref().map(|pane| &pane.markdown)
+                    })
+                    .and_then(|pane| {
+                        pane.cursor_rect.map(|rect| (rect, pane.cursor_shape()))
+                    });
+                if let Some((rect, shape)) = cursor {
+                    self.draw_content_trail_cursor_rect(
+                        sugarloaf,
+                        rect,
+                        shape,
+                        dt,
+                        cursor_color,
+                    );
+                }
+            }
+            Some(TrailCursorOverlayTarget::Code) => {
+                let cursor = self.code_pane.as_ref().and_then(|pane| {
+                    pane.cursor_rect.map(|rect| (rect, pane.cursor_shape()))
+                });
+                if let Some((rect, shape)) = cursor {
+                    self.draw_content_trail_cursor_rect(
+                        sugarloaf,
+                        rect,
+                        shape,
+                        dt,
+                        cursor_color,
+                    );
                 }
             }
             Some(TrailCursorOverlayTarget::TerminalBlockInput) => {
@@ -663,6 +879,32 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             }
         }
 
+        // Diagnostics popup — anchored to a status line pill. Mirrors
+        // the desktop layering in `desktop/src/host/run.rs` (~:1425):
+        // painted after the side panels / modal surfaces so a click on
+        // its pill can never open a popup that ducks behind them.
+        // `render` ticks the popover fade itself and early-returns
+        // while closed, so the unconditional call matches desktop.
+        // Web works in CSS px (no separate physical scale), so the
+        // scale_factor argument — which the shared render ignores in
+        // favor of its own `set_scale` chrome scale — is 1.0.
+        {
+            let ide_theme = self.ide_theme;
+            self.diagnostics_popup
+                .render(sugarloaf, window_width, 1.0, &ide_theme);
+        }
+
+        // Code-pane LSP overlays: the hover/signature card pinned to
+        // its buffer cell, and the LSP status-pill "Server Details"
+        // popup. Painted late (with the diagnostics popup) so editor
+        // content and side panels never cover them.
+        self.draw_code_lsp_overlays(
+            sugarloaf,
+            window_width,
+            layout.status_line.y + layout.status_line.h,
+            input_modal_active,
+        );
+
         // TOP BAR LAST PASS — render after every other chrome panel so
         // hit rects and late overlay menu draws use the final tab /
         // breadcrumb geometry for this frame.
@@ -683,5 +925,511 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             self.top_bar
                 .render(sugarloaf, rect.x, rect.y, rect.w, &ide_theme);
         }
+
+        // FULL-SCREEN CHROME OVERLAYS — settings page + About modal —
+        // paint after every other panel, through sugarloaf's late
+        // overlay pass, so no earlier text can bleed through (the
+        // same layering desktop gives its settings overlay + modal).
+        self.draw_chrome_overlays(sugarloaf);
+    }
+
+    /// Render every UNFOCUSED visible pane's surface while the grid is
+    /// split. Editor-like panes resolve through the host-pushed
+    /// [`crate::chrome::PaneSurfaceInfo`] descriptors onto the parked
+    /// pane maps (cursor/undo/edits intact) — or onto the live hosted
+    /// slot when the focused pane doesn't claim it. Panes the host
+    /// painted itself (live terminal grids, listed via
+    /// [`Chrome::set_host_drawn_panes`]) are skipped. Anything else
+    /// gets a theme-bg fill with a title label so the split never
+    /// shows another pane's bleed-through.
+    fn draw_unfocused_pane_surfaces(&mut self, sugarloaf: &mut Sugarloaf) {
+        if !self.pane_grid.is_split()
+            || self.chrome_overlay_active()
+            || self.is_neoism_agent_tab_active()
+        {
+            return;
+        }
+        let theme = self.ide_theme;
+        let chrome_scale = self.chrome_scale;
+        let animation_phase = self.animation_phase;
+        let panes: Vec<(u64, crate::layout::Rect, crate::layout::Rect)> = self
+            .pane_grid
+            .panes()
+            .iter()
+            .filter(|p| !p.focused)
+            .filter_map(|p| {
+                p.external_id.map(|id| {
+                    (id, p.rect, self.pane_content_rect(id).unwrap_or(p.rect))
+                })
+            })
+            .collect();
+        if panes.is_empty() {
+            return;
+        }
+        // Whether the focused pane's surface is currently hosted in the
+        // live editor slots — if not (the focused pane is a terminal),
+        // an unfocused pane may borrow the live slot for rendering.
+        let focused_claims_live_slots = !self.is_terminal_tab_active();
+        for (id, rect, content) in panes {
+            if self.host_drawn_panes.contains(&id) {
+                continue;
+            }
+            let info = self
+                .pane_surfaces
+                .iter()
+                .find(|s| s.external_id == id)
+                .cloned();
+            // Base fill so the previous surface can't bleed through.
+            sugarloaf.rect(
+                None,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                theme.f32(theme.bg),
+                0.0,
+                1,
+            );
+            let rect_arr = [content.x, content.y, content.w, content.h];
+            let mut rendered = false;
+            let mut animating = false;
+            if let Some(path) = info.as_ref().and_then(|i| i.path.clone()) {
+                if let Some(pane) = self.parked_code_panes.get_mut(&path) {
+                    pane.caret_drawn_by_host = true;
+                    animating |= crate::editor::code::render::render(
+                        sugarloaf,
+                        pane,
+                        rect_arr,
+                        &theme,
+                        &[],
+                        chrome_scale,
+                        None,
+                    );
+                    rendered = true;
+                } else if let Some(pane) = self.parked_notebook_panes.get_mut(&path) {
+                    crate::editor::markdown::render::render(
+                        sugarloaf,
+                        &mut pane.markdown,
+                        rect_arr,
+                        &theme,
+                        None,
+                        &[],
+                        chrome_scale,
+                        animation_phase,
+                    );
+                    rendered = true;
+                } else if let Some(pane) = self.parked_draw_panes.get_mut(&path) {
+                    crate::editor::neodraw::render_pane(sugarloaf, pane, rect_arr, &theme);
+                    rendered = true;
+                } else if !focused_claims_live_slots {
+                    // Focused pane is a terminal — the live hosted slot
+                    // (if it matches this pane's file) is free to paint
+                    // here so switching focus doesn't blank the editor.
+                    if self
+                        .code_pane
+                        .as_ref()
+                        .is_some_and(|pane| pane.path == path)
+                    {
+                        let pane = self.code_pane.as_mut().expect("checked above");
+                        pane.caret_drawn_by_host = true;
+                        animating |= crate::editor::code::render::render(
+                            sugarloaf,
+                            pane,
+                            rect_arr,
+                            &theme,
+                            &[],
+                            chrome_scale,
+                            None,
+                        );
+                        rendered = true;
+                    } else if self
+                        .notebook_pane
+                        .as_ref()
+                        .is_some_and(|pane| pane.path == path)
+                    {
+                        let pane = self.notebook_pane.as_mut().expect("checked above");
+                        crate::editor::markdown::render::render(
+                            sugarloaf,
+                            &mut pane.markdown,
+                            rect_arr,
+                            &theme,
+                            None,
+                            &[],
+                            chrome_scale,
+                            animation_phase,
+                        );
+                        rendered = true;
+                    } else if self
+                        .draw_pane
+                        .as_ref()
+                        .is_some_and(|pane| pane.path == path)
+                    {
+                        let pane = self.draw_pane.as_mut().expect("checked above");
+                        crate::editor::neodraw::render_pane(
+                            sugarloaf, pane, rect_arr, &theme,
+                        );
+                        rendered = true;
+                    } else if self
+                        .markdown_pane
+                        .as_ref()
+                        .is_some_and(|pane| pane.path == path)
+                    {
+                        let pane = self.markdown_pane.as_mut().expect("checked above");
+                        crate::editor::markdown::render::render(
+                            sugarloaf,
+                            pane,
+                            rect_arr,
+                            &theme,
+                            None,
+                            &[],
+                            chrome_scale,
+                            animation_phase,
+                        );
+                        rendered = true;
+                    }
+                }
+            }
+            self.editor_pane_animating |= animating;
+            if !rendered {
+                // Labeled placeholder: pane title (or file name /
+                // surface kind) in the pane's top-left corner.
+                let title = info
+                    .as_ref()
+                    .and_then(|i| i.title.clone())
+                    .or_else(|| {
+                        info.as_ref().and_then(|i| {
+                            i.path.as_ref().and_then(|p| {
+                                p.file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                            })
+                        })
+                    })
+                    .or_else(|| info.as_ref().map(|i| i.kind.clone()))
+                    .unwrap_or_else(|| "pane".to_string());
+                let opts = sugarloaf::text::DrawOpts {
+                    font_size: 12.0 * chrome_scale.max(0.5),
+                    color: theme.u8(theme.muted),
+                    clip_rect: Some(rect_arr),
+                    ..sugarloaf::text::DrawOpts::default()
+                };
+                sugarloaf.text_mut().draw(
+                    content.x + 12.0,
+                    content.y + 10.0 + 12.0 * chrome_scale.max(0.5) * 0.75,
+                    &title,
+                    &opts,
+                );
+            }
+        }
+    }
+
+    /// Paint each stacked pane's local tab strip + breadcrumbs row in
+    /// the rects `ChromeLayout::panes` reserved. Top-aligned panes
+    /// carry no local strip (the workspace strip serves them), so
+    /// their entries have `tabs: None` and are skipped here.
+    fn draw_pane_tab_strips(&mut self, sugarloaf: &mut Sugarloaf) {
+        if !self.pane_grid.is_split()
+            || self.chrome_overlay_active()
+            || self.is_neoism_agent_tab_active()
+        {
+            return;
+        }
+        let theme = self.ide_theme;
+        let pane_layouts = self.layout.panes.clone();
+        for pane in pane_layouts {
+            if let Some(tabs_rect) = pane.tabs {
+                if let Some(strip) = self.pane_tabs.get_mut(&pane.external_id) {
+                    strip.render(
+                        sugarloaf,
+                        tabs_rect.x,
+                        tabs_rect.y,
+                        tabs_rect.w,
+                        &theme,
+                        None,
+                        &[],
+                    );
+                }
+            }
+            if let Some(crumbs_rect) = pane.breadcrumbs {
+                if let Some(crumbs) = self.pane_breadcrumbs.get(&pane.external_id) {
+                    crumbs.render(
+                        sugarloaf,
+                        crumbs_rect.x,
+                        crumbs_rect.y,
+                        crumbs_rect.w,
+                        &theme,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Paint the shared pane-grid chrome: one thin divider line per
+    /// resizable gap (accent-highlighted under the pointer / while
+    /// dragging), a subtle outline around the focused pane while
+    /// split, and the translucent drop-zone preview during a
+    /// drag-to-split. All geometry comes straight from the solved
+    /// [`crate::panels::pane_grid::PaneGrid`] so it can never drift
+    /// from the hit-test rects the pointer path uses.
+    fn draw_pane_grid_overlay(&mut self, sugarloaf: &mut Sugarloaf) {
+        if self.chrome_overlay_active() || self.is_neoism_agent_tab_active() {
+            return;
+        }
+        let theme = self.ide_theme;
+        let (px, py) = self.last_pointer_pos;
+        let accent = theme.f32(theme.accent);
+
+        if self.pane_grid.is_split() {
+            let active_divider = self.pane_grid.active_divider_rect();
+            let divider_dragging = self.pane_grid.is_divider_dragging();
+            let dividers: Vec<_> = self.pane_grid.solved().dividers.to_vec();
+            for div in &dividers {
+                let r = div.rect;
+                let is_active = active_divider.map_or(false, |a| a == r)
+                    || (!divider_dragging && r.contains(px, py));
+                let horizontal = matches!(
+                    div.axis,
+                    crate::session_layout::SplitAxis::Horizontal
+                );
+                let (line_w, color) = if is_active {
+                    (3.0, accent)
+                } else {
+                    (1.0, theme.f32(theme.border))
+                };
+                let (x, y, w, h) = if horizontal {
+                    // Horizontal split → left/right panes → vertical band.
+                    (r.x + (r.w - line_w) * 0.5, r.y, line_w, r.h)
+                } else {
+                    (r.x, r.y + (r.h - line_w) * 0.5, r.w, line_w)
+                };
+                sugarloaf.rect(None, x, y, w, h, color, 0.0, 1);
+            }
+
+            // Focused-pane outline (desktop's active-pane cue).
+            if let Some(pane) = self.pane_grid.panes().iter().find(|p| p.focused) {
+                let r = pane.rect;
+                let edge = [accent[0], accent[1], accent[2], 0.55];
+                let bw = 1.0;
+                sugarloaf.rect(None, r.x, r.y, r.w, bw, edge, 0.0, 1);
+                sugarloaf.rect(None, r.x, r.y + r.h - bw, r.w, bw, edge, 0.0, 1);
+                sugarloaf.rect(None, r.x, r.y, bw, r.h, edge, 0.0, 1);
+                sugarloaf.rect(None, r.x + r.w - bw, r.y, bw, r.h, edge, 0.0, 1);
+            }
+        }
+
+        // Live drag-to-split preview: the region the dragged surface
+        // would occupy if released now.
+        if let Some(zone) = self.pane_grid.hover_drop_zone() {
+            let hl = zone.highlight;
+            let fill = [accent[0], accent[1], accent[2], 0.16];
+            sugarloaf.rect(None, hl.x, hl.y, hl.w, hl.h, fill, 0.0, 2);
+            let edge = [accent[0], accent[1], accent[2], 0.85];
+            let bw = 2.0;
+            sugarloaf.rect(None, hl.x, hl.y, hl.w, bw, edge, 0.0, 2);
+            sugarloaf.rect(None, hl.x, hl.y + hl.h - bw, hl.w, bw, edge, 0.0, 2);
+            sugarloaf.rect(None, hl.x, hl.y, bw, hl.h, edge, 0.0, 2);
+            sugarloaf.rect(None, hl.x + hl.w - bw, hl.y, bw, hl.h, edge, 0.0, 2);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Code-pane LSP hosting (shared `editor::code::lsp_session` layer):
+// desktop drives the same session shapes from `host/run.rs`; on web the
+// chrome pumps the session per frame and feeds/paints its popups here.
+// ---------------------------------------------------------------------
+impl<A: Send + Copy + 'static> Chrome<A> {
+    /// Whether the hosted CODE pane is the active content surface.
+    fn code_lsp_pane_active(&self) -> bool {
+        !self.is_terminal_tab_active()
+            && !self.is_neoism_agent_tab_active()
+            && self.active_editor_pane_kind() == Some(EditorPaneKind::Code)
+    }
+
+    /// Per-frame session pump + completion/action menu feed. Runs just
+    /// before the completion-menu shim paints so the stored popup is
+    /// this frame's snapshot.
+    fn pump_code_lsp_layer(&mut self, input_modal_active: bool) {
+        if !self.code_lsp_pane_active() || self.code_pane.is_none() {
+            if self.code_lsp.has_session_state() {
+                self.code_lsp.clear_sessions();
+            }
+            if self.code_lsp.owns_menu_popup {
+                self.completion_menu.set_popup(None);
+                self.code_lsp.owns_menu_popup = false;
+            }
+            return;
+        }
+        let pointer = self.last_pointer_pos;
+        if let Some(pane) = self.code_pane.as_mut() {
+            self.code_lsp.note_mouse_move(pane, Some(pointer));
+            self.code_lsp.pump(pane);
+        }
+
+        // Feed the shared completion-menu panel: the code-action menu
+        // takes precedence over completion (desktop host parity — at
+        // most one is open; opening one dismisses the other).
+        let popup_and_anchor = if input_modal_active {
+            None
+        } else {
+            let pane = self.code_pane.as_ref();
+            let actions = self.code_lsp.actions.as_ref().and_then(|session| {
+                let pane = pane?;
+                Self::code_lsp_menu_anchor(
+                    pane,
+                    &session.path,
+                    session.line,
+                    session.col,
+                    &session.display,
+                )
+            });
+            let completion = self.code_lsp.completion.as_ref().and_then(|session| {
+                let pane = pane?;
+                Self::code_lsp_menu_anchor(
+                    pane,
+                    &session.path,
+                    session.line,
+                    session.anchor_col,
+                    &session.display,
+                )
+            });
+            actions.or(completion)
+        };
+        match popup_and_anchor {
+            Some((popup, anchor)) => {
+                self.completion_menu.set_anchor(anchor);
+                self.completion_menu.set_popup(Some(popup));
+                self.code_lsp.owns_menu_popup = true;
+            }
+            None => {
+                if self.code_lsp.owns_menu_popup {
+                    self.completion_menu.set_popup(None);
+                    self.code_lsp.owns_menu_popup = false;
+                }
+            }
+        }
+    }
+
+    /// Build the wrap-aware popup anchor for a session pinned at
+    /// `(line, col)` on the hosted code pane. Port of the desktop
+    /// anchor build in `desktop/src/host/run.rs` (web works in CSS px,
+    /// so scale_factor is 1). Returns `None` while the session has no
+    /// visible rows yet or the pane moved to another file.
+    fn code_lsp_menu_anchor(
+        pane: &crate::editor::code::CodePane,
+        session_path: &std::path::Path,
+        line: usize,
+        col: usize,
+        display: &crate::editor_snapshot::PopupMenu,
+    ) -> Option<(
+        crate::editor_snapshot::PopupMenu,
+        crate::panels::completion_menu::EditorAnchor,
+    )> {
+        if pane.path != session_path || display.items.is_empty() {
+            return None;
+        }
+        let geometry = &pane.geometry;
+        if geometry.cell_w <= 0.0 || geometry.row_h <= 0.0 {
+            return None;
+        }
+        let line_text = pane.buffer.lines.get(line)?;
+        let (segment, col_cells) = geometry.wrap.visual_position(
+            line,
+            line_text,
+            col,
+            crate::editor::code::layout::TAB_DISPLAY_WIDTH,
+        );
+        let visual_row = geometry.wrap.first_row_of_line(line) + segment;
+        let anchor_x =
+            geometry.text_x + col_cells as f32 * geometry.cell_w - geometry.scroll_x;
+        let anchor_y =
+            geometry.rect[1] + visual_row as f32 * geometry.row_h - geometry.scroll_y;
+        let pane_bottom = geometry.rect[1] + geometry.rect[3];
+        let lines_below =
+            (((pane_bottom - anchor_y) / geometry.row_h).floor()).max(1.0) as u32;
+        Some((
+            display.clone(),
+            crate::panels::completion_menu::EditorAnchor {
+                cell_w: geometry.cell_w,
+                cell_h: geometry.row_h,
+                panel_left_phys: anchor_x,
+                panel_top_phys: anchor_y,
+                panel_lines: lines_below,
+                editor_focused: true,
+            },
+        ))
+    }
+
+    /// Late-pass code LSP overlays: the hover/signature card pinned to
+    /// its buffer cell (desktop `host/run.rs` code_hover port) and the
+    /// LSP status-pill "Server Details" popup.
+    fn draw_code_lsp_overlays(
+        &mut self,
+        sugarloaf: &mut Sugarloaf,
+        window_width: f32,
+        window_bottom: f32,
+        input_modal_active: bool,
+    ) {
+        let ide_theme = self.ide_theme;
+        // The pill popup ticks its own fade and early-returns while
+        // closed, so the unconditional call matches the desktop layer.
+        self.lsp_popup.render(sugarloaf, &ide_theme, self.chrome_scale);
+
+        if input_modal_active || !self.code_lsp_pane_active() {
+            return;
+        }
+        // The completion / action menu wins the surface (desktop
+        // suppresses the hover card while a popup is up).
+        if self.code_lsp.owns_menu_popup {
+            return;
+        }
+        let Some(pane) = self.code_pane.as_ref() else {
+            return;
+        };
+        let Some(card) = self.code_lsp.hover.as_ref() else {
+            return;
+        };
+        if card.lines.is_empty() || card.path != pane.path {
+            return;
+        }
+        // Keyboard cards pin to the cursor; mouse cards pin to the
+        // hovered cell (dismissed by pointer-cell change instead).
+        let cursor = pane.buffer.cursor();
+        if !card.from_mouse && (cursor.line != card.line || cursor.col != card.col) {
+            return;
+        }
+        let geometry = &pane.geometry;
+        if geometry.cell_w <= 0.0 || geometry.row_h <= 0.0 {
+            return;
+        }
+        let Some(line_text) = pane.buffer.lines.get(card.line) else {
+            return;
+        };
+        // Wrap-aware anchor: the card position maps through the wrap
+        // index to a VISUAL row + column-within-segment (identity when
+        // wrap is off, honoring scroll_x).
+        let (segment, local_col) = geometry.wrap.visual_position(
+            card.line,
+            line_text,
+            card.col,
+            crate::editor::code::layout::TAB_DISPLAY_WIDTH,
+        );
+        let visual_row = geometry.wrap.first_row_of_line(card.line) + segment;
+        let anchor_x =
+            geometry.text_x + local_col as f32 * geometry.cell_w - geometry.scroll_x;
+        let anchor_y =
+            geometry.rect[1] + visual_row as f32 * geometry.row_h - geometry.scroll_y;
+        crate::panels::hover_popup::render(
+            sugarloaf,
+            &card.lines,
+            crate::panels::hover_popup::HoverPopupLayout {
+                anchor_x,
+                anchor_y,
+                cell_h: geometry.row_h,
+                window_w: window_width,
+                window_h: window_bottom,
+                scale: self.chrome_scale,
+            },
+            &ide_theme,
+        );
     }
 }

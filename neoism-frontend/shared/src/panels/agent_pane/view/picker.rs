@@ -15,8 +15,8 @@ pub trait AgentPickerPane {
     fn picker_mut(&mut self) -> Option<&mut NeoismAgentPicker>;
 
     /// In-progress inline rename buffer for the `/sessions` picker, if the
-    /// host is currently renaming the selected session. Defaults to `None`;
-    /// only the desktop wires rename today.
+    /// host is currently renaming the selected session. Defaults to `None`
+    /// for panes without rename state.
     fn picker_rename_buffer(&self) -> Option<String> {
         None
     }
@@ -25,6 +25,10 @@ pub trait AgentPickerPane {
 impl AgentPickerPane for NeoismAgentPane {
     fn picker_mut(&mut self) -> Option<&mut NeoismAgentPicker> {
         self.picker_mut()
+    }
+
+    fn picker_rename_buffer(&self) -> Option<String> {
+        self.session_rename_buffer()
     }
 }
 

@@ -23,6 +23,59 @@ fn is_background_task_completion(system: &str, message_id: &str) -> bool {
         || message_id.starts_with(BACKGROUND_TASK_COMPLETION_MESSAGE_PREFIX)
 }
 
+/// The compact, durable transcript card for a finished background shell
+/// task. The agent-server persists the completion as a user-role
+/// runtime-notification prompt (`msg_background_completion_{job}`, see
+/// `background_job.rs`); the desktop's live SSE path synthesizes a
+/// `background_task_result` tool card with id `background-task-{job}` the
+/// moment `session.background_task.completed` fires. Mapping the persisted
+/// prompt to that SAME card (same id, same shape) means every history
+/// snapshot REGENERATES the card in place of the client-injected copy —
+/// the server copy replaces it instead of a refresh wiping it — and the
+/// web host gets the identical card from the daemon's shared mapping.
+fn background_completion_card(fallback_id: &str, text: &str) -> NeoismAgentMessage {
+    let job_id = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("job_id:"))
+        .map(str::trim)
+        .and_then(|value| value.split_whitespace().next())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            fallback_id
+                .strip_prefix(BACKGROUND_TASK_COMPLETION_MESSAGE_PREFIX)
+                .filter(|suffix| !suffix.is_empty())
+                .map(str::to_string)
+        });
+    let status = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("status:"))
+        .map(str::trim)
+        .and_then(|value| value.split_whitespace().next())
+        .unwrap_or("completed");
+    let summary = match job_id.as_deref() {
+        Some(job_id) => {
+            format!("job_id: {job_id}\nstatus: {status}\nbackground shell task finished")
+        }
+        None => format!("status: {status}\nbackground shell task finished"),
+    };
+    let mut card = agent_message_tool(
+        "background_task_result",
+        summary,
+        status,
+        "background_task_result",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    );
+    card.detail = text.to_string();
+    card.id = match job_id {
+        Some(job_id) => format!("background-task-{job_id}"),
+        None => fallback_id.to_string(),
+    };
+    card
+}
+
 fn is_subtask_completion(system: &str, message_id: &str) -> bool {
     system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER)
         || message_id.starts_with(SUBTASK_COMPLETION_MESSAGE_PREFIX)
@@ -599,14 +652,16 @@ fn message_blocks_with_start(
             return Vec::new();
         }
         let system = info.get("system").and_then(Value::as_str).unwrap_or("");
+        if is_background_task_completion(system, &id) {
+            // Injected as a user-role turn so the model sees the captured
+            // output, but the user didn't send it. Map it to the durable
+            // completion card (NOT a user bubble, and not a hidden system
+            // notice) so the card the live event painted survives every
+            // history refresh under the same identity.
+            return vec![background_completion_card(&id, &text)];
+        }
         let message = if is_subtask_completion(system, &id) {
             agent_message_system("Subagent", text)
-        } else if is_background_task_completion(system, &id) {
-            // Injected as a user-role turn so the model sees the captured
-            // output, but the user didn't send it — render as a system
-            // notice (no user bubble / presence orb), matching how opencode
-            // surfaces tool/runtime output rather than as a fake user turn.
-            agent_message_system("Background task", text)
         } else {
             agent_message_user(text)
         };
@@ -1225,15 +1280,23 @@ mod tests {
             "parts": [{
                 "id": "prt-background-done",
                 "type": "text",
-                "text": "Background shell task finished.\njob_id: job_123"
+                "text": "Background shell task finished.\njob_id: job_123\nstatus: completed"
             }]
         });
 
         let blocks = message_blocks(&message);
 
+        // Maps to the durable completion card under the live event's
+        // identity — a history refresh replaces the client-injected copy
+        // instead of wiping it (and never renders a fake user bubble).
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].kind, NeoismAgentMessageKind::System);
-        assert_eq!(blocks[0].title, "Background task");
+        assert_eq!(blocks[0].kind, NeoismAgentMessageKind::Tool);
+        assert_eq!(blocks[0].tool, "background_task_result");
+        assert_eq!(blocks[0].id, "background-task-job_123");
+        assert_eq!(blocks[0].status, "completed");
+        assert!(blocks[0].text.contains("job_id: job_123"));
+        assert!(blocks[0].text.contains("background shell task finished"));
+        assert!(blocks[0].detail.contains("Background shell task finished."));
     }
 
     #[test]
@@ -1243,13 +1306,36 @@ mod tests {
             "messageID": "msg_background_completion_job_123",
             "type": "text",
             "role": "user",
-            "text": "Background shell task finished.\njob_id: job_123"
+            "text": "Background shell task finished.\njob_id: job_123\nstatus: completed"
         }))
         .expect("runtime completion block");
 
-        assert_eq!(block.kind, NeoismAgentMessageKind::System);
-        assert_eq!(block.title, "Background task");
-        assert_eq!(block.id, "msg_background_completion_job_123");
+        assert_eq!(block.kind, NeoismAgentMessageKind::Tool);
+        assert_eq!(block.tool, "background_task_result");
+        assert_eq!(block.id, "background-task-job_123");
+    }
+
+    #[test]
+    fn background_completion_card_falls_back_to_the_reserved_id_suffix() {
+        // No job_id line in the text: the job id still recovers from the
+        // reserved message id so the live/persisted identities stay equal.
+        let message = json!({
+            "info": {
+                "id": "msg_background_completion_job_9",
+                "role": "user"
+            },
+            "parts": [{
+                "id": "prt-background-done",
+                "type": "text",
+                "text": "Background shell task finished."
+            }]
+        });
+
+        let blocks = message_blocks(&message);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].id, "background-task-job_9");
+        assert_eq!(blocks[0].status, "completed");
     }
 
     #[test]
@@ -1490,11 +1576,22 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
                 .or_else(|| part.get("messageId"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                if is_background_task_completion(system, message_id) {
+                    // Same durable completion card as `message_blocks` — the
+                    // live broadcast and the history reload must agree on the
+                    // card's identity so refreshes replace instead of wipe.
+                    let fallback_id = if message_id.is_empty() {
+                        id.as_str()
+                    } else {
+                        message_id
+                    };
+                    return Some(background_completion_card(fallback_id, text));
+                }
+            }
             part.get("text").and_then(Value::as_str).map(|text| {
                 if is_subtask_completion(system, message_id) {
                     agent_message_system("Subagent", text)
-                } else if is_background_task_completion(system, message_id) {
-                    agent_message_system("Background task", text)
                 } else {
                     agent_message_user(text)
                 }

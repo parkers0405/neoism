@@ -1,10 +1,12 @@
 pub mod bridge_policy;
+pub mod dispatch;
 pub mod doc_sync;
 pub mod helpers;
 pub mod history;
 pub mod input;
 pub mod interactions;
 pub mod links;
+pub mod menus;
 pub mod modes;
 pub mod navigation;
 pub mod pane;

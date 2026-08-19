@@ -61,6 +61,13 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
         }
         AgentClientMessage::ResumeStream { session_id } => {
             start_event_stream(&inner, &session_id);
+            // Recover interactions that happened while no client was
+            // attached: a `question` tool call parks the run until it
+            // is answered, so a reloaded page must learn about it even
+            // though the `question.asked` SSE event is long gone.
+            tokio::spawn(async move {
+                push_pending_questions(inner, session_id).await;
+            });
         }
         AgentClientMessage::StopStream { session_id } => {
             stop_event_stream(&inner, &session_id);
@@ -346,9 +353,34 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_reject(inner, session_id, request_id).await;
             });
         }
+        AgentClientMessage::AnswerQuestion {
+            request_id,
+            session_id,
+            answers,
+        } => {
+            tokio::spawn(async move {
+                handle_answer_question(inner, session_id, request_id, answers).await;
+            });
+        }
+        AgentClientMessage::RejectQuestion {
+            request_id,
+            session_id,
+        } => {
+            tokio::spawn(async move {
+                handle_reject_question(inner, session_id, request_id).await;
+            });
+        }
         AgentClientMessage::SetTitle { session_id, title } => {
             tokio::spawn(async move {
                 handle_set_title(inner, session_id, title).await;
+            });
+        }
+        AgentClientMessage::SetPinned {
+            session_id,
+            pinned,
+        } => {
+            tokio::spawn(async move {
+                handle_set_pinned(inner, session_id, pinned).await;
             });
         }
 

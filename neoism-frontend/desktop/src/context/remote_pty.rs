@@ -130,6 +130,16 @@ fn send_op(
             session_id: session_id.to_string(),
         },
     };
+    // Fast path: enqueue synchronously so back-to-back ops keep the
+    // order the pane issued them in. Terminal-protocol replies depend
+    // on this — a querier like gh/termenv reads its OSC 11 color
+    // reply and the paired CPR in sequence, and the old per-op
+    // `runtime.spawn` let two sends enqueue in either order. Only a
+    // full (or closed) channel falls back to the async send.
+    let message = match handle.try_send_pty(message) {
+        Ok(_) => return,
+        Err(message) => message,
+    };
     let handle = handle.clone();
     runtime.spawn(async move {
         if let Err(error) = handle.send_pty(message).await {

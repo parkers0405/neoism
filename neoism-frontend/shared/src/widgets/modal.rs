@@ -441,6 +441,45 @@ pub struct UniversalModal {
     blocking: bool,
     opened_at: Instant,
     top_anchor: f32,
+    /// Confirmed modal outcomes awaiting a host that cannot execute
+    /// side effects inline (the web chrome). Queued by the chrome's
+    /// modal dispatch (`chrome/pages.rs`) and drained by the host
+    /// bridge; survives `close()` so a "confirm then close" flow
+    /// hands the action over even though the modal is already gone.
+    pending_host_actions: Vec<ModalHostAction>,
+}
+
+/// A modal outcome the CHROME could validate but not execute — the
+/// host owns the side effect (daemon files op, LSP rename request).
+/// This is the web twin of the arms in desktop
+/// `Screen::execute_modal_action` that touch the filesystem / LSP:
+/// the chrome validates input exactly like desktop, closes the modal
+/// per the shared dispatch policy, and queues one of these for the
+/// host bridge to drain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModalHostAction {
+    /// Create `name` under `dir` (validated: relative, non-escaping).
+    /// Mirrors `ModalAction::FileTreeNewFile`.
+    FileTreeNewFile { dir: String, name: String },
+    /// Create folder `name` under `dir`. Mirrors
+    /// `ModalAction::FileTreeNewFolder`.
+    FileTreeNewFolder { dir: String, name: String },
+    /// Rename the entry at `path` to `name` (same folder; relative
+    /// sub-paths allowed, desktop parity). Mirrors
+    /// `ModalAction::FileTreeRename`.
+    FileTreeRename { path: String, name: String },
+    /// Delete the entry at `path` (confirmed through the destructive
+    /// modal). Mirrors `ModalAction::FileTreeDelete`.
+    FileTreeDelete { path: String },
+    /// LSP symbol rename confirmed with a non-empty `name` — the twin
+    /// of desktop's `submit_code_rename` entered through the
+    /// `code_rename_to` form.
+    LspRename { name: String },
+    /// Spec-driven generic outcome: a host-defined `id` plus the
+    /// modal input's value (empty for plain confirm buttons). Lets
+    /// hosts drive arbitrary confirm/input flows (vault + workspace
+    /// ops as their wire paths land) without growing this enum.
+    Generic { id: String, value: String },
 }
 
 impl Default for UniversalModal {
@@ -471,6 +510,7 @@ impl Default for UniversalModal {
             blocking: true,
             opened_at: Instant::now(),
             top_anchor: MODAL_MARGIN_TOP,
+            pending_host_actions: Vec::new(),
         }
     }
 }
@@ -589,6 +629,25 @@ impl UniversalModal {
 
     pub fn take_submitted_form(&mut self) -> Option<Vec<(String, String)>> {
         self.submitted_form.take()
+    }
+
+    /// Queue a confirmed outcome for the host bridge. Used by hosts
+    /// whose side effects live across an FFI boundary (web/wasm) —
+    /// desktop executes its `ModalAction`s inline instead.
+    pub fn queue_host_action(&mut self, action: ModalHostAction) {
+        self.pending_host_actions.push(action);
+    }
+
+    /// Drain every queued [`ModalHostAction`] (oldest first). Safe to
+    /// call after `close()` — confirm-then-close flows queue before
+    /// closing and the queue survives the close.
+    pub fn take_host_actions(&mut self) -> Vec<ModalHostAction> {
+        std::mem::take(&mut self.pending_host_actions)
+    }
+
+    /// True when at least one host action is waiting to be drained.
+    pub fn has_host_actions(&self) -> bool {
+        !self.pending_host_actions.is_empty()
     }
 
     pub fn open_message(&mut self, title: impl Into<String>, body: impl Into<String>) {

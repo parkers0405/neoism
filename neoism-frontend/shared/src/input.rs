@@ -113,45 +113,6 @@ pub trait InputBuffer {
     }
 }
 
-/// Inert input buffer — empty text, cursor at 0, no completions or
-/// suggestions. Useful for the web's first-paint pass before the
-/// daemon has pushed real terminal state, and for the chrome assembly
-/// to render the composer chassis without an attached terminal.
-pub struct NullInputBuffer;
-
-impl InputBuffer for NullInputBuffer {
-    fn text(&self) -> &str {
-        ""
-    }
-    fn cursor_byte(&self) -> usize {
-        0
-    }
-    fn is_empty(&self) -> bool {
-        true
-    }
-    fn completion_items(&self) -> &[String] {
-        &[]
-    }
-    fn completion_detail(&self) -> Option<&str> {
-        None
-    }
-    fn flash_state(&self) -> Option<CompletionFlashState> {
-        None
-    }
-    fn control_notice(&self) -> Option<&'static str> {
-        None
-    }
-    fn prompt_burst_elapsed_ms(&self) -> Option<f32> {
-        None
-    }
-    fn suggestion_after_cursor(&self) -> Option<&str> {
-        None
-    }
-    fn is_prompt_animating(&self) -> bool {
-        false
-    }
-}
-
 /// Minimal host-fed input snapshot for frontends that do not yet run
 /// the native `TerminalInputBuffer` state machine. It is intentionally
 /// read-only from the composer point of view: the host owns mutation

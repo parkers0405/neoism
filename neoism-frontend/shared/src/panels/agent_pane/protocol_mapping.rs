@@ -32,6 +32,10 @@ pub enum AgentProtocolMapping {
 pub struct PendingAgentProtocolPrompt {
     pub message_id: String,
     pub text: String,
+    /// Attachments extracted from the prompt's `file` parts. Carried so
+    /// the no-session path (prompt queued until `ThreadCreated`) ships
+    /// the same attachments a live-session `SubmitPrompt` would.
+    pub attachments: Vec<Attachment>,
     pub mode: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<String>,
@@ -77,6 +81,7 @@ pub fn map_outbound_command(
                 None => Mapping::PendingPrompt(PendingAgentProtocolPrompt {
                     message_id,
                     text,
+                    attachments,
                     mode,
                     model,
                     thinking,
@@ -170,15 +175,24 @@ pub fn map_outbound_command(
             .unwrap_or(Mapping::Unsupported(
                 "permission reply requires an active session",
             )),
-        // The daemon websocket protocol has no question envelopes yet —
-        // desktop answers over HTTP (`/question/{id}/reply`); web will
-        // follow once `AgentClientMessage` grows a question pair.
-        Cmd::ReplyQuestion { .. } => {
-            Mapping::Unsupported("question replies aren't wired over the web bridge yet")
-        }
-        Cmd::RejectQuestion { .. } => {
-            Mapping::Unsupported("question replies aren't wired over the web bridge yet")
-        }
+        // Structured questions (the `question` tool). Desktop answers
+        // over HTTP (`POST /question/{id}/reply` / `/reject`); the
+        // daemon proxies the same semantics behind these envelopes.
+        Cmd::ReplyQuestion { id, answers } => match context.active_session_id.clone() {
+            Some(session_id) => Mapping::Messages(vec![Msg::AnswerQuestion {
+                request_id: id,
+                session_id,
+                answers,
+            }]),
+            None => Mapping::Unsupported("question reply requires an active session"),
+        },
+        Cmd::RejectQuestion { id } => match context.active_session_id.clone() {
+            Some(session_id) => Mapping::Messages(vec![Msg::RejectQuestion {
+                request_id: id,
+                session_id,
+            }]),
+            None => Mapping::Unsupported("question reject requires an active session"),
+        },
         Cmd::ApplyAgent { session_id, agent } => {
             Mapping::Messages(vec![Msg::SetAgent { session_id, agent }])
         }
@@ -277,6 +291,12 @@ pub fn map_outbound_command(
         }
         Cmd::SetTitle { session_id, title } => {
             Mapping::Messages(vec![Msg::SetTitle { session_id, title }])
+        }
+        Cmd::DeleteSession { session_id } => {
+            Mapping::Messages(vec![Msg::DeleteThread { session_id }])
+        }
+        Cmd::SetSessionPinned { session_id, pinned } => {
+            Mapping::Messages(vec![Msg::SetPinned { session_id, pinned }])
         }
         // The `/connect` provider-auth flow maps onto the daemon's
         // provider-auth WebSocket variants, which the daemon proxies to the
@@ -430,6 +450,43 @@ mod tests {
     }
 
     #[test]
+    fn pending_prompt_carries_file_part_attachments() {
+        // No-session prompts must keep their attachments: the wasm
+        // bridge queues the PendingPrompt until `ThreadCreated`, and a
+        // pasted image dropped here would silently vanish.
+        let parts = vec![
+            serde_json::json!({ "type": "text", "text": "look [image1]" }),
+            serde_json::json!({
+                "type": "file",
+                "url": "data:image/png;base64,aGk=",
+                "filename": "shot.png",
+                "mime": "image/png",
+            }),
+        ];
+        let mapped = map_outbound_command(
+            OutboundAgentCommand::SendPrompt {
+                message_id: crate::panels::agent_pane::outbound::next_prompt_message_id(),
+                text: "look [image1]".to_string(),
+                parts,
+                system: None,
+                agent: None,
+                model: String::new(),
+                thinking: None,
+                delivery: neoism_protocol::agent::PromptDelivery::Steer,
+                transcript_echo: true,
+            },
+            &AgentProtocolMappingContext::default(),
+        );
+        let AgentProtocolMapping::PendingPrompt(prompt) = mapped else {
+            panic!("expected pending prompt");
+        };
+        assert_eq!(prompt.attachments.len(), 1);
+        assert_eq!(prompt.attachments[0].kind, "image/png");
+        assert_eq!(prompt.attachments[0].path.as_deref(), Some("shot.png"));
+        assert_eq!(prompt.attachments[0].bytes, b"hi".to_vec());
+    }
+
+    #[test]
     fn undo_redo_map_to_session_protocol_messages() {
         let context = AgentProtocolMappingContext {
             active_session_id: Some("s1".to_string()),
@@ -471,6 +528,110 @@ mod tests {
             ),
             AgentProtocolMapping::Unsupported(_)
         ));
+    }
+
+    #[test]
+    fn question_reply_and_reject_map_to_question_envelopes() {
+        let context = AgentProtocolMappingContext {
+            active_session_id: Some("s1".to_string()),
+            ..AgentProtocolMappingContext::default()
+        };
+
+        let reply = map_outbound_command(
+            OutboundAgentCommand::ReplyQuestion {
+                id: "que_1".to_string(),
+                answers: vec![vec!["Yes".to_string()], vec!["prod".to_string()]],
+            },
+            &context,
+        );
+        assert_eq!(
+            reply,
+            AgentProtocolMapping::Messages(vec![AgentClientMessage::AnswerQuestion {
+                request_id: "que_1".to_string(),
+                session_id: "s1".to_string(),
+                answers: vec![vec!["Yes".to_string()], vec!["prod".to_string()]],
+            }])
+        );
+
+        let reject = map_outbound_command(
+            OutboundAgentCommand::RejectQuestion {
+                id: "que_1".to_string(),
+            },
+            &context,
+        );
+        assert_eq!(
+            reject,
+            AgentProtocolMapping::Messages(vec![AgentClientMessage::RejectQuestion {
+                request_id: "que_1".to_string(),
+                session_id: "s1".to_string(),
+            }])
+        );
+    }
+
+    #[test]
+    fn question_reply_requires_active_session() {
+        assert!(matches!(
+            map_outbound_command(
+                OutboundAgentCommand::ReplyQuestion {
+                    id: "que_1".to_string(),
+                    answers: vec![vec!["Yes".to_string()]],
+                },
+                &AgentProtocolMappingContext::default()
+            ),
+            AgentProtocolMapping::Unsupported(_)
+        ));
+        assert!(matches!(
+            map_outbound_command(
+                OutboundAgentCommand::RejectQuestion {
+                    id: "que_1".to_string(),
+                },
+                &AgentProtocolMappingContext::default()
+            ),
+            AgentProtocolMapping::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn session_verbs_map_to_daemon_protocol() {
+        let context = AgentProtocolMappingContext::default();
+
+        assert_eq!(
+            map_outbound_command(
+                OutboundAgentCommand::SetTitle {
+                    session_id: "s1".to_string(),
+                    title: "Renamed".to_string(),
+                },
+                &context,
+            ),
+            AgentProtocolMapping::Messages(vec![AgentClientMessage::SetTitle {
+                session_id: "s1".to_string(),
+                title: "Renamed".to_string(),
+            }])
+        );
+        assert_eq!(
+            map_outbound_command(
+                OutboundAgentCommand::DeleteSession {
+                    session_id: "s1".to_string(),
+                },
+                &context,
+            ),
+            AgentProtocolMapping::Messages(vec![AgentClientMessage::DeleteThread {
+                session_id: "s1".to_string(),
+            }])
+        );
+        assert_eq!(
+            map_outbound_command(
+                OutboundAgentCommand::SetSessionPinned {
+                    session_id: "s1".to_string(),
+                    pinned: true,
+                },
+                &context,
+            ),
+            AgentProtocolMapping::Messages(vec![AgentClientMessage::SetPinned {
+                session_id: "s1".to_string(),
+                pinned: true,
+            }])
+        );
     }
 
     #[test]

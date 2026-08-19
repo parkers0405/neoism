@@ -229,6 +229,19 @@ pub fn assistant_blocks_ime(assistant_active: bool) -> bool {
     assistant_active
 }
 
+/// Pure classifier for whether a host `keydown` was fired by the IME
+/// mid-composition and must be swallowed. Combines the standard
+/// `KeyboardEvent.isComposing` flag (Chromium / Firefox / Safari /
+/// WKWebView) with the legacy `keyCode === 229` fallback some
+/// IBus/fcitx + Chromium combos still emit for the final commit
+/// cycle. Hosts with no legacy key-code concept (winit) pass `0`.
+///
+/// Returns `true` when the host should swallow the key event.
+#[inline]
+pub fn key_event_is_ime_composing(is_composing: bool, key_code: u32) -> bool {
+    is_composing || key_code == 229
+}
+
 /// Decision for a `compositionstart` / `Ime::Enabled` event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComposeStartAction {
@@ -394,6 +407,15 @@ mod tests {
     fn assistant_blocks_ime_when_active() {
         assert!(assistant_blocks_ime(true));
         assert!(!assistant_blocks_ime(false));
+    }
+
+    #[test]
+    fn key_event_is_composing_covers_flag_and_legacy_code() {
+        assert!(key_event_is_ime_composing(true, 0));
+        assert!(key_event_is_ime_composing(false, 229));
+        assert!(key_event_is_ime_composing(true, 229));
+        assert!(!key_event_is_ime_composing(false, 0));
+        assert!(!key_event_is_ime_composing(false, 65));
     }
 
     #[test]

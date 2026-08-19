@@ -29,6 +29,7 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use neoism_protocol::agent::{AgentClientMessage, AgentServerMessage};
+use neoism_protocol::config::{ConfigClientMessage, ConfigServerMessage};
 use neoism_protocol::crdt::{CrdtClientMessage, CrdtPresenceUpdate, CrdtServerMessage};
 use neoism_protocol::cursor::{CursorOverlayClientMessage, CursorOverlayServerMessage};
 use neoism_protocol::diagnostics::{DiagnosticsClientMessage, DiagnosticsServerMessage};
@@ -46,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{self as agent_handler, AgentSession};
 use crate::auth::{self, AuthService};
 use crate::cloud_auth;
+use crate::config_surface as config_handler;
 use crate::crdt::sync::CrdtSyncHub;
 use crate::files as files_handler;
 use crate::git as git_handler;

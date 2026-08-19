@@ -313,7 +313,7 @@ pub(crate) async fn queued_prompt_preview(
 async fn next_queued_prompt(
     state: &AppState,
     session_id: &str,
-) -> Option<(PromptRequest, usize)> {
+) -> Option<(PromptRequest, String, usize)> {
     next_prompt_with_delivery(state, session_id, None).await
 }
 
@@ -321,8 +321,8 @@ async fn next_prompt_with_delivery(
     state: &AppState,
     session_id: &str,
     delivery: Option<&str>,
-) -> Option<(PromptRequest, usize)> {
-    let Some(request) = state
+) -> Option<(PromptRequest, String, usize)> {
+    let Some((request, delivery)) = state
         .inner
         .store
         .pop_queued_prompt_with_delivery(session_id, delivery)
@@ -338,7 +338,7 @@ async fn next_prompt_with_delivery(
         .queued_prompt_count(session_id)
         .await
         .unwrap_or(0);
-    Some((request, remaining))
+    Some((request, delivery, remaining))
 }
 
 async fn next_active_continuation_prompt(
@@ -484,7 +484,8 @@ async fn wait_until_session_not_running(state: &AppState, session_id: &str) {
 pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
     loop {
         wait_until_session_not_running(&state, &session_id).await;
-        let Some((request, remaining)) = next_queued_prompt(&state, &session_id).await
+        let Some((request, delivery, remaining)) =
+            next_queued_prompt(&state, &session_id).await
         else {
             if state
                 .inner
@@ -508,8 +509,48 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
         publish_prompt_queue_status(&state, &session_id, remaining).await;
         let create_reply = !request.no_reply;
         if let Err(error) =
-            append_prompt(&state, &session_id, request, create_reply).await
+            append_prompt(&state, &session_id, request.clone(), create_reply).await
         {
+            // A run can claim the session between our idle observation and
+            // append_prompt's own runs check (e.g. the user submits a prompt
+            // right as the queue drains). The popped prompt — possibly a
+            // subagent/background-task completion notification — must NOT be
+            // dropped: put it back at the front of the durable queue and wait
+            // for the run to finish. Only this exact transient conflict
+            // requeues; content conflicts and hard errors surface as before,
+            // so a poisoned prompt can never hot-loop the worker.
+            let session_running = error.is_conflict()
+                && error.to_string() == crate::session_prompt::SESSION_RUNNING_CONFLICT;
+            if session_running {
+                match state
+                    .inner
+                    .store
+                    .requeue_prompt_front_with_delivery(&session_id, &request, &delivery)
+                    .await
+                {
+                    Ok(queue_len) => {
+                        publish_prompt_queue_changed(
+                            &state,
+                            &session_id,
+                            "requeue",
+                            Some(&request),
+                            Some(&delivery),
+                            0,
+                        )
+                        .await;
+                        publish_prompt_queue_status(&state, &session_id, queue_len)
+                            .await;
+                        continue;
+                    }
+                    Err(requeue_error) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %requeue_error,
+                            "failed to requeue prompt after run conflict; surfacing loss"
+                        );
+                    }
+                }
+            }
             state.publish(EventPayload::new(
                 event_type::SESSION_ERROR,
                 json!({ "sessionID": session_id, "error": { "name": "PromptError", "data": { "message": error.to_string() } } }),
@@ -517,6 +558,15 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
         }
     }
     publish_idle_if_no_run(&state, &session_id).await;
+    // The worker exiting with an empty queue is the reliable "truly idle"
+    // point for a child that ran a QUEUED continue-prompt (during the run's
+    // own teardown this worker still holds ownership, so the deferred
+    // completion check no-ops there and must fire here).
+    crate::session_actions::publish_deferred_subtask_completion_if_idle(
+        &state,
+        &session_id,
+    )
+    .await;
 }
 
 pub(crate) fn spawn_drain_prompt_queue(state: AppState, session_id: String) {

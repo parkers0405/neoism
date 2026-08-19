@@ -114,7 +114,11 @@ pub fn stable_presence_color(peer_id: &str) -> PresenceColor {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
-    PRESENCE_PALETTE[(hash as usize) % PRESENCE_PALETTE.len()]
+    // Reduce in u64 BEFORE narrowing: `hash as usize` truncates to 32
+    // bits on wasm32, which picked a DIFFERENT palette slot than the
+    // 64-bit desktop build for the same peer id. Desktop (and the web
+    // TS mirror that matched it) is canonical.
+    PRESENCE_PALETTE[(hash % PRESENCE_PALETTE.len() as u64) as usize]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

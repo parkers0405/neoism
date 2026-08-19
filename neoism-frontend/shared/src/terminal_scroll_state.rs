@@ -182,9 +182,11 @@ impl TerminalScroll {
         rich_text_id: usize,
         visual_row: usize,
     ) -> Option<Option<usize>> {
-        self.block_frame_sources.get(&rich_text_id).map(|sources| {
-            crate::render_policy::block_visual_to_source_row(sources, visual_row)
-                .unwrap_or(None)
-        })
+        // Mirrors desktop `terminal/scroll.rs::block_frame_source_at`
+        // exactly: out-of-range visual rows resolve to `Some(None)`
+        // (pane known, row unmapped) rather than `None` (pane unknown).
+        self.block_frame_sources
+            .get(&rich_text_id)
+            .map(|sources| sources.get(visual_row).copied().unwrap_or(None))
     }
 }

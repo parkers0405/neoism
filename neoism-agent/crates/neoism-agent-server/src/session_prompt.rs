@@ -55,6 +55,11 @@ const AUTO_COMPACTION_ESTIMATED_PROMPT_RATIO_DENOMINATOR: u64 = 4;
 const TOOL_PRUNE_MINIMUM_TOKENS: u64 = 20_000;
 const TOOL_PRUNE_PROTECT_TOKENS: u64 = 40_000;
 
+/// Exact message of the transient conflict raised when a prompt lands
+/// while a run holds the session. The queue drain matches on it to
+/// requeue the popped prompt instead of dropping it.
+pub(crate) const SESSION_RUNNING_CONFLICT: &str = "Session is already running";
+
 pub(crate) async fn append_prompt(
     state: &AppState,
     session_id: &str,
@@ -81,7 +86,7 @@ pub(crate) async fn append_prompt(
         .acquire(&info.directory, &state.inner.plugins)
         .await;
     if create_stub_reply && state.inner.runs.read().await.contains_key(&session_id_text) {
-        return Err(ApiError::conflict("Session is already running"));
+        return Err(ApiError::conflict(SESSION_RUNNING_CONFLICT));
     }
     let PromptRequest {
         message_id,

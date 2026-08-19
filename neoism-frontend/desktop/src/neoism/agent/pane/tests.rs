@@ -1,4 +1,5 @@
 use super::*;
+use neoism_ui::panels::agent_pane::state::side_panel::STATUS_LABEL_GRACE;
 use std::fs;
 
 #[test]
@@ -36,6 +37,11 @@ fn idle_clears_status_but_keeps_trace_until_session_reset() {
 
     pane.note_streaming(NeoismAgentStreamingState::Idle, None);
     assert!(!pane.is_streaming());
+    // A transient idle reading holds the displayed label; sustained
+    // idle past the grace window clears it for real.
+    assert_eq!(pane.streaming_label(), "Crafting");
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
     assert_eq!(pane.streaming_label(), "");
     assert_eq!(pane.streaming_elapsed_seconds(), None);
     assert_eq!(pane.timeline_live_trace_start, Some(1));
@@ -82,17 +88,28 @@ fn active_subagent_part_updates_do_not_restart_waiting_clock() {
 }
 
 #[test]
-fn active_subagent_footer_wins_over_transient_parent_streaming() {
+fn main_agent_verb_wins_while_it_streams_over_running_subagents() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
     pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
     pane.sync_subagent_waiting_clock();
     let original_clock = pane.subagent_waiting_started_at;
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
 
-    // Parent-side bookkeeping can briefly report a streaming part while the
-    // child remains active. That must not replace or restart the child footer.
+    // The main agent starts talking (the user sent a prompt / the model
+    // is responding): its own verb always wins over the aggregate
+    // sub-agents label while it is actively streaming.
     pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    assert_eq!(pane.streaming_label(), "Crafting");
 
+    // The main agent stops while the same child keeps running: only now
+    // does "Sub-agents working" take over — and on the SAME waiting
+    // clock (no restart, the child never stopped).
+    pane.note_streaming(NeoismAgentStreamingState::Idle, None);
     assert_eq!(
         pane.streaming_state(),
         NeoismAgentStreamingState::WaitingSubagents
@@ -292,6 +309,89 @@ fn child_background_completion_stays_out_of_main_transcript() {
 }
 
 #[test]
+fn background_completion_card_survives_messages_snapshot_replacement() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "parent",
+        [
+            // The live completion event injects the card…
+            AgentSessionUpdate::BackgroundTaskCompleted {
+                session_id: "parent".to_string(),
+                job_id: "job-1".to_string(),
+                status: "completed".to_string(),
+            },
+            // …then a full-transcript refresh lands BEFORE the server's
+            // queued completion prompt drained — no trace of the card in
+            // the snapshot. It must survive the replacement.
+            AgentSessionUpdate::Messages {
+                messages: vec![
+                    NeoismAgentMessage::user("kick off the build").with_id("u-1"),
+                    NeoismAgentMessage::assistant("Started.").with_id("a-1"),
+                ],
+                oldest_cursor: None,
+            },
+        ],
+    ));
+
+    pane.drain_server_updates();
+
+    assert_eq!(pane.messages.len(), 3);
+    assert_eq!(pane.messages[2].id, "background-task-job-1");
+}
+
+#[test]
+fn server_background_completion_copy_replaces_client_card_without_duplicate() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    // Persisted runtime prompt as the shared mapping regenerates it —
+    // the SAME durable id the live event used.
+    let server_copy = neoism_ui::panels::agent_pane::api_mapping::message_blocks(&json!({
+        "info": {
+            "id": "msg_background_completion_job-1",
+            "role": "user"
+        },
+        "parts": [{
+            "id": "prt-background-done",
+            "type": "text",
+            "text": "Background shell task finished.\njob_id: job-1\nstatus: completed"
+        }]
+    }))
+    .into_iter()
+    .map(NeoismAgentMessage::from)
+    .next()
+    .expect("mapped completion card");
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "parent",
+        [
+            AgentSessionUpdate::BackgroundTaskCompleted {
+                session_id: "parent".to_string(),
+                job_id: "job-1".to_string(),
+                status: "completed".to_string(),
+            },
+            AgentSessionUpdate::Messages {
+                messages: vec![
+                    NeoismAgentMessage::user("kick off the build").with_id("u-1"),
+                    server_copy,
+                ],
+                oldest_cursor: None,
+            },
+        ],
+    ));
+
+    pane.drain_server_updates();
+
+    assert_eq!(
+        pane.messages
+            .iter()
+            .filter(|message| message.id == "background-task-job-1")
+            .count(),
+        1,
+        "server copy replaces the client copy, no duplicate"
+    );
+}
+
+#[test]
 fn retry_status_includes_a_compact_provider_reason() {
     let mut pane = NeoismAgentPane::default();
     pane.note_streaming(
@@ -414,6 +514,14 @@ fn running_background_task_count_tracks_started_and_collected_jobs() {
     pane.ensure_background_task_activity_clock();
 
     assert_eq!(pane.running_background_task_count(), 0);
+    // The display grace hold bridges the collection edge; sustained idle
+    // then clears it.
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::BackgroundTasks
+    );
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
     assert!(!pane.background_task_details_expanded());
 }
@@ -1485,17 +1593,30 @@ fn runtime_completion_rehydrate_does_not_append_cached_part_at_bottom() {
         "text": "Background shell task finished.\njob_id: job_123\nstatus: completed"
     }))
     .expect("live runtime completion");
-    let snapshot = vec![NeoismAgentMessage::system(
-        "Background task",
-        "Background shell task finished.\njob_id: job_123\nstatus: completed",
-    )
-    .with_id("msg_background_completion_job_123")];
+    // The persisted runtime prompt maps to the SAME durable card id as the
+    // live broadcast (`background-task-{job}`), so rehydration merges them
+    // into one row instead of appending a duplicate at the bottom.
+    let snapshot = neoism_ui::panels::agent_pane::api_mapping::message_blocks(&json!({
+        "info": {
+            "id": "msg_background_completion_job_123",
+            "role": "user"
+        },
+        "parts": [{
+            "id": "prt-background-done",
+            "type": "text",
+            "text": "Background shell task finished.\njob_id: job_123\nstatus: completed"
+        }]
+    }))
+    .into_iter()
+    .map(NeoismAgentMessage::from)
+    .collect::<Vec<_>>();
 
     let merged = merge_session_snapshot(snapshot, vec![live]);
 
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].id, "msg_background_completion_job_123");
-    assert_eq!(merged[0].kind, NeoismAgentMessageKind::System);
+    assert_eq!(merged[0].id, "background-task-job_123");
+    assert_eq!(merged[0].kind, NeoismAgentMessageKind::Tool);
+    assert_eq!(merged[0].tool, "background_task_result");
 }
 
 #[test]
@@ -1780,6 +1901,14 @@ fn runtime_child_keeps_waiting_status_before_sidebar_hydrates() {
     pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
     pane.sync_subagent_waiting_clock();
     assert_eq!(pane.active_subagent_count(), 0);
+    // The completion edge is bridged by the display grace hold, then
+    // sustained idle clears the label.
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
 }
 

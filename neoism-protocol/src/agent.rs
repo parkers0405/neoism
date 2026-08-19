@@ -311,6 +311,24 @@ pub enum AgentClientMessage {
     },
     /// Answer the first pending question for a session.
     HandleAnswer { session_id: String, answer: String },
+    /// Answer a specific pending structured question (the `question`
+    /// tool). Mirrors the desktop pane's HTTP
+    /// `POST /question/{id}/reply` with one answer list per question
+    /// in the request. `session_id` scopes the daemon's
+    /// [`AgentServerMessage::QuestionRemoved`] acknowledgement.
+    AnswerQuestion {
+        request_id: String,
+        session_id: String,
+        answers: Vec<Vec<String>>,
+    },
+    /// Reject a specific pending structured question (Esc on the
+    /// prompt picker) so the parked run resumes with a "rejected"
+    /// error instead of waiting forever. Mirrors the desktop pane's
+    /// `POST /question/{id}/reject`.
+    RejectQuestion {
+        request_id: String,
+        session_id: String,
+    },
     /// Reject either a specific pending question/permission or the
     /// first pending interaction for a session.
     HandleReject {
@@ -320,6 +338,11 @@ pub enum AgentClientMessage {
     },
     /// Update the session's stored title.
     SetTitle { session_id: String, title: String },
+    /// Toggle a session's pinned flag. Mirrors the desktop pane's
+    /// `POST /session/{id}/pin` with `{ "pinned": <bool> }` — the
+    /// flag persists server-side and floats the session into the
+    /// "Pinned" section of the `/sessions` picker.
+    SetPinned { session_id: String, pinned: bool },
 
     // -- Provider connect / auth flow (`/connect` picker) --------------
     //
@@ -538,6 +561,56 @@ pub enum AgentServerMessage {
         error: Option<String>,
     },
 
+    // -- Structured questions (the `question` tool) --------------------
+    /// The model called the `question` tool — the run is parked until
+    /// the user answers (or rejects). `request` is the raw
+    /// `question.asked` SSE payload (`QuestionRequestInfo`: `id`,
+    /// `sessionID`, `questions: [{question, options}]`) — the exact
+    /// JSON the desktop SSE path feeds
+    /// `question_policy::question_request_from_event`, so both
+    /// frontends parse questions through one code path.
+    QuestionAsked {
+        session_id: String,
+        request: serde_json::Value,
+    },
+    /// Snapshot of every pending question request for a session.
+    /// Emitted on stream (re-)attach so a reloaded client recovers a
+    /// question that was asked while it was away, and as the typed
+    /// reply to [`AgentClientMessage::ShowQuestions`]. Elements share
+    /// the [`AgentServerMessage::QuestionAsked`] `request` shape.
+    QuestionsUpdated {
+        session_id: String,
+        requests: Vec<serde_json::Value>,
+    },
+    /// A question was answered or rejected (possibly from another
+    /// device) — the chrome drops it from its pending queue. Emitted
+    /// both as the ack for [`AgentClientMessage::AnswerQuestion`] /
+    /// `RejectQuestion` and from the agent-server's
+    /// `question.replied` / `question.rejected` SSE events.
+    QuestionRemoved {
+        session_id: String,
+        request_id: String,
+    },
+    /// An [`AgentClientMessage::AnswerQuestion`] / `RejectQuestion`
+    /// POST failed — the chrome re-enables the prompt picker so the
+    /// user can retry instead of staying wedged on "responding".
+    QuestionReplyFailed {
+        request_id: String,
+        error: String,
+    },
+
+    /// A session's stored metadata changed (rename / pin). Ack for
+    /// [`AgentClientMessage::SetTitle`] / `SetPinned`; clients use it
+    /// to re-request the thread list so pickers and side panels stay
+    /// fresh without racing the mutation.
+    ThreadUpdated {
+        session_id: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        pinned: Option<bool>,
+    },
+
     // -- Edit proposals -----------------------------------------------
     /// The agent proposed a file edit. The chrome shows a diff card
     /// and waits for [`AgentClientMessage::ApplyEdit`] /
@@ -634,7 +707,13 @@ pub enum AgentServerMessage {
         started_at: Option<u64>,
     },
     /// Subagent status / activity update. Maps to the desktop's
-    /// `SubagentStatus` / `SubagentActivity` events.
+    /// `SubagentStatus` / `SubagentActivity` events. `session_id` is the
+    /// SUBAGENT's own session id; `parent_session_id` (when known)
+    /// carries the parent link from the server's `session.created`
+    /// announcement so the client can family-scope a child it has never
+    /// seen before — without it, a brand-new child spawned while a
+    /// sibling transcript is on screen fails the roster's membership
+    /// check (its id isn't tracked yet) and the update is dropped.
     SubagentUpdate {
         session_id: String,
         status: SubagentStatus,
@@ -646,6 +725,8 @@ pub enum AgentServerMessage {
         current_tool: Option<String>,
         #[serde(default)]
         started_at: Option<u64>,
+        #[serde(default)]
+        parent_session_id: Option<String>,
     },
     /// Context-window compaction lifecycle. `phase` tells the
     /// chrome whether this is a `Started` / `Delta` / `Ended` event.

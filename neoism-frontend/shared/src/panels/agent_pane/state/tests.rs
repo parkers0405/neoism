@@ -1,6 +1,7 @@
 use super::*;
 use crate::panels::agent_pane::outbound::OutboundAgentCommand;
 use crate::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry;
+use crate::panels::agent_pane::state::side_panel::STATUS_LABEL_GRACE;
 
 #[test]
 fn runtime_branch_status_policy_maps_daemon_statuses() {
@@ -522,13 +523,156 @@ fn unknown_slash_command_is_queued_as_slash_command() {
 }
 
 #[test]
-fn slash_clear_is_inline_with_no_outbound_command() {
+fn slash_clear_routes_to_the_server_like_desktop() {
+    // `/clear` has no arm in `plan_slash_command`; the desktop dispatcher
+    // forwards it through `run_server_command` (EnsureSession first when
+    // no session exists yet). The shared pane must match, not keep its
+    // old local-only arm.
     let mut pane = NeoismAgentPane::default();
-    pane.messages
-        .push(NeoismAgentMessage::user("first".to_string()));
     pane.execute_slash_text("/clear");
-    assert!(pane.messages.is_empty());
+    let drained = pane.drain_pending_outbound();
+    assert!(
+        matches!(drained.first(), Some(OutboundAgentCommand::EnsureSession)),
+        "expected EnsureSession first: {drained:?}"
+    );
+    assert!(
+        matches!(
+            drained.get(1),
+            Some(OutboundAgentCommand::SlashCommand { name, args })
+                if name == "clear" && args.is_empty()
+        ),
+        "expected SlashCommand clear: {drained:?}"
+    );
+}
+
+#[test]
+fn slash_undo_redo_queue_session_history_commands() {
+    let mut pane = NeoismAgentPane::default();
+    // Without a session the desktop surfaces "no session has started yet"
+    // and queues nothing.
+    pane.execute_slash_text("/undo");
+    pane.execute_slash_text("/redo");
     assert!(pane.drain_pending_outbound().is_empty());
+
+    pane.set_session_id(Some("sess-1".to_string()));
+    pane.execute_slash_text("/undo");
+    assert_eq!(
+        pane.drain_pending_outbound(),
+        vec![OutboundAgentCommand::UndoSession]
+    );
+    pane.execute_slash_text("/redo");
+    assert_eq!(
+        pane.drain_pending_outbound(),
+        vec![OutboundAgentCommand::RedoSession]
+    );
+}
+
+#[test]
+fn slash_help_renders_the_desktop_command_sheet_locally() {
+    let mut pane = NeoismAgentPane::default();
+    pane.execute_slash_text("/help");
+    assert!(pane.drain_pending_outbound().is_empty());
+    let message = pane
+        .messages
+        .iter()
+        .find(|message| {
+            message.kind == NeoismAgentMessageKind::System
+                && message.title == "Commands"
+        })
+        .expect("help must land as a local system message");
+    for option in crate::panels::agent_pane::command_controller::slash_options() {
+        assert!(
+            message.text.contains(&option.title),
+            "help sheet must list {}",
+            option.title
+        );
+    }
+}
+
+#[test]
+fn slash_yolo_toggles_skip_permissions_and_auto_answers() {
+    let mut pane = NeoismAgentPane::default();
+    assert!(!pane.skip_permissions_enabled());
+    pane.enqueue_pending_permission(NeoismAgentPendingPermission {
+        id: "perm-1".to_string(),
+        session_id: String::new(),
+        parent_session_id: None,
+        source_agent: None,
+        source_title: None,
+        title: "Run command".to_string(),
+        permission: "bash".to_string(),
+        patterns: Vec::new(),
+        selected: 0,
+        responding: false,
+    });
+    assert!(pane.drain_pending_outbound().is_empty());
+
+    pane.execute_slash_text("/yolo");
+    assert!(pane.skip_permissions_enabled());
+    // Turning it on immediately answers the pending request "Yes".
+    assert_eq!(
+        pane.drain_pending_outbound(),
+        vec![OutboundAgentCommand::ReplyPermission {
+            id: "perm-1".to_string(),
+            reply: "once".to_string(),
+        }]
+    );
+
+    pane.execute_slash_text("/yolo");
+    assert!(!pane.skip_permissions_enabled());
+}
+
+#[test]
+fn slash_fx_easter_eggs_queue_a_request_for_the_render_loop() {
+    use crate::panels::agent_pane::view::fx::AgentFxKind;
+
+    let mut pane = NeoismAgentPane::default();
+    for (command, kind) in [
+        ("/piss", AgentFxKind::Piss),
+        ("/cuss", AgentFxKind::Cuss),
+        ("/glitch", AgentFxKind::Glitch),
+        ("/disco", AgentFxKind::Disco),
+        ("/gangfight", AgentFxKind::GangFight),
+        ("/praise", AgentFxKind::Praise),
+    ] {
+        pane.execute_slash_text(command);
+        assert!(pane.is_animating(), "{command} must own the redraw loop");
+        assert_eq!(pane.take_fx_request(), Some(kind), "{command}");
+        // Consumed exactly once — the render loop stamps its own clock.
+        assert_eq!(pane.take_fx_request(), None, "{command}");
+        // The held prompt fires through the normal send path.
+        pane.fire_fx_prompt();
+        let drained = pane.drain_pending_outbound();
+        assert!(
+            drained
+                .iter()
+                .any(|cmd| matches!(cmd, OutboundAgentCommand::SendPrompt { .. })),
+            "{command} must send its follow-up prompt: {drained:?}"
+        );
+        pane.start_new_conversation();
+        pane.note_streaming(NeoismAgentStreamingState::Idle, None);
+    }
+}
+
+#[test]
+fn slash_goal_surfaces_wire_gap_instead_of_inventing_protocol() {
+    let mut pane = NeoismAgentPane::default();
+    pane.execute_slash_text("/goal ship it");
+    assert!(pane.drain_pending_outbound().is_empty());
+    assert!(pane
+        .messages
+        .iter()
+        .any(|message| message.title == "Goal"
+            && message.text.contains("no session has started yet")));
+
+    pane.set_session_id(Some("sess-1".to_string()));
+    pane.execute_slash_text("/goal");
+    assert!(pane.drain_pending_outbound().is_empty());
+    assert!(pane
+        .messages
+        .iter()
+        .any(|message| message.title == "Goal"
+            && message.text.contains("aren't available over this connection")));
 }
 
 #[test]
@@ -623,7 +767,7 @@ fn provider_catalog_limit_applies_when_catalog_arrives_after_model() {
 }
 
 #[test]
-fn idle_streaming_state_clears_status_label() {
+fn idle_streaming_state_clears_status_label_after_grace() {
     let mut pane = NeoismAgentPane::default();
 
     pane.note_streaming(NeoismAgentStreamingState::Generating, None);
@@ -632,26 +776,185 @@ fn idle_streaming_state_clears_status_label() {
 
     pane.note_streaming(NeoismAgentStreamingState::Idle, None);
     assert!(!pane.is_streaming());
+    // A transient idle reading holds the displayed label (and its clock)
+    // so the status row never blinks out between events…
+    assert_eq!(pane.streaming_label(), "Crafting");
+    assert!(pane.has_status_activity());
+    assert!(pane.streaming_elapsed_seconds().is_some());
+    // …while idle sustained past the grace window clears it for real.
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
     assert_eq!(pane.streaming_label(), "");
+    assert!(!pane.has_status_activity());
     assert_eq!(pane.streaming_elapsed_seconds(), None);
 }
 
 #[test]
-fn active_subagent_footer_wins_over_transient_parent_streaming() {
+fn main_agent_verb_wins_while_it_streams_over_running_subagents() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
     pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
     pane.sync_subagent_waiting_clock();
     let original_clock = pane.subagent_waiting_started_at;
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
 
+    // The main agent starts talking (the user sent a prompt / the model
+    // is responding): its own verb always wins over the aggregate
+    // sub-agents label while it is actively streaming.
     pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    assert_eq!(pane.streaming_label(), "Crafting");
+    pane.note_streaming(NeoismAgentStreamingState::Thinking, None);
+    assert_eq!(pane.streaming_label(), "Pondering");
 
+    // The main agent stops while the same child keeps running: only now
+    // does "Sub-agents working" take over — and on the SAME waiting
+    // clock (no restart, the child never stopped).
+    pane.note_streaming(NeoismAgentStreamingState::Idle, None);
     assert_eq!(
         pane.streaming_state(),
         NeoismAgentStreamingState::WaitingSubagents
     );
     assert_eq!(pane.streaming_label(), "Sub-agents working");
     assert_eq!(pane.subagent_waiting_started_at, original_clock);
+}
+
+/// The raw derivation can pass through Idle for a tick between events
+/// (MessageEnd → next MessageStart, a child's inter-message idle edge).
+/// The display must bridge those gaps: label, activity flag (which
+/// reserves the status row's height) and clock all keep their values,
+/// so the composer never drops a line and bounces mid-run.
+#[test]
+fn transient_idle_gap_keeps_status_label_and_row() {
+    // Verb gap: MessageEnd → MessageStart.
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.messages = vec![NeoismAgentMessage::user("go")];
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    assert_eq!(pane.streaming_label(), "Crafting");
+
+    pane.note_streaming(NeoismAgentStreamingState::Idle, None); // gap opens
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    assert_eq!(pane.streaming_label(), "Crafting");
+    assert!(pane.has_status_activity(), "status row must stay reserved");
+    assert!(pane.streaming_elapsed_seconds().is_some());
+    assert_eq!(
+        pane.animation_reason(),
+        Some("streaming_status_hold"),
+        "hold must drive frames so it can expire on its own"
+    );
+
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None); // gap closes
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+
+    // Sub-agents gap: a child's idle edge zeroes the active count for a
+    // beat before the next lifecycle event re-raises it.
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
+    pane.sync_subagent_waiting_clock();
+    assert_eq!(pane.streaming_label(), "Sub-agents working");
+
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
+    pane.sync_subagent_waiting_clock(); // gap opens
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
+    assert_eq!(pane.streaming_label(), "Sub-agents working");
+    assert!(pane.has_status_activity());
+
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
+    pane.sync_subagent_waiting_clock(); // gap closes (respawn / next step)
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
+}
+
+#[test]
+fn sustained_idle_clears_status_label_and_activity() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.messages = vec![NeoismAgentMessage::user("go")];
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    assert_eq!(pane.streaming_label(), "Crafting");
+
+    pane.note_streaming(NeoismAgentStreamingState::Idle, None);
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
+
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert_eq!(pane.streaming_label(), "");
+    assert!(!pane.has_status_activity());
+    assert_eq!(pane.streaming_elapsed_seconds(), None);
+    // An expired hold must not keep owning redraw frames.
+    assert_ne!(pane.animation_reason(), Some("streaming_status_hold"));
+    assert_ne!(pane.animation_reason(), Some("streaming"));
+}
+
+#[test]
+fn user_abort_clears_status_label_without_grace_lag() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    assert_eq!(pane.streaming_label(), "Crafting");
+
+    pane.abort_session();
+
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert_eq!(pane.streaming_label(), "");
+    assert!(!pane.has_status_activity());
+}
+
+#[test]
+fn held_status_never_leaks_across_sessions() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel
+        .set_viewed_session_id(Some("parent".to_string()));
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    assert_eq!(pane.streaming_label(), "Crafting");
+
+    pane.note_streaming(NeoismAgentStreamingState::Idle, None);
+    assert_eq!(pane.streaming_label(), "Crafting"); // held in-session
+
+    // Switching to an unrelated session must not show the previous
+    // conversation's held label for even one frame.
+    pane.switch_session("unrelated".to_string());
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert_eq!(pane.streaming_label(), "");
+}
+
+#[test]
+fn viewed_child_shows_its_own_verb_not_the_sibling_aggregate() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child-1".to_string());
+    pane.parent_session_id = Some("parent".to_string());
+    pane.side_panel.ensure_subagent_main_entry("parent");
+    pane.side_panel
+        .upsert_subagent("child-2", "Write the docs", "build");
+    pane.note_subagent_runtime("child-2".to_string(), BranchStatus::Active, None);
+    pane.sync_subagent_waiting_clock();
+
+    // While the viewed child streams, its own verb is the label even
+    // though a sibling is running.
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    assert_eq!(pane.streaming_label(), "Crafting");
+
+    // A child view never shows the parent's aggregate label: after its
+    // own verb's grace hold expires, the display is Idle even though a
+    // sibling is still running.
+    pane.note_streaming(NeoismAgentStreamingState::Idle, None);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert_eq!(pane.streaming_label(), "");
 }
 
 #[test]
@@ -877,6 +1180,14 @@ fn runtime_child_keeps_waiting_status_before_sidebar_hydrates() {
     pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
     pane.sync_subagent_waiting_clock();
     assert_eq!(pane.active_subagent_count(), 0);
+    // The completion edge is bridged by the display grace hold, then
+    // sustained idle clears the label.
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
 }
 
@@ -1210,6 +1521,14 @@ fn running_background_task_count_tracks_started_and_collected_jobs() {
     pane.refresh_background_task_activity_clock();
 
     assert_eq!(pane.running_background_task_count(), 0);
+    // The display grace hold bridges the collection edge; sustained idle
+    // then clears it.
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::BackgroundTasks
+    );
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
     assert!(!pane.background_task_details_expanded());
 }
@@ -1411,6 +1730,177 @@ fn cancelled_background_task_clears_running_job() {
     assert!(pane.active_background_task_summaries().is_empty());
 }
 
+/// The card the live `session.background_task.completed` path injects
+/// (desktop `pane/ingest.rs::BackgroundTaskCompleted`) — same shape the
+/// shared `api_mapping::background_completion_card` regenerates from the
+/// persisted runtime prompt.
+fn client_background_completion_card(job_id: &str) -> NeoismAgentMessage {
+    let mut card = NeoismAgentMessage::tool(
+        "background_task_result",
+        format!("job_id: {job_id}\nstatus: completed\nbackground shell task finished"),
+        "completed",
+        "background_task_result",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    )
+    .with_id(format!("background-task-{job_id}"));
+    card.detail = card.text.clone();
+    card
+}
+
+#[test]
+fn background_completion_card_survives_history_snapshot_replacement() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("kick off the build").with_id("u-1"),
+        NeoismAgentMessage::assistant("Started.").with_id("a-1"),
+    ]);
+    pane.upsert_part_message(client_background_completion_card("job-1"));
+
+    // A refresh lands BEFORE the server's queued completion prompt has
+    // drained: the snapshot carries no trace of the card. It must survive,
+    // anchored after the content that preceded it.
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("kick off the build").with_id("u-1"),
+        NeoismAgentMessage::assistant("Started.").with_id("a-1"),
+    ]);
+
+    assert_eq!(pane.messages.len(), 3);
+    assert_eq!(pane.messages[2].id, "background-task-job-1");
+
+    // Repeated refreshes (with newer turns appended) keep it in its
+    // chronological slot — after "a-1", before the newer prompt.
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("kick off the build").with_id("u-1"),
+        NeoismAgentMessage::assistant("Started.").with_id("a-1"),
+        NeoismAgentMessage::user("second question").with_id("u-2"),
+    ]);
+    assert_eq!(
+        pane.messages
+            .iter()
+            .filter(|message| message.id == "background-task-job-1")
+            .count(),
+        1
+    );
+    assert_eq!(pane.messages[2].id, "background-task-job-1");
+    assert_eq!(pane.messages[3].id, "u-2");
+}
+
+#[test]
+fn server_background_completion_copy_replaces_client_card_without_duplicate() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_history(vec![NeoismAgentMessage::user("run it").with_id("u-1")]);
+    pane.upsert_part_message(client_background_completion_card("job-1"));
+
+    // Once the runtime prompt drains, snapshots carry the persisted copy
+    // under the SAME durable id (`api_mapping::background_completion_card`)
+    // with the full captured output in detail — it replaces the client
+    // copy instead of duplicating or wiping it.
+    let mut server_copy = NeoismAgentMessage::tool(
+        "background_task_result",
+        "job_id: job-1\nstatus: completed\nbackground shell task finished",
+        "completed",
+        "background_task_result",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    )
+    .with_id("background-task-job-1");
+    server_copy.detail =
+        "Background shell task finished.\njob_id: job-1\nstatus: completed\n<task_result>ok</task_result>"
+            .to_string();
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("run it").with_id("u-1"),
+        server_copy,
+    ]);
+
+    let cards: Vec<_> = pane
+        .messages
+        .iter()
+        .filter(|message| message.id == "background-task-job-1")
+        .collect();
+    assert_eq!(cards.len(), 1);
+    assert!(cards[0].detail.contains("<task_result>"), "server copy won");
+}
+
+#[test]
+fn snapshot_with_matching_job_id_suppresses_card_reinsertion() {
+    let mut pane = NeoismAgentPane::default();
+    pane.upsert_part_message(client_background_completion_card("job-1"));
+
+    // A server-visible completion for the same job under a DIFFERENT id
+    // (e.g. a background_task_result tool-call row that reread the
+    // finished output) counts as the server copy — no duplicate insert.
+    let mut reread = NeoismAgentMessage::tool(
+        "background_task_result",
+        "job_id: job-1\nstatus: completed",
+        "completed",
+        "background_task_result",
+        NeoismAgentOutputKind::Text,
+        "text",
+        Vec::new(),
+    )
+    .with_id("prt-reread-1");
+    reread.detail = reread.text.clone();
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("check it").with_id("u-1"),
+        reread,
+    ]);
+
+    assert!(pane
+        .messages
+        .iter()
+        .all(|message| message.id != "background-task-job-1"));
+    assert_eq!(
+        pane.messages
+            .iter()
+            .filter(|message| message.tool == "background_task_result")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn cached_background_completion_card_survives_park_restore_and_refresh() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-a".to_string()));
+
+    // Completion for a parked session streams into its cache entry…
+    pane.cache_upsert_part_message(
+        "sess-b",
+        client_background_completion_card("job-9"),
+    );
+    // …and the background history refresh (server copy not persisted yet)
+    // keeps it through the snapshot merge.
+    pane.apply_history_to_cache(
+        "sess-b",
+        vec![NeoismAgentMessage::user("bg question").with_id("u-1")],
+        None,
+    );
+    {
+        let cached = pane.session_cache.get("sess-b").expect("entry");
+        assert!(cached
+            .messages
+            .iter()
+            .any(|message| message.id == "background-task-job-9"));
+    }
+
+    // Switching to the parked session restores the card…
+    pane.switch_session("sess-b".to_string());
+    assert!(pane
+        .messages
+        .iter()
+        .any(|message| message.id == "background-task-job-9"));
+
+    // …and an active-session refresh after the restore still keeps it.
+    pane.apply_history(vec![NeoismAgentMessage::user("bg question").with_id("u-1")]);
+    assert!(pane
+        .messages
+        .iter()
+        .any(|message| message.id == "background-task-job-9"));
+}
+
 #[test]
 fn background_status_is_scoped_to_pane_session_messages() {
     let mut pane_with_job = NeoismAgentPane::default();
@@ -1518,8 +2008,222 @@ fn subagent_composer_status_tracks_only_active_children() {
     pane.sync_subagent_waiting_clock();
 
     assert_eq!(pane.active_subagent_count(), 0);
+    // Grace hold bridges the last child's completion edge, then
+    // sustained idle clears the label and the row's reserved activity.
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
     assert!(!pane.has_status_activity());
+}
+
+/// A subagent conversation is an EXTENSION of the main chat: entering a
+/// child must keep the parent-keyed roster (names, statuses, running
+/// count) alive in the sidebar instead of clearing it.
+#[test]
+fn roster_survives_entering_subagent_session() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel.ensure_subagent_main_entry("parent");
+    pane.side_panel
+        .upsert_subagent("child-1", "Fix the tests", "explore");
+    pane.side_panel
+        .upsert_subagent("child-2", "Write the docs", "build");
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
+    pane.note_subagent_runtime("child-2".to_string(), BranchStatus::Active, None);
+    pane.sync_subagent_waiting_clock();
+    assert_eq!(pane.active_subagent_count(), 2);
+
+    // Cold switch into a child (no hydrated cache entry).
+    pane.switch_session("child-1".to_string());
+
+    assert_eq!(pane.session_id.as_deref(), Some("child-1"));
+    assert_eq!(pane.parent_session_id.as_deref(), Some("parent"));
+    assert!(pane.is_subagent_session());
+    let roster: Vec<&str> = pane
+        .side_panel
+        .subagents()
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(roster, vec!["parent", "child-1", "child-2"]);
+    assert_eq!(
+        pane.side_panel
+            .subagents()
+            .iter()
+            .find(|entry| entry.id == "child-2")
+            .map(|entry| entry.title.as_str()),
+        Some("Write the docs")
+    );
+    // The sibling still reads as running from the child's viewpoint.
+    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 1);
+
+    // Sibling lifecycle updates keep applying to the roster while the
+    // child transcript is open.
+    assert!(pane.note_family_session_streaming("child-2", false));
+    assert!(matches!(
+        pane.side_panel
+            .branch_activity("child-2")
+            .map(|activity| activity.status),
+        Some(BranchStatus::Completed)
+    ));
+    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 0);
+}
+
+#[test]
+fn roster_survives_cached_switch_into_subagent() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel.ensure_subagent_main_entry("parent");
+    pane.side_panel
+        .upsert_subagent("child-1", "Fix the tests", "explore");
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
+    // Hydrate the child's cache slot so the switch takes the instant
+    // restore path (`activate_cached_session`).
+    pane.apply_history_to_cache(
+        "child-1",
+        vec![NeoismAgentMessage::user("go")],
+        None,
+    );
+    assert!(pane.cached_session_is_hydrated("child-1"));
+
+    pane.switch_session("child-1".to_string());
+
+    assert_eq!(pane.session_id.as_deref(), Some("child-1"));
+    // The live-only cache slot had no session metadata; the parent
+    // linkage is derived from the roster so the child still opens as a
+    // view-only subagent transcript.
+    assert_eq!(pane.parent_session_id.as_deref(), Some("parent"));
+    let roster: Vec<&str> = pane
+        .side_panel
+        .subagents()
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(roster, vec!["parent", "child-1"]);
+
+    // Returning to the parent keeps the roster intact as well.
+    pane.switch_session("parent".to_string());
+    assert_eq!(pane.session_id.as_deref(), Some("parent"));
+    assert!(pane.parent_session_id.is_none());
+    let roster: Vec<&str> = pane
+        .side_panel
+        .subagents()
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(roster, vec!["parent", "child-1"]);
+}
+
+/// Clicking a Task card raises/expands it (that's also the navigation
+/// affordance into the subagent). Returning to the parent must render
+/// the timeline fresh — the raised card must NOT still be up showing
+/// its title, demanding an extra click to dismiss.
+#[test]
+fn task_card_expansion_clears_on_subagent_round_trip() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel.ensure_subagent_main_entry("parent");
+    pane.side_panel
+        .upsert_subagent("child-1", "Fix the tests", "explore");
+    pane.messages = vec![task_tool_message("child-1", "running")];
+
+    // The navigation click expands the Task card…
+    pane.register_tool_hit_rect("task-card".to_string(), [0.0, 0.0, 200.0, 40.0]);
+    assert!(pane.toggle_tool_at(10.0, 10.0));
+    assert!(pane.tool_expanded("task-card"));
+    assert!(pane.tool_expand_animating("task-card"));
+
+    // …then the user enters the child and comes back to the parent.
+    pane.switch_session("child-1".to_string());
+    assert!(
+        !pane.tool_expanded("task-card"),
+        "child timeline must not inherit the parent's expansion"
+    );
+    pane.switch_session("parent".to_string());
+
+    assert!(
+        !pane.tool_expanded("task-card"),
+        "returning must render the timeline fresh — no raised Task card"
+    );
+    assert!(!pane.tool_expand_animating("task-card"));
+    assert!(!pane.any_tool_expand_animating());
+}
+
+#[test]
+fn group_child_selection_and_link_hover_clear_on_session_switch() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.register_tool_hit_rect(
+        "group-1::child::read-2".to_string(),
+        [0.0, 0.0, 200.0, 40.0],
+    );
+    assert!(pane.toggle_tool_at(10.0, 10.0));
+    assert_eq!(pane.selected_tool_group_child("group-1"), Some("read-2"));
+    pane.register_link_hit_rect("src/main.rs".to_string(), [0.0, 50.0, 100.0, 12.0]);
+    assert!(pane.update_link_hover_at(10.0, 55.0));
+    assert!(pane.link_hovered("src/main.rs"));
+
+    pane.switch_session("unrelated".to_string());
+
+    assert_eq!(pane.selected_tool_group_child("group-1"), None);
+    assert!(!pane.link_hovered("src/main.rs"));
+    assert!(!pane.link_hover_active());
+    // Stale hit rects from the previous timeline are gone too — a click
+    // at the old coordinates falls through instead of re-toggling.
+    assert!(!pane.toggle_tool_at(10.0, 10.0));
+}
+
+#[test]
+fn roster_clears_when_leaving_the_session_family() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel.ensure_subagent_main_entry("parent");
+    pane.side_panel
+        .upsert_subagent("child-1", "Fix the tests", "explore");
+
+    pane.switch_session("unrelated".to_string());
+
+    assert_eq!(pane.session_id.as_deref(), Some("unrelated"));
+    assert!(pane.parent_session_id.is_none());
+    assert!(pane.side_panel.subagents().is_empty());
+}
+
+#[test]
+fn family_streaming_edges_only_touch_tracked_rows() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child-1".to_string());
+    pane.parent_session_id = Some("parent".to_string());
+    pane.side_panel.ensure_subagent_main_entry("parent");
+    pane.side_panel
+        .upsert_subagent("child-1", "Fix the tests", "explore");
+    pane.side_panel
+        .upsert_subagent("child-2", "Write the docs", "build");
+
+    // Untracked sessions never pollute the family roster.
+    assert!(!pane.note_family_session_streaming("stranger", true));
+    assert!(pane
+        .side_panel
+        .subagents()
+        .iter()
+        .all(|entry| entry.id != "stranger"));
+
+    // A tracked sibling's edges apply while a child is on screen…
+    assert!(pane.note_family_session_streaming("child-2", true));
+    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 1);
+    assert!(pane.note_family_session_streaming("child-2", false));
+    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 0);
+
+    // …but a straggler active edge cannot resurrect a sibling whose
+    // idle edge already latched the terminal lock.
+    assert!(!pane.note_family_session_streaming("child-2", true));
+    assert_eq!(pane.side_panel.active_child_count(Some("child-1")), 0);
+
+    // The viewed session itself is never routed through the roster.
+    assert!(!pane.note_family_session_streaming("child-1", true));
 }
 
 #[test]
@@ -2475,4 +3179,476 @@ fn connect_secret_escape_steps_back_to_auth_method() {
     // ESC again → dismissed entirely.
     pane.close_picker();
     assert!(pane.picker().is_none());
+}
+
+#[test]
+fn history_chunk_mid_stream_keeps_optimistic_echo_and_streamed_text() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-1".to_string()));
+    // Optimistic user echo of a just-sent prompt (the server store
+    // hasn't caught up yet) + assistant text streamed ahead of the
+    // snapshot fetch.
+    pane.messages.push(NeoismAgentMessage::user("do the thing"));
+    pane.remember_pending_user_prompt("do the thing");
+    pane.apply_part_delta(
+        None,
+        Some("part-1".to_string()),
+        Some("text".to_string()),
+        "streamed answer",
+    );
+
+    // A stale HistoryChunk lands mid-stream: it neither contains the
+    // user echo nor the full streamed assistant text.
+    pane.apply_history(vec![NeoismAgentMessage::assistant("streamed").with_id("part-1")]);
+
+    assert!(
+        pane.messages.iter().any(|message| {
+            message.kind == NeoismAgentMessageKind::User
+                && message.text == "do the thing"
+        }),
+        "optimistic echo dropped: {:?}",
+        pane.messages
+    );
+    let assistant = pane
+        .messages
+        .iter()
+        .find(|message| message.id == "part-1")
+        .expect("assistant part");
+    assert_eq!(assistant.text, "streamed answer");
+    // Once a later chunk carries the stored user prompt, the pending
+    // echo resolves instead of duplicating.
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("do the thing").with_id("user-1"),
+        NeoismAgentMessage::assistant("streamed answer").with_id("part-1"),
+    ]);
+    assert_eq!(
+        pane.messages
+            .iter()
+            .filter(|message| message.kind == NeoismAgentMessageKind::User
+                && message.text == "do the thing")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn history_chunk_canonicalizes_expanded_prompt_echoes() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-1".to_string()));
+    pane.insert_text("please review ");
+    pane.insert_pasted_text_attachment("line one\nline two\nline three".to_string());
+    let composer_text = pane.input().trim().to_string();
+    let expanded = pane.expand_text_attachments(&composer_text);
+    assert_ne!(
+        expanded.trim(),
+        composer_text,
+        "paste token must expand on send"
+    );
+    assert!(pane.submit());
+    let _ = pane.drain_pending_outbound();
+
+    // The server echoes the EXPANDED prompt back; the timeline must keep
+    // ONE bubble in the compact composer form.
+    pane.apply_history(vec![
+        NeoismAgentMessage::user(expanded.trim()).with_id("user-1")
+    ]);
+    let users = pane
+        .messages
+        .iter()
+        .filter(|message| message.kind == NeoismAgentMessageKind::User)
+        .collect::<Vec<_>>();
+    assert_eq!(users.len(), 1, "expected one bubble: {:?}", pane.messages);
+    assert_eq!(users[0].text, composer_text);
+}
+
+#[test]
+fn switching_sessions_does_not_leak_pending_echoes_into_the_new_transcript() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-1".to_string()));
+    pane.messages.push(NeoismAgentMessage::user("old prompt"));
+    pane.remember_pending_user_prompt("old prompt");
+
+    pane.switch_session("sess-2".to_string());
+    let _ = pane.drain_pending_outbound();
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("their prompt").with_id("user-9"),
+        NeoismAgentMessage::assistant("their answer").with_id("answer-9"),
+    ]);
+
+    assert!(
+        !pane
+            .messages
+            .iter()
+            .any(|message| message.text == "old prompt"),
+        "stale echo resurrected: {:?}",
+        pane.messages
+    );
+}
+
+// ---------------------------------------------------------------
+// @file mentions (host-fed candidates) + byte-based attachments
+// ---------------------------------------------------------------
+
+#[test]
+fn typing_at_opens_file_mention_picker_ranked_by_fuzzy_score() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_file_mention_candidates(vec![
+        "docs/guide.md".to_string(),
+        "src/main.rs".to_string(),
+        "./src\\models\\map.rs".to_string(),
+    ]);
+
+    pane.insert_text("open @ma");
+
+    let picker = pane.picker().expect("file mention picker");
+    assert_eq!(picker.kind, NeoismAgentPickerKind::FileMention);
+    assert_eq!(pane.file_mention_query().as_deref(), Some("ma"));
+    let values: Vec<&str> = picker
+        .options()
+        .iter()
+        .map(|option| option.value.as_str())
+        .collect();
+    // Substring hits rank first, earlier hit position winning (desktop
+    // fuzzy_score policy); the backslash candidate was normalized to
+    // forward slashes and its leading "./" stripped.
+    assert_eq!(values[0], "src/main.rs");
+    assert!(values.contains(&"src/models/map.rs"));
+    assert!(
+        !values.contains(&"docs/guide.md"),
+        "no 'm→a' subsequence exists in docs/guide.md: {values:?}"
+    );
+    let main = picker
+        .options()
+        .iter()
+        .find(|option| option.value == "src/main.rs")
+        .expect("main.rs row");
+    assert_eq!(main.title, "@src/main.rs");
+    assert_eq!(main.description, "file in src");
+}
+
+#[test]
+fn candidates_arriving_while_mention_is_open_refresh_the_picker() {
+    let mut pane = NeoismAgentPane::default();
+    pane.insert_text("see @gui");
+    let picker = pane.picker().expect("file mention picker opens on @");
+    assert_eq!(picker.kind, NeoismAgentPickerKind::FileMention);
+    assert!(picker.options().is_empty(), "no candidates fed yet");
+
+    pane.set_file_mention_candidates(vec!["docs/guide.md".to_string()]);
+
+    let picker = pane.picker().expect("picker still open");
+    assert_eq!(picker.options().len(), 1);
+    assert_eq!(picker.options()[0].value, "docs/guide.md");
+}
+
+#[test]
+fn committing_a_file_mention_inserts_the_token_and_closes_the_picker() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_file_mention_candidates(vec!["src/main.rs".to_string()]);
+    pane.insert_text("open @main");
+
+    assert!(pane.submit(), "Enter commits the picker, not the prompt");
+
+    assert_eq!(pane.input(), "open @src/main.rs ");
+    assert!(pane.picker().is_none());
+    assert_eq!(pane.file_mention_query(), None);
+}
+
+#[test]
+fn attach_file_bytes_tokens_follow_the_shared_attachment_policy() {
+    let mut pane = NeoismAgentPane::default();
+
+    assert!(pane.attach_file_bytes("shot.png", "image/png", b"png-bytes"));
+    assert!(pane.attach_file_bytes("paper.pdf", "application/pdf", b"pdf-bytes"));
+    assert!(pane.attach_file_bytes("notes.txt", "", b"text-bytes"));
+
+    assert_eq!(pane.input(), "[image1] [pdf1] [file1: notes.txt] ");
+    let images = pane.input_images();
+    assert_eq!(images.len(), 1, "only the png is an image-rail chip");
+    assert_eq!(images[0].filename, "shot.png");
+    assert!(images[0].url.starts_with("data:image/png;base64,"));
+}
+
+#[test]
+fn attach_file_bytes_rejects_oversized_and_empty_payloads() {
+    let mut pane = NeoismAgentPane::default();
+    assert!(!pane.attach_file_bytes("empty.png", "image/png", b""));
+    let oversized = vec![0u8; (20 * 1024 * 1024) + 1];
+    assert!(!pane.attach_file_bytes("big.png", "image/png", &oversized));
+    assert_eq!(pane.input(), "");
+    assert!(pane.input_images().is_empty());
+    assert!(
+        pane.drain_ui_events()
+            .iter()
+            .any(|event| matches!(event, NeoismAgentUiEvent::Notice { .. })),
+        "oversized attach should surface a notice"
+    );
+}
+
+#[test]
+fn attach_clipboard_image_names_unnamed_pastes_like_desktop() {
+    let mut pane = NeoismAgentPane::default();
+    assert!(pane.attach_clipboard_image("", "image/png", b"bytes"));
+    assert!(!pane.attach_clipboard_image("x.txt", "text/plain", b"bytes"));
+
+    assert_eq!(pane.input(), "[image1] ");
+    let images = pane.input_images();
+    assert_eq!(images[0].filename, "clipboard-image-1.png");
+}
+
+#[test]
+fn repeated_image_attachments_get_unique_tokens() {
+    let mut pane = NeoismAgentPane::default();
+    assert!(pane.attach_clipboard_image("", "image/png", b"one"));
+    assert!(pane.attach_clipboard_image("", "image/png", b"two"));
+
+    assert_eq!(pane.input(), "[image1] [image2] ");
+    assert_eq!(pane.input_images().len(), 2);
+}
+
+#[test]
+fn submitting_an_attached_image_ships_a_file_part_and_echoes_the_chip() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-1".to_string()));
+    let _ = pane.drain_pending_outbound();
+
+    assert!(pane.attach_clipboard_image("shot.png", "image/png", b"png"));
+    pane.insert_text("what is this?");
+    assert!(pane.submit());
+
+    let drained = pane.drain_pending_outbound();
+    match &drained[0] {
+        OutboundAgentCommand::SendPrompt { text, parts, .. } => {
+            assert_eq!(text, "[image1] what is this?");
+            assert_eq!(parts[0]["type"], "text");
+            assert_eq!(parts[1]["type"], "file");
+            assert_eq!(parts[1]["filename"], "shot.png");
+            assert_eq!(parts[1]["mime"], "image/png");
+            assert!(parts[1]["url"]
+                .as_str()
+                .expect("url string")
+                .starts_with("data:image/png;base64,"));
+        }
+        other => panic!("expected SendPrompt, got {other:?}"),
+    }
+    // The transcript echo renders the image rail on the sent user card.
+    let user = pane
+        .messages
+        .iter()
+        .find(|message| message.kind == NeoismAgentMessageKind::User)
+        .expect("user bubble");
+    assert_eq!(user.images.len(), 1);
+    assert_eq!(user.images[0].filename, "shot.png");
+    // Attachments are consumed by the send.
+    assert!(pane.input_images().is_empty());
+}
+
+// ---------------------------------------------------------------
+// Multi-session background cache (desktop `CachedAgentSession` port):
+// park on switch, instant restore on return, background streaming
+// into caches, snapshot merges, LRU eviction.
+// ---------------------------------------------------------------
+
+#[test]
+fn session_cache_park_restore_roundtrip_is_instant() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-a".to_string()));
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("question a").with_id("ua-1"),
+        NeoismAgentMessage::assistant("answer a").with_id("aa-1"),
+    ]);
+    pane.timeline_scroll_px = 123.5;
+    pane.timeline_follow_bottom = false;
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+
+    // Switching away PARKS the full conversation state under its id.
+    pane.switch_session("sess-b".to_string());
+    assert_eq!(pane.session_id.as_deref(), Some("sess-b"));
+    assert!(pane.messages.is_empty(), "cold switch shows a fresh pane");
+    assert!(
+        pane.cached_session_is_hydrated("sess-a"),
+        "parked session must be hydrated (instant-switch eligible)"
+    );
+    {
+        let parked = pane.session_cache.get("sess-a").expect("parked entry");
+        assert_eq!(parked.messages.len(), 2);
+        assert!((parked.timeline_scroll_px - 123.5).abs() < f32::EPSILON);
+        assert!(!parked.timeline_follow_bottom);
+        assert!(parked.runtime.is_streaming(), "runtime UI parked too");
+    }
+    assert!(!pane.is_streaming(), "runtime UI must not leak across parks");
+
+    // Hydrate B so it parks as a distinct conversation.
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("question b").with_id("ub-1")
+    ]);
+
+    // Switching back restores INSTANTLY — messages/scroll/runtime are
+    // present the moment `switch_session` returns, before any
+    // HistoryChunk lands.
+    pane.switch_session("sess-a".to_string());
+    assert_eq!(pane.session_id.as_deref(), Some("sess-a"));
+    assert_eq!(pane.messages.len(), 2);
+    assert_eq!(pane.messages[0].text, "question a");
+    assert_eq!(pane.messages[1].text, "answer a");
+    assert!((pane.timeline_scroll_px - 123.5).abs() < f32::EPSILON);
+    assert!(!pane.timeline_follow_bottom);
+    assert!(pane.is_streaming(), "restored runtime keeps streaming UI");
+    // …and B is parked in A's place.
+    assert!(pane.cached_session_is_hydrated("sess-b"));
+    // The instant restore still issues a background SwitchSession so
+    // the host re-binds the stream + refreshes history for staleness.
+    let drained = pane.drain_pending_outbound();
+    let switches = drained
+        .iter()
+        .filter(|cmd| matches!(cmd, OutboundAgentCommand::SwitchSession { .. }))
+        .count();
+    assert_eq!(switches, 2, "both switches reach the host: {drained:?}");
+}
+
+#[test]
+fn switching_to_the_active_session_is_a_noop() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-a".to_string()));
+    pane.messages.push(NeoismAgentMessage::user("hi"));
+    pane.switch_session("sess-a".to_string());
+    assert_eq!(pane.messages.len(), 1, "no clear on same-session switch");
+    assert!(
+        pane.drain_pending_outbound().is_empty(),
+        "no redundant SwitchSession for the active session"
+    );
+}
+
+#[test]
+fn background_events_stream_into_session_cache_not_dropped() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-a".to_string()));
+
+    // Streamed deltas for a NON-active session land in its cache entry.
+    pane.cache_apply_part_delta("sess-b", Some("part-1"), Some("text"), "hello");
+    pane.cache_apply_part_delta("sess-b", Some("part-1"), Some("text"), " world");
+    assert!(pane.messages.is_empty(), "active pane untouched");
+    {
+        let cached = pane.session_cache.get("sess-b").expect("cache entry");
+        assert!(!cached.hydrated, "live-only until a snapshot lands");
+        assert_eq!(cached.messages.len(), 1);
+        assert_eq!(cached.messages[0].text, "hello world");
+        assert!(cached.runtime.is_streaming(), "tail drives cached spinner");
+    }
+
+    pane.cache_note_session_idle("sess-b");
+    assert!(!pane.session_cache.get("sess-b").unwrap().runtime.is_streaming());
+
+    // Part removal + upsert route to the cache as well.
+    pane.cache_upsert_part_message(
+        "sess-b",
+        NeoismAgentMessage::assistant("tail").with_id("part-2"),
+    );
+    pane.cache_remove_part_message("sess-b", "part-1");
+    let cached = pane.session_cache.get("sess-b").expect("cache entry");
+    assert_eq!(cached.messages.len(), 1);
+    assert_eq!(cached.messages[0].id, "part-2");
+}
+
+#[test]
+fn history_chunk_for_cached_session_merges_like_desktop() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-a".to_string()));
+
+    // Live parts streamed into the background cache while the snapshot
+    // request was in flight…
+    pane.cache_apply_part_delta("sess-b", Some("part-1"), Some("text"), "hello wor");
+    {
+        let cached = pane.session_cache.get_mut("sess-b").expect("entry");
+        // …plus an optimistic user echo that the snapshot has caught
+        // up to (reconcile_cached_pending_user_prompts must retire it).
+        cached.messages.insert(0, NeoismAgentMessage::user("hi"));
+        cached.pending_user_prompts.push("hi".to_string());
+    }
+
+    // Snapshot: the same part with an OLDER text prefix — live wins.
+    pane.apply_history_to_cache(
+        "sess-b",
+        vec![
+            NeoismAgentMessage::user("hi").with_id("u-1"),
+            NeoismAgentMessage::assistant("hello").with_id("part-1"),
+        ],
+        Some("cursor-1".to_string()),
+    );
+
+    let cached = pane.session_cache.get("sess-b").expect("entry");
+    assert!(cached.hydrated);
+    assert_eq!(
+        cached.timeline_history.oldest_loaded_cursor.as_deref(),
+        Some("cursor-1")
+    );
+    assert!(cached.pending_user_prompts.is_empty(), "echo resolved");
+    assert_eq!(cached.messages.len(), 2, "no duplicate user bubble");
+    assert_eq!(cached.messages[0].id, "u-1");
+    assert_eq!(
+        cached.messages[1].text, "hello wor",
+        "stale snapshot must not truncate streamed text"
+    );
+}
+
+#[test]
+fn cold_switch_seeds_from_background_streamed_parts() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-a".to_string()));
+    pane.cache_apply_part_delta("sess-b", Some("p1"), Some("text"), "background answer");
+
+    pane.switch_session("sess-b".to_string());
+    assert_eq!(pane.session_id.as_deref(), Some("sess-b"));
+    assert_eq!(pane.messages.len(), 1, "streamed parts show immediately");
+    assert_eq!(pane.messages[0].text, "background answer");
+    assert!(pane.is_streaming(), "cached runtime restored on cold switch");
+    assert!(
+        !pane.session_cache.contains_key("sess-b"),
+        "live-only entry consumed by the switch"
+    );
+    // The refresh snapshot reconciles rather than truncates.
+    pane.apply_history(vec![
+        NeoismAgentMessage::assistant("background").with_id("p1")
+    ]);
+    assert_eq!(pane.messages[0].text, "background answer");
+}
+
+#[test]
+fn session_cache_eviction_is_lru_bounded_with_pins() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("active".to_string()));
+    // Entry for the active session id (bridge/pane id skew scenario) —
+    // must be pinned through eviction.
+    pane.cache_apply_part_delta("active", Some("p"), Some("text"), "x");
+    for index in 0..60 {
+        pane.cache_apply_part_delta(
+            &format!("bg-{index}"),
+            Some("p"),
+            Some("text"),
+            "x",
+        );
+    }
+    assert_eq!(
+        pane.session_cache.len(),
+        40,
+        "cache bounded at desktop's MAX_CACHED_SESSIONS"
+    );
+    assert!(
+        pane.session_cache.contains_key("active"),
+        "active session pinned"
+    );
+    assert!(
+        pane.session_cache.contains_key("bg-59"),
+        "most recent entry survives"
+    );
+}
+
+#[test]
+fn deleted_thread_evicts_its_cache_entry() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-a".to_string()));
+    pane.cache_apply_part_delta("sess-b", Some("p"), Some("text"), "x");
+    pane.clear_session_id_if("sess-b");
+    assert!(!pane.session_cache.contains_key("sess-b"));
+    assert_eq!(pane.session_id.as_deref(), Some("sess-a"));
 }

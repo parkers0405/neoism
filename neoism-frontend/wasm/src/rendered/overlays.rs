@@ -434,6 +434,23 @@ impl ChromeBridge {
         use neoism_ui::panels::diagnostics_popup::Severity;
         use neoism_ui::panels::status_line::StatusLineClickAction;
 
+        // LSP "Server Details" popup first refusal: clicks inside are
+        // routed to it (copy-message rows queue the payload for the
+        // host clipboard); clicks outside close it and fall through to
+        // the pills, matching the desktop layering.
+        if self.chrome.lsp_popup.is_visible() {
+            let scale = self.chrome.chrome_scale();
+            if self.chrome.lsp_popup.contains_point(x, y, scale) {
+                // CopyMessage rows are not routed to the host clipboard
+                // yet (the click intent enum has no copy variant) —
+                // the click is still consumed so it can't fall through.
+                let _ = self.chrome.lsp_popup.click(x, y, scale);
+                return serde_wasm_bindgen::to_value(&StatusLineClickIntent::Consumed)
+                    .unwrap_or(JsValue::NULL);
+            }
+            self.chrome.lsp_popup.close();
+        }
+
         if self.chrome.diagnostics_popup.is_visible() {
             match self.chrome.diagnostics_popup.hit_test(x, y) {
                 Ok(Some(idx)) => {
@@ -472,7 +489,17 @@ impl ChromeBridge {
         let intent = match action {
             StatusLineClickAction::ToggleSplit => StatusLineClickIntent::ToggleSplit,
             StatusLineClickAction::ToggleGitDiff => StatusLineClickIntent::ToggleGitDiff,
-            StatusLineClickAction::ToggleLspPopup => StatusLineClickIntent::Consumed,
+            StatusLineClickAction::ToggleLspPopup => {
+                // Shared "Server Details" card anchored to the pill;
+                // rows are fed from daemon `LspSnapshot` pushes
+                // (`editor_lsp_reply`).
+                if self.chrome.lsp_popup.is_visible() {
+                    self.chrome.lsp_popup.close();
+                } else if let Some(anchor) = self.chrome.status_line.lsp_pill_rect() {
+                    self.chrome.lsp_popup.open(anchor);
+                }
+                StatusLineClickIntent::Consumed
+            }
             StatusLineClickAction::Diagnostics { pill } => {
                 let items: Vec<_> = self
                     .cached_diagnostics
@@ -604,6 +631,275 @@ impl ChromeBridge {
     /// menu is already closed.
     pub fn hide_context_menu(&mut self) {
         self.chrome.context_menu.close();
+    }
+
+    // ----- chrome modal (spec-driven) ---------------------------------
+    //
+    // The generalized `UniversalModal` channel: TS opens desktop's
+    // exact modal specs (file-tree create/rename/delete, the LSP
+    // rename form, or an arbitrary JSON spec), the shared chrome
+    // routes keys/clicks through the modal exactly like desktop's
+    // router (`keyboard_capture_active` flips true while the modal is
+    // up, so the existing key forwarding path feeds it), and confirmed
+    // outcomes surface through `drain_modal_actions` for the host to
+    // execute (daemon Files ops, LSP rename submit).
+
+    /// True while the chrome-hosted modal is up (input-owning).
+    pub fn modal_active(&self) -> bool {
+        self.chrome.modal.is_active()
+    }
+
+    /// Open the "New File" prompt for `dir` (desktop
+    /// `open_file_tree_new_file_prompt` spec). `dir` is the absolute
+    /// path the host's tree row carries; it is echoed back verbatim in
+    /// the confirmed action.
+    pub fn open_file_tree_new_file_modal(&mut self, dir: String) {
+        self.chrome.open_file_tree_new_file_modal(&dir);
+    }
+
+    /// Open the "New Folder" prompt for `dir`.
+    pub fn open_file_tree_new_folder_modal(&mut self, dir: String) {
+        self.chrome.open_file_tree_new_folder_modal(&dir);
+    }
+
+    /// Open the "Rename" prompt for `path` (pre-filled with the
+    /// current file name).
+    pub fn open_file_tree_rename_modal(&mut self, path: String) {
+        self.chrome.open_file_tree_rename_modal(&path);
+    }
+
+    /// Open the destructive "Delete file/folder?" confirm for `path`.
+    /// Pass `null` for `is_dir` to let the chrome resolve the kind
+    /// from its current tree entries.
+    pub fn open_file_tree_delete_modal(&mut self, path: String, is_dir: Option<bool>) {
+        let is_dir =
+            is_dir.unwrap_or_else(|| self.chrome.file_tree_path_is_dir(&path));
+        self.chrome.open_file_tree_delete_modal(&path, is_dir);
+    }
+
+    /// Open the LSP rename form pre-filled with `word` (desktop
+    /// `open_code_rename_prompt` spec — Enter submits, Esc cancels).
+    pub fn open_lsp_rename_modal(&mut self, word: String) {
+        self.chrome.open_lsp_rename_modal(&word);
+    }
+
+    /// Open an arbitrary chrome-hosted modal from a JSON spec:
+    ///
+    /// ```text
+    /// {
+    ///   "title": String, "body": String, "meta": String,
+    ///   "input": { "value": String, "placeholder": String } | null,
+    ///   "buttons": [
+    ///     { "label": String, "hint": String,
+    ///       "action": "close"
+    ///               | { "submit":  { "id": String } }   // input attached
+    ///               | { "confirm": { "id": String } } } // plain confirm
+    ///   ],
+    ///   "busy": bool, "blocking": bool,
+    ///   // alternatively a labelled multi-field form:
+    ///   "form": { "title": String, "submit_label": String,
+    ///             "fields": [{ "id", "label", "value", "placeholder", "secret" }] }
+    /// }
+    /// ```
+    ///
+    /// `submit`/`confirm` outcomes drain as `{kind:"generic", id,
+    /// value}`; form submits drain one generic action per field.
+    pub fn open_modal_spec(&mut self, spec_json: &str) -> Result<(), JsValue> {
+        use neoism_ui::widgets::modal::{
+            ModalAction, ModalButton, ModalFormField, ModalFormSpec, ModalInputSpec,
+            ModalSpec,
+        };
+
+        #[derive(serde::Deserialize)]
+        struct JsInput {
+            #[serde(default)]
+            value: String,
+            #[serde(default)]
+            placeholder: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct JsHostId {
+            id: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum JsButtonAction {
+            Submit(JsHostId),
+            Confirm(JsHostId),
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum JsAction {
+            // "close" (or any bare string) — the label itself is not
+            // meaningful, every named action closes.
+            Named(#[allow(dead_code)] String),
+            Tagged(JsButtonAction),
+        }
+        #[derive(serde::Deserialize)]
+        struct JsButton {
+            #[serde(default)]
+            label: String,
+            #[serde(default)]
+            hint: String,
+            action: JsAction,
+        }
+        #[derive(serde::Deserialize)]
+        struct JsFormField {
+            id: String,
+            #[serde(default)]
+            label: String,
+            #[serde(default)]
+            value: String,
+            #[serde(default)]
+            placeholder: String,
+            #[serde(default)]
+            secret: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct JsForm {
+            #[serde(default)]
+            title: String,
+            #[serde(default)]
+            fields: Vec<JsFormField>,
+            #[serde(default = "default_submit_label")]
+            submit_label: String,
+        }
+        fn default_submit_label() -> String {
+            "OK".to_string()
+        }
+        #[derive(serde::Deserialize)]
+        struct JsModalSpec {
+            #[serde(default)]
+            title: String,
+            #[serde(default)]
+            body: String,
+            #[serde(default)]
+            meta: String,
+            #[serde(default)]
+            input: Option<JsInput>,
+            #[serde(default)]
+            buttons: Vec<JsButton>,
+            #[serde(default)]
+            busy: bool,
+            #[serde(default = "default_true_modal")]
+            blocking: bool,
+            #[serde(default)]
+            form: Option<JsForm>,
+        }
+        fn default_true_modal() -> bool {
+            true
+        }
+
+        let parsed: JsModalSpec = serde_json::from_str(spec_json)
+            .map_err(|e| JsValue::from_str(&format!("modal spec parse: {e}")))?;
+
+        if let Some(form) = parsed.form {
+            self.chrome.open_chrome_form_modal(ModalFormSpec {
+                title: if form.title.is_empty() {
+                    parsed.title
+                } else {
+                    form.title
+                },
+                fields: form
+                    .fields
+                    .into_iter()
+                    .map(|field| ModalFormField {
+                        id: field.id,
+                        label: field.label,
+                        value: field.value,
+                        placeholder: field.placeholder,
+                        secret: field.secret,
+                    })
+                    .collect(),
+                submit_label: form.submit_label,
+            });
+            return Ok(());
+        }
+
+        let buttons = parsed
+            .buttons
+            .into_iter()
+            .map(|button| {
+                let action = match button.action {
+                    JsAction::Named(_) => ModalAction::Close,
+                    JsAction::Tagged(JsButtonAction::Submit(host)) => {
+                        // Input value attaches through `with_input` on
+                        // Enter/click — drains as a generic outcome.
+                        ModalAction::RunEditorCommandWithInput {
+                            command: host.id,
+                            value: String::new(),
+                        }
+                    }
+                    JsAction::Tagged(JsButtonAction::Confirm(host)) => {
+                        ModalAction::RunEditorCommand { command: host.id }
+                    }
+                };
+                ModalButton::new(button.label, button.hint, action)
+            })
+            .collect();
+        self.chrome.open_chrome_modal(ModalSpec {
+            title: parsed.title,
+            body: parsed.body,
+            meta: parsed.meta,
+            input: parsed.input.map(|input| ModalInputSpec {
+                value: input.value,
+                placeholder: input.placeholder,
+            }),
+            buttons,
+            busy: parsed.busy,
+            blocking: parsed.blocking,
+        });
+        Ok(())
+    }
+
+    /// Drain confirmed modal outcomes as a JSON array (oldest first):
+    ///
+    /// ```text
+    /// [
+    ///   { "kind": "file_tree_new_file",   "dir": String, "name": String },
+    ///   { "kind": "file_tree_new_folder", "dir": String, "name": String },
+    ///   { "kind": "file_tree_rename",     "path": String, "name": String },
+    ///   { "kind": "file_tree_delete",     "path": String },
+    ///   { "kind": "lsp_rename",           "name": String },
+    ///   { "kind": "generic",              "id": String, "value": String }
+    /// ]
+    /// ```
+    ///
+    /// `null` when nothing was confirmed since the last drain — so a
+    /// host poll loop can distinguish "modal cancelled" (modal
+    /// inactive, drain null) from "confirmed" cheaply.
+    pub fn drain_modal_actions(&mut self) -> JsValue {
+        use neoism_ui::widgets::modal::ModalHostAction;
+        let actions = self.chrome.drain_modal_host_actions();
+        if actions.is_empty() {
+            return JsValue::NULL;
+        }
+        let out: Vec<serde_json::Value> = actions
+            .into_iter()
+            .map(|action| match action {
+                ModalHostAction::FileTreeNewFile { dir, name } => serde_json::json!({
+                    "kind": "file_tree_new_file", "dir": dir, "name": name,
+                }),
+                ModalHostAction::FileTreeNewFolder { dir, name } => serde_json::json!({
+                    "kind": "file_tree_new_folder", "dir": dir, "name": name,
+                }),
+                ModalHostAction::FileTreeRename { path, name } => serde_json::json!({
+                    "kind": "file_tree_rename", "path": path, "name": name,
+                }),
+                ModalHostAction::FileTreeDelete { path } => serde_json::json!({
+                    "kind": "file_tree_delete", "path": path,
+                }),
+                ModalHostAction::LspRename { name } => serde_json::json!({
+                    "kind": "lsp_rename", "name": name,
+                }),
+                ModalHostAction::Generic { id, value } => serde_json::json!({
+                    "kind": "generic", "id": id, "value": value,
+                }),
+            })
+            .collect();
+        JsValue::from_str(
+            &serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()),
+        )
     }
 
     // ----- git branch pill --------------------------------------------

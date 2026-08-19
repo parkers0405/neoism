@@ -147,6 +147,17 @@ impl NeoismAgentPane {
             return true;
         }
         self.remember_sent_prompt(&text);
+        // The transcript echo keeps the compact composer form while the
+        // server receives (and later re-echoes) the expanded prompt.
+        // Remember the pairing so inbound snapshots canonicalize back to
+        // ONE bubble (see `compact_inbound_user_texts`).
+        if prompt.trim() != text.trim() {
+            self.prompt_echo_aliases
+                .push((prompt.trim().to_string(), text.clone()));
+            if self.prompt_echo_aliases.len() > 16 {
+                self.prompt_echo_aliases.remove(0);
+            }
+        }
         let was_streaming = self.is_streaming();
         self.abort_requested_at = None;
         // For a fresh run, show activity immediately. During an active run,
@@ -305,6 +316,24 @@ impl NeoismAgentPane {
         (!query.contains(char::is_whitespace)).then(|| (trigger, query.to_string()))
     }
 
+    /// Seed the composer's Up-arrow recall with a persisted history
+    /// (oldest first). Hosts with durable storage (web localStorage,
+    /// desktop's prompt-history file) restore through this on
+    /// startup; live entries submitted afterwards append on top.
+    pub fn seed_sent_history(&mut self, oldest_first: Vec<String>) {
+        let mut seeded: Vec<String> = oldest_first
+            .into_iter()
+            .filter(|entry| !entry.trim().is_empty())
+            .collect();
+        seeded.dedup();
+        const MAX_HISTORY: usize = 100;
+        if seeded.len() > MAX_HISTORY {
+            let extra = seeded.len() - MAX_HISTORY;
+            seeded.drain(0..extra);
+        }
+        self.sent_history = seeded;
+    }
+
     pub(in crate::panels::agent_pane::state) fn remember_sent_prompt(
         &mut self,
         text: &str,
@@ -347,11 +376,71 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Options for the `@` file-mention picker, ranked exactly like the
+    /// desktop pane: the host-fed candidate list is scored with the
+    /// shared `fuzzy_score` policy, sorted best-first, and capped to
+    /// [`FILE_MENTION_LIMIT`] rows. Row shape mirrors desktop's
+    /// `file_mention_options` (`@path` title, "file in parent"
+    /// description, `file` footer, relative path as the value).
     pub(in crate::panels::agent_pane::state) fn file_mention_options(
         &self,
-        _query: &str,
+        query: &str,
     ) -> Vec<NeoismAgentPickerOption> {
-        Vec::new()
+        use crate::panels::agent_pane::attachment_policy::{
+            file_mention_description, fuzzy_score,
+        };
+
+        let mut scored: Vec<(i64, &str)> = self
+            .file_mention_candidates
+            .iter()
+            .filter_map(|path| fuzzy_score(path, query).map(|score| (score, path.as_str())))
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        scored
+            .into_iter()
+            .take(FILE_MENTION_LIMIT)
+            .map(|(_, relative)| {
+                let description = file_mention_description(relative, "file");
+                NeoismAgentPickerOption::new(
+                    &format!("@{relative}"),
+                    &description,
+                    "file",
+                    relative,
+                )
+            })
+            .collect()
+    }
+
+    /// Host hook: install the `@`-mention candidate paths. Paths are
+    /// mention-root-relative and `/`-separated (backslashes are
+    /// normalized, leading `./` stripped). Hosts with a local
+    /// filesystem can walk it themselves; the web host feeds the
+    /// daemon's workspace file list. Re-syncs an open FileMention
+    /// picker so candidates arriving mid-typing appear immediately.
+    pub fn set_file_mention_candidates(&mut self, candidates: Vec<String>) {
+        self.file_mention_candidates = candidates
+            .into_iter()
+            .map(|path| {
+                let path = path.replace('\\', "/");
+                path.strip_prefix("./").map(str::to_string).unwrap_or(path)
+            })
+            .filter(|path| !path.is_empty())
+            .collect();
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.kind == NeoismAgentPickerKind::FileMention)
+        {
+            self.sync_file_mention_picker();
+        }
+    }
+
+    /// The active `@`-mention query (text between the trigger `@` and
+    /// the cursor), or `None` when no mention is being typed. Hosts
+    /// poll this after input mutations to decide when to (re)feed
+    /// [`Self::set_file_mention_candidates`].
+    pub fn file_mention_query(&self) -> Option<String> {
+        self.active_file_mention().map(|(_, query)| query)
     }
 
     pub(in crate::panels::agent_pane::state) fn file_mention_root(
@@ -478,8 +567,13 @@ impl NeoismAgentPane {
         self.session_id = None;
         self.parent_session_id = None;
         self.side_panel.set_viewed_session_id(None);
+        // A fresh chat must not inherit the previous conversation's
+        // grace-held status label.
+        self.side_panel.clear_status_display_hold();
         self.clear_pending_user_prompts();
+        self.prompt_echo_aliases.clear();
         self.messages.clear();
+        self.reset_transient_timeline_interactions();
         self.reset_session_runtime_ui();
         self.invalidate_timeline_layout();
     }
@@ -492,14 +586,80 @@ impl NeoismAgentPane {
         if trimmed.is_empty() {
             return;
         }
+        // Already showing — nothing to do (desktop
+        // `execute_switch_session_command` parity).
+        if self.session_id.as_deref() == Some(trimmed.as_str()) {
+            return;
+        }
+        if self.activate_cached_session(&trimmed) {
+            // Instant restore from the session cache. The outbound
+            // SwitchSession below still runs: the host re-binds the
+            // daemon stream (ResumeStream) and issues a background
+            // GetHistory whose snapshot reconciles through
+            // `apply_history` — the web analogue of desktop's
+            // resume-time event-stream snapshot refresh.
+            self.push_outbound(OutboundAgentCommand::SwitchSession {
+                session_id: trimmed,
+            });
+            return;
+        }
+        // Family bookkeeping, decided BEFORE ids change hands: a switch
+        // within the tracked conversation family (parent ↔ child ↔
+        // sibling) keeps the parent-keyed subagent roster alive so the
+        // sidebar keeps showing sub-agent names/statuses while a child
+        // transcript is open. Leaving the family clears it instead of
+        // letting a stale roster shadow the new conversation.
+        let stays_in_family = self.session_family_contains(&trimmed);
+        let family_root = self
+            .side_panel
+            .subagents()
+            .first()
+            .map(|entry| entry.id.clone())
+            .or_else(|| self.parent_session_id.clone());
+        // Cold switch: park the current conversation first so returning
+        // to it later is instant, then seed from whatever streamed into
+        // the target's live-only cache slot while it was backgrounded.
+        self.cache_current_session();
+        let live_only = self.take_live_only_cache(&trimmed);
         self.session_id = Some(trimmed.clone());
+        // Opening a roster child makes this a view-only subagent
+        // transcript keyed to the family root (desktop restores the
+        // same linkage from its cached SessionState); opening the root
+        // — or leaving the family — clears it.
+        self.parent_session_id = if stays_in_family {
+            family_root.filter(|root| root != &trimmed)
+        } else {
+            None
+        };
+        if !stays_in_family {
+            self.side_panel.invalidate_subagent_refresh();
+        }
         self.side_panel.set_viewed_session_id(Some(trimmed.clone()));
+        // Optimistic echoes belong to the session they were sent in.
+        // Leaving them armed would let `apply_history`'s reconciliation
+        // resurrect them inside the newly opened session's transcript.
+        self.clear_pending_user_prompts();
+        self.prompt_echo_aliases.clear();
         self.messages.clear();
+        // The new timeline must render fresh — no raised/expanded card
+        // artifacts from the click that navigated away.
+        self.reset_transient_timeline_interactions();
         // Any session switch returns the panel to chat view — the "← Back"
         // home-override peek shouldn't linger onto the newly opened session.
         self.side_panel.set_show_home_override(false);
         self.reset_session_runtime_ui();
-        self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
+        self.reset_timeline_navigation_for_session_switch();
+        if let Some(live_only) = live_only {
+            // Background-streamed parts show immediately; the incoming
+            // HistoryChunk reconciles them via `apply_history`'s
+            // preserve/merge pipeline (desktop's SessionPreloaded
+            // active-merge path).
+            self.messages = live_only.messages;
+            self.pending_user_prompts = live_only.pending_user_prompts;
+            self.prompt_echo_aliases = live_only.prompt_echo_aliases;
+            self.restore_session_runtime_ui(live_only.runtime);
+        }
+        self.invalidate_timeline_layout();
         self.push_outbound(OutboundAgentCommand::SwitchSession {
             session_id: trimmed,
         });
@@ -509,110 +669,266 @@ impl NeoismAgentPane {
         &mut self,
         text: &str,
     ) {
-        // Mirrors the desktop dispatcher in
-        // `frontends/neoism/src/neoism/agent/commands.rs` minus the
-        // direct HTTP calls. Anything that's purely an in-memory state
-        // mutation runs inline; anything that needs IO records the
-        // request on the outbound queue.
-        let trimmed = text.trim();
-        let mut parts = trimmed.split_whitespace();
-        let raw = parts.next().unwrap_or_default();
-        let args_vec: Vec<&str> = parts.collect();
-        let args_tail = args_vec.join(" ");
-        match raw {
-            // -- pure in-memory ----------------------------------------
-            "/clear" => {
-                self.messages.clear();
-                self.timeline_live_trace_start = None;
-                self.timeline_live_trace_anchor = None;
-                self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
+        use crate::panels::agent_pane::api_mapping::{
+            normalize_model_ref, normalize_thinking,
+        };
+        use crate::panels::agent_pane::command_controller::{
+            plan_slash_command, SlashCommandAction,
+        };
+        use crate::panels::agent_pane::view::fx::AgentFxKind;
+
+        // Consume the SAME planned action table the desktop dispatcher
+        // does (`desktop/src/neoism/agent/commands.rs`), minus the
+        // direct HTTP calls: pure state mutations run inline; anything
+        // that needs IO records the request on the outbound queue for
+        // the host to drain.
+        match plan_slash_command(text) {
+            SlashCommandAction::Noop => {}
+            SlashCommandAction::ShowHelp => self.show_help(),
+            SlashCommandAction::ApplyModel(model) => {
+                self.apply_model(normalize_model_ref(&model));
             }
-            "/exit" => self.request_close_tab(),
-            "/new" => self.start_new_conversation(),
-            "/hints" | "/helper" | "/help-strip" | "/footer" => {
+            SlashCommandAction::OpenModelPicker => self.open_model_picker(),
+            SlashCommandAction::OpenConnectPicker => self.open_connect_picker(),
+            SlashCommandAction::ApplyThinking(value) => {
+                self.apply_thinking(normalize_thinking(&value));
+            }
+            SlashCommandAction::OpenThinkingPicker => self.open_thinking_picker(),
+            SlashCommandAction::ApplyAgent(agent) => self.apply_agent(agent),
+            SlashCommandAction::OpenAgentPicker => self.open_agent_picker(),
+            SlashCommandAction::SwitchSession(session_id) => {
+                self.switch_session(session_id);
+            }
+            SlashCommandAction::OpenSessionsPicker => self.open_sessions_picker(),
+            SlashCommandAction::ChangeDirectory(directory) => {
+                // Desktop PATCHes the session synchronously; IO-free
+                // here, the host executes the daemon-side `cd`.
+                self.push_outbound(OutboundAgentCommand::SlashCommand {
+                    name: "cd".to_string(),
+                    args: directory,
+                });
+            }
+            SlashCommandAction::OpenDirectoryPicker => self.open_directory_picker(),
+            SlashCommandAction::OpenSubagentPicker => self.open_subagent_picker(),
+            SlashCommandAction::ShowSkills => {
+                self.push_outbound(OutboundAgentCommand::ShowSkills {
+                    directory: self.directory.clone(),
+                });
+            }
+            SlashCommandAction::ShowSkill(name) => self.show_skill(name),
+            SlashCommandAction::ShowSkillUsage => {
+                self.system_message("Skill", "usage: /skill info <name>");
+            }
+            SlashCommandAction::InsertSkillMentionByName(skill) => {
+                self.insert_skill_mention_by_name(skill);
+            }
+            SlashCommandAction::OpenSkillPicker => self.open_skill_picker(),
+            SlashCommandAction::HandleQueue(action) => {
+                self.handle_queue(action.as_deref());
+            }
+            SlashCommandAction::ShowMcp => self.open_mcp_picker(),
+            SlashCommandAction::ShowPermissions => self.show_permissions(),
+            SlashCommandAction::ShowQuestions => self.show_questions(),
+            SlashCommandAction::ToggleSkipPermissions => self.toggle_skip_permissions(),
+            SlashCommandAction::HandlePermit(args) => self.handle_permit(&args),
+            SlashCommandAction::HandleAnswer(answer) => self.handle_answer(&answer),
+            SlashCommandAction::HandleReject(id) => self.handle_reject(id.as_deref()),
+            SlashCommandAction::CompactSession => self.compact_session(),
+            SlashCommandAction::UndoSession => self.undo_session(),
+            SlashCommandAction::RedoSession => self.redo_session(),
+            SlashCommandAction::ToggleInputHelp => {
                 self.toggle_input_help();
             }
-            "/sidebar" => {
+            SlashCommandAction::ToggleSidebar => {
                 self.side_panel.toggle_visibility();
                 let visible = !self.side_panel.user_hidden();
                 self.push_outbound(OutboundAgentCommand::SetSidebarVisible { visible });
             }
-
-            // -- picker openers / arg-setters --------------------------
-            //
-            // These match the desktop's dispatch shape: if the user passed
-            // an argument we apply it directly (which itself may push an
-            // outbound command — e.g. `apply_model` doesn't here but
-            // `switch_session` does); without an argument we open the
-            // matching picker. Picker open is pure UI.
-            "/model" => {
-                if let Some(model) = args_vec.first() {
-                    self.apply_model((*model).to_string());
+            SlashCommandAction::PissOnScreen => {
+                self.start_fx_easter_egg(AgentFxKind::Piss);
+            }
+            SlashCommandAction::CussOnScreen => {
+                self.start_fx_easter_egg(AgentFxKind::Cuss);
+            }
+            SlashCommandAction::GlitchOnScreen => {
+                self.start_fx_easter_egg(AgentFxKind::Glitch);
+            }
+            SlashCommandAction::DiscoOnScreen => {
+                self.start_fx_easter_egg(AgentFxKind::Disco);
+            }
+            SlashCommandAction::GangFightOnScreen => {
+                self.start_fx_easter_egg(AgentFxKind::GangFight);
+            }
+            SlashCommandAction::PraiseOnScreen => {
+                self.start_fx_easter_egg(AgentFxKind::Praise);
+            }
+            SlashCommandAction::AbortSession => self.abort_session(),
+            SlashCommandAction::CreateNewSession => self.start_new_conversation(),
+            SlashCommandAction::RequestCloseTab => self.request_close_tab(),
+            SlashCommandAction::RunServerCommand { command, args } => {
+                self.run_server_command(&command, &args);
+            }
+            // The daemon websocket protocol has no goal envelope yet —
+            // desktop drives `/goal` over its local HTTP surface. Mirror
+            // desktop's session gate, then say so instead of inventing
+            // wire messages (same posture as the question-reply gap in
+            // `protocol_mapping.rs`).
+            SlashCommandAction::ShowGoal
+            | SlashCommandAction::SetGoal(_)
+            | SlashCommandAction::ClearGoal
+            | SlashCommandAction::PauseGoal
+            | SlashCommandAction::ResumeGoal => {
+                if self.session_id.is_none() {
+                    self.system_message("Goal", "no session has started yet");
                 } else {
-                    self.open_model_picker();
+                    self.system_message(
+                        "Goal",
+                        "goals aren't available over this connection yet",
+                    );
                 }
             }
-            "/connect" => self.open_connect_picker(),
-            "/mcp" | "/mcps" => self.open_mcp_picker(),
-            "/think" | "/reasoning" => {
-                if let Some(value) = args_vec.first() {
-                    self.apply_thinking((*value).to_string());
-                } else {
-                    self.open_thinking_picker();
-                }
-            }
-            "/agent" => {
-                if let Some(agent) = args_vec.first() {
-                    self.apply_agent((*agent).to_string());
-                } else {
-                    self.open_agent_picker();
-                }
-            }
-            "/sessions" | "/session" => {
-                if let Some(id) = args_vec.first() {
-                    self.switch_session((*id).to_string());
-                } else {
-                    self.open_sessions_picker();
-                }
-            }
-            "/cd" => {
-                if args_vec.is_empty() {
-                    self.open_directory_picker();
-                } else {
-                    self.push_outbound(OutboundAgentCommand::SlashCommand {
-                        name: "cd".to_string(),
-                        args: args_tail,
-                    });
-                }
-            }
-            "/sub-agent" | "/subagents" | "/sub" => self.open_subagent_picker(),
-            "/skill" | "/skills" => {
-                if args_vec.is_empty() {
-                    self.open_skill_picker();
-                } else {
-                    // Anything beyond a bare `/skill` (info / list / a
-                    // skill name) needs the host to talk to the
-                    // agent-server: defer to the slash-command queue.
-                    self.push_outbound(OutboundAgentCommand::SlashCommand {
-                        name: raw.trim_start_matches('/').to_string(),
-                        args: args_tail,
-                    });
-                }
-            }
-
-            // -- session-level IO routed through dedicated commands ----
-            "/compact" | "/compaction" | "/comapction" => self.compact_session(),
-            "/abort" => self.abort_session(),
-
-            // -- everything else needs the daemon: queue it ------------
-            other if other.starts_with('/') => {
-                self.push_outbound(OutboundAgentCommand::SlashCommand {
-                    name: other.trim_start_matches('/').to_string(),
-                    args: args_tail,
-                });
-            }
-            _ => {}
         }
+    }
+
+    fn show_help(&mut self) {
+        let body = slash_options()
+            .into_iter()
+            .map(|option| format!("{}  {}", option.title, option.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.system_message("Commands", body);
+    }
+
+    /// `/skill info <name>` — desktop fetches the catalogue and prints
+    /// the matching skill card. IO-free here: search the host-supplied
+    /// cache and ask the host to refresh it for next time.
+    fn show_skill(&mut self, name: String) {
+        self.push_outbound(OutboundAgentCommand::RefreshSkills {
+            directory: self.directory.clone(),
+        });
+        let needle = name.to_ascii_lowercase();
+        if let Some(option) = self
+            .skill_options
+            .iter()
+            .find(|option| {
+                option.value.eq_ignore_ascii_case(&name)
+                    || option.title.eq_ignore_ascii_case(&name)
+                    || option.title.to_ascii_lowercase().contains(&needle)
+            })
+            .cloned()
+        {
+            self.system_message(
+                "Skill",
+                format!(
+                    "{}\n{}\n{}\n\nModel usage: call the skill tool with name \"{}\".",
+                    option.title, option.description, option.footer, option.value
+                ),
+            );
+        } else {
+            self.system_message("Skill", format!("skill {name} not found"));
+        }
+    }
+
+    fn undo_session(&mut self) {
+        if self.session_id.is_none() {
+            self.system_message("Undo", "no session has started yet");
+            return;
+        }
+        self.push_outbound(OutboundAgentCommand::UndoSession);
+    }
+
+    fn redo_session(&mut self) {
+        if self.session_id.is_none() {
+            self.system_message("Redo", "no session has started yet");
+            return;
+        }
+        self.push_outbound(OutboundAgentCommand::RedoSession);
+    }
+
+    fn handle_queue(&mut self, action: Option<&str>) {
+        let Some(session_id) = self.session_id.clone() else {
+            self.system_message("Queue", "no session has started yet");
+            return;
+        };
+        self.push_outbound(OutboundAgentCommand::HandleQueue {
+            session_id,
+            action: action.map(str::to_string),
+        });
+    }
+
+    fn show_permissions(&mut self) {
+        let Some(session_id) = self.session_id.clone() else {
+            self.system_message("Permissions", "no session has started yet");
+            return;
+        };
+        self.push_outbound(OutboundAgentCommand::ShowPermissions { session_id });
+    }
+
+    fn show_questions(&mut self) {
+        let Some(session_id) = self.session_id.clone() else {
+            self.system_message("Questions", "no session has started yet");
+            return;
+        };
+        self.push_outbound(OutboundAgentCommand::ShowQuestions { session_id });
+    }
+
+    fn handle_permit(&mut self, args: &[String]) {
+        let Some(session_id) = self.session_id.clone() else {
+            self.system_message("Permissions", "no session has started yet");
+            return;
+        };
+        let reply =
+            permission_reply_alias(args.first().map(String::as_str).unwrap_or("once"));
+        let id = args
+            .get(1)
+            .map(String::as_str)
+            .or_else(|| {
+                args.first()
+                    .map(String::as_str)
+                    .filter(|value| !is_permission_reply(value))
+            })
+            .map(str::to_string);
+        self.push_outbound(OutboundAgentCommand::HandlePermit {
+            session_id,
+            reply: reply.to_string(),
+            id,
+        });
+    }
+
+    fn handle_answer(&mut self, answer: &str) {
+        let Some(session_id) = self.session_id.clone() else {
+            self.system_message("Questions", "no session has started yet");
+            return;
+        };
+        if answer.trim().is_empty() {
+            self.system_message("Questions", "usage: /answer <text>");
+            return;
+        }
+        self.push_outbound(OutboundAgentCommand::HandleAnswer {
+            session_id,
+            answer: answer.to_string(),
+        });
+    }
+
+    fn handle_reject(&mut self, id_arg: Option<&str>) {
+        let Some(session_id) = self.session_id.clone() else {
+            self.system_message("Interaction", "no session has started yet");
+            return;
+        };
+        self.push_outbound(OutboundAgentCommand::HandleReject {
+            session_id,
+            id: id_arg.map(str::to_string),
+        });
+    }
+
+    fn run_server_command(&mut self, command: &str, command_args: &str) {
+        if self.session_id.is_none() {
+            self.push_outbound(OutboundAgentCommand::EnsureSession);
+        }
+        self.push_outbound(OutboundAgentCommand::SlashCommand {
+            name: command.to_string(),
+            args: command_args.to_string(),
+        });
     }
 
     pub fn apply_model(&mut self, value: String) {
@@ -724,18 +1040,25 @@ impl NeoismAgentPane {
     }
 
     pub(in crate::panels::agent_pane::state) fn abort_session(&mut self) {
+        // A user-driven stop is a hard clear: the status label must not
+        // linger through the display grace hold, or Stop reads as lag.
+        self.side_panel.clear_status_display_hold();
+        // Mirrors desktop `commands::abort_session`: without a session
+        // there's nothing for the host to abort.
+        if self.session_id.is_none() {
+            self.note_streaming(NeoismAgentStreamingState::Idle, None);
+            self.system_message("Abort", "no session has started yet");
+            return;
+        }
         self.abort_requested_at = Some(Instant::now());
         self.note_streaming(NeoismAgentStreamingState::Idle, None);
-        // Without a session id there's nothing for the host to abort;
-        // mirrors desktop `commands::abort_session`'s early return.
-        if self.session_id.is_some() {
-            self.push_outbound(OutboundAgentCommand::AbortSession);
-        }
+        self.push_outbound(OutboundAgentCommand::AbortSession);
     }
 
     pub(in crate::panels::agent_pane::state) fn compact_session(&mut self) {
         // No session yet → nothing to compact (matches desktop).
         if self.session_id.is_none() {
+            self.system_message("Context", "no session has started yet");
             return;
         }
         // The host turns the `CompactSession` outbound command into the
@@ -745,7 +1068,6 @@ impl NeoismAgentPane {
         self.push_outbound(OutboundAgentCommand::CompactSession);
     }
 
-    #[allow(dead_code)]
     pub(in crate::panels::agent_pane) fn insert_skill_mention_by_name(
         &mut self,
         name: String,
@@ -844,19 +1166,38 @@ impl NeoismAgentPane {
             .push(NeoismAgentInputAttachment::File {
                 token: token.to_string(),
                 filename: value.trim_end_matches('/').to_string(),
-                url: input_controller::file_url(&path),
+                url: attachment_url_for_path(&path, mime),
                 mime: mime.to_string(),
             });
     }
 
+    /// A pasted single-line file path / `file://` URI that resolves to
+    /// an attachable file on the host filesystem (desktop parity —
+    /// `pane/submit.rs`). Hosts without a local filesystem (wasm)
+    /// always fall through: `is_file()` is `false` there.
     pub(in crate::panels::agent_pane::state) fn pasted_attachment_path(
         &self,
-        _text: &str,
+        text: &str,
     ) -> Option<std::path::PathBuf> {
-        None
+        let raw = text.trim();
+        if raw.is_empty() || raw.contains('\n') {
+            return None;
+        }
+        let candidate = input_controller::path_from_pasted_reference(raw)?;
+        let root = self.file_mention_root();
+        let candidates = if candidate.is_absolute() {
+            vec![candidate]
+        } else {
+            vec![root.join(&candidate), candidate]
+        };
+        candidates.into_iter().find(|path| {
+            path.is_file()
+                && input_controller::mime_can_attach_from_paste(
+                    input_controller::mime_for_path(path),
+                )
+        })
     }
 
-    #[allow(dead_code)]
     pub(in crate::panels::agent_pane::state) fn display_path_for_attachment(
         &self,
         path: &std::path::Path,
@@ -874,7 +1215,6 @@ impl NeoismAgentPane {
         display
     }
 
-    #[allow(dead_code)]
     pub(in crate::panels::agent_pane::state) fn file_attachment_token(
         &self,
         path: &std::path::Path,
@@ -884,21 +1224,32 @@ impl NeoismAgentPane {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("file");
-        if mime.starts_with("image/") {
-            let next = self.file_attachment_count(|mime| mime.starts_with("image/")) + 1;
-            return format!("[image{next}]");
-        }
-        if mime == "application/pdf" {
-            let next = self.file_attachment_count(|mime| mime == "application/pdf") + 1;
-            return format!("[pdf{next}]");
-        }
-        let next = self.file_attachment_count(|mime| {
-            !mime.starts_with("image/") && mime != "application/pdf"
-        }) + 1;
-        format!("[file{next}: {filename}]")
+        self.file_attachment_token_for(filename, mime)
     }
 
-    #[allow(dead_code)]
+    /// `[imageN]` / `[pdfN]` / `[fileN: name]` token for the next
+    /// attachment of `mime` — shared by the path- and byte-based
+    /// attach flows (`attachment_policy::file_attachment_token`
+    /// numbering, counted per attachment class like desktop).
+    pub(in crate::panels::agent_pane::state) fn file_attachment_token_for(
+        &self,
+        filename: &str,
+        mime: &str,
+    ) -> String {
+        let next = if mime.starts_with("image/") {
+            self.file_attachment_count(|mime| mime.starts_with("image/")) + 1
+        } else if mime == "application/pdf" {
+            self.file_attachment_count(|mime| mime == "application/pdf") + 1
+        } else {
+            self.file_attachment_count(|mime| {
+                !mime.starts_with("image/") && mime != "application/pdf"
+            }) + 1
+        };
+        crate::panels::agent_pane::attachment_policy::file_attachment_token(
+            filename, mime, next,
+        )
+    }
+
     pub(in crate::panels::agent_pane::state) fn file_attachment_count<F>(
         &self,
         mut predicate: F,
@@ -1030,4 +1381,23 @@ impl NeoismAgentPane {
         }
         expanded
     }
+}
+
+/// `/permit` reply aliasing — mirrors `permission_reply_alias` in the
+/// desktop's `agent/api.rs`.
+fn permission_reply_alias(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "a" | "always" => "always",
+        "n" | "no" | "deny" | "reject" => "reject",
+        _ => "once",
+    }
+}
+
+/// Whether a `/permit` argument names a reply (vs a permission id) —
+/// mirrors `is_permission_reply` in the desktop's `agent/api.rs`.
+fn is_permission_reply(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "once" | "always" | "reject" | "y" | "a" | "n" | "yes" | "no" | "deny"
+    )
 }

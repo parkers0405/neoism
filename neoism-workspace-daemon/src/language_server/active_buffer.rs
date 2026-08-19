@@ -1,20 +1,67 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use neoism_agent_server::language_server;
 use neoism_protocol::{diagnostics::DiagnosticItem, editor::EditorServerMessage};
 
-/// Feed the native guest editor's authoritative text into the host LSP and
-/// return the status snapshot used by the desktop status bar. The ordered
-/// barrier makes the first snapshot meaningful (Connected/Error rather than
-/// racing the queued didOpen), while subsequent revision syncs reuse the
-/// already-live server.
-pub(crate) fn sync_buffer_snapshot(
+/// Last authoritative buffer text per file, as synced by the native
+/// editor through `OpenBuffer`. Interactive queries (completion) and
+/// reference-row previews read this so they reflect unsaved edits
+/// instead of stale disk content.
+fn live_text_store() -> &'static Mutex<HashMap<PathBuf, String>> {
+    static STORE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    STORE.get_or_init(Default::default)
+}
+
+/// The text last synced for `file` (None when the editor never opened
+/// it on this daemon).
+pub(crate) fn live_buffer_text(file: &Path) -> Option<String> {
+    live_text_store()
+        .lock()
+        .ok()
+        .and_then(|store| store.get(file).cloned())
+}
+
+/// Queue the native editor's authoritative text into the host LSP —
+/// the NON-BLOCKING half of the old `sync_buffer_snapshot`: a cache
+/// insert plus a channel send onto the per-document FIFO worker, safe
+/// to run inline in the socket loop (a cold server spawn can no longer
+/// stall PTY forwarding behind a keystroke sync). Because it runs
+/// inline, queue order matches socket order — interactive queries that
+/// later `flush_document_sync` are guaranteed to see this text.
+pub(crate) fn queue_buffer_sync(workspace_root: &Path, file: &Path, text: String) {
+    if let Ok(mut store) = live_text_store().lock() {
+        store.insert(file.to_path_buf(), text.clone());
+    }
+    super::live_sync::sync_document(workspace_root, file, text);
+}
+
+/// The BLOCKING half: wait for the queued sync to reach the engine,
+/// then build the `LspSnapshot` status message. Run on a blocking
+/// task. Returns `None` when the per-file snapshot throttle says the
+/// last one is fresh enough (`language_server::status` walks the
+/// workspace — desktop throttles the same way in `refresh_lsp_pill`).
+pub(crate) fn buffer_snapshot_message(
     workspace_root: &Path,
     file: &Path,
-    text: String,
     surface_id: Option<String>,
-) -> EditorServerMessage {
-    super::live_sync::sync_document(workspace_root, file, text);
+) -> Option<EditorServerMessage> {
+    {
+        static LAST_SNAPSHOT: OnceLock<Mutex<HashMap<PathBuf, std::time::Instant>>> =
+            OnceLock::new();
+        let mut last = match LAST_SNAPSHOT.get_or_init(Default::default).lock() {
+            Ok(last) => last,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let now = std::time::Instant::now();
+        match last.get(file) {
+            Some(at) if now.duration_since(*at).as_secs_f32() < 3.0 => return None,
+            _ => {
+                last.insert(file.to_path_buf(), now);
+            }
+        }
+    }
     super::live_sync::flush_document_sync(workspace_root, file);
     let statuses = language_server::status(workspace_root, Some(file));
     let filetype = language_server::language_id_for_path_in(workspace_root, file)
@@ -50,12 +97,12 @@ pub(crate) fn sync_buffer_snapshot(
             }
         })
         .collect();
-    EditorServerMessage::LspSnapshot {
+    Some(EditorServerMessage::LspSnapshot {
         surface_id,
         file_path: Some(file.to_path_buf()),
         filetype,
         servers,
-    }
+    })
 }
 
 // The active-buffer snapshot poll (`poll`/`read_active_file_buffer`) was fed

@@ -46,6 +46,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 finder: None,
                 git_diff: None,
                 command_composer: None,
+                panes: Vec::new(),
             },
             theme,
             ide_theme,
@@ -62,6 +63,17 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             terminal_input: SimpleInputBuffer::default(),
             tab_lang: crate::syntax::Lang::Other,
             markdown_pane: None,
+            code_pane: None,
+            notebook_pane: None,
+            draw_pane: None,
+            editor_pane_tab: None,
+            editor_pane_animating: false,
+            code_doc_binding: None,
+            code_lsp: Default::default(),
+            lsp_popup: crate::panels::lsp_popup::LspPopup::new(),
+            parked_code_panes: std::collections::HashMap::new(),
+            parked_notebook_panes: std::collections::HashMap::new(),
+            parked_draw_panes: std::collections::HashMap::new(),
             status_line: StatusLine::new(),
             buffer_tabs: BufferTabs::<A>::new(),
             top_bar: ChromeTopBar::new(),
@@ -73,6 +85,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             notes_sidebar: NotesSidebar::default(),
             command_composer: CommandComposer::new(),
             pane_grid: PaneGrid::new(crate::session_layout::SessionLeafKind::Terminal, 0),
+            pane_surfaces: Vec::new(),
+            pane_tabs: std::collections::HashMap::new(),
+            pane_breadcrumbs: std::collections::HashMap::new(),
+            host_drawn_panes: Vec::new(),
             agent_pane: None,
             splash_overlay: SplashOverlay::new(),
             terminal_splash_dismissed: false,
@@ -87,6 +103,13 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             context_menu: ContextMenu::new(),
             git_branch: GitBranch::new(),
             custom_cursor: CustomCursor::new(),
+            settings_page: crate::panels::settings_page::NeoismSettingsPane::new(),
+            extensions_page: crate::panels::extensions_page::NeoismExtensionsPane::new(),
+            neoworld_pane: None,
+            modal: crate::widgets::modal::UniversalModal::new(),
+            pending_settings_actions: Vec::new(),
+            pending_extensions_actions: Vec::new(),
+            pending_neoworld_snapshots: Vec::new(),
             focus_stack: Vec::new(),
             scroll_spring: CriticallyDampedSpring::new(),
             scroll_offset_px: 0.0,
@@ -490,7 +513,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// True when the selected buffer tab is the Rust-rendered Neoism
     /// Agent surface. The agent is a tab in the main strip, so it
     /// consumes the terminal rect instead of docking as a side pane.
+    ///
+    /// Suspended (false) while a full-screen chrome overlay is up so
+    /// the agent pane's pointer/key routes stand down under the
+    /// settings page / About modal, mirroring the terminal gate.
     pub fn is_neoism_agent_tab_active(&self) -> bool {
+        if self.chrome_overlay_active() {
+            return false;
+        }
         matches!(
             self.buffer_tabs.target_at(self.active_tab_index),
             Some(BufferTabTarget::NeoismAgent(_))
@@ -506,7 +536,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// file tab at slot 0 (and fresh "Terminal 2" tabs past it). The
     /// old `index == 0` shortcut painted the splash under a markdown
     /// tab and left every additional terminal tab black.
+    ///
+    /// A full-screen chrome overlay (settings page / About modal)
+    /// suspends the terminal surface while it is up — desktop parity:
+    /// terminal compose is gated on `!settings.is_active()` there, and
+    /// on web this same gate keeps the terminal grid from eating the
+    /// overlay's pointer input.
     pub fn is_terminal_tab_active(&self) -> bool {
+        if self.chrome_overlay_active() {
+            return false;
+        }
         self.buffer_tabs.target_at(self.active_tab_index).is_none()
     }
 }

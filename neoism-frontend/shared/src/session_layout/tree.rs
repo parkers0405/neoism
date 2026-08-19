@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 pub use super::legacy::{SessionLeafKind, SessionLeafSpec, SplitAxis, SplitPlacement};
 
+mod convert;
 mod helpers;
 mod ops;
 pub use helpers::*;

@@ -444,6 +444,111 @@ pub fn rasterize_decoration(
     }
 }
 
+/// One solid sub-rectangle of a rasterized sprite, offset from the
+/// CELL's top-left corner in sprite/physical px. Produced by
+/// [`sprite_solid_quads`] for hosts that draw decoration / cursor
+/// sprites as plain quads instead of atlas glyphs (the web renderer's
+/// sugarloaf surface has no terminal grid atlas). Geometry stays
+/// byte-identical to the atlas path because it derives from the same
+/// `rasterize_*` bitmaps and the same bearing convention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpriteQuad {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Decompose a grayscale sprite bitmap (row-major, `w * h` bytes,
+/// `0` = transparent) into solid rectangles: horizontal RLE runs,
+/// merged vertically when consecutive rows carry an identical run.
+/// `x_off` / `y_off` translate sprite-local coordinates into
+/// cell-local coordinates (the atlas path's `bearing_x` /
+/// `cell_h - bearing_y`).
+pub fn sprite_solid_quads(bytes: &[u8], w: u32, x_off: i32, y_off: i32) -> Vec<SpriteQuad> {
+    let mut out: Vec<SpriteQuad> = Vec::new();
+    if w == 0 {
+        return out;
+    }
+    let h = bytes.len() as u32 / w;
+    // Indices into `out` of the quads whose bottom edge touches the
+    // previous row, keyed implicitly by scan order.
+    let mut prev_row: Vec<usize> = Vec::new();
+    let mut cur_row: Vec<usize> = Vec::new();
+    for row in 0..h {
+        cur_row.clear();
+        let base = (row * w) as usize;
+        let mut col = 0u32;
+        while col < w {
+            if bytes[base + col as usize] < 0x80 {
+                col += 1;
+                continue;
+            }
+            let start = col;
+            while col < w && bytes[base + col as usize] >= 0x80 {
+                col += 1;
+            }
+            let run_w = col - start;
+            // Vertical merge: a quad from the previous row with the
+            // same x/w extends down by one row.
+            let merged = prev_row.iter().copied().find(|&idx| {
+                let q = &out[idx];
+                q.x == start as i32 + x_off && q.w == run_w
+            });
+            match merged {
+                Some(idx) => {
+                    out[idx].h += 1;
+                    cur_row.push(idx);
+                }
+                None => {
+                    out.push(SpriteQuad {
+                        x: start as i32 + x_off,
+                        y: row as i32 + y_off,
+                        w: run_w,
+                        h: 1,
+                    });
+                    cur_row.push(out.len() - 1);
+                }
+            }
+        }
+        std::mem::swap(&mut prev_row, &mut cur_row);
+    }
+    out
+}
+
+/// [`rasterize_decoration`] decomposed into cell-local solid quads for
+/// quad-drawing hosts. Placement follows the atlas convention: the
+/// sprite's top edge sits at `cell_h - bearing_y` below the cell top.
+pub fn decoration_quads(
+    style: DecorationStyle,
+    cell_w: u32,
+    cell_h: u32,
+    thickness: u32,
+) -> Vec<SpriteQuad> {
+    let (bytes, w, _h, bearing_y) = rasterize_decoration(style, cell_w, cell_h, thickness);
+    sprite_solid_quads(&bytes, w, 0, cell_h as i32 - bearing_y as i32)
+}
+
+/// [`rasterize_cursor`] decomposed into cell-local solid quads for
+/// quad-drawing hosts. Same bearing convention as [`decoration_quads`];
+/// `bearing_x` shifts the sprite horizontally (the bar cursor centers
+/// on the cell's left edge via a negative bearing).
+pub fn cursor_quads(
+    style: CursorSpriteStyle,
+    cell_w: u32,
+    cell_h: u32,
+    thickness: u32,
+) -> Vec<SpriteQuad> {
+    let (bytes, w, _h, bearing_x, bearing_y) =
+        rasterize_cursor(style, cell_w, cell_h, thickness);
+    sprite_solid_quads(
+        &bytes,
+        w as u32,
+        bearing_x as i32,
+        cell_h as i32 - bearing_y as i32,
+    )
+}
+
 #[inline]
 pub fn underline_style_from_flags(flags: StyleFlags) -> Option<DecorationStyle> {
     if flags.contains(StyleFlags::UNDERLINE) {
@@ -881,6 +986,83 @@ mod tests {
         assert_eq!((w, h, bearing_x, bearing_y), (10, 2, 0, 4));
         assert_eq!(bytes.len(), 20);
         assert!(bytes.iter().all(|b| *b == 0xFF));
+    }
+
+    #[test]
+    fn sprite_solid_quads_rle_and_vertical_merge() {
+        // 4x3 bitmap: full top row, then two rows with left/right
+        // single-px columns (a hollow-box slice).
+        #[rustfmt::skip]
+        let bytes = [
+            0xFFu8, 0xFF, 0xFF, 0xFF,
+            0xFF,   0x00, 0x00, 0xFF,
+            0xFF,   0x00, 0x00, 0xFF,
+        ];
+        let quads = sprite_solid_quads(&bytes, 4, 0, 0);
+        assert_eq!(
+            quads,
+            vec![
+                SpriteQuad { x: 0, y: 0, w: 4, h: 1 },
+                SpriteQuad { x: 0, y: 1, w: 1, h: 2 },
+                SpriteQuad { x: 3, y: 1, w: 1, h: 2 },
+            ]
+        );
+    }
+
+    #[test]
+    fn decoration_quads_match_atlas_placement() {
+        // Plain underline: one quad, `gap` px above the cell bottom.
+        let quads = decoration_quads(DecorationStyle::Underline, 8, 40, 2);
+        assert_eq!(quads, vec![SpriteQuad { x: 0, y: 36, w: 8, h: 2 }]);
+
+        // Double underline: two bars separated by a `thickness` gap.
+        let quads = decoration_quads(DecorationStyle::DoubleUnderline, 8, 40, 2);
+        assert_eq!(
+            quads,
+            vec![
+                SpriteQuad { x: 0, y: 32, w: 8, h: 2 },
+                SpriteQuad { x: 0, y: 36, w: 8, h: 2 },
+            ]
+        );
+
+        // Strikethrough: centered on the cell's vertical midpoint.
+        let quads = decoration_quads(DecorationStyle::Strikethrough, 8, 40, 2);
+        assert_eq!(quads, vec![SpriteQuad { x: 0, y: 19, w: 8, h: 2 }]);
+
+        // Curly underline decomposes into per-column quads that stay
+        // inside the sprite band above the bottom gap.
+        let quads = decoration_quads(DecorationStyle::CurlyUnderline, 8, 40, 2);
+        assert!(!quads.is_empty());
+        let gap = underline_gap_below(40) as i32;
+        assert!(quads.iter().all(|q| q.y + q.h as i32 <= 40 - gap));
+    }
+
+    #[test]
+    fn cursor_quads_match_atlas_placement() {
+        // Block: one full-cell quad.
+        let quads = cursor_quads(CursorSpriteStyle::Block, 8, 16, 1);
+        assert_eq!(quads, vec![SpriteQuad { x: 0, y: 0, w: 8, h: 16 }]);
+
+        // Hollow: 4 border quads (top, left, right, bottom).
+        let quads = cursor_quads(CursorSpriteStyle::Hollow, 5, 5, 1);
+        assert_eq!(
+            quads,
+            vec![
+                SpriteQuad { x: 0, y: 0, w: 5, h: 1 },
+                SpriteQuad { x: 0, y: 1, w: 1, h: 3 },
+                SpriteQuad { x: 4, y: 1, w: 1, h: 3 },
+                SpriteQuad { x: 0, y: 4, w: 5, h: 1 },
+            ]
+        );
+
+        // Bar: thickness-wide column centered on the cell's left edge
+        // (negative bearing_x).
+        let quads = cursor_quads(CursorSpriteStyle::Bar, 10, 24, 1);
+        assert_eq!(quads, vec![SpriteQuad { x: -1, y: 0, w: 1, h: 24 }]);
+
+        // Underline cursor: bar `gap` px above the cell bottom.
+        let quads = cursor_quads(CursorSpriteStyle::Underline, 10, 40, 2);
+        assert_eq!(quads, vec![SpriteQuad { x: 0, y: 36, w: 10, h: 2 }]);
     }
 
     #[test]

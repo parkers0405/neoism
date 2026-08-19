@@ -1,30 +1,25 @@
 /**
- * IME composition decisions, mirrored 1:1 from the shared Rust
- * `neoism-ui::ime_state` module. Keeps the web frontend and the
- * desktop fork in lock step on every composition-driven choice:
+ * IME composition decisions, routed through the SHARED RUST policy
+ * (`neoism-ui::ime_state`) via the wasm exports in
+ * `wasm/src/rendered/input_policy.rs` (`ime_commit_dispatch`,
+ * `ime_should_drop_keys_during_compose`, `ime_key_event_is_composing`).
  *
- *   - mode-locking during compose (drop real key events while the
- *     IME owns the keyboard)
- *   - commit-string routing (raw single keystroke vs bracketed
- *     paste for multi-char commits)
- *   - preedit cursor offset clamping
- *
- * If the shared Rust module changes one of these decisions, this
- * file is the single mirror that must change with it.
- *
- * See `neoism-frontend/shared/src/ime_state.rs` for the source of
- * truth and the unit tests that pin the behavior.
+ * This file is a thin adapter, not a mirror: it looks up the loaded
+ * wasm module per call (the bundle loads asynchronously after the
+ * panel constructs) and only carries the minimal inline fallbacks
+ * needed so typing never breaks in the pre-load window or on a stale
+ * served bundle. The Rust module is the single source of truth; the
+ * fallback expressions are pinned to it by
+ * `neoism-frontend/shared/src/ime_state.rs`'s unit tests.
  */
+
+import { wasmInputPolicy } from "../terminal/createTerminal";
 
 /**
  * Threshold (in characters) above which an IME commit is forwarded
  * to the terminal via bracketed-paste rather than as raw keystrokes.
- * Matches `COMMIT_BRACKETED_PASTE_MIN_CHARS` in the Rust module.
- *
- * Single-character commits (the common case for Japanese / Chinese
- * typewriter input) go through the raw path so terminal modes that
- * care about per-key timing (vim insert mode, readline) see them as
- * individual events.
+ * Matches `COMMIT_BRACKETED_PASTE_MIN_CHARS` in the Rust module —
+ * kept exported for hosts that only need the constant.
  */
 export const COMMIT_BRACKETED_PASTE_MIN_CHARS = 2;
 
@@ -39,59 +34,50 @@ export interface CommitDispatch {
 }
 
 /**
- * Pure classifier for an IME `Commit` event.
- *
- * Mirrors `commit_dispatch` in `ime_state.rs`. Single-char commits
- * stay as raw keystrokes so vim insert mode sees them as individual
- * inputs; multi-char commits use bracketed paste so terminal modes
- * with autocomplete / abbreviation expansion don't fire mid-string.
- *
- * `chars().count()` in Rust counts Unicode scalar values (code
- * points); we mirror that here with `Array.from(text).length` so a
- * single CJK code point still counts as one char regardless of UTF-8
- * byte length.
+ * Classify an IME `Commit` event: single-char commits stay raw
+ * keystrokes (vim insert mode sees individual inputs); multi-char
+ * commits use bracketed paste. Decision comes from the shared Rust
+ * `commit_dispatch`; the fallback mirrors its `chars().count()`
+ * semantics (`Array.from` counts code points, not UTF-16 units).
  */
 export function commitDispatch(text: string): CommitDispatch {
-  const charCount = Array.from(text).length;
+  const dispatch = wasmInputPolicy()?.ime_commit_dispatch?.(text);
+  if (dispatch) {
+    return { text: dispatch.text, useBracketedPaste: dispatch.useBracketedPaste };
+  }
+  // Pre-wasm / stale-bundle fallback (source of truth: ime_state.rs).
   return {
     text,
-    useBracketedPaste: charCount >= COMMIT_BRACKETED_PASTE_MIN_CHARS,
+    useBracketedPaste: Array.from(text).length >= COMMIT_BRACKETED_PASTE_MIN_CHARS,
   };
 }
 
 /**
- * Pure classifier for key events while a preedit is in flight.
- *
- * While the IME is showing a preedit popup, every keystroke (Enter
- * to commit, Escape to cancel, arrows to navigate the candidate
- * list) belongs to the IME, not the underlying terminal
- * surface. The browser fires `keydown` alongside `compositionupdate`
- * with `KeyboardEvent.isComposing === true` (or `keyCode === 229` on
- * legacy hosts); the host must swallow them.
- *
- * Returns `true` when the host should swallow the key event.
- *
- * Mirrors `should_drop_keys_during_compose` in `ime_state.rs`.
+ * Mode-locking during compose: while the IME shows a preedit popup,
+ * every keystroke (Enter to commit, Escape to cancel, arrows for the
+ * candidate list) belongs to the IME and must be swallowed by the
+ * host. Routed through the shared `should_drop_keys_during_compose`.
  */
 export function shouldDropKeysDuringCompose(hasPreedit: boolean): boolean {
-  return hasPreedit;
+  const decided =
+    wasmInputPolicy()?.ime_should_drop_keys_during_compose?.(hasPreedit);
+  // Pre-wasm / stale-bundle fallback (source of truth: ime_state.rs).
+  return decided ?? hasPreedit;
 }
 
 /**
  * Returns `true` when the browser `keydown` event was fired by the
- * IME mid-composition and should be swallowed by the host. Combines
- * the standard `isComposing` flag (Chromium / Firefox / Safari) with
- * the `keyCode === 229` fallback some legacy / Edge paths emit.
+ * IME mid-composition and should be swallowed. Combines the standard
+ * `isComposing` flag with the legacy `keyCode === 229` path some
+ * IBus/fcitx + Chromium combos still emit — the classification lives
+ * in the shared `key_event_is_ime_composing`; only the DOM field
+ * extraction happens here.
  */
 export function keyEventIsImeComposing(event: KeyboardEvent): boolean {
-  if (event.isComposing) {
-    return true;
-  }
-  // 229 is the legacy "IME is processing the key" code that pre-dates
-  // `isComposing`. Some Linux IBus / fcitx + Chromium combos still
-  // surface keystrokes that way for the final commit cycle.
-  if (event.keyCode === 229) {
-    return true;
-  }
-  return false;
+  const decided = wasmInputPolicy()?.ime_key_event_is_composing?.(
+    event.isComposing === true,
+    event.keyCode | 0,
+  );
+  // Pre-wasm / stale-bundle fallback (source of truth: ime_state.rs).
+  return decided ?? (event.isComposing === true || event.keyCode === 229);
 }

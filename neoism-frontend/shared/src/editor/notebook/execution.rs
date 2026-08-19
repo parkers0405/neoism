@@ -9,6 +9,26 @@ pub(crate) fn next_execution_count(cells: &[NotebookCell]) -> u32 {
         .saturating_add(1)
 }
 
+/// Clear, host-visible reason cell execution can't run on wasm32.
+/// `std::process::Command::spawn` and `std::thread::spawn` both exist
+/// on wasm32-unknown-unknown but fail only at RUNTIME (spawn returns
+/// `Unsupported`; threads panic), which used to surface as a silent
+/// dead run. The wasm stubs below return this instead so callers show
+/// a real message.
+#[cfg(target_arch = "wasm32")]
+const WASM_EXECUTION_UNSUPPORTED: &str =
+    "Notebook cell execution isn't available in the web build (no local \
+     processes) — run this notebook from the desktop app";
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn command_for_language(
+    language: &str,
+) -> Result<std::process::Command, String> {
+    let _ = language;
+    Err(WASM_EXECUTION_UNSUPPORTED.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn command_for_language(
     language: &str,
 ) -> Result<std::process::Command, String> {
@@ -39,6 +59,15 @@ pub(crate) fn command_for_language(
     Ok(command)
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn run_execution_job(
+    job: &NotebookExecutionJob,
+) -> Result<(String, String, bool), String> {
+    let _ = job;
+    Err(WASM_EXECUTION_UNSUPPORTED.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn run_execution_job(
     job: &NotebookExecutionJob,
 ) -> Result<(String, String, bool), String> {
@@ -70,6 +99,16 @@ pub(crate) fn run_execution_job(
     ))
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn run_execution_job_streaming(
+    job: &NotebookExecutionJob,
+    send: &impl Fn(NotebookExecutionEvent),
+) -> Result<(Vec<Value>, bool), String> {
+    let _ = (job, send);
+    Err(WASM_EXECUTION_UNSUPPORTED.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn run_execution_job_streaming(
     job: &NotebookExecutionJob,
     send: &impl Fn(NotebookExecutionEvent),
@@ -147,6 +186,7 @@ pub(crate) fn run_execution_job_streaming(
     Ok((outputs, status.success()))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn stream_reader<R: std::io::Read + Send + 'static>(
     mut reader: R,
     cell_index: usize,

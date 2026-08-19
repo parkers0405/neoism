@@ -1,13 +1,18 @@
 // Wave 7F — OUTBOUND side of the web presence plane.
 //
-// TypeScript mirror of the shared Rust `PresencePublisher`
-// (`neoism-frontend/shared/src/editor/crdt/remote_presence.rs`): a
-// pure coalescing state machine. Feed it the local cursor every frame
-// (or on a coarse timer) and it emits `CrdtClientMessage`s only when
-// something changed (rate-limited to ~13Hz) or when a keep-alive
-// heartbeat is due (the daemon expires silent peers after a ~10s TTL).
-// Switching buffers — or losing the buffer entirely — emits a
-// `ClearPresence` for the buffer being left.
+// Thin adapter over the SHARED RUST `PresencePublisher`
+// (`neoism-frontend/shared/src/editor/crdt/remote_presence.rs`),
+// reached through the wasm `PresencePublisherBridge` exported from
+// `wasm/src/rendered/input_policy.rs`. The coalescing state machine —
+// rate-limited publishes (~13Hz), TTL keep-alive heartbeats,
+// `ClearPresence` on buffer switch/close — runs in the exact Rust the
+// desktop fork runs; the hand-mirrored TS copy is gone.
+//
+// Before the wasm bundle loads, `tick` returns no messages (there is
+// no rendered surface whose cursor could be published) and
+// `setColor`/`setRainbow` are buffered so they apply the moment the
+// bridge exists; the first post-load tick then publishes immediately
+// (fresh state machine ⇒ "first sight of this buffer" fast path).
 //
 // Cursor coordinates are zero-based `(line, column)` with column in
 // UTF-16 code units, matching the CRDT text offset policy used by the
@@ -19,7 +24,11 @@ import type {
   CrdtPresenceColor,
   CrdtSelectionRange,
 } from "../workspace/types";
-import { stablePresenceColor } from "./presenceColor";
+import {
+  wasmInputPolicy,
+  type WasmInputPolicyModule,
+  type WasmPresencePublisherInstance,
+} from "../terminal/createTerminal";
 
 /** Minimum interval between publishes while the cursor IS moving:
  * 75ms ≈ 13Hz, matching the shared Rust constant. */
@@ -40,26 +49,72 @@ export interface ActivePresenceTarget {
   insert?: boolean;
 }
 
-interface PublishedState {
-  bufferId: string;
-  cursor: CrdtCursorPosition;
-  selection: CrdtSelectionRange | null;
-  insert: boolean;
+let warnedMissingExport = false;
+function warnMissingExport(): void {
+  if (warnedMissingExport) return;
+  warnedMissingExport = true;
+  if (typeof console !== "undefined") {
+    console.warn(
+      "[neoism] served wasm bundle predates the shared presence-publisher " +
+        "export; local-cursor presence is not published until the bundle is " +
+        "rebuilt (npm run build:wasm).",
+    );
+  }
 }
 
 export class PresencePublisher {
-  private color: CrdtPresenceColor;
-  private rainbow = false;
-  private lastPublished: PublishedState | null = null;
-  private lastPublishedAtMs = 0;
+  private wasm: WasmPresencePublisherInstance | null = null;
+  /** Buffered until the bridge exists. */
+  private pendingColor: CrdtPresenceColor | null = null;
+  private pendingRainbow: boolean | null = null;
 
+  /** Test seam: a fake input-policy module, or a getter for one.
+   *  Production resolves the live wasm module lazily per call. */
   constructor(
     private readonly peerId: string,
     private readonly displayName: string,
     private readonly minIntervalMs = PRESENCE_PUBLISH_MIN_INTERVAL_MS,
     private readonly heartbeatIntervalMs = PRESENCE_HEARTBEAT_INTERVAL_MS,
-  ) {
-    this.color = stablePresenceColor(peerId);
+    private readonly bindings?:
+      | WasmInputPolicyModule
+      | (() => WasmInputPolicyModule | null)
+      | null,
+  ) {}
+
+  private module(): WasmInputPolicyModule | null {
+    if (typeof this.bindings === "function") return this.bindings();
+    return this.bindings ?? wasmInputPolicy();
+  }
+
+  private publisher(): WasmPresencePublisherInstance | null {
+    if (this.wasm) return this.wasm;
+    const mod = this.module();
+    if (!mod) return null; // Bundle still loading.
+    const Klass = mod.PresencePublisherBridge;
+    if (!Klass) {
+      warnMissingExport();
+      return null;
+    }
+    const publisher = new Klass(
+      this.peerId,
+      this.displayName,
+      this.minIntervalMs,
+      this.heartbeatIntervalMs,
+    );
+    this.wasm = publisher;
+    if (this.pendingColor) {
+      publisher.set_color(
+        this.pendingColor.r,
+        this.pendingColor.g,
+        this.pendingColor.b,
+      );
+      this.pendingColor = null;
+    }
+    if (this.pendingRainbow !== null) {
+      publisher.set_rainbow(this.pendingRainbow);
+      this.pendingRainbow = null;
+    }
+    return publisher;
   }
 
   getPeerId(): string {
@@ -69,14 +124,24 @@ export class PresencePublisher {
   /** Publish under the LOCAL THEME'S cursor color — peers render this
    *  user's caret in the color their cursor actually wears. */
   setColor(color: CrdtPresenceColor): void {
-    this.color = color;
+    const publisher = this.publisher();
+    if (publisher) {
+      publisher.set_color(color.r, color.g, color.b);
+    } else {
+      this.pendingColor = { ...color };
+    }
   }
 
   /** Publish the rainbow-preset flag — peers animate the rainbow
    *  locally instead of using `color` (heartbeats are far too slow to
    *  stream an animation). */
   setRainbow(rainbow: boolean): void {
-    this.rainbow = rainbow;
+    const publisher = this.publisher();
+    if (publisher) {
+      publisher.set_rainbow(rainbow);
+    } else {
+      this.pendingRainbow = rainbow;
+    }
   }
 
   /**
@@ -88,94 +153,9 @@ export class PresencePublisher {
     active: ActivePresenceTarget | null,
     nowMs: number,
   ): CrdtClientMessage[] {
-    const out: CrdtClientMessage[] = [];
-    if (active === null) {
-      if (this.lastPublished) {
-        out.push({
-          ClearPresence: {
-            buffer_id: this.lastPublished.bufferId,
-            peer_id: this.peerId,
-          },
-        });
-        this.lastPublished = null;
-      }
-      return out;
-    }
-
-    if (this.lastPublished && this.lastPublished.bufferId !== active.bufferId) {
-      out.push({
-        ClearPresence: {
-          buffer_id: this.lastPublished.bufferId,
-          peer_id: this.peerId,
-        },
-      });
-      this.lastPublished = null;
-    }
-
-    const next: PublishedState = {
-      bufferId: active.bufferId,
-      cursor: {
-        line: active.cursor.line,
-        column: active.cursor.column,
-        offset: active.cursor.offset ?? null,
-      },
-      selection: active.selection ?? null,
-      insert: active.insert ?? false,
-    };
-    const changed =
-      this.lastPublished === null || !sameState(this.lastPublished, next);
-    const elapsed = Math.max(0, nowMs - this.lastPublishedAtMs);
-    const due =
-      this.lastPublished === null
-        ? // First sight of this buffer: publish immediately.
-          true
-        : changed
-          ? elapsed >= this.minIntervalMs
-          : elapsed >= this.heartbeatIntervalMs;
-    if (due) {
-      out.push({
-        PublishPresence: {
-          presence: {
-            buffer_id: next.bufferId,
-            peer_id: this.peerId,
-            display_name: this.displayName,
-            color: this.color,
-            cursor: { ...next.cursor },
-            selection: next.selection,
-            insert: next.insert,
-            rainbow: this.rainbow,
-            updated_at_ms: nowMs,
-          },
-        },
-      });
-      this.lastPublished = next;
-      this.lastPublishedAtMs = nowMs;
-    }
-    return out;
+    const publisher = this.publisher();
+    if (!publisher) return [];
+    const messages = publisher.tick(active, nowMs);
+    return Array.isArray(messages) ? (messages as CrdtClientMessage[]) : [];
   }
-}
-
-function sameState(a: PublishedState, b: PublishedState): boolean {
-  if ((a.insert ?? false) !== (b.insert ?? false)) return false;
-  return (
-    a.bufferId === b.bufferId &&
-    sameCursor(a.cursor, b.cursor) &&
-    sameSelection(a.selection, b.selection)
-  );
-}
-
-function sameCursor(a: CrdtCursorPosition, b: CrdtCursorPosition): boolean {
-  return (
-    a.line === b.line &&
-    a.column === b.column &&
-    (a.offset ?? null) === (b.offset ?? null)
-  );
-}
-
-function sameSelection(
-  a: CrdtSelectionRange | null,
-  b: CrdtSelectionRange | null,
-): boolean {
-  if (a === null || b === null) return a === b;
-  return sameCursor(a.anchor, b.anchor) && sameCursor(a.head, b.head);
 }

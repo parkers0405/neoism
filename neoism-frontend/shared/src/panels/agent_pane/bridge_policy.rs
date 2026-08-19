@@ -65,7 +65,17 @@ pub struct AgentBridgeKeyEvent {
 pub struct AgentKeyContext {
     pub side_panel_focused: bool,
     pub pending_permission: bool,
+    /// A `question` tool request is awaiting an answer — the prompt
+    /// picker owns the keyboard (arrows pick, typing filters/free-
+    /// answers, Enter commits, Esc rejects).
+    pub pending_question: bool,
     pub picker_open: bool,
+    /// The open picker is the `/sessions` picker — enables the
+    /// pin/delete/rename shortcuts (Ctrl+F / Ctrl+D / Ctrl+R).
+    pub session_picker_open: bool,
+    /// An inline session rename is being edited — every key routes to
+    /// the rename buffer until Enter commits or Esc cancels.
+    pub session_rename_active: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,8 +88,13 @@ pub enum AgentPermissionReply {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentKeyIntent {
     Backspace,
+    /// Ctrl+R on the `/sessions` picker — start the inline rename of
+    /// the selected session.
+    BeginSelectedSessionRename,
     ClearOrAbort,
     ClosePicker,
+    /// Ctrl+D on the `/sessions` picker — delete the selected session.
+    DeleteSelectedSession,
     InsertNewline,
     InsertText(String),
     MoveInputDownOrHistory,
@@ -90,8 +105,26 @@ pub enum AgentKeyIntent {
     MoveInputUpOrHistory,
     MovePermissionSelection(isize),
     MovePickerSelection(isize),
+    /// Arrows / Tab while a `question` prompt is pending.
+    MoveQuestionSelection(isize),
     Paste,
+    /// Backspace into the question prompt's typed filter/answer.
+    QuestionBackspace,
+    /// Typed characters filter the question's options and double as
+    /// the free-typed answer.
+    QuestionInput(String),
+    /// Esc while a `question` prompt is pending — reject it so the
+    /// parked run resumes instead of waiting forever.
+    RejectPendingQuestion,
     RespondPendingPermission(AgentPermissionReply),
+    /// Backspace in the inline session-rename buffer.
+    SessionRenameBackspace,
+    /// Esc — abandon the inline session rename.
+    SessionRenameCancel,
+    /// Enter — commit the inline session rename (emits `SetTitle`).
+    SessionRenameCommit,
+    /// Typed characters append to the inline session-rename buffer.
+    SessionRenameInput(String),
     SidePanelActivateSelection,
     SidePanelBlur,
     SidePanelSelectNext,
@@ -100,7 +133,13 @@ pub enum AgentKeyIntent {
     ScrollTimelineHalfPageUp,
     Submit,
     SubmitPendingPermission,
+    /// Enter while a `question` prompt is pending — commit the
+    /// selected row (or typed answer) for the current question.
+    SubmitPendingQuestion,
     ToggleMode,
+    /// Ctrl+F on the `/sessions` picker — pin/unpin the selected
+    /// session.
+    ToggleSelectedSessionPin,
     ToggleSidePanel,
 }
 
@@ -164,6 +203,29 @@ pub fn agent_key_decision(
         return AgentKeyDecision::dirty_intents(vec![AgentKeyIntent::Paste]);
     }
 
+    // Session picker: inline-rename editing + pin/delete/rename
+    // shortcuts. Handled ahead of the Ctrl+D history-scroll binding
+    // below so Ctrl+D deletes the selected session while the picker is
+    // open (mirrors desktop `handle_neoism_agent_key`).
+    if ctx.session_picker_open {
+        if ctx.session_rename_active {
+            return session_rename_key_decision(event, mods);
+        }
+        if mods.control && !mods.alt && !mods.super_key && !mods.shift {
+            if let AgentBridgeKey::Character(ch) = &event.key_without_modifiers {
+                let intent = match ch.to_ascii_lowercase().as_str() {
+                    "f" => Some(AgentKeyIntent::ToggleSelectedSessionPin),
+                    "d" => Some(AgentKeyIntent::DeleteSelectedSession),
+                    "r" => Some(AgentKeyIntent::BeginSelectedSessionRename),
+                    _ => None,
+                };
+                if let Some(intent) = intent {
+                    return AgentKeyDecision::dirty_intents(vec![intent]);
+                }
+            }
+        }
+    }
+
     if mods.alt
         && !mods.control
         && !mods.shift
@@ -187,6 +249,14 @@ pub fn agent_key_decision(
 
     if ctx.pending_permission {
         return permission_key_decision(event, mods, ctx.picker_open);
+    }
+
+    // Model question prompt (the `question` tool). Same modal
+    // precedence as permissions: arrows pick an option, typing
+    // filters / free-answers into the prompt picker's search row,
+    // Enter commits, Esc rejects so the run resumes.
+    if ctx.pending_question {
+        return question_key_decision(event, mods, ctx.picker_open);
     }
 
     if mods.control && !mods.alt && !mods.super_key && !mods.shift {
@@ -339,6 +409,95 @@ fn permission_key_decision(
             }
         }
         _ => {}
+    }
+
+    AgentKeyDecision {
+        handled: true,
+        dirty: true,
+        intents,
+        ..AgentKeyDecision::default()
+    }
+}
+
+/// Keys while a `question` prompt is pending. Mirrors the desktop key
+/// bridge's question block (`bridges/agent.rs`): a lingering picker is
+/// closed first, then Enter commits, arrows/Tab move, Esc rejects,
+/// Backspace edits, and plain typing filters / free-answers.
+fn question_key_decision(
+    event: &AgentBridgeKeyEvent,
+    mods: AgentBridgeModifiers,
+    picker_open: bool,
+) -> AgentKeyDecision {
+    let mut intents = Vec::new();
+    if picker_open {
+        intents.push(AgentKeyIntent::ClosePicker);
+    }
+
+    match event.logical_key {
+        AgentBridgeKey::Named(AgentBridgeNamedKey::Enter) => {
+            intents.push(AgentKeyIntent::SubmitPendingQuestion);
+        }
+        AgentBridgeKey::Named(AgentBridgeNamedKey::ArrowDown)
+        | AgentBridgeKey::Named(AgentBridgeNamedKey::Tab) => {
+            let delta = if mods.shift { -1 } else { 1 };
+            intents.push(AgentKeyIntent::MoveQuestionSelection(delta));
+        }
+        AgentBridgeKey::Named(AgentBridgeNamedKey::ArrowUp) => {
+            intents.push(AgentKeyIntent::MoveQuestionSelection(-1));
+        }
+        AgentBridgeKey::Named(AgentBridgeNamedKey::Escape) => {
+            intents.push(AgentKeyIntent::RejectPendingQuestion);
+        }
+        AgentBridgeKey::Named(AgentBridgeNamedKey::Backspace) => {
+            intents.push(AgentKeyIntent::QuestionBackspace);
+        }
+        AgentBridgeKey::Character(_)
+            if !mods.control && !mods.alt && !mods.super_key =>
+        {
+            if !event.text.is_empty() && !event.text.chars().any(char::is_control) {
+                intents.push(AgentKeyIntent::QuestionInput(event.text.clone()));
+            }
+        }
+        _ => {}
+    }
+
+    AgentKeyDecision {
+        handled: true,
+        dirty: true,
+        intents,
+        ..AgentKeyDecision::default()
+    }
+}
+
+/// Keys while an inline session rename is being edited on the
+/// `/sessions` picker: Enter commits, Esc cancels, Backspace edits,
+/// unmodified typing appends. Everything else is swallowed so it never
+/// leaks into the composer behind the picker.
+fn session_rename_key_decision(
+    event: &AgentBridgeKeyEvent,
+    mods: AgentBridgeModifiers,
+) -> AgentKeyDecision {
+    let mut intents = Vec::new();
+    match event.logical_key {
+        AgentBridgeKey::Named(AgentBridgeNamedKey::Enter) => {
+            intents.push(AgentKeyIntent::SessionRenameCommit);
+        }
+        AgentBridgeKey::Named(AgentBridgeNamedKey::Escape) => {
+            intents.push(AgentKeyIntent::SessionRenameCancel);
+        }
+        AgentBridgeKey::Named(AgentBridgeNamedKey::Backspace) => {
+            intents.push(AgentKeyIntent::SessionRenameBackspace);
+        }
+        _ => {
+            if !mods.control
+                && !mods.alt
+                && !mods.super_key
+                && !event.text.is_empty()
+                && !event.text.chars().any(char::is_control)
+            {
+                intents.push(AgentKeyIntent::SessionRenameInput(event.text.clone()));
+            }
+        }
     }
 
     AgentKeyDecision {
@@ -556,6 +715,192 @@ mod tests {
                 AgentKeyIntent::RespondPendingPermission(AgentPermissionReply::Always),
             ]
         );
+    }
+
+    #[test]
+    fn pending_question_routes_typing_arrows_enter_and_escape() {
+        let ctx = AgentKeyContext {
+            pending_question: true,
+            ..AgentKeyContext::default()
+        };
+
+        assert_eq!(
+            agent_key_decision(&character("a", "a"), AgentBridgeModifiers::default(), ctx)
+                .intents,
+            vec![AgentKeyIntent::QuestionInput("a".to_string())]
+        );
+        assert_eq!(
+            agent_key_decision(
+                &named(AgentBridgeNamedKey::ArrowDown),
+                AgentBridgeModifiers::default(),
+                ctx
+            )
+            .intents,
+            vec![AgentKeyIntent::MoveQuestionSelection(1)]
+        );
+        assert_eq!(
+            agent_key_decision(
+                &named(AgentBridgeNamedKey::Tab),
+                AgentBridgeModifiers {
+                    shift: true,
+                    ..AgentBridgeModifiers::default()
+                },
+                ctx
+            )
+            .intents,
+            vec![AgentKeyIntent::MoveQuestionSelection(-1)]
+        );
+        assert_eq!(
+            agent_key_decision(
+                &named(AgentBridgeNamedKey::Enter),
+                AgentBridgeModifiers::default(),
+                ctx
+            )
+            .intents,
+            vec![AgentKeyIntent::SubmitPendingQuestion]
+        );
+        assert_eq!(
+            agent_key_decision(
+                &named(AgentBridgeNamedKey::Escape),
+                AgentBridgeModifiers::default(),
+                ctx
+            )
+            .intents,
+            vec![AgentKeyIntent::RejectPendingQuestion]
+        );
+        assert_eq!(
+            agent_key_decision(
+                &named(AgentBridgeNamedKey::Backspace),
+                AgentBridgeModifiers::default(),
+                ctx
+            )
+            .intents,
+            vec![AgentKeyIntent::QuestionBackspace]
+        );
+    }
+
+    #[test]
+    fn pending_question_closes_picker_first_and_permission_takes_precedence() {
+        let decision = agent_key_decision(
+            &named(AgentBridgeNamedKey::Enter),
+            AgentBridgeModifiers::default(),
+            AgentKeyContext {
+                pending_question: true,
+                picker_open: true,
+                ..AgentKeyContext::default()
+            },
+        );
+        assert_eq!(
+            decision.intents,
+            vec![
+                AgentKeyIntent::ClosePicker,
+                AgentKeyIntent::SubmitPendingQuestion,
+            ]
+        );
+
+        // A pending permission outranks a pending question — same modal
+        // precedence as the desktop key bridge.
+        let decision = agent_key_decision(
+            &named(AgentBridgeNamedKey::Enter),
+            AgentBridgeModifiers::default(),
+            AgentKeyContext {
+                pending_permission: true,
+                pending_question: true,
+                ..AgentKeyContext::default()
+            },
+        );
+        assert_eq!(
+            decision.intents,
+            vec![AgentKeyIntent::SubmitPendingPermission]
+        );
+    }
+
+    #[test]
+    fn session_picker_ctrl_shortcuts_map_to_pin_delete_rename() {
+        let ctx = AgentKeyContext {
+            picker_open: true,
+            session_picker_open: true,
+            ..AgentKeyContext::default()
+        };
+        let ctrl = AgentBridgeModifiers {
+            control: true,
+            ..AgentBridgeModifiers::default()
+        };
+
+        assert_eq!(
+            agent_key_decision(&character("f", ""), ctrl, ctx).intents,
+            vec![AgentKeyIntent::ToggleSelectedSessionPin]
+        );
+        // Ctrl+D deletes the selected session instead of scrolling the
+        // timeline while the /sessions picker is open.
+        assert_eq!(
+            agent_key_decision(&character("d", ""), ctrl, ctx).intents,
+            vec![AgentKeyIntent::DeleteSelectedSession]
+        );
+        assert_eq!(
+            agent_key_decision(&character("r", ""), ctrl, ctx).intents,
+            vec![AgentKeyIntent::BeginSelectedSessionRename]
+        );
+        // Without the session picker, Ctrl+D keeps its scroll binding.
+        assert_eq!(
+            agent_key_decision(&character("d", ""), ctrl, AgentKeyContext::default())
+                .intents,
+            vec![AgentKeyIntent::ScrollTimelineHalfPageDown]
+        );
+    }
+
+    #[test]
+    fn session_rename_captures_typing_enter_escape_and_backspace() {
+        let ctx = AgentKeyContext {
+            picker_open: true,
+            session_picker_open: true,
+            session_rename_active: true,
+            ..AgentKeyContext::default()
+        };
+
+        assert_eq!(
+            agent_key_decision(&character("x", "x"), AgentBridgeModifiers::default(), ctx)
+                .intents,
+            vec![AgentKeyIntent::SessionRenameInput("x".to_string())]
+        );
+        assert_eq!(
+            agent_key_decision(
+                &named(AgentBridgeNamedKey::Enter),
+                AgentBridgeModifiers::default(),
+                ctx
+            )
+            .intents,
+            vec![AgentKeyIntent::SessionRenameCommit]
+        );
+        assert_eq!(
+            agent_key_decision(
+                &named(AgentBridgeNamedKey::Escape),
+                AgentBridgeModifiers::default(),
+                ctx
+            )
+            .intents,
+            vec![AgentKeyIntent::SessionRenameCancel]
+        );
+        assert_eq!(
+            agent_key_decision(
+                &named(AgentBridgeNamedKey::Backspace),
+                AgentBridgeModifiers::default(),
+                ctx
+            )
+            .intents,
+            vec![AgentKeyIntent::SessionRenameBackspace]
+        );
+        // Modified keys are swallowed, not typed into the buffer.
+        let decision = agent_key_decision(
+            &character("c", ""),
+            AgentBridgeModifiers {
+                control: true,
+                ..AgentBridgeModifiers::default()
+            },
+            ctx,
+        );
+        assert!(decision.handled);
+        assert!(decision.intents.is_empty());
     }
 
     #[test]

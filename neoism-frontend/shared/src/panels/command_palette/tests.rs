@@ -4,9 +4,10 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::actions::{
-    command_visible_for_surface, shaders_modal_spec, theme_picker_modal_spec, HostKind,
-    PaletteAction, PaletteMashupEntry, PaletteServerEntry, PaletteShaderEntry,
-    PaletteSurface, PaletteWorkspaceEntry, PaletteWorkspaceTarget, WorkspaceHostKind,
+    command_visible_for_host, command_visible_for_surface, shaders_modal_spec,
+    theme_picker_modal_spec, HostKind, PaletteAction, PaletteHostCapabilities,
+    PaletteMashupEntry, PaletteServerEntry, PaletteShaderEntry, PaletteSurface,
+    PaletteWorkspaceEntry, PaletteWorkspaceTarget, WorkspaceHostKind,
     WorkspaceVisibility,
 };
 use super::commands::COMMANDS;
@@ -151,6 +152,128 @@ fn test_filtered_commands_empty_query() {
         .filter(|cmd| command_visible_for_surface(&cmd.action, PaletteSurface::Terminal))
         .count();
     assert_eq!(filtered.len(), expected);
+}
+
+/// Desktop's list must be byte-identical whether or not the (all-true
+/// default) capability set is asserted explicitly.
+#[test]
+fn desktop_capabilities_keep_the_full_catalog() {
+    let baseline = CommandPalette::new();
+    let mut explicit = CommandPalette::new();
+    explicit.set_host_capabilities(PaletteHostCapabilities::all());
+    let titles = |palette: &CommandPalette| -> Vec<String> {
+        palette
+            .filtered_rows()
+            .iter()
+            .map(|(_, row)| row.title().to_string())
+            .collect()
+    };
+    assert_eq!(titles(&baseline), titles(&explicit));
+    // And every catalog action passes the all-true host filter.
+    for cmd in COMMANDS {
+        assert!(
+            command_visible_for_host(&cmd.action, PaletteHostCapabilities::all()),
+            "desktop must list {:?}",
+            cmd.action
+        );
+    }
+}
+
+/// Web capabilities drop exactly the commands the web host cannot
+/// execute, keep the rest, and preserve desktop's relative ordering.
+#[test]
+fn web_capabilities_hide_unsupported_commands_and_keep_order() {
+    let mut palette = CommandPalette::new();
+    palette.set_host_capabilities(PaletteHostCapabilities::web());
+    palette.set_surface(PaletteSurface::Editor);
+    let listed: Vec<String> = palette
+        .filtered_rows()
+        .iter()
+        .map(|(_, row)| row.title().to_string())
+        .collect();
+
+    for hidden in [
+        "Go to Symbol…",
+        "Hover Documentation",
+        "Code Actions",
+        "Format Document",
+        "Go to Definition",
+        "Find References",
+        "Rename Symbol",
+        "Document Symbols",
+        "Workspace Symbols",
+        "Toggle Minimap",
+        "Draw on Note",
+        "Leave Workspace",
+    ] {
+        assert!(!listed.contains(&hidden.to_string()), "{hidden} should hide on web");
+    }
+    for kept in [
+        "NeoWorld",
+        "Settings",
+        "Go to Line…",
+        "Toggle Word Wrap",
+        "Replace in File",
+        "Project Problems",
+        "Toggle Inlay Hints",
+        "Search Forward",
+        "Write File",
+        "Theme Picker",
+    ] {
+        assert!(listed.contains(&kept.to_string()), "{kept} should stay on web");
+    }
+
+    // Ordering: the web list is a strict subsequence of the desktop
+    // list for the same surface — filtering must never reorder.
+    let mut desktop = CommandPalette::new();
+    desktop.set_surface(PaletteSurface::Editor);
+    let desktop_titles: Vec<String> = desktop
+        .filtered_rows()
+        .iter()
+        .map(|(_, row)| row.title().to_string())
+        .collect();
+    let mut cursor = 0usize;
+    for title in &listed {
+        let found = desktop_titles[cursor..]
+            .iter()
+            .position(|t| t == title)
+            .map(|off| cursor + off);
+        match found {
+            Some(ix) => cursor = ix + 1,
+            None => panic!("web row {title:?} out of desktop order"),
+        }
+    }
+}
+
+/// Notebook kernel/batch commands hide on web while the pane-local
+/// cell operations stay listed on the notebook surface.
+#[test]
+fn web_notebook_surface_keeps_pane_local_cell_ops() {
+    let mut palette = CommandPalette::new();
+    palette.set_host_capabilities(PaletteHostCapabilities::web());
+    palette.set_surface(PaletteSurface::Notebook);
+    let listed: Vec<String> = palette
+        .filtered_rows()
+        .iter()
+        .map(|(_, row)| row.title().to_string())
+        .collect();
+    for hidden in [
+        "Interrupt Kernel",
+        "Restart Kernel",
+        "Run All Cells",
+        "Run Current Cell And Below",
+    ] {
+        assert!(!listed.contains(&hidden.to_string()), "{hidden} should hide on web");
+    }
+    for kept in [
+        "Run Current Cell",
+        "Insert Code Cell Above",
+        "Delete Current Cell",
+        "Move Cell Up",
+        "Clear All Outputs",
+    ] {
+        assert!(listed.contains(&kept.to_string()), "{kept} should stay on web");
+    }
 }
 
 #[test]

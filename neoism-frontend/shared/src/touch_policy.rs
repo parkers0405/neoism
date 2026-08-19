@@ -635,6 +635,156 @@ pub fn classify_touch_end(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mobile soft-keyboard policy (host-agnostic).
+//
+// Pure decisions behind the web/iOS `MobileKeyboard` adapter: keyboard
+// inset math, capture-element attribute selection, and the soft-toolbar
+// byte tables. DOM wiring (visualViewport listeners, contenteditable,
+// toolbar buttons) stays in the host; every DECISION lives here so the
+// web frontend and a Capacitor iOS shell can never drift.
+// ---------------------------------------------------------------------------
+
+/// Fractional-pixel slop below which a reported keyboard inset is
+/// treated as "no keyboard" — browsers report sub-4px deltas on
+/// URL-bar hide/show that aren't a real keyboard event.
+pub const KEYBOARD_INSET_SLOP_PX: f64 = 4.0;
+
+/// Keyboard-adjusted bottom inset decision.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyboardInset {
+    /// Pixels obscured at the bottom of the layout viewport by the
+    /// on-screen keyboard. `0` when the soft keyboard is closed.
+    pub bottom: f64,
+    /// True iff the soft keyboard appears to be open right now.
+    pub keyboard_open: bool,
+}
+
+/// Compute the soft-keyboard inset from the host's viewport metrics.
+///
+/// `inner_height` is the layout viewport height; `viewport_height` +
+/// `viewport_offset_top` come from the visual viewport (which shrinks
+/// when the soft keyboard opens). Their delta, clamped to `>= 0` (the
+/// visual viewport can be taller mid pinch-zoom transition) and
+/// rounded to whole pixels, is the inset. The inset must survive
+/// resize events — callers re-run this on every viewport change and
+/// compare against the previous decision.
+pub fn keyboard_inset(
+    inner_height: f64,
+    viewport_height: f64,
+    viewport_offset_top: f64,
+) -> KeyboardInset {
+    let bottom = (inner_height - (viewport_height + viewport_offset_top))
+        .round()
+        .max(0.0);
+    KeyboardInset {
+        bottom,
+        keyboard_open: bottom > KEYBOARD_INSET_SLOP_PX,
+    }
+}
+
+/// What kind of input the focused pane wants from the soft keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MobileInputContext {
+    /// Terminal / code-like input: autocorrect off, Enter sends.
+    #[default]
+    Code,
+    /// Prose (chat composer): autocorrect/autocapitalize relaxed.
+    Text,
+    /// URL entry: iOS shows the `.com` keyboard.
+    Url,
+    /// Search field: search keyboard + "search" Enter hint.
+    Search,
+    /// Multi-line buffer editing (markdown / editor): Enter is a
+    /// newline, so the return key must say "return", not "send".
+    Editor,
+}
+
+impl MobileInputContext {
+    /// Parse the host's context tag. Unknown tags fall back to `Code`
+    /// (the safe default: everything disabled, Enter sends).
+    pub fn from_tag(tag: &str) -> Self {
+        match tag {
+            "text" => Self::Text,
+            "url" => Self::Url,
+            "search" => Self::Search,
+            "editor" => Self::Editor,
+            _ => Self::Code,
+        }
+    }
+}
+
+/// Capture-element attribute decision for one context. Values are the
+/// literal HTML attribute values the host should set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MobileInputAttributes {
+    pub autocapitalize: &'static str,
+    pub autocorrect: &'static str,
+    pub spellcheck: &'static str,
+    pub inputmode: &'static str,
+    pub enterkeyhint: &'static str,
+}
+
+/// Decide the capture element's attributes from the context + whether
+/// the in-page toolbar is showing. `inputmode` flips to `none` while
+/// the toolbar is visible so iPadOS doesn't stack two keyboards.
+pub fn mobile_input_attributes(
+    context: MobileInputContext,
+    toolbar_visible: bool,
+) -> MobileInputAttributes {
+    use MobileInputContext::*;
+    let code_like = matches!(context, Code | Editor | Url | Search);
+    MobileInputAttributes {
+        autocapitalize: if code_like { "off" } else { "sentences" },
+        autocorrect: if code_like { "off" } else { "on" },
+        spellcheck: if code_like { "false" } else { "true" },
+        inputmode: if toolbar_visible {
+            "none"
+        } else {
+            match context {
+                Url => "url",
+                Search => "search",
+                _ => "text",
+            }
+        },
+        enterkeyhint: match context {
+            Search => "search",
+            Editor => "enter",
+            _ => "send",
+        },
+    }
+}
+
+/// PTY byte sequence for one soft-toolbar / navigation key. Returns
+/// `None` for keys the toolbar doesn't own (the host then falls back
+/// to its normal key path). Arrow sequences are the plain (non
+/// application-cursor) CSI forms the historical web toolbar emitted.
+pub fn mobile_named_key_bytes(key: &str) -> Option<&'static [u8]> {
+    Some(match key {
+        "ArrowUp" => b"\x1b[A",
+        "ArrowDown" => b"\x1b[B",
+        "ArrowRight" => b"\x1b[C",
+        "ArrowLeft" => b"\x1b[D",
+        "Enter" => b"\x0d",
+        "Backspace" => b"\x7f",
+        "Escape" => b"\x1b",
+        "Tab" => b"\x09",
+        _ => return None,
+    })
+}
+
+/// Ctrl-chord byte for one latched-Ctrl character (`Ctrl+a` = 0x01 …
+/// `Ctrl+z` = 0x1a). Case-insensitive; `None` for non-letters so the
+/// host forwards the raw text instead.
+pub fn mobile_ctrl_chord_byte(ch: char) -> Option<u8> {
+    let lower = ch.to_ascii_lowercase();
+    if lower.is_ascii_lowercase() {
+        Some(lower as u8 - 96)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,5 +1178,111 @@ mod tests {
                 other => panic!("expected UpdateMousePosition, got {other:?}"),
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Mobile soft-keyboard policy
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn keyboard_inset_open_when_visual_viewport_shrinks() {
+        // 800px layout, keyboard eats 300px: inset 300, open.
+        let inset = keyboard_inset(800.0, 500.0, 0.0);
+        assert_eq!(inset.bottom, 300.0);
+        assert!(inset.keyboard_open);
+        // offsetTop counts toward the visible region.
+        let inset = keyboard_inset(800.0, 500.0, 100.0);
+        assert_eq!(inset.bottom, 200.0);
+        assert!(inset.keyboard_open);
+    }
+
+    #[test]
+    fn keyboard_inset_slop_treats_url_bar_jitter_as_closed() {
+        // Sub-4px fractional deltas (URL-bar hide/show) are not a
+        // keyboard; the inset survives but reports closed.
+        let inset = keyboard_inset(800.0, 797.4, 0.0);
+        assert_eq!(inset.bottom, 3.0);
+        assert!(!inset.keyboard_open);
+        // Exactly at the slop is still closed (`>` not `>=`).
+        let inset = keyboard_inset(800.0, 796.0, 0.0);
+        assert_eq!(inset.bottom, 4.0);
+        assert!(!inset.keyboard_open);
+    }
+
+    #[test]
+    fn keyboard_inset_clamps_negative_delta_to_zero() {
+        // Visual viewport taller than layout mid pinch-zoom unzoom.
+        let inset = keyboard_inset(800.0, 900.0, 0.0);
+        assert_eq!(inset.bottom, 0.0);
+        assert!(!inset.keyboard_open);
+    }
+
+    #[test]
+    fn mobile_attributes_match_web_capture_element() {
+        use MobileInputContext::*;
+        let code = mobile_input_attributes(Code, false);
+        assert_eq!(code.autocapitalize, "off");
+        assert_eq!(code.autocorrect, "off");
+        assert_eq!(code.spellcheck, "false");
+        assert_eq!(code.inputmode, "text");
+        assert_eq!(code.enterkeyhint, "send");
+
+        let text = mobile_input_attributes(Text, false);
+        assert_eq!(text.autocapitalize, "sentences");
+        assert_eq!(text.autocorrect, "on");
+        assert_eq!(text.spellcheck, "true");
+        assert_eq!(text.enterkeyhint, "send");
+
+        assert_eq!(mobile_input_attributes(Url, false).inputmode, "url");
+        assert_eq!(mobile_input_attributes(Search, false).inputmode, "search");
+        assert_eq!(mobile_input_attributes(Search, false).enterkeyhint, "search");
+        // Editor keeps a plain return key (Enter inserts a newline).
+        assert_eq!(mobile_input_attributes(Editor, false).enterkeyhint, "enter");
+        // Toolbar visible: inputmode none so iPadOS doesn't stack
+        // two keyboards, regardless of context.
+        assert_eq!(mobile_input_attributes(Url, true).inputmode, "none");
+        assert_eq!(mobile_input_attributes(Code, true).inputmode, "none");
+    }
+
+    #[test]
+    fn mobile_context_tag_parses_with_code_fallback() {
+        assert_eq!(MobileInputContext::from_tag("text"), MobileInputContext::Text);
+        assert_eq!(MobileInputContext::from_tag("url"), MobileInputContext::Url);
+        assert_eq!(
+            MobileInputContext::from_tag("search"),
+            MobileInputContext::Search
+        );
+        assert_eq!(
+            MobileInputContext::from_tag("editor"),
+            MobileInputContext::Editor
+        );
+        assert_eq!(MobileInputContext::from_tag("code"), MobileInputContext::Code);
+        assert_eq!(
+            MobileInputContext::from_tag("bogus"),
+            MobileInputContext::Code
+        );
+    }
+
+    #[test]
+    fn mobile_named_key_bytes_cover_toolbar_keys() {
+        assert_eq!(mobile_named_key_bytes("ArrowUp"), Some(b"\x1b[A" as &[u8]));
+        assert_eq!(mobile_named_key_bytes("ArrowDown"), Some(b"\x1b[B" as &[u8]));
+        assert_eq!(mobile_named_key_bytes("ArrowRight"), Some(b"\x1b[C" as &[u8]));
+        assert_eq!(mobile_named_key_bytes("ArrowLeft"), Some(b"\x1b[D" as &[u8]));
+        assert_eq!(mobile_named_key_bytes("Enter"), Some(b"\x0d" as &[u8]));
+        assert_eq!(mobile_named_key_bytes("Backspace"), Some(b"\x7f" as &[u8]));
+        assert_eq!(mobile_named_key_bytes("Escape"), Some(b"\x1b" as &[u8]));
+        assert_eq!(mobile_named_key_bytes("Tab"), Some(b"\x09" as &[u8]));
+        assert_eq!(mobile_named_key_bytes("F13"), None);
+    }
+
+    #[test]
+    fn mobile_ctrl_chord_maps_letters_only() {
+        assert_eq!(mobile_ctrl_chord_byte('c'), Some(3));
+        assert_eq!(mobile_ctrl_chord_byte('C'), Some(3));
+        assert_eq!(mobile_ctrl_chord_byte('a'), Some(1));
+        assert_eq!(mobile_ctrl_chord_byte('z'), Some(26));
+        assert_eq!(mobile_ctrl_chord_byte('1'), None);
+        assert_eq!(mobile_ctrl_chord_byte('ß'), None);
     }
 }

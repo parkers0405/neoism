@@ -1745,6 +1745,19 @@ fn background_task_empty_snapshot(message: &NeoismAgentMessage) -> bool {
         || text.contains("no background tasks are running")
 }
 
+/// A background-task completion card carrying the durable job identity —
+/// either the client-injected copy synthesized from the live
+/// `session.background_task.completed` event or the server-persisted
+/// runtime notification mapped by the shared
+/// `api_mapping::background_completion_card` (both use id
+/// `background-task-{job}`). Mirrors the shared pane's predicate
+/// (`neoism-ui` state.rs).
+pub(super) fn is_background_completion_card(message: &NeoismAgentMessage) -> bool {
+    message.kind == NeoismAgentMessageKind::Tool
+        && message.tool == "background_task_result"
+        && message.id.starts_with("background-task-")
+}
+
 fn running_background_task_count(messages: &[NeoismAgentMessage]) -> usize {
     use std::collections::BTreeSet;
 

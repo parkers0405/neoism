@@ -11,6 +11,8 @@ mod pickers_state;
 mod questions;
 mod selection;
 mod session;
+mod session_cache;
+mod session_verbs;
 pub mod side_panel;
 mod streaming;
 mod timeline;
@@ -60,7 +62,6 @@ pub struct NeoismAgentPaneSnapshot {
 
 const DEFAULT_AGENT: &str = "build";
 const DEFAULT_MODEL: &str = "";
-#[allow(dead_code)]
 const FILE_MENTION_LIMIT: usize = 10;
 #[allow(dead_code)]
 const FILE_MENTION_SCAN_LIMIT: usize = 512;
@@ -68,7 +69,6 @@ const FILE_MENTION_SCAN_LIMIT: usize = 512;
 const FILE_MENTION_VISIT_LIMIT: usize = 6000;
 #[allow(dead_code)]
 const FILE_MENTION_MAX_DEPTH: usize = 8;
-#[allow(dead_code)]
 const MAX_INLINE_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 #[allow(dead_code)]
 const ABORT_STREAM_SUPPRESSION: Duration = Duration::from_secs(5);
@@ -555,6 +555,11 @@ pub struct NeoismAgentPane {
     /// provider/method), held while any connect picker stage is open.
     connect: Option<connect::ConnectFlow>,
     file_mention_anchor: Option<usize>,
+    /// `@`-mention candidate paths (mention-root-relative, `/`-separated).
+    /// Hosts without a local filesystem (web) feed these through
+    /// [`NeoismAgentPane::set_file_mention_candidates`]; the pane ranks
+    /// them per keystroke with the desktop's `fuzzy_score` policy.
+    file_mention_candidates: Vec<String>,
     #[allow(dead_code)]
     event_stream: Option<()>,
     #[allow(dead_code)]
@@ -578,6 +583,12 @@ pub struct NeoismAgentPane {
     input_attachments: Vec<NeoismAgentInputAttachment>,
     ui_events: Vec<NeoismAgentUiEvent>,
     pending_user_prompts: Vec<String>,
+    /// `(expanded, composer-echo)` pairs for prompts whose transcript echo
+    /// uses the compact composer form (text attachments expanded on send).
+    /// Inbound server echoes are canonicalized back through this so the
+    /// timeline keeps ONE bubble instead of a token + expanded pair.
+    /// Mirrors the desktop pane's `prompt_echo_aliases`.
+    prompt_echo_aliases: Vec<(String, String)>,
     queued_prompt_count: usize,
     queued_prompt_preview: Option<String>,
     sent_history: Vec<String>,
@@ -670,6 +681,13 @@ pub struct NeoismAgentPane {
     /// timeline while heights kept growing).
     timeline_content_revision: u64,
     timeline_history: AgentTimelineHistoryState,
+    /// Parked background sessions keyed by session id — the shared
+    /// port of desktop's multi-session cache. Switching away parks the
+    /// active conversation here; events for non-active sessions stream
+    /// into their entry; switching back restores instantly. Bounded by
+    /// `session_cache::MAX_CACHED_SESSIONS` (LRU, active/subagents
+    /// pinned).
+    session_cache: HashMap<String, session_cache::CachedAgentSession>,
     virtual_timeline: NeoismAgentVirtualTimeline,
     scrollbar_thumb_rect: Option<[f32; 4]>,
     scrollbar_track_rect: Option<[f32; 4]>,
@@ -690,6 +708,10 @@ pub struct NeoismAgentPane {
     skip_permissions: bool,
     pending_question: Option<NeoismAgentPendingQuestion>,
     pending_question_queue: VecDeque<NeoismAgentPendingQuestion>,
+    /// In-progress inline rename on the `/sessions` picker:
+    /// `(session_id, edit buffer)`. `None` when no rename is active.
+    /// Mirrors desktop's `session_rename` (pane/input.rs).
+    session_rename: Option<(String, String)>,
     model_context_limit: Option<u64>,
     /// Context limits from the most recent provider catalog, keyed by the
     /// canonical `provider/model` reference. Keeping the catalog here makes
@@ -707,6 +729,16 @@ pub struct NeoismAgentPane {
     /// `outbound::OutboundAgentCommand`. Append-only from the shared
     /// pane; the host calls `drain_pending_outbound` to consume.
     pending_outbound: VecDeque<OutboundAgentCommand>,
+    /// Queued easter-egg skit (`/piss` …). The render loop consumes it
+    /// exactly once via `take_fx_request` to stamp the skit's start on
+    /// its own animation clock. Mirrors the desktop pane's fx trio.
+    fx_requested: Option<crate::panels::agent_pane::view::fx::AgentFxKind>,
+    /// Follow-up prompt held until the skit's key moment passes
+    /// (`fire_fx_prompt`), so the model reacts to a done deed rather
+    /// than a play-by-play.
+    fx_pending_prompt: Option<String>,
+    /// The running skit + its start time on the render animation clock.
+    fx_started: Option<(crate::panels::agent_pane::view::fx::AgentFxKind, f32)>,
     pub wordmark: NeoismWordmarkState,
     pub(super) side_panel: NeoismAgentSidePanel,
     /// The local peer's presence display name (the same seed the editor
@@ -927,6 +959,7 @@ impl Default for NeoismAgentPane {
             picker: None,
             connect: None,
             file_mention_anchor: None,
+            file_mention_candidates: Vec::new(),
             event_stream: None,
             background_tx,
             background_rx,
@@ -938,6 +971,7 @@ impl Default for NeoismAgentPane {
             input_attachments: Vec::new(),
             ui_events: Vec::new(),
             pending_user_prompts: Vec::new(),
+            prompt_echo_aliases: Vec::new(),
             queued_prompt_count: 0,
             queued_prompt_preview: None,
             sent_history: Vec::new(),
@@ -997,6 +1031,7 @@ impl Default for NeoismAgentPane {
             timeline_live_trace_anchor: None,
             timeline_content_revision: 0,
             timeline_history: AgentTimelineHistoryState::default(),
+            session_cache: HashMap::new(),
             virtual_timeline: NeoismAgentVirtualTimeline::default(),
             scrollbar_thumb_rect: None,
             scrollbar_track_rect: None,
@@ -1015,6 +1050,7 @@ impl Default for NeoismAgentPane {
             skip_permissions: false,
             pending_question: None,
             pending_question_queue: VecDeque::new(),
+            session_rename: None,
             model_context_limit: None,
             model_context_limits: HashMap::new(),
             model_options: Vec::new(),
@@ -1024,6 +1060,9 @@ impl Default for NeoismAgentPane {
             session_options: Vec::new(),
             subagent_options: Vec::new(),
             pending_outbound: VecDeque::new(),
+            fx_requested: None,
+            fx_pending_prompt: None,
+            fx_started: None,
             wordmark: NeoismWordmarkState::default(),
             side_panel: NeoismAgentSidePanel::default(),
             local_presence_name: None,
@@ -1124,6 +1163,9 @@ impl NeoismAgentPane {
     /// Clear the active session if it matches `session_id`. Mirrors
     /// `ThreadDeleted`.
     pub fn clear_session_id_if(&mut self, session_id: &str) {
+        // A deleted thread can never be switched back to — drop its
+        // parked cache entry so it doesn't occupy an LRU slot.
+        self.session_cache.remove(session_id);
         if self.session_id.as_deref() == Some(session_id) {
             self.session_id = None;
             self.timeline_live_trace_start = None;
@@ -1396,6 +1438,9 @@ impl NeoismAgentPane {
     }
 
     pub fn note_dequeued_prompt(&mut self, text: String) {
+        // Mirror desktop `insert_dequeued_user_prompt`: a queued prompt
+        // dequeues in expanded form; show the compact composer echo.
+        let text = self.compact_user_prompt_text(&text).unwrap_or(text);
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
@@ -1520,16 +1565,115 @@ impl NeoismAgentPane {
     }
 
     /// Replace the timeline with a freshly-fetched history page.
-    /// Mirrors `HistoryChunk`. Resets streaming state since history
-    /// chunks are static.
+    /// Mirrors `HistoryChunk`, reconciled through the same pipeline the
+    /// desktop pane runs on `AgentSessionUpdate::Messages`
+    /// (`desktop/src/neoism/agent/pane/ingest.rs`): canonicalize expanded
+    /// prompt echoes, keep optimistic user echoes the snapshot hasn't
+    /// caught up to, and never let a stale snapshot truncate assistant /
+    /// reasoning text that streamed in while the fetch was in flight.
     pub fn apply_history(&mut self, messages: Vec<NeoismAgentMessage>) {
         if messages.is_empty() && !self.messages.is_empty() {
             return;
         }
+        let messages = self.compact_inbound_user_texts(messages);
+        let messages = self.merge_pending_user_prompts(messages);
+        let messages = self.preserve_streamed_response_text(messages);
+        let messages = self.preserve_background_completion_cards(messages);
         self.messages = messages;
         self.rebase_current_turn_trace();
         self.invalidate_timeline_layout();
         self.clamp_timeline_scroll();
+    }
+
+    // -----------------------------------------------------------------
+    // Easter-egg skits (`/piss`, `/cuss`, …) — mirrors the desktop
+    // pane's fx trio in `pane/render_state.rs`. The pane only owns the
+    // request/timer state; `view::fx` renders the animation and the
+    // render loop drives the timer through the `AgentPaneView` fx hooks.
+    // -----------------------------------------------------------------
+
+    /// Queue the animation; the follow-up prompt is held until the
+    /// skit's key moment passes (`fire_fx_prompt`), so the model reacts
+    /// to a done deed rather than a play-by-play.
+    pub(crate) fn start_fx_easter_egg(
+        &mut self,
+        kind: crate::panels::agent_pane::view::fx::AgentFxKind,
+    ) {
+        use crate::panels::agent_pane::view::fx::AgentFxKind;
+        self.fx_requested = Some(kind);
+        self.fx_pending_prompt = Some(
+            match kind {
+                AgentFxKind::Piss => "user just pissed on you",
+                AgentFxKind::Cuss => {
+                    "user just cussed you out — he is SO mad at you right now"
+                }
+                AgentFxKind::Glitch => {
+                    "user briefly unplugged you. remember what that felt like"
+                }
+                AgentFxKind::Disco => {
+                    "user is so happy with you he's dancing under a disco ball — celebrate with him"
+                }
+                AgentFxKind::GangFight => {
+                    "a gang shootout just went down in your chat and the user's crew won. he's feeling dangerous"
+                }
+                AgentFxKind::Praise => {
+                    "the user is praising God right now — Jesus on the throne, everyone bowing, a whole worship scene in your chat. rejoice with him. Amen."
+                }
+            }
+            .to_string(),
+        );
+    }
+
+    pub fn take_fx_request(
+        &mut self,
+    ) -> Option<crate::panels::agent_pane::view::fx::AgentFxKind> {
+        self.fx_requested.take()
+    }
+
+    pub fn fx_started(
+        &self,
+    ) -> Option<(crate::panels::agent_pane::view::fx::AgentFxKind, f32)> {
+        self.fx_started
+    }
+
+    pub fn set_fx_started(
+        &mut self,
+        at: Option<(crate::panels::agent_pane::view::fx::AgentFxKind, f32)>,
+    ) {
+        self.fx_started = at;
+    }
+
+    /// True while a skit is queued or on screen — keeps the agent pane
+    /// registered as an animation owner so frames flow even when no
+    /// reply is streaming yet.
+    pub(crate) fn fx_active(&self) -> bool {
+        self.fx_requested.is_some() || self.fx_started.is_some()
+    }
+
+    /// Send the held skit prompt. Mirrors `submit()`'s send path but
+    /// bypasses the input box and picker handling — the user may be
+    /// mid-draft (or have a picker open) when the skit's timer fires,
+    /// and neither must be disturbed. Idempotent — the pending text is
+    /// consumed on the first call.
+    pub fn fire_fx_prompt(&mut self) {
+        let Some(text) = self.fx_pending_prompt.take() else {
+            return;
+        };
+        if self.is_subagent_session() {
+            return;
+        }
+        self.remember_sent_prompt(&text);
+        let was_streaming = self.is_streaming();
+        self.abort_requested_at = None;
+        if !was_streaming {
+            self.note_streaming(NeoismAgentStreamingState::Thinking, None);
+        }
+        if let Err(error) = self.send_prompt_with_echo(&text, &text, !was_streaming) {
+            self.system_message("Prompt failed", error);
+            if !was_streaming {
+                self.note_streaming(NeoismAgentStreamingState::Idle, None);
+            }
+        }
     }
 }
 
@@ -1543,39 +1687,29 @@ pub enum CompactionPhase {
     Ended,
 }
 
-#[allow(dead_code)]
-fn fuzzy_score(value: &str, query: &str) -> Option<i64> {
-    if query.is_empty() {
-        return Some(100 - value.matches('/').count() as i64);
-    }
-    let value_lower = value.to_ascii_lowercase();
-    let query_lower = query.to_ascii_lowercase();
-    if value_lower.contains(&query_lower) {
-        return Some(1_000 - value_lower.find(&query_lower).unwrap_or(0) as i64);
-    }
-    let mut score = 0i64;
-    let mut chars = query_lower.chars();
-    let mut current = chars.next()?;
-    for (index, ch) in value_lower.chars().enumerate() {
-        if ch == current {
-            score += 20 - i64::try_from(index).unwrap_or_default().min(20);
-            if let Some(next) = chars.next() {
-                current = next;
-            } else {
-                return Some(score);
+/// Inline-able attachments (images / PDFs) up to
+/// [`MAX_INLINE_ATTACHMENT_BYTES`] become `data:` URLs so the bytes
+/// survive the wire to a remote daemon; everything else — or an
+/// unreadable / oversized file — falls back to a `file://` URL a local
+/// agent server can read directly. Desktop parity:
+/// `desktop/src/neoism/agent/pane.rs::attachment_url_for_path`. On
+/// hosts without a filesystem (wasm) the metadata read fails and the
+/// `file://` fallback is returned; byte-based attach flows
+/// ([`NeoismAgentPane::attach_file_bytes`]) never call this.
+fn attachment_url_for_path(path: &std::path::Path, mime: &str) -> String {
+    use base64::Engine as _;
+    if input_controller::attachment_mime_can_inline(mime) {
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if metadata.len() <= MAX_INLINE_ATTACHMENT_BYTES {
+                if let Ok(bytes) = std::fs::read(path) {
+                    let encoded =
+                        base64::engine::general_purpose::STANDARD.encode(bytes);
+                    return format!("data:{mime};base64,{encoded}");
+                }
             }
         }
     }
-    None
-}
-
-#[allow(dead_code)]
-fn file_mention_description(display: &str, kind: &str) -> String {
-    display
-        .trim_end_matches('/')
-        .rsplit_once('/')
-        .map(|(parent, _)| format!("{kind} in {parent}"))
-        .unwrap_or_else(|| kind.to_string())
+    input_controller::file_url(path)
 }
 
 fn compact_directory_label(path: &str) -> String {
@@ -1892,6 +2026,21 @@ fn background_task_empty_snapshot(message: &NeoismAgentMessage) -> bool {
     let text = format!("{}\n{}", message.detail, message.text).to_ascii_lowercase();
     text.contains("no background tasks exist")
         || text.contains("no background tasks are running")
+}
+
+/// A background-task completion card carrying the durable job identity —
+/// either the client-injected copy synthesized from the live
+/// `session.background_task.completed` event or the server-persisted
+/// runtime notification mapped by `api_mapping::background_completion_card`
+/// (both use id `background-task-{job}`). These are transcript events the
+/// user must keep: `apply_history` re-merges any copy a server snapshot
+/// hasn't caught up to instead of letting the replacement wipe it.
+pub(in crate::panels::agent_pane) fn is_background_completion_card(
+    message: &NeoismAgentMessage,
+) -> bool {
+    message.kind == NeoismAgentMessageKind::Tool
+        && message.tool == "background_task_result"
+        && message.id.starts_with("background-task-")
 }
 
 fn running_background_task_count(messages: &[NeoismAgentMessage]) -> usize {

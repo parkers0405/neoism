@@ -23,7 +23,6 @@ pub mod cross_window_drag;
 pub mod file_tree;
 pub mod finder;
 pub mod git_diff;
-pub mod pairings_settings;
 pub mod status_line;
 
 pub mod breadcrumbs;
@@ -36,7 +35,6 @@ pub mod neoworld;
 pub mod notes_sidebar;
 pub mod notifications;
 pub mod pane_grid;
-pub mod remote_carets;
 pub mod search;
 pub mod splash_overlay;
 pub mod terminal_splash;
@@ -70,7 +68,6 @@ pub use finder::{Finder, FinderMode};
 pub use git_diff::{DiffFile, DiffHunk, DiffLine, GitDiff};
 pub use neoworld::NeoWorldPane;
 pub use notes_sidebar::NotesSidebar;
-pub use pairings_settings::{PairingRow, PairingsSettings, PairingsSettingsAction};
 pub use settings_page::{NeoismSettingsPane, PointerOutcome, SettingsAction};
 pub use status_line::{
     DiagnosticCounts, DiagnosticPill, GitChangeSummary, LspStatus, Mode, PillRect,

@@ -79,8 +79,27 @@ mod config;
 mod content;
 mod draw;
 mod events;
+mod pages;
 mod paint;
+pub use content::EditorPaneKind;
 pub(crate) use paint::*;
+
+/// Host-declared description of what one pane leaf currently displays.
+/// The web bridge pushes one entry per visible pane (keyed by the pane
+/// grid's `external_id`) so the chrome can render UNFOCUSED pane
+/// surfaces — parked editor panes resolved by `path` — and paint an
+/// honest labeled placeholder for surfaces it cannot host yet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaneSurfaceInfo {
+    pub external_id: u64,
+    /// Surface kind string (`"terminal"`, `"editor"`, `"markdown"`, …).
+    pub kind: String,
+    /// Backing file for editor-like surfaces; used to resolve parked
+    /// panes.
+    pub path: Option<std::path::PathBuf>,
+    /// Display title for the placeholder label.
+    pub title: Option<String>,
+}
 
 /// Zero-state placeholder for the stateless `git_branch` module.
 /// The module itself only exposes free helpers (`branch_for`,
@@ -285,6 +304,60 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// for a `.md` path; cleared when the host pushes a non-markdown
     /// tab.
     markdown_pane: Option<crate::editor::markdown::MarkdownPane>,
+    /// Hosted native code editor pane for the active non-markdown text
+    /// tab (desktop hosts one `CodePane` per tab Context; the web
+    /// chrome hosts ONE at a time and re-seeds it on tab switch, the
+    /// same model `markdown_pane` uses). Seeded through
+    /// [`Chrome::open_editor_file`]; painted by `Chrome::draw` inside
+    /// the terminal rect whenever [`Chrome::active_editor_pane_kind`]
+    /// says the pane belongs to the active tab.
+    code_pane: Option<crate::editor::code::CodePane>,
+    /// Hosted `.ipynb` notebook pane (owns an inner `MarkdownPane`
+    /// that the shared markdown renderer paints — desktop parity with
+    /// `bridges/markdown/render.rs`'s notebook branch).
+    notebook_pane: Option<crate::editor::notebook::NotebookPane>,
+    /// Hosted `.neodraw` sketch pane, painted through
+    /// `editor::neodraw::render_pane`.
+    draw_pane: Option<crate::editor::neodraw::DrawPane>,
+    /// Buffer-tab index the hosted editor pane (code / notebook /
+    /// draw) belongs to. The pane only paints while this matches
+    /// `active_tab_index`; the host re-calls `open_editor_file` on
+    /// every tab activation so a shifted index self-heals.
+    editor_pane_tab: Option<usize>,
+    /// Set by `Chrome::draw` while the hosted editor pane still has an
+    /// animation in flight (code scroll glide, notebook eased scroll,
+    /// draw graph sim) so `animations_active()` keeps the host's
+    /// frame pump running.
+    editor_pane_animating: bool,
+    /// CRDT binding for the hosted code pane (web co-editing + the
+    /// daemon-owned single-writer save). Lives next to the pane so
+    /// both are dropped/re-bound together on tab switches. The wasm
+    /// bridge drives it through [`Chrome::code_editor_parts_mut`].
+    code_doc_binding: Option<crate::editor::code::doc_sync::CodeDocBinding>,
+    /// Shared LSP session layer for the hosted code pane — desktop's
+    /// `Renderer::code_lsp` twin (completion / hover / actions /
+    /// rename / diagnostics state machines). The host installs an
+    /// `LspService` backend and feeds results; `Chrome::draw` pumps it
+    /// and hosts its popups (completion menu + hover card).
+    pub code_lsp: crate::editor::code::lsp_session::CodeLspUi,
+    /// LSP status-pill popup ("Server Details" card) — opened by the
+    /// status line's LSP pill, fed from daemon `LspSnapshot` pushes.
+    pub lsp_popup: crate::panels::lsp_popup::LspPopup,
+    /// Panes displaced from the hosted slots by a tab switch, keyed by
+    /// path. Desktop keeps one pane per tab Context; the web chrome
+    /// hosts one slot per kind, so displaced panes park here and are
+    /// restored by [`Chrome::open_editor_file`] — cursor, undo, and
+    /// unsaved edits survive a tab round-trip. Bounded by the set of
+    /// files opened this session (same order as the host's per-tab
+    /// content cache).
+    parked_code_panes:
+        std::collections::HashMap<std::path::PathBuf, crate::editor::code::CodePane>,
+    parked_notebook_panes: std::collections::HashMap<
+        std::path::PathBuf,
+        crate::editor::notebook::NotebookPane,
+    >,
+    parked_draw_panes:
+        std::collections::HashMap<std::path::PathBuf, crate::editor::neodraw::DrawPane>,
 
     pub status_line: StatusLine,
     pub buffer_tabs: BufferTabs<A>,
@@ -317,6 +390,22 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// Other chrome pieces query it (focused pane, pane rects) so they
     /// "know about" the live split topology.
     pub pane_grid: PaneGrid,
+    /// Host-declared per-pane surface descriptors (see
+    /// [`PaneSurfaceInfo`]). Consulted by the unfocused-pane render
+    /// pass while the grid is split.
+    pane_surfaces: Vec<PaneSurfaceInfo>,
+    /// Per-pane tab strips keyed by pane external id — the web twin of
+    /// desktop's `Renderer::pane_tabs` map (host/mod.rs). Stacked
+    /// (non-top-aligned) panes render their strip inside their own
+    /// rect; layout reserves the row via `ChromeLayout::panes`.
+    pane_tabs: std::collections::HashMap<u64, BufferTabs<A>>,
+    /// Per-pane breadcrumbs (desktop `Renderer::pane_breadcrumbs`):
+    /// sits under the pane's strip and shows its active tab's path.
+    pane_breadcrumbs: std::collections::HashMap<u64, Breadcrumbs>,
+    /// External ids of panes the HOST painted this frame (live
+    /// terminal grids). The chrome's unfocused-pane pass skips these
+    /// so it never paints a placeholder over live cells.
+    host_drawn_panes: Vec<u64>,
     /// Shared Rust-rendered agent pane. Installed by hosts that want the
     /// Neoism Agent tab to paint through chrome instead of a
     /// frontend-local agent pane.
@@ -354,6 +443,31 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// Installable handle for the stateless `custom_cursor` module
     /// (free-function sprite draw; no per-instance state).
     pub custom_cursor: CustomCursor,
+
+    /// Full-screen Settings overlay (desktop `renderer.settings`
+    /// twin). Opened via [`Chrome::open_settings_page`]; owns all
+    /// input while active and paints last through the late-overlay
+    /// pass. See `chrome/pages.rs`.
+    pub settings_page: crate::panels::settings_page::NeoismSettingsPane,
+    /// Extensions catalog page — body of the
+    /// `ChromePageKind::Extensions` buffer tab (read-only on web).
+    pub extensions_page: crate::panels::extensions_page::NeoismExtensionsPane,
+    /// NeoWorld pet page — body of the `ChromePageKind::NeoWorld`
+    /// buffer tab. `None` until the host installs a pane (a preview
+    /// pet is auto-installed on first paint as a fallback).
+    pub neoworld_pane: Option<crate::panels::neoworld::NeoWorldPane>,
+    /// Chrome-owned universal modal (About dialog today). Late-overlay
+    /// painted, input-owning while active.
+    pub modal: crate::widgets::modal::UniversalModal,
+    /// Settings actions queued for the host to persist/route —
+    /// drained via [`Chrome::drain_settings_actions`].
+    pending_settings_actions: Vec<crate::panels::settings_page::SettingsAction>,
+    /// Extensions page intents for the host (OpenRepository) —
+    /// drained via [`Chrome::drain_extensions_actions`].
+    pending_extensions_actions: Vec<crate::panels::extensions_page::PaneAction>,
+    /// NeoWorld pet snapshots awaiting persistence — drained via
+    /// [`Chrome::drain_neoworld_snapshots`].
+    pending_neoworld_snapshots: Vec<neoism_neoworld_core::PetState>,
 
     /// Top-of-stack panel receives keyboard events first among the
     /// non-modal panels. Hosts push when a panel gains focus and pop
@@ -428,5 +542,19 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
 impl<A: Send + Copy + 'static> Default for Chrome<A> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<A: Send + Copy + 'static> Chrome<A> {
+    /// Split borrow of the hosted code pane and its LSP session layer —
+    /// the wasm bridge routes daemon LSP replies and key hooks through
+    /// both at once (twin of [`Chrome::code_editor_parts_mut`]).
+    pub fn code_lsp_parts_mut(
+        &mut self,
+    ) -> (
+        Option<&mut crate::editor::code::CodePane>,
+        &mut crate::editor::code::lsp_session::CodeLspUi,
+    ) {
+        (self.code_pane.as_mut(), &mut self.code_lsp)
     }
 }

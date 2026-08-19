@@ -494,9 +494,20 @@ impl CommandPalette {
             PaletteMode::Commands => {
                 let has_adaptive = self.has_adaptive_theme;
                 let surface = self.surface;
+                let host_caps = self.host_capabilities;
                 let mut rows: Vec<(i32, PaletteRow<'_>)> = COMMANDS
                     .iter()
                     .filter(|cmd| {
+                        // Host axis first: a command the host cannot
+                        // execute is never listed, whatever surface
+                        // owns focus. Desktop defaults to all-true so
+                        // its list is byte-identical to before.
+                        if !super::actions::command_visible_for_host(
+                            &cmd.action,
+                            host_caps,
+                        ) {
+                            return false;
+                        }
                         if cmd.action == PaletteAction::ToggleAppearanceTheme {
                             return has_adaptive;
                         }

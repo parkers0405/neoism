@@ -435,6 +435,9 @@ impl NeoismAgentPane {
         if self.visible_user_orb {
             return Some("visible_user_orb");
         }
+        if self.fx_active() {
+            return Some("easter_fx");
+        }
         if self
             .picker
             .as_ref()
@@ -452,6 +455,12 @@ impl NeoismAgentPane {
         // through events and must not own the continuous redraw loop.
         if self.streaming_state != NeoismAgentStreamingState::Idle {
             return Some("streaming");
+        }
+        // A transient idle gap keeps the last status label on screen
+        // through the display grace hold; keep frames coming so it can
+        // expire (and erase) without waiting for the next input event.
+        if self.side_panel.held_status_display().is_some() {
+            return Some("streaming_status_hold");
         }
         // Background task start/completion events invalidate the pane; elapsed
         // seconds alone must not keep the renderer spinning continuously.

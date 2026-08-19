@@ -62,6 +62,10 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    pub(crate) fn is_conflict(&self) -> bool {
+        self.status == StatusCode::CONFLICT
+    }
 }
 
 impl From<anyhow::Error> for ApiError {

@@ -68,7 +68,16 @@ import type {
   EditorSurfaceSummary,
   EditorClientMessage,
 } from "../workspace/types";
-import type { SearchBridge } from "../services/SearchService";
+import type { ServiceRegistryBridge } from "../services/ServiceRegistry";
+import {
+  fetchConfig,
+  fetchExtensions,
+  loadStoredNeoworldPet,
+  parseSettingsActions,
+  persistKeybind,
+  persistSetting,
+  saveStoredNeoworldPet,
+} from "../services/ConfigService";
 
 const CELL_WIDTH = 8;
 const CELL_HEIGHT = 16;
@@ -77,6 +86,11 @@ const MIN_ROWS = 6;
 const MAX_REPLAY_BYTES_PER_PTY = 2 * 1024 * 1024;
 const MOBILE_SCROLL_TAP_SLOP = 10;
 const TERMINAL_RESET_BYTES = new TextEncoder().encode("\x1bc\x1b[3J\x1b[H\x1b[2J");
+// FALLBACK theme list only — used while the wasm bridge is still
+// loading (or a stale bundle predates the export). The real catalog
+// (~100 themes: builtins + the bundled NvChad Base46 set) comes from
+// the bridge's `all_ide_theme_names` export, the same shared source
+// of truth the desktop pickers read; see `ideThemeNames()`.
 const WEB_IDE_THEMES = [
   "pastel_dark",
   "nvchad_one",
@@ -106,6 +120,8 @@ interface WebBufferTab {
 interface PendingTerminalTabSpawn {
   title?: string;
   command?: string;
+  /** Pane the freshly spawned shell should bind to (terminal split). */
+  paneExternalId?: number;
 }
 
 interface WebPaneState {
@@ -282,7 +298,7 @@ export interface TerminalPanelOptions {
    * `SearchBridge` since the bridge surface is a strict
    * superset of the search-service hook.
    */
-  onBridgeReady?: (bridge: SearchBridge) => void;
+  onBridgeReady?: (bridge: ServiceRegistryBridge) => void;
   onFontSizeChanged?: (fontSize: number) => void;
   onShowWorkplaces?: () => void;
   /**
@@ -342,8 +358,6 @@ export class TerminalPanel {
   private readonly root: HTMLElement;
   private readonly canvas: HTMLCanvasElement;
   private readonly markdownLayer: HTMLDivElement;
-  private readonly paneOverlay: HTMLDivElement;
-  private readonly paneDragPreview: HTMLDivElement;
   // Lazily acquired — calling getContext("2d") on the canvas locks it
   // to a 2D context for its lifetime, which makes sugarloaf's WebGL2
   // getContext return null. We must NOT touch this until we know wasm
@@ -393,7 +407,7 @@ export class TerminalPanel {
   // keystroke. Ctrl+0 snaps back to 1.0. Clamped to [0.5, 3.0] — the
   // bridge clamps too, this just keeps `currentFontScale` honest.
   private currentFontScale = 1.0;
-  private activeThemeName: (typeof WEB_IDE_THEMES)[number] = "pastel_dark";
+  private activeThemeName: string = "pastel_dark";
   private fallbackFontFamily =
     "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', monospace";
   private activeShaderFilter: string | null = null;
@@ -415,12 +429,18 @@ export class TerminalPanel {
   private readonly compositionEndHandler: (event: CompositionEvent) => void;
   private readonly pasteHandler: (event: ClipboardEvent) => void;
   private readonly contextMenuHandler: (event: MouseEvent) => void;
+  /** Drag-and-drop a file onto the agent pane → composer attachment
+   *  (the web analogue of desktop's `DroppedFile` → `attach_path`). */
+  private readonly agentDragOverHandler: (event: DragEvent) => void;
+  private readonly agentDropHandler: (event: DragEvent) => void;
   // Touch handlers — C3 polish. The classifier (`touchPolicy.ts`)
-  // mirrors `neoism-frontend/shared/src/touch_policy.rs` 1:1 so the
-  // tap-vs-drag-vs-pinch-vs-pan state machine and long-press timer
-  // match the desktop fork's behaviour. Side effects are applied by
-  // `applyTouchAction`. `touchLongPressTimer` polls
-  // `tickLongPress` while a finger is held inside the tap radius.
+  // routes every decision through the SHARED RUST state machine
+  // (`neoism-frontend/shared/src/touch_policy.rs`, via the wasm
+  // `TouchGesturePolicy` export) so tap-vs-drag-vs-pinch-vs-pan and
+  // the long-press timer ARE the desktop fork's behaviour, not a TS
+  // mirror of it. Side effects are applied by `applyTouchAction`.
+  // `touchLongPressTimer` polls `tickLongPress` while a finger is
+  // held inside the tap radius.
   private readonly touchStartHandler: (event: TouchEvent) => void;
   private readonly touchMoveHandler: (event: TouchEvent) => void;
   private readonly touchEndHandler: (event: TouchEvent) => void;
@@ -498,19 +518,16 @@ export class TerminalPanel {
       // key handler; this catches mutations from other entry points
       // (paste, checkbox toggles, drags) within a frame or two.
       this.pumpCrdtOutbox();
+      this.pumpCodeCrdt();
       this.pollOpenMarkdownTabs();
       if (this.remotePresence.pruneStale(Date.now(), 15_000)) {
         this.syncMarkdownPresenceOverlay();
+        this.syncFileTreePresence();
         this.scheduleDraw();
       }
     }, 250);
-    this.paneOverlay = document.createElement("div");
-    this.paneOverlay.className = "terminal-pane-layout-overlay";
-    this.root.appendChild(this.paneOverlay);
-    this.paneDragPreview = document.createElement("div");
-    this.paneDragPreview.className = "terminal-pane-drag-preview";
-    this.paneDragPreview.hidden = true;
-    this.root.appendChild(this.paneDragPreview);
+    // (The old DOM pane-layout overlay + drag preview elements are
+    // gone — pane chrome paints on the canvas via the shared PaneGrid.)
 
     this.stubTerminal = new WasmTerminalStub(this.cols, this.rows);
     // Try to upgrade to the real wasm engine asynchronously. While this
@@ -533,6 +550,20 @@ export class TerminalPanel {
           this.installChromeCallbacks(adapter);
           this.ensureSessionLayoutState();
           this.options.client.listEditorSurfaces();
+          // The chrome was constructed with the workspaceRoot captured
+          // when the panel was built; any `setWorkspaceRoot` that
+          // landed while the wasm module was still loading only
+          // updated `options.workspaceRoot` (the adapter was null and
+          // the optional-chained call no-op'd). Replay the current
+          // value so the file tree roots at the corrected path —
+          // without this, the tree can keep listing a stale absolute
+          // daemon-side path the Files service rejects ("absolute
+          // paths are not allowed") and its loading skeleton never
+          // resolves. `set_workspace_root` is idempotent for an
+          // unchanged root, so this is free in the common case.
+          if (this.options.workspaceRoot) {
+            adapter.setWorkspaceRoot?.(this.options.workspaceRoot);
+          }
           adapter.refreshFileTree?.();
           // Align sugarloaf's clear color, the chrome panels, and the
           // terminal cell palette to one source so the web frontend
@@ -570,7 +601,7 @@ export class TerminalPanel {
       if (this.wasmAdapter) {
         try {
           this.options.onBridgeReady?.(
-            this.wasmAdapter as unknown as SearchBridge,
+            this.wasmAdapter as unknown as ServiceRegistryBridge,
           );
         } catch (err) {
           if (typeof console !== "undefined") {
@@ -647,6 +678,10 @@ export class TerminalPanel {
     this.wheelHandler = (event) => this.handleWheel(event);
     this.pasteHandler = (event) => this.handlePaste(event);
     this.contextMenuHandler = (event) => this.handleContextMenu(event);
+    this.agentDragOverHandler = (event) => this.handleAgentDragOver(event);
+    this.agentDropHandler = (event) => {
+      void this.handleAgentFileDrop(event);
+    };
     this.touchStartHandler = (event) => this.handleTouchStart(event);
     this.touchMoveHandler = (event) => this.handleTouchMove(event);
     this.touchEndHandler = (event) => this.handleTouchEnd(event);
@@ -661,6 +696,8 @@ export class TerminalPanel {
     this.canvas.addEventListener("wheel", this.wheelHandler, { passive: false });
     this.canvas.addEventListener("paste", this.pasteHandler);
     this.canvas.addEventListener("contextmenu", this.contextMenuHandler);
+    this.canvas.addEventListener("dragover", this.agentDragOverHandler);
+    this.canvas.addEventListener("drop", this.agentDropHandler);
     this.markdownLayer.addEventListener("pointermove", this.pointerMoveHandler);
     this.markdownLayer.addEventListener("pointerdown", this.pointerDownHandler);
     this.markdownLayer.addEventListener("pointerup", this.pointerUpHandler);
@@ -740,6 +777,11 @@ export class TerminalPanel {
     if (!this.knowsPtySession(sessionId)) {
       return;
     }
+    // Live multi-pane rendering: while the grid is split, every
+    // terminal pane owns a per-pane wasm terminal — route this
+    // session's bytes into it (the focused pane's session ALSO feeds
+    // the main grid below so an un-split is instant).
+    this.feedPaneTerminalBytes(sessionId, bytes);
     if (sessionId !== this.activePtySessionId()) {
       return;
     }
@@ -772,6 +814,12 @@ export class TerminalPanel {
       return;
     }
     this.registerTerminalSession(sessionId, pending !== undefined, pending?.title);
+    if (pending?.paneExternalId != null) {
+      // Terminal split: bind the fresh shell's session to the pane
+      // that asked for it so its bytes render into that pane.
+      this.paneSessionIds.set(pending.paneExternalId, sessionId);
+      this.syncPaneTerminals();
+    }
     if (pending?.command) {
       this.options.pty?.sendInput(
         sessionId,
@@ -845,6 +893,7 @@ export class TerminalPanel {
       2,
       ...result.active_external_ids.map((id) => id + 1),
     );
+    this.syncPaneTerminals();
     this.renderPaneLayoutOverlay();
     return true;
   }
@@ -1127,6 +1176,8 @@ export class TerminalPanel {
     this.canvas.removeEventListener("wheel", this.wheelHandler);
     this.canvas.removeEventListener("paste", this.pasteHandler);
     this.canvas.removeEventListener("contextmenu", this.contextMenuHandler);
+    this.canvas.removeEventListener("dragover", this.agentDragOverHandler);
+    this.canvas.removeEventListener("drop", this.agentDropHandler);
     this.markdownLayer.removeEventListener("pointermove", this.pointerMoveHandler);
     this.markdownLayer.removeEventListener("pointerdown", this.pointerDownHandler);
     this.markdownLayer.removeEventListener("pointerup", this.pointerUpHandler);
@@ -1179,19 +1230,101 @@ export class TerminalPanel {
   // ---------------------------------------------------------------
 
   /// Sink for daemon `EditorReply` envelopes. The embedded-nvim grid
-  /// path is gone (the daemon answers editor messages with an
-  /// "editor backend unavailable" error), so frames are ignored.
-  /// The envelope wiring is kept: the future native Rust CodePane
-  /// will consume this same reply channel.
-  editorReply(_payload: unknown): void {}
+  /// path is gone; what remains on this channel is the native code
+  /// pane's LSP plane — diagnostics pushes, status snapshots, and
+  /// seq-tokened hover/completion/query results — routed into the
+  /// wasm session layer (`editor_lsp_reply`).
+  editorReply(payload: unknown): void {
+    const adapter = this.wasmAdapter as {
+      editorLspReply?: (json: string) => boolean;
+    };
+    if (!adapter?.editorLspReply) return;
+    let changed = false;
+    try {
+      changed = adapter.editorLspReply(JSON.stringify(payload));
+    } catch (err) {
+      console.warn("[lsp] editor reply routing failed", err);
+    }
+    this.processEditorLspHostActions();
+    if (changed) this.scheduleDraw();
+  }
+
+  /// Drain + execute host actions queued by the wasm LSP session
+  /// (cross-file definition jumps, the rename prompt, finishing a
+  /// deferred format-on-save).
+  private processEditorLspHostActions(): void {
+    const adapter = this.wasmAdapter as {
+      editorLspHostActions?: () => string | null;
+      editorLspRenameSubmit?: (name: string) => void;
+    };
+    const raw = adapter?.editorLspHostActions?.();
+    if (!raw) return;
+    let actions: Array<Record<string, unknown>> = [];
+    try {
+      actions = JSON.parse(raw) as Array<Record<string, unknown>>;
+    } catch {
+      return;
+    }
+    for (const action of actions) {
+      switch (action.kind) {
+        case "open": {
+          const path = typeof action.path === "string" ? action.path : null;
+          if (path) this.openActivatedPaths([path]);
+          break;
+        }
+        case "rename_prompt": {
+          const word = typeof action.word === "string" ? action.word : "";
+          // Desktop's rename modal (`open_code_rename_prompt`): the
+          // `code_rename_to` form pre-filled with the symbol, Enter
+          // submits, Esc cancels. The confirmed name drains as
+          // `{kind:"lsp_rename"}` and lands in
+          // `handleModalHostActions` → `editorLspRenameSubmit`.
+          const modalAdapter = this.wasmAdapter;
+          if (
+            this.modalChannelAvailable() &&
+            typeof modalAdapter?.openLspRenameModal === "function"
+          ) {
+            modalAdapter.openLspRenameModal(word);
+            this.focus();
+            this.scheduleDraw();
+            this.pumpModalOutcomes();
+            break;
+          }
+          // Fallback for bundles predating the modal exports.
+          const name = window.prompt(`Rename \`${word}\` to:`, word);
+          if (name && name.trim().length > 0) {
+            adapter.editorLspRenameSubmit?.(name.trim());
+          }
+          break;
+        }
+        case "save_after_format": {
+          // Format edits landed (or formatting failed) — complete the
+          // save WITHOUT re-queueing the formatter.
+          this.saveActiveEditorPane(true);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    this.scheduleDraw();
+  }
 
   private crdtInboundLogAt = new Map<string, number>();
   crdtReply(payload: CrdtServerMessage): void {
     // Wave 8D: document plane first — snapshots seed the wasm pane's
     // doc binding, syncs splice remote keystrokes into the visible
     // text (echo-guarded in wasm), `Saved` clears the doc dirty bit.
-    const textChanged =
-      this.wasmAdapter?.crdtApply?.(JSON.stringify(payload)) === true;
+    const payloadJson = JSON.stringify(payload);
+    let textChanged = this.wasmAdapter?.crdtApply?.(payloadJson) === true;
+    // Code-pane document plane: same message stream, code binding.
+    const editorAdapter = this.wasmAdapter as {
+      editorCrdtApply?: (json: string) => boolean;
+    };
+    if (editorAdapter?.editorCrdtApply?.(payloadJson) === true) {
+      textChanged = true;
+    }
+    this.pumpCodeCrdt();
     // Visible diagnostics (info level — debug is hidden by default):
     // one line per second per buffer saying what arrived and whether
     // the pane spliced it. This is the desktop→web display question
@@ -1215,6 +1348,7 @@ export class TerminalPanel {
     const changed = this.remotePresence.applyServerMessage(payload);
     if (changed) {
       this.syncMarkdownPresenceOverlay();
+      this.syncFileTreePresence();
     }
     if (textChanged) {
       this.pumpMarkdownAnimation();
@@ -1603,6 +1737,19 @@ export class TerminalPanel {
         }),
       );
     });
+    // Code-pane LSP requests: the wasm session layer serializes one
+    // `EditorClientMessage` per request (OpenBuffer sync / LspQueryAt /
+    // ApplyLspCodeActionAt); ship it over the daemon editor envelope.
+    (adapter as {
+      setEditorLspRequest?: (cb: (envelopeJson: string) => void) => void;
+    }).setEditorLspRequest?.((envelopeJson) => {
+      try {
+        const message = JSON.parse(envelopeJson) as EditorClientMessage;
+        this.sendEditorMessage(message);
+      } catch (err) {
+        console.warn("[lsp] failed to parse outbound editor envelope", err);
+      }
+    });
   }
 
   private toDaemonWorkspacePath(path: string | null | undefined): string {
@@ -1940,8 +2087,12 @@ export class TerminalPanel {
   }
 
   applyWorkplacePreferences(prefs: WorkplacePreferences): void {
-    if (typeof prefs.theme === "string" && WEB_IDE_THEMES.includes(prefs.theme as (typeof WEB_IDE_THEMES)[number])) {
-      this.setIdeTheme(prefs.theme as (typeof WEB_IDE_THEMES)[number]);
+    // Accept any stored name: the full catalog lives in the wasm
+    // bridge (which may still be loading when prefs arrive), and the
+    // bridge's `IdeTheme::by_name` falls back to pastel_dark for
+    // unknown names — same forgiving path the desktop config takes.
+    if (typeof prefs.theme === "string" && prefs.theme.length > 0) {
+      this.setIdeTheme(prefs.theme);
     }
     if (typeof prefs.font_size === "number" && Number.isFinite(prefs.font_size)) {
       this.applyFontScale(prefs.font_size / 14.0, false);
@@ -1996,6 +2147,23 @@ export class TerminalPanel {
       });
       return;
     }
+    // Prefer the wasm catalog's accent (covers all ~100 themes); the
+    // static table only backs the builtin four for pre-wasm frames.
+    const catalogAccent = this.wasmAdapter
+      ?.allIdeThemes?.()
+      .find((entry) => entry.name === theme)?.accent;
+    const catalogParsed =
+      catalogAccent && /^#?[0-9a-fA-F]{6}$/.test(catalogAccent.trim())
+        ? parseInt(catalogAccent.trim().replace(/^#/, ""), 16)
+        : null;
+    if (catalogParsed !== null) {
+      this.presencePublisher.setColor({
+        r: (catalogParsed >> 16) & 0xff,
+        g: (catalogParsed >> 8) & 0xff,
+        b: catalogParsed & 0xff,
+      });
+      return;
+    }
     const accent = TerminalPanel.THEME_ACCENTS[theme];
     if (accent) this.presencePublisher.setColor(accent);
   }
@@ -2032,8 +2200,15 @@ export class TerminalPanel {
     }
     const adapter = this.wasmAdapter as {
       markdownInInsertMode?: () => boolean;
+      markdownSearchActive?: () => boolean;
     };
     if (adapter?.markdownInInsertMode?.() === true) {
+      this.markdownLeaderPendingAt = null;
+      return false;
+    }
+    // A live `/`-search session owns the keyboard — spaces belong to
+    // the query (multi-word searches), not the leader chord.
+    if (adapter?.markdownSearchActive?.() === true) {
       this.markdownLeaderPendingAt = null;
       return false;
     }
@@ -2157,12 +2332,30 @@ export class TerminalPanel {
   private sessionLayoutStateJson: string | null = null;
   private paneLayoutPanes: WebPaneRect[] = [];
   private readonly paneTabState = new Map<number, WebPaneState>();
+  /** Pane external id → PTY session id for TERMINAL panes. Focused
+   *  terminal panes ride the main grid; the map keeps every split
+   *  terminal pane's session known so its bytes route into the
+   *  per-pane wasm terminal that renders it live. */
+  private readonly paneSessionIds = new Map<number, string>();
   private nextWebPaneId = 2;
   private bufferTabDrag: WebBufferTabDrag | null = null;
   private agentInput = "";
   private agentLastAttachAt = 0;
+  /** Cached `@`-mention candidate list (workspace-relative file paths)
+   *  last fed into the shared pane, plus the fetch timestamp. The pane
+   *  fuzzy-ranks per keystroke locally, so the list only needs a
+   *  periodic refresh. */
+  private agentMentionFileCache: { paths: string[]; at: number } | null = null;
+  private agentMentionFetchInFlight = false;
   private terminalInput = "";
   private editorSessionStarted = false;
+  /// Delayed-frame timer that matures the code pane's mouse-rest LSP
+  /// hover after the pointer stops moving (draw-on-demand otherwise
+  /// never ticks the ~400ms candidate).
+  private editorLspHoverTimer: ReturnType<typeof setTimeout> | null = null;
+  /// Fallback timer completing a format-on-save when the formatter's
+  /// reply is lost (old daemon / dropped frame).
+  private editorLspFormatFallback: ReturnType<typeof setTimeout> | null = null;
   private editorGridCols = 0;
   private editorGridRows = 0;
   private workspaceSessionId: string | null = null;
@@ -2171,6 +2364,7 @@ export class TerminalPanel {
 
   private drainChromeIntents(): void {
     this.drainTopBarActions();
+    this.drainChromePageIntents();
     this.drainAgentTabOpens();
     this.drainFileTreeOpens();
     this.drainSidePanelOpens();
@@ -2204,9 +2398,152 @@ export class TerminalPanel {
         case "start_web_server":
           window.open(window.location.origin, "_blank", "noopener,noreferrer");
           break;
+        case "open_settings":
+          this.openWebSettingsPage();
+          break;
+        case "open_extensions":
+          this.openChromePageTab("chrome-extensions", "Extensions");
+          this.wasmAdapter?.extensionsFocusSearch?.();
+          this.refreshWebExtensions();
+          break;
+        case "open_neoworld":
+          // Seed the pane from the persisted pet (localStorage — the
+          // browser twin of desktop's sqlite NeoWorldStore) BEFORE the
+          // tab activates so the sim resumes instead of resetting.
+          this.wasmAdapter?.neoworldEnsure?.(loadStoredNeoworldPet());
+          this.openChromePageTab("chrome-neoworld", "NeoWorld");
+          break;
+        case "open_about":
+          this.wasmAdapter?.openAboutModal?.();
+          break;
+        case "open_themes": {
+          // Chrome normally consumes OpenThemes internally (palette
+          // themes mode); this is the defensive host-side route for
+          // bundles that surface it instead.
+          const themes = this.wasmAdapter?.allIdeThemes?.() ?? [];
+          if (themes.length > 0) {
+            this.wasmAdapter?.enterPaletteThemesMode?.(
+              JSON.stringify(themes.map((theme) => theme.name)),
+            );
+          }
+          break;
+        }
+        case "open_search": {
+          const adapter = this.wasmAdapter;
+          (adapter?.showFinderGrep ?? adapter?.showFinder)?.call(adapter);
+          break;
+        }
       }
     }
     if (acted) this.scheduleDraw();
+  }
+
+  /** Open the full-screen Settings overlay immediately, then refresh
+   *  it with the daemon host's config.json once the fetch lands. */
+  private openWebSettingsPage(): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter?.openSettingsPage) return;
+    adapter.openSettingsPage(null);
+    this.scheduleDraw();
+    void fetchConfig(this.options.client).then((value) => {
+      if (value == null) return;
+      try {
+        adapter.setSettingsValues?.(JSON.stringify(value));
+      } catch {
+        // Serialization hiccup — overlay keeps last-known values.
+      }
+      this.scheduleDraw();
+    });
+  }
+
+  /** Append (or re-activate) a chrome helper-page tab — the web twin
+   *  of desktop's `open_chrome_page(ChromePageKind::…)` singleton
+   *  tabs. The kind string maps to a `ChromePageRef` inside the wasm
+   *  `setBufferTabs` replay. */
+  private openChromePageTab(
+    kind: "chrome-extensions" | "chrome-neoworld",
+    title: string,
+  ): void {
+    const existing = this.bufferTabs.findIndex(
+      (tab) => (tab.kind as string) === kind,
+    );
+    if (existing >= 0) {
+      this.activeTabIndex = existing;
+    } else {
+      this.bufferTabs.push({
+        title,
+        kind: kind as unknown as WebBufferTab["kind"],
+      });
+      this.activeTabIndex = this.bufferTabs.length - 1;
+    }
+    this.assignActiveTabToFocusedEditorPane();
+    this.replayBufferTabs();
+    this.scheduleDraw();
+  }
+
+  /** Fetch the daemon host's read-only extensions inventory and seed
+   *  the shared Extensions page. Statuses reflect the DAEMON machine;
+   *  install/uninstall stay desktop-host actions. */
+  private refreshWebExtensions(): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter?.setExtensionsEntries) return;
+    void fetchExtensions(this.options.client).then((entries) => {
+      try {
+        adapter.setExtensionsEntries?.(JSON.stringify(entries));
+      } catch {
+        // Malformed reply — the page keeps its empty state.
+      }
+      this.scheduleDraw();
+    });
+  }
+
+  /** Per-frame drain for the chrome-page hosts: persist settings
+   *  writes through the daemon config plane, open repository links,
+   *  and store NeoWorld pet snapshots. */
+  private drainChromePageIntents(): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter) return;
+    const actions = parseSettingsActions(
+      adapter.drainSettingsActions?.() ?? null,
+    );
+    for (const action of actions) {
+      if (action.kind === "set") {
+        void persistSetting(this.options.client, action.key, action.value);
+      } else if (action.kind === "set_keybind") {
+        void persistKeybind(
+          this.options.client,
+          action.action,
+          action.key,
+          action.with,
+        );
+      }
+      // "open_config_file" / "run_action" are fully handled inside
+      // the wasm bridge (toast / agent model picker).
+    }
+    if (actions.length > 0) this.scheduleDraw();
+    const extRaw = adapter.drainExtensionsActions?.() ?? null;
+    if (extRaw) {
+      try {
+        const rows: unknown = JSON.parse(extRaw);
+        if (Array.isArray(rows)) {
+          for (const row of rows) {
+            const rec = row as { kind?: unknown; url?: unknown };
+            if (
+              rec?.kind === "open_repository" &&
+              typeof rec.url === "string"
+            ) {
+              window.open(rec.url, "_blank", "noopener,noreferrer");
+            }
+          }
+        }
+      } catch {
+        // Malformed drain — ignore.
+      }
+    }
+    const snapshot = adapter.drainNeoworldSnapshot?.();
+    if (snapshot) {
+      saveStoredNeoworldPet(snapshot);
+    }
   }
 
   /** Tab completion on web has no filesystem — feed it daemon dir
@@ -2458,6 +2795,12 @@ export class TerminalPanel {
     const intents = this.wasmAdapter?.drainFinderOpenIntents?.();
     if (!intents || intents.length === 0) return;
     let changed = false;
+    // Line-carrying hits (grep / git-changes / Project Problems rows,
+    // `intent.line` 1-based): the wasm bridge armed its deferred
+    // cross-file cursor target when it queued the intent, so the
+    // caret lands on the hit line automatically once the fetched file
+    // routes back through `editorOpenFile` (requestFileContent below)
+    // — same mechanism as LSP go-to-definition. No extra hop here.
     for (const intent of intents) {
       const fileName = intent.path.split(/[\\/]/).pop() ?? intent.path;
       const existing = this.bufferTabs.findIndex((t) => t.path === intent.path);
@@ -2607,7 +2950,7 @@ export class TerminalPanel {
     if (trimmed.length === 0) return;
     const normalized = trimmed.toLowerCase();
     if (normalized === "themepicker" || normalized === "theme picker") {
-      adapter.enterPaletteThemesMode?.(JSON.stringify(WEB_IDE_THEMES));
+      adapter.enterPaletteThemesMode?.(JSON.stringify(this.ideThemeNames()));
       return;
     }
     if (normalized === "shaderpicker" || normalized === "shader picker") {
@@ -2620,6 +2963,22 @@ export class TerminalPanel {
         return;
       }
       if (normalized === "q" || normalized === "quit") {
+        this.closeCurrentSplitOrTab();
+        return;
+      }
+    }
+    if (this.activeEditorPaneKind() !== null) {
+      // Native editor panes: `:w` / `:q` / `:wq` — the vim ex surface.
+      if (normalized === "w" || normalized === "write") {
+        this.saveActiveEditorPane();
+        return;
+      }
+      if (normalized === "q" || normalized === "quit") {
+        this.closeCurrentSplitOrTab();
+        return;
+      }
+      if (normalized === "wq" || normalized === "x") {
+        this.saveActiveEditorPane();
         this.closeCurrentSplitOrTab();
         return;
       }
@@ -2639,12 +2998,50 @@ export class TerminalPanel {
   /// Rust owns the command list and palette UI; this host layer owns
   /// transport-specific effects such as spawning daemon PTYs or
   /// opening browser windows.
+  ///
+  /// Not every action lands here: the wasm bridge executes chrome-side
+  /// arms itself at drain time (GoToLine, ToggleWordWrap, Search*/
+  /// ReplaceInFile over a code pane, ProjectProblems, OpenMashupPacks,
+  /// OpenNeoismNotes, notebook cell ops — see `palettes_finder.rs`'s
+  /// `execute_palette_action_chrome_side`), and commands the web host
+  /// cannot execute are filtered out of the listing entirely by the
+  /// shared `PaletteHostCapabilities::web()` visibility hook. The
+  /// default arm's toast is a last-resort safety net, not a routing
+  /// strategy.
   private dispatchPaletteAction(action: string): void {
     const adapter = this.wasmAdapter;
     if (!adapter) return;
     switch (action) {
+      case "SearchForward":
+      case "SearchBackward":
+        // Reaches TS only when no code pane owns focus (the bridge
+        // handles the in-buffer `/` search chrome-side). The web has
+        // no terminal scrollback search yet, so fall back to the
+        // workspace grep finder.
+        (adapter.showFinderGrep ?? adapter.showFinder)?.call(adapter);
+        break;
+      case "ShowServers":
+        // Web connection ownership lives above TerminalPanel — route
+        // to the host's workplace/server switcher, same as the
+        // top-bar's open_servers action.
+        this.options.onShowWorkplaces?.();
+        break;
+      case "ToggleInlayHints":
+        // Kept listed on web deliberately (discoverability); honest
+        // notice until the web LSP surface grows inlay hints.
+        this.notifyPaletteUnavailable(
+          "Inlay hints haven't landed in the web LSP surface yet.",
+          adapter,
+        );
+        break;
       case "ToggleGitDiffPanel":
         this.toggleGitSidePanel();
+        break;
+      case "ConfigEditor":
+        // Same route as the top-bar hamburger's `open_settings`
+        // action: open the shared Settings overlay, then seed it
+        // with the daemon host's config.json.
+        this.openWebSettingsPage();
         break;
       case "CreateNeoismNote":
         this.options.client.sendWorkspace({
@@ -2752,9 +3149,11 @@ export class TerminalPanel {
       case "SaveDocument":
         if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
           this.saveActiveMarkdown();
+        } else if (this.activeEditorPaneKind() !== null) {
+          this.saveActiveEditorPane();
         } else {
           this.notifyPaletteUnavailable(
-            "Save is only available for markdown documents on the web today.",
+            "Save is only available for document tabs on the web today.",
             adapter,
           );
         }
@@ -2769,7 +3168,7 @@ export class TerminalPanel {
         this.cycleIdeTheme(1);
         break;
       case "OpenThemePicker":
-        adapter.enterPaletteThemesMode?.(JSON.stringify(WEB_IDE_THEMES));
+        adapter.enterPaletteThemesMode?.(JSON.stringify(this.ideThemeNames()));
         break;
       case "OpenShaders":
         adapter.enterPaletteShadersMode?.(JSON.stringify(WEB_SHADER_FILTERS));
@@ -2815,11 +3214,11 @@ export class TerminalPanel {
   }
 
   private handlePaletteThemePick(name: string, adapter: TerminalAdapter): void {
-    if (!(WEB_IDE_THEMES as readonly string[]).includes(name)) {
+    if (!this.ideThemeNames().includes(name)) {
       this.notifyPaletteUnavailable(`Unknown IDE theme "${name}".`, adapter);
       return;
     }
-    this.setIdeTheme(name as (typeof WEB_IDE_THEMES)[number]);
+    this.setIdeTheme(name);
     adapter.pushNotification?.(
       JSON.stringify({
         title: "Theme picker",
@@ -3079,6 +3478,111 @@ export class TerminalPanel {
     }
   }
 
+  /** Presence buffer id for the active CODE pane tab (feeds the code
+   *  co-editing pump). Null while any other surface is active. */
+  private activeCodeBufferId(): string | null {
+    if (this.activeEditorPaneKind() !== "code") return null;
+    const tab = this.bufferTabs[this.activeTabIndex];
+    if (tab?.kind !== "file" || !tab.path) return null;
+    return presenceBufferIdForPath(tab.path, this.options.workspaceRoot);
+  }
+
+  /** Code-pane co-editing pump — the code twin of `pumpCrdtOutbox`.
+   *  Binds the active code pane's doc (OpenBuffer on first sight),
+   *  flushes pane mutations, ships queued client messages. */
+  private pumpCodeCrdt(): void {
+    const adapter = this.wasmAdapter as {
+      codeCrdtPump?: (bufferId: string | null) => string | null;
+    };
+    if (!adapter?.codeCrdtPump) return;
+    const json = adapter.codeCrdtPump(this.activeCodeBufferId());
+    if (!json) return;
+    try {
+      const messages = JSON.parse(json) as CrdtClientMessage[];
+      for (const message of messages) {
+        this.options.client.sendCrdt(message);
+      }
+    } catch (err) {
+      console.warn("[crdt] failed to ship code outbound batch", err);
+    }
+  }
+
+  /** Save the active chrome-hosted editor pane. Code panes prefer the
+   *  daemon-owned single-writer save (CRDT `SaveBuffer`, markdown
+   *  parity); unbound code panes and notebook/draw panes fall back to
+   *  a direct daemon `WriteFile` of the pane's serialized payload. */
+  private saveActiveEditorPane(skipFormat = false): void {
+    const adapter = this.wasmAdapter as {
+      editorRequestSave?: () => string;
+      editorRequestSaveFormatted?: () => string;
+      editorSavePayload?: () => string | null;
+      editorMarkSaved?: (payload: string) => void;
+    };
+    if (!adapter?.editorRequestSave) return;
+    // Bind/flush first so a bound doc includes everything just typed.
+    this.pumpCodeCrdt();
+    // Format-on-save (code panes with a live LSP backend): the wasm
+    // side fires the formatter and answers "format"; the save resumes
+    // through the `save_after_format` host action with skipFormat.
+    if (this.editorLspFormatFallback !== null) {
+      clearTimeout(this.editorLspFormatFallback);
+      this.editorLspFormatFallback = null;
+    }
+    const mode = skipFormat
+      ? adapter.editorRequestSave()
+      : (adapter.editorRequestSaveFormatted?.() ?? adapter.editorRequestSave());
+    if (mode === "format") {
+      // Safety net: if the formatter's reply never lands (old daemon,
+      // dropped frame), finish the save unformatted instead of
+      // hanging the user's Ctrl+S.
+      this.editorLspFormatFallback = setTimeout(() => {
+        this.editorLspFormatFallback = null;
+        this.saveActiveEditorPane(true);
+      }, 3000);
+      return;
+    }
+    if (mode === "crdt") {
+      // The SaveBuffer message is queued in the wasm outbound — ship it.
+      this.pumpCodeCrdt();
+      return;
+    }
+    if (mode !== "host") return;
+    const tab = this.bufferTabs[this.activeTabIndex];
+    const path = tab?.kind === "file" ? tab.path : null;
+    const payload = adapter.editorSavePayload?.();
+    if (!path || payload == null) {
+      this.pushInAppNotification(
+        "Not saved",
+        "The editor pane has no writable document.",
+        "error",
+      );
+      return;
+    }
+    const requestId = nextFileReadRequestId++;
+    this.pendingServiceMappers.set(requestId, (reply) => {
+      if ("FileWritten" in reply) {
+        adapter.editorMarkSaved?.(payload);
+        this.pushInAppNotification("Saved", `Wrote ${path}`, "info");
+        this.scheduleDraw();
+        return reply.FileWritten.bytes_written;
+      }
+      if ("Error" in reply) {
+        this.pushInAppNotification("Save failed", reply.Error.message, "error");
+      }
+      return null;
+    });
+    this.options.client.sendFiles(
+      requestId,
+      {
+        WriteFile: {
+          path: this.toDaemonWorkspacePath(path),
+          bytes: Array.from(new TextEncoder().encode(payload)),
+        },
+      },
+      this.options.workspaceRoot ?? null,
+    );
+  }
+
   /**
    * Outbound presence pump. Computes the buffer + cursor the local
    * user is "in" and lets the coalescing publisher decide whether
@@ -3120,9 +3624,28 @@ export class TerminalPanel {
         insert: cursor?.insert ?? false,
       };
     }
-    // Editor-like file tabs used to publish the embedded-nvim grid
-    // cursor. That plane is gone; until the native CodePane publishes a
-    // real caret, retain workspace membership like terminal/agent tabs.
+    // Native code pane tabs publish the pane's REAL caret (same wire
+    // shape as markdown), so peers see this client where it types.
+    const codeBufferId = this.activeCodeBufferId();
+    if (codeBufferId) {
+      const cursor = (this.wasmAdapter as {
+        editorCursor?: () => {
+          line: number;
+          columnUtf16: number;
+          insert?: boolean;
+        } | null;
+      })?.editorCursor?.();
+      if (cursor) {
+        return {
+          bufferId: codeBufferId,
+          cursor: { line: cursor.line, column: cursor.columnUtf16, offset: null },
+          selection: null,
+          insert: cursor.insert ?? false,
+        };
+      }
+    }
+    // Other editor-like file tabs (notebook/draw) retain workspace
+    // membership like terminal/agent tabs.
     return {
       bufferId: WORKSPACE_PRESENCE_BUFFER_ID,
       cursor: { line: 0, column: 0, offset: null },
@@ -3153,8 +3676,33 @@ export class TerminalPanel {
     return 0;
   }
 
+  /** Feed collaborator carets into the chrome-hosted CODE pane so the
+   *  shared renderer draws them (colored bar + name flag), the code
+   *  twin of the markdown remote-caret push. */
+  private syncCodePanePresence(): void {
+    const adapter = this.wasmAdapter as {
+      editorSetRemoteCursors?: (peers: unknown) => void;
+    };
+    if (!adapter?.editorSetRemoteCursors) return;
+    const bufferId = this.activeCodeBufferId();
+    if (!bufferId) {
+      adapter.editorSetRemoteCursors([]);
+      return;
+    }
+    const peers = this.remotePresence.cursorsFor(bufferId).map((p) => ({
+      name: p.display_name,
+      color: [p.color.r, p.color.g, p.color.b],
+      rainbow: p.rainbow ?? false,
+      insert: p.insert ?? true,
+      line: p.cursor.line,
+      col_utf16: p.cursor.column,
+    }));
+    adapter.editorSetRemoteCursors(peers);
+  }
+
   /** Repaint the markdown DOM overlay from the presence store. */
   private syncMarkdownPresenceOverlay(): void {
+    this.syncCodePanePresence();
     const bufferId = this.activeMarkdownBufferId();
     if (bufferId && this.useWasmMarkdown() && this.activeTabIsMarkdown()) {
       // Real-renderer path: feed peers into the wasm pane so the shared
@@ -3176,6 +3724,17 @@ export class TerminalPanel {
       return;
     }
     this.markdownPresenceOverlay.sync(this.remotePresence.cursorsFor(bufferId));
+  }
+
+  /** Feed the wasm file tree's `path -> peers` presence index so tree
+   *  rows light collaborator avatars (desktop parity:
+   *  `Screen::rebuild_file_tree_presence_index`). EVENT-DRIVEN:
+   *  called from the same presence-store updates that repaint the
+   *  markdown carets — never per frame. */
+  private syncFileTreePresence(): void {
+    this.wasmAdapter?.setPresenceIndex?.(
+      this.remotePresence.avatarPeersByBuffer(),
+    );
   }
 
   private bindEditorSurface(externalId: number, path: string | null): void {
@@ -3209,6 +3768,20 @@ export class TerminalPanel {
   private activeTabIsMarkdown(): boolean {
     const tab = this.bufferTabs[this.activeTabIndex];
     return tab?.kind === "file" && isMarkdownPath(tab.path);
+  }
+
+  /** Which chrome-hosted editor pane serves the active tab: "code" /
+   *  "notebook" / "draw", or null for terminal/markdown/agent tabs
+   *  (and for stale bundles without the editor-pane exports). Gated on
+   *  the rendered wasm chrome, same as the markdown pane path. */
+  private activeEditorPaneKind(): string | null {
+    if (!this.useWasmMarkdown()) return null;
+    const tab = this.bufferTabs[this.activeTabIndex];
+    if (tab?.kind !== "file" || !tab.path || isMarkdownPath(tab.path)) return null;
+    const adapter = this.wasmAdapter as {
+      editorActiveKind?: () => string | null;
+    };
+    return adapter?.editorActiveKind?.() ?? null;
   }
 
   private activeSurface(): "terminal" | "editor" | "agent" | "markdown" {
@@ -3429,12 +4002,29 @@ export class TerminalPanel {
   private activatePaneExternalId(externalId: number, openEditorBuffer: boolean): void {
     const state = this.paneTabState.get(externalId);
     const tabIndex = state?.activeTabIndex;
-    if (
+    const editorTabBound =
       typeof tabIndex === "number" &&
       tabIndex >= 0 &&
       tabIndex < this.bufferTabs.length &&
-      this.isEditorLikeTab(this.bufferTabs[tabIndex])
-    ) {
+      this.isEditorLikeTab(this.bufferTabs[tabIndex]);
+    // Terminal pane: its bound session takes over the main grid (tab
+    // switch + replay + PTY viewport), while the pane terminal keeps
+    // rendering it in place.
+    const paneSession = this.paneSessionIds.get(externalId);
+    if (!editorTabBound && paneSession) {
+      if (paneSession !== this.activePtySessionId()) {
+        this.activatePtySession(paneSession);
+      }
+      this.syncPaneTerminals();
+      return;
+    }
+    if (editorTabBound && typeof tabIndex === "number") {
+      // A pane hosting an editor tab must not keep a stale terminal
+      // binding — otherwise its pane terminal would paint under/over
+      // the editor surface.
+      if (this.paneSessionIds.delete(externalId)) {
+        this.wasmAdapter?.removePaneTerminal?.(externalId);
+      }
       this.activeTabIndex = tabIndex;
       this.wasmAdapter?.setActiveTab?.(tabIndex);
       const tab = this.bufferTabs[tabIndex];
@@ -3462,15 +4052,6 @@ export class TerminalPanel {
     }
   }
 
-  private paneTitle(pane: WebPaneRect): string {
-    const state = this.paneTabState.get(pane.external_id);
-    const tab =
-      typeof state?.activeTabIndex === "number"
-        ? this.bufferTabs[state.activeTabIndex]
-        : null;
-    return tab?.title || pane.title || `Pane ${pane.external_id}`;
-  }
-
   private ensureSessionLayoutState(): void {
     if (this.sessionLayoutStateJson || !this.wasmAdapter?.applySessionLayoutPolicy) {
       return;
@@ -3496,6 +4077,11 @@ export class TerminalPanel {
     const adapter = this.wasmAdapter;
     if (!adapter?.applySessionLayoutPolicy) return null;
     this.ensureSessionLayoutState();
+    // Capture the outgoing focus BEFORE the op so a terminal pane
+    // losing focus keeps its session bound (and keeps rendering live).
+    const prevFocusedPane =
+      this.paneLayoutPanes.find((pane) => pane.focused)?.external_id ?? null;
+    const prevSession = this.activePtySessionId();
     const result = parseSessionLayoutPolicyResult(
       adapter.applySessionLayoutPolicy(
         this.sessionLayoutStateJson,
@@ -3509,17 +4095,31 @@ export class TerminalPanel {
     this.sessionLayoutStateJson = result.state_json;
     this.paneLayoutPanes = result.panes;
     this.syncPaneRouteState(result.panes);
+    if (
+      prevFocusedPane !== null &&
+      prevSession &&
+      result.focused_external_id !== prevFocusedPane &&
+      result.panes.some((pane) => pane.external_id === prevFocusedPane)
+    ) {
+      this.paneSessionIds.set(prevFocusedPane, prevSession);
+    }
     this.nextWebPaneId = Math.max(
       this.nextWebPaneId,
       1,
       ...result.active_external_ids.map((id) => id + 1),
     );
+    this.syncPaneTerminals();
     this.renderPaneLayoutOverlay();
     return result;
   }
 
   private splitEditorPane(axis: WebPaneSplitAxis): void {
-    if (this.activeSurface() !== "editor") {
+    const surface = this.activeSurface();
+    if (surface === "terminal") {
+      this.splitTerminalPane(axis);
+      return;
+    }
+    if (surface !== "editor") {
       return;
     }
     const paneId = this.nextWebPaneId++;
@@ -3541,8 +4141,36 @@ export class TerminalPanel {
     }
   }
 
+  /** Terminal split (desktop parity): the focused pane keeps the
+   *  current shell — bound through `paneSessionIds` so it renders
+   *  live in its pane — and the new (focused) pane spawns a fresh
+   *  shell that attaches through the pending-spawn queue. */
+  private splitTerminalPane(axis: WebPaneSplitAxis): void {
+    this.ensureSessionLayoutState();
+    const currentSession = this.activePtySessionId();
+    const focusedPane =
+      this.paneLayoutPanes.find((pane) => pane.focused)?.external_id ?? null;
+    const paneId = this.nextWebPaneId++;
+    const result = this.applySessionLayoutPolicy(
+      "split_terminal",
+      axis,
+      "Terminal",
+      paneId,
+    );
+    if (!result) {
+      this.nextWebPaneId -= 1;
+      return;
+    }
+    if (currentSession && focusedPane !== null) {
+      this.paneSessionIds.set(focusedPane, currentSession);
+    }
+    this.syncPaneTerminals();
+    this.spawnTerminalTab({ paneExternalId: paneId });
+  }
+
   private focusEditorPane(previous: boolean): void {
-    if (this.activeSurface() !== "editor") {
+    const surface = this.activeSurface();
+    if (surface !== "editor" && surface !== "terminal") {
       return;
     }
     const result = this.applySessionLayoutPolicy(previous ? "focus_prev" : "focus_next");
@@ -3552,7 +4180,25 @@ export class TerminalPanel {
   }
 
   private closeEditorPaneOrTab(): void {
-    if (this.activeSurface() !== "editor") {
+    const surface = this.activeSurface();
+    if (surface === "terminal" && this.paneLayoutPanes.length > 1) {
+      // Close the focused TERMINAL pane (its tab + session survive in
+      // the strip; only the split cell collapses).
+      const closingPane =
+        this.paneLayoutPanes.find((pane) => pane.focused)?.external_id ?? null;
+      const result = this.applySessionLayoutPolicy("close_focused");
+      if (result) {
+        if (closingPane !== null) {
+          this.paneSessionIds.delete(closingPane);
+          this.wasmAdapter?.removePaneTerminal?.(closingPane);
+        }
+        if (typeof result.focused_external_id === "number") {
+          this.activatePaneExternalId(result.focused_external_id, true);
+        }
+      }
+      return;
+    }
+    if (surface !== "editor") {
       this.closeActiveBufferTab();
       return;
     }
@@ -3572,35 +4218,13 @@ export class TerminalPanel {
   }
 
   private renderPaneLayoutOverlay(): void {
-    this.paneOverlay.replaceChildren();
-    if (
-      this.paneLayoutPanes.length <= 1 ||
-      this.activeSurface() !== "editor"
-    ) {
-      this.paneOverlay.hidden = true;
-      return;
-    }
-    this.paneOverlay.hidden = false;
-    for (const pane of this.paneLayoutPanes) {
-      const el = document.createElement("div");
-      el.className = `terminal-pane-layout-cell${pane.focused ? " is-focused" : ""}`;
-      el.style.left = `${pane.x * 100}%`;
-      el.style.top = `${pane.y * 100}%`;
-      el.style.width = `${pane.w * 100}%`;
-      el.style.height = `${pane.h * 100}%`;
-      el.dataset.paneId = String(pane.external_id);
-      el.title = this.paneTitle(pane);
-      const label = document.createElement("span");
-      label.className = "terminal-pane-layout-label";
-      label.textContent = this.paneTitle(pane);
-      el.appendChild(label);
-      el.addEventListener("pointerdown", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this.focusEditorPaneByExternalId(pane.external_id);
-      });
-      this.paneOverlay.appendChild(el);
-    }
+    // The decorative DOM pane-chip overlay is gone: the shared Rust
+    // PaneGrid paints dividers, the focused-pane outline, and the
+    // drag-to-split preview directly on the canvas (Chrome::draw), and
+    // pane surfaces render per-rect through the wasm frame path. This
+    // stub survives only so the many historical call sites keep
+    // triggering a repaint of the canvas-side pane chrome.
+    this.scheduleDraw();
   }
 
   private focusEditorPaneByExternalId(externalId: number): void {
@@ -3613,12 +4237,21 @@ export class TerminalPanel {
   }
 
   private moveEditorDivider(direction: WebPaneResizeDirection): void {
-    if (this.activeSurface() === "editor") {
+    const surface = this.activeSurface();
+    if (surface === "editor" || surface === "terminal") {
       this.applySessionLayoutPolicy("resize", direction);
     }
   }
 
-  private setIdeTheme(name: (typeof WEB_IDE_THEMES)[number]): void {
+  /** Theme names for the pickers/cycling: the wasm bridge's full
+   *  shared catalog (builtins + bundled NvChad set, same list the
+   *  desktop offers) when loaded, else the builtin fallback four. */
+  private ideThemeNames(): readonly string[] {
+    const catalog = this.wasmAdapter?.allIdeThemes?.() ?? [];
+    return catalog.length > 0 ? catalog.map((entry) => entry.name) : WEB_IDE_THEMES;
+  }
+
+  private setIdeTheme(name: string): void {
     this.activeThemeName = name;
     this.wasmAdapter?.setIdeTheme?.(name);
     // Presence broadcasts MY cursor color — switching themes updates
@@ -3627,9 +4260,10 @@ export class TerminalPanel {
   }
 
   private cycleIdeTheme(delta: number): void {
-    const current = WEB_IDE_THEMES.indexOf(this.activeThemeName);
-    const next = (current + delta + WEB_IDE_THEMES.length) % WEB_IDE_THEMES.length;
-    this.setIdeTheme(WEB_IDE_THEMES[next]);
+    const names = this.ideThemeNames();
+    const current = names.indexOf(this.activeThemeName);
+    const next = (current + delta + names.length) % names.length;
+    this.setIdeTheme(names[next]);
   }
 
   private drainAgentTabOpens(): void {
@@ -3657,6 +4291,9 @@ export class TerminalPanel {
     );
     this.wasmAdapter?.setActiveTab?.(this.activeTabIndex);
     this.syncActiveBreadcrumbs();
+    // Per-pane strips mirror slices of this list — keep them (and the
+    // pane surface descriptors) fresh on every replay.
+    this.syncPaneTerminals();
     this.renderPaneLayoutOverlay();
     this.notifyBufferTabsChanged();
   }
@@ -3839,6 +4476,16 @@ export class TerminalPanel {
       this.scheduleDraw();
       return;
     }
+    if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
+      // Right-click on the markdown surface: spelling menu for the
+      // word under the pointer (desktop markdown context spelling).
+      if (adapter.markdownSpellingMenuAt?.(x, y)) {
+        event.preventDefault();
+        this.drainMarkdownPointerEffects();
+        this.scheduleDraw();
+        return;
+      }
+    }
     const layout = adapter.chromeLayout?.();
     const treeRect = layout?.file_tree ?? null;
     if (!treeRect || !pointInRect({ x, y }, treeRect)) return;
@@ -3918,7 +4565,9 @@ export class TerminalPanel {
         label: "Delete",
         enabled: hasTarget,
         run: () => {
-          if (ctx.target?.path) void this.confirmDelete(ctx.target.path);
+          if (ctx.target?.path) {
+            void this.confirmDelete(ctx.target.path, ctx.target.is_dir);
+          }
         },
       },
     ];
@@ -3988,17 +4637,133 @@ export class TerminalPanel {
     };
   }
 
+  // ── File-tree modal flows ──────────────────────────────────────
+  //
+  // Create/rename/delete run through the chrome-hosted shared
+  // `UniversalModal` — the exact ModalSpecs desktop opens in
+  // `bridges/file_tree/create_rename.rs` / `path_ops.rs` (same
+  // titles, placeholders, validation messages, `d`/Enter/Esc keys).
+  // Confirmed outcomes drain out of the wasm bridge and land in
+  // `performCreateFile` etc., which drive the daemon Files ops the
+  // old `window.prompt` flow used. The prompt/confirm bodies remain
+  // only as a fallback for bundles predating the modal exports.
+
+  /** True when the wasm bundle carries the spec-driven modal channel. */
+  private modalChannelAvailable(): boolean {
+    const adapter = this.wasmAdapter;
+    return (
+      typeof adapter?.drainModalActions === "function" &&
+      typeof adapter?.modalActive === "function"
+    );
+  }
+
+  /** Single-flight rAF pump: while the chrome modal is up, drain
+   *  confirmed outcomes each frame and dispatch them; when the modal
+   *  closes with nothing drained the flow was cancelled and the loop
+   *  simply ends. Survives the confirm-then-close ordering because
+   *  the wasm queue outlives the modal's close. */
+  private modalPumpActive = false;
+  private pumpModalOutcomes(): void {
+    if (this.modalPumpActive) return;
+    this.modalPumpActive = true;
+    const poll = () => {
+      const adapter = this.wasmAdapter;
+      if (!adapter) {
+        this.modalPumpActive = false;
+        return;
+      }
+      const raw = adapter.drainModalActions?.();
+      if (raw) {
+        let actions: Array<Record<string, unknown>> = [];
+        try {
+          actions = JSON.parse(raw) as Array<Record<string, unknown>>;
+        } catch {
+          actions = [];
+        }
+        if (actions.length > 0) this.handleModalHostActions(actions);
+      }
+      if (adapter.modalActive?.() === true) {
+        requestAnimationFrame(poll);
+      } else {
+        this.modalPumpActive = false;
+        this.scheduleDraw();
+      }
+    };
+    requestAnimationFrame(poll);
+  }
+
+  /** Execute drained modal outcomes — the web half of desktop's
+   *  `execute_modal_action` file-tree/LSP arms. */
+  private handleModalHostActions(actions: Array<Record<string, unknown>>): void {
+    for (const action of actions) {
+      const str = (key: string): string =>
+        typeof action[key] === "string" ? (action[key] as string) : "";
+      switch (action.kind) {
+        case "file_tree_new_file": {
+          const dir = str("dir");
+          const name = str("name");
+          if (dir && name) void this.performCreateFile(dir, name);
+          break;
+        }
+        case "file_tree_new_folder": {
+          const dir = str("dir");
+          const name = str("name");
+          if (dir && name) void this.performCreateDir(dir, name);
+          break;
+        }
+        case "file_tree_rename": {
+          const path = str("path");
+          const name = str("name");
+          if (path && name) void this.performRename(path, name);
+          break;
+        }
+        case "file_tree_delete": {
+          const path = str("path");
+          if (path) void this.performDelete(path);
+          break;
+        }
+        case "lsp_rename": {
+          const name = str("name");
+          if (name) {
+            const adapter = this.wasmAdapter as {
+              editorLspRenameSubmit?: (name: string) => void;
+            } | null;
+            adapter?.editorLspRenameSubmit?.(name);
+          }
+          break;
+        }
+        default:
+          // "generic" spec outcomes have no consumers on this panel
+          // yet (vault/workspace flows adopt them as their wire
+          // paths land).
+          break;
+      }
+    }
+    this.scheduleDraw();
+  }
+
   private async promptCreateFile(parentDir: string): Promise<void> {
+    if (this.modalChannelAvailable()) {
+      this.wasmAdapter?.openFileTreeNewFileModal?.(parentDir);
+      this.focus();
+      this.scheduleDraw();
+      this.pumpModalOutcomes();
+      return;
+    }
     const name = window.prompt(`New file in ${parentDir}`, "untitled.txt");
     if (name === null) return;
     const trimmed = name.trim();
     if (trimmed.length === 0) return;
+    await this.performCreateFile(parentDir, trimmed);
+  }
+
+  private async performCreateFile(parentDir: string, name: string): Promise<void> {
     try {
       const reply = await this.options.client.requestFiles(
         {
           CreateFile: {
             dir: this.toDaemonWorkspacePath(parentDir),
-            name: trimmed,
+            name,
           },
         },
         this.options.workspaceRoot ?? null,
@@ -4014,16 +4779,27 @@ export class TerminalPanel {
   }
 
   private async promptCreateDir(parentDir: string): Promise<void> {
+    if (this.modalChannelAvailable()) {
+      this.wasmAdapter?.openFileTreeNewFolderModal?.(parentDir);
+      this.focus();
+      this.scheduleDraw();
+      this.pumpModalOutcomes();
+      return;
+    }
     const name = window.prompt(`New folder in ${parentDir}`, "untitled");
     if (name === null) return;
     const trimmed = name.trim();
     if (trimmed.length === 0) return;
+    await this.performCreateDir(parentDir, trimmed);
+  }
+
+  private async performCreateDir(parentDir: string, name: string): Promise<void> {
     try {
       const reply = await this.options.client.requestFiles(
         {
           CreateDir: {
             dir: this.toDaemonWorkspacePath(parentDir),
-            name: trimmed,
+            name,
           },
         },
         this.options.workspaceRoot ?? null,
@@ -4039,13 +4815,26 @@ export class TerminalPanel {
   }
 
   private async promptRename(fromPath: string): Promise<void> {
+    if (this.modalChannelAvailable()) {
+      this.wasmAdapter?.openFileTreeRenameModal?.(fromPath);
+      this.focus();
+      this.scheduleDraw();
+      this.pumpModalOutcomes();
+      return;
+    }
     const oldName = fromPath.split(/[\\/]/).pop() ?? fromPath;
     const next = window.prompt(`Rename ${oldName}`, oldName);
     if (next === null) return;
     const trimmed = next.trim();
     if (trimmed.length === 0 || trimmed === oldName) return;
+    await this.performRename(fromPath, trimmed);
+  }
+
+  private async performRename(fromPath: string, newName: string): Promise<void> {
+    const oldName = fromPath.split(/[\\/]/).pop() ?? fromPath;
     const parent = fromPath.slice(0, fromPath.length - oldName.length);
-    const toPath = `${parent}${trimmed}`;
+    const toPath = `${parent}${newName}`;
+    if (toPath === fromPath) return;
     try {
       const reply = await this.options.client.requestFiles(
         {
@@ -4066,7 +4855,7 @@ export class TerminalPanel {
       for (const tab of this.bufferTabs) {
         if (tab.kind === "file" && tab.path === fromPath) {
           tab.path = toPath;
-          tab.title = trimmed;
+          tab.title = toPath.split(/[\\/]/).pop() ?? newName;
           changed = true;
         }
       }
@@ -4077,9 +4866,20 @@ export class TerminalPanel {
     }
   }
 
-  private async confirmDelete(path: string): Promise<void> {
+  private async confirmDelete(path: string, isDir?: boolean): Promise<void> {
+    if (this.modalChannelAvailable()) {
+      this.wasmAdapter?.openFileTreeDeleteModal?.(path, isDir ?? null);
+      this.focus();
+      this.scheduleDraw();
+      this.pumpModalOutcomes();
+      return;
+    }
     const ok = window.confirm(`Delete ${path}? This cannot be undone.`);
     if (!ok) return;
+    await this.performDelete(path);
+  }
+
+  private async performDelete(path: string): Promise<void> {
     try {
       const reply = await this.options.client.requestFiles(
         { Delete: { path: this.toDaemonWorkspacePath(path) } },
@@ -4421,8 +5221,22 @@ export class TerminalPanel {
         this.wasmAdapter?.setTabContent?.(tabIdx, decoded, path);
         if (isMarkdownPath(path)) {
           this.renderMarkdownLayer(tabIdx, decoded);
-        } else if (this.markdownLayerTabIndex === tabIdx) {
-          this.clearMarkdownLayer();
+        } else {
+          if (this.markdownLayerTabIndex === tabIdx) {
+            this.clearMarkdownLayer();
+          }
+          // Route the fetched file into the chrome-hosted native
+          // editor pane (code / notebook / draw) — desktop parity.
+          // Re-opening the same path keeps live pane state (cursor,
+          // undo, unsaved edits), so the refetch never clobbers.
+          (this.wasmAdapter as {
+            editorOpenFile?: (
+              tabIdx: number,
+              path: string,
+              text: string,
+            ) => string;
+          })?.editorOpenFile?.(tabIdx, path, decoded);
+          this.pumpCodeCrdt();
         }
         this.scheduleDraw();
         return decoded.length;
@@ -4680,19 +5494,137 @@ export class TerminalPanel {
         this.saveActiveMarkdown();
         return;
       }
-      // Real-renderer markdown: full vim-mode key routing in the wasm
-      // pane (motions, insert typing, Ctrl+U/D). Unhandled keys fall
-      // through to the normal routing below.
+      // Real-renderer markdown: desktop-breadth key routing through
+      // the shared dispatcher (operators, visual mode, tables/lists,
+      // title editing, `/` block menu, `[[` completion, `/` search).
+      // Unhandled keys fall through to the normal routing below.
       const adapter = this.wasmAdapter as {
         markdownKey?: (key: string, ctrl: boolean) => boolean;
+        markdownKeyFull?: (
+          key: string,
+          ctrl: boolean,
+          shift: boolean,
+          alt: boolean,
+          meta: boolean,
+        ) => boolean;
+        markdownKeyFullSupported?: () => boolean;
+        markdownDrainClipboardOut?: () => string | null;
+        markdownDrainOpenIntents?: () => unknown;
+        markdownSeedClipboard?: (text: string) => void;
+        markdownInInsertMode?: () => boolean;
       };
-      if (adapter?.markdownKey?.(event.key, event.ctrlKey)) {
+      // Vim `p`/`P` paste from the system clipboard: browsers only
+      // hand clipboard text over asynchronously, so seed the wasm
+      // unnamed register in the background — key repeats and
+      // follow-up pastes read fresh text (in-session yanks already
+      // live in the pane's own registers).
+      if (
+        adapter?.markdownSeedClipboard &&
+        (event.key === "p" || event.key === "P") &&
+        !event.ctrlKey &&
+        adapter.markdownInInsertMode?.() !== true
+      ) {
+        void navigator.clipboard
+          ?.readText?.()
+          .then((text) => adapter.markdownSeedClipboard?.(text))
+          .catch(() => {});
+      }
+      const handled = adapter?.markdownKeyFullSupported?.()
+        ? (adapter.markdownKeyFull?.(
+            event.key,
+            event.ctrlKey,
+            event.shiftKey,
+            false,
+            false,
+          ) ?? false)
+        : (adapter?.markdownKey?.(event.key, event.ctrlKey) ?? false);
+      if (handled) {
         event.preventDefault();
+        // Yanks / copy chips / contact links queue clipboard text.
+        const copyOut = adapter?.markdownDrainClipboardOut?.();
+        if (copyOut) {
+          void navigator.clipboard?.writeText?.(copyOut).catch(() => {});
+        }
+        // Link activations + committed title renames queue intents.
+        const intents = adapter?.markdownDrainOpenIntents?.();
+        if (Array.isArray(intents)) {
+          for (const raw of intents) {
+            if (!raw || typeof raw !== "object") continue;
+            const intent = raw as {
+              kind?: string;
+              target?: string;
+              line?: number;
+            };
+            const target = intent.target ?? "";
+            if (target.length === 0) continue;
+            if (intent.kind === "external") {
+              window.open(target, "_blank", "noopener,noreferrer");
+            } else if (intent.kind === "markdown" || intent.kind === "editor") {
+              this.openActivatedPaths([target]);
+            }
+            // "rename": committed title-edit renames need a daemon
+            // move op the web host doesn't expose yet — the buffer
+            // text is already updated via the CRDT path.
+          }
+        }
         // Letter-by-letter outbound: the keystroke just mutated the
         // pane — flush it into the shared doc right away.
         this.pumpCrdtOutbox();
         this.scheduleDraw();
         this.pumpMarkdownAnimation();
+        return;
+      }
+    }
+    // Chrome-hosted native editor panes (code / notebook / draw) —
+    // the desktop `dispatch_code_key` / notebook / draw key surfaces
+    // adapted to the browser. Alt combos stay with the chrome
+    // shortcuts EXCEPT Ctrl+Alt (multi-cursor caret stacking).
+    if (
+      !event.metaKey &&
+      (!event.altKey || event.ctrlKey) &&
+      // A focused chrome surface (palette / finder / tree / tabs /
+      // composer) owns the keyboard first — desktop parity: keys
+      // route by focused surface, not by the visible buffer.
+      !this.isChromeKeyboardCaptureActive() &&
+      this.activeEditorPaneKind() !== null
+    ) {
+      // Ctrl+S = save (daemon single-writer when doc-bound, WriteFile
+      // fallback otherwise). Must run before editorKey so a bare "s"
+      // never reaches insert-mode routing with ctrl held.
+      if (event.ctrlKey && !event.altKey && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        this.saveActiveEditorPane();
+        return;
+      }
+      const adapter = this.wasmAdapter as {
+        editorKey?: (
+          key: string,
+          ctrl: boolean,
+          shift: boolean,
+          alt: boolean,
+        ) => boolean;
+        editorDrainClipboardOut?: () => string | null;
+      };
+      if (
+        adapter?.editorKey?.(
+          event.key,
+          event.ctrlKey,
+          event.shiftKey,
+          event.altKey,
+        )
+      ) {
+        event.preventDefault();
+        // Yank/cut queued text for the system clipboard.
+        const copyOut = adapter.editorDrainClipboardOut?.();
+        if (copyOut) {
+          void this.writeClipboard(copyOut);
+        }
+        // Letter-by-letter outbound for bound code docs.
+        this.pumpCodeCrdt();
+        // LSP host actions the key may have queued (rename prompt,
+        // open-definition-target, deferred save completion).
+        this.processEditorLspHostActions();
+        this.scheduleDraw();
         return;
       }
     }
@@ -4719,12 +5651,125 @@ export class TerminalPanel {
       return;
     }
 
-    const bytes = keyEventToBytes(event);
+    // Terminal-grid shortcuts: selection copy + scrollback paging
+    // (desktop bindings/defaults.rs + platform/linux.rs parity).
+    if (
+      this.activeSurface() === "terminal" &&
+      this.handleTerminalGridShortcut(event)
+    ) {
+      event.preventDefault();
+      return;
+    }
+
+    const bytes = encodePtyKeyEvent(event, this.activeSurface(), this.wasmAdapter);
     if (!bytes) {
       return;
     }
     event.preventDefault();
+    if (
+      this.activeSurface() === "terminal" &&
+      !(this.wasmAdapter?.terminalShouldCaptureInput?.() ?? false)
+    ) {
+      // Desktop key_event.rs SendToPty arm: keys headed for the PTY
+      // snap scrollback to the live tail and clear any selection.
+      // Composer-owned keys never reach the PTY, so they're skipped.
+      if (this.wasmAdapter?.terminalNotifyKeyInput?.()) {
+        this.scheduleDraw();
+      }
+    }
     this.handleInputBytes(bytes);
+  }
+
+  /** Terminal-surface keyboard shortcuts that never reach the PTY:
+   *
+   *  - Ctrl+Shift+C (Linux/Windows) / Cmd+C (macOS) → copy the
+   *    selection through the ClipboardService path. Consumed even
+   *    with no selection, matching the desktop binding (otherwise
+   *    Ctrl+Shift+C would leak 0x03 SIGINT into the shell).
+   *  - Shift+PageUp / Shift+PageDown → scrollback paging outside the
+   *    alt screen (defaults.rs:37-38); on the alt screen the desktop
+   *    key encoder sends CSI 5;2~ / 6;2~ instead.
+   *  - Plain PageUp / PageDown → \x1b[5~ / \x1b[6~ to the PTY
+   *    (defaults.rs:134-135) — the generic keyEventToBytes table
+   *    doesn't cover them.
+   */
+  private handleTerminalGridShortcut(event: KeyboardEvent): boolean {
+    const adapter = this.wasmAdapter;
+    if (!adapter) return false;
+    const key = event.key.toLowerCase();
+    // Terminal hint mode (desktop bindings/defaults.rs
+    // create_hint_bindings — default binding Ctrl+Shift+O). While a
+    // hint is being selected it owns EVERY key, mirroring desktop
+    // key_event.rs:399-483 ("all key bindings are disabled while a
+    // hint is being selected"): Escape stops, Backspace pops,
+    // printable chars narrow the labels, a completed label opens.
+    if (adapter.terminalHintActive?.() === true) {
+      const flags = adapter.terminalHintKey?.(event.key) ?? 0;
+      if (flags & 2) this.drainTerminalLinkOpens();
+      this.scheduleDraw();
+      return true;
+    }
+    if (
+      event.ctrlKey &&
+      event.shiftKey &&
+      !event.altKey &&
+      !event.metaKey &&
+      key === "o"
+    ) {
+      if (adapter.terminalHintStart?.() === true) {
+        this.scheduleDraw();
+      }
+      // Consumed either way, like the desktop binding (hint mode
+      // cancels itself silently when nothing matches).
+      return true;
+    }
+    const isMac = /Mac|iP(hone|ad|od)/.test(navigator.platform);
+    const copyCombo =
+      (event.ctrlKey &&
+        event.shiftKey &&
+        !event.altKey &&
+        !event.metaKey &&
+        key === "c") ||
+      (isMac &&
+        event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        key === "c");
+    if (copyCombo) {
+      const text = adapter.terminalSelectedText?.();
+      if (text) {
+        void this.writeClipboard(text);
+      }
+      return true;
+    }
+    if (event.key === "PageUp" || event.key === "PageDown") {
+      const up = event.key === "PageUp";
+      if (
+        event.shiftKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey
+      ) {
+        if (adapter.terminalScrollPage?.(up)) {
+          this.scheduleDraw();
+        } else {
+          // Alt screen: desktop falls through to the shift-modified
+          // key escape.
+          this.handleInputBytes(
+            new TextEncoder().encode(up ? "\x1b[5;2~" : "\x1b[6;2~"),
+          );
+        }
+        return true;
+      }
+      if (!event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey) {
+        this.handleInputBytes(
+          new TextEncoder().encode(up ? "\x1b[5~" : "\x1b[6~"),
+        );
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -5403,6 +6448,9 @@ export class TerminalPanel {
       true;
     if (!handled) return false;
     this.agentInput = this.wasmAdapter?.agentInput?.() ?? "";
+    // Typing may have opened / extended an `@file` mention — make sure
+    // the shared picker has candidates to rank.
+    this.maybeFeedAgentFileMentions();
     this.scheduleDraw();
     return true;
   }
@@ -5423,14 +6471,26 @@ export class TerminalPanel {
   }
 
   private beginBufferTabDrag(event: PointerEvent): void {
-    if (event.button !== 0 || !this.wasmAdapter?.bufferTabHitTest) return;
+    if (event.button !== 0) return;
+    const adapter = this.wasmAdapter;
     const { x, y } = this.canvasLogicalPoint(event);
-    const tabIndex = this.wasmAdapter.bufferTabHitTest(x, y);
-    if (
-      tabIndex < 0 ||
-      tabIndex >= this.bufferTabs.length ||
-      !this.isEditorLikeTab(this.bufferTabs[tabIndex])
-    ) {
+    let tabIndex = -1;
+    if (adapter?.bufferTabBeginDrag) {
+      // Shared strip pipeline: arms `BufferTabs::begin_drag` so the
+      // strip itself paints the floating tab, reorders incrementally,
+      // and reports the tear-out threshold.
+      tabIndex = adapter.bufferTabBeginDrag(x, y);
+    } else if (adapter?.bufferTabHitTest) {
+      tabIndex = adapter.bufferTabHitTest(x, y);
+    }
+    if (tabIndex < 0 || tabIndex >= this.bufferTabs.length) {
+      return;
+    }
+    const tab = this.bufferTabs[tabIndex];
+    const draggable =
+      this.isEditorLikeTab(tab) || (tab?.kind === "terminal" && !!tab.sessionId);
+    if (!draggable) {
+      adapter?.bufferTabCancelDrag?.();
       return;
     }
     this.bufferTabDrag = {
@@ -5447,81 +6507,402 @@ export class TerminalPanel {
   private updateBufferTabDrag(event: PointerEvent): boolean {
     const drag = this.bufferTabDrag;
     if (!drag || drag.pointerId !== event.pointerId) return false;
+    const adapter = this.wasmAdapter;
+    const { x, y } = this.canvasLogicalPoint(event);
+    if (adapter?.bufferTabUpdateDrag) {
+      // Shared pipeline: the strip reorders while the pointer stays in
+      // the row; crossing the tear-out threshold switches to the pane
+      // drop-zone preview (Rust-painted).
+      if (adapter.bufferTabUpdateDrag(x, y)) {
+        this.scheduleDraw();
+      }
+      const tearArmed = adapter.bufferTabDragTearArmed?.() === true;
+      if (tearArmed) {
+        if (!drag.active) {
+          drag.active = true;
+          adapter.paneGridBeginTabDrag?.();
+        }
+        drag.target = this.paneDropTargetAt(event.clientX, event.clientY);
+        adapter.paneGridDragPreview?.(x, y);
+        this.scheduleDraw();
+      } else if (drag.active) {
+        drag.active = false;
+        drag.target = null;
+        adapter.paneGridCancelDrag?.();
+        this.scheduleDraw();
+      }
+      event.preventDefault();
+      return true;
+    }
+    // Legacy fallback for stale bundles without the shared pipeline.
     if (!drag.active) {
       const dx = event.clientX - drag.startX;
       const dy = event.clientY - drag.startY;
       if (Math.hypot(dx, dy) < 4) return false;
       drag.active = true;
-      // A one-pane overlay is normally hidden because it has no useful
-      // chrome. During drag it becomes the drop canvas, so the same five
-      // zones work before and after the first split.
-      this.paneOverlay.hidden = false;
-      this.paneOverlay.classList.add("is-tab-dragging");
+      adapter?.paneGridBeginTabDrag?.();
     }
     drag.target = this.paneDropTargetAt(event.clientX, event.clientY);
-    this.paintWebPaneDropPreview(drag.target);
+    adapter?.paneGridDragPreview?.(x, y);
+    this.scheduleDraw();
     event.preventDefault();
     return true;
   }
 
   private paneDropTargetAt(clientX: number, clientY: number): WebPaneDropTarget | null {
-    const bounds = this.paneOverlay.getBoundingClientRect();
-    if (bounds.width <= 0 || bounds.height <= 0) return null;
+    // Normalize against the chrome's terminal (content) rect — the
+    // same rect the Rust pane grid solves against — instead of the
+    // deleted DOM overlay's approximation.
+    const terminal = this.wasmAdapter?.chromeLayout?.()?.terminal;
+    if (!terminal || terminal.w <= 0 || terminal.h <= 0) return null;
+    const canvasRect = this.canvas.getBoundingClientRect();
+    const bounds = {
+      left: canvasRect.left + terminal.x,
+      top: canvasRect.top + terminal.y,
+      width: terminal.w,
+      height: terminal.h,
+    };
     const nx = (clientX - bounds.left) / bounds.width;
     const ny = (clientY - bounds.top) / bounds.height;
-    const pane = this.paneLayoutPanes.find(
-      (candidate) =>
-        nx >= candidate.x &&
-        nx <= candidate.x + candidate.w &&
-        ny >= candidate.y &&
-        ny <= candidate.y + candidate.h,
+    // Shared-geometry hit test: the wasm bridge runs the SAME
+    // `session_layout::geometry::drop_zone_at` (with the shared
+    // `DEFAULT_EDGE_FRAC`) the desktop PaneGrid uses, so the edge
+    // bands and the half-split preview can never drift from the
+    // shared constants. Deliberately no TS fallback math — a stale
+    // bundle just disables drag-to-split instead of desyncing.
+    const zone = this.wasmAdapter?.paneDropTarget?.(
+      JSON.stringify(
+        this.paneLayoutPanes.map((pane) => ({
+          external_id: pane.external_id,
+          x: pane.x,
+          y: pane.y,
+          w: pane.w,
+          h: pane.h,
+        })),
+      ),
+      nx,
+      ny,
     );
-    if (!pane) return null;
-
-    const localX = (nx - pane.x) / Math.max(pane.w, Number.EPSILON);
-    const localY = (ny - pane.y) / Math.max(pane.h, Number.EPSILON);
-    const candidates: Array<{ distance: number; placement: WebPaneDropPlacement }> = [];
-    if (localX <= 0.25) candidates.push({ distance: localX, placement: "left" });
-    if (localX >= 0.75) candidates.push({ distance: 1 - localX, placement: "right" });
-    if (localY <= 0.25) candidates.push({ distance: localY, placement: "top" });
-    if (localY >= 0.75) candidates.push({ distance: 1 - localY, placement: "bottom" });
-    candidates.sort((a, b) => a.distance - b.distance);
-    const placement = candidates[0]?.placement ?? "center";
-
-    let x = pane.x;
-    let y = pane.y;
-    let w = pane.w;
-    let h = pane.h;
-    if (placement === "left" || placement === "right") {
-      w *= 0.5;
-      if (placement === "right") x += w;
-    } else if (placement === "top" || placement === "bottom") {
-      h *= 0.5;
-      if (placement === "bottom") y += h;
-    }
+    if (!zone) return null;
     return {
-      paneExternalId: pane.external_id,
-      placement,
+      paneExternalId: zone.external_id,
+      placement: zone.placement as WebPaneDropPlacement,
       rect: {
-        x: bounds.left + x * bounds.width,
-        y: bounds.top + y * bounds.height,
-        w: w * bounds.width,
-        h: h * bounds.height,
+        x: bounds.left + zone.rect.x * bounds.width,
+        y: bounds.top + zone.rect.y * bounds.height,
+        w: zone.rect.w * bounds.width,
+        h: zone.rect.h * bounds.height,
       },
     };
   }
 
-  private paintWebPaneDropPreview(target: WebPaneDropTarget | null): void {
-    if (!target) {
-      this.paneDragPreview.hidden = true;
+  // ----------------------------------------------------------------
+  // Shared PaneGrid pointer surface. Divider drag, focus-by-click and
+  // the drag-to-split preview run inside the Rust grid; TS only
+  // routes pointer events and drains the resulting side effects.
+  // ----------------------------------------------------------------
+
+  private paneGridDividerDragging = false;
+
+  private paneGridHandlePointerDown(event: PointerEvent): boolean {
+    if (event.button !== 0) return false;
+    const adapter = this.wasmAdapter;
+    if (!adapter?.paneGridPointerDown) return false;
+    const { x, y } = this.canvasLogicalPoint(event);
+    const flags = adapter.paneGridPointerDown(x, y);
+    if ((flags & 1) === 0) return false;
+    if (flags & 2) {
+      this.paneGridDividerDragging = true;
+      try {
+        this.canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture is best-effort.
+      }
+    }
+    if (flags & 4) {
+      this.drainPaneGridUpdates(true);
+    }
+    if (flags & 8) {
+      this.drainPaneTabIntents();
+    }
+    event.preventDefault();
+    this.scheduleDraw();
+    return true;
+  }
+
+  private paneGridHandlePointerMove(event: PointerEvent): boolean {
+    const adapter = this.wasmAdapter;
+    if (!adapter?.paneGridPointerMove || !this.paneGridDividerDragging) {
+      return false;
+    }
+    const { x, y } = this.canvasLogicalPoint(event);
+    const flags = adapter.paneGridPointerMove(x, y);
+    if ((flags & 1) === 0) return false;
+    if (flags & 2) {
+      this.drainPaneGridUpdates(false);
+    }
+    event.preventDefault();
+    this.scheduleDraw();
+    return true;
+  }
+
+  private paneGridHandlePointerUp(event: PointerEvent): boolean {
+    const adapter = this.wasmAdapter;
+    if (!adapter?.paneGridPointerUp || !this.paneGridDividerDragging) {
+      return false;
+    }
+    this.paneGridDividerDragging = false;
+    this.canvas.releasePointerCapture?.(event.pointerId);
+    const { x, y } = this.canvasLogicalPoint(event);
+    const flags = adapter.paneGridPointerUp(x, y);
+    if ((flags & 1) === 0) return false;
+    this.drainPaneGridUpdates(false);
+    event.preventDefault();
+    this.scheduleDraw();
+    return true;
+  }
+
+  /** Drain PaneGridAction side effects out of the Rust grid and pull
+   *  the refreshed layout so the round-tripped `sessionLayoutStateJson`
+   *  and normalized pane list stay in sync with the Rust-owned tree. */
+  private drainPaneGridUpdates(activateFocused: boolean): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter) return;
+    // Capture the outgoing focus BEFORE processing focus actions so a
+    // terminal pane losing focus keeps its session bound.
+    const prevFocusedPane =
+      this.paneLayoutPanes.find((pane) => pane.focused)?.external_id ?? null;
+    const prevSession = this.activePtySessionId();
+    const raw = adapter.drainPaneGridActions?.();
+    if (Array.isArray(raw)) {
+      for (const item of raw) {
+        if (!item || typeof item !== "object") continue;
+        const rec = item as Record<string, unknown>;
+        if (
+          rec.kind === "focus_pane" &&
+          typeof rec.external_id === "number" &&
+          activateFocused
+        ) {
+          if (
+            prevFocusedPane !== null &&
+            prevSession &&
+            rec.external_id !== prevFocusedPane
+          ) {
+            this.paneSessionIds.set(prevFocusedPane, prevSession);
+          }
+          this.activatePaneExternalId(rec.external_id, true);
+        } else if (rec.kind === "close_pane" && typeof rec.external_id === "number") {
+          this.closeEditorSurface(rec.external_id);
+        }
+        // "open_pane" / "relayout" need no TS side effect beyond the
+        // layout refresh below (keyboard splits allocate surfaces
+        // through applySessionLayoutPolicy already).
+      }
+    }
+    const result = parseSessionLayoutPolicyResult(adapter.paneGridLayoutResult?.());
+    if (result) {
+      this.sessionLayoutStateJson = result.state_json;
+      this.paneLayoutPanes = result.panes;
+      this.syncPaneRouteState(result.panes);
+    }
+    this.syncPaneTerminals();
+  }
+
+  /** Keep the per-pane wasm terminals in step with the visible split:
+   *  seed newly visible terminal panes from their session's replay
+   *  buffer, prune terminals whose panes went away, resize each bound
+   *  session's PTY to its pane, and push the pane→surface descriptors
+   *  the chrome's unfocused-pane renderer reads. Collapsing back to a
+   *  single pane drops every pane terminal and restores the full-rect
+   *  PTY size. */
+  private readonly paneLastPtySize = new Map<number, string>();
+  private syncPaneTerminals(): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter?.feedPaneTerminal) {
+      this.syncPaneSurfaces();
       return;
     }
-    const root = this.root.getBoundingClientRect();
-    this.paneDragPreview.style.left = `${target.rect.x - root.left}px`;
-    this.paneDragPreview.style.top = `${target.rect.y - root.top}px`;
-    this.paneDragPreview.style.width = `${target.rect.w}px`;
-    this.paneDragPreview.style.height = `${target.rect.h}px`;
-    this.paneDragPreview.hidden = false;
+    // Bindings for panes that no longer exist die with the pane.
+    for (const externalId of [...this.paneSessionIds.keys()]) {
+      if (!this.paneLayoutPanes.some((pane) => pane.external_id === externalId)) {
+        this.paneSessionIds.delete(externalId);
+        this.paneLastPtySize.delete(externalId);
+      }
+    }
+    if (this.paneLayoutPanes.length <= 1) {
+      adapter.prunePaneTerminals?.("[]");
+      this.paneLastPtySize.clear();
+      // Back to a single surface: restore the full-rect PTY size.
+      const session = this.activePtySessionId();
+      if (session && this.cols > 0 && this.rows > 0) {
+        this.options.pty?.resize(session, this.cols, this.rows);
+      }
+      this.syncPaneSurfaces();
+      return;
+    }
+    const terminalRect = this.wasmAdapter?.chromeLayout?.()?.terminal;
+    const cellW =
+      terminalRect && this.cols > 0 ? terminalRect.w / this.cols : 8;
+    const cellH =
+      terminalRect && this.rows > 0 ? terminalRect.h / this.rows : 16;
+    const keep: number[] = [];
+    for (const pane of this.paneLayoutPanes) {
+      const sessionId = this.paneSessionIds.get(pane.external_id);
+      if (!sessionId) continue;
+      keep.push(pane.external_id);
+      if (!adapter.paneTerminalExists?.(pane.external_id)) {
+        // Seed the fresh pane terminal with the session's remembered
+        // stream so it shows the live screen, not a blank grid.
+        const replay = this.ptyReplayBuffers.get(sessionId);
+        adapter.feedPaneTerminal(pane.external_id, replay ?? new Uint8Array());
+      }
+      // Size the pane's PTY to the pane, not the whole content rect.
+      if (terminalRect && terminalRect.w > 0 && terminalRect.h > 0) {
+        const cols = Math.max(2, Math.floor((pane.w * terminalRect.w) / cellW));
+        const rows = Math.max(2, Math.floor((pane.h * terminalRect.h) / cellH));
+        const key = `${cols}x${rows}`;
+        if (this.paneLastPtySize.get(pane.external_id) !== key) {
+          this.paneLastPtySize.set(pane.external_id, key);
+          this.options.pty?.resize(sessionId, cols, rows);
+        }
+      }
+    }
+    adapter.prunePaneTerminals?.(JSON.stringify(keep));
+    this.syncPaneSurfaces();
+    this.scheduleDraw();
+  }
+
+  /** Push per-pane surface descriptors into the chrome so unfocused
+   *  editor panes resolve their parked panes and placeholders carry
+   *  honest labels — plus each pane's local tab strip (desktop
+   *  pane_tabs parity; the chrome lays the strip out on stacked
+   *  panes only, per the top-aligned rule). */
+  private syncPaneSurfaces(): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter?.setPaneSurfaces) return;
+    const split = this.paneLayoutPanes.length > 1;
+    const stripIds: number[] = [];
+    const payload = this.paneLayoutPanes.map((pane) => {
+      const state = this.paneTabState.get(pane.external_id);
+      const tab =
+        typeof state?.activeTabIndex === "number"
+          ? this.bufferTabs[state.activeTabIndex]
+          : null;
+      const session = this.paneSessionIds.get(pane.external_id);
+      const kind = session
+        ? "terminal"
+        : tab?.kind === "file"
+          ? "editor"
+          : (tab?.kind ?? pane.kind);
+      if (split && adapter.setPaneTabs) {
+        // Local strip entries: the pane's assigned editor-like tabs,
+        // or a single sticky terminal tab for a bound shell.
+        const entries: Array<{ title: string; path: string | null; kind: string }> =
+          (state?.tabIndices ?? [])
+            .filter(
+              (ix) =>
+                ix >= 0 &&
+                ix < this.bufferTabs.length &&
+                this.isEditorLikeTab(this.bufferTabs[ix]),
+            )
+            .map((ix) => ({
+              title: this.bufferTabs[ix].title,
+              path: this.bufferTabs[ix].path ?? null,
+              kind: this.bufferTabs[ix].kind,
+            }));
+        if (entries.length === 0 && session) {
+          const sessionTab = this.bufferTabs.find(
+            (t) => t.kind === "terminal" && t.sessionId === session,
+          );
+          entries.push({
+            title: sessionTab?.title ?? "Terminal",
+            path: null,
+            kind: "terminal",
+          });
+        }
+        const activeWithin = Math.max(
+          0,
+          (state?.tabIndices ?? []).indexOf(state?.activeTabIndex ?? -1),
+        );
+        adapter.setPaneTabs(
+          pane.external_id,
+          JSON.stringify(entries),
+          activeWithin,
+        );
+        if (entries.length > 0) stripIds.push(pane.external_id);
+      }
+      return {
+        external_id: pane.external_id,
+        kind,
+        path: tab?.kind === "file" ? (tab.path ?? null) : null,
+        title: tab?.title ?? pane.title ?? null,
+      };
+    });
+    adapter.setPaneSurfaces(JSON.stringify(payload));
+    adapter.retainPaneTabs?.(JSON.stringify(split ? stripIds : []));
+  }
+
+  /** Apply queued per-pane strip interactions (activate / close). */
+  private drainPaneTabIntents(): void {
+    const raw = this.wasmAdapter?.drainPaneTabIntents?.();
+    if (!Array.isArray(raw)) return;
+    for (const item of raw) {
+      if (!item || typeof item !== "object") continue;
+      const rec = item as Record<string, unknown>;
+      const externalId =
+        typeof rec.external_id === "number" ? rec.external_id : null;
+      const index = typeof rec.index === "number" ? rec.index : 0;
+      if (externalId === null) continue;
+      const state = this.paneTabState.get(externalId);
+      const paneTabs = (state?.tabIndices ?? []).filter(
+        (ix) =>
+          ix >= 0 &&
+          ix < this.bufferTabs.length &&
+          this.isEditorLikeTab(this.bufferTabs[ix]),
+      );
+      if (rec.kind === "activate") {
+        const workspaceIx = paneTabs[index];
+        if (state && typeof workspaceIx === "number") {
+          state.activeTabIndex = workspaceIx;
+        }
+        this.focusEditorPaneByExternalId(externalId);
+      } else if (rec.kind === "close") {
+        const workspaceIx = paneTabs[index];
+        if (state && typeof workspaceIx === "number") {
+          state.tabIndices = state.tabIndices.filter((ix) => ix !== workspaceIx);
+          if (state.activeTabIndex === workspaceIx) {
+            state.activeTabIndex = state.tabIndices[0] ?? null;
+          }
+          if (state.tabIndices.length === 0 && !this.paneSessionIds.get(externalId)) {
+            // Last tab left the pane — collapse the split cell.
+            this.focusEditorPaneByExternalId(externalId);
+            this.closeEditorPaneOrTab();
+          } else {
+            this.syncPaneTerminals();
+          }
+        }
+      }
+      // "new_tab" on a pane strip has no host mapping yet.
+    }
+    this.scheduleDraw();
+  }
+
+  /** Route one session's PTY bytes into every visible pane terminal
+   *  bound to it (split panes render live from these). */
+  private feedPaneTerminalBytes(sessionId: string, bytes: Uint8Array): void {
+    if (this.paneLayoutPanes.length <= 1) return;
+    const adapter = this.wasmAdapter;
+    if (!adapter?.feedPaneTerminal) return;
+    let fed = false;
+    for (const [externalId, session] of this.paneSessionIds) {
+      if (session !== sessionId) continue;
+      if (!this.paneLayoutPanes.some((pane) => pane.external_id === externalId)) {
+        continue;
+      }
+      adapter.feedPaneTerminal(externalId, bytes);
+      fed = true;
+    }
+    if (fed) this.scheduleDraw();
   }
 
   private endBufferTabDrag(event: PointerEvent): boolean {
@@ -5529,9 +6910,47 @@ export class TerminalPanel {
     if (!drag || drag.pointerId !== event.pointerId) return false;
     this.bufferTabDrag = null;
     this.canvas.releasePointerCapture?.(event.pointerId);
-    this.paneOverlay.classList.remove("is-tab-dragging");
-    this.paneDragPreview.hidden = true;
-    this.renderPaneLayoutOverlay();
+    // Clear the Rust-painted drop preview.
+    this.wasmAdapter?.paneGridCancelDrag?.();
+    this.scheduleDraw();
+    const releaseRaw = this.wasmAdapter?.bufferTabEndDrag?.();
+    if (releaseRaw && typeof releaseRaw === "object") {
+      const rec = releaseRaw as Record<string, unknown>;
+      if (
+        rec.kind === "reorder" &&
+        typeof rec.from === "number" &&
+        typeof rec.to === "number"
+      ) {
+        if (rec.from !== rec.to) {
+          // The strip already reordered its own copy incrementally;
+          // mirror the move into the canonical TS list through the
+          // shared policy so active-index bookkeeping matches.
+          this.applyBufferTabPolicy(
+            "reorder",
+            ((rec.from as number) << 16) | (rec.to as number),
+          );
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        return true;
+      }
+      if (rec.kind === "tear_out") {
+        if (drag.target) {
+          this.commitWebTabPaneDrop(drag.tabIndex, drag.target);
+        } else {
+          // Released past the strip but over no pane zone — restore
+          // the strip (the replay puts the canonical list back).
+          this.replayBufferTabs();
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        return true;
+      }
+      // kind "none": plain click — activation flows through the
+      // strip's own PointerDown handling.
+      return false;
+    }
+    // Legacy fallback (stale bundle): pane drop only.
     if (!drag.active || !drag.target) return false;
     this.commitWebTabPaneDrop(drag.tabIndex, drag.target);
     event.preventDefault();
@@ -5540,7 +6959,43 @@ export class TerminalPanel {
   }
 
   private commitWebTabPaneDrop(tabIndex: number, target: WebPaneDropTarget): void {
-    if (!this.isEditorLikeTab(this.bufferTabs[tabIndex])) return;
+    const dropped = this.bufferTabs[tabIndex];
+    if (dropped?.kind === "terminal" && dropped.sessionId) {
+      // Terminal tab drop: an edge drop opens a terminal split bound
+      // to the dragged shell's session; a center drop rebinds the
+      // target pane to it.
+      this.replayBufferTabs();
+      if (target.placement === "center") {
+        this.paneSessionIds.set(target.paneExternalId, dropped.sessionId);
+        this.wasmAdapter?.removePaneTerminal?.(target.paneExternalId);
+        this.syncPaneTerminals();
+        this.focusEditorPaneByExternalId(target.paneExternalId);
+        return;
+      }
+      this.focusEditorPaneByExternalId(target.paneExternalId);
+      const paneId = this.nextWebPaneId++;
+      const horizontal =
+        target.placement === "left" || target.placement === "right";
+      const before = target.placement === "left" || target.placement === "top";
+      const result = this.applySessionLayoutPolicy(
+        before ? "split_terminal_before" : "split_terminal",
+        horizontal ? "horizontal" : "vertical",
+        dropped.title ?? "Terminal",
+        paneId,
+      );
+      if (!result) {
+        this.nextWebPaneId -= 1;
+        return;
+      }
+      this.paneSessionIds.set(paneId, dropped.sessionId);
+      this.syncPaneTerminals();
+      this.activatePaneExternalId(paneId, false);
+      return;
+    }
+    if (!this.isEditorLikeTab(this.bufferTabs[tabIndex])) {
+      this.replayBufferTabs();
+      return;
+    }
     for (const state of this.paneTabState.values()) {
       state.tabIndices = state.tabIndices.filter((index) => index !== tabIndex);
       if (state.activeTabIndex === tabIndex) {
@@ -5597,7 +7052,47 @@ export class TerminalPanel {
     // pointerdown, then closed again on the synthesized tap).
     if (event.pointerType === "touch") return;
     if (this.updateBufferTabDrag(event)) return;
+    if (this.paneGridHandlePointerMove(event)) return;
     this.updateCustomCursorFromPointer(event, true);
+    if (this.activeEditorPaneKind() !== null) {
+      // Editor-pane drags: code selection / scrollbar, draw gestures
+      // + graph hover. Consumed moves stay out of the chrome path.
+      const { x, y } = this.canvasLogicalPoint(event);
+      // Mouse-rest LSP hover: the wasm session arms a ~400ms candidate
+      // on each move; with draw-on-demand nothing would tick after the
+      // pointer stops, so schedule one delayed frame to mature it.
+      if (this.activeEditorPaneKind() === "code") {
+        if (this.editorLspHoverTimer !== null) {
+          clearTimeout(this.editorLspHoverTimer);
+        }
+        this.editorLspHoverTimer = setTimeout(() => {
+          this.editorLspHoverTimer = null;
+          this.scheduleDraw();
+        }, 450);
+      }
+      const adapter = this.wasmAdapter as {
+        editorPointerMove?: (x: number, y: number) => boolean;
+      };
+      if (adapter?.editorPointerMove?.(x, y)) {
+        event.preventDefault();
+        this.scheduleDraw();
+        return;
+      }
+    }
+    if (
+      this.activeTabIsMarkdown() &&
+      this.useWasmMarkdown() &&
+      (event.buttons & 1) !== 0
+    ) {
+      // Markdown drag: selection extend / block reorder — the
+      // pointer-move half of desktop `handle_markdown_drag_move`.
+      const { x, y } = this.canvasLogicalPoint(event);
+      if (this.wasmAdapter?.markdownDragMove?.(x, y)) {
+        event.preventDefault();
+        this.scheduleDraw();
+        return;
+      }
+    }
     if (this.activeSurface() === "agent") {
       const { x } = this.canvasLogicalPoint(event);
       if (this.wasmAdapter?.agentDragMarkdownHorizontalScrollbar?.(x)) {
@@ -5610,6 +7105,21 @@ export class TerminalPanel {
       const { x, y } = this.canvasLogicalPoint(event);
       this.wasmAdapter.splashMouseMove(x, y);
       this.scheduleDraw();
+    }
+    // Selection drag / TUI motion reports on the terminal grid. While
+    // a drag is active the bridge consumes the move (desktop skips
+    // hint/hover work during selection too).
+    if (this.handleTerminalGridPointerMove(event)) {
+      return;
+    }
+    // Link hover underline (desktop draw_terminal_file_link_hover):
+    // probe the grid under the pointer, redraw when the hover span
+    // changes, and feed the daemon-backed link-existence cache.
+    if (this.activeSurface() === "terminal") {
+      const { x, y } = this.canvasLogicalPoint(event);
+      const flags = this.wasmAdapter?.terminalHoverProbe?.(x, y) ?? 0;
+      if (flags & 4) this.pumpTerminalLinkDirRequests();
+      if (flags & 1) this.scheduleDraw();
     }
     this.forwardChromeEvent(fromPointerMoveEvent(event, this.canvas));
   }
@@ -5627,6 +7137,11 @@ export class TerminalPanel {
       this.scheduleDraw();
       return;
     }
+    // Shared PaneGrid pointer surface: divider grabs and clicks into
+    // an unfocused pane route through the Rust grid BEFORE the
+    // editor/terminal branches so a divider press near a caret can't
+    // start a selection instead of a resize.
+    if (this.paneGridHandlePointerDown(event)) return;
     if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
       // Real-renderer markdown: clicks place the caret (roster dots and
       // task checkboxes hit-test first, mirroring the desktop order).
@@ -5641,6 +7156,35 @@ export class TerminalPanel {
         )
       ) {
         event.preventDefault();
+        this.scheduleDraw();
+        return;
+      }
+    }
+    if (this.activeEditorPaneKind() !== null) {
+      // Chrome-hosted editor pane: caret placement, drag select,
+      // scrollbar, notebook gutter actions, draw gestures — desktop
+      // press semantics live in the wasm bridge.
+      const { x, y } = this.canvasLogicalPoint(event);
+      const adapter = this.wasmAdapter as {
+        editorPointerDown?: (
+          x: number,
+          y: number,
+          shift: boolean,
+          ctrl: boolean,
+          clickCount: number,
+        ) => boolean;
+      };
+      if (
+        adapter?.editorPointerDown?.(
+          x,
+          y,
+          event.shiftKey,
+          event.ctrlKey,
+          event.detail || 1,
+        )
+      ) {
+        event.preventDefault();
+        this.pumpCodeCrdt();
         this.scheduleDraw();
         return;
       }
@@ -5684,12 +7228,221 @@ export class TerminalPanel {
     if (this.handleStatusLineClick(event)) {
       return;
     }
+    if (this.handleTerminalGridPointerDown(event)) {
+      return;
+    }
     this.forwardChromeEvent(
       fromPointerDownEvent(event, event.detail || 1, this.canvas),
     );
     if (this.isMobileViewport() && event.pointerType !== "touch") {
       const { x, y } = this.canvasLogicalPoint(event);
       this.maybeRequestSoftKeyboardAfterTap(x, y);
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // Terminal grid pointer surface (selection + TUI mouse reports).
+  // Mirrors desktop app/window_event/mouse.rs; the wasm bridge owns
+  // the click chain, selection state, and PTY report encoding.
+  // ----------------------------------------------------------------
+
+  private terminalSelectionScrollTimer: number | null = null;
+
+  private handleTerminalGridPointerDown(event: PointerEvent): boolean {
+    if (this.activeSurface() !== "terminal") return false;
+    const adapter = this.wasmAdapter;
+    if (!adapter?.terminalPointerDown) return false;
+    const { x, y } = this.canvasLogicalPoint(event);
+    if (event.button < 0 || event.button > 2) return false;
+    const flags = adapter.terminalPointerDown(
+      x,
+      y,
+      event.button,
+      event.shiftKey,
+      event.ctrlKey,
+      event.altKey,
+      performance.now(),
+    );
+    if ((flags & 1) === 0) return false;
+    event.preventDefault();
+    if (flags & 2) this.flushTerminalPointerBytes();
+    if (flags & 8) {
+      // Plain single-click landed on a link (desktop on_left_click's
+      // link arm): open it instead of starting a selection.
+      this.drainTerminalLinkOpens();
+    }
+    if (flags & 4) {
+      // Selection drag started: keep move/up events flowing while the
+      // pointer leaves the canvas, and run the desktop 15ms
+      // edge-autoscroll tick.
+      try {
+        this.canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture is best-effort (detached canvas etc.).
+      }
+      this.startTerminalSelectionAutoscroll();
+    }
+    // Chrome still needs the press for focus bookkeeping (blurring
+    // side panels), mirroring desktop's select_current_based_on_mouse
+    // running alongside the terminal click.
+    this.forwardChromeEvent(
+      fromPointerDownEvent(event, event.detail || 1, this.canvas),
+    );
+    this.scheduleDraw();
+    return true;
+  }
+
+  private handleTerminalGridPointerMove(event: PointerEvent): boolean {
+    if (this.activeSurface() !== "terminal") return false;
+    const adapter = this.wasmAdapter;
+    if (!adapter?.terminalPointerMove) return false;
+    const { x, y } = this.canvasLogicalPoint(event);
+    const flags = adapter.terminalPointerMove(
+      x,
+      y,
+      event.shiftKey,
+      event.ctrlKey,
+      event.altKey,
+    );
+    if ((flags & 1) === 0) return false;
+    if (flags & 2) this.flushTerminalPointerBytes();
+    this.scheduleDraw();
+    return true;
+  }
+
+  private handleTerminalGridPointerUp(event: PointerEvent): boolean {
+    const adapter = this.wasmAdapter;
+    if (!adapter?.terminalPointerUp) return false;
+    if (event.button < 0 || event.button > 2) return false;
+    const { x, y } = this.canvasLogicalPoint(event);
+    // Always deliver the release so the bridge's button/drag state
+    // resets even when the press landed elsewhere.
+    const flags = adapter.terminalPointerUp(
+      x,
+      y,
+      event.button,
+      event.shiftKey,
+      event.ctrlKey,
+      event.altKey,
+    );
+    try {
+      this.canvas.releasePointerCapture(event.pointerId);
+    } catch {
+      // Not captured — fine.
+    }
+    if ((flags & 1) === 0) return false;
+    if (flags & 2) this.flushTerminalPointerBytes();
+    this.scheduleDraw();
+    return true;
+  }
+
+  private startTerminalSelectionAutoscroll(): void {
+    if (this.terminalSelectionScrollTimer !== null) return;
+    // 15ms cadence matches desktop's SelectionScrolling scheduler.
+    this.terminalSelectionScrollTimer = window.setInterval(() => {
+      if (this.wasmAdapter?.terminalDragScrollTick?.()) {
+        this.scheduleDraw();
+      }
+    }, 15);
+  }
+
+  private stopTerminalSelectionAutoscroll(): void {
+    if (this.terminalSelectionScrollTimer !== null) {
+      window.clearInterval(this.terminalSelectionScrollTimer);
+      this.terminalSelectionScrollTimer = null;
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // Terminal link opens + hint mode host effects (desktop
+  // file_link_mouse.rs click routing / hints.rs command execution).
+  // ----------------------------------------------------------------
+
+  /** Drain link-open intents queued by a terminal link click or a
+   *  hint-mode fire: URLs open in a browser tab (desktop
+   *  open_hyperlink_uri), files open as buffer tabs with an optional
+   *  deferred `file:line` jump (desktop open_path_in_editor /
+   *  open_path_in_markdown routing lives in openActivatedPaths), and
+   *  dirs reveal the file tree (desktop
+   *  open_directory_link_in_file_tree). */
+  private drainTerminalLinkOpens(): void {
+    const raw = this.wasmAdapter?.terminalDrainLinkOpens?.();
+    if (!Array.isArray(raw) || raw.length === 0) return;
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object") continue;
+      const intent = entry as { kind?: string; target?: string; line?: number };
+      const target = intent.target ?? "";
+      if (target.length === 0) continue;
+      if (intent.kind === "url") {
+        window.open(target, "_blank", "noopener,noreferrer");
+      } else if (intent.kind === "dir") {
+        this.wasmAdapter?.showFileTree?.();
+        this.scheduleDraw();
+      } else if (intent.kind === "file") {
+        this.openActivatedPaths([target]);
+        if (typeof intent.line === "number" && intent.line > 0) {
+          this.scheduleTerminalLinkLineJump(intent.line);
+        }
+      }
+    }
+  }
+
+  /** Retry a `file:line` jump until the opened file's pane is live —
+   *  file content arrives async from the daemon, so the jump defers
+   *  the same way the LSP cross-file goto lands its cursor. */
+  private scheduleTerminalLinkLineJump(line: number): void {
+    let attempts = 0;
+    const tryJump = () => {
+      if (this.wasmAdapter?.terminalLinkGotoLine?.(line)) {
+        this.scheduleDraw();
+        return;
+      }
+      if (++attempts < 20) {
+        window.setTimeout(tryJump, 160);
+      }
+    };
+    window.setTimeout(tryJump, 60);
+  }
+
+  /** Fetch daemon listings for parent dirs the wasm link-existence
+   *  probe requested. Reuses the completion seeding round-trip — the
+   *  wasm seeds both the Tab-completion and link caches from one
+   *  reply (terminal_seed_completion_dir). */
+  private pumpTerminalLinkDirRequests(): void {
+    const raw = this.wasmAdapter?.terminalDrainLinkDirRequests?.();
+    if (!Array.isArray(raw)) return;
+    for (const dir of raw) {
+      if (typeof dir === "string" && dir.length > 0) {
+        void this.seedCompletionDir(dir);
+      }
+    }
+  }
+
+  /** Pointer-side markdown drains: clipboard-out text and queued
+   *  open intents (link activations, copy chips). Mirrors the
+   *  keydown drain path so mouse-driven actions land too. */
+  private drainMarkdownPointerEffects(): void {
+    const adapter = this.wasmAdapter as {
+      markdownDrainClipboardOut?: () => string | null;
+      markdownDrainOpenIntents?: () => unknown;
+    } | null;
+    const copyOut = adapter?.markdownDrainClipboardOut?.();
+    if (copyOut) {
+      void navigator.clipboard?.writeText?.(copyOut).catch(() => {});
+    }
+    const intents = adapter?.markdownDrainOpenIntents?.();
+    if (Array.isArray(intents)) {
+      for (const raw of intents) {
+        if (!raw || typeof raw !== "object") continue;
+        const intent = raw as { kind?: string; target?: string };
+        const target = intent.target ?? "";
+        if (target.length === 0) continue;
+        if (intent.kind === "external") {
+          window.open(target, "_blank", "noopener,noreferrer");
+        } else if (intent.kind === "markdown" || intent.kind === "editor") {
+          this.openActivatedPaths([target]);
+        }
+      }
     }
   }
 
@@ -5726,21 +7479,56 @@ export class TerminalPanel {
 
   private handlePointerUp(event: PointerEvent): void {
     if (event.pointerType === "touch") return;
+    // Any release ends a terminal selection drag's edge autoscroll
+    // (desktop unschedules SelectionScrolling on button release).
+    this.stopTerminalSelectionAutoscroll();
     if (this.endBufferTabDrag(event)) return;
+    if (this.paneGridHandlePointerUp(event)) return;
     this.updateCustomCursorFromPointer(event, true);
+    if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
+      // Markdown pointer release: drop a reordered block / finish the
+      // selection / open a queued block menu (desktop
+      // handle_markdown_mouse_release), then run the pointer-side
+      // drains — clipboard-out + link open intents previously only
+      // drained on key events (the wasm side TTL-guards them, so a
+      // release with nothing queued is a no-op).
+      const consumed = this.wasmAdapter?.markdownMouseRelease?.() === true;
+      this.drainMarkdownPointerEffects();
+      if (consumed) {
+        event.preventDefault();
+        this.pumpCrdtOutbox();
+        this.scheduleDraw();
+        return;
+      }
+    }
+    if (this.activeEditorPaneKind() !== null) {
+      // Ends code selections / scrollbar drags, finalizes draw
+      // gestures (which also snapshots undo history + dirty state).
+      const adapter = this.wasmAdapter as { editorPointerUp?: () => boolean };
+      if (adapter?.editorPointerUp?.()) {
+        event.preventDefault();
+        this.pumpCodeCrdt();
+        this.scheduleDraw();
+        return;
+      }
+    }
     if (this.wasmAdapter?.agentEndMarkdownHorizontalScrollbarDrag?.()) {
       event.preventDefault();
       this.scheduleDraw();
+      return;
+    }
+    if (this.handleTerminalGridPointerUp(event)) {
       return;
     }
     this.forwardChromeEvent(fromPointerUpEvent(event, this.canvas));
   }
 
   // ----------------------------------------------------------------
-  // Touch (C3 polish). The shared classifier in
-  // `services/touchPolicy.ts` mirrors `shared/src/touch_policy.rs`.
-  // We only do platform-specific wiring here (coordinate translation,
-  // zone hit-test, `preventDefault` gating, side-effect application).
+  // Touch (C3 polish). `services/touchPolicy.ts` routes gesture
+  // classification through the shared Rust `touch_policy` state
+  // machine via the wasm `TouchGesturePolicy` export. We only do
+  // platform-specific wiring here (coordinate translation, zone
+  // hit-test, `preventDefault` gating, side-effect application).
   // ----------------------------------------------------------------
 
   /** Classify a touch point's canvas-local position into one of the
@@ -6680,7 +8468,42 @@ export class TerminalPanel {
         return;
       }
     }
+    if (this.activeEditorPaneKind() !== null) {
+      // Editor pane owns its scroll (code glide / notebook eased
+      // scroll / draw pan+zoom). The wasm side bounds-checks against
+      // the terminal rect so tree/tab wheel still reaches chrome.
+      const { x, y } = this.canvasLogicalPoint(event);
+      const adapter = this.wasmAdapter as {
+        editorScroll?: (
+          x: number,
+          y: number,
+          deltaX: number,
+          deltaY: number,
+          ctrl: boolean,
+        ) => boolean;
+      };
+      if (
+        adapter?.editorScroll?.(
+          x,
+          y,
+          event.deltaX,
+          event.deltaY,
+          event.ctrlKey,
+        )
+      ) {
+        event.preventDefault();
+        this.scheduleDraw();
+        return;
+      }
+    }
     if (this.routeWheelToAgent(event)) {
+      event.preventDefault();
+      return;
+    }
+    // Terminal grid scrollback / TUI wheel. The bridge hit-tests the
+    // chrome terminal rect itself, so wheels over the side panels
+    // still fall through to the chrome route below.
+    if (this.routeWheelToTerminalGrid(event)) {
       event.preventDefault();
       return;
     }
@@ -6691,6 +8514,37 @@ export class TerminalPanel {
     this.forwardChromeEvent(
       fromWheelEvent(event, { invertX: this.isWheelOverBufferTabs(event) }),
     );
+  }
+
+  /** Route a wheel event into the wasm terminal grid: scrollback via
+   *  the shared TerminalScroll notch accumulator, or PTY wheel
+   *  reports / arrow CSI when a TUI owns the screen — exactly the
+   *  three arms of desktop `Screen::scroll`. Deltas are negated into
+   *  the winit sign convention (positive = scroll up). */
+  private routeWheelToTerminalGrid(event: WheelEvent): boolean {
+    if (this.activeSurface() !== "terminal") return false;
+    const adapter = this.wasmAdapter;
+    if (!adapter?.terminalWheel) return false;
+    const { x, y } = this.canvasLogicalPoint(event);
+    const flags = adapter.terminalWheel(
+      x,
+      y,
+      -wheelDeltaXPixels(event),
+      -wheelDeltaYPixels(event),
+      event.shiftKey,
+    );
+    if ((flags & 1) === 0) return false;
+    if (flags & 2) this.flushTerminalPointerBytes();
+    this.scheduleDraw();
+    return true;
+  }
+
+  /** Drain PTY-bound mouse-report / CSI bytes queued by the bridge's
+   *  wheel/pointer handlers into the PTY websocket (the web stand-in
+   *  for desktop's `messenger.send_write`). */
+  private flushTerminalPointerBytes(): void {
+    const bytes = this.wasmAdapter?.takeTerminalPointerBytes?.();
+    if (bytes && bytes.length > 0) this.sendPtyInput(bytes);
   }
 
   private routeWheelToAgent(event: WheelEvent): boolean {
@@ -6769,10 +8623,19 @@ export class TerminalPanel {
     if (imageItems.length > 0) {
       if (surface === "agent") {
         event.preventDefault();
-        void this.submitPastedImages(
-          imageItems,
-          event.clipboardData?.getData("text/plain") ?? "",
-        );
+        // Desktop parity (pane/input.rs attach_clipboard_image): the
+        // image lands in the composer as an `[imageN]` token + chip and
+        // is sent on the next Enter — not immediately. The legacy
+        // send-immediately path only remains for wasm bundles that
+        // pre-date the attach export.
+        if (this.wasmAdapter?.agentAttachClipboardImage) {
+          void this.attachPastedImagesToAgent(imageItems);
+        } else {
+          void this.submitPastedImages(
+            imageItems,
+            event.clipboardData?.getData("text/plain") ?? "",
+          );
+        }
         return;
       }
       if (surface === "editor") {
@@ -6798,6 +8661,61 @@ export class TerminalPanel {
     const text = event.clipboardData?.getData("text/plain") ?? "";
     if (text.length === 0) return;
     event.preventDefault();
+    if (surface === "editor" && this.activeEditorPaneKind() !== null) {
+      // Chrome-hosted editor pane: paste inserts at the caret(s) and
+      // seeds the vim unnamed register (so `p` repeats it).
+      const adapter = this.wasmAdapter as {
+        editorInsertPaste?: (text: string) => boolean;
+      };
+      if (adapter?.editorInsertPaste?.(text)) {
+        this.pumpCodeCrdt();
+        this.scheduleDraw();
+        return;
+      }
+      // Not consumed (e.g. notebook/draw outside insert/editing):
+      // swallow rather than leak the paste into the PTY byte path.
+      return;
+    }
+    if (surface === "agent") {
+      // Desktop parity (pane/input.rs paste path): pasted text goes
+      // through the pane's insert_paste — picker-aware, large pastes
+      // compact to a "[pasted N lines]" token. A false return means
+      // the wasm bundle predates the export; fall through to bytes.
+      if (this.wasmAdapter?.agentInsertPaste?.(text)) {
+        this.agentInput = this.wasmAdapter.agentInput?.() ?? this.agentInput;
+        // The pasted text may have opened / extended an `@` mention.
+        this.maybeFeedAgentFileMentions();
+        this.scheduleDraw();
+        return;
+      }
+    }
+    if (surface === "terminal") {
+      const adapter = this.wasmAdapter;
+      const composerOwnsInput =
+        adapter?.terminalShouldCaptureInput?.() ??
+        adapter?.terminalCommandComposerVisible?.() === true;
+      if (composerOwnsInput && adapter?.terminalInputInsertPaste?.(text)) {
+        // Desktop parity (Screen::paste, selection/file_link_mouse.rs
+        // :349-363): while the composer owns the line, pasted text —
+        // newlines included — lands in the composer via insert_paste
+        // and never touches the PTY. Routing through the byte path
+        // would submit at the first newline instead. A false return
+        // means the wasm bundle predates the export — fall through to
+        // the legacy byte path below.
+        this.terminalInput = adapter.terminalInput?.() ?? this.terminalInput;
+        this.scheduleDraw();
+        return;
+      }
+      // Raw-PTY paste: frame per shared neoism_ui::paste_policy —
+      // bracketed sentinels (payload scrubbed of ESC/ETX) when the
+      // terminal has BRACKETED_PASTE set, CR-normalised raw bytes
+      // otherwise — exactly like desktop's Screen::paste PTY branch.
+      const payload = adapter?.terminalPastePayload?.(text);
+      if (payload) {
+        this.sendPtyInput(payload);
+        return;
+      }
+    }
     this.pasteTextToActiveSurface(text);
   }
 
@@ -6925,6 +8843,183 @@ export class TerminalPanel {
     this.scheduleDraw();
   }
 
+  /// Desktop-parity paste flow: each clipboard image becomes an
+  /// `[imageN]` composer token + chip via the shared pane's
+  /// `attach_clipboard_image`; the prompt (image included) sends on
+  /// the next Enter through the ordinary submit path. Files are
+  /// snapshotted synchronously — `DataTransferItem`s are neutered
+  /// once the paste handler returns.
+  private async attachPastedImagesToAgent(
+    items: DataTransferItem[],
+  ): Promise<void> {
+    const files = items
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    let attached = false;
+    for (const file of files) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const ok =
+        this.wasmAdapter?.agentAttachClipboardImage?.(
+          file.name ?? "",
+          file.type || "image/png",
+          bytes,
+        ) === true;
+      if (ok) {
+        attached = true;
+      } else {
+        this.pushInAppNotification(
+          "Attachment failed",
+          `Could not attach ${file.name || "pasted image"} (empty or over 20MB).`,
+          "warn",
+        );
+      }
+    }
+    if (attached) {
+      this.agentInput = this.wasmAdapter?.agentInput?.() ?? this.agentInput;
+      this.scheduleDraw();
+    }
+  }
+
+  /// Allow dropping files onto the agent pane (dragover must
+  /// preventDefault for the drop event to fire). Other surfaces keep
+  /// the browser default.
+  private handleAgentDragOver(event: DragEvent): void {
+    if (this.activeSurface() !== "agent") return;
+    if (!this.wasmAdapter?.agentAttachFile) return;
+    const transfer = event.dataTransfer;
+    if (!transfer || !Array.from(transfer.types).includes("Files")) return;
+    event.preventDefault();
+    transfer.dropEffect = "copy";
+  }
+
+  /// Drag-and-drop a file onto the agent pane → composer attachment —
+  /// the web analogue of desktop's `DroppedFile` → `attach_path`
+  /// (app/window_event/dnd.rs). Bytes are read host-side and attached
+  /// through the shared pane, so tokens/chips/20MB-cap match desktop.
+  private async handleAgentFileDrop(event: DragEvent): Promise<void> {
+    if (this.activeSurface() !== "agent") return;
+    const adapter = this.wasmAdapter;
+    if (!adapter?.agentAttachFile) return;
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (files.length === 0) return;
+    event.preventDefault();
+    let attached = false;
+    for (const file of files) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      // Empty mime → the shared pane sniffs from the file extension.
+      const ok = adapter.agentAttachFile(file.name || "file", file.type ?? "", bytes);
+      if (ok) {
+        attached = true;
+      } else {
+        this.pushInAppNotification(
+          "Attachment failed",
+          `Could not attach ${file.name || "file"} (empty or over 20MB).`,
+          "warn",
+        );
+      }
+    }
+    if (attached) {
+      this.agentInput = adapter.agentInput?.() ?? this.agentInput;
+      this.scheduleDraw();
+    }
+  }
+
+  /// Keep the shared `@file` mention picker supplied with candidates.
+  /// The pane exposes the active mention query; when one is live and
+  /// the cached workspace file list is stale (or absent), fetch it via
+  /// the daemon's Files surface and feed it in. Ranking/filtering per
+  /// keystroke happens pane-side (desktop `fuzzy_score` policy), so
+  /// this only refreshes the LIST, not the match set.
+  private maybeFeedAgentFileMentions(): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter?.agentFileMentionQuery || !adapter.agentSetFileMentionCandidates) {
+      return;
+    }
+    if (adapter.agentFileMentionQuery() === null) return;
+    const now = Date.now();
+    if (
+      this.agentMentionFileCache !== null &&
+      now - this.agentMentionFileCache.at < 15000
+    ) {
+      return;
+    }
+    if (this.agentMentionFetchInFlight) return;
+    this.agentMentionFetchInFlight = true;
+    void this.collectAgentMentionFiles()
+      .then((paths) => {
+        this.agentMentionFileCache = { paths, at: Date.now() };
+        if (
+          this.wasmAdapter?.agentSetFileMentionCandidates?.(JSON.stringify(paths))
+        ) {
+          this.scheduleDraw();
+        }
+      })
+      .catch(() => {
+        // Daemon hiccup — the next `@` keystroke retries.
+      })
+      .finally(() => {
+        this.agentMentionFetchInFlight = false;
+      });
+  }
+
+  /// Lightweight workspace file listing for `@` mentions: recursive
+  /// daemon `ListDir` (the same surface the notes sidebar walks),
+  /// skipping hidden entries plus desktop's historical mention
+  /// exclude set (`file_mention_ignored_component`), bounded by
+  /// depth 8 / 2000 files / 400 directory reads.
+  private async collectAgentMentionFiles(): Promise<string[]> {
+    const ignored = new Set([
+      ".git",
+      ".claude",
+      ".cache",
+      ".direnv",
+      ".neoism",
+      ".next",
+      "build",
+      "dist",
+      "node_modules",
+      "target",
+    ]);
+    const files: string[] = [];
+    let dirBudget = 400;
+    const listDir = async (dir: string, depth: number): Promise<void> => {
+      if (depth > 8 || files.length >= 2000 || dirBudget <= 0) return;
+      dirBudget -= 1;
+      let reply: unknown;
+      try {
+        reply = await this.options.client.requestFiles(
+          { ListDir: { path: dir } },
+          this.options.workspaceRoot ?? null,
+        );
+      } catch {
+        return;
+      }
+      if (!reply || typeof reply !== "object" || !("DirListing" in reply)) {
+        return;
+      }
+      const entries = (
+        reply as {
+          DirListing: { entries: Array<{ name: string; is_dir: boolean }> };
+        }
+      ).DirListing.entries;
+      const subdirs: string[] = [];
+      for (const entry of entries) {
+        if (entry.name.startsWith(".") || ignored.has(entry.name)) continue;
+        const path = dir === "." ? entry.name : `${dir}/${entry.name}`;
+        if (entry.is_dir) {
+          subdirs.push(path);
+        } else if (files.length < 2000) {
+          files.push(path);
+        }
+      }
+      for (const subdir of subdirs) {
+        await listDir(subdir, depth + 1);
+      }
+    };
+    await listDir(".", 0);
+    return files;
+  }
+
   private handleInputBytes(bytes: Uint8Array): void {
     if (this.routeInputBytesToChrome(bytes)) {
       return;
@@ -6940,9 +9035,11 @@ export class TerminalPanel {
       return;
     }
     if (surface === "editor") {
-      // File-viewer tabs are read-only until the native CodePane
-      // lands. Swallow the bytes — leaking them into the PTY would
+      // Chrome-hosted editor panes consume file-tab bytes (the soft
+      // keyboard path — desktop keydowns already routed above). Bytes
+      // are swallowed either way: leaking them into the PTY would
       // type into a shell the user isn't looking at.
+      this.routeInputBytesToEditor(bytes);
       return;
     }
     // Prefer the live capture check: it reads shell state directly, so
@@ -7023,19 +9120,48 @@ export class TerminalPanel {
         return true;
       }
       if (key === "Ctrl+L") {
+        // Desktop parity (block_overlay.rs:810-824): form-feed to the
+        // PTY so the shell repaints a fresh prompt, drop block history
+        // + scroll anchor in wasm, and bring the splash back like a
+        // `clear`. Composer text is preserved, as on desktop.
+        adapter.terminalInputKey?.(key);
         adapter.resetTerminalSplash?.();
-        adapter.clearTerminalInput?.();
+        syncInput();
+        this.sendPtyInput(Uint8Array.of(0x0c));
+        return true;
+      }
+      if (key === "Ctrl+C") {
+        // Desktop parity (block_overlay.rs:756-777): with the composer
+        // owning the line there is no foreground readline to interrupt.
+        // wasm shows the ^C notice (clearing pending text first); the
+        // ETX is swallowed in both the empty and non-empty case.
+        adapter.terminalInputKey?.(key);
         syncInput();
         return true;
       }
-      if (key === "Ctrl+C" || key === "Ctrl+D") {
+      if (key === "Ctrl+D") {
         if ((adapter.terminalInput?.() ?? this.terminalInput).length === 0) {
+          // Empty composer: EOF belongs to the shell — desktop writes
+          // the 0x04 straight through (block_overlay.rs:789-801).
           return false;
         }
-        adapter.clearTerminalInput?.();
+        // Non-empty: delete-forward, like desktop (not clear-line).
+        adapter.terminalInputKey?.(key);
         syncInput();
         return true;
       }
+      if (key === "Escape") {
+        // Consumed only when a completion menu was dismissed;
+        // otherwise ESC belongs to the PTY (desktop :850-858).
+        const consumed = adapter.terminalInputKey?.(key) === true;
+        syncInput();
+        return consumed;
+      }
+      // Everything else named by keyNameFromTerminalBytes — including
+      // Ctrl+W/U/K/A/E (line editing), Ctrl+R (history picker),
+      // Ctrl+F (favorites picker), and Shift+Enter (newline) — is
+      // handled inside wasm terminal_input_key and always consumed by
+      // the composer, matching desktop block_overlay.rs:713-935.
       adapter.terminalInputKey?.(key);
       syncInput();
       return true;
@@ -7156,6 +9282,43 @@ export class TerminalPanel {
       this.pumpMarkdownAnimation();
     }
     return true;
+  }
+
+  /** Soft-keyboard bytes → editor-pane keystrokes (the mobile twin of
+   *  the keydown routing; desktop browsers never reach this because
+   *  `editorKey` consumed the keydown). Bytes are always swallowed. */
+  private routeInputBytesToEditor(bytes: Uint8Array): void {
+    if (this.activeEditorPaneKind() === null) return;
+    const adapter = this.wasmAdapter as {
+      editorKey?: (
+        key: string,
+        ctrl: boolean,
+        shift: boolean,
+        alt: boolean,
+      ) => boolean;
+    };
+    if (!adapter?.editorKey) return;
+    const text = new TextDecoder().decode(bytes);
+    let handled = false;
+    for (const ch of text) {
+      const key =
+        ch === "\r" || ch === "\n"
+          ? "Enter"
+          : ch === "\x7f" || ch === "\b"
+            ? "Backspace"
+            : ch === "\x1b"
+              ? "Escape"
+              : ch === "\t"
+                ? "Tab"
+                : ch;
+      if (adapter.editorKey(key, false, false, false)) {
+        handled = true;
+      }
+    }
+    if (handled) {
+      this.pumpCodeCrdt();
+      this.scheduleDraw();
+    }
   }
 
   private routeInputBytesToChrome(bytes: Uint8Array): boolean {
@@ -7322,6 +9485,93 @@ function diffFilesFromWire(hunks: WireDiffHunk[]): ChromeDiffFile[] {
   return Array.from(byPath.values());
 }
 
+/**
+ * PTY key encoder entry point (desktop parity).
+ *
+ * For the terminal surface, delegates to the wasm export
+ * `encode_terminal_key`, which walks the exact desktop pipeline —
+ * bindings Esc table (DECCKM SS3 arrows/Home/End, `ESC[2~`-style
+ * tildes, Backspace family, F1–F4 SS3, Shift+Tab) → alt-as-meta
+ * masking → the shared `should_build_key_sequence` fork between the
+ * kitty keyboard protocol builder and the raw UTF-8 path — against the
+ * LIVE terminal modes. This is what gives web F-keys, Home/End/Insert/
+ * Delete, modified arrows, Alt/Meta ESC prefixes, app-cursor SS3 and
+ * kitty protocol support identical to desktop.
+ *
+ * Non-terminal surfaces (agent / markdown / editor byte routers) keep
+ * the legacy `keyEventToBytes` vocabulary their decoders expect, as
+ * does any host running a stale wasm bundle without the export.
+ *
+ * Returns null when the key produces no PTY-bound bytes (the event is
+ * left to the browser / other handlers, matching the previous
+ * behavior).
+ */
+function encodePtyKeyEvent(
+  event: KeyboardEvent,
+  surface: string,
+  adapter: {
+    encodeTerminalKey?: (
+      key: string,
+      code: string,
+      ctrl: boolean,
+      alt: boolean,
+      shift: boolean,
+      meta: boolean,
+      repeat: boolean,
+    ) => Uint8Array | null;
+    terminalShouldCaptureInput?: () => boolean;
+    terminalCommandComposerVisible?: () => boolean;
+  } | null,
+): Uint8Array | null {
+  if (surface !== "terminal" || !adapter?.encodeTerminalKey) {
+    // Stale-wasm-bundle safety + non-terminal surfaces: legacy table.
+    return keyEventToBytes(event);
+  }
+  // Composer-only Shift+Enter transport: while the composer owns the
+  // line, emit the CSI-u disambiguated form so the byte-name router
+  // maps it to "Shift+Enter" (newline instead of submit). Desktop
+  // handles Shift+Enter inside block_overlay BEFORE byte encoding, so
+  // this never reaches the PTY — routeTerminalComposerInput consumes
+  // it. Outside composer capture the wasm encoder decides (legacy
+  // 0x0d, kitty ESC[13;2u), exactly like desktop.
+  if (
+    event.key === "Enter" &&
+    event.shiftKey &&
+    !event.ctrlKey &&
+    !event.altKey &&
+    !event.metaKey &&
+    (adapter.terminalShouldCaptureInput?.() ??
+      adapter.terminalCommandComposerVisible?.() === true)
+  ) {
+    return new TextEncoder().encode("\x1b[13;2u");
+  }
+  const bytes = adapter.encodeTerminalKey(
+    event.key,
+    event.code,
+    event.ctrlKey,
+    event.altKey,
+    event.shiftKey,
+    event.metaKey,
+    event.repeat,
+  );
+  if (bytes === null || bytes === undefined) {
+    // Adapter present but export missing (older bundle): legacy table.
+    return keyEventToBytes(event);
+  }
+  // Empty = not PTY-bound in the current terminal mode (consumed
+  // host-side on desktop, or no representation). Swallow nothing:
+  // returning null leaves the event to the browser, matching the
+  // legacy null path.
+  return bytes.length > 0 ? bytes : null;
+}
+
+/**
+ * Legacy hand-rolled fallback table. ONLY used when the wasm bundle
+ * predates `encode_terminal_key`, and for non-terminal surfaces whose
+ * byte routers (agent / markdown / editor) decode this fixed
+ * vocabulary. The terminal PTY path goes through `encodePtyKeyEvent`
+ * above — do not extend this table for terminal keys.
+ */
 function keyEventToBytes(event: KeyboardEvent): Uint8Array | null {
   if (event.ctrlKey && event.key.length === 1) {
     const code = event.key.toLowerCase().charCodeAt(0);
@@ -7359,16 +9609,32 @@ function keyEventToBytes(event: KeyboardEvent): Uint8Array | null {
 function keyNameFromTerminalBytes(bytes: Uint8Array): string | null {
   if (bytes.length === 1) {
     switch (bytes[0]) {
+      case 0x01:
+        return "Ctrl+A";
       case 0x03:
         return "Ctrl+C";
       case 0x04:
         return "Ctrl+D";
+      case 0x05:
+        return "Ctrl+E";
+      case 0x06:
+        return "Ctrl+F";
       case 0x09:
         return "Tab";
+      case 0x0b:
+        return "Ctrl+K";
       case 0x0c:
         return "Ctrl+L";
       case 0x0d:
         return "Enter";
+      case 0x12:
+        return "Ctrl+R";
+      case 0x15:
+        return "Ctrl+U";
+      case 0x17:
+        return "Ctrl+W";
+      case 0x1b:
+        return "Escape";
       case 0x7f:
       case 0x08:
         return "Backspace";
@@ -7378,24 +9644,42 @@ function keyNameFromTerminalBytes(bytes: Uint8Array): string | null {
   }
   const text = new TextDecoder().decode(bytes);
   switch (text) {
+    // Both the CSI and the DECCKM app-cursor SS3 form: shells (zsh
+    // zle) set application cursor keys at the prompt, so the
+    // desktop-parity encoder emits ESC O A there — the composer must
+    // recognize both spellings.
     case "\x1b[A":
+    case "\x1bOA":
       return "ArrowUp";
     case "\x1b[B":
+    case "\x1bOB":
       return "ArrowDown";
     case "\x1b[C":
+    case "\x1bOC":
       return "ArrowRight";
     case "\x1b[D":
+    case "\x1bOD":
       return "ArrowLeft";
     case "\x1b[H":
+    case "\x1bOH":
     case "\x1b[1~":
       return "Home";
     case "\x1b[F":
+    case "\x1bOF":
     case "\x1b[4~":
       return "End";
     case "\x1b[3~":
       return "Delete";
     case "\x1b[Z":
       return "Shift+Tab";
+    // Shift+Enter in the two standard disambiguated encodings —
+    // CSI-u (kitty) and xterm modifyOtherKeys. The legacy encoding
+    // collapses Shift+Enter to plain 0x0d, which is indistinguishable
+    // from Enter here; the keydown encoder must emit one of these for
+    // the composer's newline-instead-of-submit to engage.
+    case "\x1b[13;2u":
+    case "\x1b[27;2;13~":
+      return "Shift+Enter";
     default:
       return null;
   }

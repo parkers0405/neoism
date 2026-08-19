@@ -50,6 +50,48 @@ pub enum CritterActivity {
     Sulk,
 }
 
+/// How the current activity is being performed. Styles are picked with
+/// weighted rolls shaped by temperament and the live emotion mix, so two pets
+/// (or the same pet an hour later) act out the same activity differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CritterStyle {
+    Fidget,
+    Stroll,
+    March,
+    Skip,
+    Sneak,
+    Moonwalk,
+    Zoomies,
+    Dance,
+    Robot,
+    AirGuitar,
+    Juggle,
+    Spin,
+    Boxing,
+    Pushups,
+    Squats,
+    JumpRope,
+    Sleep,
+    Hammer,
+    Read,
+    Gaze,
+    WaterPlant,
+    BirdWatch,
+    Fume,
+    KickGround,
+}
+
+/// Short one-shot interruptions layered over the current activity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Moment {
+    Sneeze,
+    Shiver,
+    Hiccup,
+    Stare,
+    Trip,
+    Dizzy,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomStyle {
     Workshop,
@@ -234,6 +276,11 @@ pub struct PetState {
     activity: CritterActivity,
     activity_seconds: f32,
     activity_duration: f32,
+    flavor: u8,
+    moment: Option<Moment>,
+    moment_seconds: f32,
+    moment_duration: f32,
+    moment_cooldown: f32,
     behavior_rng: u32,
     walk_direction: f32,
     target_station: u8,
@@ -259,6 +306,11 @@ impl PetState {
             activity: CritterActivity::Idle,
             activity_seconds: 0.0,
             activity_duration: 0.8 + (behavior_rng & 255) as f32 / 255.0,
+            flavor: 0,
+            moment: None,
+            moment_seconds: 0.0,
+            moment_duration: 0.0,
+            moment_cooldown: 4.0 + ((behavior_rng >> 8) & 255) as f32 / 64.0,
             behavior_rng,
             walk_direction,
             target_station: 0,
@@ -307,6 +359,61 @@ impl PetState {
 
     pub const fn activity(&self) -> CritterActivity {
         self.activity
+    }
+
+    pub const fn moment(&self) -> Option<Moment> {
+        self.moment
+    }
+
+    pub fn moment_phase(&self) -> f32 {
+        if self.moment_duration <= 0.0 {
+            0.0
+        } else {
+            (self.moment_seconds / self.moment_duration).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Resolve (activity, flavor) into the concrete performance style.
+    pub const fn style(&self) -> CritterStyle {
+        match self.activity {
+            CritterActivity::Idle => CritterStyle::Fidget,
+            CritterActivity::WalkTo => CritterStyle::Stroll,
+            CritterActivity::Wander => match self.flavor {
+                1 => CritterStyle::March,
+                2 => CritterStyle::Skip,
+                3 => CritterStyle::Sneak,
+                4 => CritterStyle::Moonwalk,
+                5 => CritterStyle::Zoomies,
+                _ => CritterStyle::Stroll,
+            },
+            CritterActivity::Play => match self.flavor {
+                1 => CritterStyle::Robot,
+                2 => CritterStyle::AirGuitar,
+                3 => CritterStyle::Juggle,
+                4 => CritterStyle::Spin,
+                _ => CritterStyle::Dance,
+            },
+            CritterActivity::Exercise => match self.flavor {
+                1 => CritterStyle::Pushups,
+                2 => CritterStyle::Squats,
+                3 => CritterStyle::JumpRope,
+                _ => CritterStyle::Boxing,
+            },
+            CritterActivity::Rest => CritterStyle::Sleep,
+            CritterActivity::Tinker => match self.flavor {
+                1 => CritterStyle::Read,
+                _ => CritterStyle::Hammer,
+            },
+            CritterActivity::Observe => match self.flavor {
+                1 => CritterStyle::WaterPlant,
+                2 => CritterStyle::BirdWatch,
+                _ => CritterStyle::Gaze,
+            },
+            CritterActivity::Sulk => match self.flavor {
+                1 => CritterStyle::KickGround,
+                _ => CritterStyle::Fume,
+            },
+        }
     }
 
     pub const fn target_station(&self) -> u8 {
@@ -367,6 +474,7 @@ impl PetState {
         }
         if self.emotions.irritation >= CURSE_THRESHOLD && self.sulk_lockout <= 0.0 {
             self.activity = CritterActivity::Sulk;
+            self.flavor = self.pick_sulk_flavor();
             self.activity_seconds = 0.0;
             self.activity_duration = 2.4 + (self.next_random() % 120) as f32 / 100.0;
             self.walk_direction = -self.walk_direction;
@@ -415,6 +523,25 @@ impl PetState {
         let mut events = SimulationEvents::default();
         let floor = room_size.y.max(1.0);
         let grounded = self.position.y >= floor - 0.5 && self.velocity.y.abs() < 24.0;
+        if self.moment.is_some() {
+            self.moment_seconds += dt;
+            if self.moment_seconds >= self.moment_duration {
+                self.moment = None;
+                self.moment_cooldown = 5.0 + (self.next_random() % 900) as f32 / 100.0;
+            }
+        } else if !self.grabbed
+            && self.mode == PetMode::Critter
+            && grounded
+            && !matches!(
+                self.activity,
+                CritterActivity::Rest | CritterActivity::Sulk
+            )
+        {
+            self.moment_cooldown -= dt;
+            if self.moment_cooldown <= 0.0 {
+                self.roll_moment();
+            }
+        }
         if !self.grabbed && self.mode == PetMode::Critter && grounded {
             if self.activity == CritterActivity::WalkTo {
                 let station = self.room_plan().stations[self.target_station as usize];
@@ -451,15 +578,30 @@ impl PetState {
                 } else {
                     0.0
                 };
-                let desired = if self.activity == CritterActivity::WalkTo {
+                let desired = if self.moment.is_some() {
+                    0.0 // stop mid-track for sneezes, trips, stares, ...
+                } else if self.activity == CritterActivity::WalkTo {
                     let target = self.room_plan().stations[self.target_station as usize]
                         .interaction_x();
                     self.walk_direction =
                         if target >= self.position.x { 1.0 } else { -1.0 };
                     self.walk_direction * (self.temperament().walking_speed() + 8.0)
                 } else if walking {
+                    let style_speed = if self.activity == CritterActivity::Wander {
+                        match self.flavor {
+                            1 => 0.8,  // march
+                            2 => 1.15, // skip
+                            3 => 0.45, // sneak
+                            4 => 0.55, // moonwalk
+                            5 => 2.4,  // zoomies
+                            _ => 1.0,
+                        }
+                    } else {
+                        1.0
+                    };
                     self.walk_direction
                         * (self.temperament().walking_speed() + angry_bonus)
+                        * style_speed
                 } else {
                     0.0
                 };
@@ -488,6 +630,11 @@ impl PetState {
             };
             if events.landed {
                 self.velocity.x *= 0.82;
+                if self.mode == PetMode::Critter && !self.grabbed {
+                    self.moment = Some(Moment::Dizzy);
+                    self.moment_seconds = 0.0;
+                    self.moment_duration = 1.5;
+                }
             }
         }
         if self.position.x < 0.0 {
@@ -499,6 +646,91 @@ impl PetState {
         }
 
         events
+    }
+
+    /// Weighted roll over (flavor, weight) rows. Zero-weight rows are legal
+    /// and simply unreachable, which lets tables stay static while emotions
+    /// scale individual entries.
+    fn weighted_flavor(&mut self, table: &[(u8, u16)]) -> u8 {
+        let mut total: u32 = 0;
+        for (_, weight) in table {
+            total += u32::from(*weight);
+        }
+        if total == 0 {
+            return 0;
+        }
+        let mut roll = self.next_random() % total;
+        for (flavor, weight) in table {
+            if roll < u32::from(*weight) {
+                return *flavor;
+            }
+            roll -= u32::from(*weight);
+        }
+        0
+    }
+
+    fn pick_wander_flavor(&mut self) -> u8 {
+        let excitement = self.emotions.excitement;
+        let tiredness = self.emotions.tiredness;
+        let temperament = self.temperament();
+        let playful = (temperament == Temperament::Playful) as u16;
+        let grumpy = (temperament == Temperament::Grumpy) as u16;
+        let dramatic = (temperament == Temperament::Dramatic) as u16;
+        self.weighted_flavor(&[
+            (0, 42 + tiredness / 14),                 // stroll
+            (1, 8 + grumpy * 20 + dramatic * 6),      // march
+            (2, 6 + excitement / 40 + playful * 12),  // skip
+            (3, 7 + grumpy * 5),                      // sneak
+            (4, 3 + excitement / 90 + dramatic * 8),  // moonwalk
+            (5, if tiredness >= 650 { 0 } else { 2 + excitement / 24 + playful * 12 }), // zoomies
+        ])
+    }
+
+    fn pick_sulk_flavor(&mut self) -> u8 {
+        let grumpy = (self.temperament() == Temperament::Grumpy) as u16;
+        let irritation = self.emotions.irritation;
+        self.weighted_flavor(&[
+            (0, 55),                            // fume
+            (1, 20 + grumpy * 22 + irritation / 40), // kick the ground
+        ])
+    }
+
+    fn roll_moment(&mut self) {
+        let walking = matches!(
+            self.activity,
+            CritterActivity::Wander | CritterActivity::WalkTo
+        );
+        let dramatic = (self.temperament() == Temperament::Dramatic) as u16;
+        let greenhouse = (self.room_plan().style == RoomStyle::Greenhouse) as u16;
+        let choice = self.weighted_flavor(&[
+            (0, 130),                                    // nothing this time
+            (1, 10 + greenhouse * 10),                   // sneeze
+            (2, 8),                                      // shiver
+            (3, 9),                                      // hiccup
+            (4, 6 + self.emotions.loneliness / 50),      // stare at the viewer
+            (5, if walking { 8 + dramatic * 16 } else { 0 }), // trip
+        ]);
+        let (moment, duration) = match choice {
+            1 => (Some(Moment::Sneeze), 1.0),
+            2 => (Some(Moment::Shiver), 1.2),
+            3 => (Some(Moment::Hiccup), 1.0),
+            4 => (Some(Moment::Stare), 1.8),
+            5 => (Some(Moment::Trip), 1.3),
+            _ => (None, 0.0),
+        };
+        if let Some(moment) = moment {
+            self.moment = Some(moment);
+            self.moment_seconds = 0.0;
+            self.moment_duration = duration;
+            if moment == Moment::Trip {
+                self.velocity.x *= 0.2;
+            }
+            if moment == Moment::Stare {
+                self.emotions.loneliness = self.emotions.loneliness.saturating_sub(120);
+            }
+        } else {
+            self.moment_cooldown = 2.5 + (self.next_random() % 500) as f32 / 100.0;
+        }
     }
 
     fn choose_next_activity(&mut self) {
@@ -525,6 +757,18 @@ impl PetState {
                 };
                 CritterActivity::WalkTo
             };
+        self.flavor = match self.activity {
+            CritterActivity::Wander => self.pick_wander_flavor(),
+            CritterActivity::Sulk => self.pick_sulk_flavor(),
+            _ => 0,
+        };
+        if self.activity == CritterActivity::Wander && self.flavor == 5 {
+            self.emotions.excitement = self
+                .emotions
+                .excitement
+                .saturating_add(70)
+                .min(EMOTION_MAX);
+        }
         self.activity_seconds = 0.0;
         let variation = (self.next_random() % 180) as f32 / 100.0;
         self.activity_duration = match self.activity {
@@ -586,6 +830,46 @@ impl PetState {
             StationKind::Desk => CritterActivity::Tinker,
             StationKind::Plant | StationKind::Window => CritterActivity::Observe,
         };
+        let excitement = self.emotions.excitement;
+        let tiredness = self.emotions.tiredness;
+        let temperament = self.temperament();
+        let playful = (temperament == Temperament::Playful) as u16;
+        let gentle = (temperament == Temperament::Gentle) as u16;
+        let dramatic = (temperament == Temperament::Dramatic) as u16;
+        self.flavor = match self.activity {
+            CritterActivity::Play => self.weighted_flavor(&[
+                (0, 34),                                 // dance
+                (1, 12 + dramatic * 14),                 // robot
+                (2, 14 + excitement / 30),               // air guitar
+                (3, 10 + gentle * 12),                   // juggle
+                (4, 6 + excitement / 40 + playful * 10), // spin
+            ]),
+            CritterActivity::Exercise => self.weighted_flavor(&[
+                (0, 38),                                 // boxing
+                (1, 14),                                 // pushups
+                (2, 12),                                 // squats
+                (3, 10 + excitement / 40 + playful * 12), // jump rope
+            ]),
+            CritterActivity::Tinker => self.weighted_flavor(&[
+                (0, 50),                     // hammer away
+                (1, 24 + gentle * 16 + tiredness / 24), // read instead
+            ]),
+            CritterActivity::Observe => match station.kind {
+                StationKind::Plant => self.weighted_flavor(&[
+                    (0, 40),               // gaze
+                    (1, 30 + gentle * 18), // water the plant
+                ]),
+                StationKind::Window => self.weighted_flavor(&[
+                    (0, 40),                     // gaze
+                    (2, 28 + excitement / 40),   // bird watch
+                ]),
+                _ => 0,
+            },
+            _ => 0,
+        };
+        if self.activity == CritterActivity::Tinker && self.flavor == 1 {
+            self.emotions.excitement = self.emotions.excitement.saturating_sub(40);
+        }
         self.activity_seconds = 0.0;
         let variation = (self.next_random() % 160) as f32 / 100.0;
         self.activity_duration = match self.activity {
@@ -744,6 +1028,86 @@ mod tests {
         assert!(wandered);
         assert!(used_station);
         assert!((pet.position.x - start).abs() > 5.0);
+    }
+
+    fn style_slot(style: CritterStyle) -> usize {
+        match style {
+            CritterStyle::Fidget => 0,
+            CritterStyle::Stroll => 1,
+            CritterStyle::March => 2,
+            CritterStyle::Skip => 3,
+            CritterStyle::Sneak => 4,
+            CritterStyle::Moonwalk => 5,
+            CritterStyle::Zoomies => 6,
+            CritterStyle::Dance => 7,
+            CritterStyle::Robot => 8,
+            CritterStyle::AirGuitar => 9,
+            CritterStyle::Juggle => 10,
+            CritterStyle::Spin => 11,
+            CritterStyle::Boxing => 12,
+            CritterStyle::Pushups => 13,
+            CritterStyle::Squats => 14,
+            CritterStyle::JumpRope => 15,
+            CritterStyle::Sleep => 16,
+            CritterStyle::Hammer => 17,
+            CritterStyle::Read => 18,
+            CritterStyle::Gaze => 19,
+            CritterStyle::WaterPlant => 20,
+            CritterStyle::BirdWatch => 21,
+            CritterStyle::Fume => 22,
+            CritterStyle::KickGround => 23,
+        }
+    }
+
+    #[test]
+    fn behavior_styles_vary_over_a_long_run() {
+        let mut seen = [false; 24];
+        for seed in 0u8..6 {
+            let mut pet = PetState::new(
+                PetId([seed.wrapping_mul(37).wrapping_add(3); 16]),
+                Vec2::new(100.0, WORLD_FLOOR),
+            );
+            for _ in 0..36_000 {
+                pet.step(1.0 / 120.0, Vec2::new(WORLD_WIDTH, WORLD_FLOOR));
+                seen[style_slot(pet.style())] = true;
+            }
+        }
+        let distinct = seen.iter().filter(|&&s| s).count();
+        assert!(distinct >= 8, "only {distinct} distinct styles seen");
+    }
+
+    #[test]
+    fn moments_fire_and_then_clear() {
+        let mut pet = PetState::new(PetId([9; 16]), Vec2::new(100.0, WORLD_FLOOR));
+        let mut fired = false;
+        let mut cleared_after = false;
+        for _ in 0..72_000 {
+            pet.step(1.0 / 120.0, Vec2::new(WORLD_WIDTH, WORLD_FLOOR));
+            if pet.moment().is_some() {
+                fired = true;
+            } else if fired {
+                cleared_after = true;
+                break;
+            }
+        }
+        assert!(fired && cleared_after);
+    }
+
+    #[test]
+    fn a_hard_landing_leaves_the_pet_dizzy() {
+        let mut pet = PetState::new(PetId([4; 16]), Vec2::new(80.0, 20.0));
+        pet.velocity.y = 400.0;
+        let mut landed = false;
+        for _ in 0..240 {
+            landed |= pet
+                .step(1.0 / 120.0, Vec2::new(WORLD_WIDTH, WORLD_FLOOR))
+                .landed;
+            if landed {
+                break;
+            }
+        }
+        assert!(landed);
+        assert_eq!(pet.moment(), Some(Moment::Dizzy));
     }
 
     #[test]

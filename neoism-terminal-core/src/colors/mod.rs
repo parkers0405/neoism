@@ -50,6 +50,21 @@ impl ColorRgb {
     }
 }
 
+/// Format an OSC color-query reply the way xterm does.
+///
+/// `prefix` is the OSC `Ps` portion echoed back verbatim (`"10"`,
+/// `"11"`, `"12"`, or `"4;<n>"`), the color is reported with 16-bit
+/// components (each 8-bit channel doubled, e.g. `0f` → `0f0f`), and
+/// `terminator` must be the terminator the QUERY used (BEL `"\x07"`
+/// or ST `"\x1b\\"`) so BEL-terminated queries get BEL-terminated
+/// replies and ST gets ST.
+pub fn osc_color_reply(prefix: &str, color: ColorRgb, terminator: &str) -> String {
+    format!(
+        "\x1b]{};rgb:{1:02x}{1:02x}/{2:02x}{2:02x}/{3:02x}{3:02x}{4}",
+        prefix, color.r, color.g, color.b, terminator
+    )
+}
+
 impl Mul<f32> for ColorRgb {
     type Output = ColorRgb;
 

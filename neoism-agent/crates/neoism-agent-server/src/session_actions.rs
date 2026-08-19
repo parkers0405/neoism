@@ -6,7 +6,7 @@ use axum::Json;
 use neoism_agent_core::{
     event_type, EventPayload, Id, IdKind, MessageId, MessageInfo, MessageWithParts, Part,
     PermissionAction, PermissionRule, PromptPart, PromptRequest, SessionInfo,
-    SessionStatus, TimeInfo, UserModel,
+    TimeInfo, UserModel,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -24,6 +24,11 @@ const SUBTASK_COMPLETION_SYSTEM_MARKER: &str =
     "Neoism runtime notification: background subagent completion.";
 const SUBTASK_RESULT_INLINE_CHARS: usize = 32_000;
 const SUBTASK_COMPLETION_EXTRA_KEY: &str = "subtaskCompletion";
+/// Set on a child when a continue-prompt is QUEUED onto it (the task tool's
+/// child-already-running branch). The queued prompt runs through the generic
+/// queue worker — no spawn wrapper exists to publish the completion — so the
+/// child's next true-idle point publishes it instead.
+const SUBTASK_NOTIFY_ON_IDLE_KEY: &str = "subtaskNotifyOnIdle";
 
 #[derive(Clone, Debug)]
 struct PendingSubtaskCompletion {
@@ -359,6 +364,124 @@ async fn enqueue_parent_subtask_completion_prompts_if_ready(
     Ok(())
 }
 
+/// Mark a child so its next true-idle point publishes a subtask completion
+/// to the parent. Called when a continue-prompt is queued onto a running
+/// child — the only subagent execution path with no completion wrapper.
+pub(crate) async fn mark_subtask_notify_on_idle(
+    state: &AppState,
+    child_id: &str,
+) -> Result<(), ApiError> {
+    let Some(mut child) = state.inner.store.get_session(child_id).await? else {
+        return Ok(());
+    };
+    if child.parent_id.is_none() {
+        return Ok(());
+    }
+    child
+        .extra
+        .insert(SUBTASK_NOTIFY_ON_IDLE_KEY.to_string(), json!(true));
+    state.inner.store.update_session(&child).await?;
+    Ok(())
+}
+
+/// If `session_id` is a child that owes a deferred completion (queued
+/// continue-prompt) and it is now truly idle — no run, empty queue, no
+/// queue worker — publish the completion through the standard pipeline
+/// (outbox + batching + events). The marker is cleared first so
+/// concurrent idle hooks can't double-publish.
+pub(crate) async fn publish_deferred_subtask_completion_if_idle(
+    state: &AppState,
+    session_id: &str,
+) {
+    let child = match state.inner.store.get_session(session_id).await {
+        Ok(Some(child)) => child,
+        _ => return,
+    };
+    if child.parent_id.is_none()
+        || !child
+            .extra
+            .get(SUBTASK_NOTIFY_ON_IDLE_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return;
+    }
+    if state.inner.runs.read().await.contains_key(session_id) {
+        return;
+    }
+    if state
+        .inner
+        .session_coordinator
+        .worker_active(session_id)
+        .await
+    {
+        return;
+    }
+    if state
+        .inner
+        .store
+        .queued_prompt_count(session_id)
+        .await
+        .unwrap_or(0)
+        > 0
+    {
+        return;
+    }
+    let mut cleared = child.clone();
+    cleared.extra.remove(SUBTASK_NOTIFY_ON_IDLE_KEY);
+    if let Err(error) = state.inner.store.update_session(&cleared).await {
+        tracing::warn!(session_id = %session_id, %error, "failed to clear deferred subtask notify marker");
+        return;
+    }
+    let result = last_assistant_text(state, session_id).await;
+    publish_background_subtask_finished(state, session_id, "completed", &result).await;
+}
+
+/// Last assistant text part in the child's transcript — the result the
+/// deferred completion carries (mirrors the spawn wrapper's
+/// `last_text_part` of the append result).
+async fn last_assistant_text(state: &AppState, session_id: &str) -> String {
+    let Ok(messages) = state.inner.store.list_messages(session_id).await else {
+        return String::new();
+    };
+    messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.info, MessageInfo::Assistant(_)))
+        .map(|message| {
+            message
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    Part::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// Recheck the durable completion outbox for a session acting as PARENT.
+/// Fired on every run teardown so held completions get re-attempted each
+/// time the main agent goes idle — the safety net that guarantees a
+/// pending "subagent finished" notification can never strand just because
+/// no further child lifecycle event arrives to re-trigger delivery.
+pub(crate) async fn reconcile_pending_subtask_completions_for_parent(
+    state: &AppState,
+    parent_id: &str,
+) {
+    if let Err(error) =
+        enqueue_parent_subtask_completion_prompts_if_ready(state, parent_id).await
+    {
+        tracing::warn!(
+            parent_id = %parent_id,
+            %error,
+            "failed to reconcile pending subtask completions for parent"
+        );
+    }
+}
+
 /// Recheck the durable completion outbox after a child lifecycle transition.
 /// A completion can initially be held while a sibling is still active; an
 /// abort or late run teardown must give it another chance to reach the parent.
@@ -366,6 +489,10 @@ pub(crate) async fn reconcile_parent_subtask_completions_for_child(
     state: &AppState,
     child_id: &str,
 ) {
+    // A queued continue-prompt owes its completion at the child's next
+    // idle point — check before forwarding, so the freshly-published
+    // pending entry rides the same delivery attempt below.
+    publish_deferred_subtask_completion_if_idle(state, child_id).await;
     let parent_id = match state.inner.store.get_session(child_id).await {
         Ok(Some(child)) => child.parent_id.map(|parent| parent.to_string()),
         Ok(None) => None,
@@ -506,13 +633,22 @@ async fn parent_has_active_subtasks(
         return Ok(true);
     }
     drop(runs);
-    let statuses = state.inner.statuses.read().await;
-    Ok(child_ids.iter().any(|id| {
-        matches!(
-            statuses.get(id),
-            Some(SessionStatus::Busy { .. } | SessionStatus::Retry { .. })
-        )
-    }))
+    // "Active" means genuinely executing: a live run (above) or a queue
+    // worker mid-drain. The derived `statuses` map is deliberately NOT
+    // consulted here — a stale Busy entry (e.g. a child with an orphaned
+    // queued prompt) would hold every future completion notification
+    // hostage with nothing left to clear it.
+    for child_id in &child_ids {
+        if state
+            .inner
+            .session_coordinator
+            .worker_active(child_id)
+            .await
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn parent_subtask_completion_prompt(

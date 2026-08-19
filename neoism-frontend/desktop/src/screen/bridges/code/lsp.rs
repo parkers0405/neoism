@@ -30,6 +30,18 @@ use super::*;
 use neoism_agent_server::language_server as engine;
 use neoism_backend::event::{EventProxy, RioEvent, RioEventType, WindowId};
 use neoism_ui::editor::code::layout::byte_for_utf16_col;
+// Pure LSP session helpers now live in the shared crate
+// (`neoism_ui::editor::code::lsp_session`) so the web frontend runs the
+// exact same logic; desktop delegates instead of keeping copies.
+pub(crate) use neoism_ui::editor::code::lsp_session::is_ident_char;
+use neoism_ui::editor::code::lsp_session::{
+    action_kind_label, completion_prefix, flatten_code_actions, map_severity,
+    parse_lsp_text_edits, snippet_with_first_stop, word_start_col,
+    workspace_edit_file_edits,
+};
+/// One selectable row of the code-action popup — the shared session
+/// type; `action` is the raw LSP CodeAction/Command payload.
+pub use neoism_ui::editor::code::lsp_session::LspCodeActionData as CodeActionItem;
 use neoism_ui::editor::code::{CodeDiagnosticSeverity, CodeLineDiagnostic};
 use neoism_ui::editor_snapshot::{PopupMenu, PopupMenuItem};
 use std::collections::HashMap;
@@ -342,164 +354,6 @@ fn refresh_lsp_pill(root: &Path, file: &Path) {
     store.insert(file.to_path_buf(), entry);
 }
 
-fn parse_lsp_text_edits(
-    edits: &[serde_json::Value],
-) -> Vec<neoism_ui::editor::code::buffer::CodeTextEdit> {
-    edits
-        .iter()
-        .filter_map(|edit| {
-            Some(neoism_ui::editor::code::buffer::CodeTextEdit {
-                start_line: edit.pointer("/range/start/line")?.as_u64()? as usize,
-                start_col: edit.pointer("/range/start/character")?.as_u64()? as usize,
-                end_line: edit.pointer("/range/end/line")?.as_u64()? as usize,
-                end_col: edit.pointer("/range/end/character")?.as_u64()? as usize,
-                text: edit.get("newText")?.as_str()?.to_string(),
-            })
-        })
-        .collect()
-}
-
-/// One selectable row of the code-action popup. `action` is the raw
-/// LSP CodeAction/Command payload, resolved lazily on accept.
-#[derive(Clone)]
-pub struct CodeActionItem {
-    pub server_id: String,
-    pub title: String,
-    pub kind: String,
-    pub action: serde_json::Value,
-}
-
-/// Flatten the engine's per-server `{language, path, actions}` groups
-/// into popup rows. Preferred actions (server hint) bubble to the top,
-/// otherwise server order is kept.
-fn flatten_code_actions(groups: &[serde_json::Value]) -> Vec<CodeActionItem> {
-    let mut items = Vec::new();
-    for group in groups {
-        let server_id = group
-            .get("language")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let Some(actions) = group.get("actions").and_then(|a| a.as_array()) else {
-            continue;
-        };
-        for action in actions {
-            let Some(title) = action.get("title").and_then(|t| t.as_str()) else {
-                continue;
-            };
-            let kind = action
-                .get("kind")
-                .and_then(|k| k.as_str())
-                .unwrap_or_default()
-                .to_string();
-            items.push(CodeActionItem {
-                server_id: server_id.clone(),
-                title: title.to_string(),
-                kind,
-                action: action.clone(),
-            });
-        }
-    }
-    items.sort_by_key(|item| {
-        std::cmp::Reverse(
-            item.action
-                .get("isPreferred")
-                .and_then(|p| p.as_bool())
-                .unwrap_or(false),
-        )
-    });
-    items
-}
-
-/// Short badge for a code-action kind (`quickfix` → "fix",
-/// `refactor.extract` → "refactor", `source.organizeImports` →
-/// "source", plain commands → "cmd").
-fn action_kind_label(item: &CodeActionItem) -> &'static str {
-    let head = item.kind.split('.').next().unwrap_or("");
-    match head {
-        "quickfix" => "fix",
-        "refactor" => "refactor",
-        "source" => "source",
-        "" => {
-            if item.action.get("command").is_some_and(|c| c.is_string()) {
-                "cmd"
-            } else {
-                "action"
-            }
-        }
-        _ => "action",
-    }
-}
-
-/// Minimal `file://` URI → path decoder (percent-decoded). Workspace
-/// edits key files by URI; the engine's own decoder isn't exported.
-fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    // `file:///path` → rest starts at '/'; `file://host/path` drops host.
-    let path_start = rest.find('/')?;
-    let raw = rest[path_start..].as_bytes();
-    let mut bytes = Vec::with_capacity(raw.len());
-    let mut ix = 0;
-    while ix < raw.len() {
-        if raw[ix] == b'%' && ix + 2 < raw.len() {
-            let hex = std::str::from_utf8(&raw[ix + 1..ix + 3]).ok()?;
-            let byte = u8::from_str_radix(hex, 16).ok()?;
-            bytes.push(byte);
-            ix += 3;
-        } else {
-            bytes.push(raw[ix]);
-            ix += 1;
-        }
-    }
-    String::from_utf8(bytes).ok().map(PathBuf::from)
-}
-
-/// Collect a WorkspaceEdit's text edits per file, in byte coords (the
-/// engine transport already converted them). Handles both the
-/// `changes` uri-map and `documentChanges` TextDocumentEdit entries;
-/// resource ops (create/rename/delete file) are skipped.
-fn workspace_edit_file_edits(
-    edit: &serde_json::Value,
-) -> Vec<(PathBuf, Vec<serde_json::Value>)> {
-    let mut per_file: Vec<(PathBuf, Vec<serde_json::Value>)> = Vec::new();
-    let mut push = |path: PathBuf, edits: &[serde_json::Value]| {
-        if edits.is_empty() {
-            return;
-        }
-        if let Some(entry) = per_file.iter_mut().find(|(p, _)| *p == path) {
-            entry.1.extend(edits.iter().cloned());
-        } else {
-            per_file.push((path, edits.to_vec()));
-        }
-    };
-    if let Some(changes) = edit.get("changes").and_then(|c| c.as_object()) {
-        for (uri, edits) in changes {
-            let Some(path) = file_uri_to_path(uri) else {
-                continue;
-            };
-            if let Some(list) = edits.as_array() {
-                push(path, list);
-            }
-        }
-    }
-    if let Some(doc_changes) = edit.get("documentChanges").and_then(|c| c.as_array()) {
-        for change in doc_changes {
-            let Some(uri) = change.pointer("/textDocument/uri").and_then(|u| u.as_str())
-            else {
-                // CreateFile/RenameFile/DeleteFile — unsupported here.
-                continue;
-            };
-            let Some(path) = file_uri_to_path(uri) else {
-                continue;
-            };
-            if let Some(list) = change.get("edits").and_then(|e| e.as_array()) {
-                push(path, list);
-            }
-        }
-    }
-    per_file
-}
-
 fn floor_char_boundary_of(text: &str, mut ix: usize) -> usize {
     ix = ix.min(text.len());
     while ix > 0 && !text.is_char_boundary(ix) {
@@ -782,15 +636,6 @@ fn fold_anchored_diagnostics(
     per_line
 }
 
-fn map_severity(severity: &str) -> CodeDiagnosticSeverity {
-    match severity.to_ascii_lowercase().as_str() {
-        "error" => CodeDiagnosticSeverity::Error,
-        "warning" | "warn" => CodeDiagnosticSeverity::Warn,
-        "hint" => CodeDiagnosticSeverity::Hint,
-        _ => CodeDiagnosticSeverity::Info,
-    }
-}
-
 // ---------------------------------------------------------------------
 // UI session state (lives on `Renderer::code_lsp`, mutated by the
 // Screen input/pump paths, read by the chrome pass in `host/run.rs`).
@@ -955,103 +800,6 @@ pub(crate) enum CodeKeyEdit {
     Other,
 }
 
-pub(crate) fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-/// Byte column where the identifier containing/ending at `col` starts.
-fn word_start_col(line: &str, col: usize) -> usize {
-    let col = col.min(line.len());
-    let mut start = col;
-    for (i, c) in line[..col].char_indices().rev() {
-        if is_ident_char(c) {
-            start = i;
-        } else {
-            break;
-        }
-    }
-    start
-}
-
-/// The typed prefix between the session anchor and the cursor. `None`
-/// when the range is invalid or contains non-identifier chars — the
-/// session should dismiss then.
-fn completion_prefix(line: &str, anchor: usize, cursor: usize) -> Option<String> {
-    if anchor > cursor || cursor > line.len() {
-        return None;
-    }
-    let slice = line.get(anchor..cursor)?;
-    slice.chars().all(is_ident_char).then(|| slice.to_string())
-}
-
-/// Strip LSP snippet placeholders (`$0`, `$1`, `${2:default}`) from an
-/// `insertTextFormat == 2` completion, keeping placeholder defaults.
-/// v1 has no tab-stop editing — the caret lands after the insertion.
-/// Like `strip_snippet_placeholders`, but also reports the FIRST
-/// tabstop's `(byte offset, default-text len)` in the stripped output —
-/// accept lands the caret there with the placeholder selected, so
-/// typing replaces it (snippets v1: no Tab-chain yet).
-fn snippet_with_first_stop(text: &str) -> (String, Option<(usize, usize)>) {
-    let mut out = String::with_capacity(text.len());
-    let mut first_stop: Option<(usize, usize)> = None;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(&next) = chars.peek() {
-                if next == '$' || next == '}' || next == '\\' {
-                    out.push(next);
-                    chars.next();
-                    continue;
-                }
-            }
-            out.push(c);
-            continue;
-        }
-        if c != '$' {
-            out.push(c);
-            continue;
-        }
-        match chars.peek() {
-            Some('{') => {
-                chars.next();
-                let start = out.len();
-                let mut saw_colon = false;
-                for inner in chars.by_ref() {
-                    if inner == '}' {
-                        break;
-                    }
-                    if saw_colon {
-                        out.push(inner);
-                    } else if inner == ':' {
-                        saw_colon = true;
-                    }
-                }
-                if first_stop.is_none() {
-                    first_stop = Some((start, out.len() - start));
-                }
-            }
-            Some(d) if d.is_ascii_digit() => {
-                while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
-                    chars.next();
-                }
-                if first_stop.is_none() {
-                    first_stop = Some((out.len(), 0));
-                }
-            }
-            _ => out.push('$'),
-        }
-    }
-    (out, first_stop)
-}
-
-/// Flat placeholder strip (`${N:default}` → `default`, `$N` → ``);
-/// superseded by `snippet_with_first_stop` on the accept path but kept
-/// for callers that only need the text.
-#[allow(dead_code)]
-fn strip_snippet_placeholders(text: &str) -> String {
-    snippet_with_first_stop(text).0
-}
-
 fn build_completion_popup(session: &CodeCompletionSession) -> PopupMenu {
     let items: Vec<PopupMenuItem> = session
         .filtered
@@ -1105,26 +853,11 @@ fn rebuild_completion_filter(session: &mut CodeCompletionSession, prefix: &str) 
 }
 
 /// Flatten engine hovers into the markdown-ish line list the shared
-/// hover popup parses (fences kept; multiple servers separated by a
-/// blank line).
+/// hover popup parses — delegates to the shared session helper.
 fn hover_card_lines(hovers: &[engine::LspHover]) -> Vec<String> {
-    const MAX_LINES: usize = 40;
-    let mut out: Vec<String> = Vec::new();
-    for hover in hovers {
-        if hover.contents.trim().is_empty() {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push(String::new());
-        }
-        for line in hover.contents.lines() {
-            out.push(line.to_string());
-            if out.len() >= MAX_LINES {
-                return out;
-            }
-        }
-    }
-    out
+    neoism_ui::editor::code::lsp_session::hover_card_lines(
+        hovers.iter().map(|hover| hover.contents.as_str()),
+    )
 }
 
 fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspShared {

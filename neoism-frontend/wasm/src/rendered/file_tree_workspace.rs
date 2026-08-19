@@ -150,6 +150,70 @@ impl ChromeBridge {
         Ok(())
     }
 
+    /// Web side of the file-tree presence avatars — the same
+    /// `path -> peers` index rebuild the desktop runs in
+    /// `Screen::rebuild_file_tree_presence_index`. The TS presence
+    /// store pushes this ONLY when remote presence changes (never
+    /// per frame): `[{ buffer_id, peers: [{ peer_id, display_name,
+    /// color: [r, g, b], rainbow }] }]`. Presence buffer ids are
+    /// `file://<abs path>`; they map straight onto the path a tree
+    /// row carries. Virtual buffers (non-`file://`) own no row and
+    /// are skipped, mirroring the desktop rebuild.
+    pub fn set_presence_index(&mut self, entries: JsValue) {
+        use neoism_ui::editor::crdt::PresenceAvatarPeer;
+        use std::collections::HashMap;
+
+        #[derive(serde::Deserialize)]
+        struct WirePeer {
+            peer_id: String,
+            display_name: String,
+            color: [u8; 3],
+            #[serde(default)]
+            rainbow: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct WireBuffer {
+            buffer_id: String,
+            peers: Vec<WirePeer>,
+        }
+
+        let wire: Vec<WireBuffer> = match serde_wasm_bindgen::from_value(entries) {
+            Ok(wire) => wire,
+            Err(_) => return,
+        };
+        let Some(tree) = self.chrome.file_tree.as_mut() else {
+            return;
+        };
+        let mut index: HashMap<PathBuf, Vec<PresenceAvatarPeer>> = HashMap::new();
+        for buffer in wire {
+            let Some(path) = buffer.buffer_id.strip_prefix("file://") else {
+                continue;
+            };
+            if buffer.peers.is_empty() {
+                continue;
+            }
+            index.insert(
+                PathBuf::from(path),
+                buffer
+                    .peers
+                    .into_iter()
+                    .map(|p| PresenceAvatarPeer {
+                        peer_id: p.peer_id,
+                        display_name: p.display_name,
+                        color: p.color,
+                        rainbow: p.rainbow,
+                    })
+                    .collect(),
+            );
+        }
+        // Fast-path mirror of the desktop rebuild: skip swapping an
+        // empty index into a tree that already has none.
+        if index.is_empty() && !tree.has_presence() {
+            return;
+        }
+        tree.set_presence_index(index);
+    }
+
     pub fn show_command_palette(&mut self) {
         // Desktop parity: the two center modals are mutually
         // exclusive — opening one closes the other.
@@ -158,18 +222,14 @@ impl ChromeBridge {
         self.relayout_chrome();
     }
 
-    pub fn set_command_palette_workspace_visibility(&mut self, visibility: &str) {
-        use neoism_ui::panels::context_menu::WorkspaceChromeVisibility;
-
-        let visibility = match visibility {
-            "shared" => WorkspaceChromeVisibility::Shared,
-            "team" => WorkspaceChromeVisibility::Team,
-            _ => WorkspaceChromeVisibility::Private,
-        };
-        self.chrome
-            .command_palette
-            .set_workspace_visibility(visibility);
-    }
+    /// Compatibility shim: the shared `CommandPalette` no longer
+    /// stores a chrome-wide workspace visibility — each
+    /// `PaletteWorkspaceEntry` carries its own `workspace_visibility`
+    /// since the Workspaces-modal rework, so there is nothing to set
+    /// here anymore. Kept as a no-op so the JS host's existing
+    /// `setCommandPaletteWorkspaceVisibility` call path stays valid
+    /// against this bundle.
+    pub fn set_command_palette_workspace_visibility(&mut self, _visibility: &str) {}
 
     pub fn set_workspace_island_tabs(
         &mut self,

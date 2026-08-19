@@ -25,6 +25,7 @@ default = []
 neoism-terminal-core = { workspace = true }
 neoism-ui = { workspace = true }
 neoism-protocol = { workspace = true }
+neoism-neoworld-core = { workspace = true }
 wasm-bindgen = { workspace = true }
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console"] }

@@ -1098,10 +1098,24 @@ pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
             AgentTimelineMessageKind::Reasoning
             | AgentTimelineMessageKind::Tool
             | AgentTimelineMessageKind::Subtask
-            | AgentTimelineMessageKind::Compaction => index >= live_start,
+            | AgentTimelineMessageKind::Compaction => {
+                index >= live_start || is_background_completion_result_card(message)
+            }
             AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => true,
         })
         .collect()
+}
+
+/// The background-task completion card ("this finished while you were
+/// working") is a transcript event, not turn trace: once it lands it STAYS
+/// visible — settling the turn, refreshing history, or re-entering the
+/// session must never declutter it away. Identified by the durable id the
+/// live event and the persisted runtime notification share
+/// (`background-task-{job}`, see `api_mapping::background_completion_card`);
+/// an ordinary `background_task_result` tool CALL row (the model rereading
+/// retained output, part-id identity) keeps normal trace settling.
+fn is_background_completion_result_card<M: AgentTimelineMessage>(message: &M) -> bool {
+    message.tool() == "background_task_result" && message.id().starts_with("background-task-")
 }
 
 fn build_timeline_layout_pages<M>(

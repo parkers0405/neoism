@@ -25,6 +25,7 @@ pub mod highlight;
 pub mod history;
 pub mod input;
 pub mod layout;
+pub mod lsp_session;
 pub mod multicursor;
 pub mod outline;
 pub mod render;

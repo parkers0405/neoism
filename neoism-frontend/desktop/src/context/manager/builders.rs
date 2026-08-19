@@ -244,11 +244,8 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             scrollback_history_limit: config.terminal.scrollback_history_limit,
             ide_theme: config.appearance.theme,
             cursor_blinking: config.terminal.cursor.blinking,
-            foreground: neoism_terminal_core::colors::ColorRgb::from_color_arr(
-                config.appearance.colors.foreground,
-            ),
-            background: neoism_terminal_core::colors::ColorRgb::from_color_arr(
-                config.appearance.colors.background.0,
+            colors: neoism_backend::config::colors::term::List::from(
+                &config.appearance.colors,
             ),
         };
 

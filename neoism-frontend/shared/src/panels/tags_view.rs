@@ -10,7 +10,6 @@
 //! primitives reroute, `web_time::Instant` for wasm) and a cfg-gated
 //! refresh path.
 
-#[cfg(not(target_arch = "wasm32"))]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use web_time::Duration;

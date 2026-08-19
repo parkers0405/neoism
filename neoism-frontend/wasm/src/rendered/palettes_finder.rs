@@ -1,5 +1,29 @@
 use super::*;
+use neoism_ui::chrome::EditorPaneKind;
+use neoism_ui::editor::code::substitute::{
+    apply_substitute, parse_substitute_command, split_replace_query, SubstituteRange,
+    SubstituteSpec,
+};
+use neoism_ui::editor::code::{CodeInputMode, CodeMode};
+use neoism_ui::editor::markdown::vim::{
+    vim_search_backward, vim_search_forward, VimSearch,
+};
+use neoism_ui::editor::markdown::MarkdownPosition;
+use neoism_ui::editor::notebook::NotebookCellType;
+use neoism_ui::panels::command_palette::{PaletteHostCapabilities, PaletteSurface};
+use neoism_ui::panels::finder::{FinderMode, ReferenceRow};
+use neoism_ui::panels::notifications::NotificationLevel;
 use neoism_ui::PanelKey;
+
+thread_local! {
+    /// Last `(pattern, selected row line)` the buffer-search live-drive
+    /// acted on, `Some` only while the finder sits in BufferLines /
+    /// BufferReplace mode. Wasm is single-threaded and `ChromeBridge`
+    /// cannot grow fields from this module, so the memo lives here —
+    /// same pattern as `editor_panes`' clipboard register cells.
+    static BUFFER_SEARCH_SYNC: std::cell::RefCell<Option<(String, Option<u32>)>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[wasm_bindgen]
 impl ChromeBridge {
@@ -297,24 +321,40 @@ impl ChromeBridge {
     /// background panels). Matches the `palette_enter_action`
     /// capture-only pattern in `handle_event`.
     pub fn pick_finder_selection(&mut self) -> bool {
-        use neoism_ui::panels::finder::FinderMode;
         if !self.chrome.finder.is_enabled() {
             return false;
         }
-        let Some((path, line)) = self.chrome.finder.selected_open_target() else {
-            return false;
-        };
         let mode = match self.chrome.finder.mode() {
             FinderMode::Files => "files",
             FinderMode::Grep => "grep",
             FinderMode::GitChanges => "git_changes",
-            // Web has no native code pane yet; the desktop owns these.
-            FinderMode::BufferLines
-            | FinderMode::BufferReplace
-            | FinderMode::References
-            | FinderMode::Symbols => return false,
+            // In-buffer modes commit against the hosted code pane
+            // chrome-side (desktop `open_finder_selection` parity) —
+            // their rows carry no file to hand to JS.
+            FinderMode::BufferLines => return self.confirm_finder_buffer_search_web(),
+            FinderMode::BufferReplace => {
+                return self.confirm_finder_buffer_replace_web()
+            }
+            FinderMode::References => return self.confirm_finder_reference_jump_web(),
+            // Symbols has no data source on web yet (GoToSymbol is
+            // hidden by the host-capability filter).
+            FinderMode::Symbols => return false,
+        };
+        let Some((path, line)) = self.chrome.finder.selected_open_target() else {
+            return false;
         };
         let query = self.chrome.finder.query.clone();
+        // Line-carrying hits (grep / git-changes rows, 1-based) must
+        // land the caret on the hit line: arm the same deferred
+        // cursor target the LSP cross-file goto uses — consumed when
+        // the host routes the fetched file through `editor_open_file`.
+        if let Some(hit_line) = line {
+            super::editor_panes::arm_editor_pending_goto(
+                path.clone(),
+                (hit_line as usize).saturating_sub(1),
+                0,
+            );
+        }
         self.pending_finder_open_intents.push(FinderOpenIntent {
             path: path.to_string_lossy().into_owned(),
             line,
@@ -350,10 +390,20 @@ impl ChromeBridge {
             return false;
         }
 
-        // Ex mode wins — the suggestion list is ex commands and
-        // Enter forwards the selection to nvim.
+        // Ex mode wins — a highlighted suggestion row commits its
+        // canonical name; otherwise the LITERAL typed query dispatches
+        // (desktop parity: `Go to Line…` relies on a bare `:42` with
+        // no suggestion rows reaching the dispatcher).
         if self.chrome.command_palette.is_ex_mode() {
-            if let Some(command) = self.chrome.command_palette.get_selected_ex_command() {
+            let command = self
+                .chrome
+                .command_palette
+                .get_selected_ex_command()
+                .or_else(|| {
+                    let typed = self.chrome.command_palette.query.trim().to_string();
+                    (!typed.is_empty()).then_some(typed)
+                });
+            if let Some(command) = command {
                 self.pending_palette_intents
                     .push(PaletteIntent::ExCommand { command });
                 return true;
@@ -449,15 +499,696 @@ impl ChromeBridge {
             return true;
         }
 
+        // Commands-mode Ex suggestion rows (typing e.g. `vsplit` mixes
+        // EX_COMMANDS rows into the list) — commit them like ex mode
+        // does so Enter on one isn't a dead keystroke.
+        if let Some(command) = self.chrome.command_palette.get_selected_ex_command() {
+            self.pending_palette_intents
+                .push(PaletteIntent::ExCommand { command });
+            return true;
+        }
+
         false
     }
 
-    /// Drain queued palette intents as a JSON array. JS dispatches
-    /// each one against host-side state (toggle git diff panel,
-    /// open finder, run ex command via the editor envelope, etc.).
+    /// Drain queued palette intents as a JSON array. Called by the JS
+    /// host at the top of every frame, which makes it double as the
+    /// web's per-frame palette upkeep hook (`sync_palette_host_context`)
+    /// — the desktop equivalents run from the router tick.
+    ///
+    /// Intents the bridge can satisfy chrome-side (mode re-opens,
+    /// hosted-pane operations — the web analogue of desktop's
+    /// `execute_palette_action` arms) are executed here and withheld;
+    /// everything else is forwarded for JS to dispatch (toggle git
+    /// diff panel, spawn PTYs, clipboard, fonts, …). Running the
+    /// chrome-side arms at DRAIN time matters: the palette/finder
+    /// Enter handlers close the modal after the pick, so a pick that
+    /// re-opens the palette in another mode (Go to Line → ex mode)
+    /// must apply after that close.
     pub fn drain_palette_intents(&mut self) -> JsValue {
+        self.sync_palette_host_context();
         let drained: Vec<PaletteIntent> =
             std::mem::take(&mut self.pending_palette_intents);
-        serde_wasm_bindgen::to_value(&drained).unwrap_or(JsValue::NULL)
+        let forward: Vec<PaletteIntent> = drained
+            .into_iter()
+            .filter(|intent| !self.execute_palette_intent_chrome_side(intent))
+            .collect();
+        serde_wasm_bindgen::to_value(&forward).unwrap_or(JsValue::NULL)
+    }
+
+    /// The full IDE theme catalog for the web pickers/settings —
+    /// builtins first, then the bundled NvChad Base46 set (~97
+    /// themes compiled into this wasm binary), then any runtime-
+    /// registered customs (empty on wasm today). Same source of
+    /// truth as the desktop palette (`all_ide_theme_names`), so the
+    /// web offers the identical list instead of a hardcoded four.
+    ///
+    /// Returns `[{ name, dark, accent }]` where `dark` is the
+    /// shared Rec. 601 background-luma split (`IdeTheme::is_dark`)
+    /// and `accent` is the theme's accent as `#rrggbb` — the host
+    /// seeds its presence cursor color from it so peers see the
+    /// color this user's caret actually has.
+    pub fn all_ide_theme_names(&self) -> JsValue {
+        #[derive(serde::Serialize)]
+        struct ThemeEntry {
+            name: String,
+            dark: bool,
+            accent: String,
+        }
+        let entries: Vec<ThemeEntry> =
+            neoism_ui::primitives::ide_theme::all_ide_theme_names()
+                .into_iter()
+                .map(|name| {
+                    let theme = neoism_ui::primitives::IdeTheme::by_name(&name);
+                    ThemeEntry {
+                        dark: theme.is_dark(),
+                        accent: format!("#{:06x}", theme.accent & 0xff_ff_ff),
+                        name,
+                    }
+                })
+                .collect();
+        serde_wasm_bindgen::to_value(&entries).unwrap_or(JsValue::NULL)
+    }
+}
+
+// Non-exported palette/finder internals (plain impl — `#[wasm_bindgen]`
+// blocks may only contain exported methods).
+impl ChromeBridge {
+    /// Enter in BufferLines mode: desktop `confirm_finder_buffer_search`
+    /// — jump to the selected row's match, arm `n`/`N` with the
+    /// committed pattern, keep hlsearch bands, forget the origin. The
+    /// caller (shim Enter handler / `modal_pointer_down`) closes the
+    /// finder afterwards. An empty query behaves like Esc.
+    fn confirm_finder_buffer_search_web(&mut self) -> bool {
+        let query = self.chrome.finder.query.clone();
+        let selected_line = self.chrome.finder.selected_line();
+        BUFFER_SEARCH_SYNC.with(|cell| *cell.borrow_mut() = None);
+        let Some(pane) = self.chrome.code_pane_mut() else {
+            return true;
+        };
+        if query.is_empty() {
+            if let Some((line, col)) = pane.search_origin.take() {
+                pane.buffer.set_cursor_position(line, col, false);
+                pane.buffer.follow_cursor = true;
+            }
+            pane.search_highlight = None;
+            return true;
+        }
+        if let Some(row_line) = selected_line {
+            let line_ix = (row_line as usize).saturating_sub(1);
+            let col = pane
+                .buffer
+                .lines
+                .get(line_ix)
+                .and_then(|line| line.find(&query))
+                .unwrap_or(0);
+            pane.buffer.set_cursor_position(line_ix, col, false);
+            pane.buffer.follow_cursor = true;
+        }
+        // No selected row (no matches): keep the cursor where the live
+        // incsearch left it, but still commit the pattern.
+        pane.search_highlight = Some(query.clone());
+        pane.buffer.vim.search = Some(VimSearch {
+            pattern: query,
+            // `?` commits with the direction reversed: `n` continues
+            // up, `N` back down (nvim semantics).
+            forward: !pane.search_backward,
+            whole_word: false,
+        });
+        pane.search_origin = None;
+        true
+    }
+
+    /// Enter in BufferReplace mode: desktop
+    /// `confirm_finder_buffer_replace` — parse `pattern/replacement`,
+    /// run a whole-file global substitute through the `:s` engine (one
+    /// undo step, count toast, hlsearch + `n` armed). An empty pattern
+    /// behaves like Esc (restore the origin).
+    fn confirm_finder_buffer_replace_web(&mut self) -> bool {
+        let raw_query = self.chrome.finder.query.clone();
+        let (pattern, replacement) = split_replace_query(&raw_query);
+        BUFFER_SEARCH_SYNC.with(|cell| *cell.borrow_mut() = None);
+        let notice = {
+            let Some(pane) = self.chrome.code_pane_mut() else {
+                return true;
+            };
+            if pattern.is_empty() {
+                if let Some((line, col)) = pane.search_origin.take() {
+                    pane.buffer.set_cursor_position(line, col, false);
+                    pane.buffer.follow_cursor = true;
+                }
+                pane.search_highlight = None;
+                return true;
+            }
+            pane.search_origin = None;
+            let spec = SubstituteSpec {
+                range: SubstituteRange::WholeFile,
+                pattern: pattern.clone(),
+                replacement: replacement.unwrap_or_default(),
+                global: true,
+                case_insensitive: false,
+            };
+            let outcome = apply_substitute(&mut pane.buffer, &spec);
+            if outcome.substitutions > 0 {
+                pane.search_highlight = Some(pattern.clone());
+                pane.buffer.vim.search = Some(VimSearch {
+                    pattern: pattern.clone(),
+                    forward: true,
+                    whole_word: false,
+                });
+                pane.buffer.follow_cursor = true;
+            } else {
+                pane.search_highlight = None;
+            }
+            substitute_outcome_message(&pattern, outcome)
+        };
+        self.chrome.notifications.push(notice, NotificationLevel::Info);
+        true
+    }
+
+    /// Enter in References mode (Project Problems rows). Rows for the
+    /// ACTIVE code pane jump chrome-side (the desktop
+    /// `open_code_location` shape); rows for other files fall back to
+    /// the generic finder-open intent so JS opens the tab.
+    fn confirm_finder_reference_jump_web(&mut self) -> bool {
+        let Some((path, line, col)) = self.chrome.finder.selected_reference_target()
+        else {
+            return false;
+        };
+        let is_active_pane = self
+            .chrome
+            .code_pane()
+            .is_some_and(|pane| pane.path == path);
+        if is_active_pane {
+            if let Some(pane) = self.chrome.code_pane_mut() {
+                pane.buffer.set_cursor_position(
+                    (line as usize).saturating_sub(1),
+                    col as usize,
+                    false,
+                );
+                pane.buffer.follow_cursor = true;
+            }
+            return true;
+        }
+        let query = self.chrome.finder.query.clone();
+        // Same deferred-goto mechanism as grep hits: the caret lands
+        // on the problem/reference row's line (and column) once the
+        // host opens the fetched file through `editor_open_file`.
+        super::editor_panes::arm_editor_pending_goto(
+            path.clone(),
+            (line as usize).saturating_sub(1),
+            col as usize,
+        );
+        self.pending_finder_open_intents.push(FinderOpenIntent {
+            path: path.to_string_lossy().into_owned(),
+            line: Some(line),
+            mode: "grep",
+            query,
+        });
+        true
+    }
+
+    // ------------------------------------------------------------
+    // Per-frame palette upkeep (invoked from `drain_palette_intents`,
+    // which the JS host calls at the top of every frame).
+    // ------------------------------------------------------------
+
+    /// Keep the shared palette's two visibility axes in lock-step with
+    /// live chrome state:
+    ///
+    /// 1. Host capabilities — the web set, re-asserted so commands the
+    ///    web cannot execute are never listed (desktop defaults to
+    ///    all-true and is untouched).
+    /// 2. Surface — the desktop `active_command_palette_surface`
+    ///    mapping (notebook → Notebook, draw/markdown → Markdown,
+    ///    code → Editor, else Terminal) derived from the hosted panes.
+    ///
+    /// Also drives the buffer-search live-preview (see
+    /// `sync_finder_buffer_search`).
+    fn sync_palette_host_context(&mut self) {
+        self.chrome
+            .command_palette
+            .set_host_capabilities(PaletteHostCapabilities::web());
+        let surface = match self.chrome.active_editor_pane_kind() {
+            Some(EditorPaneKind::Code) => PaletteSurface::Editor,
+            Some(EditorPaneKind::Notebook) => PaletteSurface::Notebook,
+            // A `.neodraw` pane is a saveable document like markdown —
+            // desktop reports it as the Markdown surface too.
+            Some(EditorPaneKind::Draw) => PaletteSurface::Markdown,
+            None => {
+                if self.chrome.markdown_pane_mut().is_some() {
+                    PaletteSurface::Markdown
+                } else {
+                    PaletteSurface::Terminal
+                }
+            }
+        };
+        self.chrome.command_palette.set_surface(surface);
+        self.sync_finder_buffer_search();
+    }
+
+    /// Live-drive for the finder's BufferLines / BufferReplace modes —
+    /// the web mirror of desktop's `finder_buffer_query_changed` (query
+    /// edits move the cursor to the nearest match + hlsearch) and
+    /// `finder_buffer_preview_selected` (arrowing rows previews them).
+    /// Desktop hooks these off the input events; the web bridge has no
+    /// such seam, so it diffs `(pattern, selected row)` per frame.
+    ///
+    /// Also owns Esc-cancel parity: when the finder leaves a buffer
+    /// mode while the pane still has a `search_origin` (i.e. no commit
+    /// ran), the origin cursor is restored and the bands cleared.
+    fn sync_finder_buffer_search(&mut self) {
+        let mode = self.chrome.finder.mode();
+        let in_buffer_mode = self.chrome.finder.is_visible()
+            && matches!(mode, FinderMode::BufferLines | FinderMode::BufferReplace);
+        if !in_buffer_mode {
+            let was_active =
+                BUFFER_SEARCH_SYNC.with(|cell| cell.borrow_mut().take()).is_some();
+            if was_active {
+                if let Some(pane) = self.chrome.code_pane_mut() {
+                    if let Some((line, col)) = pane.search_origin.take() {
+                        pane.buffer.set_cursor_position(line, col, false);
+                        pane.buffer.follow_cursor = true;
+                        pane.search_highlight = None;
+                    }
+                }
+            }
+            return;
+        }
+
+        let raw_query = self.chrome.finder.query.clone();
+        // Replace mode live-drives on the PATTERN half of the query.
+        let query = if mode == FinderMode::BufferReplace {
+            split_replace_query(&raw_query).0
+        } else {
+            raw_query
+        };
+        let selected = self.chrome.finder.selected_line();
+        let key = (query.clone(), selected);
+        let prev = BUFFER_SEARCH_SYNC.with(|cell| cell.borrow().clone());
+        if prev.as_ref() == Some(&key) {
+            return;
+        }
+        let query_changed = prev.as_ref().map(|(q, _)| q != &query).unwrap_or(true);
+        BUFFER_SEARCH_SYNC.with(|cell| *cell.borrow_mut() = Some(key));
+
+        if query_changed {
+            let Some(pane) = self.chrome.code_pane_mut() else {
+                return;
+            };
+            let Some((origin_line, origin_col)) = pane.search_origin else {
+                return;
+            };
+            if query.is_empty() {
+                pane.buffer
+                    .set_cursor_position(origin_line, origin_col, false);
+                pane.buffer.follow_cursor = true;
+                pane.search_highlight = None;
+                return;
+            }
+            pane.search_highlight = Some(query.clone());
+            // Both helpers exclude the exact start position, so nudge
+            // the origin one step the other way — a match AT the
+            // origin is found either direction.
+            let found = if pane.search_backward {
+                vim_search_backward(
+                    &pane.buffer.lines,
+                    MarkdownPosition {
+                        line: origin_line,
+                        col: origin_col + 1,
+                    },
+                    &query,
+                    false,
+                )
+            } else {
+                let start = if origin_col > 0 {
+                    MarkdownPosition {
+                        line: origin_line,
+                        col: origin_col - 1,
+                    }
+                } else if origin_line > 0 {
+                    MarkdownPosition {
+                        line: origin_line - 1,
+                        col: usize::MAX,
+                    }
+                } else {
+                    MarkdownPosition { line: 0, col: 0 }
+                };
+                vim_search_forward(&pane.buffer.lines, start, &query, false)
+            };
+            if let Some(found) = found {
+                pane.buffer.set_cursor_position(found.line, found.col, false);
+                pane.buffer.follow_cursor = true;
+            }
+        } else {
+            // Selection moved: preview the selected row's match.
+            let Some(row_line) = selected else {
+                return;
+            };
+            let Some(pane) = self.chrome.code_pane_mut() else {
+                return;
+            };
+            let line_ix = (row_line as usize).saturating_sub(1);
+            let col = pane
+                .buffer
+                .lines
+                .get(line_ix)
+                .and_then(|line| line.find(&query))
+                .unwrap_or(0);
+            pane.buffer.set_cursor_position(line_ix, col, false);
+            pane.buffer.follow_cursor = true;
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Chrome-side palette dispatch — the web analogue of desktop's
+    // `Screen::execute_palette_action` arms that never need the JS
+    // host. Runs at drain time (after the modal-close that follows a
+    // pick) so arms that re-open the palette in another mode work.
+    // ------------------------------------------------------------
+
+    /// Execute `intent` chrome-side when possible. `true` = consumed
+    /// (withheld from JS); `false` = forward to the TS dispatcher.
+    fn execute_palette_intent_chrome_side(&mut self, intent: &PaletteIntent) -> bool {
+        match intent {
+            PaletteIntent::Action { action } => {
+                self.execute_palette_action_chrome_side(action)
+            }
+            PaletteIntent::ExCommand { command } => {
+                self.execute_ex_command_chrome_side(command)
+            }
+            _ => false,
+        }
+    }
+
+    fn execute_palette_action_chrome_side(&mut self, action: &str) -> bool {
+        match action {
+            // Desktop: `command_palette.enter_ex_mode()` — the typed
+            // `:N` payload then jumps there (see the ex interception
+            // below).
+            "GoToLine" => {
+                self.chrome.command_palette.enter_ex_mode();
+                self.relayout_chrome();
+                true
+            }
+            // Web has no pack files on disk — fall back to the shared
+            // Themes picker (the same list the top-bar hamburger's
+            // Themes entry opens); a pick flows through the normal
+            // Theme intent into `set_ide_theme`.
+            "OpenMashupPacks" => {
+                let themes = neoism_ui::primitives::ide_theme::all_ide_theme_names();
+                self.chrome.command_palette.enter_themes_mode(themes);
+                self.relayout_chrome();
+                self.chrome.notifications.push(
+                    "Mash Up Packs need pack files on disk — showing Themes instead."
+                        .to_string(),
+                    NotificationLevel::Info,
+                );
+                true
+            }
+            // Desktop `toggle_code_word_wrap` (bridges/code/input.rs).
+            "ToggleWordWrap" => {
+                let Some(pane) = self.chrome.code_pane_mut() else {
+                    return false;
+                };
+                pane.wrap = !pane.wrap;
+                if pane.wrap {
+                    pane.scroll_x = 0.0;
+                }
+                // Re-reveal: the cursor's visual row changes with the
+                // layout.
+                pane.buffer.follow_cursor = true;
+                let wrap = pane.wrap;
+                self.chrome.notifications.push(
+                    if wrap { "Word wrap on" } else { "Word wrap off" }.to_string(),
+                    NotificationLevel::Info,
+                );
+                true
+            }
+            // Desktop `toggle_code_vim_mode`: flip the CODE pane's
+            // input mode when one owns focus; otherwise forward so the
+            // terminal's scrollback vi mode toggles host-side.
+            "ToggleViMode" => {
+                let Some(pane) = self.chrome.code_pane_mut() else {
+                    return false;
+                };
+                let entering = pane.input_mode == CodeInputMode::Standard;
+                if entering {
+                    pane.input_mode = CodeInputMode::Vim;
+                    pane.buffer.mode = CodeMode::Normal;
+                    pane.buffer.clear_selection();
+                    pane.buffer.break_undo_group();
+                    pane.buffer.snap_normal_cursor();
+                } else {
+                    pane.input_mode = CodeInputMode::Standard;
+                    pane.buffer.mode = CodeMode::Insert;
+                    pane.buffer.vim.clear_pending();
+                    pane.buffer.clear_selection();
+                }
+                self.chrome.notifications.push(
+                    if entering { "Vim mode on" } else { "Vim mode off" }.to_string(),
+                    NotificationLevel::Info,
+                );
+                true
+            }
+            // Desktop `open_finder_buffer_search`: `/`-search over the
+            // active code pane via the finder's BufferLines mode. No
+            // code pane → forward (TS opens the grep finder instead).
+            "SearchForward" | "SearchBackward" => {
+                let backward = action == "SearchBackward";
+                let lines = {
+                    let Some(pane) = self.chrome.code_pane_mut() else {
+                        return false;
+                    };
+                    pane.search_origin =
+                        Some((pane.buffer.cursor_line, pane.buffer.cursor_col));
+                    pane.search_backward = backward;
+                    pane.buffer.lines.clone()
+                };
+                BUFFER_SEARCH_SYNC.with(|cell| *cell.borrow_mut() = None);
+                self.chrome.command_palette.set_enabled(false);
+                self.chrome.finder.open_buffer_lines(lines);
+                self.relayout_chrome();
+                true
+            }
+            // Desktop `open_finder_buffer_replace`: `pattern/replacement`
+            // typed into the finder, Enter substitutes the whole file.
+            "ReplaceInFile" => {
+                let lines = {
+                    let Some(pane) = self.chrome.code_pane_mut() else {
+                        return false;
+                    };
+                    pane.search_origin =
+                        Some((pane.buffer.cursor_line, pane.buffer.cursor_col));
+                    pane.search_backward = false;
+                    pane.buffer.lines.clone()
+                };
+                BUFFER_SEARCH_SYNC.with(|cell| *cell.borrow_mut() = None);
+                self.chrome.command_palette.set_enabled(false);
+                self.chrome.finder.open_buffer_replace(lines);
+                self.relayout_chrome();
+                true
+            }
+            // Desktop `open_neoworld_page`: the chrome-page tab. The
+            // shared host falls back to a preview pet when the JS host
+            // hasn't installed a persisted one yet, so this is safe to
+            // route before the top-bar wiring lands.
+            "OpenNeoWorld" => {
+                self.chrome.open_neoworld_page_tab();
+                self.relayout_chrome();
+                true
+            }
+            // Desktop `open_project_problems`: diagnostics as a
+            // References-mode finder list; Enter jumps to the line.
+            "ProjectProblems" => {
+                self.open_project_problems_web();
+                true
+            }
+            // Desktop `open_neoism_notes_sidebar`. `toggle_notes_sidebar`
+            // seeds the workspace + queues the data refresh the JS host
+            // answers via `takeNotesRefresh`.
+            "OpenNeoismNotes" => {
+                if !self.chrome.notes_sidebar.is_visible() {
+                    self.chrome.toggle_notes_sidebar();
+                }
+                self.relayout_chrome();
+                true
+            }
+            "RunNotebookCell"
+            | "InsertNotebookCodeCellAbove"
+            | "InsertNotebookCodeCellBelow"
+            | "InsertNotebookMarkdownCellAbove"
+            | "InsertNotebookMarkdownCellBelow"
+            | "DeleteNotebookCell"
+            | "MoveNotebookCellUp"
+            | "MoveNotebookCellDown"
+            | "ClearNotebookCellOutput"
+            | "ClearNotebookOutputs" => self.notebook_palette_op(action),
+            _ => false,
+        }
+    }
+
+    /// Chrome-side ex dispatch: bare `:N` line jumps (the Go to Line…
+    /// payload) and the `:s` substitute family against the hosted
+    /// panes. Everything else forwards to the TS ex dispatcher.
+    fn execute_ex_command_chrome_side(&mut self, command: &str) -> bool {
+        let trimmed = command.trim();
+        if let Ok(line) = trimmed.parse::<usize>() {
+            let line = line.max(1);
+            if let Some(pane) = self.chrome.code_pane_mut() {
+                let line_ix =
+                    (line - 1).min(pane.buffer.lines.len().saturating_sub(1));
+                pane.buffer.set_cursor_position(line_ix, 0, false);
+                pane.buffer.follow_cursor = true;
+                if pane.input_mode == CodeInputMode::Vim
+                    && pane.buffer.mode == CodeMode::Normal
+                {
+                    pane.buffer.snap_normal_cursor();
+                }
+                return true;
+            }
+            if let Some(pane) = self.chrome.markdown_pane_mut() {
+                pane.jump_to_line(line);
+                return true;
+            }
+            return false;
+        }
+        if let Some(spec) = parse_substitute_command(trimmed) {
+            let outcome = {
+                let Some(pane) = self.chrome.code_pane_mut() else {
+                    return false;
+                };
+                let outcome = apply_substitute(&mut pane.buffer, &spec);
+                if outcome.substitutions > 0 {
+                    pane.search_highlight = Some(spec.pattern.clone());
+                    pane.buffer.vim.search = Some(VimSearch {
+                        pattern: spec.pattern.clone(),
+                        forward: true,
+                        whole_word: false,
+                    });
+                    pane.buffer.follow_cursor = true;
+                }
+                outcome
+            };
+            self.chrome.notifications.push(
+                substitute_outcome_message(&spec.pattern, outcome),
+                NotificationLevel::Info,
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Pane-local notebook cell operations (desktop
+    /// `bridges/markdown/notebook.rs` arms). Errors surface on the
+    /// shared notification stack, mirroring the notebook key path.
+    fn notebook_palette_op(&mut self, action: &str) -> bool {
+        let result: Option<Result<(), String>> = {
+            let Some(pane) = self.chrome.notebook_pane_mut() else {
+                return false;
+            };
+            match action {
+                "RunNotebookCell" => Some(pane.run_current_cell()),
+                "InsertNotebookCodeCellAbove" => {
+                    Some(pane.insert_cell_above(NotebookCellType::Code).map(|_| ()))
+                }
+                "InsertNotebookCodeCellBelow" => {
+                    Some(pane.insert_cell_below(NotebookCellType::Code).map(|_| ()))
+                }
+                "InsertNotebookMarkdownCellAbove" => Some(
+                    pane.insert_cell_above(NotebookCellType::Markdown).map(|_| ()),
+                ),
+                "InsertNotebookMarkdownCellBelow" => Some(
+                    pane.insert_cell_below(NotebookCellType::Markdown).map(|_| ()),
+                ),
+                "DeleteNotebookCell" => Some(pane.delete_current_cell().map(|_| ())),
+                "MoveNotebookCellUp" => Some(pane.move_current_cell_up().map(|_| ())),
+                "MoveNotebookCellDown" => {
+                    Some(pane.move_current_cell_down().map(|_| ()))
+                }
+                "ClearNotebookCellOutput" => {
+                    Some(pane.clear_current_output().map(|_| ()))
+                }
+                "ClearNotebookOutputs" => Some(pane.clear_all_outputs().map(|_| ())),
+                _ => None,
+            }
+        };
+        match result {
+            None => false,
+            Some(Ok(())) => true,
+            Some(Err(err)) => {
+                self.chrome.notifications.push(err, NotificationLevel::Error);
+                true
+            }
+        }
+    }
+
+    /// Desktop `open_project_problems`, fed from the diagnostics the
+    /// web host pushed for the ACTIVE buffer (`set_diagnostics`). Web
+    /// diagnostics are per-active-buffer today, so the list covers the
+    /// focused file; the References commit path jumps chrome-side.
+    fn open_project_problems_web(&mut self) {
+        use neoism_ui::panels::diagnostics_popup::Severity;
+        let display = self.chrome.code_pane().map(|pane| {
+            pane.path
+                .strip_prefix(&self.workspace_root)
+                .unwrap_or(&pane.path)
+                .to_string_lossy()
+                .into_owned()
+        });
+        let mut rows: Vec<ReferenceRow> = Vec::new();
+        if let Some(display) = display {
+            for item in &self.cached_diagnostics {
+                let severity = match item.severity {
+                    Severity::Error => "error",
+                    Severity::Warn => "warn",
+                    Severity::Info => "info",
+                    Severity::Hint => "hint",
+                };
+                let mut message =
+                    item.message.lines().next().unwrap_or("").to_string();
+                if message.chars().count() > 160 {
+                    message = message.chars().take(160).collect();
+                }
+                rows.push(ReferenceRow {
+                    path: display.clone(),
+                    line: item.lnum as u32,
+                    column: 0,
+                    text: format!("{severity}: {message}"),
+                });
+            }
+        }
+        if rows.is_empty() {
+            self.chrome.notifications.push(
+                "No problems reported".to_string(),
+                NotificationLevel::Info,
+            );
+            return;
+        }
+        rows.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
+        self.chrome.command_palette.set_enabled(false);
+        self.chrome
+            .finder
+            .open_references(self.workspace_root.clone(), rows);
+        self.relayout_chrome();
+    }
+}
+
+/// Desktop `run_code_substitute` toast wording, shared by the
+/// BufferReplace commit and the chrome-side `:s` ex dispatch.
+fn substitute_outcome_message(
+    pattern: &str,
+    outcome: neoism_ui::editor::code::substitute::SubstituteOutcome,
+) -> String {
+    if outcome.substitutions == 0 {
+        format!("Pattern not found: {pattern}")
+    } else {
+        format!(
+            "{} substitution{} on {} line{}",
+            outcome.substitutions,
+            if outcome.substitutions == 1 { "" } else { "s" },
+            outcome.lines_changed,
+            if outcome.lines_changed == 1 { "" } else { "s" },
+        )
     }
 }

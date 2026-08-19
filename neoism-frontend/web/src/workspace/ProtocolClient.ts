@@ -19,6 +19,8 @@ import {
   CursorOverlayServerMessage,
   CrdtClientMessage,
   CrdtServerMessage,
+  ConfigClientMessage,
+  ConfigServerMessage,
   isPtyCreated,
   isPtyOutput,
   isPtyClosed,
@@ -33,6 +35,7 @@ import {
   isDiagnosticsReply,
   isCursorOverlayReply,
   isCrdtReply,
+  isConfigReply,
 } from "./types";
 
 export type ProtocolStatus =
@@ -84,7 +87,7 @@ export interface ProtocolClientHandlers {
    */
   onServiceReply?: (
     requestId: number,
-    payload: FilesServerMessage | GitServerMessage,
+    payload: FilesServerMessage | GitServerMessage | ConfigServerMessage,
   ) => void;
   /**
    * Fired for every `AgentReply` envelope the daemon ships off the
@@ -145,7 +148,10 @@ export interface ProtocolClientHandlers {
   ) => void;
 }
 
-type ServiceReplyPayload = FilesServerMessage | GitServerMessage;
+type ServiceReplyPayload =
+  | FilesServerMessage
+  | GitServerMessage
+  | ConfigServerMessage;
 
 /**
  * Thin WebSocket client that speaks the `neoism-protocol` JSON wire
@@ -160,7 +166,17 @@ interface PendingRequest {
 export class ProtocolClient {
   private socket: WebSocket | null = null;
   private status: ProtocolStatus = "idle";
-  private nextRequestId = 1;
+  /**
+   * Promise-tracked request ids (`requestFiles` / `requestGit` /
+   * `requestConfig`) start from a high base so they can NEVER collide
+   * with ids the wasm chrome allocates for its own fire-and-forget
+   * `sendFiles` / `sendGit` calls (those count up from 1, and the wasm
+   * git-panel provider uses 0x5000_0000+). `routeReply` gives the
+   * pending-promise table priority — a collision would silently steal
+   * a chrome reply (e.g. a file-tree `DirListing`) and stall that
+   * panel forever.
+   */
+  private nextRequestId = 0x4000_0000;
   private readonly pending = new Map<number, PendingRequest>();
 
   constructor(
@@ -368,6 +384,26 @@ export class ProtocolClient {
    */
   sendGit(request_id: number, message: GitClientMessage): void {
     this.send(ClientMessage.git({ request_id, message }));
+  }
+
+  /**
+   * Send a config-plane request (settings get/set, read-only
+   * extensions inventory) and resolve with the matching
+   * `ConfigServerMessage`. Backs the web Settings + Extensions pages.
+   */
+  requestConfig(message: ConfigClientMessage): Promise<ConfigServerMessage> {
+    const request_id = this.allocateRequestId();
+    return new Promise<ConfigServerMessage>((resolve, reject) => {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+        reject(new Error("socket not open"));
+        return;
+      }
+      this.pending.set(request_id, {
+        resolve: (payload) => resolve(payload as ConfigServerMessage),
+        reject,
+      });
+      this.send(ClientMessage.config({ request_id, message }));
+    });
   }
 
   /**
@@ -587,6 +623,7 @@ export class ProtocolClient {
       case "DiagnosticsReply":
       case "CursorOverlayReply":
       case "CrdtReply":
+      case "ConfigReply":
         return obj as unknown as ServerMessage;
       default:
         return null;
@@ -688,6 +725,10 @@ export class ProtocolClient {
         msg.CrdtReply.request_id,
         msg.CrdtReply.message,
       );
+      return;
+    }
+    if (isConfigReply(msg)) {
+      this.routeReply(msg.ConfigReply.request_id, msg.ConfigReply.message);
       return;
     }
   }

@@ -227,6 +227,34 @@ pub(crate) fn forward_agent_server_event(
             });
             return;
         }
+        "question.asked" => {
+            // The model's `question` tool parked the run. Forward the
+            // raw request payload — the client parses it through the
+            // same `question_policy::question_request_from_event` the
+            // desktop SSE path uses.
+            let _ = tx.send(AgentServerMessage::QuestionAsked {
+                session_id: source_session,
+                request: properties,
+            });
+            return;
+        }
+        "question.replied" | "question.rejected" => {
+            let request_id = properties
+                .get("requestID")
+                .or_else(|| properties.get("requestId"))
+                .or_else(|| properties.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if !request_id.is_empty() {
+                let _ = tx.send(AgentServerMessage::QuestionRemoved {
+                    session_id: source_session,
+                    request_id,
+                });
+                return;
+            }
+            // Malformed payload — fall through to the raw envelope.
+        }
         "permission.updated" | "permission.created" => {
             let request_id = properties
                 .get("id")
@@ -423,36 +451,54 @@ pub(crate) fn forward_agent_server_event(
             });
             return;
         }
-        "subagent.status" | "subagent.activity" => {
-            let status = match properties
-                .get("status")
+        "session.created" => {
+            // The agent server has no `subagent.*` event family —
+            // `session.created` (shape: `{ sessionID, info }`, with
+            // `info.parentId` linking a child to its parent) is its ONLY
+            // live announcement of a freshly spawned subagent. Desktop
+            // discovers new children by polling `/session/:id/children`
+            // over HTTP; the ws bridge has no poll, so synthesize the
+            // `SubagentUpdate` the roster consumes here. The parent link
+            // rides along so the client can family-scope a child id it
+            // has never tracked (e.g. spawned while a sibling transcript
+            // is on screen). Root sessions (no parent) fall through to
+            // the raw envelope exactly as before.
+            let info = properties.get("info").unwrap_or(&Value::Null);
+            let parent_session_id = info
+                .get("parentId")
+                .or_else(|| info.get("parentID"))
                 .and_then(Value::as_str)
-                .unwrap_or("running")
-            {
-                "completed" => SubagentStatus::Completed,
-                "failed" | "error" => SubagentStatus::Failed,
-                "blocked" => SubagentStatus::Blocked,
-                _ => SubagentStatus::Running,
-            };
-            let _ = tx.send(AgentServerMessage::SubagentUpdate {
-                session_id: source_session,
-                status,
-                title: properties
-                    .get("title")
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
+            if let Some(parent_session_id) = parent_session_id {
+                let child_id = info
+                    .get("id")
                     .and_then(Value::as_str)
-                    .map(str::to_string),
-                agent: properties
-                    .get("agent")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                current_tool: properties
-                    .get("currentTool")
-                    .or_else(|| properties.get("current_tool"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                started_at: properties.get("startedAt").and_then(Value::as_u64),
-            });
-            return;
+                    .filter(|id| !id.is_empty())
+                    .map_or(source_session, str::to_string);
+                let _ = tx.send(AgentServerMessage::SubagentUpdate {
+                    session_id: child_id,
+                    status: SubagentStatus::Running,
+                    title: info
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                        .map(str::to_string),
+                    agent: info
+                        .get("agent")
+                        .and_then(Value::as_str)
+                        .filter(|agent| !agent.is_empty())
+                        .map(str::to_string),
+                    current_tool: None,
+                    started_at: info
+                        .get("time")
+                        .and_then(|time| time.get("created"))
+                        .and_then(Value::as_u64),
+                    parent_session_id: Some(parent_session_id),
+                });
+                return;
+            }
         }
         "step-finish" | "step.finish" => {
             if let Some(usage) = usage_from_value(properties.get("usage")) {

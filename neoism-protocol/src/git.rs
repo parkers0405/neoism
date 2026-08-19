@@ -8,8 +8,65 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitClientMessage {
     Status,
-    Diff { path: Option<String> },
-    Log { max_count: Option<u32> },
+    Diff {
+        path: Option<String>,
+    },
+    Log {
+        max_count: Option<u32>,
+    },
+    // ── Web git-panel write parity (Pass 2) ──────────────────────────
+    // The verbs below mirror the shared panel's `GitDiffIo` trait
+    // (`neoism-ui::panels::git_diff::state`) so the wasm build can run
+    // the same stage/commit/branch flows the desktop's
+    // `NativeGitDiffIo` shells out for — just daemon-side.
+    /// Desktop `collect_files` parity: the full changed-file list with
+    /// per-file add/del counts AND the real staged bit derived from
+    /// `git status --porcelain=v1` (index column non-empty).
+    ChangedFiles,
+    /// `git add -- <path>`. Replies with a refreshed [`GitServerMessage::ChangedFiles`].
+    Stage {
+        path: String,
+    },
+    /// `git restore --staged -- <path>` (falling back to `git reset`).
+    /// Replies with a refreshed `ChangedFiles`.
+    Unstage {
+        path: String,
+    },
+    /// `git commit -m <message>`. Replies with a refreshed `ChangedFiles`.
+    Commit {
+        message: String,
+    },
+    /// List local branches (`git for-each-ref refs/heads`, newest
+    /// committer date first). Replies with [`GitServerMessage::Branches`].
+    Branches,
+    /// `git switch <branch>` (falling back to `git checkout`). Replies
+    /// with a refreshed `ChangedFiles` carrying the new branch name.
+    Checkout {
+        branch: String,
+    },
+    /// Per-file patch text with desktop `load_diff` parity: `git diff
+    /// HEAD --no-color -- <path>` for tracked files, `git diff
+    /// --no-index /dev/null <path>` for untracked ones — so a staged
+    /// file's diff card doesn't blank out the way the index→workdir
+    /// [`GitClientMessage::Diff`] would. Replies with
+    /// [`GitServerMessage::FileDiffs`].
+    DiffFiles {
+        paths: Vec<String>,
+    },
+}
+
+impl GitClientMessage {
+    /// True for verbs that mutate the repository. The daemon gates
+    /// these on the write permission; reads stay on the read gate.
+    pub fn is_mutation(&self) -> bool {
+        matches!(
+            self,
+            GitClientMessage::Stage { .. }
+                | GitClientMessage::Unstage { .. }
+                | GitClientMessage::Commit { .. }
+                | GitClientMessage::Checkout { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +100,68 @@ pub enum GitServerMessage {
     Error {
         message: String,
     },
+    /// Desktop-parity changed-file list (see
+    /// [`GitClientMessage::ChangedFiles`]). Also the reply to every
+    /// mutation verb: the daemon re-collects after the op, mirroring
+    /// the desktop panel's mutate-then-`collect_files` thread, so one
+    /// round trip refreshes the panel. A failed mutation still carries
+    /// the fresh list — `error` holds git's stderr for the panel body.
+    ChangedFiles {
+        files: Vec<GitFileChange>,
+        /// Current branch after the operation (`None` when detached /
+        /// not a repo).
+        branch: Option<String>,
+        /// stderr of a failed mutation; `None` on success and for
+        /// plain refreshes.
+        error: Option<String>,
+    },
+    /// Local branch names, newest committer date first.
+    Branches {
+        branches: Vec<String>,
+    },
+    /// Per-file raw patch text (desktop `load_diff` parity), in the
+    /// order requested. Files whose diff is empty are included with an
+    /// empty `patch` so the client can clear stale cards.
+    FileDiffs {
+        diffs: Vec<GitFileDiff>,
+    },
+}
+
+/// One changed file with the same shape the shared git panel's
+/// `FileChange` renders: repo-relative path, desktop-style status tag,
+/// add/del line counts and the index-column staged bit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitFileChange {
+    pub path: String,
+    pub status: GitChangeStatus,
+    pub additions: u32,
+    pub deletions: u32,
+    /// True when the porcelain index column is non-empty (partially
+    /// staged files read `true`), matching the desktop checkbox.
+    pub staged: bool,
+}
+
+/// Mirror of the shared panel's `FileStatus` (richer than
+/// [`GitFileStatus`], which predates the write surface: `Staged` and
+/// `Mixed` don't exist there).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GitChangeStatus {
+    Modified,
+    Staged,
+    Mixed,
+    Added,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflict,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitFileDiff {
+    pub path: String,
+    /// Raw `git diff` patch text, `@@` hunk headers included. Empty
+    /// when the file currently has no diff against HEAD.
+    pub patch: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

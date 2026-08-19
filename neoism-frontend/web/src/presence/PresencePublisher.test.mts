@@ -4,16 +4,39 @@ import assert from "node:assert/strict";
 import {
   PresencePublisher,
   PRESENCE_HEARTBEAT_INTERVAL_MS,
+  PRESENCE_PUBLISH_MIN_INTERVAL_MS,
 } from "./PresencePublisher.ts";
 import { stablePresenceColor } from "./presenceColor.ts";
+import {
+  loadWasmInputPolicyModule,
+  skipReason,
+} from "./wasmPolicyTestSupport.mts";
 import type {
   CrdtClientMessage,
   CrdtPeerPresence,
 } from "../workspace/types.ts";
 
-// These mirror the shared Rust publisher tests in
-// `neoism-frontend/shared/src/editor/crdt/remote_presence.rs` so web
-// and desktop peers stay behaviorally identical on the wire.
+// The coalescing state machine is the SHARED RUST `PresencePublisher`
+// (see `neoism-frontend/shared/src/editor/crdt/remote_presence.rs` for
+// the canonical unit tests); these drive the same scenarios through
+// the wasm `PresencePublisherBridge` + the TS adapter so web peers
+// stay behaviorally identical to desktop on the wire.
+
+const wasm = await loadWasmInputPolicyModule();
+const publisherSkip = skipReason(wasm, "PresencePublisherBridge");
+
+function publisher(
+  peerId: string,
+  displayName: string,
+): PresencePublisher {
+  return new PresencePublisher(
+    peerId,
+    displayName,
+    PRESENCE_PUBLISH_MIN_INTERVAL_MS,
+    PRESENCE_HEARTBEAT_INTERVAL_MS,
+    wasm,
+  );
+}
 
 function published(messages: CrdtClientMessage[]): CrdtPeerPresence[] {
   return messages.flatMap((message) =>
@@ -25,20 +48,17 @@ function cursor(line: number, column: number) {
   return { line, column, offset: null };
 }
 
-test("publisher coalesces rapid movement to the rate limit", () => {
-  const publisher = new PresencePublisher("me", "My Browser");
+test("publisher coalesces rapid movement to the rate limit", { skip: publisherSkip }, () => {
+  const pub = publisher("me", "My Browser");
   // First sight publishes immediately.
-  const first = publisher.tick(
-    { bufferId: "buf-a", cursor: cursor(0, 0) },
-    1_000,
-  );
+  const first = pub.tick({ bufferId: "buf-a", cursor: cursor(0, 0) }, 1_000);
   assert.equal(published(first).length, 1);
 
   // 60 frames of movement over ~1s (16ms apart) must publish at most
   // ceil(1000/75)+1 times, not 60.
   let sent = 0;
   for (let frame = 1; frame <= 60; frame += 1) {
-    const messages = publisher.tick(
+    const messages = pub.tick(
       { bufferId: "buf-a", cursor: cursor(frame, 0) },
       1_000 + frame * 16,
     );
@@ -50,33 +70,30 @@ test("publisher coalesces rapid movement to the rate limit", () => {
   );
 });
 
-test("publisher is silent when nothing changed until heartbeat", () => {
-  const publisher = new PresencePublisher("me", "My Browser");
-  publisher.tick({ bufferId: "buf-a", cursor: cursor(1, 2) }, 1_000);
+test("publisher is silent when nothing changed until heartbeat", { skip: publisherSkip }, () => {
+  const pub = publisher("me", "My Browser");
+  pub.tick({ bufferId: "buf-a", cursor: cursor(1, 2) }, 1_000);
 
   for (let frame = 1; frame <= 10; frame += 1) {
-    const messages = publisher.tick(
+    const messages = pub.tick(
       { bufferId: "buf-a", cursor: cursor(1, 2) },
       1_000 + frame * 100,
     );
     assert.equal(messages.length, 0, "unchanged cursor must not republish");
   }
 
-  const heartbeat = publisher.tick(
+  const heartbeat = pub.tick(
     { bufferId: "buf-a", cursor: cursor(1, 2) },
     1_000 + PRESENCE_HEARTBEAT_INTERVAL_MS,
   );
   assert.equal(published(heartbeat).length, 1);
 });
 
-test("publisher clears old buffer when switching or closing", () => {
-  const publisher = new PresencePublisher("me", "My Browser");
-  publisher.tick({ bufferId: "buf-a", cursor: cursor(1, 2) }, 1_000);
+test("publisher clears old buffer when switching or closing", { skip: publisherSkip }, () => {
+  const pub = publisher("me", "My Browser");
+  pub.tick({ bufferId: "buf-a", cursor: cursor(1, 2) }, 1_000);
 
-  const switched = publisher.tick(
-    { bufferId: "buf-b", cursor: cursor(0, 0) },
-    2_000,
-  );
+  const switched = pub.tick({ bufferId: "buf-b", cursor: cursor(0, 0) }, 2_000);
   assert.deepEqual(switched[0], {
     ClearPresence: { buffer_id: "buf-a", peer_id: "me" },
   });
@@ -84,16 +101,16 @@ test("publisher clears old buffer when switching or closing", () => {
   assert.equal(upserts.length, 1);
   assert.equal(upserts[0].buffer_id, "buf-b");
 
-  const closed = publisher.tick(null, 3_000);
+  const closed = pub.tick(null, 3_000);
   assert.deepEqual(closed[0], {
     ClearPresence: { buffer_id: "buf-b", peer_id: "me" },
   });
-  assert.equal(publisher.tick(null, 4_000).length, 0, "clear only once");
+  assert.equal(pub.tick(null, 4_000).length, 0, "clear only once");
 });
 
-test("publisher stamps identity and stable color", () => {
-  const publisher = new PresencePublisher("user@web", "Chrome · web");
-  const messages = publisher.tick(
+test("publisher stamps identity and stable color", { skip: publisherSkip }, () => {
+  const pub = publisher("user@web", "Chrome · web");
+  const messages = pub.tick(
     {
       bufferId: "buf-a",
       cursor: cursor(2, 4),
@@ -104,15 +121,21 @@ test("publisher stamps identity and stable color", () => {
   const presence = published(messages)[0];
   assert.equal(presence.peer_id, "user@web");
   assert.equal(presence.display_name, "Chrome · web");
-  assert.deepEqual(presence.color, stablePresenceColor("user@web"));
+  // The Rust `stable_presence_color` and the TS mirror in
+  // `presenceColor.ts` (still used for DOM-overlay peer carets) must
+  // agree — this cross-checks them against each other.
+  const expected = stablePresenceColor("user@web");
+  assert.equal(presence.color.r, expected.r);
+  assert.equal(presence.color.g, expected.g);
+  assert.equal(presence.color.b, expected.b);
   assert.ok(presence.selection);
   assert.equal(presence.updated_at_ms, 1_000);
 });
 
-test("publisher republishes a selection change at the rate limit", () => {
-  const publisher = new PresencePublisher("me", "My Browser");
-  publisher.tick({ bufferId: "buf-a", cursor: cursor(1, 1) }, 1_000);
-  const withSelection = publisher.tick(
+test("publisher republishes a selection change at the rate limit", { skip: publisherSkip }, () => {
+  const pub = publisher("me", "My Browser");
+  pub.tick({ bufferId: "buf-a", cursor: cursor(1, 1) }, 1_000);
+  const withSelection = pub.tick(
     {
       bufferId: "buf-a",
       cursor: cursor(1, 1),
@@ -121,4 +144,44 @@ test("publisher republishes a selection change at the rate limit", () => {
     1_100,
   );
   assert.equal(published(withSelection).length, 1);
+});
+
+test("publisher honors a theme color override", { skip: publisherSkip }, () => {
+  const pub = publisher("me", "My Browser");
+  pub.setColor({ r: 10, g: 20, b: 30 });
+  const messages = pub.tick({ bufferId: "buf-a", cursor: cursor(0, 0) }, 1_000);
+  const presence = published(messages)[0];
+  assert.equal(presence.color.r, 10);
+  assert.equal(presence.color.g, 20);
+  assert.equal(presence.color.b, 30);
+});
+
+// ── Adapter glue: pre-load window ───────────────────────────────────
+
+test("pre-load: ticks are silent and color/rainbow are buffered", { skip: publisherSkip }, () => {
+  let loaded: typeof wasm = null;
+  const pub = new PresencePublisher(
+    "me",
+    "My Browser",
+    PRESENCE_PUBLISH_MIN_INTERVAL_MS,
+    PRESENCE_HEARTBEAT_INTERVAL_MS,
+    () => loaded,
+  );
+  assert.equal(pub.getPeerId(), "me");
+  pub.setColor({ r: 1, g: 2, b: 3 });
+  pub.setRainbow(true);
+  assert.deepEqual(
+    pub.tick({ bufferId: "buf-a", cursor: cursor(0, 0) }, 500),
+    [],
+    "no publishes before the bundle loads",
+  );
+
+  // Bundle arrives: the buffered color + rainbow apply, and the first
+  // tick publishes immediately (fresh state machine).
+  loaded = wasm;
+  const messages = pub.tick({ bufferId: "buf-a", cursor: cursor(0, 0) }, 1_000);
+  const presence = published(messages)[0];
+  assert.ok(presence, "first post-load tick publishes");
+  assert.equal(presence.color.r, 1);
+  assert.equal(presence.rainbow, true);
 });

@@ -101,6 +101,55 @@ export interface TerminalAdapter {
         externalId?: number | null,
     ): unknown;
     mirrorPaneLayoutSnapshot?(snapshotJson: string): unknown;
+    /** Shared PaneGrid pointer surface — divider drag, focus-by-click,
+     *  drag-to-split previews — in window-space canvas coordinates.
+     *  Bit flags: down 1=consumed 2=divider-drag 4=focus-changed;
+     *  move 1=consumed 2=layout-changed; up 1=consumed 2=tree-changed. */
+    paneGridPointerDown?(x: number, y: number): number;
+    paneGridPointerMove?(x: number, y: number): number;
+    paneGridPointerUp?(x: number, y: number): number;
+    /** Begin the Rust-painted tear-out drop preview for a buffer-tab
+     *  drag; `paneGridDragPreview` updates it, `paneGridCancelDrag`
+     *  clears it. */
+    paneGridBeginTabDrag?(): void;
+    paneGridDragPreview?(x: number, y: number): boolean;
+    paneGridCancelDrag?(): void;
+    /** Drain PaneGridAction side effects queued by pointer interactions:
+     *  `[{kind:"focus_pane"|"close_pane",external_id}|{kind:"open_pane",
+     *  leaf_id,leaf_kind}|{kind:"relayout"}]`. */
+    drainPaneGridActions?(): unknown;
+    /** Current live pane-grid layout in the same result shape
+     *  `applySessionLayoutPolicy` returns — re-pulled after pointer
+     *  interactions mutate the Rust-owned tree. */
+    paneGridLayoutResult?(): unknown;
+    /** Push per-pane surface descriptors (`[{external_id, kind, path?,
+     *  title?}]` JSON) so the chrome can render unfocused editor panes
+     *  and label placeholders. */
+    setPaneSurfaces?(json: string): void;
+    /** Feed one split pane terminal's PTY stream (creates + seeds the
+     *  pane-sized grid on first feed). */
+    feedPaneTerminal?(externalId: number, bytes: Uint8Array): void;
+    paneTerminalExists?(externalId: number): boolean;
+    removePaneTerminal?(externalId: number): void;
+    /** Retain only the pane terminals listed in `keepJson` (id array). */
+    prunePaneTerminals?(keepJson: string): void;
+    /** Replace one pane's local tab strip (`[{title, path?, kind?}]`
+     *  JSON; empty drops the strip + its breadcrumbs). */
+    setPaneTabs?(externalId: number, tabsJson: string, active: number): void;
+    /** Drop pane strips whose panes went away (id array JSON). */
+    retainPaneTabs?(keepJson: string): void;
+    /** Drain queued per-pane strip interactions:
+     *  `[{external_id, kind: "activate"|"close"|"new_tab", index}]`. */
+    drainPaneTabIntents?(): unknown;
+    /** Shared workspace-strip tab drag: arm at a window point (returns
+     *  the dragged tab index or -1), advance, query the tear-out
+     *  threshold, and release (`{kind: "none"|"reorder"|"tear_out",
+     *  from?, to?, index?, release?}`). */
+    bufferTabBeginDrag?(x: number, y: number): number;
+    bufferTabUpdateDrag?(x: number, y: number): boolean;
+    bufferTabDragTearArmed?(): boolean;
+    bufferTabEndDrag?(): unknown;
+    bufferTabCancelDrag?(): void;
     setActiveTab?(idx: number): void;
     setTabContent?(idx: number, text: string, path: string): void;
     setTerminalInput?(text: string): void;
@@ -109,9 +158,114 @@ export interface TerminalAdapter {
     terminalCommandComposerVisible?(): boolean;
     terminalShouldCaptureInput?(): boolean;
     terminalInputInsert?(text: string): void;
+    /** Composer-owned paste: newline-preserving insert_paste (desktop
+     *  Screen::paste parity) — never touches the PTY. Returns false
+     *  when the wasm bundle predates the export so callers can fall
+     *  back to the byte path. */
+    terminalInputInsertPaste?(text: string): boolean;
+    /** paste_policy-framed PTY bytes for a raw paste: bracketed
+     *  sentinels when BRACKETED_PASTE is set, CR-normalised raw
+     *  otherwise. Undefined on pre-export bundles. */
+    terminalPastePayload?(text: string): Uint8Array | undefined;
+    /** Star/unstar a command in the composer's favorites (feeds the
+     *  Ctrl+F picker). True=added, false=removed, undefined=blank
+     *  command or pre-export bundle. Desktop analogue: Cmd+F on a
+     *  hovered block card. */
+    terminalToggleFavoriteCommand?(command: string): boolean | undefined;
     terminalInputKey?(key: string): boolean;
     terminalSubmitPayload?(): Uint8Array;
     recordTerminalSubmit?(command: string): void;
+    /** Wheel over the terminal grid (winit sign: positive = scroll
+     *  up/left). Returns TERM_INPUT_* bit flags: 1 = handled,
+     *  2 = PTY bytes queued (drain takeTerminalPointerBytes),
+     *  4 = selection drag active. 0 = route to chrome. */
+    terminalWheel?(
+        x: number,
+        y: number,
+        deltaX: number,
+        deltaY: number,
+        shift: boolean,
+    ): number;
+    /** Pointer press on the terminal grid (button 0/1/2 = L/M/R).
+     *  Same TERM_INPUT_* flag contract as terminalWheel. */
+    terminalPointerDown?(
+        x: number,
+        y: number,
+        button: number,
+        shift: boolean,
+        ctrl: boolean,
+        alt: boolean,
+        nowMs: number,
+    ): number;
+    terminalPointerMove?(
+        x: number,
+        y: number,
+        shift: boolean,
+        ctrl: boolean,
+        alt: boolean,
+    ): number;
+    terminalPointerUp?(
+        x: number,
+        y: number,
+        button: number,
+        shift: boolean,
+        ctrl: boolean,
+        alt: boolean,
+    ): number;
+    /** 15ms selection-drag autoscroll tick (desktop
+     *  selection_scroll_tick). True = redraw needed. */
+    terminalDragScrollTick?(): boolean;
+    /** Hover-probe the terminal grid for a clickable link (OSC 8 /
+     *  URL / file token) and update the hover underline. Bits:
+     *  1 = hover changed (redraw), 2 = link under pointer,
+     *  4 = dir-listing requests queued (drain
+     *  terminalDrainLinkDirRequests). */
+    terminalHoverProbe?(x: number, y: number): number;
+    /** Queued link-open intents from a link click / hint fire:
+     *  `[{kind: "url"|"file"|"dir", target, line?}]`. */
+    terminalDrainLinkOpens?(): unknown;
+    /** Parent dirs the link existence probe wants listed through the
+     *  daemon (answered via terminalSeedCompletionDir). */
+    terminalDrainLinkDirRequests?(): unknown;
+    /** Land a deferred file:line jump once the opened pane is live.
+     *  False while no editor/markdown pane exists yet (retry). */
+    terminalLinkGotoLine?(line: number): boolean;
+    /** Enter hint mode (desktop Ctrl+Shift+O binding): label visible
+     *  links, open on keystroke narrowing. False = no matches. */
+    terminalHintStart?(): boolean;
+    /** True while hint mode owns the keyboard. */
+    terminalHintActive?(): boolean;
+    /** Route one keydown into hint mode. Bits: 1 = consumed,
+     *  2 = a match fired (drain terminalDrainLinkOpens). */
+    terminalHintKey?(key: string): number;
+    /** Drain queued PTY-bound mouse-report / CSI bytes. */
+    takeTerminalPointerBytes?(): Uint8Array;
+    /** Current selection text (undefined when empty). */
+    terminalSelectedText?(): string | undefined;
+    terminalHasSelection?(): boolean;
+    terminalClearSelection?(): void;
+    /** Shift+PageUp / Shift+PageDown scrollback paging; false on the
+     *  alt screen (caller falls back to the PTY escape). */
+    terminalScrollPage?(up: boolean): boolean;
+    /** PTY-bound key: snap scrollback to the live tail + clear the
+     *  selection (desktop SendToPty semantics). True = redraw. */
+    terminalNotifyKeyInput?(): boolean;
+    /** Desktop-parity PTY key encoder: DOM `KeyboardEvent` fields in,
+     *  PTY byte sequence out. Reads the live terminal modes (DECCKM
+     *  app-cursor, kitty keyboard protocol flags, alt screen, vi) and
+     *  walks the exact desktop decision path (bindings Esc table →
+     *  alt masking → kitty/CSI vs raw UTF-8). Empty array = the key is
+     *  not PTY-bound in the current mode. Null = the wasm bundle
+     *  predates the export; callers fall back to the legacy TS table. */
+    encodeTerminalKey?(
+        key: string,
+        code: string,
+        ctrl: boolean,
+        alt: boolean,
+        shift: boolean,
+        meta: boolean,
+        repeat: boolean,
+    ): Uint8Array | null;
     terminalCommandBlockCount?(): number;
     terminalCommandBlocksJson?(): string;
     dismissTerminalSplash?(): void;
@@ -168,6 +322,61 @@ export interface TerminalAdapter {
     editorInputModalActive?(): boolean;
     focusEditorInput?(): void;
     animationsActive?(): boolean;
+    // ── Chrome helper pages (Settings / Extensions / NeoWorld / About) ──
+    /** Open the full-screen Settings overlay. `configJson` is the daemon
+     *  host's config.json as one JSON document; omit to open immediately
+     *  and follow up with `setSettingsValues` once the fetch lands. */
+    openSettingsPage?(configJson?: string | null): void;
+    /** Refresh the settings overlay with a newer config snapshot. */
+    setSettingsValues?(configJson: string): void;
+    settingsPageActive?(): boolean;
+    /** Drain queued settings actions as a JSON array string:
+     *  `[{kind:"set",key,value}|{kind:"set_keybind",action,key,with}|
+     *   {kind:"open_config_file"}|{kind:"run_action",action}]`.
+     *  Null when nothing is pending. */
+    drainSettingsActions?(): string | null;
+    /** Open the About modal (version + commit). */
+    openAboutModal?(): void;
+    /** Seed the read-only Extensions catalog from the daemon's
+     *  `ListExtensions` reply (JSON `ExtensionSummary[]`). */
+    setExtensionsEntries?(entriesJson: string): void;
+    /** Auto-focus the Extensions search box (page-open parity). */
+    extensionsFocusSearch?(): void;
+    /** Drain Extensions intents: `[{kind:"open_repository",url}]`. */
+    drainExtensionsActions?(): string | null;
+    /** Ensure the NeoWorld pane exists, seeding from a persisted
+     *  StoredPet JSON blob (localStorage) when available. */
+    neoworldEnsure?(storedJson?: string | null): void;
+    /** Newest pet snapshot to persist (StoredPet JSON), or null. */
+    drainNeoworldSnapshot?(): string | null;
+    // ── Chrome-hosted UniversalModal (spec-driven channel) ──
+    /** True while the chrome-hosted modal is up (it owns the keyboard
+     *  via `chromeKeyboardCaptureActive`). */
+    modalActive?(): boolean;
+    /** Open desktop's "New File" prompt for `dir` (absolute path;
+     *  echoed back verbatim in the drained action). */
+    openFileTreeNewFileModal?(dir: string): void;
+    /** Open desktop's "New Folder" prompt for `dir`. */
+    openFileTreeNewFolderModal?(dir: string): void;
+    /** Open desktop's "Rename" prompt for `path`, pre-filled with the
+     *  current file name. */
+    openFileTreeRenameModal?(path: string): void;
+    /** Open desktop's destructive "Delete file/folder?" confirm.
+     *  `isDir` may be omitted — the chrome resolves the kind from its
+     *  tree entries. */
+    openFileTreeDeleteModal?(path: string, isDir?: boolean | null): void;
+    /** Open desktop's LSP rename form pre-filled with `word`
+     *  (Enter submits, Esc cancels). */
+    openLspRenameModal?(word: string): void;
+    /** Open an arbitrary chrome-hosted modal from a JSON `ModalSpec`
+     *  (see the wasm `open_modal_spec` docs for the shape). */
+    openModalSpec?(specJson: string): void;
+    /** Drain confirmed modal outcomes as a JSON array string:
+     *  `[{kind:"file_tree_new_file",dir,name}|{kind:"file_tree_new_folder",dir,name}|
+     *    {kind:"file_tree_rename",path,name}|{kind:"file_tree_delete",path}|
+     *    {kind:"lsp_rename",name}|{kind:"generic",id,value}]`.
+     *  Null when nothing was confirmed since the last drain. */
+    drainModalActions?(): string | null;
     /** Push a daemon-resolved branch name into the status line. */
     setStatusBranch?(branch: string | null): void;
     /** Push the latest working-tree change counts into the status line.
@@ -179,6 +388,31 @@ export interface TerminalAdapter {
      *  the chrome palette AND sugarloaf's swapchain clear color so the
      *  terminal background, status line, tabs, and modals agree. */
     setIdeTheme?(name: string): void;
+    /** Full IDE theme catalog from the shared Rust source of truth
+     *  (`all_ide_theme_names`): builtins + bundled NvChad Base46 set
+     *  (+ runtime customs when registered). `dark` is the shared
+     *  background-luma split; `accent` is `#rrggbb` for presence
+     *  cursor colors. Empty when the served bundle predates the
+     *  export — hosts fall back to the builtin four. */
+    allIdeThemes?(): Array<{ name: string; dark: boolean; accent: string }>;
+    /** Shared drag-to-split drop hit test
+     *  (`session_layout::geometry::drop_zone_at` + DEFAULT_EDGE_FRAC).
+     *  `panesJson` is the normalized pane list JSON; `(x, y)` is the
+     *  pointer in the same unit space. Null = missed every pane. */
+    paneDropTarget?(
+        panesJson: string,
+        x: number,
+        y: number,
+    ): {
+        external_id: number;
+        placement: string;
+        rect: { x: number; y: number; w: number; h: number };
+    } | null;
+    /** Feed the wasm file tree's `path -> peers` presence index so
+     *  tree rows light collaborator avatars (desktop parity:
+     *  `rebuild_file_tree_presence_index`). Entries are
+     *  `[{buffer_id, peers}]`; push only when presence changes. */
+    setPresenceIndex?(entries: unknown): void;
     /** User-facing font zoom (Ctrl+= / Ctrl+- / Ctrl+0). `scale` is the
      *  absolute multiplier (1.0 = default cell size); the bridge clamps
      *  to `[0.5, 3.0]`. Adapters that don't drive chrome ignore this. */
@@ -214,6 +448,103 @@ export interface TerminalAdapter {
     crdtApply?(json: string): boolean;
     /** Queue a daemon-owned save of the active markdown doc. */
     markdownRequestSave?(): boolean;
+    /** Desktop-breadth markdown key routing (shared dispatcher). */
+    markdownKeyFull?(
+        key: string,
+        ctrl: boolean,
+        shift: boolean,
+        alt: boolean,
+        meta: boolean,
+    ): boolean;
+    /** True when the served bundle exposes `markdown_key_full`. */
+    markdownKeyFullSupported?(): boolean;
+    /** True while a markdown `/`-search session owns the keyboard. */
+    markdownSearchActive?(): boolean;
+    /** Drag-move over the markdown pane (selection / block reorder). */
+    markdownDragMove?(x: number, y: number): boolean;
+    /** Pointer release for the markdown pane (drop / finish drag). */
+    markdownMouseRelease?(): boolean;
+    /** Right-click spelling menu for the word under the pointer. */
+    markdownSpellingMenuAt?(x: number, y: number): boolean;
+    /** Clipboard text queued by the last handled markdown event. */
+    markdownDrainClipboardOut?(): string | null;
+    /** Queued markdown activations (`markdown`/`editor`/`external`/
+     *  `rename` intents), or null. */
+    markdownDrainOpenIntents?(): unknown;
+    /** Seed the markdown unnamed register from the browser clipboard. */
+    markdownSeedClipboard?(text: string): void;
+    /** Open a fetched non-markdown file into the right chrome-hosted
+     *  editor pane (`.ipynb` → notebook, `.neodraw` → draw, else the
+     *  native code pane). Returns the pane kind. */
+    editorOpenFile?(tabIndex: number, path: string, text: string): string;
+    /** Which hosted editor pane serves the ACTIVE tab: "code" /
+     *  "notebook" / "draw", or null for terminal/markdown/agent tabs. */
+    editorActiveKind?(): string | null;
+    /** Drop every hosted editor pane (backing tab closed). */
+    editorClosePanes?(): void;
+    /** Route one `event.key` to the active editor pane (vim + standard
+     *  editing for code, cell/vim surface for notebooks, tools for
+     *  draw). True when consumed. */
+    editorKey?(key: string, ctrl: boolean, shift: boolean, alt: boolean): boolean;
+    /** Insert browser-pasted text into the active editor pane. */
+    editorInsertPaste?(text: string): boolean;
+    /** Pointer press in the editor surface (canvas CSS px). */
+    editorPointerDown?(
+        x: number,
+        y: number,
+        shift: boolean,
+        ctrl: boolean,
+        clickCount: number,
+    ): boolean;
+    /** Pointer move: drag-select / scrollbar drag / draw gestures. */
+    editorPointerMove?(x: number, y: number): boolean;
+    /** Pointer release for the editor surface. */
+    editorPointerUp?(): boolean;
+    /** Wheel over the editor surface (code/notebook scroll, draw
+     *  pan; ctrl = zoom for draw). */
+    editorScroll?(
+        x: number,
+        y: number,
+        deltaX: number,
+        deltaY: number,
+        ctrl: boolean,
+    ): boolean;
+    /** Text the last handled editor key queued for the SYSTEM
+     *  clipboard (vim yank, Ctrl+C/X). */
+    editorDrainClipboardOut?(): string | null;
+    /** Whether the active editor pane has unsaved changes. */
+    editorDirty?(): boolean;
+    /** The active code pane's caret for the presence plane. */
+    editorCursor?(): { line: number; columnUtf16: number; insert?: boolean } | null;
+    /** Bytes a host-side save should write for the active pane. */
+    editorSavePayload?(): string | null;
+    /** Record a successful host-side write of the payload. */
+    editorMarkSaved?(payload: string): void;
+    /** Queue a save: "crdt" (daemon single-writer via code_crdt_pump),
+     *  "host" (write editorSavePayload through Files), or "none". */
+    editorRequestSave?(): string;
+    /** Queue a save with format-on-save: "format" (formatter fired;
+     *  the save resumes via the `save_after_format` host action), else
+     *  the same answers as editorRequestSave. */
+    editorRequestSaveFormatted?(): string;
+    /** Register the callback that ships one serialized LSP
+     *  `EditorClientMessage` over the daemon editor envelope. */
+    setEditorLspRequest?(cb: (envelopeJson: string) => void): void;
+    /** Route one daemon `EditorReply` payload (JSON) into the code
+     *  pane's LSP session. True when visible state changed. */
+    editorLspReply?(json: string): boolean;
+    /** Drain queued LSP host actions (open / rename_prompt /
+     *  save_after_format) as a JSON array, or null when idle. */
+    editorLspHostActions?(): string | null;
+    /** Submit the rename prompt's answer. */
+    editorLspRenameSubmit?(name: string): void;
+    /** Code-pane co-editing pump — the code twin of crdtPump. */
+    codeCrdtPump?(bufferId: string | null): string | null;
+    /** Route one inbound CrdtServerMessage into the bound CODE pane. */
+    editorCrdtApply?(json: string): boolean;
+    /** Remote collaborator carets for the hosted CODE pane (same wire
+     *  shape as setMarkdownRemoteCursors). */
+    editorSetRemoteCursors?(peers: unknown): void;
     /** Swap a fresh host→workspace tree into the already-open
      *  Workspaces modal without resetting query/selection. */
     refreshWorkspacesPalette?(payloadJson: string): void;
@@ -290,6 +621,27 @@ export interface TerminalAdapter {
     agentSendMessage?(text: string): void;
     /** Submit an agent prompt with protocol Attachment records. */
     agentSendMessageWithAttachments?(text: string, attachmentsJson: string): void;
+    agentInsertPaste?(text: string): boolean;
+    /** Attach a pasted clipboard image to the shared composer as an
+     *  `[imageN]` token + chip (desktop's Ctrl+V-with-image flow). The
+     *  image is sent with the next Enter, not immediately. Returns
+     *  false when the pane rejected it (bad mime / over 20MB). */
+    agentAttachClipboardImage?(
+      filename: string,
+      mime: string,
+      bytes: Uint8Array,
+    ): boolean;
+    /** Attach a host-read file (drag-and-drop onto the agent pane) as a
+     *  composer chip — the web analogue of desktop's DroppedFile →
+     *  attach_path. Empty mime is sniffed from the filename. */
+    agentAttachFile?(filename: string, mime: string, bytes: Uint8Array): boolean;
+    /** Active `@`-mention query in the shared composer (text between
+     *  `@` and the caret), or null when none is being typed. */
+    agentFileMentionQuery?(): string | null;
+    /** Feed the `@`-mention candidate list (JSON array of
+     *  workspace-relative file paths); the pane fuzzy-ranks per
+     *  keystroke, so re-feed only when the file list changes. */
+    agentSetFileMentionCandidates?(json: string): boolean;
     /** Cancel the in-flight Claude request on the daemon side. */
     agentCancel?(): void;
     /** Reset the daemon-side conversation history. */
@@ -729,10 +1081,59 @@ interface ChromeBridgeInstance {
     markdown_scroll?(deltaY: number, viewportH: number): boolean;
     markdown_click?(x: number, y: number): boolean;
     markdown_key?(key: string, ctrl: boolean): boolean;
+    markdown_key_full?(
+        key: string,
+        ctrl: boolean,
+        shift: boolean,
+        alt: boolean,
+        meta: boolean,
+    ): boolean;
+    markdown_search_active?(): boolean;
+    markdown_drag_move?(x: number, y: number): boolean;
+    markdown_mouse_release?(): boolean;
+    markdown_spelling_menu_at?(x: number, y: number): boolean;
+    markdown_drain_clipboard_out?(): string | undefined;
+    markdown_drain_open_intents?(): unknown;
+    markdown_seed_clipboard?(text: string): void;
     markdown_in_insert_mode?(): boolean;
     crdt_pump?(bufferId: string | null): string | undefined;
     crdt_apply?(json: string): boolean;
     markdown_request_save?(): boolean;
+    editor_open_file?(tabIndex: number, path: string, text: string): string;
+    editor_active_kind?(): string | undefined;
+    editor_close_panes?(): void;
+    editor_key?(key: string, ctrl: boolean, shift: boolean, alt: boolean): boolean;
+    editor_insert_paste?(text: string): boolean;
+    editor_pointer_down?(
+        x: number,
+        y: number,
+        shift: boolean,
+        ctrl: boolean,
+        clickCount: number,
+    ): boolean;
+    editor_pointer_move?(x: number, y: number): boolean;
+    editor_pointer_up?(): boolean;
+    editor_scroll?(
+        x: number,
+        y: number,
+        deltaX: number,
+        deltaY: number,
+        ctrl: boolean,
+    ): boolean;
+    editor_drain_clipboard_out?(): string | undefined;
+    editor_dirty?(): boolean;
+    editor_cursor?(): Uint32Array | number[] | undefined;
+    editor_save_payload?(): string | undefined;
+    editor_mark_saved?(payload: string): void;
+    editor_request_save?(): string;
+    editor_request_save_formatted?(): string;
+    set_editor_lsp_request?(cb: (envelopeJson: string) => void): void;
+    editor_lsp_reply?(json: string): boolean;
+    editor_lsp_host_actions?(): string | undefined;
+    editor_lsp_rename_submit?(name: string): void;
+    code_crdt_pump?(bufferId: string | null): string | undefined;
+    editor_crdt_apply?(json: string): boolean;
+    editor_set_remote_cursors?(peers: unknown): void;
     resize(
         cols: number,
         rows: number,
@@ -798,6 +1199,16 @@ interface ChromeBridgeInstance {
     drain_buffer_tab_intents(): unknown;
     buffer_tab_hit_test?(x: number, y: number): number;
     drain_top_bar_action?(): string | undefined;
+    open_settings_page?(configJson?: string | null): void;
+    set_settings_values?(configJson: string): void;
+    settings_page_active?(): boolean;
+    drain_settings_actions?(): unknown;
+    open_about_modal?(): void;
+    set_extensions_entries?(entriesJson: string): void;
+    extensions_focus_search?(): void;
+    drain_extensions_actions?(): unknown;
+    neoworld_ensure?(storedJson?: string | null): void;
+    drain_neoworld_snapshot?(): string | undefined;
     drain_agent_tab_opens(): number;
     drain_finder_open_intents(): unknown;
     drain_palette_intents(): unknown;
@@ -820,6 +1231,35 @@ interface ChromeBridgeInstance {
      *  renders the authoritative desktop split tree. Optional — older
      *  bundles only expose the local policy path. */
     mirror_pane_layout_snapshot?(snapshotJson: string): unknown;
+    /** Shared PaneGrid pointer surface (divider drag, focus-by-click,
+     *  drag-to-split previews). Window-space canvas coordinates; bit
+     *  flags per method doc in the wasm bridge. Optional — pre-pane-grid
+     *  bundles fall back to keyboard-only resize. */
+    pane_grid_pointer_down?(x: number, y: number): number;
+    pane_grid_pointer_move?(x: number, y: number): number;
+    pane_grid_pointer_up?(x: number, y: number): number;
+    pane_grid_begin_tab_drag?(): void;
+    pane_grid_drag_preview?(x: number, y: number): boolean;
+    pane_grid_cancel_drag?(): void;
+    drain_pane_grid_actions?(): unknown;
+    pane_grid_layout_result?(): unknown;
+    /** Per-pane terminal surfaces for split panes. */
+    draw_pane_grid_host_surfaces?(): void;
+    set_pane_surfaces?(json: string): void;
+    feed_pane_terminal?(externalId: number, bytes: Uint8Array): void;
+    pane_terminal_exists?(externalId: number): boolean;
+    remove_pane_terminal?(externalId: number): void;
+    prune_pane_terminals?(keepJson: string): void;
+    /** Per-pane tab strips + breadcrumbs (desktop pane_tabs parity). */
+    set_pane_tabs?(externalId: number, tabsJson: string, active: number): void;
+    retain_pane_tabs?(keepJson: string): void;
+    drain_pane_tab_intents?(): unknown;
+    /** Shared workspace-strip tab drag pipeline. */
+    buffer_tab_begin_drag?(x: number, y: number): number;
+    buffer_tab_update_drag?(x: number, y: number): boolean;
+    buffer_tab_drag_tear_armed?(): boolean;
+    buffer_tab_end_drag?(): unknown;
+    buffer_tab_cancel_drag?(): void;
     set_active_tab(idx: number): void;
     set_tab_content(idx: number, text: string, path: string): void;
     set_terminal_input(text: string): void;
@@ -828,9 +1268,66 @@ interface ChromeBridgeInstance {
     terminal_command_composer_visible?(): boolean;
     terminal_should_capture_input?(): boolean;
     terminal_input_insert?(text: string): void;
+    terminal_input_insert_paste?(text: string): void;
+    terminal_paste_payload?(text: string): Uint8Array;
+    terminal_toggle_favorite_command?(command: string): boolean | undefined;
     terminal_input_key?(key: string): boolean;
     terminal_submit_payload?(): Uint8Array;
     record_terminal_submit?(command: string): void;
+    terminal_wheel?(
+        x: number,
+        y: number,
+        deltaX: number,
+        deltaY: number,
+        shift: boolean,
+    ): number;
+    terminal_pointer_down?(
+        x: number,
+        y: number,
+        button: number,
+        shift: boolean,
+        ctrl: boolean,
+        alt: boolean,
+        nowMs: number,
+    ): number;
+    terminal_pointer_move?(
+        x: number,
+        y: number,
+        shift: boolean,
+        ctrl: boolean,
+        alt: boolean,
+    ): number;
+    terminal_pointer_up?(
+        x: number,
+        y: number,
+        button: number,
+        shift: boolean,
+        ctrl: boolean,
+        alt: boolean,
+    ): number;
+    terminal_drag_scroll_tick?(): boolean;
+    terminal_hover_probe?(x: number, y: number): number;
+    terminal_drain_link_opens?(): unknown;
+    terminal_drain_link_dir_requests?(): unknown;
+    terminal_link_goto_line?(line: number): boolean;
+    terminal_hint_start?(): boolean;
+    terminal_hint_active?(): boolean;
+    terminal_hint_key?(key: string): number;
+    take_terminal_pointer_bytes?(): Uint8Array;
+    terminal_selected_text?(): string | undefined;
+    terminal_has_selection?(): boolean;
+    terminal_clear_selection?(): void;
+    terminal_scroll_page?(up: boolean): boolean;
+    terminal_notify_key_input?(): boolean;
+    encode_terminal_key?(
+        key: string,
+        code: string,
+        ctrl: boolean,
+        alt: boolean,
+        shift: boolean,
+        meta: boolean,
+        repeat: boolean,
+    ): Uint8Array;
     terminal_command_block_count?(): number;
     terminal_command_blocks_json?(): string;
     dismiss_terminal_splash(): void;
@@ -867,10 +1364,21 @@ interface ChromeBridgeInstance {
     keyboard_capture_active?(): boolean;
     editor_input_modal_active?(): boolean;
     focus_editor_input?(): void;
+    modal_active?(): boolean;
+    open_file_tree_new_file_modal?(dir: string): void;
+    open_file_tree_new_folder_modal?(dir: string): void;
+    open_file_tree_rename_modal?(path: string): void;
+    open_file_tree_delete_modal?(path: string, isDir?: boolean | null): void;
+    open_lsp_rename_modal?(word: string): void;
+    open_modal_spec?(specJson: string): void;
+    drain_modal_actions?(): unknown;
     animations_active?(): boolean;
     set_status_branch(branch: string | null): void;
     set_status_git_changes(added: number, deleted: number): void;
     set_ide_theme(name: string): void;
+    all_ide_theme_names?(): unknown;
+    pane_drop_target?(panesJson: string, x: number, y: number): unknown;
+    set_presence_index?(entries: unknown): void;
     set_cursor_style?(colorHex: string | null, style: string): void;
     set_font_scale(scale: number): void;
     enter_palette_fonts_mode?(fontsJson: string): void;
@@ -922,6 +1430,15 @@ interface ChromeBridgeInstance {
     agent_attach?(directory?: string | null): void;
     agent_send_message(text: string): void;
     agent_send_message_with_attachments?(text: string, attachmentsJson: string): void;
+    agent_insert_paste?(text: string): boolean;
+    agent_attach_clipboard_image?(
+      filename: string,
+      mime: string,
+      bytes: Uint8Array,
+    ): boolean;
+    agent_attach_file?(filename: string, mime: string, bytes: Uint8Array): boolean;
+    agent_file_mention_query?(): unknown;
+    agent_set_file_mention_candidates?(json: string): boolean;
     agent_cancel(): void;
     agent_new_thread(directory?: string | null): void;
     agent_wordmark_click?(x: number, y: number): boolean;
@@ -972,7 +1489,7 @@ interface ChromeBridgeInstance {
     /** Push the minimap viewport summary (visible-line histogram +
      *  cursor band). Single JSON blob the bridge decodes into the
      *  minimap panel's owned state. */
-    set_minimap?(snapshotJson: string): void;
+    set_minimap?(routeId: number, snapshotJson: string): void;
     /** Push a toast / status notification onto the chrome's
      *  notification stack. JSON shaped as `{ kind, title, body, ttl_ms }`. */
     push_notification?(notificationJson: string): void;
@@ -1005,7 +1522,143 @@ interface ChromeBridgeInstance {
     free?(): void;
 }
 
-interface RealWasmModule {
+// ------------------------------------------------------------------
+// Shared input-policy exports (wasm/src/rendered/input_policy.rs).
+//
+// IME composition, touch gestures, mobile soft-keyboard decisions and
+// the remote-presence store all live in shared Rust; the wasm module
+// exports them alongside `ChromeBridge`. The module-level holder below
+// captures them once the bundle loads so the synchronous TS adapters
+// (`services/imePolicy.ts`, `services/touchPolicy.ts`,
+// `mobile/MobileKeyboard.ts`, `presence/RemotePresenceStore.ts`) can
+// route their decisions through Rust without owning the async load.
+// ------------------------------------------------------------------
+
+/** One shared-policy touch classifier instance (`TouchGesturePolicy`). */
+export interface WasmTouchGesturePolicyInstance {
+    reset(): void;
+    is_active(): boolean;
+    start(id: number, x: number, y: number, timeMs: number, zone: string): unknown;
+    move(
+        id: number,
+        x: number,
+        y: number,
+        timeMs: number,
+        width: number,
+        height: number,
+    ): unknown;
+    end(
+        id: number,
+        x: number,
+        y: number,
+        timeMs: number,
+        width: number,
+        height: number,
+    ): unknown;
+    tick_long_press(nowMs: number, width: number, height: number): unknown;
+    free?(): void;
+}
+
+/** One shared outbound presence publisher (`PresencePublisherBridge`). */
+export interface WasmPresencePublisherInstance {
+    peer_id(): string;
+    set_color(r: number, g: number, b: number): void;
+    set_rainbow(rainbow: boolean): void;
+    tick(active: unknown, nowMs: number): unknown;
+    free?(): void;
+}
+
+/** One shared remote-presence store instance (`PresenceStoreBridge`). */
+export interface WasmPresenceStoreInstance {
+    set_local_peer_id(peerId: string): void;
+    apply_server_message(message: unknown): boolean;
+    cursors_for(bufferId: string): unknown;
+    has_remote_cursors(bufferId: string): boolean;
+    any_rainbow(): boolean;
+    has_any_peers(): boolean;
+    avatar_peers_by_buffer(): unknown;
+    prune_stale(nowMs: number, ttlMs: number): boolean;
+    clear(): boolean;
+    free?(): void;
+}
+
+/** The input-policy slice of the loaded wasm module. Every member is
+ *  optional so a stale served bundle (built before the exports landed)
+ *  degrades gracefully — adapters fall back or warn per their own
+ *  contract. */
+export interface WasmInputPolicyModule {
+    ime_commit_dispatch?: (
+        text: string,
+    ) => { text: string; useBracketedPaste: boolean } | null;
+    ime_should_drop_keys_during_compose?: (hasPreedit: boolean) => boolean;
+    ime_key_event_is_composing?: (isComposing: boolean, keyCode: number) => boolean;
+    ime_assistant_blocks?: (assistantActive: boolean) => boolean;
+    TouchGesturePolicy?: new () => WasmTouchGesturePolicyInstance;
+    touch_should_suppress_swipe_back?: (zone: string) => boolean;
+    mobile_keyboard_inset?: (
+        innerHeight: number,
+        viewportHeight: number,
+        viewportOffsetTop: number,
+    ) => { bottom: number; keyboardOpen: boolean } | null;
+    mobile_input_attributes?: (
+        context: string,
+        toolbarVisible: boolean,
+    ) => {
+        autocapitalize: string;
+        autocorrect: string;
+        spellcheck: string;
+        inputmode: string;
+        enterkeyhint: string;
+    } | null;
+    mobile_named_key_bytes?: (key: string) => Uint8Array | undefined;
+    mobile_ctrl_chord_byte?: (text: string) => number | undefined;
+    PresenceStoreBridge?: new () => WasmPresenceStoreInstance;
+    PresencePublisherBridge?: new (
+        peerId: string,
+        displayName: string,
+        minIntervalMs?: number,
+        heartbeatIntervalMs?: number,
+    ) => WasmPresencePublisherInstance;
+}
+
+let wasmInputPolicyModule: WasmInputPolicyModule | null = null;
+const wasmInputPolicyListeners: Array<(mod: WasmInputPolicyModule) => void> = [];
+
+/** The loaded wasm module's input-policy exports, or `null` before the
+ *  bundle finishes loading (and forever in stub-only diagnostic runs). */
+export function wasmInputPolicy(): WasmInputPolicyModule | null {
+    return wasmInputPolicyModule;
+}
+
+/** Run `listener` once the input-policy exports are available —
+ *  immediately when the module already loaded. */
+export function onWasmInputPolicyReady(
+    listener: (mod: WasmInputPolicyModule) => void,
+): void {
+    if (wasmInputPolicyModule) {
+        listener(wasmInputPolicyModule);
+        return;
+    }
+    wasmInputPolicyListeners.push(listener);
+}
+
+/** Install the loaded module's exports. Called by `loadRealWasm` on
+ *  the real bundle; tests inject a fake module through the same door. */
+export function installWasmInputPolicy(mod: WasmInputPolicyModule): void {
+    wasmInputPolicyModule = mod;
+    const listeners = wasmInputPolicyListeners.splice(0);
+    for (const listener of listeners) {
+        try {
+            listener(mod);
+        } catch (err) {
+            if (typeof console !== "undefined") {
+                console.warn("[neoism] input-policy ready listener threw", err);
+            }
+        }
+    }
+}
+
+interface RealWasmModule extends WasmInputPolicyModule {
     default(
         moduleOrPath?: RequestInfo | URL | Response | BufferSource | WebAssembly.Module,
     ): Promise<unknown>;
@@ -1262,6 +1915,10 @@ class ChromeAdapter implements TerminalAdapter {
         return true;
     }
     render() {
+        // Split pane surfaces (per-pane terminal grids) queue their
+        // draws first so they join the same swapchain flip as the
+        // chrome frame below.
+        this.inner.draw_pane_grid_host_surfaces?.();
         this.inner.render(performance.now());
     }
     handleUiEvent(event: unknown) {
@@ -1316,6 +1973,56 @@ class ChromeAdapter implements TerminalAdapter {
     markdownKey(key: string, ctrl: boolean): boolean {
         return this.inner.markdown_key?.(key, ctrl) ?? false;
     }
+    /** Desktop-breadth markdown key routing (shared dispatcher):
+     *  operators/visual mode/motions, undo/redo, tables, lists, title
+     *  editing, `/` block menu, `[[` completion, `/` incsearch.
+     *  Null-ish false when the bundle predates the export — the host
+     *  falls back to `markdownKey`. */
+    markdownKeyFull(
+        key: string,
+        ctrl: boolean,
+        shift: boolean,
+        alt: boolean,
+        meta: boolean,
+    ): boolean {
+        return this.inner.markdown_key_full?.(key, ctrl, shift, alt, meta) ?? false;
+    }
+    markdownKeyFullSupported(): boolean {
+        return typeof this.inner.markdown_key_full === "function";
+    }
+    /** True while a markdown `/`-search session owns the keyboard. */
+    markdownSearchActive(): boolean {
+        return this.inner.markdown_search_active?.() === true;
+    }
+    /** Drag-move over the markdown pane (selection extend / block
+     *  reorder), desktop `handle_markdown_drag_move`. */
+    markdownDragMove(x: number, y: number): boolean {
+        return this.inner.markdown_drag_move?.(x, y) ?? false;
+    }
+    /** Pointer release for the markdown pane (drop reordered block,
+     *  finish selection, open a queued block menu). */
+    markdownMouseRelease(): boolean {
+        return this.inner.markdown_mouse_release?.() ?? false;
+    }
+    /** Right-click spelling menu for the word under the pointer. */
+    markdownSpellingMenuAt(x: number, y: number): boolean {
+        return this.inner.markdown_spelling_menu_at?.(x, y) ?? false;
+    }
+    /** Text the last handled markdown key/press queued for the system
+     *  clipboard (yanks, copy chip, contact-link yank). */
+    markdownDrainClipboardOut(): string | null {
+        return this.inner.markdown_drain_clipboard_out?.() ?? null;
+    }
+    /** Queued markdown activations: `[{ kind: "markdown" | "editor" |
+     *  "external" | "rename", target, line? }]`, or null. */
+    markdownDrainOpenIntents(): unknown {
+        return this.inner.markdown_drain_open_intents?.() ?? null;
+    }
+    /** Seed the markdown unnamed register from the browser clipboard
+     *  so vim `p` pastes real clipboard text. */
+    markdownSeedClipboard(text: string): void {
+        this.inner.markdown_seed_clipboard?.(text);
+    }
     markdownInInsertMode(): boolean {
         return this.inner.markdown_in_insert_mode?.() === true;
     }
@@ -1339,6 +2046,99 @@ class ChromeAdapter implements TerminalAdapter {
     /** Queue a daemon-owned save of the active markdown doc. */
     markdownRequestSave(): boolean {
         return this.inner.markdown_request_save?.() ?? false;
+    }
+    editorOpenFile(tabIndex: number, path: string, text: string): string {
+        return this.inner.editor_open_file?.(tabIndex, path, text) ?? "";
+    }
+    editorActiveKind(): string | null {
+        return this.inner.editor_active_kind?.() ?? null;
+    }
+    editorClosePanes(): void {
+        this.inner.editor_close_panes?.();
+    }
+    editorKey(key: string, ctrl: boolean, shift: boolean, alt: boolean): boolean {
+        return this.inner.editor_key?.(key, ctrl, shift, alt) ?? false;
+    }
+    editorInsertPaste(text: string): boolean {
+        return this.inner.editor_insert_paste?.(text) ?? false;
+    }
+    editorPointerDown(
+        x: number,
+        y: number,
+        shift: boolean,
+        ctrl: boolean,
+        clickCount: number,
+    ): boolean {
+        return this.inner.editor_pointer_down?.(x, y, shift, ctrl, clickCount) ?? false;
+    }
+    editorPointerMove(x: number, y: number): boolean {
+        return this.inner.editor_pointer_move?.(x, y) ?? false;
+    }
+    editorPointerUp(): boolean {
+        return this.inner.editor_pointer_up?.() ?? false;
+    }
+    editorScroll(
+        x: number,
+        y: number,
+        deltaX: number,
+        deltaY: number,
+        ctrl: boolean,
+    ): boolean {
+        return this.inner.editor_scroll?.(x, y, deltaX, deltaY, ctrl) ?? false;
+    }
+    editorDrainClipboardOut(): string | null {
+        return this.inner.editor_drain_clipboard_out?.() ?? null;
+    }
+    editorDirty(): boolean {
+        return this.inner.editor_dirty?.() === true;
+    }
+    editorCursor(): { line: number; columnUtf16: number; insert?: boolean } | null {
+        const pair = this.inner.editor_cursor?.();
+        if (!pair || pair.length < 2) return null;
+        return {
+            line: Number(pair[0]),
+            columnUtf16: Number(pair[1]),
+            insert: pair.length > 2 ? Number(pair[2]) === 1 : undefined,
+        };
+    }
+    editorSavePayload(): string | null {
+        return this.inner.editor_save_payload?.() ?? null;
+    }
+    editorMarkSaved(payload: string): void {
+        this.inner.editor_mark_saved?.(payload);
+    }
+    editorRequestSave(): string {
+        return this.inner.editor_request_save?.() ?? "none";
+    }
+    editorRequestSaveFormatted(): string {
+        return (
+            this.inner.editor_request_save_formatted?.() ??
+            this.inner.editor_request_save?.() ??
+            "none"
+        );
+    }
+    setEditorLspRequest(cb: (envelopeJson: string) => void): void {
+        this.inner.set_editor_lsp_request?.(cb);
+    }
+    editorLspReply(json: string): boolean {
+        return this.inner.editor_lsp_reply?.(json) ?? false;
+    }
+    editorLspHostActions(): string | null {
+        return this.inner.editor_lsp_host_actions?.() ?? null;
+    }
+    editorLspRenameSubmit(name: string): void {
+        this.inner.editor_lsp_rename_submit?.(name);
+    }
+    /** Code-pane co-editing pump — the code twin of `crdtPump`. */
+    codeCrdtPump(bufferId: string | null): string | null {
+        return this.inner.code_crdt_pump?.(bufferId) ?? null;
+    }
+    /** Route one inbound CrdtServerMessage into the bound CODE pane. */
+    editorSetRemoteCursors(peers: unknown): void {
+        this.inner.editor_set_remote_cursors?.(peers);
+    }
+    editorCrdtApply(json: string): boolean {
+        return this.inner.editor_crdt_apply?.(json) ?? false;
     }
     setFileTreeEntries(entriesJson: string) {
         this.inner.set_file_tree_entries(entriesJson);
@@ -1489,6 +2289,69 @@ class ChromeAdapter implements TerminalAdapter {
     mirrorPaneLayoutSnapshot(snapshotJson: string): unknown {
         return this.inner.mirror_pane_layout_snapshot?.(snapshotJson);
     }
+    paneGridPointerDown(x: number, y: number): number {
+        return this.inner.pane_grid_pointer_down?.(x, y) ?? 0;
+    }
+    paneGridPointerMove(x: number, y: number): number {
+        return this.inner.pane_grid_pointer_move?.(x, y) ?? 0;
+    }
+    paneGridPointerUp(x: number, y: number): number {
+        return this.inner.pane_grid_pointer_up?.(x, y) ?? 0;
+    }
+    paneGridBeginTabDrag(): void {
+        this.inner.pane_grid_begin_tab_drag?.();
+    }
+    paneGridDragPreview(x: number, y: number): boolean {
+        return this.inner.pane_grid_drag_preview?.(x, y) === true;
+    }
+    paneGridCancelDrag(): void {
+        this.inner.pane_grid_cancel_drag?.();
+    }
+    drainPaneGridActions(): unknown {
+        return this.inner.drain_pane_grid_actions?.() ?? [];
+    }
+    paneGridLayoutResult(): unknown {
+        return this.inner.pane_grid_layout_result?.();
+    }
+    setPaneSurfaces(json: string): void {
+        this.inner.set_pane_surfaces?.(json);
+    }
+    feedPaneTerminal(externalId: number, bytes: Uint8Array): void {
+        this.inner.feed_pane_terminal?.(externalId, bytes);
+    }
+    paneTerminalExists(externalId: number): boolean {
+        return this.inner.pane_terminal_exists?.(externalId) === true;
+    }
+    removePaneTerminal(externalId: number): void {
+        this.inner.remove_pane_terminal?.(externalId);
+    }
+    prunePaneTerminals(keepJson: string): void {
+        this.inner.prune_pane_terminals?.(keepJson);
+    }
+    setPaneTabs(externalId: number, tabsJson: string, active: number): void {
+        this.inner.set_pane_tabs?.(externalId, tabsJson, active);
+    }
+    retainPaneTabs(keepJson: string): void {
+        this.inner.retain_pane_tabs?.(keepJson);
+    }
+    drainPaneTabIntents(): unknown {
+        return this.inner.drain_pane_tab_intents?.() ?? [];
+    }
+    bufferTabBeginDrag(x: number, y: number): number {
+        return this.inner.buffer_tab_begin_drag?.(x, y) ?? -1;
+    }
+    bufferTabUpdateDrag(x: number, y: number): boolean {
+        return this.inner.buffer_tab_update_drag?.(x, y) === true;
+    }
+    bufferTabDragTearArmed(): boolean {
+        return this.inner.buffer_tab_drag_tear_armed?.() === true;
+    }
+    bufferTabEndDrag(): unknown {
+        return this.inner.buffer_tab_end_drag?.();
+    }
+    bufferTabCancelDrag(): void {
+        this.inner.buffer_tab_cancel_drag?.();
+    }
     setActiveTab(idx: number) {
         this.inner.set_active_tab(idx);
     }
@@ -1513,6 +2376,19 @@ class ChromeAdapter implements TerminalAdapter {
     terminalInputInsert(text: string) {
         this.inner.terminal_input_insert?.(text);
     }
+    terminalInputInsertPaste(text: string): boolean {
+        if (typeof this.inner.terminal_input_insert_paste !== "function") {
+            return false;
+        }
+        this.inner.terminal_input_insert_paste(text);
+        return true;
+    }
+    terminalPastePayload(text: string): Uint8Array | undefined {
+        return this.inner.terminal_paste_payload?.(text);
+    }
+    terminalToggleFavoriteCommand(command: string): boolean | undefined {
+        return this.inner.terminal_toggle_favorite_command?.(command);
+    }
     terminalInputKey(key: string): boolean {
         return this.inner.terminal_input_key?.(key) === true;
     }
@@ -1521,6 +2397,120 @@ class ChromeAdapter implements TerminalAdapter {
     }
     recordTerminalSubmit(command: string) {
         this.inner.record_terminal_submit?.(command);
+    }
+    terminalWheel(
+        x: number,
+        y: number,
+        deltaX: number,
+        deltaY: number,
+        shift: boolean,
+    ): number {
+        return this.inner.terminal_wheel?.(x, y, deltaX, deltaY, shift) ?? 0;
+    }
+    terminalPointerDown(
+        x: number,
+        y: number,
+        button: number,
+        shift: boolean,
+        ctrl: boolean,
+        alt: boolean,
+        nowMs: number,
+    ): number {
+        return (
+            this.inner.terminal_pointer_down?.(x, y, button, shift, ctrl, alt, nowMs) ??
+            0
+        );
+    }
+    terminalPointerMove(
+        x: number,
+        y: number,
+        shift: boolean,
+        ctrl: boolean,
+        alt: boolean,
+    ): number {
+        return this.inner.terminal_pointer_move?.(x, y, shift, ctrl, alt) ?? 0;
+    }
+    terminalPointerUp(
+        x: number,
+        y: number,
+        button: number,
+        shift: boolean,
+        ctrl: boolean,
+        alt: boolean,
+    ): number {
+        return this.inner.terminal_pointer_up?.(x, y, button, shift, ctrl, alt) ?? 0;
+    }
+    terminalDragScrollTick(): boolean {
+        return this.inner.terminal_drag_scroll_tick?.() === true;
+    }
+    /** Link hover probe (hover underline + dir-request queueing). */
+    terminalHoverProbe(x: number, y: number): number {
+        return this.inner.terminal_hover_probe?.(x, y) ?? 0;
+    }
+    /** Queued link-open intents (`[{kind, target, line?}]`). */
+    terminalDrainLinkOpens(): unknown {
+        return this.inner.terminal_drain_link_opens?.() ?? null;
+    }
+    /** Parent dirs the link existence probe wants listed. */
+    terminalDrainLinkDirRequests(): unknown {
+        return this.inner.terminal_drain_link_dir_requests?.() ?? null;
+    }
+    /** Deferred file:line jump; false until the pane is live. */
+    terminalLinkGotoLine(line: number): boolean {
+        return this.inner.terminal_link_goto_line?.(line) === true;
+    }
+    /** Enter terminal hint mode (desktop Ctrl+Shift+O). */
+    terminalHintStart(): boolean {
+        return this.inner.terminal_hint_start?.() === true;
+    }
+    terminalHintActive(): boolean {
+        return this.inner.terminal_hint_active?.() === true;
+    }
+    /** Route one keydown into hint mode (1 = consumed, 2 = fired). */
+    terminalHintKey(key: string): number {
+        return this.inner.terminal_hint_key?.(key) ?? 0;
+    }
+    takeTerminalPointerBytes(): Uint8Array {
+        return this.inner.take_terminal_pointer_bytes?.() ?? new Uint8Array();
+    }
+    terminalSelectedText(): string | undefined {
+        return this.inner.terminal_selected_text?.() ?? undefined;
+    }
+    terminalHasSelection(): boolean {
+        return this.inner.terminal_has_selection?.() === true;
+    }
+    terminalClearSelection() {
+        this.inner.terminal_clear_selection?.();
+    }
+    terminalScrollPage(up: boolean): boolean {
+        return this.inner.terminal_scroll_page?.(up) === true;
+    }
+    terminalNotifyKeyInput(): boolean {
+        return this.inner.terminal_notify_key_input?.() === true;
+    }
+    encodeTerminalKey(
+        key: string,
+        code: string,
+        ctrl: boolean,
+        alt: boolean,
+        shift: boolean,
+        meta: boolean,
+        repeat: boolean,
+    ): Uint8Array | null {
+        if (typeof this.inner.encode_terminal_key !== "function") {
+            // Stale wasm bundle: signal the caller to use the legacy
+            // TS fallback table.
+            return null;
+        }
+        return this.inner.encode_terminal_key(
+            key,
+            code,
+            ctrl,
+            alt,
+            shift,
+            meta,
+            repeat,
+        );
     }
     terminalCommandBlockCount(): number {
         return this.inner.terminal_command_block_count?.() ?? 0;
@@ -1659,6 +2649,63 @@ class ChromeAdapter implements TerminalAdapter {
         const action = this.inner.drain_top_bar_action?.();
         return typeof action === "string" ? action : null;
     }
+    openSettingsPage(configJson?: string | null) {
+        this.inner.open_settings_page?.(configJson ?? undefined);
+    }
+    setSettingsValues(configJson: string) {
+        this.inner.set_settings_values?.(configJson);
+    }
+    settingsPageActive(): boolean {
+        return this.inner.settings_page_active?.() === true;
+    }
+    drainSettingsActions(): string | null {
+        const raw = this.inner.drain_settings_actions?.();
+        return typeof raw === "string" ? raw : null;
+    }
+    openAboutModal() {
+        this.inner.open_about_modal?.();
+    }
+    setExtensionsEntries(entriesJson: string) {
+        this.inner.set_extensions_entries?.(entriesJson);
+    }
+    extensionsFocusSearch() {
+        this.inner.extensions_focus_search?.();
+    }
+    drainExtensionsActions(): string | null {
+        const raw = this.inner.drain_extensions_actions?.();
+        return typeof raw === "string" ? raw : null;
+    }
+    neoworldEnsure(storedJson?: string | null) {
+        this.inner.neoworld_ensure?.(storedJson ?? undefined);
+    }
+    drainNeoworldSnapshot(): string | null {
+        return this.inner.drain_neoworld_snapshot?.() ?? null;
+    }
+    modalActive(): boolean {
+        return this.inner.modal_active?.() === true;
+    }
+    openFileTreeNewFileModal(dir: string) {
+        this.inner.open_file_tree_new_file_modal?.(dir);
+    }
+    openFileTreeNewFolderModal(dir: string) {
+        this.inner.open_file_tree_new_folder_modal?.(dir);
+    }
+    openFileTreeRenameModal(path: string) {
+        this.inner.open_file_tree_rename_modal?.(path);
+    }
+    openFileTreeDeleteModal(path: string, isDir?: boolean | null) {
+        this.inner.open_file_tree_delete_modal?.(path, isDir ?? null);
+    }
+    openLspRenameModal(word: string) {
+        this.inner.open_lsp_rename_modal?.(word);
+    }
+    openModalSpec(specJson: string) {
+        this.inner.open_modal_spec?.(specJson);
+    }
+    drainModalActions(): string | null {
+        const raw = this.inner.drain_modal_actions?.();
+        return typeof raw === "string" ? raw : null;
+    }
     chromeKeyboardCaptureActive(): boolean {
         return this.inner.keyboard_capture_active?.() === true;
     }
@@ -1679,6 +2726,32 @@ class ChromeAdapter implements TerminalAdapter {
     }
     setIdeTheme(name: string): void {
         this.inner.set_ide_theme(name);
+    }
+    allIdeThemes(): Array<{ name: string; dark: boolean; accent: string }> {
+        const raw = this.inner.all_ide_theme_names?.();
+        return Array.isArray(raw)
+            ? (raw as Array<{ name: string; dark: boolean; accent: string }>)
+            : [];
+    }
+    paneDropTarget(
+        panesJson: string,
+        x: number,
+        y: number,
+    ): {
+        external_id: number;
+        placement: string;
+        rect: { x: number; y: number; w: number; h: number };
+    } | null {
+        const zone = this.inner.pane_drop_target?.(panesJson, x, y);
+        if (!zone || typeof zone !== "object") return null;
+        return zone as {
+            external_id: number;
+            placement: string;
+            rect: { x: number; y: number; w: number; h: number };
+        };
+    }
+    setPresenceIndex(entries: unknown): void {
+        this.inner.set_presence_index?.(entries);
     }
     /** User cursor style: optional `#RRGGBB` override + preset name
      *  (`"rainbow"` animates and ignores the color). */
@@ -1845,8 +2918,30 @@ class ChromeAdapter implements TerminalAdapter {
     agentSendMessage(text: string): void {
         this.inner.agent_send_message(text);
     }
+    agentInsertPaste(text: string): boolean {
+        return this.inner.agent_insert_paste?.(text) ?? false;
+    }
     agentSendMessageWithAttachments(text: string, attachmentsJson: string): void {
         this.inner.agent_send_message_with_attachments?.(text, attachmentsJson);
+    }
+    agentAttachClipboardImage(
+        filename: string,
+        mime: string,
+        bytes: Uint8Array,
+    ): boolean {
+        return (
+            this.inner.agent_attach_clipboard_image?.(filename, mime, bytes) === true
+        );
+    }
+    agentAttachFile(filename: string, mime: string, bytes: Uint8Array): boolean {
+        return this.inner.agent_attach_file?.(filename, mime, bytes) === true;
+    }
+    agentFileMentionQuery(): string | null {
+        const query = this.inner.agent_file_mention_query?.();
+        return typeof query === "string" ? query : null;
+    }
+    agentSetFileMentionCandidates(json: string): boolean {
+        return this.inner.agent_set_file_mention_candidates?.(json) === true;
     }
     agentCancel(): void {
         this.inner.agent_cancel();
@@ -1937,7 +3032,10 @@ class ChromeAdapter implements TerminalAdapter {
         this.inner.set_completion_menu?.(itemsJson);
     }
     setMinimap(snapshotJson: string): void {
-        this.inner.set_minimap?.(snapshotJson);
+        // Route 0 is the single-surface web pane; Chrome::draw falls
+        // back to painting route 0 over the terminal rect when no
+        // pane-grid external ids are bound.
+        this.inner.set_minimap?.(0, snapshotJson);
     }
     pushNotification(notificationJson: string): void {
         this.inner.push_notification?.(notificationJson);
@@ -2028,6 +3126,9 @@ async function loadRealWasm(): Promise<RealWasmModule | null> {
         wasmWorkspaceChromeActionsForVisibility = mod.workspace_chrome_actions_for_visibility ?? null;
         wasmIslandChromeSpec = mod.island_chrome_spec ?? null;
         wasmIslandTabLabel = mod.island_tab_label ?? null;
+        // Hand the shared input-policy exports (IME / touch / mobile
+        // keyboard / presence store) to their synchronous TS adapters.
+        installWasmInputPolicy(mod);
         return mod;
     } catch (err) {
         if (terminalStubFallbackAllowed() && typeof console !== "undefined") {

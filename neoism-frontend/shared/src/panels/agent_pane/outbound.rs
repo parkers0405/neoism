@@ -298,6 +298,21 @@ pub enum OutboundAgentCommand {
         title: String,
     },
 
+    /// Delete a session entirely (Ctrl+D on the `/sessions` picker).
+    /// Maps to `AgentClientMessage::DeleteThread` on web and
+    /// `DELETE /session/{id}` on desktop.
+    DeleteSession {
+        session_id: String,
+    },
+
+    /// Toggle a session's pinned flag (Ctrl+F on the `/sessions`
+    /// picker). Maps to `AgentClientMessage::SetPinned` on web and
+    /// `POST /session/{id}/pin` with `{ "pinned": ... }` on desktop.
+    SetSessionPinned {
+        session_id: String,
+        pinned: bool,
+    },
+
     // -- `/connect` provider-auth flow --------------------------------
     //
     // These drive the multi-stage connect picker. The host fetches / mutates
@@ -431,6 +446,17 @@ mod tests {
         let _ = OutboundAgentCommand::HandleReject {
             session_id: "sess-1".to_string(),
             id: Some("q-1".to_string()),
+        };
+        let _ = OutboundAgentCommand::SetTitle {
+            session_id: "sess-1".to_string(),
+            title: "Renamed".to_string(),
+        };
+        let _ = OutboundAgentCommand::DeleteSession {
+            session_id: "sess-1".to_string(),
+        };
+        let _ = OutboundAgentCommand::SetSessionPinned {
+            session_id: "sess-1".to_string(),
+            pinned: true,
         };
     }
 }

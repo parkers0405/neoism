@@ -6,6 +6,11 @@ import {
   workspaceChromeActionsForVisibility,
   type WorkspaceChromeActionKind,
 } from "../terminal/createTerminal";
+import {
+  attachBridgeServices,
+  defaultServiceRegistry,
+  type ServiceRegistry,
+} from "../services/ServiceRegistry";
 import { PtyService } from "../services/PtyService";
 import { SearchService } from "../services/SearchService";
 import { WorkspaceService } from "../services/WorkspaceService";
@@ -62,8 +67,11 @@ export class App {
   private terminalPanel: TerminalPanel | null = null;
   private client: ProtocolClient | null = null;
   private activeSessionId: string | null = null;
+  private serviceRegistry: ServiceRegistry | null = null;
   private ptyService: PtyService | null = null;
   private searchService: SearchService | null = null;
+  // Git panel writes live on the registry (`serviceRegistry.gitPanel`);
+  // no direct field — `attachBridgeServices` owns install + rebind.
   private workspaceService: WorkspaceService | null = null;
   /** Set by the Alt+W create-workspace flow; the daemon upsert ack is
    *  followed by an explicit active-workspace switch. */
@@ -244,7 +252,8 @@ export class App {
     // route correctly. Bridge-bound services (search/diagnostics
     // sinks) are installed later in `handlePtyCreated` once
     // `TerminalPanel` exposes the wasm bridge.
-    this.ptyService = new PtyService(client);
+    this.serviceRegistry = defaultServiceRegistry(client);
+    this.ptyService = this.serviceRegistry.pty;
     this.ptyService.subscribe({
       onCreated: (sessionId, workspaceRoot) =>
         this.handlePtyCreated(sessionId, workspaceRoot),
@@ -253,9 +262,9 @@ export class App {
         this.handlePtyClosed(sessionId, exitCode),
       onError: (message) => this.handlePtyError(message),
     });
-    this.workspaceService = new WorkspaceService(client);
+    this.workspaceService = this.serviceRegistry.workspace;
     this.installWorkspaceTreeSubscription();
-    this.diagnosticsService = new DiagnosticsService(client);
+    this.diagnosticsService = this.serviceRegistry.diagnostics;
     client.connect();
   }
 
@@ -474,13 +483,25 @@ export class App {
       this.terminalPanel.ptyCreated(sessionId);
       return;
     }
+    // `workspaceRoot` is whatever the caller knew: for a daemon
+    // `PtyCreated` frame that is the daemon's GLOBAL project root —
+    // NOT the picked workspace's directory. The browser flow always
+    // resolves a workspace root at pick time (`switchToWorkspaceById`
+    // sets `activeWorkspaceRootPath` before spawning), so that choice
+    // wins; the PTY's value only seeds ungated/legacy connects.
+    // Seeding the panel with the daemon-global root used to point the
+    // wasm file tree at an absolute path outside the workspace, which
+    // the Files service rejects ("absolute paths are not allowed") —
+    // the tree then showed its loading skeleton forever and the agent
+    // pane scoped its thread list to the wrong directory.
+    const effectiveRoot = this.activeWorkspaceRootPath ?? workspaceRoot;
     this.activeSessionId = sessionId;
     this.connectionScreen?.dispose();
     this.connectionScreen = null;
     this.terminalPanel = new TerminalPanel({
       client: this.client,
       pty: this.ptyService ?? undefined,
-      workspaceRoot,
+      workspaceRoot: effectiveRoot,
       sessionId,
       mount: this.root,
       onBridgeReady: (bridge) => {
@@ -489,8 +510,16 @@ export class App {
         // `IoError::Pending(req_id)` and resume only when JS calls
         // `bridge.service_reply(...)`.
         if (!this.client) return;
-        this.searchService = new SearchService(this.client, bridge);
-        this.searchService.install();
+        if (!this.serviceRegistry) {
+          this.serviceRegistry = defaultServiceRegistry(this.client);
+        }
+        // Git side panel write parity: attachBridgeServices installs
+        // the ops callback, plugging a daemon-marshalling `GitDiffIo`
+        // provider into the shared panel, so stage/unstage, commit and
+        // branch switching run real git ops on the daemon repo
+        // (desktop parity).
+        attachBridgeServices(this.serviceRegistry, this.client, bridge);
+        this.searchService = this.serviceRegistry.search;
         // Diagnostics also needs the bridge now — each
         // `DiagnosticsServerMessage` variant maps to a specific
         // `set_diagnostics` / `hide_diagnostics` / `set_status_lsp_*`
@@ -546,15 +575,15 @@ export class App {
         );
       }
     }
-    this.activeWorkspaceRootPath = workspaceRoot;
-    this.terminalPanel?.setWorkspaceRoot(workspaceRoot);
+    this.activeWorkspaceRootPath = effectiveRoot;
+    this.terminalPanel?.setWorkspaceRoot(effectiveRoot);
     // Establish this connection's project-root workspace on the daemon.
     // The daemon scopes editor-surface binds, pane-layout ops, and
     // session inventory to a per-connection active workspace; without
     // opening one, every file/tab open bounced with a "no active
     // workspace" error toast.
-    if (workspaceRoot) {
-      this.workspaceService?.openProjectRoot(workspaceRoot, false);
+    if (effectiveRoot) {
+      this.workspaceService?.openProjectRoot(effectiveRoot, false);
     }
   }
 
@@ -1272,7 +1301,8 @@ export class App {
     if (!client) return;
     this.clearTerminal();
     this.client = client;
-    this.ptyService = new PtyService(client);
+    this.serviceRegistry = defaultServiceRegistry(client);
+    this.ptyService = this.serviceRegistry.pty;
     this.ptyService.subscribe({
       onCreated: (sessionId, workspaceRoot) =>
         this.handlePtyCreated(sessionId, workspaceRoot),
@@ -1281,9 +1311,9 @@ export class App {
         this.handlePtyClosed(sessionId, exitCode),
       onError: (message) => this.handlePtyError(message),
     });
-    this.workspaceService = new WorkspaceService(client);
+    this.workspaceService = this.serviceRegistry.workspace;
     this.installWorkspaceTreeSubscription();
-    this.diagnosticsService = new DiagnosticsService(client);
+    this.diagnosticsService = this.serviceRegistry.diagnostics;
     this.connectionScreen = new ConnectionScreen(
       this.connectionScreenOptions(event.targetUrl ?? this.defaultConnectionUrl()),
     );

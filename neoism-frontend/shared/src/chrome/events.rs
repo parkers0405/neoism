@@ -206,7 +206,79 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             finder,
             git_diff,
             command_composer: composer_rect,
+            panes: Vec::new(),
         };
+
+        // Re-solve the shared pane grid against the freshly computed
+        // content rect so pane rects / divider bands / drop zones hit
+        // and paint in window coordinates every relayout. Zero gap:
+        // pane boundaries stay flush (the web surfaces already fill
+        // their normalized rects edge-to-edge) while the solver's
+        // divider tolerance still inflates each band for grabbing.
+        self.pane_grid.set_content(terminal, 0.0);
+
+        // Per-pane chrome rects (desktop `apply_pane_chrome_offsets`
+        // rules): top-aligned panes use the workspace strip; stacked
+        // panes reserve a local tab strip (+ breadcrumbs row when the
+        // active tab shows a document) inside their own rect.
+        let mut pane_chrome = Vec::new();
+        if self.pane_grid.is_split() {
+            let min_top = self
+                .pane_grid
+                .panes()
+                .iter()
+                .map(|p| p.rect.y)
+                .fold(f32::INFINITY, f32::min);
+            for pane in self.pane_grid.panes() {
+                let Some(ext) = pane.external_id else {
+                    continue;
+                };
+                let rect = pane.rect;
+                let top_aligned =
+                    crate::session_layout::is_pane_top_aligned(rect.y, min_top);
+                if top_aligned {
+                    pane_chrome.push(crate::layout::PaneChromeLayout {
+                        external_id: ext,
+                        rect,
+                        tabs: None,
+                        breadcrumbs: None,
+                        content: rect,
+                    });
+                    continue;
+                }
+                let strip_h = (BUFFER_TABS_HEIGHT * scale).min(rect.h);
+                let tabs_rect = Rect::new(rect.x, rect.y, rect.w, strip_h);
+                let crumbs_h = if self
+                    .pane_tabs
+                    .get(&ext)
+                    .is_some_and(|tabs| tabs.active_shows_breadcrumbs())
+                {
+                    self.pane_breadcrumbs
+                        .get(&ext)
+                        .map(|crumbs| crumbs.height())
+                        .unwrap_or(0.0)
+                        .min((rect.h - strip_h).max(0.0))
+                } else {
+                    0.0
+                };
+                let crumbs_rect = (crumbs_h > 0.0).then(|| {
+                    Rect::new(rect.x, rect.y + strip_h, rect.w, crumbs_h)
+                });
+                pane_chrome.push(crate::layout::PaneChromeLayout {
+                    external_id: ext,
+                    rect,
+                    tabs: Some(tabs_rect),
+                    breadcrumbs: crumbs_rect,
+                    content: Rect::new(
+                        rect.x,
+                        rect.y + strip_h + crumbs_h,
+                        rect.w,
+                        (rect.h - strip_h - crumbs_h).max(0.0),
+                    ),
+                });
+            }
+        }
+        self.layout.panes = pane_chrome;
     }
 
     /// Push a panel onto the focus stack. Idempotent: pushing a
@@ -436,6 +508,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 | UiEvent::Wheel { .. }
         );
 
+        // Chrome-page layer first: the full-screen settings overlay
+        // and the About modal own input outright while active, and an
+        // active Extensions/NeoWorld tab owns input inside its page
+        // rect. Runs BEFORE the chrome key shortcuts so Alt+E & co.
+        // can't reach the panels underneath an overlay — desktop
+        // parity with router/route.rs's settings/modal arms.
+        if self.handle_chrome_page_event(event) {
+            return;
+        }
+
         if self.handle_chrome_key_shortcut(event, &mut ctx) {
             return;
         }
@@ -598,7 +680,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // scroll only fires when the cursor was actually over the
         // terminal rect at the time of the wheel tick.
         if let UiEvent::Wheel { dy, mode, .. } = event {
-            if !self.is_terminal_tab_active() {
+            // Hosted editor panes (markdown / code / notebook / draw)
+            // own their scroll through the bridge routes — the legacy
+            // plain-painter offset below must not fight them.
+            if !self.is_terminal_tab_active()
+                && self.active_editor_pane_kind().is_none()
+                && !(self.tab_lang == crate::syntax::Lang::Markdown
+                    && self.markdown_pane.is_some())
+            {
                 let terminal_rect = self.layout.terminal;
                 let (px, py) = self.last_pointer_pos;
                 let inside = terminal_rect.contains(px, py);

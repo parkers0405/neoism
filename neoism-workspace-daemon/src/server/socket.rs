@@ -68,6 +68,14 @@ pub(crate) enum ServiceClientMessage {
         request_id: u64,
         message: CrdtClientMessage,
     },
+    /// Config plane: generic get/set over the daemon host's unified
+    /// `config.json` + the read-only extensions inventory. Backs the
+    /// web Settings and Extensions pages.
+    Config {
+        #[serde(default)]
+        request_id: u64,
+        message: ConfigClientMessage,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -126,6 +134,10 @@ pub(crate) enum ServiceServerMessage {
     CrdtReply {
         request_id: u64,
         message: CrdtServerMessage,
+    },
+    ConfigReply {
+        request_id: u64,
+        message: ConfigServerMessage,
     },
 }
 
@@ -257,6 +269,10 @@ pub(crate) async fn handle_socket(
     // main client-frame loop below.
     let (push_tx, mut push_rx) =
         tokio::sync::mpsc::unbounded_channel::<ServiceServerMessage>();
+    // Native-editor LSP queries run on blocking tasks (language servers
+    // can stall for seconds on cold start); their replies ride the same
+    // push lane so the socket pump never blocks behind them.
+    let editor_query_tx = push_tx.clone();
     let poll_task = tokio::spawn(status_poll_loop(
         push_tx,
         initial_branch_name(&initial_branch),
@@ -814,8 +830,12 @@ pub(crate) async fn handle_socket(
                     workspace_root,
                     message,
                 } => {
-                    if let Err(denial) = check_permission(&device, Permission::ReadFiles)
-                    {
+                    // Mutating verbs (stage/commit/checkout…) require the
+                    // write gate; reads stay on ReadFiles.
+                    if let Err(denial) = check_permission(
+                        &device,
+                        git_handler::required_permission(&message),
+                    ) {
                         let _ = send_json(&mut sink, &denial).await;
                         continue;
                     }
@@ -950,9 +970,33 @@ pub(crate) async fn handle_socket(
                             };
                             active_editor_file =
                                 Some(file.to_string_lossy().into_owned());
-                            crate::language_server::sync_buffer_snapshot(
-                                &root, &file, text, surface_id,
-                            )
+                            // Non-blocking half inline (cache + FIFO queue,
+                            // socket order = sync order); the flush barrier
+                            // + status walk build the LspSnapshot on a
+                            // blocking task so a cold server spawn can't
+                            // stall PTY forwarding behind a keystroke sync.
+                            crate::language_server::queue_buffer_sync(
+                                &root, &file, text,
+                            );
+                            {
+                                let root = root.clone();
+                                let tx = editor_query_tx.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    if let Some(message) =
+                                        crate::language_server::buffer_snapshot_message(
+                                            &root, &file, surface_id,
+                                        )
+                                    {
+                                        let _ = tx.send(
+                                            ServiceServerMessage::EditorReply {
+                                                request_id,
+                                                message,
+                                            },
+                                        );
+                                    }
+                                });
+                            }
+                            continue;
                         }
                         EditorClientMessage::LspAction {
                             action,
@@ -1052,6 +1096,93 @@ pub(crate) async fn handle_socket(
                                 *target = surface_id;
                             }
                             reply
+                        }
+                        // Native-editor position-explicit queries: served
+                        // from the workspace-owned language servers on a
+                        // blocking task (cold servers can stall seconds);
+                        // the reply rides the push lane, tagged with this
+                        // envelope's request id.
+                        EditorClientMessage::LspQueryAt {
+                            seq,
+                            action,
+                            path,
+                            line,
+                            character,
+                            text,
+                            open_paths,
+                            surface_id,
+                        } => {
+                            let root = root.clone();
+                            let tx = editor_query_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let message = crate::language_server::query_at(
+                                    &root,
+                                    seq,
+                                    action,
+                                    &path,
+                                    line,
+                                    character,
+                                    text.as_deref(),
+                                    &open_paths,
+                                    surface_id,
+                                );
+                                let _ = tx.send(ServiceServerMessage::EditorReply {
+                                    request_id,
+                                    message,
+                                });
+                            });
+                            continue;
+                        }
+                        EditorClientMessage::ApplyLspCodeActionAt {
+                            seq,
+                            action,
+                            open_paths,
+                            surface_id,
+                        } => {
+                            let root = root.clone();
+                            let tx = editor_query_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let message =
+                                    crate::language_server::apply_code_action_at(
+                                        &root,
+                                        seq,
+                                        action,
+                                        &open_paths,
+                                        surface_id,
+                                    );
+                                let _ = tx.send(ServiceServerMessage::EditorReply {
+                                    request_id,
+                                    message,
+                                });
+                            });
+                            continue;
+                        }
+                        // Native-editor save notification: queue `didSave`
+                        // behind every pending `didChange` for this document
+                        // (the live-sync FIFO owns ordering) so save-
+                        // triggered slow-lane diagnostics (rust-analyzer's
+                        // check lane) fire for web/native saves exactly like
+                        // daemon-side saves. Fire-and-forget: no reply, and
+                        // out-of-workspace paths are silently dropped. Runs
+                        // on a blocking task — a cold language-server spawn
+                        // must never stall the socket loop.
+                        EditorClientMessage::DidSave { path, .. } => {
+                            let file = if path.is_absolute() {
+                                path
+                            } else {
+                                root.join(path)
+                            };
+                            if let Ok(file) = file.canonicalize() {
+                                if file.starts_with(&root) {
+                                    let root = root.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        crate::language_server::save_document(
+                                            &root, &file,
+                                        );
+                                    });
+                                }
+                            }
+                            continue;
                         }
                         // SendKeys / Command / MouseInput / Resize drove the
                         // embedded nvim grid. The native editor only reuses
@@ -1266,6 +1397,31 @@ pub(crate) async fn handle_socket(
                         }
                     }
                 }
+                ServiceClientMessage::Config {
+                    request_id,
+                    message,
+                } => {
+                    // Settings writes need the file-write grant; reads
+                    // (config snapshot, extensions inventory) ride the
+                    // read grant — same split as the files plane.
+                    if let Err(denial) = check_permission(
+                        &device,
+                        config_handler::required_permission(&message),
+                    ) {
+                        let _ = send_json(&mut sink, &denial).await;
+                        continue;
+                    }
+                    for message in config_handler::handle(message).await {
+                        let resp = ServiceServerMessage::ConfigReply {
+                            request_id,
+                            message,
+                        };
+                        if let Err(err) = send_json(&mut sink, &resp).await {
+                            tracing::warn!(error = %err, "websocket send error draining config reply");
+                            return;
+                        }
+                    }
+                }
             }
             continue;
         }
@@ -1316,9 +1472,11 @@ pub(crate) async fn handle_socket(
             continue;
         }
         if let Ok(msg) = serde_json::from_str::<GitClientMessage>(&text) {
-            // All current git ops are read-only; future writes (commit,
-            // stage, etc.) will branch on the variant to require GitWrite.
-            if let Err(denial) = check_permission(&device, Permission::ReadFiles) {
+            // Reads gate on ReadFiles; the write verbs (commit, stage,
+            // checkout…) require the file-write permission.
+            if let Err(denial) =
+                check_permission(&device, git_handler::required_permission(&msg))
+            {
                 let _ = send_json(&mut sink, &denial).await;
                 continue;
             }

@@ -8,8 +8,6 @@ use crate::event::RioEvent;
 use crate::event::{EventListener, Msg, WindowId};
 use corcovado::channel;
 use corcovado::{self, Events, PollOpt, Ready};
-use neoism_terminal_core::colors::term::TermColors;
-use neoism_terminal_core::colors::{ColorRgb, NamedColor};
 use neoism_terminal_core::crosswords::Crosswords;
 use neoism_terminal_core::handler;
 use neoism_terminal_core::TerminalEffect;
@@ -61,41 +59,45 @@ fn bytes_text_for_log(bytes: &[u8]) -> String {
     out
 }
 
-fn live_color_reply(
-    effect: &TerminalEffect,
-    colors: &TermColors,
-    default_foreground: ColorRgb,
-    default_background: ColorRgb,
-) -> Option<Vec<u8>> {
-    let TerminalEffect::ColorRequest {
-        prefix,
-        index,
-        terminator,
-    } = effect
-    else {
-        return None;
-    };
-    if !((prefix == "10" && *index == NamedColor::Foreground as usize)
-        || (prefix == "11" && *index == NamedColor::Background as usize))
-    {
-        return None;
+/// Split one parser pass's drained effects into terminal-protocol
+/// replies — written to the PTY child NOW, via `write_reply` — and
+/// everything else, which the caller defers through the host event
+/// loop as before.
+///
+/// `TerminalEffect::PtyWrite` carries every reply the terminal
+/// answers a query with (DSR 5/6 → CPR, DA1/DA2, DECRPM, XTVERSION,
+/// XTGETTCAP, kitty-keyboard reports, and — since the parse-time
+/// color-reply change in `Crosswords::dynamic_color_sequence` — OSC
+/// 4/10/11/12 color replies). Those bytes must land on the child's
+/// stdin synchronously, in parse order, exactly once: a querier like
+/// `gh`/`termenv` only reads them during its own short raw-mode
+/// window, and a reply that instead bounces through the winit event
+/// loop arrives after that window closed — the kernel then echoes it
+/// as `^[]11;rgb:…` junk and the next reader (gh's prompt library)
+/// aborts on the stray `ESC ]`.
+///
+/// Only when the synchronous write fails is the reply handed back for
+/// the deferred `RioEvent::PtyWrite` path, so bytes are never lost
+/// and never duplicated.
+fn flush_reply_effects(
+    effects: Vec<TerminalEffect>,
+    mut write_reply: impl FnMut(&[u8]) -> std::io::Result<usize>,
+) -> (Vec<TerminalEffect>, Vec<std::io::Error>) {
+    let mut deferred = Vec::with_capacity(effects.len());
+    let mut errors = Vec::new();
+    for effect in effects {
+        match effect {
+            TerminalEffect::PtyWrite(bytes) => match write_reply(&bytes) {
+                Ok(_) => {}
+                Err(err) => {
+                    errors.push(err);
+                    deferred.push(TerminalEffect::PtyWrite(bytes));
+                }
+            },
+            other => deferred.push(other),
+        }
     }
-
-    let fallback = if *index == NamedColor::Foreground as usize {
-        default_foreground
-    } else {
-        default_background
-    };
-    let color = colors[*index]
-        .map(ColorRgb::from_color_arr)
-        .unwrap_or(fallback);
-    Some(
-        format!(
-            "\x1b]{};rgb:{1:02x}{1:02x}/{2:02x}{2:02x}/{3:02x}{3:02x}{4}",
-            prefix, color.r, color.g, color.b, terminator
-        )
-        .into_bytes(),
-    )
+    (deferred, errors)
 }
 
 struct PeekableReceiver<T> {
@@ -147,8 +149,6 @@ pub struct Machine<U: EventListener> {
     event_proxy: U,
     window_id: WindowId,
     route_id: usize,
-    default_foreground: ColorRgb,
-    default_background: ColorRgb,
 }
 
 #[derive(Default)]
@@ -166,8 +166,6 @@ where
         event_proxy: U,
         window_id: WindowId,
         route_id: usize,
-        default_foreground: ColorRgb,
-        default_background: ColorRgb,
     ) -> Result<Machine<U>, Box<dyn std::error::Error>> {
         let (sender, receiver) = channel::channel();
         let poll = corcovado::Poll::new()?;
@@ -190,8 +188,6 @@ where
             event_proxy,
             window_id,
             route_id,
-            default_foreground,
-            default_background,
         })
     }
 
@@ -272,28 +268,16 @@ where
             state.parser.advance(&mut **terminal, &chunk);
 
             let drained_effects: Vec<_> = terminal.drain_effects().collect();
-            let mut deferred_effects = Vec::with_capacity(drained_effects.len());
-            for effect in drained_effects {
-                let reply = live_color_reply(
-                    &effect,
-                    terminal.colors(),
-                    self.default_foreground,
-                    self.default_background,
+            let pty = &mut self.pty;
+            let (deferred_effects, reply_errors) =
+                flush_reply_effects(drained_effects, |bytes| pty.write_reply(bytes));
+            for err in reply_errors {
+                tracing::warn!(
+                    target: "neoism_backend::pty_input",
+                    route_id = self.route_id,
+                    error = %err,
+                    "failed to write live terminal reply; deferring via event loop"
                 );
-
-                if let Some(reply) = reply {
-                    if let Err(err) = self.pty.write_reply(&reply) {
-                        tracing::warn!(
-                            target: "neoism_backend::pty_input",
-                            route_id = self.route_id,
-                            error = %err,
-                            "failed to write live OSC color reply"
-                        );
-                        deferred_effects.push(effect);
-                    }
-                } else {
-                    deferred_effects.push(effect);
-                }
             }
             if !deferred_effects.is_empty() {
                 crate::effects_adapter::dispatch_terminal_effects(
@@ -598,43 +582,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_osc_11_reply_uses_background_fallback_and_preserves_terminator() {
-        let effect = TerminalEffect::ColorRequest {
-            prefix: "11".to_owned(),
-            index: NamedColor::Background as usize,
-            terminator: "\x1b\\".to_owned(),
-        };
+    fn pty_write_effects_are_written_synchronously_in_order_exactly_once() {
+        let effects = vec![
+            TerminalEffect::PtyWrite(b"\x1b]11;rgb:1212/3434/5656\x1b\\".to_vec()),
+            TerminalEffect::Bell,
+            TerminalEffect::PtyWrite(b"\x1b[4;1R".to_vec()),
+        ];
 
-        let reply = live_color_reply(
-            &effect,
-            &TermColors::default(),
-            ColorRgb { r: 1, g: 2, b: 3 },
-            ColorRgb {
-                r: 0x12,
-                g: 0x34,
-                b: 0x56,
-            },
+        let mut written: Vec<Vec<u8>> = Vec::new();
+        let (deferred, errors) = flush_reply_effects(effects, |bytes| {
+            written.push(bytes.to_vec());
+            Ok(bytes.len())
+        });
+
+        assert_eq!(
+            written,
+            vec![
+                b"\x1b]11;rgb:1212/3434/5656\x1b\\".to_vec(),
+                b"\x1b[4;1R".to_vec(),
+            ],
+            "each reply written once, in parse order"
         );
-
-        assert_eq!(reply, Some(b"\x1b]11;rgb:1212/3434/5656\x1b\\".to_vec()));
+        assert!(errors.is_empty());
+        assert_eq!(deferred.len(), 1, "non-reply effects still defer");
+        assert!(matches!(deferred[0], TerminalEffect::Bell));
     }
 
     #[test]
-    fn live_color_reply_leaves_other_color_queries_for_the_renderer() {
-        let effect = TerminalEffect::ColorRequest {
-            prefix: "12".to_owned(),
-            index: NamedColor::Cursor as usize,
-            terminator: "\x07".to_owned(),
-        };
+    fn failed_reply_write_defers_the_bytes_instead_of_dropping_them() {
+        let effects = vec![TerminalEffect::PtyWrite(b"\x1b[0n".to_vec())];
 
-        assert_eq!(
-            live_color_reply(
-                &effect,
-                &TermColors::default(),
-                ColorRgb::default(),
-                ColorRgb::default(),
-            ),
-            None
-        );
+        let (deferred, errors) = flush_reply_effects(effects, |_bytes| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "worker gone",
+            ))
+        });
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(deferred.len(), 1);
+        match &deferred[0] {
+            TerminalEffect::PtyWrite(bytes) => {
+                assert_eq!(bytes.as_slice(), b"\x1b[0n")
+            }
+            other => panic!("expected deferred PtyWrite, got {other:?}"),
+        }
     }
 }

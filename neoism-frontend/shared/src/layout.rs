@@ -31,6 +31,29 @@ pub struct PanelLayout {
     pub scale: f32,
 }
 
+/// Per-pane chrome slice of the content area while the pane grid is
+/// split. Mirrors the desktop's `apply_pane_chrome_offsets` rules
+/// (`chrome_geom.rs`): a TOP-ALIGNED pane (its top matches the
+/// grid's smallest pane top) uses the workspace strip and keeps its
+/// whole rect as content; a STACKED (lower) pane reserves a local tab
+/// strip — plus a breadcrumbs row when its active tab is a document —
+/// inside its own rect.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PaneChromeLayout {
+    /// Host route/pane id (the pane grid leaf's `external_id`).
+    pub external_id: u64,
+    /// The pane's full solved rect.
+    pub rect: Rect,
+    /// Per-pane tab strip rect — `None` for top-aligned panes (the
+    /// workspace strip serves them).
+    pub tabs: Option<Rect>,
+    /// Per-pane breadcrumbs rect below the strip, when the active tab
+    /// shows a document.
+    pub breadcrumbs: Option<Rect>,
+    /// Content rect after the local chrome reservations.
+    pub content: Rect,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChromeLayout {
     /// Top-of-window chrome strip (panel toggle + hamburger menu).
@@ -58,4 +81,9 @@ pub struct ChromeLayout {
     /// hidden (it docks above the status line when shown).
     #[serde(default)]
     pub command_composer: Option<Rect>,
+    /// Per-pane chrome rects while the pane grid is split — one entry
+    /// per visible pane, empty when a single pane fills the content
+    /// rect. See [`PaneChromeLayout`].
+    #[serde(default)]
+    pub panes: Vec<PaneChromeLayout>,
 }

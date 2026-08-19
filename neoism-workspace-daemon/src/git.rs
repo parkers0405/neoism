@@ -11,11 +11,23 @@ use std::path::Path;
 
 use git2::{DiffFormat, DiffOptions, Repository, Status, StatusOptions};
 use neoism_protocol::git::{
-    CommitSummary, DiffHunk, GitClientMessage, GitFileStatus, GitServerMessage,
-    GitStatusEntry,
+    CommitSummary, DiffHunk, GitChangeStatus, GitClientMessage, GitFileChange,
+    GitFileDiff, GitFileStatus, GitServerMessage, GitStatusEntry,
 };
+use neoism_protocol::pairing::Permission;
 
 use crate::files::{resolve_path, workspace_root};
+
+/// Permission the socket layer must check before dispatching `msg`.
+/// Mutating verbs (stage / unstage / commit / checkout) ride the same
+/// write gate as file writes; everything else stays read-only.
+pub fn required_permission(msg: &GitClientMessage) -> Permission {
+    if msg.is_mutation() {
+        Permission::WriteFiles
+    } else {
+        Permission::ReadFiles
+    }
+}
 
 fn err(msg: impl Into<String>) -> Vec<GitServerMessage> {
     vec![GitServerMessage::Error {
@@ -159,7 +171,264 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
         GitClientMessage::Status => status(&repo),
         GitClientMessage::Diff { path } => diff(&repo, path.as_deref(), root),
         GitClientMessage::Log { max_count } => log(&repo, max_count),
+        // ── Web git-panel write parity (Pass 2) ──────────────────────
+        // These shell out to `git` with the exact flags the desktop
+        // panel's `NativeGitDiffIo` uses (see
+        // `neoism-frontend/desktop/src/editor/git_diff_panel/io.rs`) so
+        // web and desktop observe identical semantics. All of them run
+        // against the repo's TOPLEVEL workdir — the panel's paths are
+        // repo-relative, and the workspace root may sit below it.
+        GitClientMessage::ChangedFiles => with_workdir(&repo, |wd| {
+            vec![changed_files_reply(wd, None)]
+        }),
+        GitClientMessage::Stage { path } => with_workdir(&repo, |wd| {
+            if let Err(e) = resolve_path(wd, &path) {
+                return err(e);
+            }
+            let result = run_git(wd, &["add", "--", &path]);
+            vec![changed_files_reply(wd, result.err())]
+        }),
+        GitClientMessage::Unstage { path } => with_workdir(&repo, |wd| {
+            if let Err(e) = resolve_path(wd, &path) {
+                return err(e);
+            }
+            // Desktop parity: `git restore --staged`, falling back to
+            // the older `git reset` for git builds without `restore`.
+            let result = run_git(wd, &["restore", "--staged", "--", &path])
+                .or_else(|_| run_git(wd, &["reset", "-q", "HEAD", "--", &path]));
+            vec![changed_files_reply(wd, result.err())]
+        }),
+        GitClientMessage::Commit { message } => with_workdir(&repo, |wd| {
+            let result = if message.trim().is_empty() {
+                Err("Commit message is empty".to_string())
+            } else {
+                run_git(wd, &["commit", "-m", &message])
+            };
+            vec![changed_files_reply(wd, result.err())]
+        }),
+        GitClientMessage::Branches => with_workdir(&repo, |wd| {
+            vec![GitServerMessage::Branches {
+                branches: list_branches(wd),
+            }]
+        }),
+        GitClientMessage::Checkout { branch } => with_workdir(&repo, |wd| {
+            // `git switch`, falling back to `git checkout` — same
+            // two-step the desktop panel runs.
+            let result = run_git(wd, &["switch", &branch])
+                .or_else(|_| run_git(wd, &["checkout", &branch]));
+            vec![changed_files_reply(wd, result.err())]
+        }),
+        GitClientMessage::DiffFiles { paths } => with_workdir(&repo, |wd| {
+            let mut diffs = Vec::with_capacity(paths.len());
+            for path in paths {
+                if resolve_path(wd, &path).is_err() {
+                    continue;
+                }
+                diffs.push(GitFileDiff {
+                    patch: load_file_diff(wd, &path),
+                    path,
+                });
+            }
+            vec![GitServerMessage::FileDiffs { diffs }]
+        }),
     }
+}
+
+/// Run `f` against the repository's toplevel working directory, or
+/// reply with an error for bare repositories.
+fn with_workdir<F>(repo: &Repository, f: F) -> Vec<GitServerMessage>
+where
+    F: FnOnce(&Path) -> Vec<GitServerMessage>,
+{
+    match repo.workdir() {
+        Some(wd) => f(wd),
+        None => err("bare repository has no working tree"),
+    }
+}
+
+/// `ChangedFiles` reply: refreshed file list + current branch, with an
+/// optional mutation error carried alongside (mirrors the desktop
+/// panel's mutate-then-`collect_files` background thread, which stores
+/// the fresh list even when the op failed).
+fn changed_files_reply(workdir: &Path, error: Option<String>) -> GitServerMessage {
+    GitServerMessage::ChangedFiles {
+        files: collect_changed_files(workdir),
+        branch: resolve_branch(workdir),
+        error,
+    }
+}
+
+/// Port of the desktop panel's `collect_files`
+/// (`desktop/src/editor/git_diff_panel/io.rs`): `git status
+/// --porcelain=v1 -z --untracked-files=all` for the entry list +
+/// staged bit, `git diff HEAD --numstat -z` for per-file line counts,
+/// and a raw line count for untracked files.
+fn collect_changed_files(workdir: &Path) -> Vec<GitFileChange> {
+    let status = match git_command(workdir)
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+
+    let numstat = git_command(workdir)
+        .args(["diff", "HEAD", "--numstat", "-z", "--no-color"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| neoism_ui::panels::git_diff::parse_numstat(&o.stdout))
+        .unwrap_or_default();
+
+    let mut files = Vec::new();
+    let mut i = 0usize;
+    while i < status.len() {
+        let start = i;
+        while i < status.len() && status[i] != 0 {
+            i += 1;
+        }
+        let record = &status[start..i];
+        i = i.saturating_add(1);
+        if record.len() < 4 {
+            continue;
+        }
+        let x = record[0] as char;
+        let y = record[1] as char;
+        let path = String::from_utf8_lossy(&record[3..]).into_owned();
+
+        let status_kind = if x == '?' || y == '?' {
+            GitChangeStatus::Untracked
+        } else if matches!((x, y), ('A', 'A') | ('D', 'D')) || x == 'U' || y == 'U' {
+            GitChangeStatus::Conflict
+        } else if !matches!(x, ' ' | '?') && !matches!(y, ' ' | '?') {
+            GitChangeStatus::Mixed
+        } else if x == 'D' || y == 'D' {
+            GitChangeStatus::Deleted
+        } else if x == 'A' || y == 'A' {
+            GitChangeStatus::Added
+        } else if x == 'R' || y == 'R' {
+            GitChangeStatus::Renamed
+        } else if matches!(x, 'M' | 'T') {
+            GitChangeStatus::Staged
+        } else {
+            GitChangeStatus::Modified
+        };
+
+        // Rename/copy records carry the ORIGINAL path in a second
+        // NUL-separated field — skip it, same as the desktop parser.
+        if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
+            while i < status.len() && status[i] != 0 {
+                i += 1;
+            }
+            i = i.saturating_add(1);
+        }
+
+        let (additions, deletions) = if matches!(status_kind, GitChangeStatus::Untracked)
+        {
+            let line_count = std::fs::read(workdir.join(&path))
+                .map(|bytes| bytecount_lines(&bytes) as u32)
+                .unwrap_or(0);
+            (line_count, 0)
+        } else {
+            numstat.get(&path).copied().unwrap_or((0, 0))
+        };
+        // Index column (`x`) non-empty ⇒ the file has staged content.
+        // Untracked (`?`) and worktree-only (` `) read as unstaged. A
+        // partially-staged file (both columns dirty) still reads staged.
+        let staged = !matches!(x, ' ' | '?');
+        files.push(GitFileChange {
+            path,
+            status: status_kind,
+            additions,
+            deletions,
+            staged,
+        });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
+}
+
+/// List every local branch, newest committer date first — desktop
+/// `list_branches` parity. Empty on git failure.
+fn list_branches(workdir: &Path) -> Vec<String> {
+    let output = git_command(workdir)
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "--sort=-committerdate",
+            "refs/heads",
+        ])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Desktop `load_diff` parity: raw patch text for one file. Tracked
+/// files diff against HEAD (so fully-staged changes still show);
+/// untracked files diff against `/dev/null` via `--no-index`, which
+/// exits non-zero by design when a diff exists.
+fn load_file_diff(workdir: &Path, path: &str) -> String {
+    let tracked = git_command(workdir)
+        .args(["diff", "HEAD", "--no-color", "--", path])
+        .output();
+    if let Ok(o) = &tracked {
+        if o.status.success() && !o.stdout.is_empty() {
+            return String::from_utf8_lossy(&o.stdout).into_owned();
+        }
+    }
+    // Empty tracked diff — the file may be untracked (or new+staged
+    // with HEAD unborn). `--no-index` renders the whole file as
+    // additions, matching the desktop's untracked branch.
+    let abs = workdir.join(path);
+    if !abs.is_file() {
+        return String::new();
+    }
+    let untracked = git_command(workdir)
+        .args(["diff", "--no-index", "--no-color", "--", "/dev/null"])
+        .arg(&abs)
+        .output();
+    match untracked {
+        // `--no-index` exits 1 when the files differ; take stdout
+        // whenever git produced any.
+        Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => String::new(),
+    }
+}
+
+/// Run a git subcommand in `workdir`, mapping a non-zero exit to the
+/// trimmed stderr (or stdout) so the panel can surface it — a direct
+/// port of the desktop panel's `run_git`.
+fn run_git(workdir: &Path, args: &[&str]) -> Result<(), String> {
+    let output = git_command(workdir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let mut msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if msg.is_empty() {
+        msg = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    }
+    if msg.is_empty() {
+        msg = "git command failed".to_string();
+    }
+    Err(msg)
+}
+
+/// Base `git` invocation rooted at `workdir` with the same
+/// lock-avoidance env the rest of the daemon (and the desktop panel)
+/// uses.
+fn git_command(workdir: &Path) -> std::process::Command {
+    let mut cmd = crate::process::background_command("git");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0").arg("-C").arg(workdir);
+    cmd
 }
 
 fn map_status(s: Status) -> Option<GitFileStatus> {
@@ -415,6 +684,170 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
         assert_eq!(deleted, 1, "doomed.txt should count as one deletion");
         assert_eq!(added, 1, "brand_new.txt should count as one addition");
+    }
+
+    #[test]
+    fn stage_commit_branch_roundtrip_via_wire_verbs() {
+        let tmp = std::env::temp_dir()
+            .join(format!("neoism-git-panel-verbs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).expect("mkdir tmp");
+        let _repo = Repository::init(&tmp).expect("init repo");
+        run_git(&tmp, &["config", "user.name", "t"]).expect("config name");
+        run_git(&tmp, &["config", "user.email", "t@e"]).expect("config email");
+        std::fs::write(tmp.join("a.txt"), b"one\n").expect("write a.txt");
+
+        // Untracked + unstaged before any op.
+        let out = handle_blocking(&tmp, GitClientMessage::ChangedFiles);
+        match out.first() {
+            Some(GitServerMessage::ChangedFiles { files, error, .. }) => {
+                assert!(error.is_none(), "unexpected error: {error:?}");
+                assert_eq!(files.len(), 1, "expected one entry, got {files:?}");
+                assert_eq!(files[0].path, "a.txt");
+                assert_eq!(files[0].status, GitChangeStatus::Untracked);
+                assert!(!files[0].staged);
+                assert_eq!(files[0].additions, 1, "untracked line count");
+            }
+            other => panic!("expected ChangedFiles, got {other:?}"),
+        }
+
+        // Stage flips the staged bit (index column non-empty).
+        let out = handle_blocking(
+            &tmp,
+            GitClientMessage::Stage {
+                path: "a.txt".into(),
+            },
+        );
+        match out.first() {
+            Some(GitServerMessage::ChangedFiles { files, error, .. }) => {
+                assert!(error.is_none(), "stage error: {error:?}");
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].status, GitChangeStatus::Added);
+                assert!(files[0].staged, "staged bit after git add");
+            }
+            other => panic!("expected ChangedFiles, got {other:?}"),
+        }
+
+        // Unstage puts it back.
+        let out = handle_blocking(
+            &tmp,
+            GitClientMessage::Unstage {
+                path: "a.txt".into(),
+            },
+        );
+        match out.first() {
+            Some(GitServerMessage::ChangedFiles { files, error, .. }) => {
+                assert!(error.is_none(), "unstage error: {error:?}");
+                assert!(!files[0].staged, "unstaged after restore --staged");
+            }
+            other => panic!("expected ChangedFiles, got {other:?}"),
+        }
+
+        // Re-stage + commit empties the list and reports a branch.
+        handle_blocking(
+            &tmp,
+            GitClientMessage::Stage {
+                path: "a.txt".into(),
+            },
+        );
+        let out = handle_blocking(
+            &tmp,
+            GitClientMessage::Commit {
+                message: "init".into(),
+            },
+        );
+        match out.first() {
+            Some(GitServerMessage::ChangedFiles {
+                files,
+                branch,
+                error,
+            }) => {
+                assert!(error.is_none(), "commit error: {error:?}");
+                assert!(files.is_empty(), "clean tree after commit: {files:?}");
+                assert!(branch.is_some(), "branch after first commit");
+            }
+            other => panic!("expected ChangedFiles, got {other:?}"),
+        }
+
+        // Branch list + checkout of a fresh branch.
+        run_git(&tmp, &["branch", "dev"]).expect("create dev branch");
+        let out = handle_blocking(&tmp, GitClientMessage::Branches);
+        match out.first() {
+            Some(GitServerMessage::Branches { branches }) => {
+                assert!(
+                    branches.iter().any(|b| b == "dev"),
+                    "dev missing from {branches:?}"
+                );
+            }
+            other => panic!("expected Branches, got {other:?}"),
+        }
+        let out = handle_blocking(
+            &tmp,
+            GitClientMessage::Checkout {
+                branch: "dev".into(),
+            },
+        );
+        match out.first() {
+            Some(GitServerMessage::ChangedFiles { branch, error, .. }) => {
+                assert!(error.is_none(), "checkout error: {error:?}");
+                assert_eq!(branch.as_deref(), Some("dev"));
+            }
+            other => panic!("expected ChangedFiles, got {other:?}"),
+        }
+
+        // Per-file diff carries HEAD-relative patch text.
+        std::fs::write(tmp.join("a.txt"), b"one\ntwo\n").expect("modify a.txt");
+        let out = handle_blocking(
+            &tmp,
+            GitClientMessage::DiffFiles {
+                paths: vec!["a.txt".into()],
+            },
+        );
+        match out.first() {
+            Some(GitServerMessage::FileDiffs { diffs }) => {
+                assert_eq!(diffs.len(), 1);
+                assert_eq!(diffs[0].path, "a.txt");
+                assert!(
+                    diffs[0].patch.contains("+two"),
+                    "patch missing addition: {}",
+                    diffs[0].patch
+                );
+            }
+            other => panic!("expected FileDiffs, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn mutation_verbs_require_write_permission() {
+        assert!(matches!(
+            required_permission(&GitClientMessage::Stage { path: "x".into() }),
+            Permission::WriteFiles
+        ));
+        assert!(matches!(
+            required_permission(&GitClientMessage::Commit {
+                message: "m".into()
+            }),
+            Permission::WriteFiles
+        ));
+        assert!(matches!(
+            required_permission(&GitClientMessage::Checkout {
+                branch: "b".into()
+            }),
+            Permission::WriteFiles
+        ));
+        assert!(matches!(
+            required_permission(&GitClientMessage::ChangedFiles),
+            Permission::ReadFiles
+        ));
+        assert!(matches!(
+            required_permission(&GitClientMessage::Branches),
+            Permission::ReadFiles
+        ));
+        assert!(matches!(
+            required_permission(&GitClientMessage::DiffFiles { paths: vec![] }),
+            Permission::ReadFiles
+        ));
     }
 
     #[test]

@@ -126,6 +126,22 @@ impl AgentPaneView for NeoismAgentPane {
         NeoismAgentPane::picker(self)
             .is_some_and(|picker| picker.kind == NeoismAgentPickerKind::Session)
     }
+
+    fn take_fx_request(&mut self) -> Option<fx::AgentFxKind> {
+        NeoismAgentPane::take_fx_request(self)
+    }
+
+    fn fx_started(&self) -> Option<(fx::AgentFxKind, f32)> {
+        NeoismAgentPane::fx_started(self)
+    }
+
+    fn set_fx_started(&mut self, at: Option<(fx::AgentFxKind, f32)>) {
+        NeoismAgentPane::set_fx_started(self, at);
+    }
+
+    fn fire_fx_prompt(&mut self) {
+        NeoismAgentPane::fire_fx_prompt(self);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

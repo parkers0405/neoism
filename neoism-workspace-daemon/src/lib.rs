@@ -7,6 +7,9 @@ pub mod agent;
 pub mod audit;
 pub mod auth;
 pub mod cloud_auth;
+/// Config get/set + read-only extensions inventory for the websocket
+/// `Config` envelope (web settings + extensions pages).
+pub mod config_surface;
 pub mod crdt;
 /// Standalone-daemon `NEOISM_DAEMON_TOKEN` bootstrap.
 pub mod daemon_token;

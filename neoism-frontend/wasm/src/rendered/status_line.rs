@@ -337,120 +337,308 @@ impl ChromeBridge {
             .is_some_and(|pane| pane.mode == MarkdownMode::Insert)
     }
 
+    /// Mouse press in the markdown pane (CSS px, canvas coords), at
+    /// desktop press-order parity (`handle_markdown_mouse_press`):
+    /// open markdown menu → roster dots → links → block-conversion
+    /// chip → copy chip → table actions → task checkboxes → drag
+    /// handle / caret placement. True when consumed.
     pub fn markdown_click(&mut self, x: f32, y: f32) -> bool {
-        match self.chrome.markdown_pane_mut() {
-            Some(pane) => {
-                pane.roster_jump_at(x, y)
-                    || pane.toggle_task_at(x, y)
-                    || pane.begin_drag_at(x, y)
-                    || pane.click_at(x, y)
+        // An open markdown menu (block / link completion / spelling)
+        // owns the pointer first: a row pick applies its action, a
+        // click inside the card is swallowed, a click outside closes
+        // the menu and falls through to the pane press.
+        if self.markdown_menu_open() {
+            match self.chrome.context_menu.hit_test(x, y) {
+                Ok(Some(_index)) => {
+                    self.chrome.context_menu.hover(x, y);
+                    let action = self.chrome.context_menu.selected_action();
+                    self.chrome.context_menu.close();
+                    if let Some(action) = action {
+                        self.apply_web_markdown_menu_action(action);
+                    }
+                    return true;
+                }
+                Ok(None) => return true,
+                Err(()) => self.chrome.context_menu.close(),
             }
-            None => false,
         }
+        if self.chrome.markdown_pane_mut().is_none() {
+            return false;
+        }
+        if self
+            .chrome
+            .markdown_pane_mut()
+            .is_some_and(|pane| pane.roster_jump_at(x, y))
+        {
+            return true;
+        }
+        if let Some(target) = self
+            .chrome
+            .markdown_pane_mut()
+            .and_then(|pane| pane.link_at(x, y))
+        {
+            self.route_markdown_link_target(target);
+            return true;
+        }
+        if let Some(rect) = self
+            .chrome
+            .markdown_pane_mut()
+            .and_then(|pane| pane.block_conversion_at(x, y))
+        {
+            self.open_web_markdown_block_menu(Some(rect));
+            return true;
+        }
+        if let Some(content) = self
+            .chrome
+            .markdown_pane_mut()
+            .and_then(|pane| pane.copy_at(x, y))
+        {
+            set_markdown_clipboard_cache(&content);
+            queue_markdown_clipboard_out(&content);
+            self.chrome.notifications.push(
+                "Copied Markdown block".to_string(),
+                neoism_ui::panels::notifications::NotificationLevel::Info,
+            );
+            return true;
+        }
+        if self
+            .chrome
+            .markdown_pane_mut()
+            .is_some_and(|pane| pane.activate_table_action_at(x, y))
+        {
+            return true;
+        }
+        if self
+            .chrome
+            .markdown_pane_mut()
+            .is_some_and(|pane| pane.toggle_task_at(x, y))
+        {
+            return true;
+        }
+        self.chrome
+            .markdown_pane_mut()
+            .is_some_and(|pane| pane.begin_drag_at(x, y) || pane.click_at(x, y))
+    }
+
+    /// Pointer drag over the markdown pane while a button is held —
+    /// extends the mouse selection / moves a dragged block, mirroring
+    /// the desktop's `handle_markdown_drag_move`. True while a drag
+    /// consumed the move.
+    pub fn markdown_drag_move(&mut self, x: f32, y: f32) -> bool {
+        self.chrome
+            .markdown_pane_mut()
+            .is_some_and(|pane| pane.update_drag(x, y))
+    }
+
+    /// Pointer release for the markdown pane: ends drags (block
+    /// reorder drop, selection finish) and opens the block menu a
+    /// handle-click queued — the desktop's
+    /// `handle_markdown_mouse_release`. True when the release did
+    /// something.
+    pub fn markdown_mouse_release(&mut self) -> bool {
+        let Some((handled, menu_rect)) = self
+            .chrome
+            .markdown_pane_mut()
+            .map(|pane| (pane.end_drag(), pane.take_pending_block_menu_rect()))
+        else {
+            return false;
+        };
+        if let Some(rect) = menu_rect {
+            self.open_web_markdown_block_menu(Some(rect));
+            return true;
+        }
+        handled
+    }
+
+    /// Right-click in the markdown pane: spelling menu for the
+    /// misspelled word under the pointer (desktop
+    /// `open_markdown_spelling_menu`). True when a menu opened.
+    pub fn markdown_spelling_menu_at(&mut self, x: f32, y: f32) -> bool {
+        use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
+
+        let Some(target) = self
+            .chrome
+            .markdown_pane_mut()
+            .and_then(|pane| pane.spelling_word_at(x, y))
+        else {
+            return false;
+        };
+        let suggestions =
+            neoism_ui::editor::markdown::spelling_suggestions(&target.word);
+        let mut items = suggestions
+            .into_iter()
+            .map(|replacement| {
+                ContextMenuItem::new(
+                    replacement.clone(),
+                    "fix",
+                    ContextMenuAction::MarkdownSpellingReplace {
+                        line: target.line,
+                        start: target.start,
+                        end: target.end,
+                        expected: target.word.clone(),
+                        replacement,
+                    },
+                )
+                .with_preview("\u{f0eb}")
+            })
+            .collect::<Vec<_>>();
+        items.push(
+            ContextMenuItem::new(
+                "Ignore",
+                "Session",
+                ContextMenuAction::MarkdownSpellingIgnore(target.word.clone()),
+            )
+            .with_preview("\u{f05e}"),
+        );
+        items.push(
+            ContextMenuItem::new(
+                "Add to Dictionary",
+                "Global",
+                ContextMenuAction::MarkdownSpellingAddToDictionary(target.word.clone()),
+            )
+            .with_preview("\u{f02d}"),
+        );
+        let (win_w, win_h) = self.markdown_window_dims();
+        self.chrome.context_menu.open(
+            format!("Spelling: {}", target.word),
+            items,
+            x,
+            y + 8.0,
+            win_w,
+            win_h,
+        );
+        true
+    }
+
+    /// Text queued for the SYSTEM clipboard by the last handled
+    /// markdown key/press (vim yank/delete with sync, copy chip,
+    /// contact-link yank). The JS host drains it after each handled
+    /// event and writes `navigator.clipboard`.
+    pub fn markdown_drain_clipboard_out(&mut self) -> Option<String> {
+        MARKDOWN_CLIPBOARD_OUT.with(|cell| cell.borrow_mut().take())
+    }
+
+    /// Seed the markdown unnamed-register cache from the browser
+    /// clipboard (paste events / async `readText`), so vim `p`
+    /// pastes real clipboard text like the desktop.
+    pub fn markdown_seed_clipboard(&mut self, text: &str) {
+        set_markdown_clipboard_cache(text);
+    }
+
+    /// Drain queued markdown open intents as a JSON-ish array:
+    /// `[{ kind: "markdown"|"editor"|"external"|"rename", target,
+    /// line? }]`. Link activations (Enter on a link, click on a
+    /// link) and committed title renames land here; the JS host
+    /// routes each one through its existing open-tab / window.open
+    /// paths.
+    pub fn markdown_drain_open_intents(&mut self) -> JsValue {
+        let now = web_time::Instant::now();
+        let drained: Vec<MarkdownWebOpenIntent> = MARKDOWN_OPEN_INTENTS
+            .with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+            .into_iter()
+            .filter(|(queued_at, _)| {
+                now.duration_since(*queued_at).as_millis() < MARKDOWN_OPEN_INTENT_TTL_MS
+            })
+            .map(|(_, intent)| intent)
+            .collect();
+        if drained.is_empty() {
+            return JsValue::NULL;
+        }
+        serde_wasm_bindgen::to_value(&drained).unwrap_or(JsValue::NULL)
     }
 
     /// Full key routing for the markdown pane, mirroring the desktop
-    /// bridge's vim-mode handling: Normal-mode motions + mode
-    /// switches, Insert-mode typing, Ctrl+U/D half-page scroll.
-    /// `key` is the browser's `event.key`. True when handled.
+    /// bridge's vim-mode handling. Kept for older hosts; forwards
+    /// into `markdown_key_full` with only the Ctrl modifier.
     pub fn markdown_key(&mut self, key: &str, ctrl: bool) -> bool {
-        use neoism_ui::editor::markdown::MarkdownMode;
-        let viewport = self.last_markdown_viewport_h.max(1.0);
-        let Some(pane) = self.chrome.markdown_pane_mut() else {
+        self.markdown_key_full(key, ctrl, false, false, false)
+    }
+
+    /// True while a markdown `/`-search session owns the keyboard
+    /// (palette in Search mode over an armed incsearch). The host's
+    /// Space-leader shortcut must stand down so spaces reach the
+    /// query (multi-word searches).
+    pub fn markdown_search_active(&mut self) -> bool {
+        self.markdown_search_mode_active()
+    }
+
+    /// Desktop-breadth key routing for the markdown pane — the shared
+    /// `dispatch_markdown_pane_key` port of the desktop's
+    /// `dispatch_markdown_key`: operators/visual mode/motions via the
+    /// shared vim engine, undo/redo, table + list editing, title
+    /// editing, the `/` block menu, `[[` link completion and `/`
+    /// incsearch. `key` is the browser's `event.key`. True when
+    /// handled (the host then drains clipboard-out + open intents).
+    pub fn markdown_key_full(
+        &mut self,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        meta: bool,
+    ) -> bool {
+        use neoism_ui::editor::markdown::bridge_policy::MarkdownBridgeModifiers;
+        use neoism_ui::editor::markdown::dispatch::{
+            dispatch_markdown_pane_key, parse_browser_markdown_key,
+        };
+
+        // Overlay gate: while a full-screen chrome overlay (Settings
+        // page / chrome-owned modal) or a chrome helper-page tab owns
+        // the keyboard, markdown vim keys must never leak into the
+        // hidden pane underneath. Returning false lets the host fall
+        // through to its chrome key routing (`routeKeyToChrome`), the
+        // same way the palette/finder preempt the code-editor key path
+        // via `keyboard_capture_active`.
+        if self.chrome.chrome_page_wants_keyboard() {
+            return false;
+        }
+        if self.chrome.markdown_pane_mut().is_none() {
+            return false;
+        }
+        // A live `/`-search session (palette in Search mode over this
+        // pane) owns the keyboard: query editing, match navigation,
+        // Enter commit, Esc cancel.
+        if self.markdown_search_mode_active() {
+            return self.markdown_search_key(key, ctrl || alt || meta);
+        }
+        // An open markdown menu owns navigation/accept keys; every
+        // other key falls through to the pane and the menus refresh
+        // from the new cursor context (desktop finalize order).
+        if self.markdown_menu_open() {
+            if let Some(consumed) = self.markdown_menu_key(key) {
+                if consumed {
+                    return true;
+                }
+            }
+        }
+
+        let mods = MarkdownBridgeModifiers {
+            shift,
+            control: ctrl,
+            alt,
+            super_key: meta,
+        };
+        let Some(parsed) = parse_browser_markdown_key(key) else {
             return false;
         };
-        if ctrl {
-            match key {
-                "d" => pane.scroll_cursor_by_content_pixels(viewport * 0.5, viewport),
-                "u" => pane.scroll_cursor_by_content_pixels(-(viewport * 0.5), viewport),
-                "e" => pane.scroll_cursor_by_lines(1, viewport),
-                "y" => pane.scroll_cursor_by_lines(-1, viewport),
-                _ => return false,
-            }
-            return true;
-        }
-        // Mode-independent keys.
-        match key {
-            "ArrowUp" => pane.move_up(),
-            "ArrowDown" => pane.move_down(),
-            "ArrowLeft" => pane.move_left(),
-            "ArrowRight" => pane.move_right(),
-            "Home" => pane.move_line_start(),
-            "End" => pane.move_line_end(),
-            "Escape" => pane.enter_normal(),
-            "Enter" => {
-                if pane.mode == MarkdownMode::Insert {
-                    pane.insert_newline();
-                } else {
-                    pane.enter_insert();
-                }
-            }
-            "Backspace" => {
-                if pane.mode == MarkdownMode::Insert {
-                    pane.backspace();
-                } else {
-                    pane.move_left();
-                }
-            }
-            "Delete" => pane.delete_forward(),
-            "Tab" => {
-                if pane.mode == MarkdownMode::Insert {
-                    pane.insert_text("  ");
-                } else {
-                    return false;
-                }
-            }
-            _ => {
-                let mut chars = key.chars();
-                let (Some(ch), None) = (chars.next(), chars.next()) else {
-                    return false;
-                };
-                if pane.mode == MarkdownMode::Insert {
-                    pane.insert_text(&ch.to_string());
-                } else {
-                    // Normal-mode core, like the desktop bridge.
-                    match ch {
-                        'h' => pane.move_left(),
-                        'j' => pane.move_down(),
-                        'k' => pane.move_up(),
-                        'l' => pane.move_right(),
-                        'i' => pane.enter_insert(),
-                        'a' => {
-                            // Append: step right only within the line —
-                            // move_right at line end hops to the NEXT
-                            // line, which is not what `a` means.
-                            let at_line_end = pane
-                                .lines
-                                .get(pane.cursor_line)
-                                .map(|line| pane.cursor_col >= line.len())
-                                .unwrap_or(true);
-                            if !at_line_end {
-                                pane.move_right();
-                            }
-                            pane.enter_insert();
-                        }
-                        'o' => {
-                            pane.move_line_end();
-                            pane.enter_insert();
-                            pane.insert_newline();
-                        }
-                        'u' => {
-                            pane.undo();
-                        }
-                        '0' => pane.move_line_start(),
-                        '$' => pane.move_line_end(),
-                        'n' => {
-                            pane.search_repeat(false);
-                        }
-                        'N' => {
-                            pane.search_repeat(true);
-                        }
-                        _ => return false,
-                    }
-                }
-            }
-        }
-        true
+        let text = if key.chars().count() == 1 { key } else { "" };
+        let paste = markdown_clipboard_cache();
+        let viewport = self.last_markdown_viewport_h.max(1.0);
+        let effects = {
+            let Some(pane) = self.chrome.markdown_pane_mut() else {
+                return false;
+            };
+            dispatch_markdown_pane_key(
+                pane,
+                parsed,
+                text,
+                mods,
+                viewport,
+                Some(&paste),
+                false,
+            )
+        };
+        self.apply_markdown_dispatch_effects(effects)
     }
 
     /// Wave 7-web: remote collaborator carets for the live markdown
@@ -555,5 +743,637 @@ impl ChromeBridge {
         let mut info = self.chrome.status_line.info().clone();
         info.cursor_lines = Some((line as usize, col as usize));
         self.chrome.status_line.set_info(info);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Markdown key/mouse parity support (desktop `dispatch_markdown_key` +
+// press-order breadth, routed through the shared
+// `editor::markdown::dispatch` module).
+//
+// Wasm is single-threaded and the host drains the clipboard/open
+// queues synchronously after each handled event, so process-wide cells
+// are safe — the same pattern the hosted editor panes use.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// The unnamed register: last markdown yank/delete payload, also
+    /// seeded by the host from browser clipboard reads so vim `p`
+    /// pastes real clipboard text.
+    static MARKDOWN_CLIPBOARD: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
+    /// Text queued for the SYSTEM clipboard (yank with sync, copy
+    /// chip). JS drains it and writes navigator.clipboard.
+    static MARKDOWN_CLIPBOARD_OUT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+    /// Queued link-open / rename intents for the JS host, stamped
+    /// with their queue time — stale entries (host had no drain
+    /// opportunity, e.g. a click with no follow-up key yet) are
+    /// dropped instead of firing surprisingly later.
+    static MARKDOWN_OPEN_INTENTS: std::cell::RefCell<
+        Vec<(web_time::Instant, MarkdownWebOpenIntent)>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How long a queued markdown open intent stays valid.
+const MARKDOWN_OPEN_INTENT_TTL_MS: u128 = 3_000;
+
+/// One host-routed markdown activation. `kind` is
+/// `"markdown" | "editor" | "external" | "rename"`.
+#[derive(Clone, serde::Serialize)]
+struct MarkdownWebOpenIntent {
+    kind: &'static str,
+    target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<usize>,
+}
+
+fn markdown_clipboard_cache() -> String {
+    MARKDOWN_CLIPBOARD.with(|cell| cell.borrow().clone())
+}
+
+fn set_markdown_clipboard_cache(text: &str) {
+    MARKDOWN_CLIPBOARD.with(|cell| *cell.borrow_mut() = text.to_string());
+}
+
+fn queue_markdown_clipboard_out(text: &str) {
+    MARKDOWN_CLIPBOARD_OUT.with(|cell| *cell.borrow_mut() = Some(text.to_string()));
+}
+
+fn queue_markdown_open_intent(intent: MarkdownWebOpenIntent) {
+    MARKDOWN_OPEN_INTENTS
+        .with(|cell| cell.borrow_mut().push((web_time::Instant::now(), intent)));
+}
+
+fn markdown_target_is_external(raw: &str) -> bool {
+    raw.starts_with("http://")
+        || raw.starts_with("https://")
+        || raw.starts_with("www.")
+}
+
+impl ChromeBridge {
+    /// Window dims for menu clamping, in the chrome's CSS-px space.
+    fn markdown_window_dims(&self) -> (f32, f32) {
+        (self.viewport.w.max(320.0), self.viewport.h.max(240.0))
+    }
+
+    /// Apply one shared-dispatch effects plan to the web chrome.
+    /// Returns the plan's `handled` flag for the key router.
+    fn apply_markdown_dispatch_effects(
+        &mut self,
+        fx: neoism_ui::editor::markdown::dispatch::MarkdownDispatchEffects,
+    ) -> bool {
+        use neoism_ui::panels::notifications::NotificationLevel;
+
+        if let Some(text) = fx.clipboard_out {
+            set_markdown_clipboard_cache(&text);
+            queue_markdown_clipboard_out(&text);
+        }
+        if let Some(message) = fx.yank_message {
+            self.chrome
+                .notifications
+                .push(message, NotificationLevel::Info);
+        }
+        if let Some(link) = fx.open_cursor_link {
+            self.route_markdown_cursor_link(link);
+        }
+        if let Some(reverse) = fx.open_search {
+            self.open_markdown_search_palette(reverse);
+        }
+        if fx.open_palette {
+            self.chrome.finder.set_enabled(false);
+            self.chrome.command_palette.set_enabled(true);
+            self.relayout_chrome();
+        }
+        if fx.open_block_menu {
+            self.open_web_markdown_block_menu(fx.open_block_menu_at);
+        }
+        if let Some(title) = fx.title_rename {
+            // File renames are daemon-side on the web; hand the
+            // committed title to the host.
+            queue_markdown_open_intent(MarkdownWebOpenIntent {
+                kind: "rename",
+                target: title,
+                line: None,
+            });
+        }
+        if let Some((path, icon)) = fx.value_picker_icon {
+            // Mirror the fresh `icon:` straight onto the Alt+N row —
+            // desktop parity for the frontmatter value picker.
+            self.chrome.notes_sidebar.set_note_icon(&path, icon);
+        }
+        if fx.refresh_menus {
+            self.refresh_web_markdown_menus();
+        }
+        fx.handled
+    }
+
+    // ----- link routing ------------------------------------------------
+
+    fn route_markdown_cursor_link(
+        &mut self,
+        link: neoism_ui::editor::markdown::MarkdownCursorLink,
+    ) {
+        use neoism_ui::editor::markdown::MarkdownCursorLink;
+        match link {
+            MarkdownCursorLink::External(target) => {
+                self.route_markdown_external_target(target);
+            }
+            MarkdownCursorLink::Internal { target, .. } => {
+                let resolved = self
+                    .chrome
+                    .markdown_pane_mut()
+                    .and_then(|pane| pane.resolve_markdown_link(&target));
+                if let Some(target) = resolved {
+                    self.route_markdown_link_target(target);
+                }
+            }
+        }
+    }
+
+    /// `mailto:`/`tel:` targets yank the value (desktop
+    /// `yank_contact_link`); everything else queues a host open.
+    fn route_markdown_external_target(&mut self, target: String) {
+        use neoism_ui::panels::notifications::NotificationLevel;
+        if let Some(value) =
+            neoism_ui::editor::markdown::markdown_contact_value(&target)
+        {
+            let value = value.trim().to_string();
+            set_markdown_clipboard_cache(&value);
+            queue_markdown_clipboard_out(&value);
+            self.chrome
+                .notifications
+                .push(format!("Yanked `{value}`"), NotificationLevel::Info);
+            return;
+        }
+        queue_markdown_open_intent(MarkdownWebOpenIntent {
+            kind: "external",
+            target,
+            line: None,
+        });
+    }
+
+    fn route_markdown_link_target(
+        &mut self,
+        target: neoism_ui::editor::markdown::MarkdownLinkTarget,
+    ) {
+        let raw = target.path.to_string_lossy().into_owned();
+        if neoism_ui::editor::markdown::markdown_contact_value(&raw).is_some()
+            || markdown_target_is_external(&raw)
+        {
+            self.route_markdown_external_target(raw);
+            return;
+        }
+        let kind = if neoism_ui::editor::markdown::is_markdown_path(&target.path) {
+            "markdown"
+        } else {
+            "editor"
+        };
+        queue_markdown_open_intent(MarkdownWebOpenIntent {
+            kind,
+            target: raw,
+            line: target.line,
+        });
+    }
+
+    // ----- markdown context menus (block / link completion / spelling) --
+
+    fn markdown_menu_open(&self) -> bool {
+        let menu = &self.chrome.context_menu;
+        menu.is_visible()
+            && (menu.is_markdown_block_completion()
+                || menu.is_markdown_link_completion()
+                || menu.is_markdown_spelling())
+    }
+
+    /// Menu-owned keys while a markdown menu is open. `Some(true)` =
+    /// consumed; `None` = not a menu key (dispatch to the pane, then
+    /// refresh the menus).
+    fn markdown_menu_key(&mut self, key: &str) -> Option<bool> {
+        match key {
+            "ArrowDown" => {
+                self.chrome.context_menu.move_selection(1);
+                Some(true)
+            }
+            "ArrowUp" => {
+                self.chrome.context_menu.move_selection(-1);
+                Some(true)
+            }
+            "Enter" => {
+                let action = self.chrome.context_menu.selected_action();
+                self.chrome.context_menu.close();
+                if let Some(action) = action {
+                    self.apply_web_markdown_menu_action(action);
+                }
+                Some(true)
+            }
+            "Escape" => {
+                self.chrome.context_menu.close();
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+
+    fn apply_web_markdown_menu_action(
+        &mut self,
+        action: neoism_ui::panels::context_menu::ContextMenuAction,
+    ) {
+        use neoism_ui::panels::context_menu::ContextMenuAction as Action;
+        match action {
+            Action::MarkdownBlock(template) => {
+                let applied = self
+                    .chrome
+                    .markdown_pane_mut()
+                    .map(|pane| pane.apply_block_template(template))
+                    .is_some();
+                if applied
+                    && neoism_ui::editor::markdown::menus::markdown_block_template_opens_link_completion(
+                        template,
+                    )
+                {
+                    self.refresh_web_markdown_link_completion();
+                }
+            }
+            Action::MarkdownLinkCompletion(target) => {
+                // Note: creating a missing note file is a daemon-side
+                // write on the web; the link text still inserts and the
+                // note is created on first open.
+                if let Some(pane) = self.chrome.markdown_pane_mut() {
+                    pane.apply_wiki_link_completion(&target);
+                }
+            }
+            Action::MarkdownSpellingReplace {
+                line,
+                start,
+                end,
+                expected,
+                replacement,
+            } => {
+                if let Some(pane) = self.chrome.markdown_pane_mut() {
+                    pane.replace_spelling_word(
+                        line,
+                        start,
+                        end,
+                        &expected,
+                        &replacement,
+                    );
+                }
+            }
+            Action::MarkdownSpellingIgnore(word) => {
+                let _ = neoism_ui::editor::markdown::ignore_spelling_word(&word);
+            }
+            Action::MarkdownSpellingAddToDictionary(word) => {
+                // No writable global dictionary in the browser —
+                // fall back to a session-scope ignore.
+                if neoism_ui::editor::markdown::add_spelling_word_to_dictionary(&word)
+                    .is_err()
+                {
+                    let _ = neoism_ui::editor::markdown::ignore_spelling_word(&word);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the Notion-style `/` block-template menu (desktop
+    /// `open_markdown_block_menu`), item data from the shared
+    /// `menus::markdown_block_menu_entries` table.
+    fn open_web_markdown_block_menu(&mut self, cursor_rect: Option<[f32; 4]>) {
+        use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
+
+        let items = neoism_ui::editor::markdown::menus::markdown_block_menu_entries()
+            .iter()
+            .map(|entry| {
+                ContextMenuItem::new(
+                    entry.label,
+                    entry.hint,
+                    ContextMenuAction::MarkdownBlock(entry.template),
+                )
+                .with_preview(entry.preview)
+            })
+            .collect::<Vec<_>>();
+        let query = self
+            .chrome
+            .markdown_pane_mut()
+            .and_then(|pane| pane.slash_block_query_before_cursor())
+            .unwrap_or_default();
+        let (win_w, win_h) = self.markdown_window_dims();
+        let (x, y) = cursor_rect
+            .map(|[x, y, _w, h]| (x, y + h + 6.0))
+            .unwrap_or((win_w * 0.35, win_h * 0.3));
+        self.chrome
+            .context_menu
+            .open_markdown_block("Add block", items, query, x, y, win_w, win_h);
+        if let Some([_, row_y, _, row_h]) = cursor_rect {
+            // Never let the window-bottom clamp shove the menu onto
+            // the line being typed — flip it above the row instead.
+            self.chrome.context_menu.avoid_row(row_y, row_y + row_h);
+        }
+    }
+
+    /// Post-key markdown menu refresh, mirroring the desktop finalize
+    /// (`refresh_markdown_block_menu` + link completion).
+    fn refresh_web_markdown_menus(&mut self) {
+        self.refresh_web_markdown_block_menu();
+        self.refresh_web_markdown_link_completion();
+    }
+
+    fn refresh_web_markdown_block_menu(&mut self) -> bool {
+        use neoism_ui::editor::markdown::MarkdownMode;
+        if !self.chrome.context_menu.is_markdown_block_completion() {
+            return false;
+        }
+        let query = self.chrome.markdown_pane_mut().and_then(|pane| {
+            if !matches!(pane.mode, MarkdownMode::Insert) {
+                return None;
+            }
+            pane.slash_block_query_before_cursor()
+        });
+        let Some(query) = query else {
+            self.chrome.context_menu.close();
+            return true;
+        };
+        self.chrome.context_menu.set_markdown_block_query(query)
+    }
+
+    /// Candidate note paths for `[[` completion. The web has no
+    /// synchronous filesystem, so the notes-sidebar entry list (host
+    /// keeps it fresh from the daemon) is the suggestion source.
+    fn markdown_note_link_candidates(&self) -> Vec<std::path::PathBuf> {
+        const SCAN_LIMIT: usize = 512;
+        let mut out = Vec::new();
+        for index in 0..SCAN_LIMIT {
+            let Some(path) = self.chrome.notes_sidebar.note_path(index) else {
+                break;
+            };
+            if self.chrome.notes_sidebar.note_is_dir(index) {
+                continue;
+            }
+            if neoism_ui::editor::markdown::is_markdown_path(&path) {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// Wiki-link (`[[`) completion menu (desktop
+    /// `refresh_markdown_link_completion_menu`). Suggestion ranking,
+    /// titles, hints and the create-note target all come from shared
+    /// helpers; only the candidate list is host-sourced.
+    fn refresh_web_markdown_link_completion(&mut self) -> bool {
+        use neoism_ui::editor::markdown::bridge_policy::markdown_link_line_suffix_mode;
+        use neoism_ui::editor::markdown::dispatch::{
+            markdown_create_note_target, markdown_link_suggestions_from_paths,
+        };
+        use neoism_ui::editor::markdown::menus::{
+            markdown_link_completion_menu_meta, markdown_link_completion_menu_title,
+        };
+        use neoism_ui::editor::markdown::{MarkdownMode, MarkdownWikiLinkKind};
+        use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
+
+        let context = self.chrome.markdown_pane_mut().and_then(|pane| {
+            if !matches!(pane.mode, MarkdownMode::Insert) {
+                return None;
+            }
+            pane.wiki_link_query_before_cursor()
+                .map(|query| (query, pane.cursor_rect, pane.path.clone()))
+        });
+        let Some((query, cursor_rect, doc_path)) = context else {
+            if self.chrome.context_menu.is_markdown_link_completion() {
+                self.chrome.context_menu.close();
+                return true;
+            }
+            return false;
+        };
+        if matches!(query.kind, MarkdownWikiLinkKind::CodeRef)
+            && markdown_link_line_suffix_mode(&query.query)
+        {
+            if self.chrome.context_menu.is_markdown_link_completion() {
+                self.chrome.context_menu.close();
+                return true;
+            }
+            return false;
+        }
+        let base_dir = doc_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| self.workspace_root.clone());
+        let mut suggestions: Vec<(String, String)> = match query.kind {
+            // Heading completion is disabled with the graph index on
+            // desktop too; the page-link project scan needs an fs
+            // index the web doesn't have yet.
+            MarkdownWikiLinkKind::Heading | MarkdownWikiLinkKind::CodeRef => Vec::new(),
+            MarkdownWikiLinkKind::Note => {
+                let candidates = self.markdown_note_link_candidates();
+                markdown_link_suggestions_from_paths(
+                    &candidates,
+                    &base_dir,
+                    &doc_path,
+                    &query.query,
+                )
+                .into_iter()
+                .map(|target| (target.clone(), target))
+                .collect()
+            }
+        };
+        let create_target = if matches!(query.kind, MarkdownWikiLinkKind::Note) {
+            markdown_create_note_target(&query.query).filter(|target| {
+                !suggestions
+                    .iter()
+                    .any(|(_, item)| item.eq_ignore_ascii_case(target))
+            })
+        } else {
+            None
+        };
+        if let Some(target) = create_target.clone() {
+            suggestions.push((target.clone(), target));
+        }
+        if suggestions.is_empty() {
+            if self.chrome.context_menu.is_markdown_link_completion() {
+                self.chrome.context_menu.close();
+                return true;
+            }
+            return false;
+        }
+
+        let title = markdown_link_completion_menu_title(query.kind);
+        let items = suggestions
+            .into_iter()
+            .map(|(label, target)| {
+                let creating = create_target
+                    .as_ref()
+                    .is_some_and(|create| create.eq_ignore_ascii_case(&target));
+                let meta = markdown_link_completion_menu_meta(query.kind, creating);
+                ContextMenuItem::new(
+                    label,
+                    meta.hint,
+                    ContextMenuAction::MarkdownLinkCompletion(target),
+                )
+                .with_preview(meta.preview)
+            })
+            .collect::<Vec<_>>();
+        let (win_w, win_h) = self.markdown_window_dims();
+        match cursor_rect {
+            Some([x, y, _w, h]) => self.chrome.context_menu.open_avoiding_row(
+                title,
+                items,
+                x,
+                y,
+                y + h,
+                win_w,
+                win_h,
+            ),
+            None => self.chrome.context_menu.open(
+                title,
+                items,
+                win_w * 0.35,
+                win_h * 0.3,
+                win_w,
+                win_h,
+            ),
+        }
+        true
+    }
+
+    // ----- `/` incsearch via the shared palette Search modal ------------
+
+    fn open_markdown_search_palette(&mut self, reverse: bool) {
+        self.chrome.finder.set_enabled(false);
+        if reverse {
+            self.chrome.command_palette.enter_search_mode_backward();
+        } else {
+            self.chrome.command_palette.enter_search_mode();
+        }
+        self.relayout_chrome();
+    }
+
+    fn markdown_search_mode_active(&mut self) -> bool {
+        self.chrome.command_palette.is_enabled()
+            && self.chrome.command_palette.is_search_mode()
+            && self
+                .chrome
+                .markdown_pane_mut()
+                .is_some_and(|pane| pane.search_active())
+    }
+
+    /// Keys while the markdown `/`-search session owns the palette:
+    /// query editing rescans the buffer (shared `search_scan`),
+    /// selection moves preview matches, Enter commits, Esc restores
+    /// the origin view — desktop `dispatch_palette_search_query` +
+    /// palette-Enter parity. `chorded` = a non-Shift modifier is
+    /// held; chorded chars are swallowed, never typed into the query.
+    fn markdown_search_key(&mut self, key: &str, chorded: bool) -> bool {
+        match key {
+            "Escape" => {
+                if let Some(pane) = self.chrome.markdown_pane_mut() {
+                    pane.search_cancel();
+                }
+                self.chrome.command_palette.set_enabled(false);
+                self.relayout_chrome();
+                true
+            }
+            "Enter" => {
+                self.commit_markdown_search();
+                true
+            }
+            "ArrowDown" => {
+                self.chrome.command_palette.move_selection_down();
+                self.markdown_search_preview_selected();
+                true
+            }
+            "ArrowUp" => {
+                self.chrome.command_palette.move_selection_up();
+                self.markdown_search_preview_selected();
+                true
+            }
+            "Backspace" => {
+                let mut query = self.chrome.command_palette.query.clone();
+                query.pop();
+                self.chrome.command_palette.set_query(query);
+                self.markdown_search_rescan();
+                true
+            }
+            _ if !chorded
+                && key.chars().count() == 1
+                && !key.chars().next().is_some_and(char::is_control) =>
+            {
+                let mut query = self.chrome.command_palette.query.clone();
+                query.push_str(key);
+                self.chrome.command_palette.set_query(query);
+                self.markdown_search_rescan();
+                true
+            }
+            // The search modal owns the keyboard — swallow the rest so
+            // stray keys can't leak into the buffer beneath.
+            _ => true,
+        }
+    }
+
+    fn markdown_search_rescan(&mut self) {
+        let query = self.chrome.command_palette.query.clone();
+        let pairs = self
+            .chrome
+            .markdown_pane_mut()
+            .map(|pane| pane.search_scan(&query))
+            .unwrap_or_default();
+        self.chrome.command_palette.set_buffer_matches(pairs);
+        self.markdown_search_preview_selected();
+    }
+
+    fn markdown_search_preview_selected(&mut self) {
+        if let Some((lnum, col)) =
+            self.chrome.command_palette.selected_buffer_match_location()
+        {
+            if let Some(pane) = self.chrome.markdown_pane_mut() {
+                pane.search_preview(lnum, col);
+            }
+        }
+    }
+
+    /// Enter in search mode — mirrors the desktop palette pick
+    /// (`bridges/palette.rs` search-mode arm): commit the selected
+    /// buffer match, else scan-and-commit a recent/freeform term,
+    /// else cancel back to the origin view.
+    fn commit_markdown_search(&mut self) {
+        if let Some(location) =
+            self.chrome.command_palette.selected_buffer_match_location()
+        {
+            let query = self.chrome.command_palette.query.clone();
+            self.chrome.command_palette.set_enabled(false);
+            if !query.is_empty() {
+                self.chrome.command_palette.push_recent_search(query);
+                if let Some(pane) = self.chrome.markdown_pane_mut() {
+                    pane.search_commit(location.0, location.1);
+                }
+            } else if let Some(pane) = self.chrome.markdown_pane_mut() {
+                pane.search_cancel();
+            }
+        } else if let Some(term) =
+            self.chrome.command_palette.get_selected_search_term()
+        {
+            self.chrome.command_palette.set_enabled(false);
+            if !term.is_empty() {
+                self.chrome.command_palette.push_recent_search(term.clone());
+                if let Some(pane) = self.chrome.markdown_pane_mut() {
+                    let first = pane
+                        .search_scan(&term)
+                        .first()
+                        .map(|(lnum, col, _)| (*lnum, *col));
+                    match first {
+                        Some((lnum, col)) => pane.search_commit(lnum, col),
+                        None => pane.search_cancel(),
+                    }
+                }
+            } else if let Some(pane) = self.chrome.markdown_pane_mut() {
+                pane.search_cancel();
+            }
+        } else {
+            self.chrome.command_palette.set_enabled(false);
+            if let Some(pane) = self.chrome.markdown_pane_mut() {
+                pane.search_cancel();
+            }
+        }
+        self.relayout_chrome();
     }
 }

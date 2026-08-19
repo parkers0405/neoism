@@ -779,6 +779,24 @@ impl NeoismAgentPane {
         self.tool_expand_anims.values().any(|anim| anim.is_active())
     }
 
+    /// Drop transient timeline interaction state — expanded tool cards,
+    /// in-flight expand animations, the pinned group-child selection,
+    /// link hover, and stale hit rects — so a session switch renders
+    /// the target's timeline exactly as it would fresh. Mirrors the
+    /// shared pane's `reset_transient_timeline_interactions`: without
+    /// this, a child→parent round trip restored the same message ids
+    /// and the navigation click's raised Task card came back still
+    /// showing its title until clicked again.
+    pub(crate) fn reset_transient_timeline_interactions(&mut self) {
+        self.expanded_tool_ids.clear();
+        self.tool_expand_anims.clear();
+        self.selected_tool_group_child = None;
+        self.hover_link_target = None;
+        self.tool_hit_rects.clear();
+        self.link_hit_rects.clear();
+        self.markdown_horizontal_scroll_hover_key = None;
+    }
+
     pub fn toggle_tool_at(&mut self, x: f32, y: f32) -> bool {
         let Some((id, rect)) =
             interaction_policy::hit_rect_target(&self.tool_hit_rects, x, y)

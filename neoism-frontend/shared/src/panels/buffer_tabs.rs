@@ -1261,6 +1261,22 @@ impl<A: Send + Copy + 'static> Panel for BufferTabs<A> {
                     }
                 }
             }
+            UiEvent::PointerDown {
+                button: PointerButton::Middle,
+                x,
+                y,
+                ..
+            } => {
+                // Middle-click closes the tab under the cursor (body or
+                // close glyph — desktop parity). The host's drain path
+                // decides closeability, same as the X.
+                let (ox, oy) = self.panel_origin;
+                if let Some(TabHit::Activate(ix) | TabHit::Close(ix)) =
+                    self.hit_test(*x + ox, *y + oy, ox, oy, self.last_strip_width())
+                {
+                    self.pending_closes.push(ix);
+                }
+            }
             UiEvent::PointerMove { x, y, .. } => {
                 let (ox, oy) = self.panel_origin;
                 let hit =

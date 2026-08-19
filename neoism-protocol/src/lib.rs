@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod auth;
+pub mod config;
 pub mod crdt;
 pub mod cursor;
 pub mod diagnostics;

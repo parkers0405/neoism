@@ -711,26 +711,62 @@ impl NeoismAgentPane {
         let Some(cached) = self.session_cache.remove(session_id) else {
             return;
         };
+        // Decide BEFORE the ids change hands: a switch within the same
+        // conversation family (parent ↔ child ↔ sibling) keeps the
+        // parent-keyed subagent roster alive — the sidebar continues to
+        // show the family's sub-agent names/statuses while a child
+        // transcript is open, and sibling lifecycle updates keep
+        // landing in it. Only leaving the family rebuilds the roster.
+        let stays_in_family = self.session_family_contains(session_id)
+            || cached
+                .state
+                .parent_id
+                .as_deref()
+                .is_some_and(|parent| self.session_family_contains(parent));
+        // A live-only cache slot carries no session metadata. When the
+        // roster tracks the target as a child row, carry the family root
+        // as its parent so the restored view opens as a view-only
+        // subagent transcript instead of a detached main session.
+        let roster_parent = self
+            .side_panel
+            .subagents()
+            .first()
+            .map(|entry| entry.id.clone())
+            .filter(|root| {
+                root != session_id
+                    && self
+                        .side_panel
+                        .subagents()
+                        .iter()
+                        .skip(1)
+                        .any(|entry| entry.id == session_id)
+            });
         self.cache_current_session();
         let state = cached.state;
-        if state.parent_id.is_none() {
+        let parent_id = state.parent_id.clone().or(roster_parent);
+        if parent_id.is_none() {
             self.session_tree_root_id = Some(session_id.to_string());
         } else if self.session_tree_root_id.is_none() {
-            self.session_tree_root_id = state.parent_id.clone();
+            self.session_tree_root_id = parent_id.clone();
         }
         self.session_id = Some(session_id.to_string());
-        self.parent_session_id = state.parent_id.clone();
+        self.parent_session_id = parent_id;
         self.side_panel
             .set_viewed_session_id(Some(session_id.to_string()));
         self.input.clear();
         self.close_picker();
         self.reset_timeline_navigation_for_session_switch();
+        // The restored timeline must render fresh — no raised/expanded
+        // card artifacts from the click that navigated away.
+        self.reset_transient_timeline_interactions();
         self.timeline_history = cached.timeline_history;
         self.timeline_scroll_px = cached.timeline_scroll_px;
         self.timeline_follow_bottom = cached.timeline_follow_bottom;
         self.timeline_content_height_px = cached.timeline_content_height_px;
         self.side_panel.set_show_home_override(false);
-        self.side_panel.invalidate_subagent_refresh();
+        if !stays_in_family {
+            self.side_panel.invalidate_subagent_refresh();
+        }
         self.side_panel.reset_session_goal();
         if let Some((goal, version)) = self.session_goal_cache.get(session_id).cloned() {
             if goal.is_some() {
@@ -1478,6 +1514,9 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn abort_session(&mut self) {
+        // A user-driven stop is a hard clear: the status label must not
+        // linger through the display grace hold, or Stop reads as lag.
+        self.side_panel.clear_status_display_hold();
         if self.session_id.is_none() {
             self.note_streaming(NeoismAgentStreamingState::Idle, None);
             self.system_message("Abort", "no session has started yet");
@@ -1628,8 +1667,12 @@ impl NeoismAgentPane {
         self.session_id = None;
         self.parent_session_id = None;
         self.side_panel.set_viewed_session_id(None);
+        // A fresh chat must not inherit the previous conversation's
+        // grace-held status label.
+        self.side_panel.clear_status_display_hold();
         self.clear_pending_user_prompts();
         self.messages.clear();
+        self.reset_transient_timeline_interactions();
         self.invalidate_timeline_layout();
         self.reset_session_runtime_ui();
         self.clear_composer();

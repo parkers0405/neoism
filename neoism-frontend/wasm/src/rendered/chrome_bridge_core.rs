@@ -1,5 +1,6 @@
 use super::*;
 use neoism_terminal_core::crosswords::pos::Line;
+use neoism_ui::editor::selection_model::hint_label_placements;
 use neoism_ui::layout::Rect as ChromeRect;
 use neoism_ui::render_policy::{
     block_header_panel_geometry, block_header_row_metrics, block_status_glyph,
@@ -190,6 +191,24 @@ impl ChromeBridge {
         terminal_rect: ChromeRect,
         chrome_owns_prompt: bool,
     ) {
+        // PANE-GRID SPLIT: every visible terminal pane renders from its
+        // own pane-sized terminal (rendered/buffer_tabs_layout.rs) and
+        // the full-rect pipeline below stands down for the frame.
+        if self.draw_split_terminal_panes() {
+            return;
+        }
+        self.draw_terminal_blocks_or_cells_inner(terminal_rect, chrome_owns_prompt);
+        // Link affordances paint over the finished grid: the hover
+        // underline (desktop draw_terminal_file_link_hover) and hint
+        // mode's match highlights + label chips.
+        self.draw_terminal_link_overlays(terminal_rect);
+    }
+
+    fn draw_terminal_blocks_or_cells_inner(
+        &mut self,
+        terminal_rect: ChromeRect,
+        chrome_owns_prompt: bool,
+    ) {
         // Decide raw cells vs the Warp-style block pipeline. The block
         // pipeline re-composes the grid from command-block boundaries; a
         // program that paints the screen with cursor addressing (any TUI)
@@ -218,6 +237,9 @@ impl ChromeBridge {
             .last()
             .is_some_and(|s| matches!(s.status, BlockStatusKind::Running));
         if alt_screen || snapshots.is_empty() || (command_running && app_input_mode) {
+            // Raw-cells path: pointer mapping is plain
+            // `visual_row - display_offset` (no composed window).
+            self.rendered.pointer.frame_sources = None;
             self.rendered.draw_cells_in(
                 terminal_rect.x,
                 terminal_rect.y,
@@ -250,6 +272,7 @@ impl ChromeBridge {
             || raw_sources.is_empty()
             || raw_rows.len() != raw_sources.len()
         {
+            self.rendered.pointer.frame_sources = None;
             self.rendered.draw_cells_in(
                 terminal_rect.x,
                 terminal_rect.y,
@@ -332,6 +355,14 @@ impl ChromeBridge {
             )
         };
 
+        // Publish the composed visual-row → source-row map so pointer
+        // hit-testing can anchor clicks on the right absolute rows
+        // (block chrome rows map to `None` and take no selection) —
+        // the web analogue of desktop's
+        // `set_block_frame_sources_changed` bookkeeping.
+        self.rendered.pointer.frame_sources =
+            Some(window.frame.source_row_indices.clone());
+
         self.rendered.draw_composed_rows_in(
             &window.frame.rows,
             &window.frame.source_row_indices,
@@ -351,6 +382,177 @@ impl ChromeBridge {
             &window.frame.block_header_spans,
             &snapshots,
         );
+    }
+
+    /// Paint the terminal link affordances over the grid:
+    ///
+    /// * Hover underline — the web port of desktop
+    ///   `draw_terminal_file_link_hover` (file_link_mouse.rs:4-83):
+    ///   a 1.5px `theme.blue` bar under the hovered link span so it
+    ///   reads as a hyperlink on every theme.
+    /// * Hint mode — match spans get the desktop search-match
+    ///   background (`theme.surface`, host/state.rs:74) drawn UNDER
+    ///   the glyphs, and the keystroke labels paint as
+    ///   `theme.yellow` chips with `theme.black` chars
+    ///   (named_colors.hint_background / hint_foreground) through the
+    ///   late-overlay layer so they sit over the grid text.
+    pub(crate) fn draw_terminal_link_overlays(&mut self, terminal_rect: ChromeRect) {
+        if !self.terminal_surface_active() {
+            return;
+        }
+        let theme = *self.chrome.ide_theme();
+        let cell_w = self.rendered.cell_w.max(1.0);
+        let cell_h = self.rendered.cell_h.max(1.0);
+        let content_rows = ((terminal_rect.h / cell_h).floor().max(0.0)) as usize;
+
+        let hover = super::terminal_input::with_terminal_link_ui(|ui| ui.hover.clone());
+        let hint = super::terminal_input::with_terminal_link_ui(|ui| {
+            if !ui.hint.is_active() {
+                return None;
+            }
+            let match_spans: Vec<(Line, usize, usize)> = ui
+                .hint
+                .matches()
+                .iter()
+                .map(|m| (m.start.row, m.start.col.0, m.end.col.0))
+                .collect();
+            let match_starts: Vec<neoism_terminal_core::crosswords::pos::Pos> =
+                ui.hint.matches().iter().map(|m| m.start).collect();
+            Some((match_spans, match_starts, ui.hint.visible_labels()))
+        });
+        if hover.is_none() && hint.is_none() {
+            return;
+        }
+
+        // Visual-row mapping: under the block pipeline each display
+        // row knows its absolute source row; otherwise plain
+        // `line + display_offset`.
+        let (history_size, display_offset) = {
+            let terminal = &self.rendered.terminal_ref().inner;
+            (terminal.history_size(), terminal.display_offset())
+        };
+        let frame_sources = self.rendered.pointer.frame_sources.clone();
+        let display_row_for = |line: Line| -> Option<usize> {
+            if let Some(sources) = frame_sources.as_ref() {
+                let abs = history_size as i64 + line.0 as i64;
+                if abs < 0 {
+                    return None;
+                }
+                sources
+                    .iter()
+                    .position(|source| *source == Some(abs as usize))
+            } else {
+                let visual = line.0 + display_offset as i32;
+                (visual >= 0 && (visual as usize) < content_rows.max(1))
+                    .then_some(visual as usize)
+            }
+        };
+
+        let clip = [
+            terminal_rect.x,
+            terminal_rect.y,
+            terminal_rect.w,
+            terminal_rect.h,
+        ];
+        let Some(sugarloaf) = self.rendered.sugarloaf_mut() else {
+            return;
+        };
+
+        if let Some(hover) = hover {
+            let width = hover.col_end.saturating_sub(hover.col_start) as f32 * cell_w;
+            let y = terminal_rect.y + (hover.visual_row as f32 + 1.0) * cell_h - 1.5;
+            if width > 0.0 && y + 1.5 <= terminal_rect.y + terminal_rect.h {
+                sugarloaf.rect(
+                    None,
+                    terminal_rect.x + hover.col_start as f32 * cell_w,
+                    y,
+                    width,
+                    1.5,
+                    theme.f32(theme.blue),
+                    0.0,
+                    2,
+                );
+            }
+        }
+
+        let Some((match_spans, match_starts, visible_labels)) = hint else {
+            return;
+        };
+
+        // Match highlight bands (under glyphs — same layer as the
+        // selection band, later draw order than cell backgrounds).
+        for (line, col_start, col_end) in &match_spans {
+            let Some(display_row) = display_row_for(*line) else {
+                continue;
+            };
+            let row_y = terminal_rect.y + display_row as f32 * cell_h;
+            let width = (col_end.saturating_sub(*col_start) as f32 + 1.0) * cell_w;
+            if let Some(band) = intersect_rect(
+                [
+                    terminal_rect.x + *col_start as f32 * cell_w,
+                    row_y,
+                    width,
+                    cell_h,
+                ],
+                clip,
+            ) {
+                sugarloaf.rect(
+                    None,
+                    band[0],
+                    band[1],
+                    band[2],
+                    band[3],
+                    theme.f32(theme.surface),
+                    0.0,
+                    1,
+                );
+            }
+        }
+
+        // Label chips through the late-overlay layer so they read
+        // over the underlying glyphs (rects in the base pass always
+        // draw under text on this host).
+        let placements =
+            hint_label_placements(true, &match_starts, &visible_labels);
+        if placements.is_empty() {
+            return;
+        }
+        let font_size = (cell_h * 0.875).clamp(8.0, 32.0);
+        let text_y_pad = ((cell_h - font_size) * 0.5).max(0.0);
+        sugarloaf.set_late_overlay_mode(true);
+        for placement in &placements {
+            let Some(display_row) = display_row_for(placement.position.row) else {
+                continue;
+            };
+            let cell_x =
+                terminal_rect.x + placement.position.col.0 as f32 * cell_w;
+            let row_y = terminal_rect.y + display_row as f32 * cell_h;
+            let Some(chip) =
+                intersect_rect([cell_x, row_y, cell_w, cell_h], clip)
+            else {
+                continue;
+            };
+            sugarloaf.rect(
+                None,
+                chip[0],
+                chip[1],
+                chip[2],
+                chip[3],
+                theme.f32_alpha(theme.yellow, if placement.is_first { 1.0 } else { 0.88 }),
+                0.0,
+                0,
+            );
+            let label: String = placement.label.iter().collect();
+            let opts = DrawOpts {
+                font_size,
+                color: theme.u8(theme.black),
+                bold: true,
+                clip_rect: Some(chip),
+                ..DrawOpts::default()
+            };
+            sugarloaf.text_mut().draw(cell_x, row_y + text_y_pad, &label, &opts);
+        }
+        sugarloaf.set_late_overlay_mode(false);
     }
 
     pub(crate) fn draw_terminal_block_headers(

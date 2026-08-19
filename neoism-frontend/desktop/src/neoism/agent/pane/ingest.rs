@@ -76,6 +76,10 @@ impl NeoismAgentPane {
                             }
                         }
                     }
+                    // Landed background-task completion cards survive the
+                    // snapshot replacement (runs last so the dedupe check
+                    // sees the final candidate list).
+                    let messages = self.preserve_background_completion_cards(messages);
                     // These full-transcript snapshots arrive repeatedly around
                     // each turn. `invalidate_timeline_layout()` here dropped the
                     // WHOLE layout cache, so the next frame re-measured and
@@ -1001,6 +1005,32 @@ impl NeoismAgentPane {
                     self.execute_set_title_command(session_id, title);
                     changed = true;
                 }
+                // The desktop key bridge drives pin/delete through the
+                // pane's synchronous methods (`toggle_selected_session_pin`
+                // / `delete_selected_session` in pane/input.rs), which call
+                // the agent-server directly — but the shared pane records
+                // these commands, so honour them if they ever land here.
+                OutboundAgentCommand::DeleteSession { session_id } => {
+                    if let Err(error) = delete_session(&self.server, &session_id) {
+                        self.system_message("Sessions", error);
+                    } else {
+                        if self.session_id.as_deref() == Some(session_id.as_str()) {
+                            self.create_new_session();
+                        }
+                        self.refresh_sessions_after_mutation();
+                    }
+                    changed = true;
+                }
+                OutboundAgentCommand::SetSessionPinned { session_id, pinned } => {
+                    if let Err(error) =
+                        set_session_pinned(&self.server, &session_id, pinned)
+                    {
+                        self.system_message("Sessions", error);
+                    } else {
+                        self.refresh_sessions_after_mutation();
+                    }
+                    changed = true;
+                }
                 // The desktop pane drives `/connect` through its own
                 // synchronous `connect.rs` methods (blocking HTTP +
                 // background threads) and never enqueues these shared
@@ -1764,6 +1794,52 @@ impl NeoismAgentPane {
 
     pub(crate) fn clear_pending_user_prompts(&mut self) {
         self.pending_user_prompts.clear();
+    }
+
+    /// Keep every landed background-task completion card through a
+    /// snapshot replacement. The live `session.background_task.completed`
+    /// event injects the card immediately, but the server only persists its
+    /// equivalent (the `msg_background_completion_{job}` runtime prompt,
+    /// mapped back to the SAME card id by the shared `api_mapping`) once
+    /// the queued notification prompt drains — a `Messages` refresh inside
+    /// that window would silently wipe the card. Re-insert any copy the
+    /// snapshot lacks at its chronological position; when the snapshot DOES
+    /// carry the server copy (same id, or same job id) it replaces the
+    /// client copy — no duplicate. Mirrors the shared pane's helper of the
+    /// same name (`neoism-ui` state/ingest.rs).
+    pub(crate) fn preserve_background_completion_cards(
+        &self,
+        mut server_messages: Vec<NeoismAgentMessage>,
+    ) -> Vec<NeoismAgentMessage> {
+        for (index, existing) in self.messages.iter().enumerate() {
+            if !is_background_completion_card(existing) {
+                continue;
+            }
+            let job_id = background_job_id_from_message(existing);
+            let already_present = server_messages.iter().any(|incoming| {
+                incoming.id == existing.id
+                    || (job_id.is_some()
+                        && background_completion_job_id_from_message(incoming) == job_id)
+            });
+            if already_present {
+                continue;
+            }
+            let insert_at = self.messages[..index]
+                .iter()
+                .rev()
+                .find_map(|prior| {
+                    if prior.id.is_empty() {
+                        return None;
+                    }
+                    server_messages
+                        .iter()
+                        .position(|incoming| incoming.id == prior.id)
+                })
+                .map(|position| position + 1)
+                .unwrap_or(server_messages.len());
+            server_messages.insert(insert_at, existing.clone());
+        }
+        server_messages
     }
 
     pub(crate) fn insert_dequeued_user_prompt(&mut self, text: String) -> bool {

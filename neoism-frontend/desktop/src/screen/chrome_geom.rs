@@ -193,6 +193,12 @@ impl Screen<'_> {
         let scale = self.sugarloaf.scale_factor();
         let chrome_offset = self.chrome_x_offset();
         let chrome_margins = self.workspace_chrome_margins();
+        // Keep the parse-time color-query palette in sync with the
+        // (possibly new) theme: refresh the seed used by future panes
+        // and re-seed every live terminal below.
+        self.context_manager.config.colors =
+            neoism_backend::config::colors::term::List::from(&config.appearance.colors);
+        let default_colors = self.context_manager.config.colors.as_default_colors();
         for context_grid in self.context_manager.contexts_mut() {
             context_grid.update_line_height(config.appearance.line_height);
 
@@ -241,6 +247,7 @@ impl Screen<'_> {
                 terminal.default_cursor_shape = shape;
                 terminal.blinking_cursor = config.terminal.cursor.blinking;
                 terminal.default_blinking_cursor = config.terminal.cursor.blinking;
+                terminal.set_default_colors(default_colors);
                 drop(terminal);
             }
         }
@@ -1069,6 +1076,11 @@ impl Screen<'_> {
             tracing::warn!(target: "neoism::config", "failed to persist theme: {err}");
         }
 
+        // `set_ide_theme` refreshed `renderer.colors` in place; mirror
+        // it into the context-manager seed (new panes) and re-seed the
+        // parse-time color-query palette on every live terminal below.
+        self.context_manager.config.colors = self.renderer.colors;
+        let default_colors = self.renderer.colors.as_default_colors();
         for context_grid in self.context_manager.contexts_mut() {
             for context_item in context_grid.contexts_mut().values_mut() {
                 let context = context_item.context_mut();
@@ -1078,6 +1090,7 @@ impl Screen<'_> {
                 let mut terminal = context.terminal.lock();
                 terminal.colors =
                     neoism_terminal_core::colors::term::TermColors::default();
+                terminal.set_default_colors(default_colors);
                 drop(terminal);
 
                 context

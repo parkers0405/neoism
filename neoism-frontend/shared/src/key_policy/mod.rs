@@ -28,6 +28,7 @@
 //!   lock acquisition, and damage tracking.
 
 pub mod kitty_sequence;
+pub mod web_key_encoder;
 
 /// Minimal modifier-state POD used by [`mask_alt_for_output`].
 ///

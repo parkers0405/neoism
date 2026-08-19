@@ -836,6 +836,13 @@ async fn queue_child_task_prompt(
         crate::session_queue::enqueue_prompt_request(state, child_session_id, request)
             .await
             .map_err(|error| error.to_string())?;
+    // The queued prompt runs through the generic queue worker — no spawn
+    // wrapper publishes its completion. Mark the child so its next true-idle
+    // point notifies the parent (the fix for "told the subagent to wrap up,
+    // it finished, main model never heard back").
+    crate::session_actions::mark_subtask_notify_on_idle(state, child_session_id)
+        .await
+        .map_err(|error| error.to_string())?;
     crate::session_queue::publish_prompt_queue_changed(
         state,
         child_session_id,

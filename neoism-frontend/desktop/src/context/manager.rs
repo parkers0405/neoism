@@ -48,8 +48,13 @@ pub struct ContextManagerConfig {
     /// renders, so workspace restore on startup was seeding restored
     /// panes with blinking permanently off.
     pub cursor_blinking: bool,
-    pub foreground: neoism_terminal_core::colors::ColorRgb,
-    pub background: neoism_terminal_core::colors::ColorRgb,
+    /// Resolved theme palette, seeded into every new terminal's
+    /// `Crosswords::set_default_colors` so OSC 4/10/11/12 color
+    /// queries are answered synchronously at parse time (see
+    /// `dynamic_color_sequence` in terminal-core). Refreshed on
+    /// config reload so panes created afterwards inherit the new
+    /// theme.
+    pub colors: neoism_backend::config::colors::term::List,
 }
 
 pub struct ContextManager<T: EventListener> {

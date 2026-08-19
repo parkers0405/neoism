@@ -813,3 +813,386 @@ async fn prompt_message_ids_are_idempotent_and_conflict_on_reuse() {
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Regression: a run claiming the session between the drain worker's pop and
+/// its `append_prompt` (the user submits right as the queue drains) must NOT
+/// lose the popped prompt — the exact window that silently dropped the last
+/// subagent/background-task completion notification. The prompt goes back to
+/// the FRONT of the durable queue and delivers once the run finishes.
+#[tokio::test]
+async fn run_conflict_mid_drain_requeues_prompt_instead_of_dropping_it() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-requeue-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/session?directory={}", root.to_string_lossy()),
+                Some(json!({})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let session_id = session.id.to_string();
+
+    let completion_request = |text: &str| PromptRequest {
+        message_id: None,
+        model: None,
+        agent: None,
+        no_reply: false,
+        system: None,
+        tools: None,
+        author: None,
+        parts: vec![PromptPart::Text {
+            text: text.to_string(),
+        }],
+    };
+    state
+        .inner
+        .store
+        .enqueue_prompt_with_delivery(
+            &session_id,
+            &completion_request("subagent finished: last one"),
+            "continue",
+        )
+        .await
+        .unwrap();
+    // Worker pops the completion (delivery tag comes back with it).
+    let (popped, delivery) = state
+        .inner
+        .store
+        .pop_queued_prompt_with_delivery(&session_id, None)
+        .await
+        .unwrap()
+        .expect("queued completion");
+    assert_eq!(delivery, "continue");
+
+    // A run claims the session inside the pop->append window.
+    state.inner.runs.write().await.insert(
+        session_id.clone(),
+        SessionRun {
+            id: "user-turn".to_string(),
+            started_at: 0,
+            cancel: Arc::new(AtomicBool::new(false)),
+        },
+    );
+    let error = crate::session_prompt::append_prompt(
+        &state,
+        &session_id,
+        popped.clone(),
+        !popped.no_reply,
+    )
+    .await
+    .expect_err("append during an active run must conflict");
+    assert!(error.is_conflict());
+    assert_eq!(
+        error.to_string(),
+        crate::session_prompt::SESSION_RUNNING_CONFLICT
+    );
+
+    // Requeue puts it back at the FRONT, ahead of the other queued prompt.
+    state
+        .inner
+        .store
+        .requeue_prompt_front_with_delivery(&session_id, &popped, &delivery)
+        .await
+        .unwrap();
+    let entries = state
+        .inner
+        .store
+        .list_queued_prompt_entries(&session_id)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(
+        entries[0].0.parts.first(),
+        Some(PromptPart::Text { text }) if text == "subagent finished: last one"
+    ));
+    assert_eq!(entries[0].1, "continue");
+
+    // Run finishes; the requeued completion is the next prompt out, and a
+    // plain append (no stub reply, so no provider round trip) lands it in
+    // the transcript — nothing was lost.
+    state.inner.runs.write().await.remove(&session_id);
+    let (redelivered, redelivery) = state
+        .inner
+        .store
+        .pop_queued_prompt_with_delivery(&session_id, None)
+        .await
+        .unwrap()
+        .expect("requeued completion still queued");
+    assert_eq!(redelivery, "continue");
+    assert!(matches!(
+        redelivered.parts.first(),
+        Some(PromptPart::Text { text }) if text == "subagent finished: last one"
+    ));
+    crate::session_prompt::append_prompt(&state, &session_id, redelivered, false)
+        .await
+        .expect("append succeeds once the run is gone");
+    let messages = state.inner.store.list_messages(&session_id).await.unwrap();
+    assert!(messages.iter().any(|message| {
+        matches!(message.info, MessageInfo::User(_))
+            && matches!(
+                message.parts.first(),
+                Some(Part::Text(TextPart { text, .. })) if text == "subagent finished: last one"
+            )
+    }));
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Regression: a pending subagent-completion notification held at the moment
+/// the last child finished (here: wedged behind a STALE Busy status for the
+/// child — the old `parent_has_active_subtasks` consulted the derived
+/// statuses map) must deliver when the PARENT's own run ends. Previously
+/// only child lifecycle events re-attempted delivery, so this stranded
+/// forever: sidebar showed complete, the main model was never told.
+#[tokio::test]
+async fn held_subtask_completion_delivers_when_parent_turn_ends() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-parent-reconcile-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let parent: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/session?directory={}", root.to_string_lossy()),
+                Some(json!({})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    // Finished child with a durable pending completion (the outbox entry
+    // `mark_subtask_completion_pending` writes).
+    let child_id = neoism_agent_core::new_session_id();
+    let mut child_extra = BTreeMap::new();
+    child_extra.insert(
+        "subtaskCompletion".to_string(),
+        json!({
+            "pending": true,
+            "status": "completed",
+            "result": "the last subagent result",
+            "completedAt": 42,
+        }),
+    );
+    let child = SessionInfo {
+        id: child_id.clone(),
+        slug: "held-child".to_string(),
+        project_id: parent.project_id.clone(),
+        workspace_id: parent.workspace_id.clone(),
+        directory: parent.directory.clone(),
+        path: parent.path.clone(),
+        parent_id: Some(parent.id.clone()),
+        title: "Held child".to_string(),
+        agent: Some("build".to_string()),
+        model: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        time: TimeInfo {
+            created: 1,
+            updated: 42,
+            compacting: None,
+            archived: None,
+        },
+        permission: None,
+        extra: child_extra,
+    };
+    state.inner.store.insert_session(&child).await.unwrap();
+    // The stale Busy status that used to wedge delivery forever.
+    state
+        .inner
+        .statuses
+        .write()
+        .await
+        .insert(child_id.to_string(), busy_status(1, None));
+
+    // Parent finishes a turn (the user was talking to the main agent).
+    state.inner.runs.write().await.insert(
+        parent.id.to_string(),
+        SessionRun {
+            id: "parent-turn".to_string(),
+            started_at: 0,
+            cancel: Arc::new(AtomicBool::new(false)),
+        },
+    );
+    finish_session_run(&state, parent.id.as_str(), "parent-turn").await;
+
+    // The held completion is now queued for the parent as a "continue"
+    // notification carrying the child's result.
+    let entries = state
+        .inner
+        .store
+        .list_queued_prompt_entries(parent.id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1, "completion notification must be queued");
+    assert_eq!(entries[0].1, "continue");
+    assert!(matches!(
+        entries[0].0.parts.first(),
+        Some(PromptPart::Text { text }) if text.contains("the last subagent result")
+    ));
+
+    // And the durable outbox entry is marked sent — no duplicate later.
+    let stored_child = state
+        .inner
+        .store
+        .get_session(child_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored_child
+            .extra
+            .get("subtaskCompletion")
+            .and_then(|value| value.get("pending"))
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Regression for the deterministic missed notification: the task tool's
+/// child-already-running branch QUEUES the continue-prompt ("wrap up") and
+/// returns — no spawn wrapper exists on that path, so nothing ever published
+/// the completion when the child finished. The child now carries a
+/// notify-on-idle marker; its queue worker's exit (true idle) publishes the
+/// completion through the standard outbox → the parent is notified.
+#[tokio::test]
+async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-deferred-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let parent: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/session?directory={}", root.to_string_lossy()),
+                Some(json!({})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let child_id = neoism_agent_core::new_session_id();
+    let child = SessionInfo {
+        id: child_id.clone(),
+        slug: "queued-continue-child".to_string(),
+        project_id: parent.project_id.clone(),
+        workspace_id: parent.workspace_id.clone(),
+        directory: parent.directory.clone(),
+        path: parent.path.clone(),
+        parent_id: Some(parent.id.clone()),
+        title: "Wrap-up child".to_string(),
+        agent: Some("build".to_string()),
+        model: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        time: TimeInfo {
+            created: 1,
+            updated: 1,
+            compacting: None,
+            archived: None,
+        },
+        permission: None,
+        extra: BTreeMap::new(),
+    };
+    state.inner.store.insert_session(&child).await.unwrap();
+
+    // The task tool queues the continue-prompt and sets the marker.
+    crate::session_actions::mark_subtask_notify_on_idle(&state, child_id.as_str())
+        .await
+        .unwrap();
+    state
+        .inner
+        .store
+        .enqueue_prompt(
+            child_id.as_str(),
+            &PromptRequest {
+                message_id: None,
+                model: None,
+                agent: None,
+                no_reply: true,
+                system: None,
+                tools: None,
+                author: None,
+                parts: vec![PromptPart::Text {
+                    text: "wrap up with what you have".to_string(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    // The child's queue worker runs the prompt and exits at true idle.
+    assert!(state
+        .inner
+        .session_coordinator
+        .wake(child_id.as_str())
+        .await);
+    crate::session_queue::drain_prompt_queue(state.clone(), child_id.to_string()).await;
+
+    // Parent got the completion notification.
+    let entries = state
+        .inner
+        .store
+        .list_queued_prompt_entries(parent.id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1, "parent must be notified");
+    assert_eq!(entries[0].1, "continue");
+    assert!(matches!(
+        entries[0].0.parts.first(),
+        Some(PromptPart::Text { text })
+            if text.contains("Subagent finished.") && text.contains(child_id.as_str())
+    ));
+
+    // Marker cleared, outbox entry marked sent — no double delivery.
+    let stored_child = state
+        .inner
+        .store
+        .get_session(child_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored_child.extra.get("subtaskNotifyOnIdle").is_none());
+    assert_eq!(
+        stored_child
+            .extra
+            .get("subtaskCompletion")
+            .and_then(|value| value.get("pending"))
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}

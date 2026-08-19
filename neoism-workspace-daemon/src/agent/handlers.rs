@@ -1146,12 +1146,39 @@ pub(crate) async fn handle_show_permissions(inner: Arc<AgentInner>, session_id: 
 
 pub(crate) async fn handle_show_questions(inner: Arc<AgentInner>, session_id: String) {
     let path = format!("/question?sessionID={}", percent_encode(&session_id));
-    emit_command_result(
-        &inner,
-        Some(session_id),
-        "Questions",
-        http_get_json(&inner, &path).await,
-    );
+    let result = http_get_json(&inner, &path).await;
+    // Typed snapshot first so the pane's pending-question state syncs
+    // (the prompt picker uses this); the human-readable listing keeps
+    // the `/questions` slash-command output desktop-shaped.
+    if let Ok(value) = result.as_ref() {
+        let requests = value.as_array().cloned().unwrap_or_default();
+        let _ = inner.tx.send(AgentServerMessage::QuestionsUpdated {
+            session_id: session_id.clone(),
+            requests,
+        });
+    }
+    emit_command_result(&inner, Some(session_id), "Questions", result);
+}
+
+/// Fetch the pending question requests for `session_id` and push them
+/// as a typed [`AgentServerMessage::QuestionsUpdated`] snapshot. Fired
+/// on stream (re-)attach so a reloaded client recovers a `question`
+/// tool call that parked the run while no client was listening.
+pub(crate) async fn push_pending_questions(inner: Arc<AgentInner>, session_id: String) {
+    let path = format!("/question?sessionID={}", percent_encode(&session_id));
+    let Ok(value) = http_get_json(&inner, &path).await else {
+        // Recovery is best-effort; a failed poll must not spam the
+        // transcript with errors on every reconnect.
+        return;
+    };
+    let requests = value.as_array().cloned().unwrap_or_default();
+    if requests.is_empty() {
+        return;
+    }
+    let _ = inner.tx.send(AgentServerMessage::QuestionsUpdated {
+        session_id,
+        requests,
+    });
 }
 
 pub(crate) async fn handle_slash_command(
@@ -1342,6 +1369,62 @@ pub(crate) async fn handle_reject(
     }
 }
 
+/// Answer a specific pending question: `POST /question/{id}/reply` with
+/// `{ "answers": [[..], ..] }` — one answer list per question in the
+/// request, exactly the body desktop's
+/// `execute_reply_question_command` sends. Success acks with
+/// [`AgentServerMessage::QuestionRemoved`] (the SSE `question.replied`
+/// broadcast also lands; removal is idempotent client-side), failure
+/// with [`AgentServerMessage::QuestionReplyFailed`] so the prompt
+/// un-wedges and the user can retry.
+pub(crate) async fn handle_answer_question(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    request_id: String,
+    answers: Vec<Vec<String>>,
+) {
+    let body = json!({ "answers": answers });
+    let path = format!("/question/{}/reply", percent_encode(&request_id));
+    match http_post_json(&inner, &path, &body).await {
+        Ok(_) => {
+            let _ = inner.tx.send(AgentServerMessage::QuestionRemoved {
+                session_id,
+                request_id,
+            });
+        }
+        Err(error) => {
+            let _ = inner.tx.send(AgentServerMessage::QuestionReplyFailed {
+                request_id,
+                error,
+            });
+        }
+    }
+}
+
+/// Reject a specific pending question: `POST /question/{id}/reject`
+/// (no body), mirroring desktop's `execute_reject_question_command`.
+pub(crate) async fn handle_reject_question(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    request_id: String,
+) {
+    let path = format!("/question/{}/reject", percent_encode(&request_id));
+    match post_no_body(&inner, &path).await {
+        Ok(_) => {
+            let _ = inner.tx.send(AgentServerMessage::QuestionRemoved {
+                session_id,
+                request_id,
+            });
+        }
+        Err(error) => {
+            let _ = inner.tx.send(AgentServerMessage::QuestionReplyFailed {
+                request_id,
+                error,
+            });
+        }
+    }
+}
+
 pub(crate) async fn first_interaction_id(
     inner: &AgentInner,
     base_path: &str,
@@ -1455,9 +1538,41 @@ pub(crate) async fn handle_set_title(
     title: String,
 ) {
     let body = json!({ "title": title });
-    if let Err(err) =
-        http_patch_json(&inner, &format!("/session/{session_id}"), &body).await
-    {
-        emit_error(&inner.tx, err);
+    match http_patch_json(&inner, &format!("/session/{session_id}"), &body).await {
+        Ok(_) => {
+            // Ack AFTER the upstream mutation lands so clients can
+            // re-request the thread list without racing the rename.
+            let _ = inner.tx.send(AgentServerMessage::ThreadUpdated {
+                session_id,
+                title: Some(title),
+                pinned: None,
+            });
+        }
+        Err(err) => emit_error(&inner.tx, err),
+    }
+}
+
+/// `POST /session/{id}/pin` — toggle the session's pinned flag. Mirrors
+/// desktop's `api::set_session_pinned`; the ack carries the pinned state
+/// read back from the updated session info.
+pub(crate) async fn handle_set_pinned(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    pinned: bool,
+) {
+    let body = json!({ "pinned": pinned });
+    match http_post_json(&inner, &format!("/session/{session_id}/pin"), &body).await {
+        Ok(value) => {
+            let resolved = value
+                .get("pinned")
+                .and_then(Value::as_bool)
+                .unwrap_or(pinned);
+            let _ = inner.tx.send(AgentServerMessage::ThreadUpdated {
+                session_id,
+                title: None,
+                pinned: Some(resolved),
+            });
+        }
+        Err(err) => emit_error(&inner.tx, err),
     }
 }

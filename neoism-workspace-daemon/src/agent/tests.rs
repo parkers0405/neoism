@@ -97,3 +97,84 @@ fn forwarded_part_update_uses_part_id() {
         other => panic!("unexpected message: {other:?}"),
     }
 }
+
+#[test]
+fn session_created_with_parent_synthesizes_subagent_update() {
+    use neoism_protocol::agent::SubagentStatus;
+    // The agent server never emits a `subagent.*` event — a child
+    // spawn is announced solely through `session.created` carrying
+    // `info.parentId`. The translation must surface it as the
+    // `SubagentUpdate` the side-panel roster consumes, parent link
+    // included, even though the daemon's SSE stream is bound to a
+    // DIFFERENT family session.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    forward_agent_server_event(
+        &tx,
+        "sess-viewed-sibling",
+        json!({
+            "type": "session.created",
+            "properties": {
+                "sessionID": "sess-child",
+                "info": {
+                    "id": "sess-child",
+                    "parentId": "sess-parent",
+                    "title": "Investigate flaky test",
+                    "agent": "explore",
+                    "time": { "created": 1_755_500_000_000u64, "updated": 1_755_500_000_000u64 }
+                }
+            }
+        }),
+    );
+
+    match rx.try_recv().expect("subagent update") {
+        AgentServerMessage::SubagentUpdate {
+            session_id,
+            status,
+            title,
+            agent,
+            current_tool,
+            started_at,
+            parent_session_id,
+        } => {
+            assert_eq!(session_id, "sess-child");
+            assert!(matches!(status, SubagentStatus::Running));
+            assert_eq!(title.as_deref(), Some("Investigate flaky test"));
+            assert_eq!(agent.as_deref(), Some("explore"));
+            assert_eq!(current_tool, None);
+            assert_eq!(started_at, Some(1_755_500_000_000));
+            assert_eq!(parent_session_id.as_deref(), Some("sess-parent"));
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
+}
+
+#[test]
+fn session_created_without_parent_stays_a_raw_envelope() {
+    // Root sessions carry no parent link: they must NOT be mistaken
+    // for subagents — the event keeps falling through to the generic
+    // `SessionEvent` envelope exactly as before this arm existed.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    forward_agent_server_event(
+        &tx,
+        "sess-root",
+        json!({
+            "type": "session.created",
+            "properties": {
+                "sessionID": "sess-root",
+                "info": {
+                    "id": "sess-root",
+                    "title": "New conversation",
+                    "time": { "created": 1u64, "updated": 1u64 }
+                }
+            }
+        }),
+    );
+
+    match rx.try_recv().expect("raw envelope") {
+        AgentServerMessage::SessionEvent { session_id, kind, .. } => {
+            assert_eq!(session_id, "sess-root");
+            assert_eq!(kind, "session.created");
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
+}

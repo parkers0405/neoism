@@ -43,7 +43,25 @@ impl ChromeBridge {
         let parsed: AgentServerMessage = serde_json::from_str(event_json)
             .map_err(|e| JsValue::from_str(&format!("agent_event parse: {e}")))?;
 
+        // List-level refresh triggers run BEFORE the per-session gate:
+        // a rename / pin / delete can target a session other than the
+        // active one (any row of the /sessions picker), and its ack
+        // must still refresh the catalog.
+        self.note_agent_catalog_side_effects(&parsed);
+
         if !self.should_apply_agent_event(&parsed) {
+            // NOT dropped: cache-eligible events for non-active sessions
+            // stream into the shared pane's background session cache
+            // (desktop's `!stream_is_active` ingest arms), so switching
+            // to that session later restores a fully-caught-up
+            // conversation instantly. The bridge mirror is deliberately
+            // skipped — cached events must not flip `agent_state`
+            // (session id, streaming flag) for the live view.
+            if agent_event_session_id(&parsed).is_some() {
+                if let Some(pane) = self.chrome.agent_pane_mut() {
+                    apply_agent_event_to_cache(pane, parsed);
+                }
+            }
             return Ok(());
         }
 
@@ -94,6 +112,29 @@ impl ChromeBridge {
                 .as_deref()
                 .map(|active| active == event_session_id)
                 .unwrap_or(true),
+        }
+    }
+
+    /// Session-catalog refresh triggers that must fire regardless of
+    /// the per-session event gate: the daemon acks a rename / pin
+    /// (`ThreadUpdated`) or delete (`ThreadDeleted`) only AFTER the
+    /// upstream mutation landed, so re-requesting the thread list here
+    /// is race-free — the desktop analogue is
+    /// `refresh_sessions_after_mutation`.
+    pub(crate) fn note_agent_catalog_side_effects(
+        &mut self,
+        parsed: &neoism_protocol::agent::AgentServerMessage,
+    ) {
+        use neoism_protocol::agent::{AgentClientMessage, AgentServerMessage};
+        if matches!(
+            parsed,
+            AgentServerMessage::ThreadUpdated { .. }
+                | AgentServerMessage::ThreadDeleted { .. }
+        ) {
+            self.send_agent_envelope(&AgentClientMessage::ListThreads {
+                directory: self.agent_state.default_directory.clone(),
+                limit: Some(50),
+            });
         }
     }
 
@@ -257,33 +298,68 @@ impl ChromeBridge {
         });
     }
 
-    /// Set the composer input text. JS pushes this on every
-    /// keystroke; `clear_terminal_input`-equivalent.
+    /// Reconcile the composer with a JS-side text push (tab re-open,
+    /// mobile IME sync). The pane is the single source of truth for
+    /// the composer — there is no bridge-side mirror — so an equal
+    /// string is a no-op and a pure tail-append is applied as an
+    /// incremental `insert_text` (preserving the caret, any open
+    /// slash/@file picker, and composer attachment tokens). Only a
+    /// genuinely divergent text falls back to `replace_input`.
     pub fn agent_set_input(&mut self, text: &str) {
-        self.agent_state.input = text.to_string();
-        if let Some(pane) = self.chrome.agent_pane_mut() {
-            pane.replace_input(text);
+        {
+            let Some(pane) = self.chrome.agent_pane_mut() else {
+                return;
+            };
+            let current = pane.input().to_string();
+            if current == text {
+                return;
+            }
+            match text.strip_prefix(current.as_str()) {
+                Some(suffix)
+                    if !suffix.is_empty() && pane.cursor_byte() == current.len() =>
+                {
+                    pane.insert_text(suffix);
+                }
+                _ => pane.replace_input(text),
+            }
         }
-        // Stepping into a freshly-edited input drops any stashed
-        // live draft so `agent_history_step` starts fresh from the
-        // bottom on the next press.
-        self.agent_state.history_cursor = None;
-        self.agent_state.history_pending_live = None;
+        // Typing into a picker (slash / @file / $skill) can queue
+        // outbound refreshes — flush like every other entrypoint.
+        let _ = self.drain_agent_outbound();
     }
 
-    /// Current composer input.
+    /// Current composer input — read straight off the pane.
     pub fn agent_input(&self) -> String {
-        self.agent_state.input.clone()
+        self.chrome
+            .agent_pane()
+            .map(|pane| pane.input().to_string())
+            .unwrap_or_default()
     }
 
-    /// Clear the composer input.
+    /// Clear the composer input (Esc semantics: clears a non-empty
+    /// composer, aborts a live run on an empty one).
     pub fn agent_clear_input(&mut self) {
-        self.agent_state.input.clear();
         if let Some(pane) = self.chrome.agent_pane_mut() {
             pane.clear_or_abort();
         }
-        self.agent_state.history_cursor = None;
-        self.agent_state.history_pending_live = None;
+        let _ = self.drain_agent_outbound();
+    }
+
+    /// Route pasted clipboard text through the shared pane's paste
+    /// path (`insert_paste`): picker-aware routing, `[pasted N lines]`
+    /// token compaction for large pastes, and composer attachment
+    /// bookkeeping — the same pipeline desktop's Ctrl+V uses. JS
+    /// calls this from its ClipboardEvent handler after
+    /// `agent_handle_key` declined the Ctrl+V press (the clipboard
+    /// payload only exists on the async browser paste event).
+    /// Returns `true` when an agent pane consumed the paste.
+    pub fn agent_insert_paste(&mut self, text: &str) -> bool {
+        let Some(pane) = self.chrome.agent_pane_mut() else {
+            return false;
+        };
+        pane.insert_paste(text);
+        let _ = self.drain_agent_outbound();
+        true
     }
 
     /// Route one browser key event through the shared desktop
@@ -330,12 +406,23 @@ impl ChromeBridge {
         let ctx = AgentKeyContext {
             side_panel_focused: pane.side_panel().is_focused(),
             pending_permission: pane.pending_permission().is_some(),
+            pending_question: pane.pending_question().is_some(),
             picker_open: pane.picker().is_some(),
+            session_picker_open: pane.session_picker_open(),
+            session_rename_active: pane.session_rename_active(),
         };
         let decision = agent_key_decision(&event, mods, ctx);
         if !decision.handled {
             return false;
         }
+        // Ctrl+V: the clipboard payload is NOT part of the key event on
+        // the web — it only arrives on the browser's asynchronous
+        // ClipboardEvent. Returning `false` here (before any pane
+        // mutation) leaves the keypress unconsumed so that event fires;
+        // the JS paste handler then routes the text back through
+        // `agent_insert_paste` → the pane's `insert_paste` (desktop's
+        // exact paste pipeline: picker-aware, `[pasted N lines]`
+        // compaction, attachment tokens).
         if decision
             .intents
             .iter()
@@ -364,6 +451,42 @@ impl ChromeBridge {
                 }
                 AgentKeyIntent::MovePickerSelection(delta) => {
                     let _ = pane.move_picker_selection(delta);
+                }
+                AgentKeyIntent::MoveQuestionSelection(delta) => {
+                    let _ = pane.move_question_selection(delta);
+                }
+                AgentKeyIntent::QuestionBackspace => {
+                    let _ = pane.question_backspace();
+                }
+                AgentKeyIntent::QuestionInput(value) => {
+                    let _ = pane.question_type_str(&value);
+                }
+                AgentKeyIntent::SubmitPendingQuestion => {
+                    let _ = pane.submit_pending_question();
+                }
+                AgentKeyIntent::RejectPendingQuestion => {
+                    let _ = pane.reject_pending_question();
+                }
+                AgentKeyIntent::ToggleSelectedSessionPin => {
+                    let _ = pane.toggle_selected_session_pin();
+                }
+                AgentKeyIntent::DeleteSelectedSession => {
+                    let _ = pane.delete_selected_session();
+                }
+                AgentKeyIntent::BeginSelectedSessionRename => {
+                    let _ = pane.begin_selected_session_rename();
+                }
+                AgentKeyIntent::SessionRenameInput(value) => {
+                    pane.push_session_rename(&value);
+                }
+                AgentKeyIntent::SessionRenameBackspace => {
+                    pane.backspace_session_rename();
+                }
+                AgentKeyIntent::SessionRenameCommit => {
+                    let _ = pane.commit_session_rename();
+                }
+                AgentKeyIntent::SessionRenameCancel => {
+                    pane.cancel_session_rename();
                 }
                 AgentKeyIntent::RespondPendingPermission(reply) => {
                     let choice = match reply {
@@ -429,12 +552,12 @@ impl ChromeBridge {
                 AgentKeyIntent::ToggleSidePanel => {
                     pane.toggle_side_panel();
                 }
+                // Unreachable — a Paste decision returns `false` above
+                // so the browser's ClipboardEvent can deliver the
+                // payload (see `agent_insert_paste`).
                 AgentKeyIntent::Paste => {}
             }
         }
-        self.agent_state.input = pane.input().to_string();
-        self.agent_state.history_cursor = None;
-        self.agent_state.history_pending_live = None;
         let _ = self.drain_agent_outbound();
         true
     }
@@ -442,35 +565,22 @@ impl ChromeBridge {
     /// Step through input history. `delta < 0` walks back in time
     /// (older entries); `delta > 0` walks forward toward the live
     /// edit. Returns the resulting input text so JS can mirror it
-    /// into its DOM composer in one step.
+    /// into its DOM composer in one step. Backed entirely by the
+    /// pane's own zsh-style history walk (`sent_history` +
+    /// `history_draft` inside `AgentInputBuffer`) — the bridge no
+    /// longer keeps a parallel history vec.
     pub fn agent_history_step(&mut self, delta: i32) -> String {
-        if self.agent_state.history.is_empty() || delta == 0 {
-            return self.agent_state.input.clone();
-        }
-        let len = self.agent_state.history.len();
-        let cursor = match self.agent_state.history_cursor {
-            Some(c) => c as i32,
-            None => {
-                // Stash whatever's in the composer so stepping
-                // forward off the end can restore it.
-                self.agent_state.history_pending_live =
-                    Some(self.agent_state.input.clone());
-                len as i32
-            }
+        let Some(pane) = self.chrome.agent_pane_mut() else {
+            return String::new();
         };
-        let next = (cursor + delta).clamp(0, len as i32);
-        if next == len as i32 {
-            // Past the newest entry — back to the live draft.
-            self.agent_state.history_cursor = None;
-            if let Some(live) = self.agent_state.history_pending_live.take() {
-                self.agent_state.input = live;
+        for _ in 0..delta.unsigned_abs() {
+            if delta < 0 {
+                pane.move_input_up_or_history();
+            } else {
+                pane.move_input_down_or_history();
             }
-        } else {
-            let idx = next.max(0) as usize;
-            self.agent_state.history_cursor = Some(idx);
-            self.agent_state.input = self.agent_state.history[idx].clone();
         }
-        self.agent_state.input.clone()
+        pane.input().to_string()
     }
 
     /// Rect of the agent pane's prompt input in chrome-logical
@@ -548,6 +658,14 @@ impl ChromeBridge {
     /// decision. JS uses this to gate the permission-picker UI.
     pub fn agent_has_pending_permission(&self) -> bool {
         self.agent_state.pending_permission.is_some()
+    }
+
+    /// True if a `question` tool request is awaiting the user's
+    /// answer (the shared prompt picker owns the keyboard while set).
+    pub fn agent_has_pending_question(&self) -> bool {
+        self.chrome
+            .agent_pane()
+            .is_some_and(|pane| pane.pending_question().is_some())
     }
 
     /// True while a daemon-side turn is in flight (between
@@ -664,25 +782,25 @@ impl ChromeBridge {
         if trimmed.is_empty() {
             return;
         }
-        if self.agent_state.history.last().map(String::as_str) != Some(trimmed) {
-            self.agent_state.history.push(trimmed.to_string());
-        }
-        if let Some(pane) = self.chrome.agent_pane_mut() {
-            if pane.input() != text {
-                pane.replace_input(text);
+        if self.chrome.agent_pane_mut().is_some() {
+            {
+                let pane = self
+                    .chrome
+                    .agent_pane_mut()
+                    .expect("agent pane checked above");
+                if pane.input() != text {
+                    pane.replace_input(text);
+                }
+                // The pane records the prompt into its own
+                // `sent_history` (Up-arrow recall) as part of submit.
+                let _ = pane.submit();
             }
-            let _ = pane.submit();
-            self.agent_state.input = pane.input().to_string();
-            self.agent_state.history_cursor = None;
-            self.agent_state.history_pending_live = None;
             let _ = self.drain_agent_outbound();
             return;
         }
 
         let (mode, model, thinking) = self.agent_prompt_defaults();
-        self.agent_state.input.clear();
-        self.agent_state.history_cursor = None;
-        self.agent_state.history_pending_live = None;
+        self.note_prompt_for_history(trimmed);
         self.agent_state.pending_prompt = Some(PendingAgentPrompt {
             message_id: neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
             text: trimmed.to_string(),
@@ -695,12 +813,86 @@ impl ChromeBridge {
         self.create_agent_thread_with_defaults();
     }
 
-    /// Same submit path as `agent_send_message`, but with
-    /// structured attachments supplied by the JS host. Used for
-    /// clipboard image paste: JS reads `ClipboardEvent` files,
-    /// serializes them as protocol `Attachment` records, and the
-    /// bridge stamps the current agent session id before emitting
-    /// the outbound envelope.
+    /// Attach a pasted clipboard image to the shared composer as an
+    /// `[imageN]` token + chip — desktop's Ctrl+V-with-image flow. The
+    /// image is NOT sent yet; it rides along with the next submit
+    /// (Enter), and the sent user card renders it like desktop.
+    /// Returns `false` when the pane rejected the payload (empty,
+    /// non-image mime, or over the 20MB cap) so the host can surface
+    /// a notice.
+    pub fn agent_attach_clipboard_image(
+        &mut self,
+        filename: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> bool {
+        let Some(pane) = self.chrome.agent_pane_mut() else {
+            return false;
+        };
+        let attached = pane.attach_clipboard_image(filename, mime, bytes);
+        if attached {
+            let _ = self.drain_agent_outbound();
+        }
+        attached
+    }
+
+    /// Attach a host-mediated file (drag-and-drop onto the agent pane,
+    /// file picker) to the shared composer — the web analogue of
+    /// desktop's `DroppedFile` → `attach_path`. Any mime is accepted
+    /// (`[imageN]` / `[pdfN]` / `[fileN: name]` token per the shared
+    /// attachment policy); an empty `mime` is sniffed from the
+    /// filename. Send happens on the next submit.
+    pub fn agent_attach_file(&mut self, filename: &str, mime: &str, bytes: &[u8]) -> bool {
+        let Some(pane) = self.chrome.agent_pane_mut() else {
+            return false;
+        };
+        let attached = pane.attach_file_bytes(filename, mime, bytes);
+        if attached {
+            let _ = self.drain_agent_outbound();
+        }
+        attached
+    }
+
+    /// The active `@`-mention query in the shared composer (the text
+    /// between `@` and the caret), or `null` when no mention is being
+    /// typed. JS polls this after key/paste routing to decide when to
+    /// fetch + feed mention candidates.
+    pub fn agent_file_mention_query(&self) -> JsValue {
+        match self
+            .chrome
+            .agent_pane()
+            .and_then(|pane| pane.file_mention_query())
+        {
+            Some(query) => JsValue::from_str(&query),
+            None => JsValue::NULL,
+        }
+    }
+
+    /// Install the `@`-mention candidate list (JSON array of
+    /// workspace-relative file paths) on the shared pane. The pane
+    /// ranks candidates per keystroke with the desktop `fuzzy_score`
+    /// policy, so this only needs to be re-fed when the file list
+    /// itself changes. Returns `false` on a parse error or when no
+    /// agent pane is installed.
+    pub fn agent_set_file_mention_candidates(&mut self, json: &str) -> bool {
+        let Ok(paths) = serde_json::from_str::<Vec<String>>(json) else {
+            return false;
+        };
+        let Some(pane) = self.chrome.agent_pane_mut() else {
+            return false;
+        };
+        pane.set_file_mention_candidates(paths);
+        true
+    }
+
+    /// Same submit path as `agent_send_message`, but with structured
+    /// attachments supplied by the JS host. Kept for older host code:
+    /// the attachments are attached to the shared pane as composer
+    /// chips (`attach_file_bytes`) and the prompt submits through the
+    /// pane, so the user bubble, image rail, streaming state, and
+    /// session bootstrap all match a plain Enter. New host code should
+    /// attach via `agent_attach_clipboard_image` / `agent_attach_file`
+    /// and let the user press Enter instead.
     pub fn agent_send_message_with_attachments(
         &mut self,
         text: &str,
@@ -714,31 +906,44 @@ impl ChromeBridge {
         if trimmed.is_empty() && attachments.is_empty() {
             return Ok(());
         }
-
-        if !trimmed.is_empty()
-            && self.agent_state.history.last().map(String::as_str) != Some(trimmed)
-        {
-            self.agent_state.history.push(trimmed.to_string());
-        }
-        self.agent_state.input.clear();
-        if let Some(pane) = self.chrome.agent_pane_mut() {
-            pane.replace_input("");
-        }
-        self.agent_state.history_cursor = None;
-        self.agent_state.history_pending_live = None;
-
-        let text = if trimmed.is_empty() {
-            "Please analyze the pasted image.".to_string()
+        let prompt_text = if trimmed.is_empty() {
+            "Please analyze the pasted image."
         } else {
-            trimmed.to_string()
+            trimmed
         };
+
+        if self.chrome.agent_pane_mut().is_some() {
+            {
+                let pane = self
+                    .chrome
+                    .agent_pane_mut()
+                    .expect("agent pane checked above");
+                if pane.input() != prompt_text {
+                    pane.replace_input(prompt_text);
+                }
+                for attachment in &attachments {
+                    let filename = attachment.path.as_deref().unwrap_or("");
+                    let _ = pane.attach_file_bytes(
+                        filename,
+                        &attachment.kind,
+                        &attachment.bytes,
+                    );
+                }
+                let _ = pane.submit();
+            }
+            let _ = self.drain_agent_outbound();
+            return Ok(());
+        }
+
+        // No pane installed (headless bridge) — legacy direct path.
+        self.note_prompt_for_history(prompt_text);
         let (mode, model, thinking) = self.agent_prompt_defaults();
         if let Some(session_id) = self.agent_state.session_id.clone() {
             self.send_agent_envelope(&AgentClientMessage::SubmitPrompt {
                 session_id,
                 message_id:
                     neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
-                text,
+                text: prompt_text.to_string(),
                 attachments,
                 mode,
                 model,
@@ -749,7 +954,7 @@ impl ChromeBridge {
             self.agent_state.pending_prompt = Some(PendingAgentPrompt {
                 message_id:
                     neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
-                text,
+                text: prompt_text.to_string(),
                 attachments,
                 mode,
                 model,
@@ -759,6 +964,128 @@ impl ChromeBridge {
             self.create_agent_thread_with_defaults();
         }
         Ok(())
+    }
+
+    // -------- prompt history persistence ------------------------
+    //
+    // Desktop keeps a zsh-style global prompt history file
+    // (`desktop/src/neoism/agent/prompt_history.rs`): every sent
+    // prompt appends, capped to the most recent 1000, and each new
+    // pane seeds Up-arrow recall from it. The web analogue lives in
+    // browser localStorage. The bridge holds only a persistence
+    // LEDGER (oldest-first, like the pane's `sent_history` walk
+    // order) — live recall state stays in the pane. JSON exchanged
+    // with JS is newest-first, matching the desktop file's read
+    // order for a fresh pane.
+
+    /// Record one sent prompt into the persistence ledger and
+    /// write-through to localStorage. Empties are skipped and a
+    /// prompt identical to the previous entry is deduped
+    /// (`HIST_IGNORE_DUPS`), mirroring desktop `prompt_history::append`.
+    pub(crate) fn note_prompt_for_history(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.ensure_prompt_history_loaded();
+        if self
+            .agent_state
+            .prompt_history
+            .last()
+            .is_some_and(|last| last == trimmed)
+        {
+            return;
+        }
+        self.agent_state.prompt_history.push(trimmed.to_string());
+        let len = self.agent_state.prompt_history.len();
+        if len > MAX_PROMPT_HISTORY {
+            self.agent_state.prompt_history.drain(0..len - MAX_PROMPT_HISTORY);
+        }
+        self.persist_prompt_history();
+    }
+
+    fn ensure_prompt_history_loaded(&mut self) {
+        if self.agent_state.prompt_history_loaded {
+            return;
+        }
+        self.agent_state.prompt_history_loaded = true;
+        let Some(stored) = local_storage_get(PROMPT_HISTORY_KEY) else {
+            return;
+        };
+        let Ok(newest_first) = serde_json::from_str::<Vec<String>>(&stored) else {
+            return;
+        };
+        let mut restored: Vec<String> = newest_first
+            .into_iter()
+            .rev()
+            .filter(|entry| !entry.trim().is_empty())
+            .collect();
+        // Entries recorded before the load (a prompt raced the first
+        // read) stay newest — append them after the restored base.
+        restored.append(&mut self.agent_state.prompt_history);
+        restored.dedup();
+        let len = restored.len();
+        if len > MAX_PROMPT_HISTORY {
+            restored.drain(0..len - MAX_PROMPT_HISTORY);
+        }
+        self.agent_state.prompt_history = restored;
+    }
+
+    fn persist_prompt_history(&self) {
+        let newest_first: Vec<&str> = self
+            .agent_state
+            .prompt_history
+            .iter()
+            .rev()
+            .map(String::as_str)
+            .collect();
+        if let Ok(json) = serde_json::to_string(&newest_first) {
+            local_storage_set(PROMPT_HISTORY_KEY, &json);
+        }
+    }
+
+    /// Snapshot the persisted prompt history as a JSON array of
+    /// strings, NEWEST FIRST, capped at 1000 — the desktop
+    /// `prompt_history.rs` shape. JS can persist / inspect this;
+    /// the bridge also write-throughs to localStorage itself on
+    /// every send, so calling this is optional.
+    pub fn agent_prompt_history_json(&mut self) -> String {
+        self.ensure_prompt_history_loaded();
+        let newest_first: Vec<&str> = self
+            .agent_state
+            .prompt_history
+            .iter()
+            .rev()
+            .map(String::as_str)
+            .collect();
+        serde_json::to_string(&newest_first).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Restore a persisted prompt history (JSON array of strings,
+    /// newest first — the `agent_prompt_history_json` shape) into
+    /// the bridge ledger, replacing any localStorage-loaded base.
+    /// Returns `false` on a parse error.
+    ///
+    pub fn agent_restore_prompt_history(&mut self, json: &str) -> bool {
+        let Ok(newest_first) = serde_json::from_str::<Vec<String>>(json) else {
+            return false;
+        };
+        self.agent_state.prompt_history_loaded = true;
+        let mut oldest_first: Vec<String> = newest_first
+            .into_iter()
+            .rev()
+            .filter(|entry| !entry.trim().is_empty())
+            .collect();
+        let len = oldest_first.len();
+        if len > MAX_PROMPT_HISTORY {
+            oldest_first.drain(0..len - MAX_PROMPT_HISTORY);
+        }
+        self.agent_state.prompt_history = oldest_first;
+        if let Some(pane) = self.chrome.agent_pane_mut() {
+            pane.seed_sent_history(self.agent_state.prompt_history.clone());
+        }
+        self.persist_prompt_history();
+        true
     }
 
     /// Fire a `Cancel` (legacy) or `CancelInflight` (session)
@@ -898,10 +1225,18 @@ impl ChromeBridge {
                     }
                 }
                 AgentProtocolMapping::PendingPrompt(prompt) => {
+                    // Mirror desktop's zsh-style history: the ledger
+                    // records prompts at send time (persisted to
+                    // localStorage; see `note_prompt_for_history`).
+                    // Attachments travel INSIDE the pending prompt now
+                    // (extracted from the pane's file parts by
+                    // `protocol_mapping`), so the no-session path ships
+                    // pasted images exactly like a live-session submit.
+                    self.note_prompt_for_history(&prompt.text);
                     self.agent_state.pending_prompt = Some(PendingAgentPrompt {
                         message_id: prompt.message_id,
                         text: prompt.text,
-                        attachments: Vec::new(),
+                        attachments: prompt.attachments,
                         mode: prompt.mode,
                         model: prompt.model,
                         thinking: prompt.thinking,
@@ -914,13 +1249,22 @@ impl ChromeBridge {
                 }
                 AgentProtocolMapping::Messages(messages) => {
                     for envelope in messages {
-                        if let neoism_protocol::agent::AgentClientMessage::SwitchThread {
+                        match &envelope {
+                            neoism_protocol::agent::AgentClientMessage::SwitchThread {
                                 session_id,
-                            } = &envelope
-                            {
+                            } => {
                                 self.agent_state.session_id = Some(session_id.clone());
-                                self.agent_state.requested_session_id = Some(session_id.clone());
+                                self.agent_state.requested_session_id =
+                                    Some(session_id.clone());
                             }
+                            neoism_protocol::agent::AgentClientMessage::SubmitPrompt {
+                                text,
+                                ..
+                            } => {
+                                self.note_prompt_for_history(&text.clone());
+                            }
+                            _ => {}
+                        }
                         if self.send_agent_envelope(&envelope) {
                             delivered = delivered.saturating_add(1);
                         }
@@ -1026,6 +1370,13 @@ impl ChromeBridge {
                 pane.side_panel_mut().set_focused(false);
             }
             if pane.respond_permission_at(x, y) {
+                result.handled = true;
+                break 'chain;
+            }
+            // `question` tool prompt rows — click selects + commits,
+            // mirroring desktop's `respond_question_at` hit right after
+            // the permission chain.
+            if pane.respond_question_at(x, y) {
                 result.handled = true;
                 break 'chain;
             }
@@ -1172,4 +1523,50 @@ impl ChromeBridge {
         };
         pane.pop_wordmark_click(x, y)
     }
+}
+
+/// localStorage key for the persisted agent prompt history (JSON
+/// array of strings, newest first).
+pub(crate) const PROMPT_HISTORY_KEY: &str = "neoism.agent.prompt-history.v1";
+/// zsh's default `SAVEHIST` — matches desktop
+/// `prompt_history::MAX_PROMPT_HISTORY`.
+pub(crate) const MAX_PROMPT_HISTORY: usize = 1000;
+
+// Browser localStorage via `js_sys` reflection (the crate's `web-sys`
+// feature set doesn't include `Storage`, and these two calls don't
+// justify widening it). Best-effort on both ends: a sandboxed /
+// storage-denied context (some private modes throw on ACCESS) simply
+// yields `None` and history stays session-local, mirroring desktop's
+// swallow-on-write-failure stance.
+fn local_storage() -> Option<JsValue> {
+    let storage =
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("localStorage"))
+            .ok()?;
+    (!storage.is_undefined() && !storage.is_null()).then_some(storage)
+}
+
+fn local_storage_call(method: &str, args: &[&JsValue]) -> Option<JsValue> {
+    use wasm_bindgen::JsCast;
+    let storage = local_storage()?;
+    let func: js_sys::Function =
+        js_sys::Reflect::get(&storage, &JsValue::from_str(method))
+            .ok()?
+            .dyn_into()
+            .ok()?;
+    match args {
+        [a] => func.call1(&storage, a).ok(),
+        [a, b] => func.call2(&storage, a, b).ok(),
+        _ => None,
+    }
+}
+
+pub(crate) fn local_storage_get(key: &str) -> Option<String> {
+    local_storage_call("getItem", &[&JsValue::from_str(key)])?.as_string()
+}
+
+pub(crate) fn local_storage_set(key: &str, value: &str) {
+    let _ = local_storage_call(
+        "setItem",
+        &[&JsValue::from_str(key), &JsValue::from_str(value)],
+    );
 }

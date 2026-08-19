@@ -121,8 +121,115 @@ impl NeoismAgentPane {
         }
     }
 
-    pub fn attach_path(&mut self, _path: &std::path::Path) -> bool {
-        false
+    /// Attach a file (or mention a directory) from the host
+    /// filesystem — desktop parity (`pane/input.rs::attach_path`).
+    /// Hosts without a local filesystem get `false` (the fs probes
+    /// fail on wasm); they attach through
+    /// [`Self::attach_file_bytes`] / [`Self::attach_clipboard_image`]
+    /// instead.
+    pub fn attach_path(&mut self, path: &std::path::Path) -> bool {
+        if self.is_subagent_session() {
+            return false;
+        }
+        if path.is_dir() {
+            let display = self.display_path_for_attachment(path, true);
+            self.close_picker();
+            self.insert_input_token(&format!("@{display}"));
+            self.sync_input_pickers();
+            return true;
+        }
+        if !path.is_file() {
+            return false;
+        }
+        let mime = input_controller::mime_for_path(path);
+        let filename = self.display_path_for_attachment(path, false);
+        let token = self.unique_attachment_token(&self.file_attachment_token(path, mime));
+        let url = attachment_url_for_path(path, mime);
+        self.close_picker();
+        self.insert_input_token(&token);
+        self.input_attachments
+            .push(NeoismAgentInputAttachment::File {
+                token,
+                filename,
+                url,
+                mime: mime.to_string(),
+            });
+        self.sync_input_pickers();
+        true
+    }
+
+    /// Attach a clipboard image supplied as raw bytes — desktop parity
+    /// (`pane/input.rs::attach_clipboard_image`), with the bytes
+    /// handed over by the host (desktop reads the OS clipboard, web
+    /// reads the browser `ClipboardEvent`). The image lands as an
+    /// `[imageN]` composer token + chip and is sent with the next
+    /// submit. Oversized payloads (> 20MB) are rejected.
+    pub fn attach_clipboard_image(
+        &mut self,
+        filename: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> bool {
+        if bytes.is_empty() || !mime.starts_with("image/") {
+            return false;
+        }
+        let filename = if filename.trim().is_empty() {
+            let next = self.file_attachment_count(|mime| mime.starts_with("image/")) + 1;
+            format!(
+                "clipboard-image-{next}.{}",
+                input_controller::extension_for_mime(mime)
+            )
+        } else {
+            filename.to_string()
+        };
+        self.attach_file_bytes(&filename, mime, bytes)
+    }
+
+    /// Attach a host-mediated file (drag-and-drop, file picker, pasted
+    /// image) from raw bytes: `[imageN]` / `[pdfN]` / `[fileN: name]`
+    /// token per `attachment_policy`, mime from the host (falling back
+    /// to extension sniffing), 20MB cap, bytes inlined as a `data:`
+    /// URL so they survive the wire to the daemon. The attachment
+    /// shows as a composer chip and is sent on the next submit —
+    /// matching desktop's attach-then-Enter flow.
+    pub fn attach_file_bytes(&mut self, filename: &str, mime: &str, bytes: &[u8]) -> bool {
+        use base64::Engine as _;
+
+        if self.is_subagent_session() || bytes.is_empty() {
+            return false;
+        }
+        if bytes.len() as u64 > MAX_INLINE_ATTACHMENT_BYTES {
+            self.ui_events.push(NeoismAgentUiEvent::Notice {
+                message: format!("Attachment too large (max 20MB): {filename}"),
+                level: NeoismAgentNoticeLevel::Warn,
+            });
+            return false;
+        }
+        let filename = if filename.trim().is_empty() {
+            "file".to_string()
+        } else {
+            filename.trim().to_string()
+        };
+        let mime = if mime.trim().is_empty() {
+            input_controller::mime_for_path(std::path::Path::new(&filename)).to_string()
+        } else {
+            mime.trim().to_string()
+        };
+        let token =
+            self.unique_attachment_token(&self.file_attachment_token_for(&filename, &mime));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let url = format!("data:{mime};base64,{encoded}");
+        self.close_picker();
+        self.insert_input_token(&token);
+        self.input_attachments
+            .push(NeoismAgentInputAttachment::File {
+                token,
+                filename,
+                url,
+                mime,
+            });
+        self.sync_input_pickers();
+        true
     }
 
     pub(in crate::panels::agent_pane::state) fn insert_pasted_text_attachment(

@@ -216,4 +216,12 @@ impl GitDiffPanel {
     pub fn set_io_provider(&mut self, io: Arc<dyn GitDiffIo>) {
         self.io = Some(io);
     }
+
+    /// True once a host installed a [`GitDiffIo`] provider — desktop's
+    /// native shell-out, or the web's daemon-marshalling provider. The
+    /// wasm host uses this to ignore the legacy staged-less push path
+    /// once the provider-driven flow owns the panel's data.
+    pub fn has_io_provider(&self) -> bool {
+        self.io.is_some()
+    }
 }

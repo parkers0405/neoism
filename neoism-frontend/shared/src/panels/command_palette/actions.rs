@@ -483,6 +483,126 @@ pub fn mashup_packs_modal_spec(packs: Vec<PaletteMashupEntry>) -> ModalSpec {
     }
 }
 
+/// What the HOST embedding the palette can actually execute — the
+/// second axis of command visibility next to [`PaletteSurface`].
+///
+/// Desktop is the golden standard and supports everything, so the
+/// default ([`PaletteHostCapabilities::all`]) changes nothing there.
+/// The web host calls [`CommandPalette::set_host_capabilities`] with
+/// [`PaletteHostCapabilities::web`] so commands that would dead-end in
+/// a "not available in the web frontend" toast are not listed at all.
+/// Each flag flips back to `true` the moment the matching web
+/// capability lands — the catalog itself never forks.
+///
+/// [`CommandPalette::set_host_capabilities`]: super::state::CommandPalette::set_host_capabilities
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaletteHostCapabilities {
+    /// LSP request/response actions (hover, code action, format,
+    /// definition, references, rename, document/workspace symbols)
+    /// plus the symbols-fed `GoToSymbol` finder mode.
+    pub lsp_actions: bool,
+    /// Kernel-level notebook control (interrupt/restart) and the
+    /// batch run commands (run-all / run-and-below) that need the
+    /// host execution runtime beyond the shared pane's single-cell
+    /// operations.
+    pub notebook_kernel: bool,
+    /// `.neodraw` ink-annotation of the current note.
+    pub draw_notes: bool,
+    /// Detaching from a joined (adopted) workspace.
+    pub leave_workspace: bool,
+    /// A place to open the config: the settings page or a config.json
+    /// editor tab.
+    pub settings_editor: bool,
+    /// The NeoWorld chrome page.
+    pub neoworld_page: bool,
+    /// A minimap data feed (the toggle is pointless without one).
+    pub minimap: bool,
+}
+
+impl PaletteHostCapabilities {
+    /// Everything supported — the desktop host. Also the default, so
+    /// hosts that never call `set_host_capabilities` keep the full
+    /// catalog.
+    pub const fn all() -> Self {
+        Self {
+            lsp_actions: true,
+            notebook_kernel: true,
+            draw_notes: true,
+            leave_workspace: true,
+            settings_editor: true,
+            neoworld_page: true,
+            minimap: true,
+        }
+    }
+
+    /// What the web host can execute today. Kept here (not in the
+    /// wasm crate) so the web's capability claims live next to the
+    /// filter they drive and the two cannot drift.
+    pub const fn web() -> Self {
+        Self {
+            // No LSP request bridge on web yet — hover/rename/etc.
+            // and the symbols finder have no data source.
+            lsp_actions: false,
+            // Web notebook execution is pane-local; there is no
+            // kernel to interrupt/restart and no batch runtime.
+            notebook_kernel: false,
+            // Draw-on-note conversion is a desktop Draw-service flow.
+            draw_notes: false,
+            // Web workspaces are daemon-selected, never adopted.
+            leave_workspace: false,
+            // The shared settings overlay (`Chrome::open_settings_page`)
+            // is seeded by the web host's daemon config fetch
+            // (`openWebSettingsPage` — the same route the top-bar
+            // hamburger's `open_settings` action takes).
+            settings_editor: true,
+            // Routed chrome-side to `Chrome::open_neoworld_page_tab`
+            // (see the wasm bridge's palette dispatch).
+            neoworld_page: true,
+            // Nothing feeds `set_minimap` on web yet.
+            minimap: false,
+        }
+    }
+}
+
+impl Default for PaletteHostCapabilities {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+/// Host-capability axis of command visibility. Commands not gated by
+/// any flag are visible on every host; the [`PaletteSurface`] filter
+/// still applies on top.
+pub(crate) fn command_visible_for_host(
+    action: &PaletteAction,
+    caps: PaletteHostCapabilities,
+) -> bool {
+    match action {
+        PaletteAction::LspHover
+        | PaletteAction::LspCodeAction
+        | PaletteAction::LspFormat
+        | PaletteAction::LspDefinition
+        | PaletteAction::LspReferences
+        | PaletteAction::LspRename
+        | PaletteAction::LspDocumentSymbols
+        | PaletteAction::LspWorkspaceSymbols
+        | PaletteAction::GoToSymbol => caps.lsp_actions,
+        // NOTE: `ToggleInlayHints` is deliberately NOT gated — it
+        // stays listed with an honest host-side notice until inlay
+        // hints land, so the setting is discoverable.
+        PaletteAction::InterruptNotebookKernel
+        | PaletteAction::RestartNotebookKernel
+        | PaletteAction::RunNotebookCellAndBelow
+        | PaletteAction::RunAllNotebookCells => caps.notebook_kernel,
+        PaletteAction::DrawOnNote => caps.draw_notes,
+        PaletteAction::LeaveWorkspace => caps.leave_workspace,
+        PaletteAction::ConfigEditor => caps.settings_editor,
+        PaletteAction::OpenNeoWorld => caps.neoworld_page,
+        PaletteAction::ToggleMinimap => caps.minimap,
+        _ => true,
+    }
+}
+
 pub(crate) fn command_visible_for_surface(
     action: &PaletteAction,
     surface: PaletteSurface,

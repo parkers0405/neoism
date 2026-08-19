@@ -1,3 +1,5 @@
+import { wasmInputPolicy } from "../terminal/createTerminal";
+
 export type MobileKeyboardContext =
   | "code"
   | "text"
@@ -195,6 +197,23 @@ export class MobileKeyboard {
   // ------------------------------------------------------------------
 
   private applyContextAttributes(): void {
+    // Attribute DECISIONS come from the shared Rust policy
+    // (`neoism_ui::touch_policy::mobile_input_attributes`); only the
+    // DOM `setAttribute` wiring lives here. The inline expressions
+    // below are the pre-wasm / stale-bundle fallback, pinned to the
+    // Rust module by its unit tests.
+    const decided = wasmInputPolicy()?.mobile_input_attributes?.(
+      this.currentContext,
+      this.toolbarVisible,
+    );
+    if (decided) {
+      this.capture.setAttribute("autocapitalize", decided.autocapitalize);
+      this.capture.setAttribute("autocorrect", decided.autocorrect);
+      this.capture.setAttribute("spellcheck", decided.spellcheck);
+      this.capture.setAttribute("inputmode", decided.inputmode);
+      this.capture.setAttribute("enterkeyhint", decided.enterkeyhint);
+      return;
+    }
     const codeLike =
       this.currentContext === "code" ||
       this.currentContext === "editor" ||
@@ -226,6 +245,34 @@ export class MobileKeyboard {
     );
   }
 
+  /** PTY bytes for one named / toolbar key, decided by the shared
+   *  Rust policy (`mobile_named_key_bytes`) with an identical local
+   *  fallback for the pre-wasm window. */
+  private namedKeyBytes(key: string): Uint8Array | null {
+    const decided = wasmInputPolicy()?.mobile_named_key_bytes?.(key);
+    if (decided instanceof Uint8Array) return decided;
+    switch (key) {
+      case "ArrowUp":
+        return new TextEncoder().encode("\x1b[A");
+      case "ArrowDown":
+        return new TextEncoder().encode("\x1b[B");
+      case "ArrowRight":
+        return new TextEncoder().encode("\x1b[C");
+      case "ArrowLeft":
+        return new TextEncoder().encode("\x1b[D");
+      case "Enter":
+        return Uint8Array.of(0x0d);
+      case "Backspace":
+        return Uint8Array.of(0x7f);
+      case "Escape":
+        return Uint8Array.of(0x1b);
+      case "Tab":
+        return Uint8Array.of(0x09);
+      default:
+        return null;
+    }
+  }
+
   private handleBeforeInput(event: InputEvent): void {
     event.preventDefault();
     if (event.inputType === "insertText" && event.data) {
@@ -234,13 +281,13 @@ export class MobileKeyboard {
       event.inputType === "insertParagraph" ||
       event.inputType === "insertLineBreak"
     ) {
-      this.options.onBytes(Uint8Array.of(0x0d));
+      this.options.onBytes(this.namedKeyBytes("Enter") ?? Uint8Array.of(0x0d));
       this.clearTransientModifiers();
     } else if (
       event.inputType === "deleteContentBackward" ||
       event.inputType === "deleteByCut"
     ) {
-      this.options.onBytes(Uint8Array.of(0x7f));
+      this.options.onBytes(this.namedKeyBytes("Backspace") ?? Uint8Array.of(0x7f));
       this.clearTransientModifiers();
     }
     // Always reset the buffer so the contenteditable never accumulates.
@@ -249,19 +296,25 @@ export class MobileKeyboard {
 
   private handleKeyDown(event: KeyboardEvent): void {
     // Some mobile keyboards bypass beforeinput for navigation keys.
-    if (event.key === "Enter") {
+    if (event.key === "Enter" || event.key === "Backspace") {
       event.preventDefault();
-      this.options.onBytes(Uint8Array.of(0x0d));
-      this.clearTransientModifiers();
-    } else if (event.key === "Backspace") {
-      event.preventDefault();
-      this.options.onBytes(Uint8Array.of(0x7f));
+      const bytes = this.namedKeyBytes(event.key);
+      if (bytes) this.options.onBytes(bytes);
       this.clearTransientModifiers();
     }
   }
 
   private emitTextRespectingModifiers(data: string): void {
     if (this.modifiers.ctrl.active && data.length === 1) {
+      // Ctrl-chord byte decided by the shared Rust policy
+      // (`mobile_ctrl_chord_byte`); identical local fallback for the
+      // pre-wasm window.
+      const decided = wasmInputPolicy()?.mobile_ctrl_chord_byte?.(data);
+      if (typeof decided === "number") {
+        this.options.onBytes(Uint8Array.of(decided));
+        this.clearTransientModifiers();
+        return;
+      }
       const lower = data.toLowerCase().charCodeAt(0);
       if (lower >= 97 && lower <= 122) {
         this.options.onBytes(Uint8Array.of(lower - 96));
@@ -301,21 +354,33 @@ export class MobileKeyboard {
   private recomputeInsets(): void {
     const viewport = window.visualViewport;
     let bottom = 0;
+    let open = false;
     if (viewport) {
       // `innerHeight` is the layout viewport (above keyboard not
       // subtracted on Android Chrome); `visualViewport.height` shrinks
-      // when the soft keyboard opens. Their delta minus any pageTop
-      // offset is the keyboard inset in CSS pixels. Clamp to >= 0 in
-      // case the viewport is taller than the layout (e.g., during a
-      // pinch-zoom unzoom transition).
-      bottom = Math.max(
-        0,
-        Math.round(window.innerHeight - (viewport.height + viewport.offsetTop)),
+      // when the soft keyboard opens. The inset DECISION (delta math,
+      // >=0 clamp for pinch-zoom transitions, 4px URL-bar slop) lives
+      // in the shared Rust policy
+      // (`neoism_ui::touch_policy::keyboard_inset`); the inline math
+      // below is the identical pre-wasm / stale-bundle fallback. The
+      // decision re-runs on every viewport/resize event so the inset
+      // survives resizes either way.
+      const decided = wasmInputPolicy()?.mobile_keyboard_inset?.(
+        window.innerHeight,
+        viewport.height,
+        viewport.offsetTop,
       );
+      if (decided) {
+        bottom = decided.bottom;
+        open = decided.keyboardOpen;
+      } else {
+        bottom = Math.max(
+          0,
+          Math.round(window.innerHeight - (viewport.height + viewport.offsetTop)),
+        );
+        open = bottom > 4;
+      }
     }
-    // Tolerate a 4px slop — browsers report fractional pixels on URL-bar
-    // hide/show that aren't a real keyboard event.
-    const open = bottom > 4;
     const previous = this.currentInsets;
     if (previous.bottom === bottom && previous.keyboardOpen === open) {
       return;
@@ -435,12 +500,12 @@ export class MobileKeyboard {
     doubleTap: boolean,
   ): void {
     if (kind === "esc") {
-      this.options.onBytes(Uint8Array.of(0x1b));
+      this.options.onBytes(this.namedKeyBytes("Escape") ?? Uint8Array.of(0x1b));
       this.clearTransientModifiers();
       return;
     }
     if (kind === "tab") {
-      this.options.onBytes(Uint8Array.of(0x09));
+      this.options.onBytes(this.namedKeyBytes("Tab") ?? Uint8Array.of(0x09));
       this.clearTransientModifiers();
       return;
     }
@@ -456,22 +521,8 @@ export class MobileKeyboard {
   }
 
   private emitNamedKey(key: string): void {
-    switch (key) {
-      case "ArrowUp":
-        this.options.onBytes(new TextEncoder().encode("\x1b[A"));
-        break;
-      case "ArrowDown":
-        this.options.onBytes(new TextEncoder().encode("\x1b[B"));
-        break;
-      case "ArrowRight":
-        this.options.onBytes(new TextEncoder().encode("\x1b[C"));
-        break;
-      case "ArrowLeft":
-        this.options.onBytes(new TextEncoder().encode("\x1b[D"));
-        break;
-      default:
-        break;
-    }
+    const bytes = this.namedKeyBytes(key);
+    if (bytes) this.options.onBytes(bytes);
     this.clearTransientModifiers();
   }
 }

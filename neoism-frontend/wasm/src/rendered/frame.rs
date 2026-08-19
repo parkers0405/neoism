@@ -334,38 +334,32 @@ impl ChromeBridge {
     }
 
     pub fn drain_top_bar_action(&mut self) -> Option<String> {
-        self.chrome
-            .drain_top_bar_action()
-            .map(|action| match action {
-                neoism_ui::panels::TopBarAction::OpenSettings => {
-                    "open_settings".to_string()
-                }
-                neoism_ui::panels::TopBarAction::OpenServers => {
-                    "open_servers".to_string()
-                }
-                neoism_ui::panels::TopBarAction::OpenWorkspaces => {
-                    "open_workspaces".to_string()
-                }
-                neoism_ui::panels::TopBarAction::StartWebServer => {
-                    "start_web_server".to_string()
-                }
-                neoism_ui::panels::TopBarAction::OpenThemes => "open_themes".to_string(),
-                neoism_ui::panels::TopBarAction::OpenExtensions => {
-                    "open_extensions".to_string()
-                }
-                neoism_ui::panels::TopBarAction::OpenNeoWorld => {
-                    "open_neoworld".to_string()
-                }
-                neoism_ui::panels::TopBarAction::TogglePanel => {
-                    "toggle_panel".to_string()
-                }
-                neoism_ui::panels::TopBarAction::OpenAgent => {
-                    self.queue_agent_tab_open();
-                    return None;
-                }
-                neoism_ui::panels::TopBarAction::OpenSearch => "open_search".to_string(),
-                neoism_ui::panels::TopBarAction::OpenAbout => "open_about".to_string(),
-            })
+        // NOT a `.map(..)`: the OpenAgent arm consumes the action
+        // internally (queues a tab open) and yields nothing to JS, so
+        // the closure would need to early-return `None` out of a
+        // `String`-typed body. A plain match lets that arm bail.
+        let action = self.chrome.drain_top_bar_action()?;
+        let name = match action {
+            neoism_ui::panels::TopBarAction::OpenSettings => "open_settings",
+            neoism_ui::panels::TopBarAction::OpenServers => "open_servers",
+            neoism_ui::panels::TopBarAction::OpenWorkspaces => "open_workspaces",
+            neoism_ui::panels::TopBarAction::StartWebServer => "start_web_server",
+            neoism_ui::panels::TopBarAction::OpenThemes => "open_themes",
+            neoism_ui::panels::TopBarAction::OpenExtensions => "open_extensions",
+            neoism_ui::panels::TopBarAction::OpenNeoWorld => "open_neoworld",
+            neoism_ui::panels::TopBarAction::TogglePanel => "toggle_panel",
+            neoism_ui::panels::TopBarAction::OpenAgent => {
+                self.queue_agent_tab_open();
+                return None;
+            }
+            // Chrome handles OpenNotes internally (toggles the shared
+            // notes sidebar) and never queues it, but keep the arm
+            // exhaustive so a future queuing change surfaces to JS.
+            neoism_ui::panels::TopBarAction::OpenNotes => "open_notes",
+            neoism_ui::panels::TopBarAction::OpenSearch => "open_search",
+            neoism_ui::panels::TopBarAction::OpenAbout => "open_about",
+        };
+        Some(name.to_string())
     }
 
     /// True when visible chrome owns keyboard input and the host
@@ -374,7 +368,11 @@ impl ChromeBridge {
     /// it has explicit focus — otherwise typing belongs to the
     /// terminal underneath. Same for the file tree.
     pub fn keyboard_capture_active(&self) -> bool {
-        self.chrome.command_palette.is_visible()
+        // The chrome-page layer (settings overlay / About modal /
+        // Extensions / NeoWorld tab) routes raw keys through
+        // `Chrome::handle_event` instead of the PTY / editor paths.
+        self.chrome.chrome_page_wants_keyboard()
+            || self.chrome.command_palette.is_visible()
             || self.chrome.finder.is_visible()
             || self.chrome.git_diff.is_visible()
             || self.chrome.git_diff_panel.is_focused()

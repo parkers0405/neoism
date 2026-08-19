@@ -2156,15 +2156,15 @@ impl SessionStore {
         &self,
         session_id: &str,
         delivery: Option<&str>,
-    ) -> anyhow::Result<Option<PromptRequest>> {
+    ) -> anyhow::Result<Option<(PromptRequest, String)>> {
         let (sql, parameters) = if let Some(delivery) = delivery {
             (
-                "SELECT id, request_json FROM prompt_queue WHERE session_id = ? AND delivery = ? ORDER BY position ASC, created ASC LIMIT 1",
+                "SELECT id, request_json, delivery FROM prompt_queue WHERE session_id = ? AND delivery = ? ORDER BY position ASC, created ASC LIMIT 1",
                 vec![text(session_id), text(delivery)],
             )
         } else {
             (
-                "SELECT id, request_json FROM prompt_queue WHERE session_id = ? ORDER BY position ASC, created ASC LIMIT 1",
+                "SELECT id, request_json, delivery FROM prompt_queue WHERE session_id = ? ORDER BY position ASC, created ASC LIMIT 1",
                 vec![text(session_id)],
             )
         };
@@ -2173,10 +2173,47 @@ impl SessionStore {
         };
         let id = row.get_str("id")?;
         let request = decode_json(row.get_str("request_json")?)?;
+        let delivery = row.get_str("delivery")?;
         self.db
             .execute("DELETE FROM prompt_queue WHERE id = ?", vec![text(id)])
             .await?;
-        Ok(Some(request))
+        Ok(Some((request, delivery)))
+    }
+
+    /// Put a popped prompt back at the FRONT of the queue, preserving its
+    /// delivery tag. Used when a drain worker pops a prompt but a run
+    /// claims the session before the prompt can be appended — the prompt
+    /// must survive (durably) and go out first once the run finishes.
+    pub(crate) async fn requeue_prompt_front_with_delivery(
+        &self,
+        session_id: &str,
+        request: &PromptRequest,
+        delivery: &str,
+    ) -> anyhow::Result<usize> {
+        if !matches!(delivery, "steer" | "queue" | "continue") {
+            anyhow::bail!("unsupported prompt delivery {delivery}");
+        }
+        let position = self
+            .db
+            .fetch_scalar_i64(
+                "SELECT COALESCE(MIN(position), 1) - 1 FROM prompt_queue WHERE session_id = ?",
+                vec![text(session_id)],
+            )
+            .await?;
+        self.db
+            .execute(
+                "INSERT INTO prompt_queue (id, session_id, position, request_json, created, delivery) VALUES (?, ?, ?, ?, ?, ?)",
+                vec![
+                    text(Id::ascending(IdKind::Event).to_string()),
+                    text(session_id),
+                    int(position),
+                    text(serde_json::to_string(request)?),
+                    int(sqlite_i64(crate::now_millis())),
+                    text(delivery),
+                ],
+            )
+            .await?;
+        self.queued_prompt_count(session_id).await
     }
 
     pub(crate) async fn clear_queued_prompts(

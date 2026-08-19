@@ -12,6 +12,12 @@ use std::ops::{Index, IndexMut};
 #[derive(Copy, Debug, Clone)]
 pub struct List([ColorArray; COUNT]);
 
+impl Default for List {
+    fn default() -> Self {
+        List([ColorArray::default(); COUNT])
+    }
+}
+
 impl From<&Colors> for List {
     fn from(colors: &Colors) -> List {
         // Type inference fails without this annotation.
@@ -120,6 +126,26 @@ impl List {
             self[NamedColor::DimWhite] =
                 (ColorRgb::from_color_arr(colors.white) * DIM_FACTOR).to_arr();
         }
+    }
+
+    /// Fold this resolved theme palette into the shape
+    /// `Crosswords::set_default_colors` expects, so the terminal can
+    /// answer OSC 4/10/11/12 color queries synchronously at parse
+    /// time. Every slot is seeded except `NamedColor::Cursor`:
+    /// cursor-color queries historically reply only when the guest
+    /// program set an override (mirroring xterm-ignores-unknown and
+    /// the old renderer-side behavior), and `List` never resolves a
+    /// real cursor color — seeding it would answer `OSC 12;?` with
+    /// black.
+    pub fn as_default_colors(&self) -> neoism_terminal_core::colors::term::TermColors {
+        let mut colors = neoism_terminal_core::colors::term::TermColors::default();
+        for (index, value) in self.0.iter().enumerate() {
+            if index == NamedColor::Cursor as usize {
+                continue;
+            }
+            colors[index] = Some(*value);
+        }
+        colors
     }
 
     pub fn fill_cube(&mut self) {

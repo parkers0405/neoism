@@ -3,12 +3,10 @@
 //!
 //! The native panels exposed their own wider entry points
 //! (`render(&mut self, sugarloaf, ...lots of args)`). These shims keep
-//! chrome.rs compiling and the slim contract visible to web bridges
-//! while supplying sensible defaults for the host-side data the panels
-//! consume — empty input, neutral classification, bash shell. The
-//! native host will replace the defaults with real per-frame state in
-//! Wave 6G; until then, the web frontend paints the composer chrome
-//! exactly the same chassis pixels the native build does.
+//! chrome.rs compiling and the slim contract visible to web bridges.
+//! (The composer itself renders through the real
+//! `CommandComposer::render` call in `chrome/draw.rs`, fed by the
+//! chrome-owned `terminal_input` buffer — it has no draw shim.)
 //!
 //! Keyboard dispatch for `CommandPalette` and `Finder` mirrors
 //! `frontends/neoism/src/router/route.rs` (the native overlay-key
@@ -21,14 +19,10 @@ use sugarloaf::Sugarloaf;
 
 use crate::chrome::active_ide_theme;
 use crate::event::{KeyState, LogicalKey, NamedKey, UiEvent};
-use crate::input::{NullInputBuffer, TerminalShellKind};
 use crate::layout::PanelLayout;
-use crate::panels::command_composer::{CommandComposer, InputClassification};
+use crate::panels::command_composer::CommandComposer;
 use crate::panels::command_palette::CommandPalette;
 use crate::panels::finder::Finder;
-
-/// Default chassis height when the host hasn't sized the composer yet.
-const DEFAULT_COMPOSER_H: f32 = 60.0;
 
 /// Approximate visible-rows count for finder PageDown / ArrowDown
 /// math. Native passes `18` (see `router/route.rs`'s finder block);
@@ -47,41 +41,6 @@ impl CommandComposer {
         _ctx: &mut crate::panels::PanelContext,
     ) {
         // intentional no-op — composer mirrors InputBuffer, no own state
-    }
-
-    pub fn draw(
-        &mut self,
-        sugarloaf: &mut Sugarloaf,
-        layout: &PanelLayout,
-        _ctx: &crate::panels::PanelContext,
-    ) {
-        let theme = active_ide_theme();
-        let neutral = InputClassification::neutral(theme.u8(theme.fg));
-        let bounds = layout.bounds;
-        let chassis_h = if bounds.h > 0.0 {
-            bounds.h
-        } else {
-            DEFAULT_COMPOSER_H
-        };
-        let _ = self.render(
-            sugarloaf,
-            bounds.x,
-            bounds.y,
-            bounds.w,
-            chassis_h,
-            &theme,
-            &NullInputBuffer,
-            None,
-            None,
-            1.0,
-            true,
-            8.0,
-            16.0,
-            false,
-            530,
-            neutral,
-            TerminalShellKind::Bash,
-        );
     }
 }
 

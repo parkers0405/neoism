@@ -790,6 +790,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // Also the DEFAULT, so DECSCUSR 0 (cursor reset, e.g. nvim on
         // exit) restores the config's blink instead of disabling it.
         terminal.default_blinking_cursor = cursor_state.1;
+        // Seed the resolved theme palette so OSC 4/10/11/12 color
+        // queries (gh/termenv background detection, vim `t_RB` probes)
+        // are answered at parse time and written straight back to the
+        // PTY — never through the winit event loop, whose latency let
+        // the reply miss the querier's raw-mode read window and leak
+        // into the next reader's stdin as `^[]11;rgb:…` junk.
+        terminal.set_default_colors(config.colors.as_default_colors());
 
         let terminal: Arc<FairMutex<Crosswords>> = Arc::new(FairMutex::new(terminal));
 
@@ -845,8 +852,6 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             event_proxy.clone(),
             window_id,
             route_id,
-            config.foreground,
-            config.background,
         )?;
         let channel = machine.channel();
         let io_thread = if config.spawn_performer {

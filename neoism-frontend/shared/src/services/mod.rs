@@ -17,7 +17,6 @@ pub mod file_tree_watcher_filter;
 pub mod git_watcher_filter;
 pub mod note_roots;
 pub mod title_format;
-#[cfg(not(target_arch = "wasm32"))]
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -246,6 +245,110 @@ pub trait SearchService: Send + Sync {
 
     /// Resolve `git rev-parse --show-toplevel` for `cwd`. Added wave6.
     fn git_repo_root(&self, cwd: &Path) -> Option<std::path::PathBuf>;
+}
+
+/// One LSP request fired by the shared code-editor session layer
+/// (`crate::editor::code::lsp_session`). Positions follow the engine
+/// facade contract: 0-based line, 0-based UTF-8 BYTE column. `seq` is
+/// the session's monotonic request token — hosts echo it on the
+/// matching result push so stale replies are dropped by the session.
+///
+/// Opaque payloads (`action`) are raw LSP JSON only the language-server
+/// side interprets, mirroring the desktop worker's job shapes.
+#[derive(Debug, Clone)]
+pub enum LspRequest {
+    /// Ship the full buffer text (didOpen/didChange coalesced by the
+    /// backend). Fired whenever the pane revision moves.
+    Sync {
+        path: std::path::PathBuf,
+        text: String,
+        revision: u64,
+    },
+    /// didSave follow-up after a successful write.
+    SaveNotify { path: std::path::PathBuf },
+    Completion {
+        path: std::path::PathBuf,
+        line: u32,
+        character: u32,
+        trigger: Option<String>,
+        seq: u64,
+    },
+    Hover {
+        path: std::path::PathBuf,
+        line: u32,
+        character: u32,
+        seq: u64,
+    },
+    SignatureHelp {
+        path: std::path::PathBuf,
+        line: u32,
+        character: u32,
+        seq: u64,
+    },
+    Definition {
+        path: std::path::PathBuf,
+        line: u32,
+        character: u32,
+        seq: u64,
+    },
+    References {
+        path: std::path::PathBuf,
+        line: u32,
+        character: u32,
+        seq: u64,
+    },
+    CodeActions {
+        path: std::path::PathBuf,
+        line: u32,
+        character: u32,
+        seq: u64,
+    },
+    /// Apply one accepted code action (resolve → edit/command on the
+    /// server side). `action` is the raw LSP CodeAction/Command payload
+    /// from the CodeActions result row.
+    ApplyCodeAction {
+        path: std::path::PathBuf,
+        server_id: String,
+        title: String,
+        action: serde_json::Value,
+        seq: u64,
+    },
+    Rename {
+        path: std::path::PathBuf,
+        line: u32,
+        character: u32,
+        new_name: String,
+        seq: u64,
+    },
+    /// Format the document; the session applies the returned edits
+    /// revision-guarded and then finishes the save (format-on-save).
+    Format {
+        path: std::path::PathBuf,
+        revision: u64,
+        seq: u64,
+    },
+}
+
+/// Language-server capability surfaced to the shared code-editor LSP
+/// session layer. Requests are fire-and-forget with seq tokens —
+/// results are pushed back into the session by the host (desktop
+/// drains its worker mailbox; web routes daemon `EditorReply`
+/// envelopes), so unlike `FilesService` there is no synchronous
+/// return payload. Web impls marshal each request into a daemon
+/// editor envelope and may return `IoError::Pending(req)` when they
+/// want the reply correlated by request id in addition to the seq.
+pub trait LspService: Send + Sync {
+    fn request(&self, request: LspRequest) -> Result<(), IoError>;
+}
+
+/// Inert `LspService` that drops every request — the default for hosts
+/// without a language-server backend (mirrors `NullSearchService`).
+pub struct NullLspService;
+
+impl LspService for NullLspService {
+    fn request(&self, _request: LspRequest) -> Result<(), IoError> {
+        Ok(())
+    }
 }
 
 /// Bundle of borrowed service references passed to panels per frame.

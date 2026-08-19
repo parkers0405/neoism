@@ -51,6 +51,33 @@ pub trait HintConfig {
     fn persist(&self) -> bool;
 }
 
+/// Concrete [`HintConfig`] for hosts that don't link the desktop
+/// `neoism_backend` hint config (the web frontend). Field meanings
+/// mirror `neoism_backend::config::hints::Hint`; the action side
+/// effect stays host-owned.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SimpleHintConfig {
+    pub regex: Option<String>,
+    pub hyperlinks: bool,
+    pub post_processing: bool,
+    pub persist: bool,
+}
+
+impl HintConfig for SimpleHintConfig {
+    fn regex(&self) -> Option<&str> {
+        self.regex.as_deref()
+    }
+    fn hyperlinks(&self) -> bool {
+        self.hyperlinks
+    }
+    fn post_processing(&self) -> bool {
+        self.post_processing
+    }
+    fn persist(&self) -> bool {
+        self.persist
+    }
+}
+
 /// A match found by a hint.
 #[derive(Debug)]
 pub struct HintMatch<H> {

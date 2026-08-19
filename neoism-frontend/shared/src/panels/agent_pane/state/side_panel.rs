@@ -311,6 +311,39 @@ impl BranchActivity {
 /// returns immediately.
 pub const SUBAGENT_HIDE_AFTER: Duration = Duration::from_secs(7);
 
+/// How long the composer's status label survives a *transient* idle
+/// reading. Between events the raw derivation can pass through Idle for
+/// a tick (MessageEnd → next MessageStart, tool-phase handoffs, a
+/// child's inter-message idle edge zeroing the active-subagent count);
+/// blanking the label for that frame also collapsed the status row's
+/// reserved height and made the whole composer bounce. The display
+/// derivation therefore keeps showing the last non-idle status until
+/// idle has persisted for this window; genuine completion still clears
+/// once the window elapses.
+pub const STATUS_LABEL_GRACE: Duration = Duration::from_millis(400);
+
+/// Memory behind [`STATUS_LABEL_GRACE`]: the status the composer row
+/// last displayed, refreshed every frame the raw derivation is
+/// non-idle. Stored on the side panel (shared by the desktop and web
+/// panes) behind a `RefCell` so the `&self` display getters can record
+/// it — same interior-mutability precedent as the pane's timeline
+/// layout cache.
+#[derive(Clone)]
+struct StatusDisplayHold {
+    state: crate::panels::agent_pane::state::NeoismAgentStreamingState,
+    /// Anchor whose `elapsed()` continues the displayed timer through
+    /// the gap, so the label's wave animation / elapsed suffix don't
+    /// jump to zero while the hold bridges two events.
+    elapsed_anchor: Instant,
+    /// Last frame the raw derivation was non-idle. The grace window
+    /// counts from here and is deliberately NOT refreshed while the
+    /// hold itself is what's showing.
+    last_seen: Instant,
+    /// Session the label belonged to — a session switch must never show
+    /// the previous conversation's held label.
+    session: Option<String>,
+}
+
 /// Lifecycle of the session's persistent goal, mirroring the backend
 /// `goal.status` field. Drives the status shown alongside "Goal" in the
 /// side-panel section heading.
@@ -547,6 +580,8 @@ pub struct NeoismAgentSidePanel {
     session_hover_scale: f32,
     last_hover_frame: Instant,
     back_scramble_started: Option<Instant>,
+    /// See [`StatusDisplayHold`] / [`STATUS_LABEL_GRACE`].
+    status_hold: std::cell::RefCell<Option<StatusDisplayHold>>,
 }
 
 impl Default for NeoismAgentSidePanel {
@@ -604,6 +639,7 @@ impl Default for NeoismAgentSidePanel {
             session_hover_scale: 0.0,
             last_hover_frame: Instant::now(),
             back_scramble_started: None,
+            status_hold: std::cell::RefCell::new(None),
         }
     }
 }
@@ -938,6 +974,84 @@ impl NeoismAgentSidePanel {
 
     pub fn set_viewed_session_id(&mut self, session_id: Option<String>) {
         self.viewed_session_id = session_id.filter(|id| !id.is_empty());
+    }
+
+    /// Record the non-idle status the composer row is displaying this
+    /// frame. `elapsed_seconds` is the timer currently shown with it,
+    /// carried into the hold so the animation phase stays continuous if
+    /// the raw derivation dips through Idle next frame. Idle is never
+    /// recorded — the hold only ever bridges *away* from activity.
+    pub fn note_status_display(
+        &self,
+        state: crate::panels::agent_pane::state::NeoismAgentStreamingState,
+        elapsed_seconds: Option<f32>,
+    ) {
+        if state == crate::panels::agent_pane::state::NeoismAgentStreamingState::Idle {
+            return;
+        }
+        let now = Instant::now();
+        let elapsed_anchor = elapsed_seconds
+            .and_then(|seconds| {
+                now.checked_sub(Duration::from_secs_f32(seconds.max(0.0)))
+            })
+            .unwrap_or(now);
+        *self.status_hold.borrow_mut() = Some(StatusDisplayHold {
+            state,
+            elapsed_anchor,
+            last_seen: now,
+            session: self.viewed_session_id.clone(),
+        });
+    }
+
+    fn active_status_hold(&self) -> Option<StatusDisplayHold> {
+        let hold = self.status_hold.borrow();
+        let hold = hold.as_ref()?;
+        if hold.session != self.viewed_session_id {
+            return None;
+        }
+        (Instant::now().saturating_duration_since(hold.last_seen)
+            < STATUS_LABEL_GRACE)
+            .then(|| hold.clone())
+    }
+
+    /// The recently-displayed status, if the raw derivation went idle
+    /// less than [`STATUS_LABEL_GRACE`] ago and the viewed session
+    /// hasn't changed since it was recorded. `None` once idle has
+    /// persisted for the whole window — the label may then clear (and
+    /// the status row collapse) as a genuine completion.
+    pub fn held_status_display(
+        &self,
+    ) -> Option<crate::panels::agent_pane::state::NeoismAgentStreamingState> {
+        self.active_status_hold().map(|hold| hold.state)
+    }
+
+    /// Continuation of the held status's elapsed timer, so the display
+    /// clock doesn't jump to zero while the hold bridges two events.
+    pub fn held_status_elapsed_seconds(&self) -> Option<f32> {
+        self.active_status_hold().map(|hold| {
+            Instant::now()
+                .saturating_duration_since(hold.elapsed_anchor)
+                .as_secs_f32()
+        })
+    }
+
+    /// Drop the hold immediately — used by hard stops (user abort, new
+    /// conversation) where a lingering label would read as lag.
+    pub fn clear_status_display_hold(&self) {
+        *self.status_hold.borrow_mut() = None;
+    }
+
+    /// Test support: age the hold past [`STATUS_LABEL_GRACE`] without
+    /// sleeping. Falls back to dropping the hold when the platform
+    /// clock can't be rewound that far.
+    pub fn rewind_status_display_hold(&self, by: Duration) {
+        let mut hold = self.status_hold.borrow_mut();
+        if let Some(inner) = hold.as_mut() {
+            match inner.last_seen.checked_sub(by) {
+                Some(last_seen) => inner.last_seen = last_seen,
+                None => *hold = None,
+            }
+        }
     }
 
     /// Whether `entry` (a non-main branch) should be hidden from the

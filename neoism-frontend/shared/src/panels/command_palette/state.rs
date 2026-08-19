@@ -14,8 +14,8 @@ use web_time::Instant;
 use crate::animation::CriticallyDampedSpring;
 
 use super::actions::{
-    PaletteBufferEntry, PaletteHostEntry, PaletteServerEntry, PaletteShaderEntry,
-    PaletteSurface, PaletteWorkspaceEntry,
+    PaletteBufferEntry, PaletteHostCapabilities, PaletteHostEntry, PaletteServerEntry,
+    PaletteShaderEntry, PaletteSurface, PaletteWorkspaceEntry,
 };
 use super::modes::PaletteMode;
 use super::MAX_RECENT_SEARCHES;
@@ -104,6 +104,11 @@ pub struct CommandPalette {
     pub(super) pop_on_open: bool,
     pub(super) top_anchor: f32,
     pub(super) surface: PaletteSurface,
+    /// What the embedding host can execute — the second visibility
+    /// axis next to `surface`. Defaults to everything (desktop); the
+    /// web host narrows it via [`Self::set_host_capabilities`] so
+    /// commands that cannot run there are not listed.
+    pub(super) host_capabilities: PaletteHostCapabilities,
     /// In-progress workspace→host drag (5D-drag), or `None` when no drag
     /// is armed. Only ever populated in `Workspaces` mode.
     pub(super) workspace_drag: Option<WorkspaceDrag>,
@@ -167,6 +172,7 @@ impl Default for CommandPalette {
             pop_on_open: false,
             top_anchor: super::PALETTE_MARGIN_TOP,
             surface: PaletteSurface::Terminal,
+            host_capabilities: PaletteHostCapabilities::all(),
             workspace_drag: None,
             workspace_peer_hosts: Vec::new(),
             workspace_move: None,
@@ -201,6 +207,15 @@ impl CommandPalette {
 
     pub fn set_surface(&mut self, surface: PaletteSurface) {
         self.surface = surface;
+    }
+
+    /// Declare what the embedding host can execute. Commands whose
+    /// capability flag is off are dropped from the Commands listing
+    /// (see `command_visible_for_host`). Desktop never calls this and
+    /// keeps the full catalog; the web bridge re-asserts its set every
+    /// frame alongside `set_surface`.
+    pub fn set_host_capabilities(&mut self, caps: PaletteHostCapabilities) {
+        self.host_capabilities = caps;
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {

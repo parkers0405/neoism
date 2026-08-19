@@ -1,7 +1,40 @@
 use super::*;
 
 impl NeoismAgentPane {
-    #[allow(dead_code)]
+    /// The compact composer form for a prompt the server echoes back
+    /// expanded. Canonicalizing every inbound user text through this
+    /// keeps ONE transcript bubble instead of a token + expanded
+    /// duplicate pair. Mirrors the desktop pane's helper of the same
+    /// name (`desktop/src/neoism/agent/pane/ingest.rs`).
+    pub(in crate::panels::agent_pane::state) fn compact_user_prompt_text(
+        &self,
+        text: &str,
+    ) -> Option<String> {
+        let trimmed = text.trim();
+        self.prompt_echo_aliases
+            .iter()
+            .rev()
+            .find(|(expanded, _)| expanded == trimmed)
+            .map(|(_, echo)| echo.clone())
+    }
+
+    pub(in crate::panels::agent_pane::state) fn compact_inbound_user_texts(
+        &self,
+        mut messages: Vec<NeoismAgentMessage>,
+    ) -> Vec<NeoismAgentMessage> {
+        if self.prompt_echo_aliases.is_empty() {
+            return messages;
+        }
+        for message in &mut messages {
+            if message.kind == NeoismAgentMessageKind::User {
+                if let Some(echo) = self.compact_user_prompt_text(&message.text) {
+                    message.text = echo;
+                }
+            }
+        }
+        messages
+    }
+
     pub(in crate::panels::agent_pane::state) fn merge_pending_user_prompts(
         &mut self,
         mut server_messages: Vec<NeoismAgentMessage>,
@@ -47,7 +80,6 @@ impl NeoismAgentPane {
         server_messages
     }
 
-    #[allow(dead_code)]
     pub(in crate::panels::agent_pane::state) fn preserve_streamed_response_text(
         &self,
         mut server_messages: Vec<NeoismAgentMessage>,
@@ -66,6 +98,55 @@ impl NeoismAgentPane {
             *incoming = merge_part_message(existing.clone(), incoming.clone());
         }
 
+        server_messages
+    }
+
+    /// Keep every landed background-task completion card through a
+    /// snapshot replacement. The live `session.background_task.completed`
+    /// event injects the card immediately, but the server only persists its
+    /// equivalent (the `msg_background_completion_{job}` runtime prompt,
+    /// mapped back to the SAME card id by `api_mapping`) once the queued
+    /// notification prompt drains — a history refresh inside that window
+    /// would silently wipe the card. Re-insert any copy the snapshot lacks
+    /// at its chronological position; when the snapshot DOES carry the
+    /// server copy (same id, or same job id) it replaces the client copy —
+    /// no duplicate. Mirrors the desktop pane's helper of the same name
+    /// (`desktop/src/neoism/agent/pane/ingest.rs`).
+    pub(in crate::panels::agent_pane::state) fn preserve_background_completion_cards(
+        &self,
+        mut server_messages: Vec<NeoismAgentMessage>,
+    ) -> Vec<NeoismAgentMessage> {
+        for (index, existing) in self.messages.iter().enumerate() {
+            if !is_background_completion_card(existing) {
+                continue;
+            }
+            let job_id = background_job_id_from_message(existing);
+            let already_present = server_messages.iter().any(|incoming| {
+                incoming.id == existing.id
+                    || (job_id.is_some()
+                        && background_completion_job_id_from_message(incoming) == job_id)
+            });
+            if already_present {
+                continue;
+            }
+            // Chronological anchor: right after the nearest preceding local
+            // message the snapshot also contains; a card with no anchored
+            // neighbor (fresh, still-draining turn) belongs at the end.
+            let insert_at = self.messages[..index]
+                .iter()
+                .rev()
+                .find_map(|prior| {
+                    if prior.id.is_empty() {
+                        return None;
+                    }
+                    server_messages
+                        .iter()
+                        .position(|incoming| incoming.id == prior.id)
+                })
+                .map(|position| position + 1)
+                .unwrap_or(server_messages.len());
+            server_messages.insert(insert_at, existing.clone());
+        }
         server_messages
     }
 

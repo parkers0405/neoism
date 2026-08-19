@@ -242,6 +242,42 @@ impl DaemonClientHandle {
         Ok(request_id)
     }
 
+    /// Synchronous, order-preserving variant of [`Self::send_pty`]:
+    /// enqueues on the outbound channel from the calling thread when
+    /// there is capacity (the common case), so back-to-back PTY
+    /// writes — e.g. an OSC 11 color reply followed by its paired
+    /// DSR 6 cursor report — reach the daemon shell in exactly the
+    /// order the terminal issued them. A per-message `spawn` cannot
+    /// guarantee that: two spawned tasks may enqueue in either order.
+    ///
+    /// Returns the message back to the caller when the channel is
+    /// full or closed so it can fall back to an async send (order is
+    /// already lost at that point — the channel is drowning or dead).
+    pub fn try_send_pty(
+        &self,
+        message: PtyClientMessage,
+    ) -> std::result::Result<u64, PtyClientMessage> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        match self.tx.try_send(OutboundServiceMessage::Pty {
+            request_id,
+            message,
+        }) {
+            Ok(()) => Ok(request_id),
+            Err(err) => {
+                let payload = match err {
+                    mpsc::error::TrySendError::Full(payload) => payload,
+                    mpsc::error::TrySendError::Closed(payload) => payload,
+                };
+                match payload {
+                    OutboundServiceMessage::Pty { message, .. } => Err(message),
+                    // We constructed the payload two lines up; it is
+                    // always the Pty variant.
+                    _ => unreachable!("try_send returned a foreign payload"),
+                }
+            }
+        }
+    }
+
     pub async fn send_pty_with_request_id(
         &self,
         request_id: u64,

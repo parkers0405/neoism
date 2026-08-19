@@ -130,7 +130,10 @@ pub(crate) fn export_workspace_snapshot(
 }
 
 fn git_output<const N: usize>(root: &Path, args: [&str; N]) -> Result<String, String> {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    #[cfg(windows)]
+    crate::hide_std_command(&mut command);
+    let output = command
         .arg("-C")
         .arg(root)
         .args(args)
@@ -166,7 +169,7 @@ pub(crate) fn start_local_docker_sandbox(
     let volume = format!("{name}-data");
     run_docker(["volume", "create", volume.as_str()])?;
     let volume_mount = format!("{volume}:/var/lib/neoism");
-    let output = std::process::Command::new("docker")
+    let output = crate::hidden_std_command("docker")
         .args([
             "run",
             "-d",
@@ -194,16 +197,16 @@ pub(crate) fn start_local_docker_sandbox(
 }
 
 pub(crate) fn cleanup_local_docker_sandbox(sandbox: &LocalDockerSandbox) {
-    let _ = std::process::Command::new("docker")
+    let _ = crate::hidden_std_command("docker")
         .args(["rm", "-f", sandbox.container.as_str()])
         .output();
-    let _ = std::process::Command::new("docker")
+    let _ = crate::hidden_std_command("docker")
         .args(["volume", "rm", "-f", sandbox.volume.as_str()])
         .output();
 }
 
 fn run_docker<const N: usize>(args: [&str; N]) -> Result<(), String> {
-    let output = std::process::Command::new("docker")
+    let output = crate::hidden_std_command("docker")
         .args(args)
         .output()
         .map_err(|e| format!("failed to run docker: {e}"))?;
@@ -215,7 +218,7 @@ fn run_docker<const N: usize>(args: [&str; N]) -> Result<(), String> {
 }
 
 fn docker_mapped_port(container: &str) -> Result<String, String> {
-    let output = std::process::Command::new("docker")
+    let output = crate::hidden_std_command("docker")
         .args(["port", container, "9876/tcp"])
         .output()
         .map_err(|e| format!("failed to inspect docker port: {e}"))?;
@@ -234,7 +237,7 @@ fn wait_for_docker_daemon_health(base_url: &str) -> Result<(), String> {
     let health_url = format!("{}/health", base_url.trim_end_matches('/'));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
-        let ok = std::process::Command::new("curl")
+        let ok = crate::hidden_std_command("curl")
             .args(["-fsS", "--max-time", "2", health_url.as_str()])
             .output()
             .map(|output| output.status.success())

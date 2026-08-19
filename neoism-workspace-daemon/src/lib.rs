@@ -30,6 +30,38 @@ pub mod tailnet;
 /// Windows-only ACL hardening for secret files (unix uses mode bits).
 #[cfg(windows)]
 pub mod windows_acl;
+#[cfg(windows)]
+pub(crate) mod windows_process;
+
+#[cfg(windows)]
+pub fn hide_std_command(command: &mut std::process::Command) {
+    windows_process::hide_std_command(command);
+}
+
+#[cfg(windows)]
+pub fn hide_tokio_command(command: &mut tokio::process::Command) {
+    windows_process::hide_tokio_command(command);
+}
+
+#[cfg(windows)]
+pub fn detach_std_command(command: &mut std::process::Command) {
+    windows_process::detach_std_command(command);
+}
+
+pub fn hidden_std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    hide_std_command(&mut command);
+    command
+}
+
+pub fn hidden_tokio_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    hide_tokio_command(&mut command);
+    command
+}
+
 pub mod workspace;
 pub mod workspace_promote;
 pub mod workspace_provision;

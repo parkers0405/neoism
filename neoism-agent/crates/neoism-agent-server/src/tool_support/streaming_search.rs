@@ -50,11 +50,11 @@ pub(super) fn root_requires_fallback(root: &Path) -> bool {
 }
 
 fn root_requires_fallback_for_home(root: &Path, home: Option<&Path>) -> bool {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if root.parent().is_none() {
+    let root = crate::windows_process::canonicalize_path_lossy(root);
+    if crate::windows_process::is_filesystem_root(&root) {
         return true;
     }
-    home.map(|home| home.canonicalize().unwrap_or_else(|_| home.to_path_buf()))
+    home.map(crate::windows_process::canonicalize_path_lossy)
         .is_some_and(|home| home == root)
 }
 
@@ -684,6 +684,15 @@ mod tests {
             Some(Path::new("/home/tester"))
         ));
         assert!(root_requires_fallback_for_home(Path::new("/"), None));
+        #[cfg(windows)]
+        {
+            assert!(root_requires_fallback_for_home(Path::new(r"C:\"), None));
+            assert!(root_requires_fallback_for_home(Path::new(r"\\?\C:\"), None));
+            assert!(!root_requires_fallback_for_home(
+                Path::new(r"\\?\C:\Users\project"),
+                Some(Path::new(r"\\?\C:\Users"))
+            ));
+        }
         assert!(!root_requires_fallback_for_home(
             Path::new("/home/tester/project"),
             Some(Path::new("/home/tester"))

@@ -473,7 +473,7 @@ const TERMINAL_BLOCK_CHROME_ORDER: u8 = 10;
 const TERMINAL_BLOCK_CHROME_ACTIVE_ORDER: u8 = 11;
 // Git status can echo through the `.git` watcher; keep those self-events
 // from recursively spawning another git status process.
-const FILE_TREE_GIT_SELF_EVENT_SUPPRESS: Duration = Duration::from_millis(1200);
+const FILE_TREE_GIT_SELF_EVENT_SUPPRESS: Duration = Duration::from_secs(4);
 
 /// Maximum number of search terms stored in the history.
 const MAX_SEARCH_HISTORY_SIZE: usize = 255;
@@ -1146,7 +1146,7 @@ fn git_state_path_relevant(path: &Path) -> bool {
         return false;
     };
 
-    if name.ends_with(".lock") {
+    if name.ends_with(".lock") || name == "index" || name == "FETCH_HEAD" {
         return false;
     }
 
@@ -1154,12 +1154,10 @@ fn git_state_path_relevant(path: &Path) -> bool {
         name,
         "HEAD"
             | "ORIG_HEAD"
-            | "FETCH_HEAD"
             | "MERGE_HEAD"
             | "CHERRY_PICK_HEAD"
             | "REVERT_HEAD"
             | "BISECT_LOG"
-            | "index"
             | "packed-refs"
             | "config"
     ) || path.components().any(|component| {

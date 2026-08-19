@@ -5,6 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn git_command() -> Command {
+    crate::windows_process::std_command("git")
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorktreeCreateRequest {
@@ -227,7 +231,7 @@ fn git_root(directory: impl AsRef<Path>) -> Result<PathBuf, String> {
 }
 
 fn branch_exists(root: &Path, branch: &str) -> bool {
-    Command::new("git")
+    crate::windows_process::std_command("git")
         .args(["show-ref", "--verify", "--quiet"])
         .arg(format!("refs/heads/{branch}"))
         .current_dir(root)
@@ -322,7 +326,7 @@ fn run_git<'a>(
     directory: impl AsRef<Path>,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .current_dir(directory.as_ref())
         .output()
@@ -337,7 +341,7 @@ fn run_git_output<'a>(
     directory: impl AsRef<Path>,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .current_dir(directory.as_ref())
         .output()
@@ -491,7 +495,7 @@ mod tests {
         run_git(&repo.root, ["add", "file.txt"]).unwrap();
         run_git(&repo.root, ["commit", "-m", "main"]).unwrap();
 
-        let merge = Command::new("git")
+        let merge = git_command()
             .args(["merge", "conflict-side"])
             .current_dir(&repo.root)
             .output()

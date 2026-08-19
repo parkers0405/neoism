@@ -23,7 +23,6 @@ use fff_search::{
 const DEFAULT_CAPACITY: usize = 8;
 const MAX_CAPACITY: usize = 64;
 const INITIAL_SCAN_WAIT: Duration = Duration::from_secs(15);
-const WATCHER_READY_WAIT: Duration = Duration::from_secs(15);
 
 struct Entry {
     picker: SharedFilePicker,
@@ -162,15 +161,10 @@ impl PickerRegistry {
                 root.display()
             );
         }
-        // A completed initial scan and a ready watcher are separate fff
-        // states. Do not report the index ready in the gap between them: a
-        // file created in that window could otherwise miss live indexing.
-        if !shared.wait_for_watcher(WATCHER_READY_WAIT) {
-            anyhow::bail!(
-                "FFF watcher for {} is still starting; retry in a moment",
-                root.display()
-            );
-        }
+        // A completed initial scan is enough to search current files. The
+        // watcher is only needed for live updates; waiting on it on Windows
+        // (notify + Defender) can stall every grep/glob for 15s or fail
+        // permanently if the watcher never becomes ready.
 
         let outcome = {
             let guard = shared.read().map_err(|error| {
@@ -235,7 +229,7 @@ fn evict_lru(state: &mut RegistryState, capacity: usize) -> Vec<Entry> {
 }
 
 fn canonical_root(root: &Path) -> PathBuf {
-    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+    crate::windows_process::canonicalize_path_lossy(root)
 }
 
 fn build_picker(root: &Path) -> anyhow::Result<SharedFilePicker> {
@@ -390,6 +384,18 @@ mod tests {
         assert_eq!(registry.len(), 1);
         assert!(registry.contains(&second.0));
         drop(registry);
+    }
+
+    #[test]
+    fn canonical_root_strips_windows_verbatim_prefix() {
+        let root = TestRoot::new("verbatim");
+        let canonical = canonical_root(&root.0);
+        let text = canonical.to_string_lossy();
+        assert!(
+            !text.starts_with(r"\\?\"),
+            "search roots must not keep a verbatim prefix: {text}"
+        );
+        drop(root);
     }
 
     #[test]

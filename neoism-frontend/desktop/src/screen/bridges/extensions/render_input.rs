@@ -231,8 +231,13 @@ impl Screen<'_> {
                 }
                 #[cfg(windows)]
                 {
+                    use std::os::windows::process::CommandExt;
                     let _ = std::process::Command::new("cmd")
                         .args(["/c", "start", "", &url])
+                        .creation_flags(
+                            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                                | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+                        )
                         .spawn();
                 }
             }

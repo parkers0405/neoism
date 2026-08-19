@@ -5,6 +5,8 @@ pub mod managed_bin;
 pub mod manifest;
 pub mod mason;
 pub mod paths;
+#[cfg(windows)]
+pub(crate) mod windows_process;
 
 pub use agent_config::{
     agent_config_path, disable_builtin_mcp_entry, install_mcp_entry, uninstall_mcp_entry,

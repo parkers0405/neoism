@@ -231,14 +231,16 @@ async fn existing_managed_node(version_dir: &Path, os: &str) -> Option<ManagedNo
 /// Run `<node> --version`, erroring unless it exits successfully. Cheap gate
 /// against a truncated download or a mismatched-platform binary.
 async fn verify_node_runs(node: &Path) -> Result<(), InstallError> {
-    let output = Command::new(node)
+    let mut command = Command::new(node);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await?;
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    crate::windows_process::hide_tokio_command(&mut command);
+    let output = command.output().await?;
     if !output.status.success() {
         return Err(InstallError::BinaryNotFound(format!(
             "managed node failed `--version`: {}",
@@ -267,6 +269,8 @@ pub(crate) fn managed_npm_command(managed: &ManagedNode) -> Command {
     if let Ok(path) = std::env::join_paths(unique) {
         cmd.env("PATH", path);
     }
+    #[cfg(windows)]
+    crate::windows_process::hide_tokio_command(&mut cmd);
     cmd
 }
 

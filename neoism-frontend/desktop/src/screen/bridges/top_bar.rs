@@ -246,7 +246,17 @@ impl Screen<'_> {
 
         let url = "http://127.0.0.1:5173";
         if !web_frontend_port_listening() {
-            let child = std::process::Command::new("npm")
+        let child = {
+            let mut command = std::process::Command::new("npm");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(
+                    windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                        | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+                );
+            }
+            command
                 .arg("run")
                 .arg("preview")
                 .arg("--")
@@ -259,7 +269,8 @@ impl Screen<'_> {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())
-                .spawn();
+                .spawn()
+        };
             let mut child = match child {
                 Ok(child) => child,
                 Err(err) => {
@@ -346,6 +357,13 @@ fn open_url_in_browser(url: &str) {
     let mut command = {
         let mut command = std::process::Command::new("cmd");
         command.args(["/C", "start", "", url]);
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+            );
+        }
         command
     };
 

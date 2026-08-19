@@ -1075,6 +1075,14 @@ async fn validate_managed_python_kernel(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+        );
+    }
     let output = tokio::time::timeout(KERNEL_VALIDATE_TIMEOUT, command.output())
         .await
         .map_err(|_| InstallError::TimedOut {
@@ -1114,6 +1122,14 @@ async fn run_kernel_install_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+        );
+    }
     let output = tokio::time::timeout(KERNEL_INSTALL_TIMEOUT, command.output())
         .await
         .map_err(|_| InstallError::TimedOut {

@@ -335,6 +335,7 @@ fn spawn_pipe_process(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::tool::process::set_new_process_group(&mut process);
 
     let mut child = process
         .spawn()
@@ -696,7 +697,7 @@ mod conpty {
     use windows_sys::Win32::System::Threading::{
         CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
         InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
-        CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+        CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
         LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
         PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     };
@@ -959,7 +960,7 @@ mod conpty {
                 ptr::null(),
                 ptr::null(),
                 0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
                 env_block.as_mut_ptr() as *mut core::ffi::c_void,
                 cwd_wide
                     .as_ref()

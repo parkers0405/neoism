@@ -58,6 +58,10 @@ tree-sitter-yaml = "0.7.2"
 tree-sitter-css = "0.25.0"
 tree-sitter-html = "0.23.2"
 tree-sitter-make = "1.1.1"
+
+[target.'cfg(all(not(target_arch = "wasm32"), windows))'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_System_Threading"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Storage"] }

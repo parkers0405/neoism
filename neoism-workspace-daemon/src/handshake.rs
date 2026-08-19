@@ -511,6 +511,8 @@ pub fn tailscale_whois_blocking(ip: &str) -> Option<String> {
         return None;
     }
     let mut cmd = Command::new("tailscale");
+    #[cfg(windows)]
+    crate::hide_std_command(&mut cmd);
     cmd.arg("whois").arg("--json").arg(ip);
     // No native `Command` timeout in std; we trust `tailscale whois` to
     // return quickly (it's a local CLI call). The daemon spawns this

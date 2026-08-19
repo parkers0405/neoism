@@ -60,6 +60,7 @@ impl StdioJsonRpcClient {
         if let Some(environment) = environment {
             process.envs(environment);
         }
+        crate::tool::process::set_new_process_group(&mut process);
         let mut child = process.spawn()?;
         let stdin = child
             .stdin

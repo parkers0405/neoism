@@ -208,7 +208,7 @@ pub fn receive_workspace_blocking(
             // Best-effort: try to land on the same ref the source was on.
             // A failure (dirty tree, unknown ref) is non-fatal — the
             // snapshot apply below carries the working state regardless.
-            let _ = std::process::Command::new("git")
+            let _ = crate::hidden_std_command("git")
                 .arg("-C")
                 .arg(&existing)
                 .args(["checkout", git_ref])

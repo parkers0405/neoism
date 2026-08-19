@@ -29,14 +29,20 @@ pub fn background_command(program: impl AsRef<std::ffi::OsStr>) -> std::process:
             .is_some_and(|name| name.eq_ignore_ascii_case("neoism.exe"))
         {
             let mut command = std::process::Command::new(program);
-            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            command.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+            );
             return command;
         }
         let mut command = std::process::Command::new(executable);
         command
             .arg("--neoism-internal-background-command")
             .arg(program)
-            .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            .creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+            );
         return command;
     }
     #[cfg(not(windows))]

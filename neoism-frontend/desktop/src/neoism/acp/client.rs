@@ -172,6 +172,14 @@ impl AcpClientHandle {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+            );
+        }
 
         let mut child = command.spawn().map_err(|err| {
             format!("Could not start ACP server `{}`: {err}", config.command)

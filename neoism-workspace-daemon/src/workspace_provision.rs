@@ -187,6 +187,8 @@ fn run_git<const N: usize>(
     cwd: Option<&Path>,
 ) -> Result<(), ProvisionError> {
     let mut cmd = Command::new("git");
+    #[cfg(windows)]
+    crate::hide_std_command(&mut cmd);
     cmd.args(args);
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
@@ -211,7 +213,10 @@ fn run_git<const N: usize>(
 }
 
 fn has_upstream(path: &Path) -> bool {
-    Command::new("git")
+    let mut command = Command::new("git");
+    #[cfg(windows)]
+    crate::hide_std_command(&mut command);
+    command
         .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
         .current_dir(path)
         .output()

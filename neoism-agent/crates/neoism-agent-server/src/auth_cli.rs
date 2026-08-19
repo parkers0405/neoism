@@ -536,6 +536,7 @@ fn open_browser(url: &str) -> Result<(), String> {
     let mut command = {
         let mut command = std::process::Command::new("cmd");
         command.args(["/C", "start", "", url]);
+        crate::windows_process::hide_std_command(&mut command);
         command
     };
     #[cfg(all(unix, not(target_os = "macos")))]

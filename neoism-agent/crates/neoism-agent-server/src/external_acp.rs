@@ -117,6 +117,7 @@ impl AcpClient {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        crate::tool::process::set_new_process_group(&mut command);
 
         let mut child = command.spawn().map_err(|err| {
             format!("Could not start ACP server `{}`: {err}", config.command)
@@ -598,6 +599,7 @@ impl AcpTerminalManager {
                 }
             }
         }
+        crate::tool::process::set_new_process_group(&mut child_cmd);
 
         let mut child = child_cmd.spawn().map_err(|err| AcpRpcError {
             code: -32000,

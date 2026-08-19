@@ -90,6 +90,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 fff-search = { version = "0.10.1-nightly.31be224", default-features = false, features = [
     "ripgrep",
 ] }
+dunce = "1.0.5"
 globset = "0.4.19"
 ignore = "0.4.29"
 futures-core = "0.3"

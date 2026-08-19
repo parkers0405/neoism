@@ -413,7 +413,35 @@ fn grep_tool_sync(
         next_file_offset,
         used_mode,
     ) = match search {
-        Ok(result) => result,
+        Ok((items, files_with_matches, total_files_searched, next_file_offset, used_mode))
+            if !items.is_empty() || total_files_searched > 0 =>
+        {
+            (
+                items,
+                files_with_matches,
+                total_files_searched,
+                next_file_offset,
+                used_mode,
+            )
+        }
+        Ok(_) => {
+            let remaining = timeout_ms
+                .saturating_sub(fff_started.elapsed().as_millis() as u64)
+                .max(1);
+            return super::streaming_search::grep(super::streaming_search::GrepRequest {
+                context: &context,
+                path: &path,
+                patterns: &fallback_patterns,
+                include: include.as_deref(),
+                exclude: &exclude,
+                context_lines,
+                case_sensitive,
+                mode: fallback_mode,
+                limit,
+                timeout_ms: fallback_timeout_ms(remaining),
+                fallback_reason: "FFF returned no searchable files".to_string(),
+            });
+        }
         Err(error) => {
             let remaining = timeout_ms
                 .saturating_sub(fff_started.elapsed().as_millis() as u64)
@@ -528,7 +556,31 @@ fn multi_grep_tool_sync(
     });
     let (mut items, files_with_matches, total_files_searched, next_file_offset) =
         match search {
-            Ok(result) => result,
+            Ok((items, files_with_matches, total_files_searched, next_file_offset))
+                if !items.is_empty() || total_files_searched > 0 =>
+            {
+                (items, files_with_matches, total_files_searched, next_file_offset)
+            }
+            Ok(_) => {
+                let remaining = timeout_ms
+                    .saturating_sub(fff_started.elapsed().as_millis() as u64)
+                    .max(1);
+                return super::streaming_search::grep(
+                    super::streaming_search::GrepRequest {
+                        context: &context,
+                        path: &path,
+                        patterns: &patterns,
+                        include: include.as_deref(),
+                        exclude: &exclude,
+                        context_lines,
+                        case_sensitive: false,
+                        mode: GrepMode::PlainText,
+                        limit,
+                        timeout_ms: fallback_timeout_ms(remaining),
+                        fallback_reason: "FFF returned no searchable files".to_string(),
+                    },
+                );
+            }
             Err(error) => {
                 let remaining = timeout_ms
                     .saturating_sub(fff_started.elapsed().as_millis() as u64)
@@ -697,7 +749,7 @@ fn grep_query_text(
             .strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
-            .to_string();
+            .replace('\\', "/");
         if !path_constraint.is_empty() {
             parts.push(path_constraint);
         }

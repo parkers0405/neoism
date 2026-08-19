@@ -52,6 +52,15 @@ async fn safe_filesystem_tools_execute_inside_project() {
     assert!(grep.output.contains("src/lib.rs:"));
     assert!(grep.output.contains("Line 2"));
 
+    let scoped = execute(
+        "grep",
+        context.clone(),
+        json!({ "pattern": "needle", "path": "src\\lib.rs" }),
+    )
+    .await
+    .unwrap();
+    assert!(scoped.output.contains("src/lib.rs:"));
+
     let glob = execute("glob", context, json!({ "pattern": "*.rs" }))
         .await
         .unwrap();

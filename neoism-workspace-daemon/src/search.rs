@@ -216,6 +216,8 @@ async fn run_rg_files(cwd: &Path) -> Result<Vec<String>, String> {
         return Err("rg not on PATH".into());
     }
     let mut cmd = TokioCommand::new("rg");
+    #[cfg(windows)]
+    crate::hide_tokio_command(&mut cmd);
     cmd.arg("--files")
         .arg("--no-messages")
         .arg("--hidden")
@@ -431,6 +433,8 @@ async fn search_grep(
     }
 
     let mut cmd = TokioCommand::new("rg");
+    #[cfg(windows)]
+    crate::hide_tokio_command(&mut cmd);
     cmd.arg("--json").arg("--no-messages").arg("--hidden");
     cmd.arg("--glob").arg("!.git");
     // Mode flags. Fuzzy is a UI concept; rg has no fuzzy mode, so we
@@ -558,7 +562,10 @@ async fn search_git_changes(
 }
 
 fn run_git_status_porcelain(cwd: &Path) -> Result<Vec<SearchGitHit>, String> {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    #[cfg(windows)]
+    crate::hide_std_command(&mut command);
+    let output = command
         .arg("-C")
         .arg(cwd)
         .arg("status")
@@ -640,7 +647,10 @@ async fn git_repo_root(
     };
     let cwd_for_blocking = cwd_abs.clone();
     let join = tokio::task::spawn_blocking(move || {
-        let out = std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        #[cfg(windows)]
+        crate::hide_std_command(&mut command);
+        let out = command
             .arg("-C")
             .arg(&cwd_for_blocking)
             .arg("rev-parse")

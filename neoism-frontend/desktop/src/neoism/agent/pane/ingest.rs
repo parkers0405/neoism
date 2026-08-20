@@ -1657,10 +1657,10 @@ impl NeoismAgentPane {
         };
         let index = match derived {
             Some(index) => index,
-            None => {
-                // The anchor id vanished (e.g. an optimistic prompt was
-                // replaced by its server copy). Re-anchor at the latest turn
-                // so subsequent refreshes stay stable.
+            // An OPTIMISTIC anchor (empty id) is unfindable by design: the
+            // prompt has no durable id until the server echo lands. Re-anchor
+            // at the latest turn to pick that id up.
+            None if self.timeline_live_trace_anchor.as_deref() == Some("") => {
                 let last_user = self
                     .messages
                     .iter()
@@ -1669,6 +1669,20 @@ impl NeoismAgentPane {
                     last_user.map(|index| self.messages[index].id.clone());
                 last_user.map_or(0, |index| index + 1)
             }
+            // A DURABLE anchor that isn't in the list means the turn it
+            // marked is older than everything currently loaded - the idle
+            // refresh replaces the transcript with only the last page of
+            // messages. Every row in view therefore belongs to that turn or
+            // a later one, so the window opens at 0.
+            //
+            // This used to fall into the re-anchor branch above and jump the
+            // boundary to the LAST user message, re-hiding trace rows that
+            // were on screen a frame earlier - the "it goes away while I'm
+            // looking at it" collapse. That also contradicted this method's
+            // own contract (and `retain_current_turn_trace`'s): the trace
+            // collapses when the session is left and re-entered, never
+            // underneath a visit.
+            None => 0,
         };
         self.timeline_live_trace_start = Some(index);
     }
@@ -2156,7 +2170,19 @@ impl NeoismAgentPane {
                 | NeoismAgentMessageKind::Tool
                 | NeoismAgentMessageKind::Subtask
                 | NeoismAgentMessageKind::Compaction
-        ) {
+        ) && !is_background_completion_card(&message)
+        {
+            // Open the live-trace window for real turn output, but NOT for
+            // the background-task completion card. That card lands in an
+            // already-settled session and is mask-exempt (it shows either
+            // way), so revealing for it only un-hid the whole previous
+            // turn's trace, which the next idle refresh then re-masked -
+            // rows appearing and vanishing while the user watched.
+            //
+            // This must NOT be gated on `is_streaming()`: the web host's
+            // `MessageUpdated` path calls `upsert_part_message` and nothing
+            // else, so this is web's ONLY opener of the window. Desktop
+            // additionally calls `note_streaming_from_part` right after.
             self.retain_current_turn_trace();
         }
         if message.kind == NeoismAgentMessageKind::User {
@@ -2372,4 +2398,13 @@ fn normalize_cached_live_reasoning_order(
     reasoning_id: &str,
 ) {
     let _ = move_grouped_assistant_after_reasoning(messages, parent_ids, reasoning_id);
+}
+
+/// The durable background-task completion card (`api_mapping`'s
+/// `background_completion_card`). It reports work that finished while the
+/// user was elsewhere, is exempt from the timeline visibility mask, and
+/// must not drag the whole settled turn back into view with it.
+fn is_background_completion_card(message: &NeoismAgentMessage) -> bool {
+    message.tool == "background_task_result"
+        && message.id.starts_with("background-task-")
 }

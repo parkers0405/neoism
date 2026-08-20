@@ -322,7 +322,19 @@ async fn list_dir(root: &Path, rel: String) -> Vec<FilesServerMessage> {
                 }
                 Err(_) => (false, None),
             };
-            DirEntry { name, is_dir, size }
+            // Markdown page icon, read HERE because the browser client
+            // has no filesystem to read frontmatter from.
+            let icon = if is_dir {
+                None
+            } else {
+                markdown_frontmatter_icon(&entry.path()).await
+            };
+            DirEntry {
+                name,
+                is_dir,
+                size,
+                icon,
+            }
         })
         .buffer_unordered(METADATA_CONCURRENCY)
         .collect::<Vec<_>>()
@@ -349,7 +361,12 @@ async fn stat(root: &Path, rel: String) -> Vec<FilesServerMessage> {
             let size = if md.is_file() { Some(md.len()) } else { None };
             vec![FilesServerMessage::Stat {
                 path: rel,
-                entry: DirEntry { name, is_dir, size },
+                entry: DirEntry {
+                    name,
+                    is_dir,
+                    size,
+                    icon: None,
+                },
             }]
         }
         Err(e) => err(format!("stat {rel}: {e}")),
@@ -506,5 +523,75 @@ mod tests {
             }
             other => panic!("unexpected stat response: {other:?}"),
         }
+    }
+}
+
+/// The `icon:` value from a markdown file's YAML frontmatter, or `None`.
+///
+/// Mirrors `neoism_ui::panels::notes_sidebar::note_frontmatter_icon`,
+/// which reads the file directly — fine on the desktop, a silent `None`
+/// in a wasm client with no filesystem. Serving it from here is what lets
+/// web notes rows and tabs show the same emoji the desktop does.
+///
+/// Only the first KB is read, and only the leading frontmatter block is
+/// scanned, so this stays cheap enough to run per directory entry.
+async fn markdown_frontmatter_icon(path: &Path) -> Option<String> {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return None;
+    }
+    let mut file = fs::File::open(path).await.ok()?;
+    let mut buffer = vec![0u8; 1024];
+    let read = {
+        use tokio::io::AsyncReadExt;
+        file.read(&mut buffer).await.ok()?
+    };
+    let head = String::from_utf8_lossy(&buffer[..read]).into_owned();
+    let mut lines = head.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return None;
+    }
+    for line in lines.take(32) {
+        if line.trim() == "---" {
+            return None;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim() != "icon" {
+            continue;
+        }
+        let icon = value.trim().trim_matches(&['"', '\''][..]).trim();
+        return (!icon.is_empty()).then(|| icon.to_string());
+    }
+    None
+}
+
+#[cfg(test)]
+mod frontmatter_icon_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reads_icon_from_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("TASKS.md");
+        tokio::fs::write(&note, "---\nicon: \u{1f525}\ncover: creation\n---\n# T\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            markdown_frontmatter_icon(&note).await.as_deref(),
+            Some("\u{1f525}")
+        );
+    }
+
+    #[tokio::test]
+    async fn non_markdown_and_iconless_files_are_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt = dir.path().join("a.txt");
+        tokio::fs::write(&txt, "---\nicon: x\n---\n").await.unwrap();
+        assert!(markdown_frontmatter_icon(&txt).await.is_none());
+
+        let plain = dir.path().join("b.md");
+        tokio::fs::write(&plain, "# just a heading\n").await.unwrap();
+        assert!(markdown_frontmatter_icon(&plain).await.is_none());
     }
 }

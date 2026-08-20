@@ -311,10 +311,7 @@ pub(crate) fn call_tool(
         "memory.read" => {
             let path = required_string(&arguments, "path")?;
             let roots = roots_for_scope(&cwd, scope, false)?;
-            let root = roots
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("no memory root available"))?;
-            let absolute = safe_memory_path(root, &path)?;
+            let (root, absolute) = existing_memory_file(&roots, &path)?;
             let text = std::fs::read_to_string(&absolute)
                 .with_context(|| format!("failed to read {}", absolute.display()))?;
             json!({
@@ -392,7 +389,7 @@ pub(crate) fn call_tool(
 /// Cap on how much of a single MEMORY.md index gets injected into the
 /// system prompt. Indexes are compact by design; this only guards against
 /// a runaway hand-edited file.
-const MAX_INJECTED_INDEX_CHARS: usize = 8_000;
+const MAX_INJECTED_INDEX_CHARS: usize = 12_000;
 
 /// Compact MEMORY.md indexes for the session system prompt, so the model is
 /// briefed on durable memory automatically instead of having to remember to
@@ -415,24 +412,38 @@ pub(crate) fn system_memory_indexes(directory: &str) -> Vec<String> {
         {
             continue;
         }
-        let text = truncate_at_char_boundary(text.trim(), MAX_INJECTED_INDEX_CHARS);
+        let text = truncate_index(text.trim(), MAX_INJECTED_INDEX_CHARS);
         sections.push(format!(
-            "Persistent {} memory index (vault {}). Before repeating project discovery, read the linked topic files with the {} MCP memory.read tool (paths are relative to the memory folder); memory.recall ranks memories semantically (natural-language queries work), falling back to keyword matching when embeddings are unavailable. Save new durable facts with memory.write.\n{}",
-            root.scope, root.label, MEMORY_MCP_ID, text
+            "Persistent {} memory index (vault {}), stored in {}. That folder is OUTSIDE the workspace directory: the workspace has no `Memory/` folder, so never read memory with a workspace-relative path. Before repeating project discovery, read the linked topic files with the {} MCP memory.read tool (index links are relative to the memory folder); memory.recall ranks memories semantically (natural-language queries work), falling back to keyword matching when embeddings are unavailable. Save new durable facts with memory.write.\n{}",
+            root.scope,
+            root.label,
+            root.path.display(),
+            MEMORY_MCP_ID,
+            text
         ));
     }
     sections
 }
 
-fn truncate_at_char_boundary(text: &str, max: usize) -> &str {
+/// Trim an oversized index on line boundaries and say so, so a long index
+/// never ends mid-entry looking complete — the model can see entries are
+/// missing and reach for memory.list or memory.recall.
+fn truncate_index(text: &str, max: usize) -> String {
     if text.len() <= max {
-        return text;
+        return text.to_string();
     }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
+    let mut out = String::with_capacity(max);
+    for line in text.lines() {
+        if out.len() + line.len() + 1 > max {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
     }
-    &text[..end]
+    out.push_str(
+        "(index truncated - call memory.list or memory.recall for the entries not shown)",
+    );
+    out
 }
 
 #[derive(Clone)]
@@ -449,9 +460,13 @@ fn roots_for_scope(
     include_missing: bool,
 ) -> anyhow::Result<Vec<MemoryRoot>> {
     let mut roots = match scope {
-        "project" => vec![project_root(cwd)?],
+        "project" => project_roots(cwd, include_missing)?,
         "user" => vec![user_root(cwd)?],
-        "all" | "auto" | "" => vec![project_root(cwd)?, user_root(cwd)?],
+        "all" | "auto" | "" => {
+            let mut roots = project_roots(cwd, include_missing)?;
+            roots.push(user_root(cwd)?);
+            roots
+        }
         other => anyhow::bail!("unknown memory scope {other}"),
     };
     if !include_missing {
@@ -491,6 +506,34 @@ fn write_root_for_scope(
     }
 }
 
+/// Project memory roots, most specific first. A code dir linked to a FOLDER
+/// inside a vault owns that folder's `Memory/`, but reads also cover the
+/// vault root's `Memory/`: memories written before the folder link existed —
+/// and anything shared by every project in that vault — must stay reachable.
+/// Writes and `memory.init` (`include_missing`) only ever touch the scoped
+/// root, so a shared vault index never grows a second copy.
+fn project_roots(cwd: &Path, include_missing: bool) -> anyhow::Result<Vec<MemoryRoot>> {
+    let scoped = project_root(cwd)?;
+    if include_missing {
+        return Ok(vec![scoped]);
+    }
+    let vault = scoped.workspace.as_vault_workspace();
+    let vault_path = vault.notes_workspace_dir().join(PROJECT_MEMORY_DIR);
+    if vault_path == scoped.path {
+        return Ok(vec![scoped]);
+    }
+    let label = vault.config.notes.workspace.clone();
+    Ok(vec![
+        scoped,
+        MemoryRoot {
+            scope: "project",
+            label,
+            path: vault_path,
+            workspace: vault,
+        },
+    ])
+}
+
 fn project_root(cwd: &Path) -> anyhow::Result<MemoryRoot> {
     // Golden rule: project memory goes to the vault the code dir is explicitly
     // LINKED to — a `[[links]]` entry in a vault's `project.toml`, resolved by
@@ -504,9 +547,17 @@ fn project_root(cwd: &Path) -> anyhow::Result<MemoryRoot> {
     let workspace = neoism_workspace_index::linked_project_for_code_dir(cwd)?
         .unwrap_or_else(neoism_workspace_index::default_notes_workspace);
     let path = workspace.notes_workspace_dir().join(PROJECT_MEMORY_DIR);
+    // Name the linked folder when the project owns one, so a vault holding
+    // several projects does not report every root under the bare vault name.
+    let scope = workspace.notes_scope_relative();
+    let label = if scope == Path::new(".") {
+        workspace.config.notes.workspace.clone()
+    } else {
+        format!("{}/{}", workspace.config.notes.workspace, scope.display())
+    };
     Ok(MemoryRoot {
         scope: "project",
-        label: workspace.config.notes.workspace.clone(),
+        label,
         path,
         workspace,
     })
@@ -758,17 +809,88 @@ fn update_index(
 
 fn safe_memory_path(root: &MemoryRoot, raw: &str) -> anyhow::Result<PathBuf> {
     let path = Path::new(raw);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
+    // An absolute path is fine as long as it names a file inside this root:
+    // every tool result reports `absolutePath`, so models hand it straight
+    // back on the next call.
+    if path.is_absolute() {
+        if path.starts_with(&root.path) {
+            return Ok(path.to_path_buf());
+        }
         anyhow::bail!("memory path must be relative to {}", root.path.display());
     }
-    Ok(root.path.join(path))
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        anyhow::bail!("memory path must be relative to {}", root.path.display());
+    }
+    Ok(root.path.join(strip_root_prefix(root, path)))
+}
+
+/// Drop a memory-folder prefix the caller re-typed (`Memory/MEMORY.md`,
+/// `Memory/Personal/foo.md`): those segments are already part of `root.path`,
+/// so joining them again would point one folder too deep.
+fn strip_root_prefix<'a>(root: &MemoryRoot, path: &'a Path) -> &'a Path {
+    for prefix in [USER_MEMORY_DIR, LEGACY_USER_MEMORY_DIR, PROJECT_MEMORY_DIR] {
+        let prefix = Path::new(prefix);
+        if root.path.ends_with(prefix) {
+            if let Ok(rest) = path.strip_prefix(prefix) {
+                return rest;
+            }
+        }
+    }
+    path
+}
+
+/// Locate `raw` in the first root that actually holds it. `memory.read`
+/// defaults to `auto` scope, so a user-scope file must not fail just because
+/// the project root was searched first.
+fn existing_memory_file<'a>(
+    roots: &'a [MemoryRoot],
+    raw: &str,
+) -> anyhow::Result<(&'a MemoryRoot, PathBuf)> {
+    if roots.is_empty() {
+        anyhow::bail!("no memory root available");
+    }
+    let mut searched = Vec::new();
+    let mut error = None;
+    for root in roots {
+        match safe_memory_path(root, raw) {
+            Ok(candidate) => {
+                if candidate.is_file() {
+                    return Ok((root, candidate));
+                }
+                searched.push(candidate.display().to_string());
+            }
+            Err(problem) => error = Some(problem),
+        }
+    }
+    if let Some(error) = error.filter(|_| searched.is_empty()) {
+        return Err(error);
+    }
+    anyhow::bail!("no memory file {raw} (searched {})", searched.join(", "))
+}
+
+/// Resolve a workspace-relative `Memory/...` read against the linked vault's
+/// memory folder. Memory lives outside the workspace, so a model that reaches
+/// for the index by path would otherwise get "failed to resolve path" for a
+/// file that does exist. Only paths that name the memory folder redirect;
+/// anything else stays a genuine missing-project-file error.
+pub(crate) fn memory_file_for_workspace_path(cwd: &Path, raw: &str) -> Option<PathBuf> {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return None;
+    }
+    let Some(Component::Normal(first)) = path.components().next() else {
+        return None;
+    };
+    if first != PROJECT_MEMORY_DIR && first != INDEX_FILE {
+        return None;
+    }
+    let roots = roots_for_scope(cwd, "auto", false).ok()?;
+    existing_memory_file(&roots, raw).ok().map(|(_, path)| path)
 }
 
 fn reindex_root(root: &MemoryRoot) -> anyhow::Result<()> {
@@ -1229,6 +1351,191 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(cwd);
         let _ = std::fs::remove_dir_all(notes_home);
+    }
+
+    #[test]
+    fn memory_reads_tolerate_folder_prefixes_and_cross_scope_paths() {
+        let _lock = env_lock().lock().unwrap();
+        let cwd = tempdir("cwd-prefix");
+        let notes_home = tempdir("notes-prefix");
+        let _env = EnvGuard::set("NEOISM_NOTES_HOME", &notes_home);
+        let directory = cwd.to_str().unwrap();
+
+        call_tool(directory, "memory.init", json!({ "scope": "all" })).unwrap();
+        call_tool(
+            directory,
+            "memory.write",
+            json!({
+                "name": "Personal fact",
+                "description": "A durable fact about the user themselves",
+                "type": "personal",
+                "body": "Body."
+            }),
+        )
+        .unwrap();
+
+        // The vault-relative path a model reads off the index header.
+        let index = result_json(
+            call_tool(
+                directory,
+                "memory.read",
+                json!({ "path": "Memory/MEMORY.md" }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(index["path"], "MEMORY.md");
+        assert_eq!(index["scope"], "project");
+
+        // A user-scope file must resolve under the default `auto` scope
+        // instead of failing because the project root was searched first.
+        let personal = result_json(
+            call_tool(
+                directory,
+                "memory.read",
+                json!({ "path": "Memory/Personal/personal_fact.md" }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            personal["absolutePath"],
+            json!(notes_home.join("Default/Memory/Personal/personal_fact.md"))
+        );
+
+        // Absolute paths come straight back from every tool result.
+        let absolute = personal["absolutePath"].as_str().unwrap().to_string();
+        let echoed = result_json(
+            call_tool(
+                directory,
+                "memory.read",
+                json!({ "path": absolute, "scope": "user" }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(echoed["path"], "personal_fact.md");
+
+        // A workspace-relative read redirects into the memory folder.
+        let redirected =
+            memory_file_for_workspace_path(&cwd, "Memory/MEMORY.md").unwrap();
+        assert_eq!(redirected, notes_home.join("Default/Memory/MEMORY.md"));
+        assert!(memory_file_for_workspace_path(&cwd, "src/main.rs").is_none());
+
+        assert!(
+            call_tool(directory, "memory.read", json!({ "path": "../secret.md" }))
+                .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(cwd);
+        let _ = std::fs::remove_dir_all(notes_home);
+    }
+
+    #[test]
+    fn vault_folder_linked_project_still_reads_vault_root_memory() {
+        let _lock = env_lock().lock().unwrap();
+        let cwd = tempdir("cwd-scoped");
+        let notes_home = tempdir("notes-scoped");
+        let _env = EnvGuard::set("NEOISM_NOTES_HOME", &notes_home);
+        let directory = cwd.to_str().unwrap();
+
+        // A vault whose "Projects/App" folder is linked to the code dir.
+        let vault = notes_home.join("Team");
+        std::fs::create_dir_all(vault.join("Projects/App")).unwrap();
+        std::fs::create_dir_all(vault.join("Memory")).unwrap();
+        std::fs::write(
+            vault.join("project.json"),
+            json!({
+                "version": 2,
+                "name": "Team",
+                "links": [{
+                    "kind": "dir",
+                    "path": cwd,
+                    "label": "app",
+                    "notes_path": "Projects/App"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            vault.join("Memory/MEMORY.md"),
+            "# Memory\n\n- [Shared vault fact](project_shared.md) - Written before the folder link existed\n",
+        )
+        .unwrap();
+        std::fs::write(
+            vault.join("Memory/project_shared.md"),
+            "---\nname: \"Shared vault fact\"\ndescription: \"Written before the folder link existed\"\ntype: \"project\"\n---\n\nShared body.\n",
+        )
+        .unwrap();
+
+        // New writes land in the linked folder, not the vault root.
+        let write = result_json(
+            call_tool(
+                directory,
+                "memory.write",
+                json!({
+                    "name": "Scoped fact",
+                    "description": "Belongs to the linked project folder",
+                    "type": "project",
+                    "body": "Scoped body."
+                }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            write["absolutePath"],
+            json!(vault.join("Projects/App/Memory/project_scoped_fact.md"))
+        );
+        assert!(!vault.join("Memory/project_scoped_fact.md").exists());
+
+        // Reads still cover the vault root, so pre-link memory is not lost.
+        let recall = result_json(
+            call_tool(
+                directory,
+                "memory.recall",
+                json!({ "query": "fact", "scope": "project" }),
+            )
+            .unwrap(),
+        );
+        let roots = recall["hits"].as_array().unwrap();
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0]["vault"], "Team/Projects/App");
+        assert_eq!(roots[0]["result"][0]["path"], "project_scoped_fact.md");
+        assert_eq!(roots[1]["vault"], "Team");
+        assert_eq!(roots[1]["result"][0]["path"], "project_shared.md");
+
+        let shared = result_json(
+            call_tool(
+                directory,
+                "memory.read",
+                json!({ "path": "project_shared.md", "scope": "project" }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            shared["absolutePath"],
+            json!(vault.join("Memory/project_shared.md"))
+        );
+
+        let _ = std::fs::remove_dir_all(cwd);
+        let _ = std::fs::remove_dir_all(notes_home);
+    }
+
+    #[test]
+    fn injected_index_truncation_is_line_aligned_and_announced() {
+        let mut index = String::from("# Memory\n\n");
+        for entry in 0..400 {
+            index.push_str(&format!(
+                "- [Entry {entry}](topic_{entry}.md) - a durable fact worth recalling later\n"
+            ));
+        }
+        let truncated = truncate_index(index.trim(), MAX_INJECTED_INDEX_CHARS);
+        assert!(truncated.len() < index.len());
+        assert!(truncated.ends_with("for the entries not shown)"));
+        for line in truncated.lines().filter(|line| line.starts_with("- [")) {
+            assert!(
+                line.ends_with("worth recalling later"),
+                "cut mid-entry: {line}"
+            );
+        }
     }
 
     #[test]

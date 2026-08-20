@@ -344,6 +344,7 @@ impl ChromeBridge {
             neoism_ui::panels::TopBarAction::OpenServers => "open_servers",
             neoism_ui::panels::TopBarAction::OpenWorkspaces => "open_workspaces",
             neoism_ui::panels::TopBarAction::StartWebServer => "start_web_server",
+            neoism_ui::panels::TopBarAction::ShareWithPhone => "share_with_phone",
             neoism_ui::panels::TopBarAction::OpenThemes => "open_themes",
             neoism_ui::panels::TopBarAction::OpenExtensions => "open_extensions",
             neoism_ui::panels::TopBarAction::OpenNeoWorld => "open_neoworld",

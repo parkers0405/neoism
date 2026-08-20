@@ -1,6 +1,6 @@
 # Sugarloaf
 
-Sugarloaf is the Neoism rendering engine, designed to be multiplatform. It is based on WebGPU, Rust library for Desktops and WebAssembly for Web (JavaScript). Originally created by Raphael Amorim for Rio terminal; maintained as part of Neoism, but feel free to use it.
+Sugarloaf is the Neoism rendering engine, designed to be multiplatform. It is based on WebGPU, Rust library for Desktops and WebAssembly for Web (JavaScript).
 
 ```bash
 cargo run --example text

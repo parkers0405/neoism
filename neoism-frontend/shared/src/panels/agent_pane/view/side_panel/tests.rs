@@ -250,7 +250,7 @@ fn partial_recovery_snapshot_preserves_omitted_active_subagent() {
 }
 
 #[test]
-fn status_omission_for_present_child_preserves_live_activity() {
+fn status_omission_for_present_child_settles_live_activity() {
     let mut panel = NeoismAgentSidePanel::default();
     panel.set_subagents(vec![
         NeoismAgentSessionEntry::new("main", "main session", "return"),
@@ -258,22 +258,22 @@ fn status_omission_for_present_child_preserves_live_activity() {
             .with_runtime_status(Some("running".to_string())),
     ]);
 
-    // `/session/status` is an active-run map and may omit an entry from one
-    // recovery response. Unknown must retain the last event-driven state.
+    // `/session/status` is the live run set. A listed child omitted from
+    // a successful snapshot is idle, not still running.
     panel.set_subagents(vec![
         NeoismAgentSessionEntry::new("main", "main session", "return"),
         NeoismAgentSessionEntry::new("child", "child", "explore")
             .with_runtime_status(None),
     ]);
 
-    assert_eq!(panel.active_child_count(Some("main")), 1);
+    assert_eq!(panel.active_child_count(Some("main")), 0);
     assert_eq!(
         panel
             .subagents()
             .iter()
             .find(|entry| entry.id == "child")
             .and_then(|entry| entry.runtime_status.as_deref()),
-        Some("running")
+        Some("completed")
     );
 }
 

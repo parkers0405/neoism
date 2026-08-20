@@ -376,6 +376,13 @@ pub enum WorkspaceClientMessage {
     CreateWorkspaceVault {
         workspace_id: String,
     },
+    /// Ask the daemon for a URL a PHONE (or any other device on the
+    /// network) can open to reach this same workspace. Only the daemon
+    /// can answer: the browser sees whatever origin it was loaded from,
+    /// which for a local session is loopback and useless to a phone.
+    RequestShareTarget {
+        workspace_id: Option<String>,
+    },
     /// Advertise a local workspace to other clients/peers. MVP targets a
     /// direct/Tailscale connection; future registries can discover the same
     /// shared workspace metadata.

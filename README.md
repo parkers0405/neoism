@@ -89,4 +89,4 @@ Documentation ships inside Neoism instead of living in a separate website. Open 
 | `sugarloaf` | Native and web GPU rendering |
 | `neoism-protocol` | Wire types shared by clients and the daemon |
 
-Neoism is open source under the [MIT License](LICENSE). Its terminal core and GPU renderer descend from [Rio](https://github.com/raphamorim/rio), which descends from Alacritty. The editor, agent runtime, workspace daemon, sync layer, notebooks, drawings, and Neoism UI are first-party. See [NOTICE](NOTICE) for attribution.
+Neoism is open source under the [MIT License](LICENSE). See [NOTICE](NOTICE) for third-party attribution.

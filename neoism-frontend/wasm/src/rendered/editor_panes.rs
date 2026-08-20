@@ -2456,3 +2456,63 @@ impl ChromeBridge {
         handled
     }
 }
+
+#[wasm_bindgen]
+impl ChromeBridge {
+    /// Adopt daemon-computed tree-sitter spans for the open code pane.
+    ///
+    /// The browser has NO tree-sitter — every grammar is
+    /// `cfg(not(target_arch = "wasm32"))` and `syntax::highlight_source`
+    /// is a `None` stub here — so without this the pane silently used a
+    /// per-line lexer that cannot see block comments or multi-line
+    /// strings. `spans_json` is `[{token,start,end}]` over the whole
+    /// buffer; `revision` is dropped if the buffer has moved on.
+    pub fn code_set_highlight_spans(
+        &mut self,
+        path: String,
+        revision: u64,
+        spans_json: String,
+    ) -> bool {
+        use neoism_ui::syntax::{Lang, SynTok};
+        #[derive(serde::Deserialize)]
+        struct WireSpan {
+            token: String,
+            start: u32,
+            end: u32,
+        }
+        let Ok(wire) = serde_json::from_str::<Vec<WireSpan>>(&spans_json) else {
+            return false;
+        };
+        let spans: Vec<(SynTok, usize, usize)> = wire
+            .into_iter()
+            .map(|s| {
+                let token = match s.token.as_str() {
+                    "Keyword" => SynTok::Keyword,
+                    "Type" => SynTok::Type,
+                    "String" => SynTok::String,
+                    "Number" => SynTok::Number,
+                    "Comment" => SynTok::Comment,
+                    "Function" => SynTok::Function,
+                    "Punct" => SynTok::Punct,
+                    _ => SynTok::Plain,
+                };
+                (token, s.start as usize, s.end as usize)
+            })
+            .collect();
+        let lang = Lang::from_path(&path);
+        let Some(pane) = self.chrome.code_pane_mut() else {
+            return false;
+        };
+        let buffer = pane.buffer.clone();
+        pane.highlight
+            .set_spans_from_host(&buffer, lang, revision, spans)
+    }
+
+    /// Buffer revision the host should quote when requesting highlights.
+    pub fn code_buffer_revision(&mut self) -> u64 {
+        self.chrome
+            .code_pane_mut()
+            .map(|pane| pane.buffer.revision)
+            .unwrap_or(0)
+    }
+}

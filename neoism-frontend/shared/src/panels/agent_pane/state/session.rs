@@ -1052,6 +1052,7 @@ impl NeoismAgentPane {
         }
         self.abort_requested_at = Some(Instant::now());
         self.note_streaming(NeoismAgentStreamingState::Idle, None);
+        self.settle_tracked_subagents(BranchStatus::Stopped);
         self.push_outbound(OutboundAgentCommand::AbortSession);
     }
 

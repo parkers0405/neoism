@@ -426,29 +426,23 @@ fn run_event_stream(
                         .unwrap_or_default();
                     for child_id in known_children {
                         if let Some(statuses) = statuses.as_ref() {
-                            // `/session/status` is an active-run map, not a
-                            // lifecycle ledger. Omission is therefore
-                            // unknown—not completion. Treating it as
-                            // `completed` cleared the event-derived child set
-                            // for one frame on reconnect; the next live part
-                            // re-added it and made the footer visibly blink.
-                            // Only an explicit terminal event may finish a
-                            // child that was already known to be active.
-                            if let Some((status, started_at)) =
-                                reconnect_child_status(statuses, &child_id)
+                            // `/session/status` is the live run set. A known
+                            // child omitted from a successful snapshot is idle.
+                            let (status, started_at) =
+                                reconnect_child_status(statuses, &child_id).unwrap_or_else(
+                                    || ("completed".to_string(), None),
+                                );
+                            if tx
+                                .send(AgentSessionUpdate::SubagentStatus {
+                                    session_id: child_id.clone(),
+                                    status,
+                                    started_at,
+                                    title: None,
+                                    agent: None,
+                                })
+                                .is_err()
                             {
-                                if tx
-                                    .send(AgentSessionUpdate::SubagentStatus {
-                                        session_id: child_id.clone(),
-                                        status,
-                                        started_at,
-                                        title: None,
-                                        agent: None,
-                                    })
-                                    .is_err()
-                                {
-                                    return;
-                                }
+                                return;
                             }
                         }
                         if let Ok(page) =

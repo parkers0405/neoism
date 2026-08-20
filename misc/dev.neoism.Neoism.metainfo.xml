@@ -7,8 +7,16 @@
   <summary>Hardware-accelerated terminal-first editor workspace</summary>
 
   <description>
-    <p>Neoism is a hardware-accelerated terminal-first editor workspace derived from Rio Terminal.</p>
-    <p>It pairs Rio's GPU terminal foundation with Rust-owned IDE chrome around managed Neovim, including file tree, buffer tabs, command palette, diagnostics, finder, and agent terminal tabs.</p>
+    <p>Neoism is a hardware-accelerated terminal-first workspace for code, notes, agents, and multiplayer editing.</p>
+    <p>It includes a GPU terminal, Rust-owned IDE chrome around managed Neovim, file tree, buffer tabs, command palette, diagnostics, finder, and agent terminal tabs.</p>
+    <p>Key features:
+      <ul>
+        <li>Live CRDT collaborative editing</li>
+        <li>Agent-driven code changes with LSP integration</li>
+        <li>Markdown notes with vaults and graph views</li>
+        <li>Native Rust LSP, diff panels, and Warp-style UI</li>
+      </ul>
+    </p>
   </description>
 
   <branding>
@@ -23,11 +31,46 @@
 
   <developer id="dev.neoism">
     <name>Neoism contributors</name>
+    <url>https://github.com/parkers0405/neoism</url>
   </developer>
+
+  <!-- Added for open-sourcing prep: keywords, categories, and release tracking -->
+  <keywords>
+    <keyword>terminal</keyword>
+    <keyword>editor</keyword>
+    <keyword>ide</keyword>
+    <keyword>rust</keyword>
+    <keyword>neovim</keyword>
+    <keyword>agent</keyword>
+    <keyword>notes</keyword>
+  </keywords>
+
+  <categories>
+    <category>Development</category>
+    <category>Utility</category>
+    <category>Office</category>
+  </categories>
+
+  <releases>
+    <!-- Populated automatically by scripts/release.sh on each cut -->
+    <release version="0.5.0" date="2025-08-01">
+      <description>
+        <p>Substantial improvements to dev/release scripts, added AppStream metadata enhancements, better cross-platform support prep, and open-source readiness updates (MIT LICENSE, no Claude attribution).</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.5.0</url>
+    </release>
+  </releases>
 
   <recommends>
     <control>keyboard</control>
     <control>pointing</control>
     <control>touch</control>
   </recommends>
+
+  <provides>
+    <binary>neoism</binary>
+    <binary>neoism-workspace-daemon</binary>
+    <binary>neoism-agent</binary>
+  </provides>
+
 </component>

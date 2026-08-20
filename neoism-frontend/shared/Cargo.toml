@@ -31,6 +31,7 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 # `sync` keeps the Yrs `UndoManager` (Wave 7D per-user undo) Send+Sync
 # so the daemon can hold `CrdtTextBuffer`s across threads.
 yrs = { version = "0.26", features = ["sync"] }
+qrcode = { version = "0.14.1", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Pulls in sqlx + tokio + notify (native-only). Wasm builds replace

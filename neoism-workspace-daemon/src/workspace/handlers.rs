@@ -311,7 +311,7 @@ pub(crate) fn open_logical_window(
 
     let title = title.unwrap_or_else(|| match kind {
         WorkspaceWindowKind::Terminal | WorkspaceWindowKind::NativeTab => "Neoism".into(),
-        WorkspaceWindowKind::ConfigEditor => "Rio Settings".into(),
+        WorkspaceWindowKind::ConfigEditor => "Neoism Settings".into(),
     });
     let now = now_secs();
     let window = WorkspaceWindowSummary {

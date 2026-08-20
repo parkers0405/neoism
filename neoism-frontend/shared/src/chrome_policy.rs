@@ -699,6 +699,41 @@ mod tests {
         }
     }
 
+    /// The agent composer must own the caret whenever the agent tab is
+    /// showing and nothing to its left holds focus. Regression guard for
+    /// the web bug where Alt+Right blurred the file tree but focus never
+    /// arrived at the agent pane.
+    #[test]
+    fn agent_input_owns_the_caret_once_the_tree_releases_focus() {
+        let mut state = TrailCursorOverlayState {
+            agent_surface_active: true,
+            agent_input_cursor_available: true,
+            trail_cursor_enabled: true,
+            ..TrailCursorOverlayState::default()
+        };
+
+        // Tree focused: the tree outranks the composer.
+        state.file_tree_focused = true;
+        assert_eq!(
+            trail_cursor_overlay_target(state),
+            Some(TrailCursorOverlayTarget::FileTree)
+        );
+
+        // Tree released (Alt+Right): the composer takes it.
+        state.file_tree_focused = false;
+        assert_eq!(
+            trail_cursor_overlay_target(state),
+            Some(TrailCursorOverlayTarget::AgentInput)
+        );
+
+        // One more step right parks the caret on the agent side panel.
+        state.agent_side_panel_focused = true;
+        assert_eq!(
+            trail_cursor_overlay_target(state),
+            Some(TrailCursorOverlayTarget::AgentSidePanel)
+        );
+    }
+
     #[test]
     fn editor_reserves_full_workspace_chrome() {
         assert_eq!(workspace_chrome_margins(metrics(false)).editor_top, 68.0);

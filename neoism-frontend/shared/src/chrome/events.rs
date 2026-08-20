@@ -830,6 +830,32 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         }
                         return true;
                     }
+                    // Step off the agent side panel back onto the agent
+                    // body (timeline / composer) before leaving for the
+                    // tree - desktop's `focus_horizontal_chrome` orders
+                    // it the same way.
+                    if self.agent_side_panel_focused() {
+                        if let Some(pane) = self.agent_pane.as_mut() {
+                            pane.side_panel_mut().set_focused(false);
+                        }
+                        return true;
+                    }
+                    // Notes sidebar sits between the file tree and the
+                    // editor in desktop's spatial chain
+                    // (tree -> notes -> editor -> git panel), so Alt+Left
+                    // walks notes -> tree and editor -> notes.
+                    if self.notes_sidebar.is_visible() && self.notes_sidebar.is_focused()
+                    {
+                        self.notes_sidebar.set_focused(false);
+                        if self.file_tree.as_ref().is_some_and(|t| t.is_visible()) {
+                            self.show_file_tree();
+                        }
+                        return true;
+                    }
+                    if self.notes_sidebar.is_visible() {
+                        self.focus_notes_sidebar();
+                        return true;
+                    }
                     self.show_file_tree();
                     return true;
                 }
@@ -844,6 +870,37 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                             tree.set_focused(false);
                         }
                         self.blur(PanelKey::FileTree);
+                        // Tree -> notes when the sidebar is open, matching
+                        // desktop's spatial walk; otherwise straight on to
+                        // the editor / agent body.
+                        if self.notes_sidebar.is_visible() {
+                            self.focus_notes_sidebar();
+                        }
+                        // Leaving the tree lands on the agent body, so
+                        // the composer takes the caret. Without this the
+                        // tree simply blurred and focus went nowhere -
+                        // Alt+Right could never reach the agent pane on
+                        // web, unlike desktop where the same step runs
+                        // `focus_main_workspace()`.
+                        return true;
+                    }
+                    if self.notes_sidebar.is_visible() && self.notes_sidebar.is_focused()
+                    {
+                        // Notes -> editor / agent body.
+                        self.notes_sidebar.set_focused(false);
+                        return true;
+                    }
+                    // Already on the agent body: the next step right is
+                    // the agent's own side panel (sessions / subagents),
+                    // matching desktop's per-pane slot between the agent
+                    // body and the global git panel.
+                    if self.agent_side_panel_focusable() {
+                        if let Some(pane) = self.agent_pane.as_mut() {
+                            pane.side_panel_mut().set_focused(true);
+                            if pane.side_panel().only_back_focusable() {
+                                pane.side_panel_mut().focus_back();
+                            }
+                        }
                         return true;
                     }
                 }
@@ -852,6 +909,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         }
 
         false
+    }
+
+    /// The share sheet is modal while open: it swallows the next click
+    /// and Escape. Returns true when it consumed the input.
+    pub fn dismiss_share_sheet_if_open(&mut self) -> bool {
+        if !self.share_sheet.is_visible() {
+            return false;
+        }
+        self.share_sheet.hide();
+        true
     }
 
     pub(crate) fn hide_focus_modals(&mut self) {
@@ -891,10 +958,86 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         }
     }
 
-    /// Workspace root the host dialed into. The git side panel uses
-    /// it as repo root; the notes sidebar lists `<root>/notes`.
+    /// Workspace root the host dialed into. The git side panel uses it
+    /// as repo root. The notes sidebar does NOT derive from this - notes
+    /// live in vaults, so the host pushes that separately via
+    /// [`Chrome::set_notes_vault_root`].
     pub fn set_workspace_root_path(&mut self, root: Option<std::path::PathBuf>) {
         self.workspace_root_path = root;
+    }
+
+    /// Vault directory the notes sidebar lists. The host resolves it the
+    /// same way every other notes surface does - the daemon advertises
+    /// `WorkspaceSummary::linked_vault_dir`, which is
+    /// `linked_project_for_code_dir(root_dir)` resolved where the vaults
+    /// physically live. Pass `None` when no vault is linked; the sidebar
+    /// then shows the "no linked vault" empty state rather than silently
+    /// listing something else. Re-lists when the vault changes while the
+    /// panel is open.
+    pub fn set_notes_vault_root(&mut self, vault: Option<std::path::PathBuf>) {
+        if self.notes_vault_root == vault {
+            return;
+        }
+        self.notes_vault_root = vault;
+        if self.notes_sidebar.is_visible() {
+            self.apply_notes_vault();
+            self.pending_notes_refresh = true;
+        }
+    }
+
+    /// Give the notes sidebar the caret, taking it off the file tree so
+    /// two left-hand panels never look focused at once.
+    fn focus_notes_sidebar(&mut self) {
+        if let Some(tree) = self.file_tree.as_mut() {
+            tree.set_focused(false);
+        }
+        self.blur(PanelKey::FileTree);
+        self.notes_sidebar.set_focused(true);
+    }
+
+    /// True when the agent's side panel currently owns the caret.
+    fn agent_side_panel_focused(&self) -> bool {
+        self.agent_pane
+            .as_ref()
+            .is_some_and(|pane| pane.side_panel().is_focused())
+    }
+
+    /// True when Alt+Right from the agent body should step INTO the
+    /// agent side panel: the agent tab is showing, the panel has been
+    /// laid out, it has something focusable, and nothing on the left
+    /// (tree / notes) still holds the caret - otherwise Alt+Right from
+    /// the tree would teleport past the composer straight into the
+    /// panel. Same guard set desktop uses.
+    fn agent_side_panel_focusable(&self) -> bool {
+        if !self.is_neoism_agent_tab_active() {
+            return false;
+        }
+        if self.focused() == Some(PanelKey::FileTree) {
+            return false;
+        }
+        if self.notes_sidebar.is_visible() && self.notes_sidebar.is_focused() {
+            return false;
+        }
+        self.agent_pane.as_ref().is_some_and(|pane| {
+            !pane.side_panel().is_focused()
+                && pane.side_panel().last_panel_rect().is_some()
+                && pane.side_panel().focusable()
+        })
+    }
+
+    /// Point the sidebar at the current vault and reflect the
+    /// "no linked vault" state. Shared by the Alt+N open path and by
+    /// [`Chrome::set_notes_vault_root`] when the vault moves underneath
+    /// an already-open panel.
+    fn apply_notes_vault(&mut self) {
+        let vault = self.notes_vault_root.clone();
+        let name = vault
+            .as_deref()
+            .and_then(|v| v.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Default".to_string());
+        self.notes_sidebar.set_vault_actions(vault.is_none());
+        self.notes_sidebar.set_workspace(name, vault);
     }
 
     /// Toggle the rich right-side git diff panel (desktop Alt+G).
@@ -916,20 +1059,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         visible
     }
 
-    /// Toggle the notes sidebar (desktop Alt+N). Desktop resolves a
-    /// notes workspace from `.neoism/workspace.toml`; the daemon's
-    /// convention is `<root>/notes`, which the host lists and pushes
-    /// back via `notes_sidebar.set_entries_from_host`.
+    /// Toggle the notes sidebar (desktop Alt+N). Lists the vault the
+    /// host pushed via [`Chrome::set_notes_vault_root`] - the SAME
+    /// directory the desktop sidebar, the daemon's note-create action
+    /// and the agent's notes tools all resolve. This used to guess
+    /// `<workspace_root>/notes`, a directory the vault model never
+    /// writes, so the panel listed an empty (or unrelated) folder while
+    /// new notes landed in `~/Neoism/Vaults/...` and never appeared.
     pub fn toggle_notes_sidebar(&mut self) -> bool {
         if !self.notes_sidebar.is_visible() {
-            let root = self.workspace_root_path.clone();
-            let name = root
-                .as_deref()
-                .and_then(|r| r.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Default".to_string());
-            let notes_dir = root.map(|r| r.join("notes"));
-            self.notes_sidebar.set_workspace(name, notes_dir);
+            self.apply_notes_vault();
             self.pending_notes_refresh = true;
         }
         let changed = self.notes_sidebar.toggle_focus_or_visibility();

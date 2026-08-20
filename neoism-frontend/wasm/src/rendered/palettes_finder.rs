@@ -491,6 +491,21 @@ impl ChromeBridge {
             // OpenNeoismAgent has its own dedicated tab-open queue
             // path (see `handle_event`'s post-dispatch check); skip
             // the Action intent so JS doesn't double-fire it.
+            // Server rows must keep their payload; everything else is
+            // identified by name alone.
+            match &action {
+                PaletteAction::SelectServer { id }
+                | PaletteAction::EditServer { id }
+                | PaletteAction::RemoveServer { id } => {
+                    let id = id.clone();
+                    self.pending_palette_intents.push(PaletteIntent::Server {
+                        action: palette_action_name(action),
+                        id,
+                    });
+                    return true;
+                }
+                _ => {}
+            }
             if !matches!(action, PaletteAction::OpenNeoismAgent) {
                 self.pending_palette_intents.push(PaletteIntent::Action {
                     action: palette_action_name(action),
@@ -525,6 +540,52 @@ impl ChromeBridge {
     /// Enter handlers close the modal after the pick, so a pick that
     /// re-opens the palette in another mode (Go to Line → ex mode)
     /// must apply after that close.
+    /// Open the servers palette — the SAME shared surface desktop shows
+    /// from its top-right corner (`command_palette.enter_servers_mode`).
+    /// Web previously routed this to its own TS workplace panel, so the
+    /// two frontends had different server UIs.
+    ///
+    /// `entries_json` is `[{id,name,address,local,status,active}]`;
+    /// `status` is one of `online|connecting|offline|unknown`.
+    pub fn open_servers_palette(&mut self, entries_json: String) {
+        use neoism_ui::panels::command_palette::PaletteServerEntry;
+        use neoism_ui::panels::ServerIndicatorStatus;
+        #[derive(serde::Deserialize)]
+        struct WireServer {
+            id: String,
+            name: String,
+            #[serde(default)]
+            address: String,
+            #[serde(default)]
+            local: bool,
+            #[serde(default)]
+            status: String,
+            #[serde(default)]
+            active: bool,
+        }
+        let Ok(rows) = serde_json::from_str::<Vec<WireServer>>(&entries_json) else {
+            return;
+        };
+        let entries = rows
+            .into_iter()
+            .map(|row| PaletteServerEntry {
+                id: row.id,
+                name: row.name,
+                address: row.address,
+                local: row.local,
+                status: match row.status.as_str() {
+                    "online" => ServerIndicatorStatus::Online,
+                    "connecting" => ServerIndicatorStatus::Connecting,
+                    "offline" => ServerIndicatorStatus::Offline,
+                    _ => ServerIndicatorStatus::Unknown,
+                },
+                active: row.active,
+            })
+            .collect();
+        self.chrome.command_palette.enter_servers_mode(entries);
+        self.relayout_chrome();
+    }
+
     pub fn drain_palette_intents(&mut self) -> JsValue {
         self.sync_palette_host_context();
         let drained: Vec<PaletteIntent> =

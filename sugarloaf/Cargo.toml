@@ -19,7 +19,7 @@ include = [
     "src/**/*.metal",
     "src/**/*.glsl",
 ]
-description = "Sugarloaf is the Neoism rendering engine. Designed to be multiplatform via WebGPU (Desktops) and WebAssembly (Web). Originally created by Raphael Amorim for Rio terminal; maintained as part of Neoism."
+description = "Sugarloaf is the Neoism rendering engine. Designed to be multiplatform via WebGPU (Desktops) and WebAssembly (Web)."
 documentation = "https://docs.rs/crate/sugarloaf/latest"
 repository.workspace = true
 
@@ -183,15 +183,16 @@ web = ["wgpu"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Per-target override of the workspace `wgpu` pin so the browser
-# entrypoint can opt into the `webgpu` + `webgl` adapter backends.
-# The workspace pin (`Cargo.toml`) takes default features only, which
-# leaves the browser backends out. Activated by the `web` feature.
+# entrypoint can opt into the `webgl` adapter backend.
 # NOTE: enabling both `webgpu` and `webgl` would activate wgpu's webgpu
 # Instance path, which (as of 28.0.0) hardcodes supported_backends to
 # BROWSER_WEBGPU only and refuses to fall back to GL — see TODO in
 # wgpu-28.0.0/src/backend/webgpu.rs:938. Until that's fixed upstream we
 # ship the webgl path only; it works on every browser. Re-add `webgpu`
 # once wgpu emits a unified supported_backends mask.
+#
+# The workspace pin already has `default-features = false` (so the
+# default `webgpu` feature is off). This override only adds `webgl`.
 wgpu = { workspace = true, features = ["webgl"], optional = true }
 console_error_panic_hook = "0.1.7"
 console_log = "0.2.2"

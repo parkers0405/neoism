@@ -14,12 +14,14 @@
 #   NEOISM_VERSION   pin a release tag (default: latest)
 #   NEOISM_BIN_DIR   install dir (default: ~/.local/bin)
 #   NEOISM_REPO      owner/repo (default: parkers0405/neoism)
+#   NEOISM_SKIP_CHECKSUM  set to 1 to bypass checksum (for testing/airgap)
 set -euo pipefail
 
 REPO="${NEOISM_REPO:-parkers0405/neoism}"  # GitHub repo whose Releases host the prebuilt binaries
 BIN_DIR="${NEOISM_BIN_DIR:-${HOME}/.local/bin}"
 VERSION="${NEOISM_VERSION:-latest}"
 BINARIES=(neoism neoism-workspace-daemon neoism-agent)
+SKIP_CHECKSUM="${NEOISM_SKIP_CHECKSUM:-0}"
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -66,7 +68,9 @@ say "Downloading ${asset}"
   || err "download failed — is there a release with $asset? (try NEOISM_VERSION=vX.Y.Z)"
 
 # checksum verification — releases ship a per-asset .sha256 file
-if command -v sha256sum >/dev/null 2>&1 \
+if [ "$SKIP_CHECKSUM" = "1" ]; then
+  say "checksum verification skipped (NEOISM_SKIP_CHECKSUM=1)"
+elif command -v sha256sum >/dev/null 2>&1 \
   && "${DL[@]}" "$base/$asset.sha256" >"$tmp/$asset.sha256" 2>/dev/null; then
   ( cd "$tmp" && sha256sum -c "$asset.sha256" >/dev/null 2>&1 ) \
     && say "checksum OK" || err "checksum mismatch for $asset — aborting"

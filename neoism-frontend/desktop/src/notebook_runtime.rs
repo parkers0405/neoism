@@ -537,7 +537,7 @@ fn signal_notebook_interrupt(_process: ActiveNotebookProcess) -> Result<(), Stri
 
 fn local_command_for_language(language: &str) -> Result<StdCommand, String> {
     let normalized = language.trim().to_ascii_lowercase();
-    let command = if is_shell_language(&normalized) {
+    let mut command = if is_shell_language(&normalized) {
         let shell = match normalized.as_str() {
             "bash" => "bash",
             "zsh" => "zsh",

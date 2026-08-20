@@ -1184,6 +1184,36 @@ pub(crate) async fn handle_socket(
                             }
                             continue;
                         }
+                        // Tree-sitter highlighting on behalf of a client
+                        // that has no parser. Every `tree-sitter*` crate is
+                        // `cfg(not(target_arch = "wasm32"))`, so a browser
+                        // build cannot parse at all and degrades to a
+                        // per-line lexer; the daemon is native and already
+                        // links `neoism-ui`, so it runs the real parse here.
+                        // Off the socket loop: a large file is CPU work.
+                        EditorClientMessage::HighlightBuffer {
+                            path,
+                            text,
+                            revision,
+                        } => {
+                            let spans = tokio::task::spawn_blocking(move || {
+                                highlight_spans_for(&path, &text)
+                                    .map(|spans| (path, spans))
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            match spans {
+                                Some((path, spans)) => {
+                                    EditorServerMessage::HighlightSpans {
+                                        path,
+                                        revision,
+                                        spans,
+                                    }
+                                }
+                                None => continue,
+                            }
+                        }
                         // SendKeys / Command / MouseInput / Resize drove the
                         // embedded nvim grid. The native editor only reuses
                         // OpenBuffer for host-owned LSP synchronization.
@@ -1587,4 +1617,73 @@ where
         axum::Error::new(std::io::Error::new(std::io::ErrorKind::Other, e))
     })?;
     sink.send(Message::Text(payload)).await
+}
+
+/// Run the compiled-in tree-sitter grammars over `text` and map the
+/// result onto the wire token vocabulary.
+///
+/// `None` when the file type has no grammar — the caller then sends
+/// nothing and the client keeps its per-line fallback, which is better
+/// than painting an empty span set over real code.
+fn highlight_spans_for(
+    path: &std::path::Path,
+    text: &str,
+) -> Option<Vec<neoism_protocol::editor::SyntaxSpan>> {
+    use neoism_protocol::editor::{SyntaxSpan, SyntaxToken};
+    use neoism_ui::syntax::{highlight_source, Lang, SynTok};
+
+    let lang = Lang::from_path(&path.to_string_lossy());
+    let spans = highlight_source(text, lang)?;
+    Some(
+        spans
+            .into_iter()
+            .filter(|(token, _, _)| *token != SynTok::Plain)
+            .map(|(token, start, end)| SyntaxSpan {
+                token: match token {
+                    SynTok::Plain => SyntaxToken::Plain,
+                    SynTok::Keyword => SyntaxToken::Keyword,
+                    SynTok::Type => SyntaxToken::Type,
+                    SynTok::String => SyntaxToken::String,
+                    SynTok::Number => SyntaxToken::Number,
+                    SynTok::Comment => SyntaxToken::Comment,
+                    SynTok::Function => SyntaxToken::Function,
+                    SynTok::Punct => SyntaxToken::Punct,
+                },
+                start: start as u32,
+                end: end as u32,
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod highlight_tests {
+    use super::*;
+
+    #[test]
+    fn rust_source_yields_spans_including_a_block_comment() {
+        let spans = highlight_spans_for(
+            std::path::Path::new("a.rs"),
+            "/* multi\n   line */\nfn main() { let s = \"x\"; }\n",
+        )
+        .expect("rust has a grammar");
+        assert!(!spans.is_empty());
+        // The whole-buffer parse is exactly what the per-line web
+        // fallback cannot do: a comment that spans a newline.
+        assert!(spans.iter().any(|s| s.token
+            == neoism_protocol::editor::SyntaxToken::Comment
+            && s.end > 9));
+        assert!(spans
+            .iter()
+            .all(|s| s.token != neoism_protocol::editor::SyntaxToken::Plain));
+    }
+
+    #[test]
+    fn unknown_file_type_has_no_grammar() {
+        assert!(highlight_spans_for(
+            std::path::Path::new("notes.unknownext"),
+            "hello",
+        )
+        .is_none());
+    }
 }

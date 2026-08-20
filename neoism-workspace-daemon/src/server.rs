@@ -164,6 +164,7 @@ pub fn router(state: AppState) -> Router {
         .route("/agent", any(agent_proxy_root))
         .route("/agent/", any(agent_proxy_root))
         .route("/agent/*path", any(agent_proxy))
+        .fallback(web_fallback)
         .with_state(state)
 }
 
@@ -275,6 +276,27 @@ pub fn router_from_registry(sessions: SessionRegistry) -> Router {
 
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, "neoism-daemon")
+}
+
+async fn web_fallback(req: axum::http::Request<axum::body::Body>) -> Response {
+    let Some(root) = crate::web::web_root() else {
+        return (
+            StatusCode::NOT_FOUND,
+            "neoism web UI is not installed on this daemon",
+        )
+            .into_response();
+    };
+    let index = root.join("index.html");
+    let mut svc = tower_http::services::ServeDir::new(root)
+        .append_index_html_on_directories(true)
+        .fallback(tower_http::services::ServeFile::new(index));
+    match tower::ServiceExt::oneshot(&mut svc, req).await {
+        Ok(response) => response.into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "web UI serve error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 pub(crate) mod hosts_routes;

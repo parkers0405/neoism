@@ -203,7 +203,6 @@ struct TextWgpuState {
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     atlas_bind_group: wgpu::BindGroup,
-    #[allow(dead_code)] // retained for future atlas-bind-group recreation on atlas grow
     atlas_bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     instance_buffer: wgpu::Buffer,
@@ -990,8 +989,22 @@ impl Text {
                     bytes: &raw.bytes,
                 };
                 let slot = if is_color {
-                    state.atlas_color.insert(key, raster)?
+                    if let Some(s) = state.atlas_color.insert(key, raster) {
+                        s
+                    } else if state.atlas_color.grow(&state.device) {
+                        rebuild_text_atlas_bind_group(state);
+                        state.atlas_color.insert(key, raster)?
+                    } else {
+                        state.atlas_color.clear();
+                        state.atlas_color.insert(key, raster)?
+                    }
+                } else if let Some(s) = state.atlas_grayscale.insert(key, raster) {
+                    s
+                } else if state.atlas_grayscale.grow(&state.device) {
+                    rebuild_text_atlas_bind_group(state);
+                    state.atlas_grayscale.insert(key, raster)?
                 } else {
+                    state.atlas_grayscale.clear();
                     state.atlas_grayscale.insert(key, raster)?
                 };
                 Some((
@@ -1709,6 +1722,16 @@ fn alloc_instance_buffer_metal(device: &metal::Device, capacity: usize) -> metal
 }
 
 //  wgpu pipeline construction
+
+#[cfg(all(feature = "wgpu", not(target_os = "macos")))]
+fn rebuild_text_atlas_bind_group(state: &mut TextWgpuState) {
+    state.atlas_bind_group = create_text_atlas_bg_wgpu(
+        &state.device,
+        &state.atlas_bind_group_layout,
+        state.atlas_grayscale.view(),
+        state.atlas_color.view(),
+    );
+}
 
 #[cfg(all(feature = "wgpu", not(target_os = "macos")))]
 fn create_text_atlas_bgl_wgpu(device: &wgpu::Device) -> wgpu::BindGroupLayout {

@@ -294,6 +294,17 @@ export interface TerminalAdapter {
     toggleGitDiffPanel?(): boolean;
     /** Notes sidebar (desktop Alt+N). Returns the new visibility. */
     toggleNotesSidebar?(): boolean;
+    /** Show the "Share with phone" QR sheet. Empty url => message-only. */
+    /** Open the SHARED servers palette (desktop's server manager). */
+    openServersPalette?(entriesJson: string): void;
+    shareSheetShow?(url: string, hint?: string): void;
+    shareSheetDismiss?(): boolean;
+    shareSheetVisible?(): boolean;
+    /** Point the notes sidebar at the host's linked vault
+     *  (`WorkspaceSummary.linked_vault_dir`), or `null` when the
+     *  workspace links none. Notes live only in vaults - this is NOT
+     *  derivable from the workspace root. */
+    setNotesVaultRoot?(vault: string | null): void;
     /** One-shot flags: the panel just opened and wants daemon data. */
     takeGitPanelRefresh?(): boolean;
     takeNotesRefresh?(): boolean;
@@ -573,8 +584,36 @@ export interface TerminalAdapter {
     agentPointerDown?(
         x: number,
         y: number,
-    ): { handled: boolean; copy: string | null; link: string | null } | null;
+    ): {
+        handled: boolean;
+        copy: string | null;
+        link: string | null;
+        selecting: boolean;
+    } | null;
+    /** Extend an in-progress timeline text selection (pointermove while
+     *  the button is held, after `agentPointerDown` reported
+     *  `selecting`). */
+    agentSelectionDrag?(x: number, y: number): boolean;
+    /** Finish the drag and return the selected text for the clipboard,
+     *  or null when it was just a click. */
+    agentSelectionEnd?(): string | null;
+    agentHasActiveSelection?(): boolean;
     /** Position-aware wheel: picker / side panel / diff card / timeline. */
+    /** Desktop-parity wheel: raw deltaY + DOM deltaMode, smoothed for
+     *  notches by the shared scroll policy. */
+    agentScrollWheelAt?(
+        x: number,
+        y: number,
+        deltaY: number,
+        deltaMode: number,
+    ): boolean;
+    /** Adopt daemon-computed tree-sitter spans for the code pane. */
+    codeSetHighlightSpans?(
+        path: string,
+        revision: number,
+        spansJson: string,
+    ): boolean;
+    codeBufferRevision?(): number;
     agentScrollAt?(x: number, y: number, deltaPixels: number): boolean;
     /** Axis-specific wheel for rendered Markdown code/table overflow. */
     agentScrollHorizontalAt?(x: number, y: number, deltaPixels: number): boolean;
@@ -801,7 +840,8 @@ export type PaletteIntent =
     | { kind: "theme"; name: string }
     | { kind: "shader"; title: string; filter: string | null }
     | { kind: "buffer"; target: PaletteBufferTarget }
-    | { kind: "workspace"; workspace_id: string };
+    | { kind: "workspace"; workspace_id: string }
+    | { kind: "server"; action: string; id: string };
 
 export type PaletteBufferTarget =
     | { target: "workspace"; tab_index: number }
@@ -1194,6 +1234,11 @@ interface ChromeBridgeInstance {
      *  default "New File / New Folder" target when no row is selected. */
     file_tree_workspace_root?(): unknown;
     set_workspace_root?(workspaceRoot: string): void;
+    set_notes_vault_root?(vault: string | undefined): void;
+    open_servers_palette?(entriesJson: string): void;
+    share_sheet_show?(url: string, hint: string | undefined): void;
+    share_sheet_dismiss?(): boolean;
+    share_sheet_visible?(): boolean;
     /** True when the file tree currently owns chrome focus. */
     file_tree_focused?(): boolean;
     drain_buffer_tab_intents(): unknown;
@@ -1408,6 +1453,21 @@ interface ChromeBridgeInstance {
     agent_scroll_timeline(deltaPixels: number): boolean;
     agent_pointer_down?(x: number, y: number): unknown;
     agent_scroll_at?(x: number, y: number, deltaPixels: number): boolean;
+    code_set_highlight_spans?(
+        path: string,
+        revision: number,
+        spansJson: string,
+    ): boolean;
+    code_buffer_revision?(): number;
+    agent_scroll_wheel_at?(
+        x: number,
+        y: number,
+        deltaY: number,
+        deltaMode: number,
+    ): boolean;
+    agent_selection_drag?(x: number, y: number): boolean;
+    agent_selection_end?(): string | undefined;
+    agent_has_active_selection?(): boolean;
     agent_scroll_horizontal_at?(x: number, y: number, deltaPixels: number): boolean;
     agent_drag_markdown_horizontal_scrollbar?(x: number): boolean;
     agent_end_markdown_horizontal_scrollbar_drag?(): boolean;
@@ -2253,6 +2313,13 @@ class ChromeAdapter implements TerminalAdapter {
                 rec.workspace_id.length > 0
             ) {
                 out.push({ kind: "workspace", workspace_id: rec.workspace_id });
+            } else if (
+                kind === "server" &&
+                typeof rec.action === "string" &&
+                typeof rec.id === "string" &&
+                rec.id.length > 0
+            ) {
+                out.push({ kind: "server", action: rec.action, id: rec.id });
             }
         }
         return out;
@@ -2587,6 +2654,21 @@ class ChromeAdapter implements TerminalAdapter {
     toggleNotesSidebar(): boolean {
         return this.inner.toggle_notes_sidebar?.() === true;
     }
+    setNotesVaultRoot(vault: string | null): void {
+        this.inner.set_notes_vault_root?.(vault ?? undefined);
+    }
+    openServersPalette(entriesJson: string): void {
+        this.inner.open_servers_palette?.(entriesJson);
+    }
+    shareSheetShow(url: string, hint?: string): void {
+        this.inner.share_sheet_show?.(url, hint);
+    }
+    shareSheetDismiss(): boolean {
+        return this.inner.share_sheet_dismiss?.() === true;
+    }
+    shareSheetVisible(): boolean {
+        return this.inner.share_sheet_visible?.() === true;
+    }
     takeGitPanelRefresh(): boolean {
         return this.inner.take_git_panel_refresh?.() === true;
     }
@@ -2838,7 +2920,12 @@ class ChromeAdapter implements TerminalAdapter {
     agentPointerDown(
         x: number,
         y: number,
-    ): { handled: boolean; copy: string | null; link: string | null } | null {
+    ): {
+        handled: boolean;
+        copy: string | null;
+        link: string | null;
+        selecting: boolean;
+    } | null {
         const raw = this.inner.agent_pointer_down?.(x, y);
         if (!raw || typeof raw !== "object") return null;
         const rec = raw as Record<string, unknown>;
@@ -2846,10 +2933,41 @@ class ChromeAdapter implements TerminalAdapter {
             handled: rec.handled === true,
             copy: typeof rec.copy === "string" ? rec.copy : null,
             link: typeof rec.link === "string" ? rec.link : null,
+            selecting: rec.selecting === true,
         };
+    }
+    agentSelectionDrag(x: number, y: number): boolean {
+        return this.inner.agent_selection_drag?.(x, y) === true;
+    }
+    agentSelectionEnd(): string | null {
+        const text = this.inner.agent_selection_end?.();
+        return typeof text === "string" && text.length > 0 ? text : null;
+    }
+    agentHasActiveSelection(): boolean {
+        return this.inner.agent_has_active_selection?.() === true;
+    }
+    codeSetHighlightSpans(
+        path: string,
+        revision: number,
+        spansJson: string,
+    ): boolean {
+        return (
+            this.inner.code_set_highlight_spans?.(path, revision, spansJson) === true
+        );
+    }
+    codeBufferRevision(): number {
+        return this.inner.code_buffer_revision?.() ?? 0;
     }
     agentScrollAt(x: number, y: number, deltaPixels: number): boolean {
         return this.inner.agent_scroll_at?.(x, y, deltaPixels) === true;
+    }
+    agentScrollWheelAt(
+        x: number,
+        y: number,
+        deltaY: number,
+        deltaMode: number,
+    ): boolean {
+        return this.inner.agent_scroll_wheel_at?.(x, y, deltaY, deltaMode) === true;
     }
     agentScrollHorizontalAt(x: number, y: number, deltaPixels: number): boolean {
         return this.inner.agent_scroll_horizontal_at?.(x, y, deltaPixels) === true;

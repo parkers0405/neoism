@@ -33,6 +33,7 @@ pub mod git_branch;
 pub mod minimap;
 pub mod neoworld;
 pub mod notes_sidebar;
+pub mod share_sheet;
 pub mod notifications;
 pub mod pane_grid;
 pub mod search;

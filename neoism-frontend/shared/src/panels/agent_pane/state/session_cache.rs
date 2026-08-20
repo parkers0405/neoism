@@ -458,7 +458,9 @@ impl NeoismAgentPane {
         self.close_picker();
         self.reset_timeline_navigation_for_session_switch();
         // The restored timeline must render fresh — no raised/expanded
-        // card artifacts from the click that navigated away.
+        // card artifacts from the click that navigated away. Leave-and-return
+        // also collapses the live-trace window, so a parked layout that still
+        // contains tool rows would paint leftover titles until the next click.
         self.reset_transient_timeline_interactions();
         self.timeline_history = cached.timeline_history;
         self.timeline_scroll_px = cached.timeline_scroll_px;
@@ -492,11 +494,11 @@ impl NeoismAgentPane {
         self.messages = cached.messages;
         self.pending_user_prompts = cached.pending_user_prompts;
         self.prompt_echo_aliases = cached.prompt_echo_aliases;
-        self.timeline_layout_epoch = cached.timeline_layout_epoch;
-        *self.timeline_layout_cache.borrow_mut() = cached.timeline_layout_cache;
-        self.timeline_dirty_message_ids = cached.timeline_dirty_message_ids;
-        self.timeline_dirty_message_indices = cached.timeline_dirty_message_indices;
         self.restore_session_runtime_ui(cached.runtime);
+        // Live-trace was cleared by the switch. Drop the parked layout so
+        // settled tool/reasoning rows are re-masked instead of flashing as
+        // leftover titles from the previous visit.
+        self.invalidate_timeline_layout();
         // The virtual timeline rebuilds off the content revision, which
         // is pane-global and monotonic (never parked/restored) — bump
         // it so the restored transcript replaces the parked one on the

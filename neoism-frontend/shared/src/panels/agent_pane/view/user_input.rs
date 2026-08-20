@@ -1409,56 +1409,73 @@ fn draw_opencode_activity_scanner(
     clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    let base_opts = DrawOpts {
-        font_size,
-        color: theme.u8(streaming_status_accent(theme, state)),
-        clip_rect: Some(clip),
-        ..DrawOpts::default()
-    };
-    let solid_w = sugarloaf.text_mut().measure("■", &base_opts);
-    let dot_w = sugarloaf.text_mut().measure("⬝", &base_opts);
-    let cell_w = solid_w.max(dot_w);
+    // The scanner cells are drawn as RECTS, not as text.
+    //
+    // They used to be the glyphs `\u{25A0}` (BLACK SQUARE) and `\u{2B1D}`
+    // (BLACK VERY SMALL SQUARE). Those live in Geometric Shapes /
+    // Miscellaneous Symbols, NOT in the Private Use Area — so on web they
+    // fall outside the three PUA symbol ranges the wasm host maps to the
+    // Nerd Font, and the browser build has no system-font fallback to
+    // resolve them from. The whole scanner rendered as tofu boxes there
+    // while desktop found the glyphs through fontconfig. They are literally
+    // squares, so drawing them as rects removes the font dependency
+    // entirely and makes every platform paint the same thing.
+    let cell_w = font_size * 0.68;
+    let active_size = font_size * 0.52;
+    let idle_size = font_size * 0.22;
     let frame = opencode_scanner_frame(now_seconds);
 
     for (index, cell) in frame.into_iter().enumerate() {
-        let mut opts = base_opts;
-        opts.color = themed_activity_scanner_color(
+        let color = themed_activity_scanner_color(
             theme,
             state,
             cell.active,
             cell.brightness,
             cell.alpha,
         );
-        let glyph = if cell.active { "■" } else { "⬝" };
-        let mut far_depth_opts = opts;
-        far_depth_opts.color = theme.u8(theme.bg);
-        far_depth_opts.color[3] = opts.color[3].saturating_mul(2) / 3;
-        crate::primitives::draw_text_with_occlusion(
+        let size = if cell.active { active_size } else { idle_size };
+        let cell_x = x + index as f32 * cell_w;
+        // Centre the square in the cell and on the text's em box, so the
+        // run sits on the same optical line as the `esc` label beside it.
+        let left = cell_x + (cell_w - size) * 0.5;
+        let top = y + (font_size - size) * 0.5;
+        if occlusion_rects
+            .iter()
+            .any(|occ| crate::primitives::rects_intersect([left, top, size, size], *occ))
+        {
+            continue;
+        }
+        // Same three depth layers the glyph version stacked: a background-
+        // tinted drop behind, a dim mid layer, then the lit face.
+        let mut far = theme.f32(theme.bg);
+        far[3] = color[3] as f32 / 255.0 * (2.0 / 3.0);
+        draw_rect_clipped(
             sugarloaf,
-            x + index as f32 * cell_w + 3.0,
-            y + 3.0,
-            glyph,
-            &far_depth_opts,
-            occlusion_rects,
+            [left + 3.0, top + 3.0, size, size],
+            far,
+            ORDER_TEXT,
+            clip,
         );
-        let mut near_depth_opts = opts;
-        near_depth_opts.color = theme.u8(theme.dim);
-        near_depth_opts.color[3] = opts.color[3].saturating_mul(7) / 8;
-        crate::primitives::draw_text_with_occlusion(
+        let mut near = theme.f32(theme.dim);
+        near[3] = color[3] as f32 / 255.0 * (7.0 / 8.0);
+        draw_rect_clipped(
             sugarloaf,
-            x + index as f32 * cell_w + 1.5,
-            y + 1.5,
-            glyph,
-            &near_depth_opts,
-            occlusion_rects,
+            [left + 1.5, top + 1.5, size, size],
+            near,
+            ORDER_TEXT,
+            clip,
         );
-        crate::primitives::draw_text_with_occlusion(
+        draw_rect_clipped(
             sugarloaf,
-            x + index as f32 * cell_w,
-            y,
-            glyph,
-            &opts,
-            occlusion_rects,
+            [left, top, size, size],
+            [
+                color[0] as f32 / 255.0,
+                color[1] as f32 / 255.0,
+                color[2] as f32 / 255.0,
+                color[3] as f32 / 255.0,
+            ],
+            ORDER_TEXT,
+            clip,
         );
     }
     cell_w * frame.len() as f32

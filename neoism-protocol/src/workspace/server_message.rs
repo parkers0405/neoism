@@ -7,6 +7,14 @@ use super::*;
 // `f32`); `PartialEq` is still derived for the roundtrip tests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WorkspaceServerMessage {
+    /// Reply to `RequestShareTarget`. `url` is absent when the daemon has
+    /// no address another device could reach (offline, or loopback-only),
+    /// in which case `hint` explains why so the UI can say something
+    /// useful instead of showing a dead QR code.
+    ShareTarget {
+        url: Option<String>,
+        hint: Option<String>,
+    },
     /// Reply to `ListProjectRoots` — the full known registry, ordered by
     /// most-recently-opened first (mirrors the on-disk registry sort).
     ProjectRootList {

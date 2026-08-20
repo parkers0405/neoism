@@ -40,6 +40,14 @@ These are set in `~/.config/neoism/config.toml` under `[fonts]` (`family` + `siz
 - **Cascadia Code** (`cascadiacode`) — the default UI + terminal + editor font.
 - **Geist Mono** — bundled monospace (used on the web build).
 - **Symbols Nerd Font** — provides the icon glyphs (folder/file/branch icons, etc.).
+- **Noto Sans Symbols 2** (SIL Open Font License 1.1) — bundled on the web build for
+  geometric shapes, box/block elements and task checkboxes (U+2610 / U+2611). The
+  desktop reaches these through system fontconfig fallback; the browser has no such
+  fallback, so they rendered as tofu until this was embedded.
+- **Twemoji Mozilla** (CC-BY 4.0, Twitter/Mozilla) — bundled on the web build for
+  colour emoji: Markdown page icons (`icon:` frontmatter), emoji in notes and agent
+  text. COLR (vector colour) rather than a CBDT bitmap font, so it costs ~1.4 MB
+  instead of ~10 MB and rasterises through swash's existing colour-glyph path.
 
 > Tip: change the editor/terminal font with:
 > ```toml

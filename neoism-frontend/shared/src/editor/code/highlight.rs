@@ -104,7 +104,50 @@ impl CodeHighlightCache {
             return;
         };
         self.unavailable = false;
+        self.split_spans_into_lines(buffer, spans);
+    }
 
+    /// Adopt whole-buffer spans computed by the HOST rather than in
+    /// process.
+    ///
+    /// The wasm build has no tree-sitter at all — every grammar is under
+    /// `cfg(not(target_arch = "wasm32"))` and `highlight_source` is a
+    /// `None` stub there, so the browser silently fell back to the
+    /// per-line lexer and lost every multi-line construct (block
+    /// comments, raw/triple-quoted strings). The daemon is a native build
+    /// that already links this crate, so it can run the real parse and
+    /// ship the spans here.
+    ///
+    /// `revision` is the buffer revision the spans were computed from;
+    /// stale replies (the buffer moved on while the request was in
+    /// flight) are dropped rather than painted against shifted text.
+    pub fn set_spans_from_host(
+        &mut self,
+        buffer: &CodeBuffer,
+        lang: Lang,
+        revision: u64,
+        spans: Vec<(SynTok, usize, usize)>,
+    ) -> bool {
+        if revision != buffer.revision {
+            return false;
+        }
+        self.pending = None;
+        self.revision = Some(buffer.revision);
+        self.lang = Some(lang);
+        self.lines.clear();
+        self.unavailable = false;
+        self.split_spans_into_lines(buffer, spans);
+        true
+    }
+
+    /// Turn whole-buffer byte spans into per-line, line-local runs.
+    /// Shared by the in-process parse and the host-supplied path so both
+    /// produce byte-identical run tables.
+    fn split_spans_into_lines(
+        &mut self,
+        buffer: &CodeBuffer,
+        spans: Vec<(SynTok, usize, usize)>,
+    ) {
         let mut line_starts: Vec<usize> = Vec::with_capacity(buffer.lines.len());
         let mut acc = 0usize;
         for line in &buffer.lines {

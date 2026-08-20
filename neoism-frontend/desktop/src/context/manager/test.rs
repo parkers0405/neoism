@@ -212,6 +212,7 @@ fn self_hosted_adopted_workspace_is_collaborative_on_peer_link() {
             main_session_id: None,
             root_dir: None,
             linked_vault_dir: None,
+            notes_vault_dir: None,
             active_tab_id: None,
             running_on_host_id: None,
             controlled_by_host_id: None,

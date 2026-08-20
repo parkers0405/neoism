@@ -92,6 +92,10 @@ pub enum TopBarAction {
     OpenSettings,
     OpenWorkspaces,
     StartWebServer,
+    /// Show a QR code a phone can scan to open this workspace. The host
+    /// resolves the reachable URL (only the daemon knows its routable
+    /// address) and pushes it into the shared share sheet.
+    ShareWithPhone,
     OpenThemes,
     OpenExtensions,
     OpenNeoWorld,
@@ -113,6 +117,7 @@ pub enum ServerIndicatorStatus {
 enum MenuItem {
     Settings,
     StartWebServer,
+    ShareWithPhone,
     Themes,
     Extensions,
     About,
@@ -123,18 +128,31 @@ impl MenuItem {
     // reachable from the top-right server/workspace corner, so listing it
     // here duplicated the same action. `TopBarAction::OpenWorkspaces`
     // stays defined for those other call sites.
-    const ALL: [MenuItem; 5] = [
+    const ALL: [MenuItem; 6] = [
         MenuItem::About,
         MenuItem::Settings,
         MenuItem::StartWebServer,
+        MenuItem::ShareWithPhone,
         MenuItem::Themes,
         MenuItem::Extensions,
     ];
+
+    /// Rows the host actually offers. "Share with Phone" is web-only:
+    /// it hands a phone a URL for THIS daemon, which is a browser-session
+    /// concept — the desktop already IS the host. Hosts opt in via
+    /// `TopBar::set_share_with_phone_enabled`.
+    fn visible(share_with_phone: bool) -> Vec<MenuItem> {
+        MenuItem::ALL
+            .into_iter()
+            .filter(|item| share_with_phone || *item != MenuItem::ShareWithPhone)
+            .collect()
+    }
 
     fn label(self) -> &'static str {
         match self {
             MenuItem::Settings => "Settings",
             MenuItem::StartWebServer => "Start Web Server",
+            MenuItem::ShareWithPhone => "Share with Phone",
             MenuItem::Themes => "Themes",
             MenuItem::Extensions => "Extensions",
             MenuItem::About => "About",
@@ -157,6 +175,7 @@ impl MenuItem {
             MenuItem::Settings => "\u{f013}",
             MenuItem::StartWebServer => "\u{f0ac}",
             MenuItem::Themes => "\u{f1fc}",
+            MenuItem::ShareWithPhone => "\u{f10b}", // FA mobile
             MenuItem::Extensions => "\u{f12e}",
             MenuItem::About => "\u{f05a}", // FA info-circle
         }
@@ -166,6 +185,7 @@ impl MenuItem {
         match self {
             MenuItem::Settings => TopBarAction::OpenSettings,
             MenuItem::StartWebServer => TopBarAction::StartWebServer,
+            MenuItem::ShareWithPhone => TopBarAction::ShareWithPhone,
             MenuItem::Themes => TopBarAction::OpenThemes,
             MenuItem::Extensions => TopBarAction::OpenExtensions,
             MenuItem::About => TopBarAction::OpenAbout,
@@ -188,6 +208,8 @@ pub struct ChromeTopBar {
     panel_open: bool,
     right_panel_open: bool,
     agent_icon_overlay: bool,
+    /// Web hosts set this to surface the "Share with Phone" row.
+    share_with_phone_enabled: bool,
     left_safe_inset: f32,
     /// Last hit rects (in window-global coords) refreshed every paint.
     /// Hit-testing reads these, so layout drift between frames can't
@@ -229,6 +251,7 @@ impl ChromeTopBar {
             panel_open: false,
             right_panel_open: false,
             agent_icon_overlay: false,
+            share_with_phone_enabled: false,
             left_safe_inset: 0.0,
             panel_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -267,6 +290,12 @@ impl ChromeTopBar {
 
     /// Suppress the glyph fallback when the host paints the same PNG-backed
     /// Neoism Agent icon used by buffer tabs over this button.
+    /// Offer the web-only "Share with Phone" row (QR to open this
+    /// workspace on a phone).
+    pub fn set_share_with_phone_enabled(&mut self, enabled: bool) {
+        self.share_with_phone_enabled = enabled;
+    }
+
     pub fn set_agent_icon_overlay(&mut self, enabled: bool) {
         self.agent_icon_overlay = enabled;
     }
@@ -336,7 +365,7 @@ impl ChromeTopBar {
     pub fn menu_height(&self) -> f32 {
         let item_h = MENU_ITEM_HEIGHT * self.scale;
         let pad_y = MENU_PAD_Y * self.scale;
-        item_h * MenuItem::ALL.len() as f32 + pad_y * 2.0
+        item_h * MenuItem::visible(self.share_with_phone_enabled).len() as f32 + pad_y * 2.0
     }
 
     pub fn is_visible(&self) -> bool {
@@ -380,7 +409,7 @@ impl ChromeTopBar {
         let menu_w = MENU_WIDTH * scale;
         let item_h = MENU_ITEM_HEIGHT * scale;
         let pad_y = MENU_PAD_Y * scale;
-        let menu_h = item_h * MenuItem::ALL.len() as f32 + pad_y * 2.0;
+        let menu_h = item_h * MenuItem::visible(self.share_with_phone_enabled).len() as f32 + pad_y * 2.0;
         // Anchor below the hamburger, clamped inside the viewport so a
         // narrow window never pushes the card off-screen.
         let menu_x = menu_btn.x.min(strip.x + strip.w - menu_w).max(strip.x);
@@ -479,7 +508,8 @@ impl ChromeTopBar {
         self.hover_right_btn =
             self.right_button_visible && self.right_btn_rect.contains(x, y);
         self.hover_menu_item = if self.menu_open {
-            (0..MenuItem::ALL.len()).find(|i| self.menu_item_rect(*i).contains(x, y))
+            (0..MenuItem::visible(self.share_with_phone_enabled).len())
+                .find(|i| self.menu_item_rect(*i).contains(x, y))
         } else {
             None
         };
@@ -520,9 +550,11 @@ impl ChromeTopBar {
         }
         if self.menu_open {
             if let Some(idx) =
-                (0..MenuItem::ALL.len()).find(|i| self.menu_item_rect(*i).contains(x, y))
+                (0..MenuItem::visible(self.share_with_phone_enabled).len())
+                .find(|i| self.menu_item_rect(*i).contains(x, y))
             {
-                self.pending_action = Some(MenuItem::ALL[idx].action());
+                self.pending_action =
+                    Some(MenuItem::visible(self.share_with_phone_enabled)[idx].action());
                 self.menu_open = false;
                 return true;
             }
@@ -819,6 +851,23 @@ impl ChromeTopBar {
         theme: &IdeTheme,
     ) {
         let icon_size = ICON_FONT_SIZE * self.scale;
+        // Paint the real Neoism mark rather than the Nerd-Font "n"
+        // stand-in. Desktop never reaches this branch — it sets
+        // `agent_icon_overlay` and paints its own PNG overlay on top —
+        // so this is the web host's equivalent, using the asset the
+        // shared crate owns.
+        if crate::panels::agent_pane::icon::register_neoism_icon(sugarloaf) {
+            let size = icon_size.min(rect.w).min(rect.h);
+            crate::panels::agent_pane::icon::draw_neoism_tab_icon(
+                sugarloaf,
+                rect.x + (rect.w - size) * 0.5,
+                rect.y + (rect.h - size) * 0.5,
+                size,
+                size,
+                [0.0, 0.0, 1.0, 1.0],
+            );
+            return;
+        }
         let opts = DrawOpts {
             font_size: icon_size,
             color: if hovered {
@@ -984,8 +1033,9 @@ impl ChromeTopBar {
         );
 
         let font = MENU_FONT_SIZE * self.scale;
-        let last_ix = MenuItem::ALL.len() - 1;
-        for (i, item) in MenuItem::ALL.iter().enumerate() {
+        let items = MenuItem::visible(self.share_with_phone_enabled);
+        let last_ix = items.len() - 1;
+        for (i, item) in items.iter().enumerate() {
             let row = self.menu_item_rect(i);
             let hovered = self.hover_menu_item == Some(i);
             if hovered {
@@ -1191,7 +1241,7 @@ mod tests {
         assert_eq!(bar.take_action(), None);
 
         // Locate Themes by action so menu additions cannot stale this test.
-        let themes_ix = MenuItem::ALL
+        let themes_ix = MenuItem::visible(bar.share_with_phone_enabled)
             .iter()
             .position(|item| item.action() == TopBarAction::OpenThemes)
             .expect("Themes menu item present");
@@ -1199,6 +1249,38 @@ mod tests {
         bar.handle_pointer_down(item.x + 4.0, item.y + 4.0);
         assert_eq!(bar.take_action(), Some(TopBarAction::OpenThemes));
         assert!(!bar.is_menu_open());
+    }
+
+    /// "Share with Phone" hands a phone a URL for the daemon this browser
+    /// session is talking to. Desktop IS that host, so the row must stay
+    /// hidden there and the menu geometry must not reserve a slot for it.
+    #[test]
+    fn share_with_phone_row_is_web_only() {
+        let desktop = MenuItem::visible(false);
+        assert!(!desktop.contains(&MenuItem::ShareWithPhone));
+        let web = MenuItem::visible(true);
+        assert!(web.contains(&MenuItem::ShareWithPhone));
+        assert_eq!(web.len(), desktop.len() + 1);
+        assert_eq!(
+            MenuItem::ShareWithPhone.action(),
+            TopBarAction::ShareWithPhone
+        );
+    }
+
+    /// A hidden row must not shift what the remaining rows dispatch —
+    /// menu hit-testing indexes into the FILTERED list.
+    #[test]
+    fn hidden_share_row_does_not_shift_other_menu_actions() {
+        for enabled in [false, true] {
+            let items = MenuItem::visible(enabled);
+            for (ix, item) in items.iter().enumerate() {
+                assert_eq!(
+                    items[ix].action(),
+                    item.action(),
+                    "row {ix} dispatches its own action (share enabled: {enabled})"
+                );
+            }
+        }
     }
 
     #[test]

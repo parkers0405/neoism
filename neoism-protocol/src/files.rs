@@ -108,6 +108,13 @@ pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
     pub size: Option<u64>,
+    /// Markdown page icon from the file's `icon:` frontmatter, when it
+    /// has one. Filled in by the daemon because a wasm client has no
+    /// filesystem to read it from: `notes_sidebar::note_frontmatter_icon`
+    /// opens the file directly, which silently yields `None` in the
+    /// browser, so notes rows and tabs lost the emoji the desktop shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -231,7 +231,19 @@ impl NeoismAgentPane {
                 | NeoismAgentMessageKind::Tool
                 | NeoismAgentMessageKind::Subtask
                 | NeoismAgentMessageKind::Compaction
-        ) {
+        ) && !is_background_completion_card(&message)
+        {
+            // Open the live-trace window for real turn output, but NOT for
+            // the background-task completion card. That card lands in an
+            // already-settled session and is mask-exempt (it shows either
+            // way), so revealing for it only un-hid the whole previous
+            // turn's trace, which the next idle refresh then re-masked -
+            // rows appearing and vanishing while the user watched.
+            //
+            // This must NOT be gated on `is_streaming()`: the web host's
+            // `MessageUpdated` path calls `upsert_part_message` and nothing
+            // else, so this is web's ONLY opener of the window. Desktop
+            // additionally calls `note_streaming_from_part` right after.
             self.retain_current_turn_trace();
         }
         if message.kind == NeoismAgentMessageKind::Assistant
@@ -413,4 +425,13 @@ impl NeoismAgentPane {
             self.invalidate_timeline_layout();
         }
     }
+}
+
+/// The durable background-task completion card (`api_mapping`'s
+/// `background_completion_card`). It reports work that finished while the
+/// user was elsewhere, is exempt from the timeline visibility mask, and
+/// must not drag the whole settled turn back into view with it.
+fn is_background_completion_card(message: &NeoismAgentMessage) -> bool {
+    message.tool == "background_task_result"
+        && message.id.starts_with("background-task-")
 }

@@ -1,3 +1,3 @@
 # neoism-window
 
-neoism-window is a fork of Winit, by way of Rio's `rio-window`, maintained for Neoism.
+neoism-window is Neoism's window and event-loop crate, a maintained fork of Winit.

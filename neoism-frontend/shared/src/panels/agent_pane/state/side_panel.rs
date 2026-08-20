@@ -159,12 +159,11 @@ fn preserve_specific_subagent_metadata(
     if incoming.agent_kind.is_none() {
         incoming.agent_kind = previous.agent_kind;
     }
-    // `/session/status` is an active-run map, not a complete lifecycle
-    // ledger. A child omitted from one recovery snapshot is therefore
-    // unknown, not newly completed. Keep the last event-authoritative state
-    // until an explicit terminal event says otherwise.
+    // A listed child with no runtime_status was omitted from a successful
+    // `/session/status` snapshot. That map is the live run set, so unknown
+    // here means idle — not "keep last running forever".
     if incoming.runtime_status.is_none() {
-        incoming.runtime_status = previous.runtime_status.clone();
+        incoming.runtime_status = Some("completed".to_string());
     }
 }
 

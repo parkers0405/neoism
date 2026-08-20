@@ -1,6 +1,6 @@
 [package]
 name = "teletypewriter"
-description = "Rust crate to create a pseudoterminal (pty) that emulates a tty. Originally created by Raphael Amorim for Rio terminal; maintained as part of Neoism."
+description = "Rust crate to create a pseudoterminal (pty) that emulates a tty. Maintained as part of Neoism."
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }

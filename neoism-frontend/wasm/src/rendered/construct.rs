@@ -92,6 +92,8 @@ impl ChromeBridge {
         });
         chrome.install_file_tree(FileTree::new(root.clone()));
         chrome.set_workspace_root_path(Some(root.clone()));
+        // Web-only menu row: hand a phone a URL for THIS daemon.
+        chrome.top_bar.set_share_with_phone_enabled(true);
         chrome.install_agent_pane(NeoismAgentPane::with_directory(Some(
             root.to_string_lossy().into_owned(),
         )));

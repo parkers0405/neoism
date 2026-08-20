@@ -197,6 +197,14 @@ build_binaries() {
   run install -m 0755 "$target_dir/neoism-agent" "$BIN_DIR/neoism-agent"
 }
 
+install_web() {
+  [ "$BUILD_WEB" -eq 1 ] || return 0
+  local dest="${NEOISM_WEB_ROOT:-$PREFIX/share/neoism/web}"
+  log "Installing web UI to $dest"
+  run mkdir -p "$dest"
+  run cp -a "$ROOT_DIR/neoism-frontend/web/dist/." "$dest/"
+}
+
 build_web() {
   [ "$BUILD_WEB" -eq 1 ] || return 0
 
@@ -214,6 +222,7 @@ ensure_rust
 ensure_web_tools
 build_binaries
 build_web
+install_web
 
 cat <<EOF
 
@@ -227,8 +236,10 @@ EOF
 
 if [ "$BUILD_WEB" -eq 1 ]; then
   cat <<EOF
-Web build:
-  $ROOT_DIR/neoism-frontend/web/dist
+Web UI:
+  ${NEOISM_WEB_ROOT:-$PREFIX/share/neoism/web}
+  Open from Neoism → Start Web Server, or visit
+  http://127.0.0.1:\$NEOISM_DAEMON_TCP_PORT/ (default 7878).
 EOF
 fi
 

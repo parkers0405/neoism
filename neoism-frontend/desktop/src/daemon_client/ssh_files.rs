@@ -341,12 +341,14 @@ fn parse_ls_output(stdout: &[u8]) -> Vec<DirEntry> {
                     name: name.to_string(),
                     is_dir: true,
                     size: None,
+                    icon: None,
                 }
             } else {
                 DirEntry {
                     name: line.to_string(),
                     is_dir: false,
                     size: None,
+                    icon: None,
                 }
             }
         })

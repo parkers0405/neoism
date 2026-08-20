@@ -39,6 +39,19 @@ const FONT_GEIST_MONO_BOLD_ITALIC: &[u8] =
     include_bytes!("../../assets/fonts/GeistMono-BoldItalic.otf");
 const FONT_SYMBOLS_NERD_FONT_MONO: &[u8] =
     include_bytes!("../../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
+/// Geometric shapes, box/block elements, dingbats, misc symbols and
+/// arrows — the ranges Geist Mono doesn't carry and the Nerd Font only
+/// covers inside the PUA. Without it `\u{2610}`/`\u{2611}` task
+/// checkboxes and `\u{25A0}`/`\u{2B1D}` shapes rendered as tofu on web,
+/// because the browser build has no system-font fallback the way
+/// fontconfig gives the desktop.
+const FONT_NOTO_SANS_SYMBOLS2: &[u8] =
+    include_bytes!("../../assets/fonts/NotoSansSymbols2-Regular.ttf");
+/// COLR (vector colour) emoji. Chosen over a CBDT bitmap emoji font
+/// because it is ~1.4 MB instead of ~10 MB and swash rasterises COLR
+/// layers natively. Markdown page icons (`icon:` frontmatter) and emoji
+/// in notes/agent text are tofu without it.
+const FONT_TWEMOJI: &[u8] = include_bytes!("../../assets/fonts/TwemojiMozilla.ttf");
 
 /// Convert an 8-bit RGB triple from the snapshot's theme into the
 /// `[f32; 4]` color Sugarloaf geometry APIs expect (alpha = 1.0). The
@@ -557,20 +570,77 @@ impl RenderedTerminal {
 
             let nerd_symbols_id = lib.inner.len();
             lib.insert(FontData::from_static_slice(FONT_SYMBOLS_NERD_FONT_MONO).unwrap());
-            lib.symbol_maps = Some(vec![
-                SymbolMap {
-                    font_index: nerd_symbols_id,
-                    range: '\u{E000}'..'\u{F900}',
-                },
-                SymbolMap {
-                    font_index: nerd_symbols_id,
-                    range: '\u{F0000}'..'\u{FFFFE}',
-                },
-                SymbolMap {
-                    font_index: nerd_symbols_id,
-                    range: '\u{100000}'..'\u{10FFFE}',
-                },
-            ]);
+            let symbols2_id = lib.inner.len();
+            lib.insert(FontData::from_static_slice(FONT_NOTO_SANS_SYMBOLS2).unwrap());
+            let emoji_id = lib.inner.len();
+            lib.insert(FontData::from_static_slice(FONT_TWEMOJI).unwrap());
+            // ORDER MATTERS: `find_best_font_match` returns the FIRST
+            // range that contains the char and never checks whether that
+            // font actually has the glyph, so overlapping blocks must be
+            // listed most-specific first. Emoji wins the Dingbats/Misc
+            // Symbols overlap (U+2705 白 heavy check mark is emoji-only),
+            // and Symbols2 takes the rest of the geometry/arrow blocks.
+            // (start, end-EXCLUSIVE, font) — `find_best_font_match` takes
+            // the FIRST range containing the char and never checks whether
+            // that font actually has the glyph, so order is load-bearing
+            // and mixed blocks must be carved precisely.
+            //
+            // Dingbats (U+2700..27C0) is the trap: it interleaves TEXT
+            // symbols that only Symbols2 has (U+2713 the markdown task
+            // checkmark, U+2717) with EMOJI that only Twemoji has (U+2705,
+            // U+274C). Mapping the whole block either way guarantees tofu
+            // for the other half, so the emoji codepoints are carved out
+            // individually and Symbols2 keeps the remainder.
+            let ranges: &[(char, char, usize)] = &[
+                // Nerd Font PUA first — nothing else may claim these.
+                ('\u{E000}', '\u{F900}', nerd_symbols_id),
+                ('\u{F0000}', '\u{FFFFE}', nerd_symbols_id),
+                ('\u{100000}', '\u{10FFFE}', nerd_symbols_id),
+                // Emoji planes.
+                ('\u{1F000}', '\u{1FB00}', emoji_id),
+                ('\u{FE00}', '\u{FE10}', emoji_id),
+                // Emoji carve-outs inside Dingbats.
+                ('\u{2702}', '\u{2703}', emoji_id),
+                ('\u{2705}', '\u{2706}', emoji_id),
+                ('\u{2708}', '\u{2710}', emoji_id),
+                ('\u{2712}', '\u{2713}', emoji_id),
+                ('\u{2716}', '\u{2717}', emoji_id),
+                ('\u{271D}', '\u{271E}', emoji_id),
+                ('\u{2721}', '\u{2722}', emoji_id),
+                ('\u{2728}', '\u{2729}', emoji_id),
+                ('\u{2733}', '\u{2735}', emoji_id),
+                ('\u{2744}', '\u{2745}', emoji_id),
+                ('\u{2747}', '\u{2748}', emoji_id),
+                ('\u{274C}', '\u{274D}', emoji_id),
+                ('\u{274E}', '\u{274F}', emoji_id),
+                ('\u{2753}', '\u{2756}', emoji_id),
+                ('\u{2757}', '\u{2758}', emoji_id),
+                ('\u{2763}', '\u{2765}', emoji_id),
+                ('\u{2795}', '\u{2798}', emoji_id),
+                ('\u{27A1}', '\u{27A2}', emoji_id),
+                ('\u{27B0}', '\u{27B1}', emoji_id),
+                ('\u{27BF}', '\u{27C0}', emoji_id),
+                // Emoji carve-outs inside Misc Symbols and Arrows.
+                ('\u{2B1B}', '\u{2B1D}', emoji_id),
+                ('\u{2B50}', '\u{2B51}', emoji_id),
+                ('\u{2B55}', '\u{2B56}', emoji_id),
+                // Everything else geometric / arrows / box / dingbat text.
+                ('\u{2190}', '\u{2200}', symbols2_id),
+                ('\u{2300}', '\u{2400}', symbols2_id),
+                ('\u{2500}', '\u{2600}', symbols2_id),
+                ('\u{2600}', '\u{2700}', symbols2_id),
+                ('\u{2700}', '\u{27C0}', symbols2_id),
+                ('\u{2B00}', '\u{2C00}', symbols2_id),
+            ];
+            lib.symbol_maps = Some(
+                ranges
+                    .iter()
+                    .map(|(start, end, font_index)| SymbolMap {
+                        font_index: *font_index,
+                        range: *start..*end,
+                    })
+                    .collect(),
+            );
         }
         let renderer = SugarloafRenderer::default();
         let layout = RootStyle::new(scale, 14.0, 1.0);
@@ -1626,6 +1696,13 @@ enum PaletteIntent {
     /// of the variant (e.g. `"ToggleGitDiffPanel"`) and is mapped
     /// 1:1 to a TS-side dispatcher.
     Action { action: &'static str },
+    /// Server-manager row pick. Carries the server id, which the bare
+    /// `Action` variant drops — the name alone can't tell JS WHICH
+    /// server to connect to.
+    Server {
+        action: &'static str,
+        id: String,
+    },
     /// Run an ex command (`:Foo` typed in `:` mode or picked from
     /// the suggestion list). `command` is the trimmed command text
     /// without the leading colon.

@@ -276,7 +276,7 @@ pub(crate) fn desktop_daemon_url() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| tailscale_daemon_url(7878))
+        .or_else(|| tailscale_daemon_url(crate::embedded_daemon::default_tcp_port()))
 }
 
 pub(crate) fn tailscale_daemon_url(port: u16) -> Option<String> {

@@ -1373,15 +1373,34 @@ fn truncate_direct_tool_result(
 fn apply_central_output_truncation(
     result: &mut tool::ToolExecutionResult,
 ) -> Result<(), String> {
-    // Bail only when a previous pass already spilled this output to disk.
-    // Keying on "truncated" here was wrong: fff/web tools reuse that key as a
-    // pagination flag, which blocked their large outputs from ever spilling.
-    if result
+    // Enrich outputs spilled by an individual tool or provider. Historically
+    // these had outputPath but no artifact registration.
+    let existing_path = result
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.get("outputPath"))
-        .is_some()
-    {
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(path_string) = existing_path {
+        let has_artifact = result
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("artifact"))
+            .is_some_and(|artifact| !artifact.is_null());
+        if !has_artifact {
+            if let Ok(full_output) = std::fs::read_to_string(&path_string) {
+                let artifact = crate::tool::artifact::metadata(
+                    None,
+                    "tool-output",
+                    &result.title,
+                    &path_string,
+                    &full_output,
+                );
+                let metadata = result.metadata.get_or_insert_with(|| json!({}));
+                metadata["artifact"] = artifact;
+            }
+        }
         return Ok(());
     }
     let original_output = result.output.clone();

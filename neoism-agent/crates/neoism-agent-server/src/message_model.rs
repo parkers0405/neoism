@@ -340,6 +340,14 @@ fn tool_output_for_prompt(
     if max_chars == NORMAL_TOOL_OUTPUT_MAX_CHARS
         && output.chars().count() <= NORMAL_TOOL_OUTPUT_MAX_CHARS
     {
+        let artifact_uri = tool_output_artifact(part)
+            .and_then(|artifact| artifact.get("uri"))
+            .and_then(Value::as_str);
+        if let Some(uri) = artifact_uri.filter(|uri| !output.contains(uri)) {
+            return format!(
+                "{output}\n\nArtifact: {uri}\nUse artifact_read or artifact_search for the full output."
+            );
+        }
         return output.to_string();
     }
     if let Some(reference) = tool_output_reference(part, error) {
@@ -602,7 +610,7 @@ mod tests {
         let message_id = Id::ascending(IdKind::Message);
         let part_id = Id::ascending(IdKind::Part);
         let bounded_output =
-            "bounded preview\n\nFull output saved to artifact://tool-output/abc123";
+            "bounded preview\n\nFull output saved to: /tmp/neoism-tool-output.txt";
         let messages = provider_messages(&[MessageWithParts {
             info: assistant_info(message_id.clone(), session_id.clone()),
             parts: vec![Part::Tool(ToolPart {
@@ -638,7 +646,10 @@ mod tests {
         }]);
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1].content, bounded_output);
+        assert!(messages[1].content.starts_with(bounded_output));
+        assert!(messages[1]
+            .content
+            .contains("Artifact: artifact://tool-output/abc123"));
     }
 
     #[test]

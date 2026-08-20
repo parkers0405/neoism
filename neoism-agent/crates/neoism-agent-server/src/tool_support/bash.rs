@@ -180,22 +180,14 @@ pub(super) async fn bash_tool(
     let stdout = String::from_utf8_lossy(&stdout.bytes);
     let stderr = String::from_utf8_lossy(&stderr.bytes);
     let mut rendered = String::new();
-    let mut truncated = capture_truncated;
-    let mut output_path = None;
     if !stdout.is_empty() {
-        let output = truncate::truncate_output(&stdout)?;
-        truncated |= output.truncated;
-        output_path = output.output_path;
-        rendered.push_str(&output.output);
+        rendered.push_str(&stdout);
     }
     if !stderr.is_empty() {
         if !rendered.is_empty() {
             rendered.push('\n');
         }
-        let output = truncate::truncate_output(&stderr)?;
-        truncated |= output.truncated;
-        output_path = output_path.or(output.output_path);
-        rendered.push_str(&output.output);
+        rendered.push_str(&stderr);
     }
     if rendered.is_empty() {
         rendered.push_str("(no output)");
@@ -208,10 +200,14 @@ pub(super) async fn bash_tool(
 
     let status = match wait_result {
         Ok(status) => status,
-        Err(error) => anyhow::bail!("{error}\n{rendered}"),
+        Err(error) => {
+            let rendered = truncate::truncate_output(&rendered)?.output;
+            anyhow::bail!("{error}\n{rendered}")
+        }
     };
     let exit = status.code();
     if !status.success() {
+        let rendered = truncate::truncate_output(&rendered)?.output;
         anyhow::bail!("bash command failed with status {:?}\n{}", exit, rendered);
     }
     let snapshots = crate::snapshot::bash_after(snapshot_before);
@@ -221,12 +217,11 @@ pub(super) async fn bash_tool(
         "exit": exit,
         "timeout": timeout_ms,
         "workdir": display_path(&context.cwd, &cwd),
-        "truncated": truncated,
+        "truncated": capture_truncated,
         "captureTruncated": capture_truncated,
         "alwaysPatterns": scan.always_patterns.into_iter().collect::<Vec<_>>(),
         "commandPatterns": scan.command_patterns.into_iter().collect::<Vec<_>>(),
         "externalDirectories": scan.external_dirs.into_iter().collect::<Vec<_>>(),
-        "outputPath": output_path.as_ref().map(|path| path.to_string_lossy().to_string()),
     });
     crate::snapshot::add_metadata_snapshots(&mut metadata, snapshots);
 

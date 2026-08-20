@@ -26,7 +26,7 @@ pub(crate) fn truncate_output(text: &str) -> std::io::Result<TruncatedOutput> {
     let preview = head_tail(text, MAX_LINES, MAX_BYTES);
     let output_path = write_full_output(text)?;
     let output = format!(
-        "...output truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: {}\nUse Grep to search the full content or Read with offset/limit to view specific sections.\n\n{}",
+        "...output truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: {}\nUse artifact_search/artifact_read with the attached Artifact URI, or Grep/Read with this path.\n\n{}",
         output_path.display(),
         preview
     );
@@ -132,6 +132,21 @@ fn truncation_dir() -> PathBuf {
         .join("tool-output")
 }
 
+pub(crate) fn is_managed_output_path(path: &str) -> bool {
+    let Ok(path) = fs::canonicalize(path) else {
+        return false;
+    };
+    [
+        truncation_dir(),
+        std::env::temp_dir()
+            .join("neoism-agent-state")
+            .join("tool-output"),
+    ]
+    .into_iter()
+    .filter_map(|root| fs::canonicalize(root).ok())
+    .any(|root| path.starts_with(root))
+}
+
 fn cleanup_old_outputs(dir: PathBuf) -> std::io::Result<()> {
     let cutoff = SystemTime::now()
         .checked_sub(RETENTION)
@@ -181,6 +196,7 @@ mod tests {
         assert!(output.output.contains("0"));
         assert!(output.output.contains(&(MAX_LINES + 5).to_string()));
         let path = output.output_path.expect("full output path");
+        assert!(is_managed_output_path(path.to_str().unwrap()));
         assert_eq!(fs::read_to_string(&path).unwrap(), text);
         let _ = fs::remove_file(path);
     }

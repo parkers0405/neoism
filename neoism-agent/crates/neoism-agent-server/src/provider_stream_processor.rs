@@ -726,7 +726,16 @@ pub(crate) async fn process_provider_stream_event(
                 .map_err(|error| ApiError::internal(error.to_string()))?;
             let mut metadata = json!({ "truncated": truncated.truncated });
             if let Some(path) = truncated.output_path {
-                metadata["outputPath"] = json!(path.to_string_lossy().to_string());
+                let path = path.to_string_lossy().to_string();
+                let artifact = crate::tool::artifact::metadata(
+                    Some(ctx.session_id_text),
+                    "provider-result",
+                    "Provider result",
+                    &path,
+                    &output,
+                );
+                metadata["outputPath"] = json!(path);
+                metadata["artifact"] = artifact;
             }
             let part = {
                 let mut message = ctx.live_message.lock().await;

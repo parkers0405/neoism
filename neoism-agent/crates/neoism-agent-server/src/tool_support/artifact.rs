@@ -171,21 +171,58 @@ async fn resolve_artifact(
         if let MessageInfo::Assistant(_) = message.info {
             for part in message.parts {
                 let Part::Tool(tool) = part else { continue };
-                let ToolState::Completed { metadata, .. } = tool.state else {
-                    continue;
-                };
-                let Some(artifact) =
-                    metadata.get("artifact").and_then(artifact_from_metadata)
+                let ToolState::Completed {
+                    metadata, title, ..
+                } = tool.state
                 else {
                     continue;
                 };
-                if artifact.id == id || artifact.uri == id_or_uri {
-                    return Ok(artifact);
+                if let Some(artifact) =
+                    metadata.get("artifact").and_then(artifact_from_metadata)
+                {
+                    if artifact.id == id
+                        || artifact.uri == id_or_uri
+                        || artifact.path == id_or_uri
+                    {
+                        return Ok(artifact);
+                    }
+                }
+                // Older tool parts persisted only outputPath. Resolve those
+                // exact session-owned paths without opening arbitrary files.
+                if let Some(path) = metadata
+                    .get("outputPath")
+                    .and_then(Value::as_str)
+                    .filter(|path| *path == id_or_uri)
+                {
+                    return artifact_for_path(Some(session_id), &tool.tool, &title, path);
                 }
             }
         }
     }
+    // Failed legacy tool calls could only preserve the managed spill path in
+    // their error text. Read those cache files directly, but never accept a
+    // path outside Neoism's tool-output directories.
+    if super::truncate::is_managed_output_path(&id_or_uri) {
+        return artifact_for_path(
+            Some(session_id),
+            "tool-output",
+            "Tool output",
+            &id_or_uri,
+        );
+    }
     anyhow::bail!("unknown artifact {id_or_uri}")
+}
+
+fn artifact_for_path(
+    session_id: Option<&str>,
+    tool: &str,
+    title: &str,
+    path: &str,
+) -> anyhow::Result<ToolArtifact> {
+    let output =
+        fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
+    artifact_from_metadata(&metadata(session_id, tool, title, path, &output))
+        .context("failed to describe tool-output artifact")
 }
 
 fn artifact_metadata_json(artifact: &ToolArtifact) -> Value {
@@ -312,5 +349,16 @@ mod tests {
         assert!(summary.contains("error: bad thing"));
         assert!(summary.contains("warning: careful"));
         assert!(summary.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn artifact_path_metadata_round_trips() {
+        let value = metadata(Some("session"), "bash", "Build", "/tmp/output", "hello");
+        let artifact = artifact_from_metadata(&value).unwrap();
+
+        assert_eq!(artifact.path, "/tmp/output");
+        assert_eq!(artifact.tool, "bash");
+        assert_eq!(artifact.byte_count, 5);
+        assert!(artifact.uri.starts_with("artifact://tool-output/"));
     }
 }

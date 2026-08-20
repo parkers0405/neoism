@@ -252,27 +252,29 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
         ),
         tool(
             "artifact_read",
-            "Read lines from a saved large tool-output artifact by artifact:// URI or artifact id.",
+            "Read lines from saved large tool output by artifact:// URI, artifact id, or Neoism-managed output path.",
             json!({
                 "type": "object",
                 "properties": {
                     "artifact": { "type": "string" },
                     "offset": { "type": "integer" },
                     "limit": { "type": "integer" }
-                }
+                },
+                "required": ["artifact"]
             }),
             artifact_read_handler,
         ),
         tool(
             "artifact_search",
-            "Search within a saved large tool-output artifact by artifact:// URI or artifact id.",
+            "Search saved large tool output by artifact:// URI, artifact id, or Neoism-managed output path.",
             json!({
                 "type": "object",
                 "properties": {
                     "artifact": { "type": "string" },
                     "query": { "type": "string" },
                     "limit": { "type": "integer" }
-                }
+                },
+                "required": ["artifact", "query"]
             }),
             artifact_search_handler,
         ),

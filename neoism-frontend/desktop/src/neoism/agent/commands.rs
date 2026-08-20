@@ -650,7 +650,7 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(crate) fn cache_current_session(&mut self) {
+    pub(crate) fn cache_current_session(&mut self, preserve_live_trace: bool) {
         let Some(session_id) = self.session_id.clone() else {
             return;
         };
@@ -675,6 +675,8 @@ impl NeoismAgentPane {
         let timeline_history = std::mem::take(&mut self.timeline_history);
         let timeline_layout_cache = self.timeline_layout_cache.replace(None);
         let runtime = self.take_session_runtime_ui();
+        let (timeline_live_trace_start, timeline_live_trace_anchor) =
+            self.live_trace_for_cache(preserve_live_trace);
         self.session_cache.insert(
             session_id,
             CachedAgentSession {
@@ -686,6 +688,8 @@ impl NeoismAgentPane {
                 timeline_scroll_px: self.timeline_scroll_px,
                 timeline_follow_bottom: self.timeline_follow_bottom,
                 timeline_content_height_px: self.timeline_content_height_px,
+                timeline_live_trace_start,
+                timeline_live_trace_anchor,
                 timeline_layout_epoch: self.timeline_layout_epoch,
                 timeline_layout_cache,
                 timeline_dirty_message_ids: std::mem::take(
@@ -741,14 +745,17 @@ impl NeoismAgentPane {
                         .skip(1)
                         .any(|entry| entry.id == session_id)
             });
-        self.cache_current_session();
+        self.cache_current_session(stays_in_family);
         let state = cached.state;
-        let parent_id = state.parent_id.clone().or(roster_parent);
-        if parent_id.is_none() {
-            self.session_tree_root_id = Some(session_id.to_string());
-        } else if self.session_tree_root_id.is_none() {
-            self.session_tree_root_id = parent_id.clone();
-        }
+        let parent_id = state.parent_id.clone().or(roster_parent.clone());
+        // Never carry a root from a previously viewed family. A nested child
+        // may initially use its direct parent; the tree refresh promotes this
+        // to the true root without leaving the family stream snapshot-only.
+        self.session_tree_root_id = Some(
+            roster_parent
+                .or_else(|| parent_id.clone())
+                .unwrap_or_else(|| session_id.to_string()),
+        );
         self.session_id = Some(session_id.to_string());
         self.parent_session_id = parent_id;
         self.side_panel
@@ -756,6 +763,12 @@ impl NeoismAgentPane {
         self.input.clear();
         self.close_picker();
         self.reset_timeline_navigation_for_session_switch();
+        if stays_in_family {
+            self.restore_cached_live_trace(
+                cached.timeline_live_trace_start,
+                cached.timeline_live_trace_anchor,
+            );
+        }
         // The restored timeline must render fresh — no raised/expanded
         // card artifacts from the click that navigated away. Leave-and-return
         // also collapses the live-trace window, so a parked layout that still
@@ -801,6 +814,13 @@ impl NeoismAgentPane {
         self.pending_user_prompts = cached.pending_user_prompts;
         self.prompt_echo_aliases = cached.prompt_echo_aliases;
         self.restore_session_runtime_ui(cached.runtime);
+        // A cold or previously settled ongoing child must immediately reveal
+        // the activity it already emitted
+        // (reasoning, tools, edits, and subtasks), not wait for one more SSE
+        // part before its existing history becomes visible.
+        if self.is_streaming() {
+            self.reveal_ongoing_session_trace();
+        }
         // Live-trace was cleared by the switch. Drop the parked layout so
         // settled tool/reasoning rows are re-masked instead of flashing as
         // leftover titles from the previous visit.

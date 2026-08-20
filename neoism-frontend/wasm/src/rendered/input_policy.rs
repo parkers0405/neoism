@@ -137,7 +137,9 @@ fn wire_touch_action(action: TouchAction) -> JsValue {
         TouchAction::EndSelect => WireTouchAction::EndSelect,
         TouchAction::EndScroll => WireTouchAction::EndScroll,
         TouchAction::PromoteTapToScroll => WireTouchAction::PromoteTapToScroll,
-        TouchAction::OpenContextMenu { x, y } => WireTouchAction::OpenContextMenu { x, y },
+        TouchAction::OpenContextMenu { x, y } => {
+            WireTouchAction::OpenContextMenu { x, y }
+        }
         TouchAction::TwoFingerScroll { dx, dy } => {
             WireTouchAction::TwoFingerScroll { dx, dy }
         }
@@ -193,7 +195,14 @@ impl TouchGesturePolicy {
 
     /// Feed a `touchstart` sample with its zone tag
     /// (`"terminal-body" | "chrome-panel" | "editor-area"`).
-    pub fn start(&mut self, id: f64, x: f64, y: f64, time_ms: f64, zone: &str) -> JsValue {
+    pub fn start(
+        &mut self,
+        id: f64,
+        x: f64,
+        y: f64,
+        time_ms: f64,
+        zone: &str,
+    ) -> JsValue {
         let touch = TouchPoint::new_at(
             id as u64,
             x,
@@ -538,12 +547,10 @@ impl PresencePublisherBridge {
         heartbeat_interval_ms: Option<f64>,
     ) -> PresencePublisherBridge {
         let publisher = PresencePublisher::new(peer_id, display_name).with_intervals(
-            min_interval_ms.map_or(PRESENCE_PUBLISH_MIN_INTERVAL_MS, |ms| {
-                ms.max(0.0) as u64
-            }),
-            heartbeat_interval_ms.map_or(PRESENCE_HEARTBEAT_INTERVAL_MS, |ms| {
-                ms.max(0.0) as u64
-            }),
+            min_interval_ms
+                .map_or(PRESENCE_PUBLISH_MIN_INTERVAL_MS, |ms| ms.max(0.0) as u64),
+            heartbeat_interval_ms
+                .map_or(PRESENCE_HEARTBEAT_INTERVAL_MS, |ms| ms.max(0.0) as u64),
         );
         PresencePublisherBridge { publisher }
     }

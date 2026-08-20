@@ -1008,8 +1008,7 @@ impl NeoismAgentSidePanel {
         if hold.session != self.viewed_session_id {
             return None;
         }
-        (Instant::now().saturating_duration_since(hold.last_seen)
-            < STATUS_LABEL_GRACE)
+        (Instant::now().saturating_duration_since(hold.last_seen) < STATUS_LABEL_GRACE)
             .then(|| hold.clone())
     }
 

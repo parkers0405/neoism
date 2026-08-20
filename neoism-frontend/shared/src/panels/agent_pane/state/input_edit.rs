@@ -192,7 +192,12 @@ impl NeoismAgentPane {
     /// URL so they survive the wire to the daemon. The attachment
     /// shows as a composer chip and is sent on the next submit —
     /// matching desktop's attach-then-Enter flow.
-    pub fn attach_file_bytes(&mut self, filename: &str, mime: &str, bytes: &[u8]) -> bool {
+    pub fn attach_file_bytes(
+        &mut self,
+        filename: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> bool {
         use base64::Engine as _;
 
         if self.is_subagent_session() || bytes.is_empty() {
@@ -215,8 +220,8 @@ impl NeoismAgentPane {
         } else {
             mime.trim().to_string()
         };
-        let token =
-            self.unique_attachment_token(&self.file_attachment_token_for(&filename, &mime));
+        let token = self
+            .unique_attachment_token(&self.file_attachment_token_for(&filename, &mime));
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
         let url = format!("data:{mime};base64,{encoded}");
         self.close_picker();

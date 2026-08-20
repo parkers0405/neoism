@@ -660,6 +660,13 @@ impl Route<'_> {
                     Key::Named(NamedKey::Backspace) => {
                         self.window.screen.renderer.settings.backspace();
                     }
+                    Key::Named(NamedKey::Enter) => {
+                        if let Some(action) =
+                            self.window.screen.renderer.settings.commit_edit()
+                        {
+                            self.window.screen.apply_settings_action(action);
+                        }
+                    }
                     Key::Character(text) => {
                         for ch in text.chars().filter(|ch| !ch.is_control()) {
                             self.window.screen.renderer.settings.input_char(ch);

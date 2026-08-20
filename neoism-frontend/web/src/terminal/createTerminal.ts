@@ -340,6 +340,8 @@ export interface TerminalAdapter {
     openSettingsPage?(configJson?: string | null): void;
     /** Refresh the settings overlay with a newer config snapshot. */
     setSettingsValues?(configJson: string): void;
+    /** Seed canonical setting descriptors returned by the daemon host. */
+    setSettingsDescriptors?(descriptorsJson: string): void;
     settingsPageActive?(): boolean;
     /** Drain queued settings actions as a JSON array string:
      *  `[{kind:"set",key,value}|{kind:"set_keybind",action,key,with}|
@@ -488,6 +490,8 @@ export interface TerminalAdapter {
      *  editor pane (`.ipynb` → notebook, `.neodraw` → draw, else the
      *  native code pane). Returns the pane kind. */
     editorOpenFile?(tabIndex: number, path: string, text: string): string;
+    /** Seed built-in config completion with the daemon host's schema. */
+    editorSetConfigDescriptors?(json: string): boolean;
     /** Which hosted editor pane serves the ACTIVE tab: "code" /
      *  "notebook" / "draw", or null for terminal/markdown/agent tabs. */
     editorActiveKind?(): string | null;
@@ -1140,6 +1144,7 @@ interface ChromeBridgeInstance {
     crdt_apply?(json: string): boolean;
     markdown_request_save?(): boolean;
     editor_open_file?(tabIndex: number, path: string, text: string): string;
+    editor_set_config_descriptors?(json: string): boolean;
     editor_active_kind?(): string | undefined;
     editor_close_panes?(): void;
     editor_key?(key: string, ctrl: boolean, shift: boolean, alt: boolean): boolean;
@@ -1246,6 +1251,7 @@ interface ChromeBridgeInstance {
     drain_top_bar_action?(): string | undefined;
     open_settings_page?(configJson?: string | null): void;
     set_settings_values?(configJson: string): void;
+    set_settings_descriptors?(descriptorsJson: string): void;
     settings_page_active?(): boolean;
     drain_settings_actions?(): unknown;
     open_about_modal?(): void;
@@ -2110,6 +2116,9 @@ class ChromeAdapter implements TerminalAdapter {
     editorOpenFile(tabIndex: number, path: string, text: string): string {
         return this.inner.editor_open_file?.(tabIndex, path, text) ?? "";
     }
+    editorSetConfigDescriptors(json: string): boolean {
+        return this.inner.editor_set_config_descriptors?.(json) ?? false;
+    }
     editorActiveKind(): string | null {
         return this.inner.editor_active_kind?.() ?? null;
     }
@@ -2736,6 +2745,9 @@ class ChromeAdapter implements TerminalAdapter {
     }
     setSettingsValues(configJson: string) {
         this.inner.set_settings_values?.(configJson);
+    }
+    setSettingsDescriptors(descriptorsJson: string) {
+        this.inner.set_settings_descriptors?.(descriptorsJson);
     }
     settingsPageActive(): boolean {
         return this.inner.settings_page_active?.() === true;

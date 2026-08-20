@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use neoism_agent_server::language_server as engine;
 use neoism_protocol::editor::{
-    EditorLspAction, EditorLspCodeAction, EditorLspCompletionItem, EditorLspLocation,
-    EditorLspFileEdit, EditorLspReference, EditorLspTextEdit, EditorServerMessage,
+    EditorLspAction, EditorLspCodeAction, EditorLspCompletionItem, EditorLspFileEdit,
+    EditorLspLocation, EditorLspReference, EditorLspTextEdit, EditorServerMessage,
 };
 
 /// Serve one `LspQueryAt`. Blocking — call from `spawn_blocking`.
@@ -533,7 +533,8 @@ fn apply_edits_on_disk(path: &Path, edits: &[EditorLspTextEdit]) -> std::io::Res
         let head = lines[sl][..sc].to_string();
         let tail = lines[el][ec..].to_string();
         let replacement = format!("{head}{}{tail}", edit.new_text.replace('\r', ""));
-        let new_lines: Vec<String> = replacement.split('\n').map(str::to_string).collect();
+        let new_lines: Vec<String> =
+            replacement.split('\n').map(str::to_string).collect();
         lines.splice(sl..=el, new_lines);
     }
     let newline = if crlf { "\r\n" } else { "\n" };

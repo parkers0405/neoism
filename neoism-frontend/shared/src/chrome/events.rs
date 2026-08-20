@@ -261,9 +261,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 } else {
                     0.0
                 };
-                let crumbs_rect = (crumbs_h > 0.0).then(|| {
-                    Rect::new(rect.x, rect.y + strip_h, rect.w, crumbs_h)
-                });
+                let crumbs_rect = (crumbs_h > 0.0)
+                    .then(|| Rect::new(rect.x, rect.y + strip_h, rect.w, crumbs_h));
                 pane_chrome.push(crate::layout::PaneChromeLayout {
                     external_id: ext,
                     rect,

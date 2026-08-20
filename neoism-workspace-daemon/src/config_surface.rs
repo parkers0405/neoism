@@ -16,7 +16,8 @@
 //! installs stay a desktop-host action.
 
 use neoism_protocol::config::{
-    ConfigClientMessage, ConfigServerMessage, ExtensionStatusSummary, ExtensionSummary,
+    ConfigClientMessage, ConfigDocument, ConfigServerMessage, ExtensionStatusSummary,
+    ExtensionSummary,
 };
 
 use crate::files as files_handler;
@@ -27,10 +28,15 @@ pub fn required_permission(
     message: &ConfigClientMessage,
 ) -> neoism_protocol::pairing::Permission {
     match message {
-        ConfigClientMessage::GetConfig | ConfigClientMessage::ListExtensions => {
+        ConfigClientMessage::GetConfig
+        | ConfigClientMessage::GetConfigSchema
+        | ConfigClientMessage::GetConfigDocument
+        | ConfigClientMessage::ListExtensions => {
             neoism_protocol::pairing::Permission::ReadFiles
         }
-        ConfigClientMessage::SetSetting { .. }
+        ConfigClientMessage::EnsureConfigDocument
+        | ConfigClientMessage::SaveConfigDocument { .. }
+        | ConfigClientMessage::SetSetting { .. }
         | ConfigClientMessage::SetKeybind { .. } => {
             neoism_protocol::pairing::Permission::WriteFiles
         }
@@ -47,6 +53,59 @@ pub async fn handle(message: ConfigClientMessage) -> Vec<ConfigServerMessage> {
             .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
             vec![ConfigServerMessage::Config { value }]
         }
+        ConfigClientMessage::GetConfigSchema => {
+            let root = files_handler::workspace_root();
+            let descriptors = tokio::task::spawn_blocking(move || {
+                let mut descriptors =
+                    neoism_backend::config::intelligence::config_descriptors();
+                if let Some(lsp) = descriptors.iter_mut().find(|row| row.path == "agent.lsp") {
+                    let adapters =
+                        neoism_agent_server::language_server::language_server_adapters_for(&root);
+                    lsp.runtime_suggestions.extend(adapters.iter().flat_map(|adapter| {
+                        std::iter::once(adapter.id.clone())
+                            .chain(adapter.routes.iter().map(|route| route.id.clone()))
+                    }));
+                    lsp.runtime_suggestions.sort();
+                    lsp.runtime_suggestions.dedup();
+                    lsp.provider = Some(
+                        neoism_protocol::config::ConfigSuggestionProvider::LspAdapters,
+                    );
+                    for id in &lsp.runtime_suggestions {
+                        if !lsp.options.iter().any(|option| option.value.as_str() == Some(id)) {
+                            lsp.options.push(neoism_protocol::config::ConfigOption {
+                                value: serde_json::Value::String(id.clone()),
+                                label: None,
+                                description: Some("Language-server adapter available in this workspace.".into()),
+                            });
+                        }
+                    }
+                }
+                descriptors
+            })
+            .await
+            .unwrap_or_default();
+            vec![ConfigServerMessage::ConfigSchema { descriptors }]
+        }
+        ConfigClientMessage::GetConfigDocument => document_result(
+            tokio::task::spawn_blocking(neoism_backend::config::read_config_document)
+                .await,
+            false,
+        ),
+        ConfigClientMessage::EnsureConfigDocument => document_result(
+            tokio::task::spawn_blocking(neoism_backend::config::ensure_config_document)
+                .await,
+            false,
+        ),
+        ConfigClientMessage::SaveConfigDocument {
+            content,
+            expected_revision,
+        } => document_result(
+            tokio::task::spawn_blocking(move || {
+                neoism_backend::config::save_config_document(&content, &expected_revision)
+            })
+            .await,
+            true,
+        ),
         ConfigClientMessage::SetSetting { key, value } => {
             let write_key = key.clone();
             let result = tokio::task::spawn_blocking(move || {
@@ -87,6 +146,36 @@ pub async fn handle(message: ConfigClientMessage) -> Vec<ConfigServerMessage> {
                     .unwrap_or_default();
             vec![ConfigServerMessage::Extensions { entries }]
         }
+    }
+}
+
+fn document_result(
+    result: Result<
+        std::io::Result<neoism_backend::config::ConfigDocumentSnapshot>,
+        tokio::task::JoinError,
+    >,
+    saved: bool,
+) -> Vec<ConfigServerMessage> {
+    match result {
+        Ok(Ok(snapshot)) => {
+            let document = ConfigDocument {
+                content: snapshot.content,
+                display_path: snapshot.display_path,
+                revision: snapshot.revision,
+                writable: snapshot.writable,
+            };
+            vec![if saved {
+                ConfigServerMessage::ConfigDocumentSaved { document }
+            } else {
+                ConfigServerMessage::ConfigDocument { document }
+            }]
+        }
+        Ok(Err(error)) => vec![ConfigServerMessage::Error {
+            message: error.to_string(),
+        }],
+        Err(error) => vec![ConfigServerMessage::Error {
+            message: format!("config document task: {error}"),
+        }],
     }
 }
 
@@ -238,8 +327,8 @@ fn language_server_entries(
     installed: &Option<neoism_extensions::InstalledIndex>,
 ) -> Vec<ExtensionSummary> {
     use neoism_agent_server::language_server::{
-        command_source, language_server_adapters_for, live_languages, LspAdapterTransport,
-        LspCommandSource,
+        command_source, language_server_adapters_for, live_languages,
+        LspAdapterTransport, LspCommandSource,
     };
 
     let adapters = language_server_adapters_for(workspace_root);
@@ -410,4 +499,52 @@ fn built_in_grammar_entries() -> Vec<ExtensionSummary> {
             lsp_source: None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neoism_protocol::pairing::Permission;
+
+    #[test]
+    fn raw_document_permission_split_is_explicit() {
+        assert_eq!(
+            required_permission(&ConfigClientMessage::GetConfigDocument),
+            Permission::ReadFiles
+        );
+        assert_eq!(
+            required_permission(&ConfigClientMessage::GetConfigSchema),
+            Permission::ReadFiles
+        );
+        assert_eq!(
+            required_permission(&ConfigClientMessage::EnsureConfigDocument),
+            Permission::WriteFiles
+        );
+        assert_eq!(
+            required_permission(&ConfigClientMessage::SaveConfigDocument {
+                content: "{}".into(),
+                expected_revision: "old".into(),
+            }),
+            Permission::WriteFiles
+        );
+    }
+
+    #[test]
+    fn document_snapshot_maps_without_losing_metadata() {
+        let messages = document_result(
+            Ok(Ok(neoism_backend::config::ConfigDocumentSnapshot {
+                content: "// c\n{}\n".into(),
+                display_path: "/host/config.json".into(),
+                revision: "1234".into(),
+                writable: true,
+            })),
+            true,
+        );
+        let ConfigServerMessage::ConfigDocumentSaved { document } = &messages[0] else {
+            panic!("expected saved document")
+        };
+        assert_eq!(document.revision, "1234");
+        assert_eq!(document.display_path, "/host/config.json");
+        assert!(document.writable);
+    }
 }

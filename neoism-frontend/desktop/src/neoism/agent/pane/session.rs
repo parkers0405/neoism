@@ -379,6 +379,7 @@ impl NeoismAgentPane {
             .get(session_id)
             .filter(|status| matches!(status.kind.as_str(), "busy" | "retry"));
         if let Some(status) = active_status {
+            self.terminal_idle_sessions.remove(session_id);
             self.queued_prompt_count = status.queue_count;
             self.queued_prompt_preview = status.preview.clone();
             self.refresh_streaming_from_tail();
@@ -390,7 +391,12 @@ impl NeoismAgentPane {
                 self.streaming_started_at = Some(started);
                 self.streaming_state_changed_at = Some(started);
             }
+            // A cold child activation paints its fetched transcript before
+            // this runtime snapshot arrives. Open the existing trace as soon
+            // as the snapshot confirms the child is ongoing.
+            self.reveal_ongoing_session_trace();
         } else {
+            self.terminal_idle_sessions.insert(session_id.to_string());
             // Runtime status is authoritative. Idle sessions are omitted from
             // the map, so explicitly settle any optimistic activity retained
             // across a dropped event stream or history refresh.
@@ -418,7 +424,11 @@ impl NeoismAgentPane {
                 // omitted from a successful snapshot is idle, not unknown —
                 // otherwise a missed terminal SSE leaves the footer/sidebar
                 // latched on "working" after the child has already finished.
-                self.note_subagent_runtime(entry.id.clone(), BranchStatus::Completed, None);
+                self.note_subagent_runtime(
+                    entry.id.clone(),
+                    BranchStatus::Completed,
+                    None,
+                );
             }
         }
         for (child_id, status) in statuses.iter().filter(|(_, status)| {
@@ -786,30 +796,45 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn set_task_message_status(&mut self, task_id: &str, status: &str) {
-        let Some(index) = self.messages.iter().rposition(|message| {
-            message.kind == NeoismAgentMessageKind::Tool
-                && message.tool == "task"
-                && (message.text.contains(task_id) || message.detail.contains(task_id))
-        }) else {
-            return;
-        };
-        self.set_task_message_status_at(index, status);
+        if let Some(index) = task_message_index(&self.messages, task_id) {
+            self.set_task_message_status_at(index, status);
+        }
+        for cached in self.session_cache.values_mut() {
+            let Some(index) = task_message_index(&cached.messages, task_id) else {
+                continue;
+            };
+            set_task_message_status_at(&mut cached.messages, index, status);
+            cached.invalidate_timeline_layout();
+        }
     }
 
     pub(crate) fn set_task_message_status_at(&mut self, index: usize, status: &str) {
-        let normalized = match status {
-            "completed" | "error" | "running" => status,
-            "stopped" => "error",
-            _ => "running",
-        };
-        let Some(message) = self.messages.get_mut(index) else {
-            return;
-        };
-        message.status = normalized.to_string();
-        for field in [&mut message.text, &mut message.detail] {
-            rewrite_task_status_markers(field, normalized);
-        }
+        set_task_message_status_at(&mut self.messages, index, status);
         self.mark_timeline_message_and_next_dirty_at(index);
+    }
+
+    pub(crate) fn reconcile_parent_after_subagent_terminal(&mut self, child_id: &str) {
+        let root_id = self
+            .session_tree_root_id
+            .clone()
+            .or_else(|| {
+                self.side_panel
+                    .subagents()
+                    .first()
+                    .map(|entry| entry.id.clone())
+            })
+            .or_else(|| self.parent_session_id.clone());
+        if let Some(root_id) = root_id.filter(|root_id| root_id != child_id) {
+            if self.session_preloads_in_flight.contains(&root_id)
+                || self
+                    .session_preload_queue
+                    .iter()
+                    .any(|(session_id, _)| session_id == &root_id)
+            {
+                return;
+            }
+            self.ensure_session_preloaded(root_id, true);
+        }
     }
 
     pub(crate) fn reconcile_task_message_statuses(&mut self) {
@@ -1047,6 +1072,33 @@ impl NeoismAgentPane {
         }
         self.streaming_state_changed_at
             .map(|t| t.elapsed().as_secs_f32())
+    }
+}
+
+fn task_message_index(messages: &[NeoismAgentMessage], task_id: &str) -> Option<usize> {
+    messages.iter().rposition(|message| {
+        message.kind == NeoismAgentMessageKind::Tool
+            && message.tool == "task"
+            && (message.text.contains(task_id) || message.detail.contains(task_id))
+    })
+}
+
+fn set_task_message_status_at(
+    messages: &mut [NeoismAgentMessage],
+    index: usize,
+    status: &str,
+) {
+    let normalized = match status {
+        "completed" | "error" | "running" => status,
+        "stopped" => "error",
+        _ => "running",
+    };
+    let Some(message) = messages.get_mut(index) else {
+        return;
+    };
+    message.status = normalized.to_string();
+    for field in [&mut message.text, &mut message.detail] {
+        rewrite_task_status_markers(field, normalized);
     }
 }
 

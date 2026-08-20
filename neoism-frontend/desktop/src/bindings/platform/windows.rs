@@ -30,7 +30,7 @@ pub fn platform_key_bindings(
         "-", ModifiersState::CONTROL; Action::DecreaseFontSize;
         Key::Named(Enter), ModifiersState::ALT; Action::ToggleFullscreen;
         "n", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::WindowCreateNew;
-        ",", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::ConfigEditor;
+        ",", ModifiersState::ALT; Action::ConfigEditor;
         // This is actually a Windows Powershell shortcut
         // https://github.com/alacritty/alacritty/issues/2930
         // https://github.com/raphamorim/rio/issues/220#issuecomment-1761651339

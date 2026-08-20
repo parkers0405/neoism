@@ -118,9 +118,9 @@ pub(crate) async fn start_background_task_tool(
     let description = string_arg(&input, "description")
         .unwrap_or_else(|| command.chars().take(80).collect::<String>());
     let cwd = resolve_job_cwd(&parent.directory, optional_cwd(&input), permissions)?;
-    let project_root = Path::new(&parent.directory)
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve project directory: {error}"))?;
+    let project_root =
+        crate::windows_process::canonicalize_path(Path::new(&parent.directory))
+            .map_err(|error| format!("failed to resolve project directory: {error}"))?;
     let scan = shell_scan::scan(
         &command,
         &cwd,
@@ -695,15 +695,15 @@ fn resolve_job_cwd(
     cwd_arg: Option<String>,
     permissions: &[PermissionRule],
 ) -> Result<PathBuf, String> {
-    let project_root = Path::new(project_directory)
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve project directory: {error}"))?;
+    let project_root =
+        crate::windows_process::canonicalize_path(Path::new(project_directory))
+            .map_err(|error| format!("failed to resolve project directory: {error}"))?;
     let candidate = match cwd_arg {
         Some(raw) if Path::new(&raw).is_absolute() => PathBuf::from(raw),
         Some(raw) => project_root.join(raw),
         None => project_root.clone(),
     };
-    let cwd = candidate.canonicalize().map_err(|error| {
+    let cwd = crate::windows_process::canonicalize_path(&candidate).map_err(|error| {
         format!("failed to resolve cwd {}: {error}", candidate.display())
     })?;
     if !cwd.is_dir() {

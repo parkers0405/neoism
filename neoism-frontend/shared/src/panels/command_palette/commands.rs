@@ -196,9 +196,15 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Neoism,
     },
     Command {
-        title: "Settings",
-        shortcut: "Cmd+,",
+        title: "Open Neoism Config",
+        shortcut: "Alt+,",
         action: PaletteAction::ConfigEditor,
+        service: CommandService::Neoism,
+    },
+    Command {
+        title: "Settings",
+        shortcut: "",
+        action: PaletteAction::OpenSettings,
         service: CommandService::Neoism,
     },
     Command {

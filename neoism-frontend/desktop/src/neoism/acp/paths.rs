@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use super::client::AcpRpcError;
 
 pub(super) fn normalize_existing_dir(path: &Path) -> std::io::Result<PathBuf> {
-    let path = path.canonicalize()?;
+    let path = canonicalize_path(path)?;
     if path.is_dir() {
         Ok(path)
     } else {
@@ -33,7 +33,7 @@ pub(super) fn workspace_path(
         });
     }
 
-    let root = cwd.canonicalize().map_err(|err| AcpRpcError {
+    let root = canonicalize_path(cwd).map_err(|err| AcpRpcError {
         code: -32000,
         message: format!("Could not resolve workspace {}: {err}", cwd.display()),
     })?;
@@ -45,15 +45,13 @@ pub(super) fn workspace_path(
         message: format!("Could not resolve parent for {}", path.display()),
     })?;
     let existing_ancestor =
-        existing_ancestor
-            .canonicalize()
-            .map_err(|err| AcpRpcError {
-                code: -32000,
-                message: format!(
-                    "Could not resolve ancestor {}: {err}",
-                    existing_ancestor.display()
-                ),
-            })?;
+        canonicalize_path(&existing_ancestor).map_err(|err| AcpRpcError {
+            code: -32000,
+            message: format!(
+                "Could not resolve ancestor {}: {err}",
+                existing_ancestor.display()
+            ),
+        })?;
     if !existing_ancestor.starts_with(&root) {
         return Err(AcpRpcError {
             code: -32000,
@@ -64,6 +62,17 @@ pub(super) fn workspace_path(
         });
     }
     Ok(path)
+}
+
+pub(super) fn canonicalize_path(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        dunce::canonicalize(path)
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize()
+    }
 }
 
 pub(super) fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {

@@ -365,7 +365,8 @@ impl ChromeTopBar {
     pub fn menu_height(&self) -> f32 {
         let item_h = MENU_ITEM_HEIGHT * self.scale;
         let pad_y = MENU_PAD_Y * self.scale;
-        item_h * MenuItem::visible(self.share_with_phone_enabled).len() as f32 + pad_y * 2.0
+        item_h * MenuItem::visible(self.share_with_phone_enabled).len() as f32
+            + pad_y * 2.0
     }
 
     pub fn is_visible(&self) -> bool {
@@ -409,7 +410,9 @@ impl ChromeTopBar {
         let menu_w = MENU_WIDTH * scale;
         let item_h = MENU_ITEM_HEIGHT * scale;
         let pad_y = MENU_PAD_Y * scale;
-        let menu_h = item_h * MenuItem::visible(self.share_with_phone_enabled).len() as f32 + pad_y * 2.0;
+        let menu_h = item_h
+            * MenuItem::visible(self.share_with_phone_enabled).len() as f32
+            + pad_y * 2.0;
         // Anchor below the hamburger, clamped inside the viewport so a
         // narrow window never pushes the card off-screen.
         let menu_x = menu_btn.x.min(strip.x + strip.w - menu_w).max(strip.x);
@@ -549,8 +552,7 @@ impl ChromeTopBar {
             return true;
         }
         if self.menu_open {
-            if let Some(idx) =
-                (0..MenuItem::visible(self.share_with_phone_enabled).len())
+            if let Some(idx) = (0..MenuItem::visible(self.share_with_phone_enabled).len())
                 .find(|i| self.menu_item_rect(*i).contains(x, y))
             {
                 self.pending_action =

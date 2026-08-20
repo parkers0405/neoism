@@ -432,6 +432,5 @@ impl NeoismAgentPane {
 /// user was elsewhere, is exempt from the timeline visibility mask, and
 /// must not drag the whole settled turn back into view with it.
 fn is_background_completion_card(message: &NeoismAgentMessage) -> bool {
-    message.tool == "background_task_result"
-        && message.id.starts_with("background-task-")
+    message.tool == "background_task_result" && message.id.starts_with("background-task-")
 }

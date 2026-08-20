@@ -1850,19 +1850,19 @@ fn lsp_tool_blocking(
 }
 
 fn checked_lsp_file(context: &ToolContext, raw: &str) -> anyhow::Result<PathBuf> {
-    let base = context.cwd.canonicalize().with_context(|| {
-        format!(
-            "failed to resolve project directory {}",
-            context.cwd.display()
-        )
-    })?;
+    let base =
+        crate::windows_process::canonicalize_path(&context.cwd).with_context(|| {
+            format!(
+                "failed to resolve project directory {}",
+                context.cwd.display()
+            )
+        })?;
     let candidate = if Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else {
         base.join(raw)
     };
-    let path = candidate
-        .canonicalize()
+    let path = crate::windows_process::canonicalize_path(&candidate)
         .with_context(|| format!("failed to resolve path {}", candidate.display()))?;
     if !path.starts_with(&base) {
         context.ensure_explicit_allowed(

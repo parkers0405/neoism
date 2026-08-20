@@ -48,6 +48,7 @@ fn builds_streaming_responses_request_body() {
     assert_eq!(body["input"][3]["call_id"], "call_1");
     assert_eq!(body["input"][3]["output"], "README contents");
     assert_eq!(body["tool_choice"], "auto");
+    assert_eq!(body["parallel_tool_calls"], true);
     assert_eq!(body["tools"][0]["type"], "function");
     assert_eq!(body["tools"][0]["name"], "read");
     assert_eq!(body["reasoning"]["effort"], "high");
@@ -177,26 +178,38 @@ fn responses_request_body_includes_image_and_pdf_attachments() {
 #[test]
 fn parses_responses_function_call_events() {
     let mut parser = ResponsesSseParser::default();
-    assert!(parser
-            .push_line(
-                r#"data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":""}}"#,
-            )
-            .unwrap()
-            .is_empty());
-    assert!(parser
-            .push_line(
-                r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\":\"READ"}"#,
-            )
-            .unwrap()
-            .is_empty());
+    let started = parser
+        .push_line(
+            r#"data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":""}}"#,
+        )
+        .unwrap();
+    assert!(matches!(
+        &started[..],
+        [ProviderStreamEvent::ToolInputStart { id, name }]
+            if id == "call_1" && name == "read"
+    ));
+    let deltas = parser
+        .push_line(
+            r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\":\"READ"}"#,
+        )
+        .unwrap();
+    assert!(matches!(
+        &deltas[..],
+        [ProviderStreamEvent::ToolInputDelta { id, delta }]
+            if id == "call_1" && delta == "{\"path\":\"READ"
+    ));
     let events = parser
             .push_line(
                 r#"data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"README.md\"}"}}"#,
             )
             .unwrap();
 
-    assert_eq!(events.len(), 1);
-    match &events[0] {
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        ProviderStreamEvent::ToolInputEnd { id } if id == "call_1"
+    ));
+    match &events[1] {
         ProviderStreamEvent::ToolCall { id, name, input } => {
             assert_eq!(id, "call_1");
             assert_eq!(name, "read");
@@ -221,20 +234,27 @@ fn parses_responses_function_call_events() {
 #[test]
 fn preserves_raw_patch_arguments_as_patch_text() {
     let mut parser = ResponsesSseParser::default();
-    assert!(parser
+    assert!(matches!(
+        &parser
             .push_line(
                 r#"data: {"type":"response.output_item.added","item":{"id":"fc_patch","type":"function_call","call_id":"call_patch","name":"apply_patch","arguments":""}}"#,
             )
-            .unwrap()
-            .is_empty());
+            .unwrap()[..],
+        [ProviderStreamEvent::ToolInputStart { id, name }]
+            if id == "call_patch" && name == "apply_patch"
+    ));
     let events = parser
             .push_line(
                 r#"data: {"type":"response.output_item.done","item":{"id":"fc_patch","type":"function_call","call_id":"call_patch","name":"apply_patch","arguments":"*** Begin Patch\n*** Update File: TASK.md\n@@\n-old\n+new\n*** End Patch"}}"#,
             )
             .unwrap();
 
-    assert_eq!(events.len(), 1);
-    match &events[0] {
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        ProviderStreamEvent::ToolInputEnd { id } if id == "call_patch"
+    ));
+    match &events[1] {
         ProviderStreamEvent::ToolCall { id, name, input } => {
             assert_eq!(id, "call_patch");
             assert_eq!(name, "apply_patch");
@@ -245,6 +265,35 @@ fn preserves_raw_patch_arguments_as_patch_text() {
         }
         other => panic!("expected tool call, got {other:?}"),
     }
+}
+
+#[test]
+fn emits_a_responses_tool_call_once_across_both_done_events() {
+    let mut parser = ResponsesSseParser::default();
+    parser
+        .push_line(
+            r#"data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":""}}"#,
+        )
+        .unwrap();
+    let arguments_done = parser
+        .push_line(
+            r#"data: {"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"path\":\"README.md\"}"}"#,
+        )
+        .unwrap();
+    assert_eq!(
+        arguments_done
+            .iter()
+            .filter(|event| matches!(event, ProviderStreamEvent::ToolCall { .. }))
+            .count(),
+        1
+    );
+
+    let item_done = parser
+        .push_line(
+            r#"data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"README.md\"}"}}"#,
+        )
+        .unwrap();
+    assert!(item_done.is_empty());
 }
 
 #[test]

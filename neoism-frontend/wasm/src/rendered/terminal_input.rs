@@ -290,10 +290,7 @@ impl ChromeBridge {
     /// `Some(false)` when removed, `None` for blank commands. The
     /// favorites feed Ctrl+F's picker; web block cards have no hover
     /// star UI yet, so this is the hook for it.
-    pub fn terminal_toggle_favorite_command(
-        &mut self,
-        command: &str,
-    ) -> Option<bool> {
+    pub fn terminal_toggle_favorite_command(&mut self, command: &str) -> Option<bool> {
         self.terminal_blocks.toggle_favorite_command(command)
     }
 
@@ -395,7 +392,8 @@ impl ChromeBridge {
             .inner
             .mode()
             .contains(neoism_terminal_core::crosswords::Mode::BRACKETED_PASTE);
-        self.submit_shell_kind().command_payload(&command, bracketed)
+        self.submit_shell_kind()
+            .command_payload(&command, bracketed)
     }
 
     pub fn record_terminal_submit(&mut self, command: &str) {
@@ -956,7 +954,12 @@ impl ChromeBridge {
             let p = &mut self.rendered.pointer;
             p.last_x = x;
             p.last_y = y;
-            (p.left_pressed, p.middle_pressed, p.right_pressed, p.selecting)
+            (
+                p.left_pressed,
+                p.middle_pressed,
+                p.right_pressed,
+                p.selecting,
+            )
         };
         let mouse_mode = self.terminal_mouse_mode();
 
@@ -1244,8 +1247,8 @@ impl ChromeBridge {
         let rows = terminal.screen_lines().max(1);
         let col =
             (((x - rect.x) / cell_w).floor() as i64).clamp(0, cols as i64 - 1) as usize;
-        let visual_row = (((y - rect.y) / cell_h).floor() as i64)
-            .clamp(0, rows as i64 - 1) as usize;
+        let visual_row =
+            (((y - rect.y) / cell_h).floor() as i64).clamp(0, rows as i64 - 1) as usize;
         let side = cell_side_by_pos((x - rect.x).max(0.0) as usize, 0.0, cell_w, rect.w);
         let line = if let Some(sources) = self.rendered.pointer.frame_sources.as_ref() {
             match sources.get(visual_row).copied() {
@@ -1474,12 +1477,13 @@ impl ChromeBridge {
                 let rect = self.chrome.layout().terminal;
                 let cell_h = self.rendered.cell_h.max(1.0);
                 let visual_row = (((y - rect.y) / cell_h).floor() as i64).max(0) as usize;
-                new_hover = self
-                    .terminal_link_cols_at(pos)
-                    .map(|(col_start, col_end)| TerminalLinkHover {
-                        visual_row,
-                        col_start,
-                        col_end,
+                new_hover =
+                    self.terminal_link_cols_at(pos).map(|(col_start, col_end)| {
+                        TerminalLinkHover {
+                            visual_row,
+                            col_start,
+                            col_end,
+                        }
                     });
             }
         }

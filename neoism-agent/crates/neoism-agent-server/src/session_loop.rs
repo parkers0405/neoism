@@ -7,7 +7,10 @@ use tokio_stream::StreamExt;
 
 use crate::provider;
 
-const DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT_MS: u64 = 120_000;
+// OpenCode gives provider requests five minutes by default. Keep Neoism's
+// stronger between-event watchdog and retry recovery, but use the same window
+// so legitimate deep reasoning is not restarted at the two-minute mark.
+const DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
 
 pub(crate) enum ProviderEventPoll {
     Event(anyhow::Result<ProviderStreamEvent>),

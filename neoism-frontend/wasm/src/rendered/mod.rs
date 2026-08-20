@@ -2,18 +2,18 @@ use super::*;
 use neoism_terminal_core::colors::{AnsiColor, ColorRgb, NamedColor};
 use neoism_terminal_core::crosswords::grid::row::Row;
 
+use neoism_terminal_core::ansi::CursorShape as AnsiCursorShape;
 use neoism_terminal_core::crosswords::square::{
     CellFlags as SquareCellFlags, ContentTag, Square, Wide,
 };
 use neoism_terminal_core::crosswords::style::StyleFlags;
 use neoism_terminal_core::selection::SelectionRange;
 use neoism_ui::primitives::IdeTheme;
-use neoism_terminal_core::ansi::CursorShape as AnsiCursorShape;
 use neoism_ui::terminal_grid_emit::{
     cell_in_row_sel, cursor_quads, cursor_render_style, cursor_thickness,
-    decoration_quads, decoration_thickness, is_terminal_run_breaker,
-    row_selection_for, underline_style_from_flags, CursorRenderInputs,
-    CursorRenderStyle, CursorSpriteStyle, DecorationStyle, RowSelection, SpriteQuad,
+    decoration_quads, decoration_thickness, is_terminal_run_breaker, row_selection_for,
+    underline_style_from_flags, CursorRenderInputs, CursorRenderStyle, CursorSpriteStyle,
+    DecorationStyle, RowSelection, SpriteQuad,
 };
 use neoism_ui::terminal_scroll_state::TerminalScroll;
 use sugarloaf::font::{FontData, FontLibrary, FontLibraryData, SymbolMap};
@@ -196,9 +196,10 @@ fn emit_decoration_quads(
     y: f32,
     color: RgbTriple,
 ) {
-    let quads = cached_sprite_quads(cache, deco as u32, cell_w_px, cell_h_px, thickness, || {
-        decoration_quads(deco, cell_w_px, cell_h_px, thickness)
-    });
+    let quads =
+        cached_sprite_quads(cache, deco as u32, cell_w_px, cell_h_px, thickness, || {
+            decoration_quads(deco, cell_w_px, cell_h_px, thickness)
+        });
     for q in quads.iter() {
         s.rect(
             None,
@@ -830,8 +831,7 @@ impl RenderedTerminal {
             .iter()
             .map(|source| {
                 source.and_then(|abs| {
-                    let visual =
-                        abs as i64 - history_size as i64 + display_offset as i64;
+                    let visual = abs as i64 - history_size as i64 + display_offset as i64;
                     if visual < 0 {
                         return None;
                     }
@@ -1052,8 +1052,7 @@ impl RenderedTerminal {
             // selection_background pass.
             if let Some(sel) = row_sel {
                 let sel_x = origin_x + sel.lo as f32 * self.cell_w;
-                let sel_w =
-                    (sel.hi.saturating_sub(sel.lo) as f32 + 1.0) * self.cell_w;
+                let sel_w = (sel.hi.saturating_sub(sel.lo) as f32 + 1.0) * self.cell_w;
                 s.rect(None, sel_x, row_y, sel_w, self.cell_h, sel_bg, 0.0, 0);
             }
 
@@ -1073,28 +1072,29 @@ impl RenderedTerminal {
             // half a physical pixel. Ligatures form within a chunk;
             // one spanning a chunk boundary falls back to component
             // glyphs (documented residual vs desktop).
-            let cell_style = |cell: &CellSnapshot, col: usize| -> (RgbTriple, bool, bool) {
-                let (mut fg, _) = cell_snapshot_colors(cell, theme);
-                // Desktop `cell_fg_selected`: selected cells take the
-                // theme's selection foreground (theme.fg) unless
-                // ignore_selection_fg_color is set (default off).
-                if cell_in_row_sel(row_sel, col as u16) {
-                    fg = sel_fg;
-                }
-                // Desktop block-cursor fg swap (shared
-                // `block_cursor_uniforms`): the glyph under a focused
-                // block cursor paints in the panel background so it
-                // reads against the cursor's solid fill. Wins over the
-                // selection foreground, like the shader-side swap.
-                if block_cursor_cell == Some((row_idx, col)) {
-                    fg = theme.default_bg;
-                }
-                (
-                    fg,
-                    cell.flags.contains(CellFlags::BOLD),
-                    cell.flags.contains(CellFlags::ITALIC),
-                )
-            };
+            let cell_style =
+                |cell: &CellSnapshot, col: usize| -> (RgbTriple, bool, bool) {
+                    let (mut fg, _) = cell_snapshot_colors(cell, theme);
+                    // Desktop `cell_fg_selected`: selected cells take the
+                    // theme's selection foreground (theme.fg) unless
+                    // ignore_selection_fg_color is set (default off).
+                    if cell_in_row_sel(row_sel, col as u16) {
+                        fg = sel_fg;
+                    }
+                    // Desktop block-cursor fg swap (shared
+                    // `block_cursor_uniforms`): the glyph under a focused
+                    // block cursor paints in the panel background so it
+                    // reads against the cursor's solid fill. Wins over the
+                    // selection foreground, like the shader-side swap.
+                    if block_cursor_cell == Some((row_idx, col)) {
+                        fg = theme.default_bg;
+                    }
+                    (
+                        fg,
+                        cell.flags.contains(CellFlags::BOLD),
+                        cell.flags.contains(CellFlags::ITALIC),
+                    )
+                };
 
             let mut text_run = String::new();
             let mut col_idx = 0usize;
@@ -1160,8 +1160,7 @@ impl RenderedTerminal {
             // glyphs on desktop — lands under the glyph ink here
             // (residual, see draw order note above).
             for (col_idx, cell) in row.iter().enumerate() {
-                let deco =
-                    underline_style_from_flags(decoration_style_flags(cell.flags));
+                let deco = underline_style_from_flags(decoration_style_flags(cell.flags));
                 let strike = cell.flags.contains(CellFlags::STRIKEOUT);
                 if deco.is_none() && !strike {
                     continue;
@@ -1699,10 +1698,7 @@ enum PaletteIntent {
     /// Server-manager row pick. Carries the server id, which the bare
     /// `Action` variant drops — the name alone can't tell JS WHICH
     /// server to connect to.
-    Server {
-        action: &'static str,
-        id: String,
-    },
+    Server { action: &'static str, id: String },
     /// Run an ex command (`:Foo` typed in `:` mode or picked from
     /// the suggestion list). `command` is the trimmed command text
     /// without the leading colon.

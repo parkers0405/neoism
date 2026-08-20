@@ -1115,7 +1115,8 @@ pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
 /// an ordinary `background_task_result` tool CALL row (the model rereading
 /// retained output, part-id identity) keeps normal trace settling.
 fn is_background_completion_result_card<M: AgentTimelineMessage>(message: &M) -> bool {
-    message.tool() == "background_task_result" && message.id().starts_with("background-task-")
+    message.tool() == "background_task_result"
+        && message.id().starts_with("background-task-")
 }
 
 fn build_timeline_layout_pages<M>(

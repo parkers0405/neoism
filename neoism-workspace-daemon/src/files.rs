@@ -591,7 +591,9 @@ mod frontmatter_icon_tests {
         assert!(markdown_frontmatter_icon(&txt).await.is_none());
 
         let plain = dir.path().join("b.md");
-        tokio::fs::write(&plain, "# just a heading\n").await.unwrap();
+        tokio::fs::write(&plain, "# just a heading\n")
+            .await
+            .unwrap();
         assert!(markdown_frontmatter_icon(&plain).await.is_none());
     }
 }

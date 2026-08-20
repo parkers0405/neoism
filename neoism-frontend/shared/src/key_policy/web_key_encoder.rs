@@ -168,19 +168,15 @@ pub fn encode_web_terminal_key(
     // for pure modifier keys into `numpad_location == false`; feed it
     // `true` for right/standard-side modifiers so ShiftRight & co. get
     // the desktop non-left kitty codes (57447…).
-    let numpad_location = key_on_numpad
-        || (is_modifier_named(&logical) && !input.code.ends_with("Left"));
+    let numpad_location =
+        key_on_numpad || (is_modifier_named(&logical) && !input.code.ends_with("Left"));
 
     let event = KittyKeyEvent {
         logical_key: kitty_logical,
         state: KittyKeyState::Pressed,
         repeat: input.repeat,
         numpad_location,
-        text_with_all_modifiers: if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        },
+        text_with_all_modifiers: if text.is_empty() { None } else { Some(text) },
     };
 
     build_kitty_sequence(
@@ -516,22 +512,14 @@ fn binding_stage(
 
     // --- Font size (`Screen::font_size_action_for_key` →
     // `font_size_action_decide`): Ctrl-or-Super (never Alt) + =/+/-/0. ---
-    let zoom_modifier =
-        (ctrl && !alt && !super_key) || (super_key && !ctrl && !alt);
+    let zoom_modifier = (ctrl && !alt && !super_key) || (super_key && !ctrl && !alt);
     if zoom_modifier {
         let key_is = |needle: char| lower_char == Some(needle);
         let code_is = |needle: &str| input.code == needle;
-        if key_is('=')
-            || key_is('+')
-            || code_is("Equal")
-            || code_is("NumpadAdd")
-        {
+        if key_is('=') || key_is('+') || code_is("Equal") || code_is("NumpadAdd") {
             return consumed();
         }
-        if key_is('-')
-            || code_is("NumpadSubtract")
-            || (!shift && code_is("Minus"))
-        {
+        if key_is('-') || code_is("NumpadSubtract") || (!shift && code_is("Minus")) {
             return consumed();
         }
         if key_is('0') || (!shift && (code_is("Digit0") || code_is("Numpad0"))) {
@@ -1033,10 +1021,7 @@ mod tests {
     // entirely.
     #[test]
     fn vi_mode_consumes_everything() {
-        let modes = WebTerminalKeyModes {
-            vi: true,
-            ..LEGACY
-        };
+        let modes = WebTerminalKeyModes { vi: true, ..LEGACY };
         assert_eq!(encode(event("a", "KeyA"), modes), b"");
         assert_eq!(encode(event("ArrowUp", "ArrowUp"), modes), b"");
     }

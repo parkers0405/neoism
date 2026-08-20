@@ -828,8 +828,7 @@ fn share_target(workspace_id: Option<&str>) -> WorkspaceServerMessage {
         return WorkspaceServerMessage::ShareTarget {
             url: None,
             hint: Some(
-                "No network address to share — this machine looks offline."
-                    .to_string(),
+                "No network address to share — this machine looks offline.".to_string(),
             ),
         };
     };
@@ -880,7 +879,8 @@ mod share_target_tests {
 
     #[test]
     fn share_target_carries_workspace_and_is_http() {
-        let WorkspaceServerMessage::ShareTarget { url, hint } = share_target(Some("ws-1"))
+        let WorkspaceServerMessage::ShareTarget { url, hint } =
+            share_target(Some("ws-1"))
         else {
             panic!("expected ShareTarget");
         };

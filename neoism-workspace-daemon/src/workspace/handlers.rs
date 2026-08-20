@@ -22,14 +22,14 @@ pub(crate) fn open_workspace(
     }
     // Check for an existing workspace at this path. Otherwise mint a
     // fresh UUID.
-    let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    let canonical = crate::path::canonicalize_lossy(&path);
     let existing = {
         let inner = manager.inner.lock();
         inner
             .workspaces
             .values()
             .find(|w| {
-                std::fs::canonicalize(&w.path)
+                crate::path::canonicalize(&w.path)
                     .map(|c| c == canonical)
                     .unwrap_or(false)
             })

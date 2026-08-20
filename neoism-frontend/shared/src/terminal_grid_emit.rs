@@ -465,7 +465,12 @@ pub struct SpriteQuad {
 /// `x_off` / `y_off` translate sprite-local coordinates into
 /// cell-local coordinates (the atlas path's `bearing_x` /
 /// `cell_h - bearing_y`).
-pub fn sprite_solid_quads(bytes: &[u8], w: u32, x_off: i32, y_off: i32) -> Vec<SpriteQuad> {
+pub fn sprite_solid_quads(
+    bytes: &[u8],
+    w: u32,
+    x_off: i32,
+    y_off: i32,
+) -> Vec<SpriteQuad> {
     let mut out: Vec<SpriteQuad> = Vec::new();
     if w == 0 {
         return out;
@@ -525,7 +530,8 @@ pub fn decoration_quads(
     cell_h: u32,
     thickness: u32,
 ) -> Vec<SpriteQuad> {
-    let (bytes, w, _h, bearing_y) = rasterize_decoration(style, cell_w, cell_h, thickness);
+    let (bytes, w, _h, bearing_y) =
+        rasterize_decoration(style, cell_w, cell_h, thickness);
     sprite_solid_quads(&bytes, w, 0, cell_h as i32 - bearing_y as i32)
 }
 
@@ -1002,9 +1008,24 @@ mod tests {
         assert_eq!(
             quads,
             vec![
-                SpriteQuad { x: 0, y: 0, w: 4, h: 1 },
-                SpriteQuad { x: 0, y: 1, w: 1, h: 2 },
-                SpriteQuad { x: 3, y: 1, w: 1, h: 2 },
+                SpriteQuad {
+                    x: 0,
+                    y: 0,
+                    w: 4,
+                    h: 1
+                },
+                SpriteQuad {
+                    x: 0,
+                    y: 1,
+                    w: 1,
+                    h: 2
+                },
+                SpriteQuad {
+                    x: 3,
+                    y: 1,
+                    w: 1,
+                    h: 2
+                },
             ]
         );
     }
@@ -1013,21 +1034,47 @@ mod tests {
     fn decoration_quads_match_atlas_placement() {
         // Plain underline: one quad, `gap` px above the cell bottom.
         let quads = decoration_quads(DecorationStyle::Underline, 8, 40, 2);
-        assert_eq!(quads, vec![SpriteQuad { x: 0, y: 36, w: 8, h: 2 }]);
+        assert_eq!(
+            quads,
+            vec![SpriteQuad {
+                x: 0,
+                y: 36,
+                w: 8,
+                h: 2
+            }]
+        );
 
         // Double underline: two bars separated by a `thickness` gap.
         let quads = decoration_quads(DecorationStyle::DoubleUnderline, 8, 40, 2);
         assert_eq!(
             quads,
             vec![
-                SpriteQuad { x: 0, y: 32, w: 8, h: 2 },
-                SpriteQuad { x: 0, y: 36, w: 8, h: 2 },
+                SpriteQuad {
+                    x: 0,
+                    y: 32,
+                    w: 8,
+                    h: 2
+                },
+                SpriteQuad {
+                    x: 0,
+                    y: 36,
+                    w: 8,
+                    h: 2
+                },
             ]
         );
 
         // Strikethrough: centered on the cell's vertical midpoint.
         let quads = decoration_quads(DecorationStyle::Strikethrough, 8, 40, 2);
-        assert_eq!(quads, vec![SpriteQuad { x: 0, y: 19, w: 8, h: 2 }]);
+        assert_eq!(
+            quads,
+            vec![SpriteQuad {
+                x: 0,
+                y: 19,
+                w: 8,
+                h: 2
+            }]
+        );
 
         // Curly underline decomposes into per-column quads that stay
         // inside the sprite band above the bottom gap.
@@ -1041,28 +1088,72 @@ mod tests {
     fn cursor_quads_match_atlas_placement() {
         // Block: one full-cell quad.
         let quads = cursor_quads(CursorSpriteStyle::Block, 8, 16, 1);
-        assert_eq!(quads, vec![SpriteQuad { x: 0, y: 0, w: 8, h: 16 }]);
+        assert_eq!(
+            quads,
+            vec![SpriteQuad {
+                x: 0,
+                y: 0,
+                w: 8,
+                h: 16
+            }]
+        );
 
         // Hollow: 4 border quads (top, left, right, bottom).
         let quads = cursor_quads(CursorSpriteStyle::Hollow, 5, 5, 1);
         assert_eq!(
             quads,
             vec![
-                SpriteQuad { x: 0, y: 0, w: 5, h: 1 },
-                SpriteQuad { x: 0, y: 1, w: 1, h: 3 },
-                SpriteQuad { x: 4, y: 1, w: 1, h: 3 },
-                SpriteQuad { x: 0, y: 4, w: 5, h: 1 },
+                SpriteQuad {
+                    x: 0,
+                    y: 0,
+                    w: 5,
+                    h: 1
+                },
+                SpriteQuad {
+                    x: 0,
+                    y: 1,
+                    w: 1,
+                    h: 3
+                },
+                SpriteQuad {
+                    x: 4,
+                    y: 1,
+                    w: 1,
+                    h: 3
+                },
+                SpriteQuad {
+                    x: 0,
+                    y: 4,
+                    w: 5,
+                    h: 1
+                },
             ]
         );
 
         // Bar: thickness-wide column centered on the cell's left edge
         // (negative bearing_x).
         let quads = cursor_quads(CursorSpriteStyle::Bar, 10, 24, 1);
-        assert_eq!(quads, vec![SpriteQuad { x: -1, y: 0, w: 1, h: 24 }]);
+        assert_eq!(
+            quads,
+            vec![SpriteQuad {
+                x: -1,
+                y: 0,
+                w: 1,
+                h: 24
+            }]
+        );
 
         // Underline cursor: bar `gap` px above the cell bottom.
         let quads = cursor_quads(CursorSpriteStyle::Underline, 10, 40, 2);
-        assert_eq!(quads, vec![SpriteQuad { x: 0, y: 36, w: 10, h: 2 }]);
+        assert_eq!(
+            quads,
+            vec![SpriteQuad {
+                x: 0,
+                y: 36,
+                w: 10,
+                h: 2
+            }]
+        );
     }
 
     #[test]

@@ -350,7 +350,7 @@ fn declare_workspace_dir(root_dir: Option<PathBuf>) -> PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(crate::files::workspace_root);
     let _ = std::fs::create_dir_all(&dir);
-    std::fs::canonicalize(&dir).unwrap_or(dir)
+    crate::path::canonicalize_lossy(&dir)
 }
 
 /// Resolve the ONE notes scope the host has linked to a workspace's code

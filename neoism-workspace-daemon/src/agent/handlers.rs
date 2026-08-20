@@ -1186,7 +1186,10 @@ pub(crate) async fn push_session_running_state(
     };
     // Same live-run vocabulary the desktop status mapping uses.
     let running = matches!(
-        status.get("type").and_then(Value::as_str).unwrap_or_default(),
+        status
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
         "created" | "active" | "busy" | "running"
     );
     if !running {
@@ -1428,10 +1431,9 @@ pub(crate) async fn handle_answer_question(
             });
         }
         Err(error) => {
-            let _ = inner.tx.send(AgentServerMessage::QuestionReplyFailed {
-                request_id,
-                error,
-            });
+            let _ = inner
+                .tx
+                .send(AgentServerMessage::QuestionReplyFailed { request_id, error });
         }
     }
 }
@@ -1452,10 +1454,9 @@ pub(crate) async fn handle_reject_question(
             });
         }
         Err(error) => {
-            let _ = inner.tx.send(AgentServerMessage::QuestionReplyFailed {
-                request_id,
-                error,
-            });
+            let _ = inner
+                .tx
+                .send(AgentServerMessage::QuestionReplyFailed { request_id, error });
         }
     }
 }

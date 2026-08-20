@@ -12,10 +12,11 @@ Neoism uses one focus chain across panes and chrome panels. The command palette 
 | `Alt+G` | Git changes |
 | `Alt+S` | Project search |
 | `Alt+A` | New agent pane |
+| `Alt+,` | Open the active host's `config.json` |
 | `Alt+Arrow` | Move focus among panes/panels |
 | `Alt+Shift+Space` | Toggle Vim mode |
 
-Mouse clicks focus panels through the same focus model. Modal overlays capture input until dismissed.
+Mouse clicks focus panels through the same focus model. Modal overlays capture input until dismissed. `Alt+,` is the `openconfigeditor` action: it opens the raw JSONC file in Neoism's native editor. The graphical Settings page is a separate view over that same file.
 
 ## Tabs, workspaces, and splits
 
@@ -54,6 +55,6 @@ A binding may specify an `action` or a raw `esc` string. `mode` can restrict it 
 
 ## Discover action names
 
-Use `Alt+P` to find an action by its visible title. Configuration/action names are case-sensitive identifiers; copy an existing/default binding rather than guessing one.
+Use `Alt+P` to find an action by its visible title. Configuration/action names are case-sensitive identifiers; copy an existing/default binding rather than guessing one. The config editor suggests known action names inside `keybinds.keys`.
 
 See [[Getting Started/07 Essential Keybindings]] for the short first-day list.

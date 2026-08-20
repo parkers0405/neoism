@@ -672,8 +672,7 @@ impl ChromeBridge {
     /// Pass `null` for `is_dir` to let the chrome resolve the kind
     /// from its current tree entries.
     pub fn open_file_tree_delete_modal(&mut self, path: String, is_dir: Option<bool>) {
-        let is_dir =
-            is_dir.unwrap_or_else(|| self.chrome.file_tree_path_is_dir(&path));
+        let is_dir = is_dir.unwrap_or_else(|| self.chrome.file_tree_path_is_dir(&path));
         self.chrome.open_file_tree_delete_modal(&path, is_dir);
     }
 

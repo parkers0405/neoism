@@ -165,7 +165,7 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
         ),
         tool(
             "apply_patch",
-            "Use the apply_patch tool to edit files. patchText must be a V4A envelope patch with *** Begin Patch, one or more *** Add File / *** Delete File / *** Update File headers, and *** End Patch.",
+            "Use the apply_patch tool to edit one or many files atomically. patchText must be a V4A envelope patch with *** Begin Patch, one or more *** Add File / *** Delete File / *** Update File headers, and *** End Patch. Put related multi-file changes in one patch; independent tool calls may run in parallel.",
             object_required(&[("patchText", "string")], &["patchText"]),
             apply_patch_handler,
         ),

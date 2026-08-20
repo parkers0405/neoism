@@ -1235,7 +1235,10 @@ mod tests {
 
         assert_eq!(mobile_input_attributes(Url, false).inputmode, "url");
         assert_eq!(mobile_input_attributes(Search, false).inputmode, "search");
-        assert_eq!(mobile_input_attributes(Search, false).enterkeyhint, "search");
+        assert_eq!(
+            mobile_input_attributes(Search, false).enterkeyhint,
+            "search"
+        );
         // Editor keeps a plain return key (Enter inserts a newline).
         assert_eq!(mobile_input_attributes(Editor, false).enterkeyhint, "enter");
         // Toolbar visible: inputmode none so iPadOS doesn't stack
@@ -1246,7 +1249,10 @@ mod tests {
 
     #[test]
     fn mobile_context_tag_parses_with_code_fallback() {
-        assert_eq!(MobileInputContext::from_tag("text"), MobileInputContext::Text);
+        assert_eq!(
+            MobileInputContext::from_tag("text"),
+            MobileInputContext::Text
+        );
         assert_eq!(MobileInputContext::from_tag("url"), MobileInputContext::Url);
         assert_eq!(
             MobileInputContext::from_tag("search"),
@@ -1256,7 +1262,10 @@ mod tests {
             MobileInputContext::from_tag("editor"),
             MobileInputContext::Editor
         );
-        assert_eq!(MobileInputContext::from_tag("code"), MobileInputContext::Code);
+        assert_eq!(
+            MobileInputContext::from_tag("code"),
+            MobileInputContext::Code
+        );
         assert_eq!(
             MobileInputContext::from_tag("bogus"),
             MobileInputContext::Code
@@ -1266,9 +1275,18 @@ mod tests {
     #[test]
     fn mobile_named_key_bytes_cover_toolbar_keys() {
         assert_eq!(mobile_named_key_bytes("ArrowUp"), Some(b"\x1b[A" as &[u8]));
-        assert_eq!(mobile_named_key_bytes("ArrowDown"), Some(b"\x1b[B" as &[u8]));
-        assert_eq!(mobile_named_key_bytes("ArrowRight"), Some(b"\x1b[C" as &[u8]));
-        assert_eq!(mobile_named_key_bytes("ArrowLeft"), Some(b"\x1b[D" as &[u8]));
+        assert_eq!(
+            mobile_named_key_bytes("ArrowDown"),
+            Some(b"\x1b[B" as &[u8])
+        );
+        assert_eq!(
+            mobile_named_key_bytes("ArrowRight"),
+            Some(b"\x1b[C" as &[u8])
+        );
+        assert_eq!(
+            mobile_named_key_bytes("ArrowLeft"),
+            Some(b"\x1b[D" as &[u8])
+        );
         assert_eq!(mobile_named_key_bytes("Enter"), Some(b"\x0d" as &[u8]));
         assert_eq!(mobile_named_key_bytes("Backspace"), Some(b"\x7f" as &[u8]));
         assert_eq!(mobile_named_key_bytes("Escape"), Some(b"\x1b" as &[u8]));

@@ -93,7 +93,17 @@ impl Screen<'_> {
     /// navigation / file-tree / status-line stay scoped to the project
     /// they were working in.
     pub fn open_settings_config_tab(&mut self) {
-        let path = neoism_backend::config::config_file_path();
+        let path = match neoism_backend::config::create_config_file(None) {
+            Ok(path) => path,
+            Err(err) => {
+                self.renderer.notifications.push(
+                    format!("Could not open Neoism config: {err}"),
+                    neoism_ui::panels::notifications::NotificationLevel::Error,
+                );
+                self.mark_dirty();
+                return;
+            }
+        };
         let already_active = self
             .renderer
             .buffer_tabs
@@ -138,6 +148,9 @@ impl Screen<'_> {
         // Raw config value so every key (terminal + agent) is present.
         let values = neoism_backend::config::load_config_json_value();
         self.renderer.settings.set_values(values);
+        self.renderer
+            .settings
+            .set_descriptors(neoism_backend::config::intelligence::config_descriptors());
         let families = self.sugarloaf.font_family_names();
         self.renderer.settings.set_font_families(families);
         self.renderer.settings.open();
@@ -177,7 +190,7 @@ impl Screen<'_> {
         use neoism_ui::panels::SettingsAction;
         match action {
             SettingsAction::Set { key, value } => {
-                if let Err(err) = neoism_backend::config::write_setting(key, value) {
+                if let Err(err) = neoism_backend::config::write_setting(&key, value) {
                     tracing::warn!(target: "neoism::config", %err, key, "settings write failed");
                 }
             }

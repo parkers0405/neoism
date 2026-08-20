@@ -1,40 +1,94 @@
 //! Zed-style Settings panel — data model + interaction.
 //!
-//! A full-screen settings surface over the unified `config.json`. Keys
-//! may be flat (`minimap`) or one level deep (`cursor.blinking`); the
-//! dotted form maps to a `[section]` object both when reading and
-//! writing. The host feeds the raw `config.json` value plus the list of
-//! installed font families, and persists any [`SettingsAction`].
+//! A full-screen settings surface over the unified `config.json`. The
+//! daemon-provided descriptor catalog is the source of truth for nested
+//! paths, controls, defaults, documentation, and host-specific choices.
+//! The host feeds the raw document values and persists [`SettingsAction`].
 
+use neoism_protocol::config::{
+    ConfigCategory, ConfigConstraints, ConfigControl, ConfigDescriptor, ConfigOption,
+    ConfigValueKind,
+};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Control {
-    Toggle {
-        default: bool,
-    },
-    /// One-of-N. Clicking opens a dropdown of the options.
-    Select {
-        options: &'static [&'static str],
-        default: &'static str,
-    },
-    /// A dropdown of installed system fonts (options supplied at runtime
-    /// by the host). Bound to `fonts.family`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RowControl {
+    Toggle,
+    Select,
     FontFamily,
-    /// A row that runs a host GUI action instead of writing a value.
+    Text,
+    Keybinding,
     Action {
         action: &'static str,
         button: &'static str,
     },
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SettingDef {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SettingRow {
     pub category: Category,
-    pub key: &'static str,
-    pub label: &'static str,
-    pub description: &'static str,
-    pub control: Control,
+    pub path: String,
+    pub label: String,
+    pub description: String,
+    pub value_kind: ConfigValueKind,
+    pub default: Value,
+    pub suggestions: Vec<String>,
+    pub options: Vec<ConfigOption>,
+    pub constraints: ConfigConstraints,
+    pub extensible: bool,
+    pub control: RowControl,
+}
+
+impl SettingRow {
+    fn from_descriptor(descriptor: ConfigDescriptor) -> Self {
+        let mut suggestions = descriptor.static_suggestions;
+        suggestions.extend(descriptor.runtime_suggestions);
+        suggestions.sort_by_key(|value| value.to_lowercase());
+        suggestions.dedup();
+        let mut options = descriptor.options;
+        for suggestion in &suggestions {
+            let value = option_to_json(suggestion, descriptor.value_kind);
+            if !options.iter().any(|option| option.value == value) {
+                options.push(ConfigOption {
+                    value,
+                    label: None,
+                    description: None,
+                });
+            }
+        }
+        let control = if descriptor.path == "agent.model" {
+            RowControl::Action {
+                action: "open-model",
+                button: "Choose\u{2026}",
+            }
+        } else {
+            match descriptor.control {
+                ConfigControl::Toggle => RowControl::Toggle,
+                ConfigControl::Select => RowControl::Select,
+                ConfigControl::FontFamily => RowControl::FontFamily,
+                ConfigControl::Keybinding => RowControl::Keybinding,
+                ConfigControl::Number if !options.is_empty() => RowControl::Select,
+                ConfigControl::Text
+                | ConfigControl::Number
+                | ConfigControl::Color
+                | ConfigControl::StringList
+                | ConfigControl::Object => RowControl::Text,
+            }
+        };
+        Self {
+            category: Category::from_protocol(descriptor.category),
+            path: descriptor.path,
+            label: descriptor.label,
+            description: descriptor.description,
+            value_kind: descriptor.value_kind,
+            default: descriptor.default,
+            suggestions,
+            options,
+            constraints: descriptor.constraints,
+            extensible: descriptor.extensible,
+            control,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,19 +97,27 @@ pub enum Category {
     Appearance,
     Editor,
     Terminal,
+    Ui,
+    Presence,
     Keybinds,
     Agent,
+    Platform,
+    Renderer,
     Developer,
 }
 
 impl Category {
-    pub(crate) const ALL: [Category; 7] = [
+    pub(crate) const ALL: [Category; 11] = [
         Category::General,
         Category::Appearance,
         Category::Editor,
         Category::Terminal,
+        Category::Ui,
+        Category::Presence,
         Category::Keybinds,
         Category::Agent,
+        Category::Platform,
+        Category::Renderer,
         Category::Developer,
     ];
 
@@ -65,8 +127,12 @@ impl Category {
             Category::Appearance => "Appearance",
             Category::Editor => "Editor",
             Category::Terminal => "Terminal",
+            Category::Ui => "UI",
+            Category::Presence => "Presence",
             Category::Keybinds => "Keybinds",
             Category::Agent => "Agent",
+            Category::Platform => "Platform",
+            Category::Renderer => "Renderer",
             Category::Developer => "Developer",
         }
     }
@@ -77,129 +143,30 @@ impl Category {
             Category::Appearance => "\u{f1fc}",
             Category::Editor => "\u{f044}",
             Category::Terminal => "\u{f120}",
+            Category::Ui => "\u{f108}",
+            Category::Presence => "\u{f0c0}",
             Category::Keybinds => "\u{f11c}",
             Category::Agent => "\u{f544}",
+            Category::Platform => "\u{f17a}",
+            Category::Renderer => "\u{f1fc}",
             Category::Developer => "\u{f188}",
         }
     }
-}
 
-pub(crate) const SETTINGS: &[SettingDef] = &[
-    // ── General ──
-    tog(Category::General, "ui.confirm-before-quit", "Confirm before quit", "Ask for confirmation before closing the app.", false),
-    tog(Category::General, "terminal.copy-on-select", "Copy on select", "Automatically copy selected text to the clipboard.", false),
-    tog(Category::General, "terminal.hide-mouse-cursor-when-typing", "Hide mouse cursor when typing", "Hide the pointer while you type.", false),
-    tog(Category::General, "terminal.use-fork", "Use fork (new terminals)", "Spawn shells with fork(); applies to newly opened terminals.", true),
-    sel(Category::General, "terminal.option-as-alt", "Option as Alt (macOS)", "Treat the Option key as Alt.", &["none", "left", "right", "both"], "none"),
-
-    // ── Appearance ──
-    sel(Category::Appearance, "appearance.theme", "Theme", "The IDE theme — skins chrome, editor, and terminal.", &["pastel_dark", "nvchad_one", "tokyo_night", "catppuccin_mocha", "retro_95"], "pastel_dark"),
-    font_family(Category::Appearance, "appearance.fonts.family", "Font family", "Choose an installed system font for the terminal and editor."),
-    sel(Category::Appearance, "appearance.fonts.size", "Font size", "Terminal + editor font size.", &["12", "13", "14", "16", "18", "19", "20", "22"], "14"),
-    sel(Category::Appearance, "appearance.fonts.weight", "Font weight", "Base text thickness. 400 is normal, 700 is bold. Bold stays bold.", &["300", "400", "500", "600", "700", "800"], "400"),
-    sel(Category::Appearance, "presence.cursor-style", "Cursor style", "Solid caret, or an animated rainbow sweep.", &["solid", "rainbow"], "solid"),
-    tog(Category::Appearance, "ui.status-fps", "Status bar FPS", "Show the frame-rate pill on the status bar.", true),
-    sel(Category::Appearance, "appearance.line-height", "Line height", "Terminal line-height multiplier.", &["1.0", "1.1", "1.2", "1.3", "1.4", "1.5"], "1.0"),
-    sel(Category::Appearance, "terminal.cursor.shape", "Cursor shape", "Block, underline, beam, or hidden caret.", &["block", "underline", "beam", "hidden"], "block"),
-    tog(Category::Appearance, "terminal.cursor.blinking", "Blinking cursor", "Blink the caret.", false),
-    sel(Category::Appearance, "terminal.cursor.blinking-interval", "Blink interval (ms)", "Caret blink half-period.", &["400", "530", "700", "1000"], "530"),
-    tog(Category::Appearance, "appearance.fonts.hinting", "Font hinting", "Hint glyphs to the pixel grid.", true),
-    tog(Category::Appearance, "appearance.fonts.use-drawable-chars", "Native box drawing", "Draw box/block glyphs natively.", true),
-    sel(Category::Appearance, "ui.window.opacity", "Window opacity", "Overall window opacity.", &["0.8", "0.9", "0.95", "1.0"], "1.0"),
-    tog(Category::Appearance, "ui.window.blur", "Background blur", "Blur what's behind a translucent window.", false),
-    tog(Category::Appearance, "appearance.effects.trail-cursor", "Cursor trail", "Neovide-style cursor trail.", true),
-    tog(Category::Appearance, "appearance.effects.custom-mouse-cursor", "Custom mouse cursor", "Render the mouse pointer ourselves.", false),
-
-    // ── Editor ──
-    tog(Category::Editor, "editor.vim-mode", "Vim mode", "Vim keybindings in the code AND markdown editors. Applies to editors you open next.", true),
-    tog(Category::Editor, "editor.format-on-save", "Format on save", "Run the language server's formatter before every save.", true),
-    tog(Category::Editor, "editor.minimap", "Minimap", "Show the code-editor minimap.", false),
-
-    // ── Terminal ──
-    tog(Category::Terminal, "terminal.enable-scroll-bar", "Scrollbar", "Show the terminal scrollbar.", true),
-    sel(Category::Terminal, "terminal.scrollback-history-limit", "Scrollback lines", "How many lines of scrollback to keep.", &["1000", "5000", "10000", "50000", "100000"], "10000"),
-    sel(Category::Terminal, "terminal.scroll.multiplier", "Scroll speed", "Scroll wheel multiplier.", &["1", "2", "3", "4", "5"], "3"),
-    tog(Category::Terminal, "terminal.draw-bold-text-with-light-colors", "Bold uses bright colors", "Bold text draws in the bright ANSI palette.", false),
-    tog(Category::Terminal, "ui.navigation.hide-if-single", "Hide tab bar when single", "Hide the tab strip with only one tab.", true),
-    tog(Category::Terminal, "ui.navigation.use-split", "Enable splits", "Allow split panes.", true),
-    tog(Category::Terminal, "ui.navigation.open-config-with-split", "Open config in a split", "Open the config file beside the current pane.", true),
-    tog(Category::Terminal, "ui.navigation.current-working-directory", "New tab inherits CWD", "New tabs start in the current working directory.", true),
-    tog(Category::Terminal, "terminal.keyboard.ime-cursor-positioning", "IME at cursor", "Position the IME popup at the caret.", true),
-    tog(Category::Terminal, "terminal.bell.audio", "Audible bell", "Play the system sound on a terminal bell.", false),
-
-    // ── Agent ── (only settings the neoism agent actually reads)
-    action(Category::Agent, "Model & providers", "Pick the agent model, or connect a provider (API key / OAuth).", "open-model", "Choose\u{2026}"),
-    sel(Category::Agent, "agent.reasoning-effort", "Reasoning effort", "How hard the model thinks.", &["low", "medium", "high", "xhigh", "max"], "medium"),
-    sel(Category::Agent, "agent.text-verbosity", "Response length", "How detailed supported models make their final text.", &["low", "medium", "high"], "low"),
-    tog(Category::Agent, "agent.dangerously-skip-permissions", "Skip permission prompts", "Auto-allow agent actions that would prompt. Explicit deny rules still deny.", false),
-
-    // ── Developer ──
-    sel(Category::Developer, "developer.log-level", "Log level", "Tracing verbosity (applies on next launch).", &["off", "error", "warn", "info", "debug", "trace"], "off"),
-    tog(Category::Developer, "developer.enable-log-file", "Write log file", "Write logs to ~/.config/neoism/log/neoism.log.", false),
-    tog(Category::Developer, "developer.enable-fps-counter", "FPS counter", "Show a developer FPS counter overlay.", false),
-];
-
-const fn tog(
-    category: Category,
-    key: &'static str,
-    label: &'static str,
-    description: &'static str,
-    default: bool,
-) -> SettingDef {
-    SettingDef {
-        category,
-        key,
-        label,
-        description,
-        control: Control::Toggle { default },
-    }
-}
-
-const fn sel(
-    category: Category,
-    key: &'static str,
-    label: &'static str,
-    description: &'static str,
-    options: &'static [&'static str],
-    default: &'static str,
-) -> SettingDef {
-    SettingDef {
-        category,
-        key,
-        label,
-        description,
-        control: Control::Select { options, default },
-    }
-}
-
-const fn font_family(
-    category: Category,
-    key: &'static str,
-    label: &'static str,
-    description: &'static str,
-) -> SettingDef {
-    SettingDef {
-        category,
-        key,
-        label,
-        description,
-        control: Control::FontFamily,
-    }
-}
-
-const fn action(
-    category: Category,
-    label: &'static str,
-    description: &'static str,
-    action: &'static str,
-    button: &'static str,
-) -> SettingDef {
-    SettingDef {
-        category,
-        key: "",
-        label,
-        description,
-        control: Control::Action { action, button },
+    fn from_protocol(category: ConfigCategory) -> Self {
+        match category {
+            ConfigCategory::General => Self::General,
+            ConfigCategory::Appearance => Self::Appearance,
+            ConfigCategory::Editor => Self::Editor,
+            ConfigCategory::Terminal => Self::Terminal,
+            ConfigCategory::Ui => Self::Ui,
+            ConfigCategory::Presence => Self::Presence,
+            ConfigCategory::Keybinds => Self::Keybinds,
+            ConfigCategory::Agent => Self::Agent,
+            ConfigCategory::Platform => Self::Platform,
+            ConfigCategory::Renderer => Self::Renderer,
+            ConfigCategory::Developer => Self::Developer,
+        }
     }
 }
 
@@ -477,9 +444,9 @@ pub(crate) const KEYBINDS: &[KeybindDef] = &[
         "openconfigeditor",
         "Open config file",
         KeyGroup::Global,
-        "super",
+        "alt",
         ",",
-        "control | shift",
+        "alt",
         ",",
     ),
     kb(
@@ -626,7 +593,7 @@ fn format_key_label(key: &str) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsAction {
     /// Persist `value` (bool / number / string) at `key`.
-    Set { key: &'static str, value: Value },
+    Set { key: String, value: Value },
     /// Persist a keybinding override into `bindings.keys`. An empty `key`
     /// removes the override so the built-in default applies again.
     SetKeybind {
@@ -655,11 +622,13 @@ fn swallow() -> PointerOutcome {
 
 /// Max option rows a dropdown shows before it scrolls (fonts can be long).
 const DROPDOWN_MAX_ROWS: usize = 10;
+const CUSTOM_OPTION: &str = "Custom\u{2026}";
 
 pub struct NeoismSettingsPane {
     active: bool,
     values: Value,
     font_families: Vec<String>,
+    rows: Vec<SettingRow>,
     category: Category,
     search: String,
     search_focused: bool,
@@ -667,6 +636,8 @@ pub struct NeoismSettingsPane {
     dropdown_scroll: usize,
     /// Filter text typed while a long (font) dropdown is open.
     dropdown_search: String,
+    editing: Option<usize>,
+    edit_buffer: String,
     /// Index into `KEYBINDS` currently waiting for a captured chord.
     capturing: Option<usize>,
     scroll: f32,
@@ -699,12 +670,15 @@ impl NeoismSettingsPane {
             active: false,
             values: Value::Object(serde_json::Map::new()),
             font_families: Vec::new(),
+            rows: Vec::new(),
             category: Category::General,
             search: String::new(),
             search_focused: false,
             open_dropdown: None,
             dropdown_scroll: 0,
             dropdown_search: String::new(),
+            editing: None,
+            edit_buffer: String::new(),
             capturing: None,
             scroll: 0.0,
             max_scroll: 0.0,
@@ -746,6 +720,8 @@ impl NeoismSettingsPane {
         self.search_focused = false;
         self.open_dropdown = None;
         self.dropdown_search.clear();
+        self.editing = None;
+        self.edit_buffer.clear();
         self.capturing = None;
         self.scroll = 0.0;
     }
@@ -754,11 +730,38 @@ impl NeoismSettingsPane {
         self.active = false;
         self.search_focused = false;
         self.open_dropdown = None;
+        self.editing = None;
         self.capturing = None;
     }
 
     pub fn set_values(&mut self, values: Value) {
         self.values = values;
+    }
+
+    /// Replace all canonical metadata with host-provided descriptors.
+    pub fn set_descriptors(&mut self, descriptors: Vec<ConfigDescriptor>) {
+        self.rows = descriptors
+            .into_iter()
+            .map(SettingRow::from_descriptor)
+            .collect();
+        self.rows.sort_by(|left, right| {
+            Category::ALL
+                .iter()
+                .position(|category| *category == left.category)
+                .cmp(
+                    &Category::ALL
+                        .iter()
+                        .position(|category| *category == right.category),
+                )
+                .then_with(|| left.label.to_lowercase().cmp(&right.label.to_lowercase()))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        self.open_dropdown = None;
+        self.editing = None;
+    }
+
+    pub fn descriptor_count(&self) -> usize {
+        self.rows.len()
     }
 
     /// Host provides the installed system font families (sorted).
@@ -774,7 +777,9 @@ impl NeoismSettingsPane {
         }
         // An open font dropdown is auto-focused: typed characters filter
         // its (long) list before reaching the top-level settings search.
-        if self.open_dropdown_is_font() {
+        if self.editing.is_some() {
+            self.edit_buffer.push(c);
+        } else if self.open_dropdown_is_searchable() {
             self.dropdown_search.push(c);
             self.dropdown_scroll = 0;
         } else if self.search_focused {
@@ -787,7 +792,9 @@ impl NeoismSettingsPane {
         if !self.active {
             return;
         }
-        if self.open_dropdown_is_font() {
+        if self.editing.is_some() {
+            self.edit_buffer.pop();
+        } else if self.open_dropdown_is_searchable() {
             self.dropdown_search.pop();
             self.dropdown_scroll = 0;
         } else if self.search_focused {
@@ -799,7 +806,10 @@ impl NeoismSettingsPane {
         if !self.active {
             return false;
         }
-        if self.capturing.is_some() {
+        if self.editing.is_some() {
+            self.editing = None;
+            self.edit_buffer.clear();
+        } else if self.capturing.is_some() {
             self.capturing = None;
         } else if self.open_dropdown.is_some() {
             // Clear an in-dropdown filter first, then close the dropdown.
@@ -860,13 +870,43 @@ impl NeoismSettingsPane {
     pub(crate) fn dropdown_search_query(&self) -> &str {
         &self.dropdown_search
     }
-    /// True while the open dropdown is a (long) font-family list, which
-    /// gets the in-dropdown search box + auto-focused typing.
-    pub(crate) fn open_dropdown_is_font(&self) -> bool {
-        matches!(
-            self.open_dropdown.map(|i| SETTINGS[i].control),
-            Some(Control::FontFamily)
-        )
+    /// Long choice catalogs get an auto-focused search field. Fonts always
+    /// qualify; the same interaction scales to models, themes, shells, etc.
+    pub(crate) fn open_dropdown_is_searchable(&self) -> bool {
+        self.open_dropdown
+            .and_then(|index| self.rows.get(index))
+            .is_some_and(|row| {
+                row.control == RowControl::FontFamily || row.options.len() > 8
+            })
+    }
+
+    pub(crate) fn row(&self, index: usize) -> &SettingRow {
+        &self.rows[index]
+    }
+    pub(crate) fn is_editing(&self, index: usize) -> bool {
+        self.editing == Some(index)
+    }
+    pub(crate) fn edit_buffer(&self) -> &str {
+        &self.edit_buffer
+    }
+
+    /// Commit the active generic text/number/JSON editor.
+    pub fn commit_edit(&mut self) -> Option<SettingsAction> {
+        let index = self.editing?;
+        let row = self.rows.get(index)?;
+        let value = parse_edited_value(&self.edit_buffer, row.value_kind)?;
+        if let Some(number) = value.as_f64() {
+            if row.constraints.min.is_some_and(|min| number < min)
+                || row.constraints.max.is_some_and(|max| number > max)
+            {
+                return None;
+            }
+        }
+        let path = row.path.clone();
+        self.set_local(&path, value.clone());
+        self.editing = None;
+        self.edit_buffer.clear();
+        Some(SettingsAction::Set { key: path, value })
     }
 
     // ── Keybinds section ──
@@ -967,43 +1007,50 @@ impl NeoismSettingsPane {
         }
     }
     pub(crate) fn bool_at(&self, idx: usize) -> bool {
-        let def = SETTINGS[idx];
-        let Control::Toggle { default } = def.control else {
+        let row = &self.rows[idx];
+        if row.control != RowControl::Toggle {
             return false;
-        };
-        self.get_value(def.key)
+        }
+        self.get_value(&row.path)
             .and_then(Value::as_bool)
-            .unwrap_or(default)
+            .unwrap_or_else(|| row.default.as_bool().unwrap_or(false))
     }
     pub(crate) fn string_at(&self, idx: usize) -> String {
-        let def = SETTINGS[idx];
-        let default = match def.control {
-            Control::Select { default, .. } => default.to_string(),
-            Control::FontFamily => String::new(),
-            _ => return String::new(),
-        };
-        self.get_value(def.key)
+        let row = &self.rows[idx];
+        self.get_value(&row.path)
             .map(json_to_option_string)
-            .unwrap_or(default)
+            .unwrap_or_else(|| {
+                if row.default.is_null() {
+                    String::new()
+                } else {
+                    json_to_option_string(&row.default)
+                }
+            })
     }
     /// Options for the dropdown of a Select or FontFamily control.
     pub(crate) fn dropdown_options(&self, idx: usize) -> Vec<String> {
-        if SETTINGS[idx].key == "appearance.theme" {
-            return crate::primitives::ide_theme::all_ide_theme_names();
+        let row = &self.rows[idx];
+        let mut options = row.options.iter().map(option_label).collect::<Vec<_>>();
+        if row.path == "appearance.theme" {
+            options.extend(crate::primitives::ide_theme::all_ide_theme_names());
         }
-        match SETTINGS[idx].control {
-            Control::Select { options, .. } => {
-                options.iter().map(|o| o.to_string()).collect()
-            }
-            Control::FontFamily => {
+        if row.control == RowControl::FontFamily {
+            options.extend(self.font_families.clone());
+        }
+        if row.extensible {
+            options.push(CUSTOM_OPTION.to_string());
+        }
+        options.sort_by_key(|value| value.to_lowercase());
+        options.dedup();
+        match row.control {
+            RowControl::Select | RowControl::FontFamily => {
                 let query = self.dropdown_search.trim().to_lowercase();
                 if query.is_empty() {
-                    self.font_families.clone()
+                    options
                 } else {
-                    self.font_families
-                        .iter()
-                        .filter(|family| family.to_lowercase().contains(&query))
-                        .cloned()
+                    options
+                        .into_iter()
+                        .filter(|option| option.to_lowercase().contains(&query))
                         .collect()
                 }
             }
@@ -1055,7 +1102,7 @@ impl NeoismSettingsPane {
 
     pub(crate) fn visible_settings(&self) -> Vec<usize> {
         let query = self.search.trim().to_lowercase();
-        SETTINGS
+        self.rows
             .iter()
             .enumerate()
             .filter(|(_, def)| {
@@ -1063,7 +1110,7 @@ impl NeoismSettingsPane {
                     def.category == self.category
                 } else {
                     def.label.to_lowercase().contains(&query)
-                        || def.key.contains(query.as_str())
+                        || def.path.to_lowercase().contains(query.as_str())
                         || def.description.to_lowercase().contains(&query)
                 }
             })
@@ -1095,22 +1142,34 @@ impl NeoismSettingsPane {
         if self.open_dropdown.is_some() {
             // Clicking inside the font dropdown's search box keeps it open
             // (and focused) instead of dismissing it.
-            if self.open_dropdown_is_font() && point_in(self.dropdown_search_rect, x, y) {
+            if self.open_dropdown_is_searchable()
+                && point_in(self.dropdown_search_rect, x, y)
+            {
                 return swallow();
             }
             for (rect, idx, opt) in self.dropdown_rects.clone() {
                 if point_in(rect, x, y) {
-                    let def = SETTINGS[idx];
-                    let value = option_to_json(&opt);
-                    self.set_local(def.key, value.clone());
+                    let row = &self.rows[idx];
+                    if opt == CUSTOM_OPTION {
+                        self.editing = Some(idx);
+                        self.edit_buffer = self.string_at(idx);
+                        self.open_dropdown = None;
+                        self.dropdown_search.clear();
+                        return swallow();
+                    }
+                    let value = row
+                        .options
+                        .iter()
+                        .find(|option| option_label(option) == opt)
+                        .map(|option| option.value.clone())
+                        .unwrap_or_else(|| option_to_json(&opt, row.value_kind));
+                    let path = row.path.clone();
+                    self.set_local(&path, value.clone());
                     self.open_dropdown = None;
                     self.dropdown_search.clear();
                     return PointerOutcome {
                         consumed: true,
-                        action: Some(SettingsAction::Set {
-                            key: def.key,
-                            value,
-                        }),
+                        action: Some(SettingsAction::Set { key: path, value }),
                     };
                 }
             }
@@ -1165,29 +1224,36 @@ impl NeoismSettingsPane {
         }
         for (rect, idx) in self.control_rects.clone() {
             if point_in(rect, x, y) {
-                let def = SETTINGS[idx];
-                match def.control {
-                    Control::Toggle { default } => {
+                let row = self.rows[idx].clone();
+                match row.control {
+                    RowControl::Toggle => {
                         let next = !self
-                            .get_value(def.key)
+                            .get_value(&row.path)
                             .and_then(Value::as_bool)
-                            .unwrap_or(default);
-                        self.set_local(def.key, Value::Bool(next));
+                            .unwrap_or_else(|| row.default.as_bool().unwrap_or(false));
+                        self.set_local(&row.path, Value::Bool(next));
                         return PointerOutcome {
                             consumed: true,
                             action: Some(SettingsAction::Set {
-                                key: def.key,
+                                key: row.path,
                                 value: Value::Bool(next),
                             }),
                         };
                     }
-                    Control::Select { .. } | Control::FontFamily => {
+                    RowControl::Select | RowControl::FontFamily => {
                         self.open_dropdown = Some(idx);
                         self.dropdown_scroll = 0;
                         self.dropdown_search.clear();
                         return swallow();
                     }
-                    Control::Action { action, .. } => {
+                    RowControl::Text => {
+                        self.editing = Some(idx);
+                        self.edit_buffer = self.string_at(idx);
+                        self.open_dropdown = None;
+                        return swallow();
+                    }
+                    RowControl::Keybinding => return swallow(),
+                    RowControl::Action { action, .. } => {
                         return PointerOutcome {
                             consumed: true,
                             action: Some(SettingsAction::RunAction(action)),
@@ -1200,6 +1266,27 @@ impl NeoismSettingsPane {
     }
 }
 
+fn parse_edited_value(text: &str, kind: ConfigValueKind) -> Option<Value> {
+    match kind {
+        ConfigValueKind::String => Some(Value::String(text.to_string())),
+        ConfigValueKind::Integer => text
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .map(|value| Value::Number(value.into())),
+        ConfigValueKind::Number => text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number),
+        ConfigValueKind::Boolean => text.trim().parse::<bool>().ok().map(Value::Bool),
+        ConfigValueKind::Array | ConfigValueKind::Object => {
+            serde_json::from_str(text).ok()
+        }
+    }
+}
+
 fn json_to_option_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -1209,18 +1296,179 @@ fn json_to_option_string(value: &Value) -> String {
     }
 }
 
-fn option_to_json(opt: &str) -> Value {
-    if let Ok(i) = opt.parse::<i64>() {
-        return Value::Number(i.into());
-    }
-    if let Ok(f) = opt.parse::<f64>() {
-        if let Some(n) = serde_json::Number::from_f64(f) {
-            return Value::Number(n);
-        }
-    }
-    Value::String(opt.to_string())
+fn option_label(option: &ConfigOption) -> String {
+    option
+        .label
+        .clone()
+        .unwrap_or_else(|| json_to_option_string(&option.value))
+}
+
+fn option_to_json(opt: &str, kind: ConfigValueKind) -> Value {
+    parse_edited_value(opt, kind).unwrap_or_else(|| Value::String(opt.to_string()))
 }
 
 pub(crate) fn point_in(rect: [f32; 4], x: f32, y: f32) -> bool {
     x >= rect[0] && x <= rect[0] + rect[2] && y >= rect[1] && y <= rect[1] + rect[3]
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn descriptor(
+        path: &str,
+        category: ConfigCategory,
+        control: ConfigControl,
+        kind: ConfigValueKind,
+        default: Value,
+    ) -> ConfigDescriptor {
+        ConfigDescriptor {
+            path: path.to_string(),
+            label: path.to_string(),
+            description: format!("Configure {path}."),
+            value_kind: kind,
+            default,
+            static_suggestions: vec!["static".into(), "shared".into()],
+            runtime_suggestions: vec!["runtime".into(), "shared".into()],
+            options: vec![],
+            provider: None,
+            constraints: Default::default(),
+            accepted_kinds: vec![],
+            extensible: true,
+            category,
+            control,
+        }
+    }
+
+    #[test]
+    fn descriptors_are_owned_visible_rows_and_map_every_category() {
+        let mut pane = NeoismSettingsPane::new();
+        let descriptors = Category::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, category)| {
+                let protocol = match category {
+                    Category::General => ConfigCategory::General,
+                    Category::Appearance => ConfigCategory::Appearance,
+                    Category::Editor => ConfigCategory::Editor,
+                    Category::Terminal => ConfigCategory::Terminal,
+                    Category::Ui => ConfigCategory::Ui,
+                    Category::Presence => ConfigCategory::Presence,
+                    Category::Keybinds => ConfigCategory::Keybinds,
+                    Category::Agent => ConfigCategory::Agent,
+                    Category::Platform => ConfigCategory::Platform,
+                    Category::Renderer => ConfigCategory::Renderer,
+                    Category::Developer => ConfigCategory::Developer,
+                };
+                descriptor(
+                    &format!("group.setting-{index}"),
+                    protocol,
+                    ConfigControl::Text,
+                    ConfigValueKind::String,
+                    json!(""),
+                )
+            })
+            .collect();
+        pane.set_descriptors(descriptors);
+        assert_eq!(pane.descriptor_count(), Category::ALL.len());
+        for category in Category::ALL {
+            pane.category = category;
+            assert_eq!(pane.visible_settings().len(), 1, "missing {category:?}");
+        }
+    }
+
+    #[test]
+    fn suggestions_merge_deduplicate_and_keep_special_controls() {
+        let mut pane = NeoismSettingsPane::new();
+        pane.set_descriptors(vec![
+            descriptor(
+                "appearance.fonts.family",
+                ConfigCategory::Appearance,
+                ConfigControl::FontFamily,
+                ConfigValueKind::String,
+                json!(""),
+            ),
+            descriptor(
+                "agent.model",
+                ConfigCategory::Agent,
+                ConfigControl::Select,
+                ConfigValueKind::String,
+                Value::Null,
+            ),
+        ]);
+        pane.set_font_families(vec!["Host Font".into(), "shared".into()]);
+        let font = pane
+            .rows
+            .iter()
+            .position(|row| row.path == "appearance.fonts.family")
+            .unwrap();
+        assert_eq!(
+            pane.dropdown_options(font),
+            vec!["Custom\u{2026}", "Host Font", "runtime", "shared", "static"]
+        );
+        let model = pane
+            .rows
+            .iter()
+            .find(|row| row.path == "agent.model")
+            .unwrap();
+        assert!(matches!(
+            model.control,
+            RowControl::Action {
+                action: "open-model",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn generic_number_editor_emits_owned_persistence_action() {
+        let mut pane = NeoismSettingsPane::new();
+        let mut number = descriptor(
+            "terminal.scroll.multiplier",
+            ConfigCategory::Terminal,
+            ConfigControl::Number,
+            ConfigValueKind::Number,
+            json!(3.0),
+        );
+        number.static_suggestions.clear();
+        number.runtime_suggestions.clear();
+        number.options.clear();
+        pane.set_descriptors(vec![number]);
+        pane.open();
+        pane.control_rects.push(([0.0, 0.0, 20.0, 20.0], 0));
+        pane.pointer_down(5.0, 5.0);
+        pane.edit_buffer.clear();
+        pane.input_char('4');
+        pane.input_char('.');
+        pane.input_char('5');
+        assert_eq!(
+            pane.commit_edit(),
+            Some(SettingsAction::Set {
+                key: "terminal.scroll.multiplier".to_string(),
+                value: json!(4.5),
+            })
+        );
+    }
+
+    #[test]
+    fn number_presets_keep_typed_values_and_use_a_picker() {
+        let mut number = descriptor(
+            "appearance.fonts.size",
+            ConfigCategory::Appearance,
+            ConfigControl::Number,
+            ConfigValueKind::Number,
+            json!(14.0),
+        );
+        number.static_suggestions.clear();
+        number.runtime_suggestions.clear();
+        number.options = vec![ConfigOption {
+            value: json!(16.5),
+            label: Some("Large".into()),
+            description: None,
+        }];
+        let row = SettingRow::from_descriptor(number);
+        assert_eq!(row.control, RowControl::Select);
+        assert_eq!(row.options[0].value, json!(16.5));
+    }
 }

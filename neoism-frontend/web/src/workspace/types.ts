@@ -832,9 +832,61 @@ export type CrdtServerMessage =
 
 export type ConfigClientMessage =
   | "GetConfig"
+  | "GetConfigSchema"
+  | "GetConfigDocument"
+  | "EnsureConfigDocument"
   | "ListExtensions"
+  | { SaveConfigDocument: { content: string; expected_revision: string } }
   | { SetSetting: { key: string; value: unknown } }
   | { SetKeybind: { action: string; key: string; with: string } };
+
+export interface ConfigDocument {
+  content: string;
+  display_path: string;
+  revision: string;
+  writable: boolean;
+}
+
+export interface ConfigDescriptor {
+  path: string;
+  label: string;
+  description: string;
+  value_kind: "boolean" | "integer" | "number" | "string" | "array" | "object";
+  default: unknown;
+  static_suggestions: string[];
+  runtime_suggestions: string[];
+  options: ConfigOption[];
+  provider?:
+    | "system_fonts"
+    | "ide_themes"
+    | "terminal_palettes"
+    | "mashup_packs"
+    | "shells"
+    | "executables"
+    | "agent_names"
+    | "provider_ids"
+    | "models"
+    | "lsp_adapters"
+    | null;
+  constraints: {
+    min?: number | null;
+    max?: number | null;
+    step?: number | null;
+    unit?: string | null;
+    placeholder?: string | null;
+    nullable: boolean;
+  };
+  accepted_kinds: ConfigDescriptor["value_kind"][];
+  extensible: boolean;
+  category: string;
+  control: { kind: string } | string;
+}
+
+export interface ConfigOption {
+  value: unknown;
+  label?: string | null;
+  description?: string | null;
+}
 
 export type ExtensionStatusSummary =
   | "not_installed"
@@ -860,6 +912,9 @@ export interface ExtensionSummary {
 
 export type ConfigServerMessage =
   | { Config: { value: unknown } }
+  | { ConfigSchema: { descriptors: ConfigDescriptor[] } }
+  | { ConfigDocument: { document: ConfigDocument } }
+  | { ConfigDocumentSaved: { document: ConfigDocument } }
   | { SettingWritten: { key: string } }
   | { KeybindWritten: { action: string } }
   | { Extensions: { entries: ExtensionSummary[] } }

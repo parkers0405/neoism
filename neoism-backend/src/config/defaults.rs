@@ -229,14 +229,15 @@ pub fn default_config_file_content() -> String {
     // `//` comments and trailing commas below are legal. Every key is
     // commented out — uncomment and edit what you want; anything you omit
     // uses its default. The examples show the common knobs; the full
-    // reference lives in the in-app docs (Alt+N → Default → Getting
-    // Started → Configuration).
+    // reference lives in the in-app docs; Alt+, opens this file with
+    // built-in completion for keys and host-specific values.
     String::from(
         r##"// Neoism configuration — JSONC (// comments and trailing commas are fine).
 // One file, shared by the terminal and the agent. Settings are grouped by
 // domain: uncomment a block and edit the keys you want; anything omitted
-// uses its default. Full reference:
-// press Alt+N → Default vault → Welcome → Getting Started → Configure Neoism.
+// uses its default. Press Alt+, to reopen this file. Completion lists every
+// supported key plus values available on this host (fonts, agents, LSPs, etc.).
+// Full reference: Alt+N → Default → Welcome → Getting Started → Configure Neoism.
 {
     // ── [appearance] — theming + typography ───────────────────────
     // "appearance": {

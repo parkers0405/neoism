@@ -923,7 +923,7 @@ pub(crate) async fn handle_socket(
                             } else {
                                 root.join(path)
                             };
-                            let file = match file.canonicalize() {
+                            let file = match crate::path::canonicalize(&file) {
                                 Ok(file) if file.starts_with(&root) => file,
                                 Ok(file) => {
                                     let resp = EditorServerMessage::Error {
@@ -975,9 +975,7 @@ pub(crate) async fn handle_socket(
                             // + status walk build the LspSnapshot on a
                             // blocking task so a cold server spawn can't
                             // stall PTY forwarding behind a keystroke sync.
-                            crate::language_server::queue_buffer_sync(
-                                &root, &file, text,
-                            );
+                            crate::language_server::queue_buffer_sync(&root, &file, text);
                             {
                                 let root = root.clone();
                                 let tx = editor_query_tx.clone();
@@ -987,12 +985,11 @@ pub(crate) async fn handle_socket(
                                             &root, &file, surface_id,
                                         )
                                     {
-                                        let _ = tx.send(
-                                            ServiceServerMessage::EditorReply {
+                                        let _ =
+                                            tx.send(ServiceServerMessage::EditorReply {
                                                 request_id,
                                                 message,
-                                            },
-                                        );
+                                            });
                                     }
                                 });
                             }
@@ -1172,7 +1169,7 @@ pub(crate) async fn handle_socket(
                             } else {
                                 root.join(path)
                             };
-                            if let Ok(file) = file.canonicalize() {
+                            if let Ok(file) = crate::path::canonicalize(&file) {
                                 if file.starts_with(&root) {
                                     let root = root.clone();
                                     tokio::task::spawn_blocking(move || {
@@ -1680,10 +1677,9 @@ mod highlight_tests {
 
     #[test]
     fn unknown_file_type_has_no_grammar() {
-        assert!(highlight_spans_for(
-            std::path::Path::new("notes.unknownext"),
-            "hello",
-        )
-        .is_none());
+        assert!(
+            highlight_spans_for(std::path::Path::new("notes.unknownext"), "hello",)
+                .is_none()
+        );
     }
 }

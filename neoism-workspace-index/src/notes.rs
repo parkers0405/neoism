@@ -848,8 +848,7 @@ fn component_name(component: Component<'_>) -> Option<String> {
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
-    a.canonicalize().unwrap_or_else(|_| a.to_path_buf())
-        == b.canonicalize().unwrap_or_else(|_| b.to_path_buf())
+    crate::path::canonicalize_lossy(a) == crate::path::canonicalize_lossy(b)
 }
 
 fn hash_source(source: &str) -> u64 {

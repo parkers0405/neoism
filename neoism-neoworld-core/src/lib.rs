@@ -532,10 +532,7 @@ impl PetState {
         } else if !self.grabbed
             && self.mode == PetMode::Critter
             && grounded
-            && !matches!(
-                self.activity,
-                CritterActivity::Rest | CritterActivity::Sulk
-            )
+            && !matches!(self.activity, CritterActivity::Rest | CritterActivity::Sulk)
         {
             self.moment_cooldown -= dt;
             if self.moment_cooldown <= 0.0 {
@@ -677,12 +674,19 @@ impl PetState {
         let grumpy = (temperament == Temperament::Grumpy) as u16;
         let dramatic = (temperament == Temperament::Dramatic) as u16;
         self.weighted_flavor(&[
-            (0, 42 + tiredness / 14),                 // stroll
-            (1, 8 + grumpy * 20 + dramatic * 6),      // march
-            (2, 6 + excitement / 40 + playful * 12),  // skip
-            (3, 7 + grumpy * 5),                      // sneak
-            (4, 3 + excitement / 90 + dramatic * 8),  // moonwalk
-            (5, if tiredness >= 650 { 0 } else { 2 + excitement / 24 + playful * 12 }), // zoomies
+            (0, 42 + tiredness / 14),                // stroll
+            (1, 8 + grumpy * 20 + dramatic * 6),     // march
+            (2, 6 + excitement / 40 + playful * 12), // skip
+            (3, 7 + grumpy * 5),                     // sneak
+            (4, 3 + excitement / 90 + dramatic * 8), // moonwalk
+            (
+                5,
+                if tiredness >= 650 {
+                    0
+                } else {
+                    2 + excitement / 24 + playful * 12
+                },
+            ), // zoomies
         ])
     }
 
@@ -690,7 +694,7 @@ impl PetState {
         let grumpy = (self.temperament() == Temperament::Grumpy) as u16;
         let irritation = self.emotions.irritation;
         self.weighted_flavor(&[
-            (0, 55),                            // fume
+            (0, 55),                                 // fume
             (1, 20 + grumpy * 22 + irritation / 40), // kick the ground
         ])
     }
@@ -703,11 +707,11 @@ impl PetState {
         let dramatic = (self.temperament() == Temperament::Dramatic) as u16;
         let greenhouse = (self.room_plan().style == RoomStyle::Greenhouse) as u16;
         let choice = self.weighted_flavor(&[
-            (0, 130),                                    // nothing this time
-            (1, 10 + greenhouse * 10),                   // sneeze
-            (2, 8),                                      // shiver
-            (3, 9),                                      // hiccup
-            (4, 6 + self.emotions.loneliness / 50),      // stare at the viewer
+            (0, 130),                                         // nothing this time
+            (1, 10 + greenhouse * 10),                        // sneeze
+            (2, 8),                                           // shiver
+            (3, 9),                                           // hiccup
+            (4, 6 + self.emotions.loneliness / 50),           // stare at the viewer
             (5, if walking { 8 + dramatic * 16 } else { 0 }), // trip
         ]);
         let (moment, duration) = match choice {
@@ -763,11 +767,8 @@ impl PetState {
             _ => 0,
         };
         if self.activity == CritterActivity::Wander && self.flavor == 5 {
-            self.emotions.excitement = self
-                .emotions
-                .excitement
-                .saturating_add(70)
-                .min(EMOTION_MAX);
+            self.emotions.excitement =
+                self.emotions.excitement.saturating_add(70).min(EMOTION_MAX);
         }
         self.activity_seconds = 0.0;
         let variation = (self.next_random() % 180) as f32 / 100.0;
@@ -845,13 +846,13 @@ impl PetState {
                 (4, 6 + excitement / 40 + playful * 10), // spin
             ]),
             CritterActivity::Exercise => self.weighted_flavor(&[
-                (0, 38),                                 // boxing
-                (1, 14),                                 // pushups
-                (2, 12),                                 // squats
+                (0, 38),                                  // boxing
+                (1, 14),                                  // pushups
+                (2, 12),                                  // squats
                 (3, 10 + excitement / 40 + playful * 12), // jump rope
             ]),
             CritterActivity::Tinker => self.weighted_flavor(&[
-                (0, 50),                     // hammer away
+                (0, 50),                                // hammer away
                 (1, 24 + gentle * 16 + tiredness / 24), // read instead
             ]),
             CritterActivity::Observe => match station.kind {
@@ -860,8 +861,8 @@ impl PetState {
                     (1, 30 + gentle * 18), // water the plant
                 ]),
                 StationKind::Window => self.weighted_flavor(&[
-                    (0, 40),                     // gaze
-                    (2, 28 + excitement / 40),   // bird watch
+                    (0, 40),                   // gaze
+                    (2, 28 + excitement / 40), // bird watch
                 ]),
                 _ => 0,
             },

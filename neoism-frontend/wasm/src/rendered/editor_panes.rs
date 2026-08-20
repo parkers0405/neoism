@@ -63,11 +63,7 @@ thread_local! {
 /// intents (grep hits / Project Problems rows) both land the caret
 /// through this one mechanism once the host routes the fetched file
 /// back in.
-pub(crate) fn arm_editor_pending_goto(
-    path: std::path::PathBuf,
-    line: usize,
-    col: usize,
-) {
+pub(crate) fn arm_editor_pending_goto(path: std::path::PathBuf, line: usize, col: usize) {
     EDITOR_LSP_PENDING_GOTO.with(|cell| *cell.borrow_mut() = Some((path, line, col)));
 }
 
@@ -108,18 +104,19 @@ fn editor_lsp_wire_message(
         EditorClientMessage as Wire, EditorLspAction as Action, EditorLspCodeAction,
     };
     use neoism_ui::services::LspRequest;
-    let query = |seq, action, path: std::path::PathBuf, line, character, text, open: bool| {
-        Wire::LspQueryAt {
-            seq,
-            action,
-            open_paths: if open { vec![path.clone()] } else { Vec::new() },
-            path,
-            line,
-            character,
-            text,
-            surface_id: None,
-        }
-    };
+    let query =
+        |seq, action, path: std::path::PathBuf, line, character, text, open: bool| {
+            Wire::LspQueryAt {
+                seq,
+                action,
+                open_paths: if open { vec![path.clone()] } else { Vec::new() },
+                path,
+                line,
+                character,
+                text,
+                surface_id: None,
+            }
+        };
     Some(match request {
         LspRequest::Sync { path, text, .. } => Wire::OpenBuffer {
             path,
@@ -137,7 +134,15 @@ fn editor_lsp_wire_message(
             character,
             trigger,
             seq,
-        } => query(seq, Action::Completion, path, line, character, trigger, false),
+        } => query(
+            seq,
+            Action::Completion,
+            path,
+            line,
+            character,
+            trigger,
+            false,
+        ),
         LspRequest::Hover {
             path,
             line,
@@ -149,7 +154,15 @@ fn editor_lsp_wire_message(
             line,
             character,
             seq,
-        } => query(seq, Action::SignatureHelp, path, line, character, None, false),
+        } => query(
+            seq,
+            Action::SignatureHelp,
+            path,
+            line,
+            character,
+            None,
+            false,
+        ),
         LspRequest::Definition {
             path,
             line,
@@ -393,9 +406,7 @@ impl ChromeBridge {
     /// for the SAME path keeps live pane state (cursor, undo, unsaved
     /// edits) across tab round-trips.
     pub fn editor_open_file(&mut self, tab_index: u32, path: &str, text: &str) -> String {
-        let kind = self
-            .chrome
-            .open_editor_file(tab_index as usize, path, text);
+        let kind = self.chrome.open_editor_file(tab_index as usize, path, text);
         if kind == EditorPaneKind::Code {
             // Lazy LSP backend install: every code pane passes through
             // here, and the service is a stateless shim.
@@ -433,6 +444,18 @@ impl ChromeBridge {
         .to_string()
     }
 
+    /// Install the connected daemon's canonical config schema and runtime
+    /// suggestions for the host-config virtual document.
+    pub fn editor_set_config_descriptors(&mut self, json: &str) -> bool {
+        let Ok(descriptors) =
+            serde_json::from_str::<Vec<neoism_protocol::config::ConfigDescriptor>>(json)
+        else {
+            return false;
+        };
+        self.chrome.code_lsp.set_config_descriptors(descriptors);
+        true
+    }
+
     /// Register the JS callback that ships one serialized
     /// `EditorClientMessage` (LSP request) over the daemon websocket.
     pub fn set_editor_lsp_request(&mut self, cb: js_sys::Function) {
@@ -450,8 +473,8 @@ impl ChromeBridge {
     /// calls this after `editor_key` and after `editor_lsp_reply`.
     pub fn editor_lsp_host_actions(&mut self) -> Option<String> {
         self.drain_code_lsp_events();
-        let drained = EDITOR_LSP_HOST_ACTIONS
-            .with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+        let drained =
+            EDITOR_LSP_HOST_ACTIONS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
         if drained.is_empty() {
             return None;
         }
@@ -597,15 +620,16 @@ impl ChromeBridge {
             return false;
         };
         let rect = self.chrome.layout().terminal;
-        if !(x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h)
-        {
+        if !(x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) {
             return false;
         }
         // A press in the buffer returns chrome focus to the content
         // surface (otherwise a focused tree keeps eating j/k).
         self.chrome.focus_content_surface();
         match kind {
-            EditorPaneKind::Code => self.code_pointer_down(x, y, shift, ctrl, click_count),
+            EditorPaneKind::Code => {
+                self.code_pointer_down(x, y, shift, ctrl, click_count)
+            }
             EditorPaneKind::Notebook => self.notebook_pointer_down(x, y),
             EditorPaneKind::Draw => {
                 let Some(pane) = self.chrome.draw_pane_mut() else {
@@ -704,8 +728,7 @@ impl ChromeBridge {
             return false;
         };
         let rect = self.chrome.layout().terminal;
-        if !(x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h)
-        {
+        if !(x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) {
             return false;
         }
         let viewport_h = rect.h.max(1.0);
@@ -752,18 +775,16 @@ impl ChromeBridge {
     /// Whether the active hosted editor pane has unsaved changes.
     pub fn editor_dirty(&self) -> bool {
         match self.chrome.active_editor_pane_kind() {
-            Some(EditorPaneKind::Code) => self
-                .chrome
-                .code_pane()
-                .is_some_and(|pane| pane.is_dirty()),
+            Some(EditorPaneKind::Code) => {
+                self.chrome.code_pane().is_some_and(|pane| pane.is_dirty())
+            }
             Some(EditorPaneKind::Notebook) => self
                 .chrome
                 .notebook_pane()
                 .is_some_and(|pane| pane.is_dirty()),
-            Some(EditorPaneKind::Draw) => self
-                .chrome
-                .draw_pane()
-                .is_some_and(|pane| pane.is_dirty()),
+            Some(EditorPaneKind::Draw) => {
+                self.chrome.draw_pane().is_some_and(|pane| pane.is_dirty())
+            }
             None => false,
         }
     }
@@ -1296,10 +1317,7 @@ impl ChromeBridge {
                         filter_text: item.filter_text.clone(),
                         sort_text: item.sort_text.clone(),
                         preselect: item.preselect,
-                        payload: item
-                            .payload
-                            .clone()
-                            .unwrap_or(serde_json::Value::Null),
+                        payload: item.payload.clone().unwrap_or(serde_json::Value::Null),
                     })
                     .collect();
                 session.on_completion_result(pane, *seq, &session_path, data)
@@ -1436,13 +1454,15 @@ impl ChromeBridge {
         if !action_open && !completion_open {
             return false;
         }
-        let move_selection = |delta: isize, session: &mut neoism_ui::editor::code::lsp_session::CodeLspUi| {
-            if action_open {
-                session.move_action_selection(delta);
-            } else {
-                session.move_completion_selection(delta);
-            }
-        };
+        let move_selection =
+            |delta: isize,
+             session: &mut neoism_ui::editor::code::lsp_session::CodeLspUi| {
+                if action_open {
+                    session.move_action_selection(delta);
+                } else {
+                    session.move_completion_selection(delta);
+                }
+            };
         match key {
             "ArrowDown" => {
                 move_selection(1, &mut self.chrome.code_lsp);
@@ -1996,11 +2016,7 @@ impl ChromeBridge {
                         } else {
                             let cursor = pane.buffer.cursor();
                             session.dismiss_popups();
-                            session.request_definition_at(
-                                pane,
-                                cursor.line,
-                                cursor.col,
-                            );
+                            session.request_definition_at(pane, cursor.line, cursor.col);
                         }
                     }
                     return true;
@@ -2026,7 +2042,11 @@ impl ChromeBridge {
                         let extend = pane.buffer.mode == CodeMode::Visual;
                         if !pane.move_cursor_vertical_visual(down, extend) {
                             pane.buffer.apply_motion(
-                                if down { CodeMotion::Down } else { CodeMotion::Up },
+                                if down {
+                                    CodeMotion::Down
+                                } else {
+                                    CodeMotion::Up
+                                },
                                 extend,
                             );
                         }
@@ -2181,8 +2201,7 @@ impl ChromeBridge {
         };
         // Scrollbar first refusal: thumb press starts a 1:1 drag,
         // track press jumps a viewport toward the click.
-        if let (Some(track), Some(thumb)) = (pane.scrollbar_track, pane.scrollbar_thumb)
-        {
+        if let (Some(track), Some(thumb)) = (pane.scrollbar_track, pane.scrollbar_thumb) {
             let in_track = x >= track[0] - 4.0
                 && x <= track[0] + track[2] + 4.0
                 && y >= track[1]
@@ -2229,12 +2248,11 @@ impl ChromeBridge {
                 session.request_definition_at(pane, line, col);
             } else {
                 session.dismiss_popups();
-                let over_diagnostic =
-                    pane.diagnostics.get(&line).is_some_and(|spans| {
-                        spans.iter().any(|d| {
-                            col >= d.start && col < d.end && !d.message.is_empty()
-                        })
-                    });
+                let over_diagnostic = pane.diagnostics.get(&line).is_some_and(|spans| {
+                    spans
+                        .iter()
+                        .any(|d| col >= d.start && col < d.end && !d.message.is_empty())
+                });
                 if over_diagnostic {
                     session.show_diagnostic_card_at(pane, line, col);
                 }

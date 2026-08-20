@@ -22,7 +22,12 @@ use neoism_terminal_core::handler::Processor;
 use neoism_terminal_core::{Crosswords, TerminalEffect, TerminalId};
 
 fn new_terminal() -> Crosswords {
-    Crosswords::new((24usize, 80usize), CursorShape::Block, TerminalId::new(0), 100)
+    Crosswords::new(
+        (24usize, 80usize),
+        CursorShape::Block,
+        TerminalId::new(0),
+        100,
+    )
 }
 
 /// Seed fg/bg (and palette slot 5) the way a host seeds its resolved

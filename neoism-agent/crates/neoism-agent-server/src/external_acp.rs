@@ -442,7 +442,7 @@ fn spawn_waiter(
 }
 
 pub(crate) fn normalize_existing_dir(path: &Path) -> std::io::Result<PathBuf> {
-    let path = path.canonicalize()?;
+    let path = crate::windows_process::canonicalize_path(path)?;
     if path.is_dir() {
         Ok(path)
     } else {
@@ -472,10 +472,11 @@ pub(crate) fn workspace_path(
         });
     }
 
-    let root = cwd.canonicalize().map_err(|err| AcpRpcError {
-        code: -32000,
-        message: format!("Could not resolve workspace {}: {err}", cwd.display()),
-    })?;
+    let root =
+        crate::windows_process::canonicalize_path(cwd).map_err(|err| AcpRpcError {
+            code: -32000,
+            message: format!("Could not resolve workspace {}: {err}", cwd.display()),
+        })?;
     let existing_ancestor = nearest_existing_ancestor(
         path.parent().unwrap_or(path.as_path()),
     )
@@ -483,16 +484,14 @@ pub(crate) fn workspace_path(
         code: -32000,
         message: format!("Could not resolve parent for {}", path.display()),
     })?;
-    let existing_ancestor =
-        existing_ancestor
-            .canonicalize()
-            .map_err(|err| AcpRpcError {
-                code: -32000,
-                message: format!(
-                    "Could not resolve ancestor {}: {err}",
-                    existing_ancestor.display()
-                ),
-            })?;
+    let existing_ancestor = crate::windows_process::canonicalize_path(&existing_ancestor)
+        .map_err(|err| AcpRpcError {
+            code: -32000,
+            message: format!(
+                "Could not resolve ancestor {}: {err}",
+                existing_ancestor.display()
+            ),
+        })?;
     if !existing_ancestor.starts_with(&root) {
         return Err(AcpRpcError {
             code: -32000,
@@ -839,14 +838,21 @@ fn acp_exit_signal(_status: &std::process::ExitStatus) -> Option<String> {
 }
 
 fn normalize_terminal_cwd(workspace: &Path, cwd: &Path) -> Result<PathBuf, AcpRpcError> {
-    let cwd = cwd.canonicalize().map_err(|err| AcpRpcError {
-        code: -32000,
-        message: format!("Could not resolve terminal cwd {}: {err}", cwd.display()),
-    })?;
-    let workspace = workspace.canonicalize().map_err(|err| AcpRpcError {
-        code: -32000,
-        message: format!("Could not resolve workspace {}: {err}", workspace.display()),
-    })?;
+    let cwd =
+        crate::windows_process::canonicalize_path(cwd).map_err(|err| AcpRpcError {
+            code: -32000,
+            message: format!("Could not resolve terminal cwd {}: {err}", cwd.display()),
+        })?;
+    let workspace =
+        crate::windows_process::canonicalize_path(workspace).map_err(|err| {
+            AcpRpcError {
+                code: -32000,
+                message: format!(
+                    "Could not resolve workspace {}: {err}",
+                    workspace.display()
+                ),
+            }
+        })?;
     if cwd.starts_with(&workspace) {
         Ok(cwd)
     } else {

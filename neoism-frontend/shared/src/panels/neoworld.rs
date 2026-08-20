@@ -1,6 +1,6 @@
 use neoism_neoworld_core::{
-    CritterStyle, Moment, PetId, PetState, RoomStyle, SimulationEvents, StationKind, Vec2,
-    WORLD_FLOOR, WORLD_HEIGHT, WORLD_WIDTH,
+    CritterStyle, Moment, PetId, PetState, RoomStyle, SimulationEvents, StationKind,
+    Vec2, WORLD_FLOOR, WORLD_HEIGHT, WORLD_WIDTH,
 };
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;

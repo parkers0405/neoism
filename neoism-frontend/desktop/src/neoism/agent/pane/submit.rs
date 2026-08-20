@@ -117,6 +117,9 @@ impl NeoismAgentPane {
         // For a fresh run, show activity immediately. During an active run,
         // keep the current state and show the queued-message line instead.
         if !was_streaming {
+            if let Some(session_id) = self.session_id.as_ref() {
+                self.terminal_idle_sessions.remove(session_id);
+            }
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
         // `expanded` may contain a large paste. Reuse the expansion already
@@ -148,6 +151,9 @@ impl NeoismAgentPane {
         if !was_streaming {
             self.messages.push(NeoismAgentMessage::user(prompt.clone()));
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
+            if let Some(session_id) = self.session_id.as_ref() {
+                self.terminal_idle_sessions.remove(session_id);
+            }
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
         self.abort_requested_at = None;

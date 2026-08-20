@@ -79,9 +79,26 @@ pub(crate) async fn session_create(
         permission: None,
         workspace_id: None,
     });
+    let directory = resolve_directory(query.directory, &headers);
+    Ok(Json(
+        create_session_in_directory(&state, &directory, request, BTreeMap::new()).await?,
+    ))
+}
+
+pub(crate) async fn create_session_in_directory(
+    state: &AppState,
+    directory: &str,
+    request: CreateSessionRequest,
+    extra: BTreeMap<String, Value>,
+) -> Result<SessionInfo, ApiError> {
     let now = now_millis();
     let id = neoism_agent_core::new_session_id();
-    let project_context = project::discover(resolve_directory(query.directory, &headers));
+    let directory = crate::windows_process::canonicalize_path(FsPath::new(directory))
+        .map_err(|error| ApiError::bad_request(format!("workflow directory is not accessible: {error}")))?;
+    if !directory.is_dir() {
+        return Err(ApiError::bad_request("workflow directory is not a directory"));
+    }
+    let project_context = project::discover(directory);
     let directory = project_context.directory.clone();
     let loaded_config = config::load(&directory)?;
     let agents = AgentCatalog::from_config(&loaded_config.info);
@@ -118,7 +135,7 @@ pub(crate) async fn session_create(
             archived: None,
         },
         permission: request.permission,
-        extra: BTreeMap::new(),
+        extra,
     };
 
     state.inner.store.insert_session(&info).await?;
@@ -126,7 +143,7 @@ pub(crate) async fn session_create(
         event_type::SESSION_CREATED,
         json!({ "sessionID": id, "info": info }),
     ));
-    Ok(Json(info))
+    Ok(info)
 }
 
 pub(crate) async fn session_get(
@@ -253,12 +270,13 @@ fn resolve_session_directory(
     } else {
         PathBuf::from(current).join(expanded)
     };
-    let canonical = candidate.canonicalize().map_err(|error| {
-        ApiError::bad_request(format!(
-            "directory {} is not accessible: {error}",
-            candidate.display()
-        ))
-    })?;
+    let canonical =
+        crate::windows_process::canonicalize_path(&candidate).map_err(|error| {
+            ApiError::bad_request(format!(
+                "directory {} is not accessible: {error}",
+                candidate.display()
+            ))
+        })?;
     if !canonical.is_dir() {
         return Err(ApiError::bad_request(format!(
             "{} is not a directory",
@@ -358,9 +376,7 @@ fn fff_directory_options(
 }
 
 fn push_directory_option(options: &mut Vec<String>, path: &FsPath) {
-    let path = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
+    let path = crate::windows_process::canonicalize_path_lossy(path)
         .to_string_lossy()
         .to_string();
     if !path.is_empty() && !options.iter().any(|existing| existing == &path) {

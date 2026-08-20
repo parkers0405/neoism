@@ -576,8 +576,7 @@ fn slash_help_renders_the_desktop_command_sheet_locally() {
         .messages
         .iter()
         .find(|message| {
-            message.kind == NeoismAgentMessageKind::System
-                && message.title == "Commands"
+            message.kind == NeoismAgentMessageKind::System && message.title == "Commands"
         })
         .expect("help must land as a local system message");
     for option in crate::panels::agent_pane::command_controller::slash_options() {
@@ -659,20 +658,16 @@ fn slash_goal_surfaces_wire_gap_instead_of_inventing_protocol() {
     let mut pane = NeoismAgentPane::default();
     pane.execute_slash_text("/goal ship it");
     assert!(pane.drain_pending_outbound().is_empty());
-    assert!(pane
-        .messages
-        .iter()
-        .any(|message| message.title == "Goal"
-            && message.text.contains("no session has started yet")));
+    assert!(pane.messages.iter().any(|message| message.title == "Goal"
+        && message.text.contains("no session has started yet")));
 
     pane.set_session_id(Some("sess-1".to_string()));
     pane.execute_slash_text("/goal");
     assert!(pane.drain_pending_outbound().is_empty());
-    assert!(pane
-        .messages
-        .iter()
-        .any(|message| message.title == "Goal"
-            && message.text.contains("aren't available over this connection")));
+    assert!(pane.messages.iter().any(|message| message.title == "Goal"
+        && message
+            .text
+            .contains("aren't available over this connection")));
 }
 
 #[test]
@@ -805,7 +800,10 @@ fn main_agent_verb_wins_while_it_streams_over_running_subagents() {
     // is responding): its own verb always wins over the aggregate
     // sub-agents label while it is actively streaming.
     pane.note_streaming(NeoismAgentStreamingState::Generating, None);
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::Generating
+    );
     assert_eq!(pane.streaming_label(), "Crafting");
     pane.note_streaming(NeoismAgentStreamingState::Thinking, None);
     assert_eq!(pane.streaming_label(), "Pondering");
@@ -837,7 +835,10 @@ fn transient_idle_gap_keeps_status_label_and_row() {
     assert_eq!(pane.streaming_label(), "Crafting");
 
     pane.note_streaming(NeoismAgentStreamingState::Idle, None); // gap opens
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::Generating
+    );
     assert_eq!(pane.streaming_label(), "Crafting");
     assert!(pane.has_status_activity(), "status row must stay reserved");
     assert!(pane.streaming_elapsed_seconds().is_some());
@@ -848,7 +849,10 @@ fn transient_idle_gap_keeps_status_label_and_row() {
     );
 
     pane.note_streaming(NeoismAgentStreamingState::Generating, None); // gap closes
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::Generating
+    );
 
     // Sub-agents gap: a child's idle edge zeroes the active count for a
     // beat before the next lifecycle event re-raises it.
@@ -943,14 +947,20 @@ fn viewed_child_shows_its_own_verb_not_the_sibling_aggregate() {
     // While the viewed child streams, its own verb is the label even
     // though a sibling is running.
     pane.note_streaming(NeoismAgentStreamingState::Generating, None);
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::Generating
+    );
     assert_eq!(pane.streaming_label(), "Crafting");
 
     // A child view never shows the parent's aggregate label: after its
     // own verb's grace hold expires, the display is Idle even though a
     // sibling is still running.
     pane.note_streaming(NeoismAgentStreamingState::Idle, None);
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::Generating
+    );
     pane.side_panel
         .rewind_status_display_hold(STATUS_LABEL_GRACE);
     assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
@@ -1867,10 +1877,7 @@ fn cached_background_completion_card_survives_park_restore_and_refresh() {
     pane.set_session_id(Some("sess-a".to_string()));
 
     // Completion for a parked session streams into its cache entry…
-    pane.cache_upsert_part_message(
-        "sess-b",
-        client_background_completion_card("job-9"),
-    );
+    pane.cache_upsert_part_message("sess-b", client_background_completion_card("job-9"));
     // …and the background history refresh (server copy not persisted yet)
     // keeps it through the snapshot merge.
     pane.apply_history_to_cache(
@@ -2124,11 +2131,7 @@ fn roster_survives_cached_switch_into_subagent() {
     pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
     // Hydrate the child's cache slot so the switch takes the instant
     // restore path (`activate_cached_session`).
-    pane.apply_history_to_cache(
-        "child-1",
-        vec![NeoismAgentMessage::user("go")],
-        None,
-    );
+    pane.apply_history_to_cache("child-1", vec![NeoismAgentMessage::user("go")], None);
     assert!(pane.cached_session_is_hydrated("child-1"));
 
     pane.switch_session("child-1".to_string());
@@ -2243,11 +2246,7 @@ fn settled_tool_titles_hide_after_subagent_round_trip() {
         }],
     });
 
-    pane.apply_history_to_cache(
-        "child-1",
-        vec![NeoismAgentMessage::user("go")],
-        None,
-    );
+    pane.apply_history_to_cache("child-1", vec![NeoismAgentMessage::user("go")], None);
     pane.switch_session("child-1".to_string());
     pane.switch_session("parent".to_string());
 
@@ -3305,12 +3304,13 @@ fn history_chunk_mid_stream_keeps_optimistic_echo_and_streamed_text() {
 
     // A stale HistoryChunk lands mid-stream: it neither contains the
     // user echo nor the full streamed assistant text.
-    pane.apply_history(vec![NeoismAgentMessage::assistant("streamed").with_id("part-1")]);
+    pane.apply_history(vec![
+        NeoismAgentMessage::assistant("streamed").with_id("part-1")
+    ]);
 
     assert!(
         pane.messages.iter().any(|message| {
-            message.kind == NeoismAgentMessageKind::User
-                && message.text == "do the thing"
+            message.kind == NeoismAgentMessageKind::User && message.text == "do the thing"
         }),
         "optimistic echo dropped: {:?}",
         pane.messages
@@ -3582,12 +3582,13 @@ fn session_cache_park_restore_roundtrip_is_instant() {
         assert!(!parked.timeline_follow_bottom);
         assert!(parked.runtime.is_streaming(), "runtime UI parked too");
     }
-    assert!(!pane.is_streaming(), "runtime UI must not leak across parks");
+    assert!(
+        !pane.is_streaming(),
+        "runtime UI must not leak across parks"
+    );
 
     // Hydrate B so it parks as a distinct conversation.
-    pane.apply_history(vec![
-        NeoismAgentMessage::user("question b").with_id("ub-1")
-    ]);
+    pane.apply_history(vec![NeoismAgentMessage::user("question b").with_id("ub-1")]);
 
     // Switching back restores INSTANTLY — messages/scroll/runtime are
     // present the moment `switch_session` returns, before any
@@ -3643,7 +3644,12 @@ fn background_events_stream_into_session_cache_not_dropped() {
     }
 
     pane.cache_note_session_idle("sess-b");
-    assert!(!pane.session_cache.get("sess-b").unwrap().runtime.is_streaming());
+    assert!(!pane
+        .session_cache
+        .get("sess-b")
+        .unwrap()
+        .runtime
+        .is_streaming());
 
     // Part removal + upsert route to the cache as well.
     pane.cache_upsert_part_message(
@@ -3707,7 +3713,10 @@ fn cold_switch_seeds_from_background_streamed_parts() {
     assert_eq!(pane.session_id.as_deref(), Some("sess-b"));
     assert_eq!(pane.messages.len(), 1, "streamed parts show immediately");
     assert_eq!(pane.messages[0].text, "background answer");
-    assert!(pane.is_streaming(), "cached runtime restored on cold switch");
+    assert!(
+        pane.is_streaming(),
+        "cached runtime restored on cold switch"
+    );
     assert!(
         !pane.session_cache.contains_key("sess-b"),
         "live-only entry consumed by the switch"
@@ -3727,12 +3736,7 @@ fn session_cache_eviction_is_lru_bounded_with_pins() {
     // must be pinned through eviction.
     pane.cache_apply_part_delta("active", Some("p"), Some("text"), "x");
     for index in 0..60 {
-        pane.cache_apply_part_delta(
-            &format!("bg-{index}"),
-            Some("p"),
-            Some("text"),
-            "x",
-        );
+        pane.cache_apply_part_delta(&format!("bg-{index}"), Some("p"), Some("text"), "x");
     }
     assert_eq!(
         pane.session_cache.len(),

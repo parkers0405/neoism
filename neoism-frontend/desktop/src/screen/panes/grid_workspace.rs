@@ -12,11 +12,11 @@ impl Screen<'_> {
         #[cfg(windows)]
         {
             let normalized_cwd =
-                std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+                dunce::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
             let executable_dir = std::env::current_exe()
                 .ok()
                 .and_then(|path| path.parent().map(Path::to_path_buf))
-                .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+                .map(|path| dunce::canonicalize(&path).unwrap_or(path));
             if executable_dir.as_deref() == Some(normalized_cwd.as_path()) {
                 return dirs::home_dir().or(Some(cwd));
             }
@@ -47,7 +47,17 @@ impl Screen<'_> {
     }
 
     pub(crate) fn normalize_workspace_root(path: PathBuf) -> PathBuf {
-        path.canonicalize().unwrap_or(path)
+        // std canonicalization adds a `\\?\` prefix on Windows. Besides
+        // breaking tools, that makes agent session-list directory filtering
+        // disagree with the server's prefix-free canonical path.
+        #[cfg(windows)]
+        {
+            dunce::canonicalize(&path).unwrap_or(path)
+        }
+        #[cfg(not(windows))]
+        {
+            path.canonicalize().unwrap_or(path)
+        }
     }
 
     pub(crate) fn normalize_workspace_dir(path: PathBuf) -> Option<PathBuf> {

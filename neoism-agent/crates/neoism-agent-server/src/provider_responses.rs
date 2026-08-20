@@ -18,6 +18,7 @@ pub(crate) struct ResponsesSseParser {
     reasoning_summary_parts: BTreeSet<String>,
     active_reasoning_item_id: Option<String>,
     tool_calls: BTreeMap<String, ResponsesToolCallState>,
+    emitted_tool_items: BTreeSet<String>,
     tool_call_emitted: bool,
 }
 
@@ -36,6 +37,7 @@ struct ResponsesToolCallState {
     call_id: String,
     name: String,
     arguments: String,
+    input_started: bool,
 }
 
 #[cfg(test)]
@@ -79,6 +81,10 @@ pub(crate) fn responses_request_body_with_text_verbosity(
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
         body["tool_choice"] = Value::String("auto".to_string());
+        // Keep this explicit for Codex OAuth/Responses models. The runtime
+        // already executes same-step calls concurrently, and relying on a
+        // provider default made that capability vary between endpoints.
+        body["parallel_tool_calls"] = Value::Bool(true);
     }
     if let Some(reasoning) = responses_reasoning_options(&model_id, variant) {
         body["reasoning"] = reasoning;
@@ -240,9 +246,7 @@ impl ResponsesSseParser {
                 {
                     for item in output {
                         self.remember_tool_call(item);
-                        if let Some(event) = self.finish_tool_call(item) {
-                            events.push(event);
-                        }
+                        events.extend(self.finish_tool_call(item));
                         events.extend(self.finish_reasoning_item(item));
                     }
                 }
@@ -299,20 +303,21 @@ impl ResponsesSseParser {
                         events.push(event);
                     }
                     self.remember_tool_call(item);
+                    if let Some(event) = self.start_tool_call(item) {
+                        events.push(event);
+                    }
                 }
             }
             "response.function_call_arguments.delta" => {
-                self.append_tool_call_delta(&value);
+                events.extend(self.append_tool_call_delta(&value));
             }
             "response.function_call_arguments.done" | "response.output_item.done" => {
                 if let Some(item) = value.get("item") {
                     self.remember_tool_call(item);
-                    if let Some(event) = self.finish_tool_call(item) {
-                        events.push(event);
-                    }
+                    events.extend(self.finish_tool_call(item));
                     events.extend(self.finish_reasoning_item(item));
-                } else if let Some(event) = self.finish_tool_call_from_value(&value) {
-                    events.push(event);
+                } else {
+                    events.extend(self.finish_tool_call_from_value(&value));
                 }
             }
             _ => {}
@@ -327,6 +332,9 @@ impl ResponsesSseParser {
         let Some(id) = tool_item_id(item) else {
             return;
         };
+        if self.emitted_tool_items.contains(&id) {
+            return;
+        }
         let state = self.tool_calls.entry(id).or_default();
         if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
             state.call_id = call_id.to_string();
@@ -416,35 +424,93 @@ impl ResponsesSseParser {
             .collect()
     }
 
-    fn append_tool_call_delta(&mut self, value: &Value) {
-        let Some(id) = response_tool_call_id(value) else {
-            return;
-        };
-        let Some(delta) = value.get("delta").and_then(Value::as_str) else {
-            return;
-        };
-        self.tool_calls
-            .entry(id)
-            .or_default()
-            .arguments
-            .push_str(delta);
+    fn start_tool_call(&mut self, item: &Value) -> Option<ProviderStreamEvent> {
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            return None;
+        }
+        let id = tool_item_id(item)?;
+        let state = self.tool_calls.get_mut(&id)?;
+        if state.input_started || state.name.is_empty() {
+            return None;
+        }
+        state.input_started = true;
+        Some(ProviderStreamEvent::ToolInputStart {
+            id: tool_stream_id(&id, state),
+            name: state.name.clone(),
+        })
     }
 
-    fn finish_tool_call_from_value(
-        &mut self,
-        value: &Value,
-    ) -> Option<ProviderStreamEvent> {
-        let id = response_tool_call_id(value)?;
+    fn append_tool_call_delta(&mut self, value: &Value) -> Vec<ProviderStreamEvent> {
+        let Some(id) = response_tool_call_id(value) else {
+            return Vec::new();
+        };
+        let Some(delta) = value.get("delta").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let state = self.tool_calls.entry(id.clone()).or_default();
+        state.arguments.push_str(delta);
+        let stream_id = tool_stream_id(&id, state);
+        let mut events = Vec::new();
+        if !state.input_started && !state.name.is_empty() {
+            state.input_started = true;
+            events.push(ProviderStreamEvent::ToolInputStart {
+                id: stream_id.clone(),
+                name: state.name.clone(),
+            });
+        }
+        // Function arguments can be hundreds of kilobytes for a multi-file
+        // patch. Surface every delta so it counts as stream liveness instead
+        // of letting the outer idle watchdog retry a healthy response.
+        events.push(ProviderStreamEvent::ToolInputDelta {
+            id: stream_id,
+            delta: delta.to_string(),
+        });
+        events
+    }
+
+    fn finish_tool_call_from_value(&mut self, value: &Value) -> Vec<ProviderStreamEvent> {
+        let Some(id) = response_tool_call_id(value) else {
+            return Vec::new();
+        };
         if let Some(arguments) = value.get("arguments").and_then(Value::as_str) {
             self.tool_calls.entry(id.clone()).or_default().arguments =
                 arguments.to_string();
         }
-        self.emit_tool_call(id)
+        self.finish_tool_call_id(id)
     }
 
-    fn finish_tool_call(&mut self, item: &Value) -> Option<ProviderStreamEvent> {
-        let id = tool_item_id(item)?;
-        self.emit_tool_call(id)
+    fn finish_tool_call(&mut self, item: &Value) -> Vec<ProviderStreamEvent> {
+        let Some(id) = tool_item_id(item) else {
+            return Vec::new();
+        };
+        self.finish_tool_call_id(id)
+    }
+
+    fn finish_tool_call_id(&mut self, id: String) -> Vec<ProviderStreamEvent> {
+        if self.emitted_tool_items.contains(&id) {
+            return Vec::new();
+        }
+        let Some(state) = self.tool_calls.get_mut(&id) else {
+            return Vec::new();
+        };
+        let stream_id = tool_stream_id(&id, state);
+        let mut events = Vec::new();
+        if !state.input_started && !state.name.is_empty() {
+            state.input_started = true;
+            events.push(ProviderStreamEvent::ToolInputStart {
+                id: stream_id.clone(),
+                name: state.name.clone(),
+            });
+        }
+        if state.input_started {
+            events.push(ProviderStreamEvent::ToolInputEnd { id: stream_id });
+        }
+        let item_id = id.clone();
+        if let Some(event) = self.emit_tool_call(id) {
+            self.emitted_tool_items.insert(item_id);
+            events.push(event);
+        }
+        events
     }
 
     fn emit_tool_call(&mut self, id: String) -> Option<ProviderStreamEvent> {
@@ -463,6 +529,14 @@ impl ResponsesSseParser {
             name: state.name,
             input,
         })
+    }
+}
+
+fn tool_stream_id(item_id: &str, state: &ResponsesToolCallState) -> String {
+    if state.call_id.is_empty() {
+        item_id.to_string()
+    } else {
+        state.call_id.clone()
     }
 }
 

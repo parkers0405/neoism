@@ -40,7 +40,7 @@ pub fn platform_key_bindings(
         "m", ModifiersState::SUPER; Action::Minimize;
         "q", ModifiersState::SUPER; Action::Quit;
         "n", ModifiersState::SUPER; Action::WindowCreateNew;
-        ",", ModifiersState::SUPER; Action::ConfigEditor;
+        ",", ModifiersState::ALT; Action::ConfigEditor;
         "p", ModifiersState::ALT; Action::OpenCommandPalette;
         "p", ModifiersState::SUPER; Action::OpenCommandPalette;
         "p", ModifiersState::SUPER | ModifiersState::SHIFT; Action::OpenCommandPalette;

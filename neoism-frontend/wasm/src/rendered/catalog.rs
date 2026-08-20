@@ -597,7 +597,8 @@ fn map_history(
     m: neoism_protocol::agent::HistoryMessage,
 ) -> neoism_ui::panels::agent_pane::state::NeoismAgentMessage {
     use neoism_ui::panels::agent_pane::state::{
-        NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind, NeoismAgentTodo,
+        NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind,
+        NeoismAgentTodo,
     };
     let kind = map_history_kind(m.kind);
     let output_kind = match kind {

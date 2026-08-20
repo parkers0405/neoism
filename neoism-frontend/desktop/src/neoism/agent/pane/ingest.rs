@@ -188,6 +188,8 @@ impl NeoismAgentPane {
                 }
                 AgentSessionUpdate::SessionIdle => {
                     self.note_session_runtime_event(&stream_session_id);
+                    self.terminal_idle_sessions
+                        .insert(stream_session_id.clone());
                     if stream_is_active {
                         let had_root_activity = self.streaming_state
                             != NeoismAgentStreamingState::Idle
@@ -211,6 +213,7 @@ impl NeoismAgentPane {
                 }
                 AgentSessionUpdate::Retrying { attempt, message } => {
                     self.note_session_runtime_event(&stream_session_id);
+                    self.terminal_idle_sessions.remove(&stream_session_id);
                     if !stream_is_active {
                         let cached = self
                             .session_cache
@@ -239,6 +242,7 @@ impl NeoismAgentPane {
                     started_at,
                 } => {
                     self.note_session_runtime_event(&stream_session_id);
+                    self.terminal_idle_sessions.remove(&stream_session_id);
                     if !stream_is_active {
                         self.session_cache
                             .entry(stream_session_id.clone())
@@ -276,6 +280,7 @@ impl NeoismAgentPane {
                 }
                 AgentSessionUpdate::DequeuedPrompt { text } => {
                     self.note_session_runtime_event(&stream_session_id);
+                    self.terminal_idle_sessions.remove(&stream_session_id);
                     if stream_is_active {
                         changed |= self.insert_dequeued_user_prompt(text);
                     } else {
@@ -333,6 +338,7 @@ impl NeoismAgentPane {
                         self.set_task_message_status(&session_id, "running");
                     } else {
                         self.set_task_message_status(&session_id, status.as_str());
+                        self.reconcile_parent_after_subagent_terminal(&session_id);
                     }
                     self.sync_subagent_waiting_clock();
                     changed = true;
@@ -444,6 +450,7 @@ impl NeoismAgentPane {
                         self.note_subagent_runtime(task_id.clone(), branch_status, None);
                         self.reconcile_viewed_subagent_runtime(&task_id, branch_status);
                         self.set_task_message_status(&task_id, status.as_str());
+                        self.reconcile_parent_after_subagent_terminal(&task_id);
                     }
                     self.sync_subagent_waiting_clock();
                     changed = true;
@@ -512,7 +519,9 @@ impl NeoismAgentPane {
                             .flatten();
                     if stream_is_active {
                         self.apply_part_delta(message_id, part_id, kind, &delta);
-                        if !self.suppress_streaming_after_abort() {
+                        if !self.suppress_streaming_after_abort()
+                            && !self.terminal_idle_sessions.contains(&stream_session_id)
+                        {
                             self.refresh_streaming_from_tail();
                         }
                     } else {
@@ -533,7 +542,9 @@ impl NeoismAgentPane {
                                 reasoning_part_id,
                             );
                         }
-                        cached.runtime.refresh_streaming_from_tail(&cached.messages);
+                        if !self.terminal_idle_sessions.contains(&stream_session_id) {
+                            cached.runtime.refresh_streaming_from_tail(&cached.messages);
+                        }
                         cached.invalidate_timeline_layout();
                     }
                     changed = true;
@@ -553,7 +564,9 @@ impl NeoismAgentPane {
                             parent_message_id.as_deref(),
                         );
                         self.upsert_part_message(message);
-                        if !self.suppress_streaming_after_abort() {
+                        if !self.suppress_streaming_after_abort()
+                            && !self.terminal_idle_sessions.contains(&stream_session_id)
+                        {
                             self.note_streaming_from_part(kind, &title);
                         }
                     } else {
@@ -573,7 +586,9 @@ impl NeoismAgentPane {
                                 &part_id,
                             );
                         }
-                        cached.runtime.refresh_streaming_from_tail(&cached.messages);
+                        if !self.terminal_idle_sessions.contains(&stream_session_id) {
+                            cached.runtime.refresh_streaming_from_tail(&cached.messages);
+                        }
                         cached.invalidate_timeline_layout();
                     }
                     changed = true;
@@ -1293,7 +1308,7 @@ impl NeoismAgentPane {
                     result,
                 }) => {
                     if !self.side_panel.complete_subagent_refresh(generation)
-                        || self.session_id.as_deref() != Some(session_id.as_str())
+                        || !self.session_family_contains(&session_id)
                     {
                         continue;
                     }
@@ -1636,6 +1651,23 @@ impl NeoismAgentPane {
         self.invalidate_timeline_layout();
     }
 
+    pub(crate) fn reveal_ongoing_session_trace(&mut self) {
+        if !self.is_subagent_session() {
+            self.retain_current_turn_trace();
+            return;
+        }
+        // OpenCode's running-child inspector retains every accumulated frame.
+        // Do the same for an ongoing sub-agent, including tools from earlier
+        // resumed turns. Completion leaves this stable for the current visit;
+        // leaving and reopening the settled child restores the clean mask.
+        if self.timeline_live_trace_start == Some(0) {
+            return;
+        }
+        self.timeline_live_trace_anchor = None;
+        self.timeline_live_trace_start = Some(0);
+        self.invalidate_timeline_layout();
+    }
+
     /// Re-derive the live-trace start index from the visit anchor after the
     /// message list was replaced or prepended. Does NOT move the boundary to
     /// the latest turn — earlier turns of this visit keep their trace.
@@ -1936,6 +1968,29 @@ impl NeoismAgentPane {
         self.timeline_live_trace_anchor = None;
     }
 
+    pub(crate) fn live_trace_for_cache(
+        &self,
+        preserve: bool,
+    ) -> (Option<usize>, Option<String>) {
+        if preserve {
+            (
+                self.timeline_live_trace_start,
+                self.timeline_live_trace_anchor.clone(),
+            )
+        } else {
+            (None, None)
+        }
+    }
+
+    pub(crate) fn restore_cached_live_trace(
+        &mut self,
+        start: Option<usize>,
+        anchor: Option<String>,
+    ) {
+        self.timeline_live_trace_start = start;
+        self.timeline_live_trace_anchor = anchor;
+    }
+
     pub(crate) fn trim_session_cache(&mut self) {
         const MAX_CACHED_SESSIONS: usize = 40;
         if self.session_cache.len() <= MAX_CACHED_SESSIONS {
@@ -1963,6 +2018,7 @@ impl NeoismAgentPane {
             };
             self.session_cache.remove(&candidate);
             self.runtime_hydrated_sessions.remove(&candidate);
+            self.terminal_idle_sessions.remove(&candidate);
             self.session_runtime_revisions.remove(&candidate);
             self.runtime_status_requests.remove(&candidate);
             self.session_goal_cache.remove(&candidate);
@@ -2405,6 +2461,5 @@ fn normalize_cached_live_reasoning_order(
 /// user was elsewhere, is exempt from the timeline visibility mask, and
 /// must not drag the whole settled turn back into view with it.
 fn is_background_completion_card(message: &NeoismAgentMessage) -> bool {
-    message.tool == "background_task_result"
-        && message.id.starts_with("background-task-")
+    message.tool == "background_task_result" && message.id.starts_with("background-task-")
 }

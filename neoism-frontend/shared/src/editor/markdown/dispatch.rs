@@ -81,7 +81,9 @@ pub fn parse_browser_markdown_key(key: &str) -> Option<MarkdownDispatchKey<'_>> 
         "PageUp" => MarkdownDispatchKey::Named(PageUp),
         "PageDown" => MarkdownDispatchKey::Named(PageDown),
         " " => MarkdownDispatchKey::Named(Space),
-        _ if key.chars().count() == 1 && !key.chars().next().is_some_and(char::is_control) => {
+        _ if key.chars().count() == 1
+            && !key.chars().next().is_some_and(char::is_control) =>
+        {
             MarkdownDispatchKey::Char(key)
         }
         _ => return None,
@@ -199,10 +201,7 @@ pub fn apply_markdown_vim_feed(
             if let Some(keys) = applied.replay_keys {
                 pane.vim.replaying_macro = true;
                 for ch in keys.chars() {
-                    if !matches!(
-                        pane.mode,
-                        MarkdownMode::Normal | MarkdownMode::Visual
-                    ) {
+                    if !matches!(pane.mode, MarkdownMode::Normal | MarkdownMode::Visual) {
                         break;
                     }
                     let visual = matches!(pane.mode, MarkdownMode::Visual);
@@ -405,14 +404,30 @@ pub fn dispatch_markdown_pane_key(
     // ------ Ctrl-only bindings ---------------------------------------
     if ctrl_only {
         let kind = match key {
-            K::Char(ch) if ch.eq_ignore_ascii_case("d") => Some(MarkdownCtrlKeyKind::CharD),
-            K::Char(ch) if ch.eq_ignore_ascii_case("u") => Some(MarkdownCtrlKeyKind::CharU),
-            K::Char(ch) if ch.eq_ignore_ascii_case("e") => Some(MarkdownCtrlKeyKind::CharE),
-            K::Char(ch) if ch.eq_ignore_ascii_case("y") => Some(MarkdownCtrlKeyKind::CharY),
-            K::Char(ch) if ch.eq_ignore_ascii_case("r") => Some(MarkdownCtrlKeyKind::CharR),
-            K::Char(ch) if ch.eq_ignore_ascii_case("v") => Some(MarkdownCtrlKeyKind::CharV),
-            K::Char(ch) if ch.eq_ignore_ascii_case("o") => Some(MarkdownCtrlKeyKind::CharO),
-            K::Char(ch) if ch.eq_ignore_ascii_case("i") => Some(MarkdownCtrlKeyKind::CharI),
+            K::Char(ch) if ch.eq_ignore_ascii_case("d") => {
+                Some(MarkdownCtrlKeyKind::CharD)
+            }
+            K::Char(ch) if ch.eq_ignore_ascii_case("u") => {
+                Some(MarkdownCtrlKeyKind::CharU)
+            }
+            K::Char(ch) if ch.eq_ignore_ascii_case("e") => {
+                Some(MarkdownCtrlKeyKind::CharE)
+            }
+            K::Char(ch) if ch.eq_ignore_ascii_case("y") => {
+                Some(MarkdownCtrlKeyKind::CharY)
+            }
+            K::Char(ch) if ch.eq_ignore_ascii_case("r") => {
+                Some(MarkdownCtrlKeyKind::CharR)
+            }
+            K::Char(ch) if ch.eq_ignore_ascii_case("v") => {
+                Some(MarkdownCtrlKeyKind::CharV)
+            }
+            K::Char(ch) if ch.eq_ignore_ascii_case("o") => {
+                Some(MarkdownCtrlKeyKind::CharO)
+            }
+            K::Char(ch) if ch.eq_ignore_ascii_case("i") => {
+                Some(MarkdownCtrlKeyKind::CharI)
+            }
             K::Named(N::Tab) => Some(MarkdownCtrlKeyKind::CharI),
             K::Named(N::ArrowUp) => Some(MarkdownCtrlKeyKind::ArrowUp),
             K::Named(N::ArrowDown) => Some(MarkdownCtrlKeyKind::ArrowDown),
@@ -563,8 +578,7 @@ pub fn dispatch_markdown_pane_key(
             K::Named(N::Home) => pane.move_line_start(),
             K::Named(N::End) => pane.move_line_end(),
             K::Named(N::Tab) if plain => {
-                if pane.move_table_cell(mods.shift) || pane.indent_list_item(mods.shift)
-                {
+                if pane.move_table_cell(mods.shift) || pane.indent_list_item(mods.shift) {
                     snap_cursor = true;
                 } else if !mods.shift {
                     pane.insert_text("  ");
@@ -581,8 +595,7 @@ pub fn dispatch_markdown_pane_key(
             // checkbox toggle when no link is under the cursor.
             K::Named(N::Enter) if plain => {
                 fx.open_cursor_link = pane.link_at_cursor();
-                handled =
-                    fx.open_cursor_link.is_some() || pane.toggle_task_at_cursor();
+                handled = fx.open_cursor_link.is_some() || pane.toggle_task_at_cursor();
             }
             K::Named(N::PageUp) => {
                 pane.scroll_by_content_pixels(-(viewport * 0.86), viewport)

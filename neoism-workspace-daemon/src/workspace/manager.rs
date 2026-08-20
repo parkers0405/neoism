@@ -144,7 +144,19 @@ impl WorkspaceManager {
             inner.hosts = bootstrap_hosts();
         }
         inner.host_workspaces.clear();
-        for workspace in snapshot.host_workspaces {
+        for mut workspace in snapshot.host_workspaces {
+            #[cfg(windows)]
+            {
+                workspace.root_dir = workspace
+                    .root_dir
+                    .map(|path| crate::path::canonicalize_lossy(&path));
+                workspace.linked_vault_dir = workspace
+                    .linked_vault_dir
+                    .map(|path| crate::path::canonicalize_lossy(&path));
+                workspace.notes_vault_dir = workspace
+                    .notes_vault_dir
+                    .map(|path| crate::path::canonicalize_lossy(&path));
+            }
             inner
                 .host_workspaces
                 .insert(workspace.id.clone(), workspace);
@@ -187,7 +199,11 @@ impl WorkspaceManager {
             }
         }
         inner.workspaces.clear();
-        for ws in snapshot.workspaces {
+        for mut ws in snapshot.workspaces {
+            #[cfg(windows)]
+            {
+                ws.path = crate::path::canonicalize_lossy(&ws.path);
+            }
             inner.workspaces.insert(ws.id.clone(), ws);
         }
         inner.sessions.clear();
@@ -573,7 +589,7 @@ impl WorkspaceManager {
     /// there, so snapshot-restored restarts stay duplicate-free.
     pub fn declare_startup_workspace(&self, dir: &std::path::Path) -> WorkspaceSummary {
         let _ = std::fs::create_dir_all(dir);
-        let resolved = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let resolved = crate::path::canonicalize_lossy(dir);
         {
             let inner = self.inner.lock();
             if let Some(existing) = inner.host_workspaces.values().find(|workspace| {
@@ -1309,14 +1325,13 @@ impl WorkspaceManager {
     /// host-workspace's `root_dir` → the project root whose sessions
     /// ("tabs") should travel with the move.
     pub fn project_root_for_path(&self, path: &Path) -> Option<ProjectRootSummary> {
-        let canonical =
-            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canonical = crate::path::canonicalize_lossy(path);
         let inner = self.inner.lock();
         inner
             .workspaces
             .values()
             .find(|w| {
-                std::fs::canonicalize(&w.path)
+                crate::path::canonicalize(&w.path)
                     .map(|c| c == canonical)
                     .unwrap_or(w.path == canonical)
             })

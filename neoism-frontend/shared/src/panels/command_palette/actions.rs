@@ -27,6 +27,7 @@ pub enum PaletteAction {
     SelectNextSplit,
     SelectPrevSplit,
     ConfigEditor,
+    OpenSettings,
     WindowCreateNew,
     IncreaseFontSize,
     DecreaseFontSize,
@@ -550,10 +551,8 @@ impl PaletteHostCapabilities {
             draw_notes: false,
             // Web workspaces are daemon-selected, never adopted.
             leave_workspace: false,
-            // The shared settings overlay (`Chrome::open_settings_page`)
-            // is seeded by the web host's daemon config fetch
-            // (`openWebSettingsPage` — the same route the top-bar
-            // hamburger's `open_settings` action takes).
+            // Web supports both the daemon-backed raw config document
+            // and the shared Settings overlay over that same config.
             settings_editor: true,
             // Routed chrome-side to `Chrome::open_neoworld_page_tab`
             // (see the wasm bridge's palette dispatch).
@@ -596,7 +595,7 @@ pub(crate) fn command_visible_for_host(
         | PaletteAction::RunAllNotebookCells => caps.notebook_kernel,
         PaletteAction::DrawOnNote => caps.draw_notes,
         PaletteAction::LeaveWorkspace => caps.leave_workspace,
-        PaletteAction::ConfigEditor => caps.settings_editor,
+        PaletteAction::ConfigEditor | PaletteAction::OpenSettings => caps.settings_editor,
         PaletteAction::OpenNeoWorld => caps.neoworld_page,
         PaletteAction::ToggleMinimap => caps.minimap,
         _ => true,
@@ -673,6 +672,7 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::SelectNextSplit
         | PaletteAction::SelectPrevSplit
         | PaletteAction::ConfigEditor
+        | PaletteAction::OpenSettings
         | PaletteAction::WindowCreateNew
         | PaletteAction::IncreaseFontSize
         | PaletteAction::DecreaseFontSize

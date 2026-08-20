@@ -842,7 +842,12 @@ impl ChromeBridge {
     /// (`[imageN]` / `[pdfN]` / `[fileN: name]` token per the shared
     /// attachment policy); an empty `mime` is sniffed from the
     /// filename. Send happens on the next submit.
-    pub fn agent_attach_file(&mut self, filename: &str, mime: &str, bytes: &[u8]) -> bool {
+    pub fn agent_attach_file(
+        &mut self,
+        filename: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> bool {
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return false;
         };
@@ -999,7 +1004,9 @@ impl ChromeBridge {
         self.agent_state.prompt_history.push(trimmed.to_string());
         let len = self.agent_state.prompt_history.len();
         if len > MAX_PROMPT_HISTORY {
-            self.agent_state.prompt_history.drain(0..len - MAX_PROMPT_HISTORY);
+            self.agent_state
+                .prompt_history
+                .drain(0..len - MAX_PROMPT_HISTORY);
         }
         self.persist_prompt_history();
     }
@@ -1564,10 +1571,7 @@ impl ChromeBridge {
         };
         let shared = match notch_lines {
             Some(y) => ScrollDelta::Lines { x: 0.0, y },
-            None => ScrollDelta::Pixels {
-                x: 0.0,
-                y: delta_y,
-            },
+            None => ScrollDelta::Pixels { x: 0.0, y: delta_y },
         };
         let wheel = agent_timeline_wheel(&shared, LINE_HEIGHT);
         let Some(pane) = self.chrome.agent_pane_mut() else {

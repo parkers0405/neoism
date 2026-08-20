@@ -14,6 +14,7 @@ Linux and Windows generally use `Ctrl` or `Ctrl + Shift`; macOS uses `Cmd` for t
 | `Alt + S` | Search the project (`Ctrl + Shift + F` also works) |
 | `Alt + A` | Open a new agent pane |
 | `Alt + P` | Open the command palette |
+| `Alt + ,` | Open the active host's `config.json` |
 | `Alt + Arrow` | Move focus between panes and side panels |
 | `Alt + Shift + Space` | Toggle Vi mode |
 
@@ -41,7 +42,7 @@ Use `Alt + Shift + Left` / `Right` to move the active tab. macOS also supports `
 | `Ctrl + =` or `Ctrl + +` | `Cmd + =` | Increase font size |
 | `Ctrl + -` | `Cmd + -` | Decrease font size |
 | `Ctrl + 0` | `Cmd + 0` | Reset font size |
-| `Ctrl + Shift + ,` | `Cmd + ,` | Open `config.json` |
+| `Alt + ,` | `Alt + ,` | Open `config.json` |
 
 On macOS, `Cmd + K` clears the terminal screen and `Ctrl + Cmd + F` toggles fullscreen. On Windows, `Alt + Enter` toggles fullscreen.
 
@@ -72,4 +73,4 @@ Bindings live in the `keybinds` domain of `config.json`; there is no separate ke
 
 A binding can use `action` for a Neoism action or `esc` for a raw escape sequence. `mode` can restrict a binding to states such as `vi`, `~vi`, or `appcursor`.
 
-When learning Neoism, remember just five entries: `Alt + P` for everything, `Alt + E` for files, `Alt + N` for notes, `Alt + A` for an agent, and `Alt + Arrow` to move focus.
+When learning Neoism, remember `Alt + P` for everything, `Alt + E` for files, `Alt + N` for notes, `Alt + A` for an agent, `Alt + ,` for configuration, and `Alt + Arrow` to move focus.

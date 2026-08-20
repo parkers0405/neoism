@@ -128,7 +128,9 @@ impl ShareSheet {
         let quiet = 4usize;
         let total_modules = modules + quiet * 2;
         let module_px = if total_modules > 0 {
-            ((vw.min(vh) * 0.42) / total_modules as f32).max(1.0).floor()
+            ((vw.min(vh) * 0.42) / total_modules as f32)
+                .max(1.0)
+                .floor()
         } else {
             0.0
         };
@@ -136,7 +138,11 @@ impl ShareSheet {
 
         let pad = 22.0 * scale;
         let text_h = 20.0 * scale;
-        let hint_h = if self.hint.is_some() { 18.0 * scale } else { 0.0 };
+        let hint_h = if self.hint.is_some() {
+            18.0 * scale
+        } else {
+            0.0
+        };
         let card_w = (qr_px + pad * 2.0).max(280.0 * scale);
         let card_h = qr_px + pad * 2.0 + text_h + hint_h;
         let card_x = vx + (vw - card_w) * 0.5;
@@ -239,12 +245,9 @@ impl ShareSheet {
                 ..DrawOpts::default()
             };
             let w = sugarloaf.text_mut().measure(url, &opts);
-            sugarloaf.text_mut().draw(
-                card_x + (card_w - w) * 0.5,
-                text_y,
-                url,
-                &opts,
-            );
+            sugarloaf
+                .text_mut()
+                .draw(card_x + (card_w - w) * 0.5, text_y, url, &opts);
             text_y += text_h;
         }
         if let Some(hint) = self.hint.as_deref() {
@@ -295,7 +298,11 @@ mod tests {
         assert!(sheet.is_visible());
         let first = sheet.encoded.clone().unwrap();
         sheet.show("http://10.0.0.5:7878/", None);
-        assert_eq!(sheet.encoded.clone().unwrap().1, first.1, "re-encode avoided");
+        assert_eq!(
+            sheet.encoded.clone().unwrap().1,
+            first.1,
+            "re-encode avoided"
+        );
         sheet.hide();
         assert!(!sheet.is_visible());
     }
@@ -326,6 +333,9 @@ mod tests {
         sheet.show("http://x/", None);
         assert!(sheet.handle_click(1.0, 1.0));
         assert!(!sheet.is_visible());
-        assert!(!sheet.handle_click(1.0, 1.0), "hidden sheet consumes nothing");
+        assert!(
+            !sheet.handle_click(1.0, 1.0),
+            "hidden sheet consumes nothing"
+        );
     }
 }

@@ -70,12 +70,16 @@ import type {
 } from "../workspace/types";
 import type { ServiceRegistryBridge } from "../services/ServiceRegistry";
 import {
+  ensureConfigDocument,
   fetchConfig,
+  fetchConfigDocument,
+  fetchConfigSchema,
   fetchExtensions,
   loadStoredNeoworldPet,
   parseSettingsActions,
   persistKeybind,
   persistSetting,
+  saveConfigDocument,
   saveStoredNeoworldPet,
 } from "../services/ConfigService";
 
@@ -115,6 +119,10 @@ interface WebBufferTab {
   path?: string;
   sessionId?: string;
   neoismAgentRouteId?: number;
+  /** Present only for the daemon-hosted config virtual document. */
+  configRevision?: string;
+  configDisplayPath?: string;
+  configWritable?: boolean;
 }
 
 interface PendingTerminalTabSpawn {
@@ -2557,6 +2565,11 @@ export class TerminalPanel {
     if (!adapter?.openSettingsPage) return;
     adapter.openSettingsPage(null);
     this.scheduleDraw();
+    void fetchConfigSchema(this.options.client).then((descriptors) => {
+      if (descriptors.length === 0) return;
+      adapter.setSettingsDescriptors?.(JSON.stringify(descriptors));
+      this.scheduleDraw();
+    });
     void fetchConfig(this.options.client).then((value) => {
       if (value == null) return;
       try {
@@ -2566,6 +2579,57 @@ export class TerminalPanel {
       }
       this.scheduleDraw();
     });
+  }
+
+  /** Open the connected host's config as a native editor document.
+   *  The virtual path keeps it outside workspace file APIs while still
+   *  selecting JSON highlighting and config intelligence. */
+  private openWebConfigDocument(): void {
+    const document = fetchConfigDocument(this.options.client).then(
+      (current) => current ?? ensureConfigDocument(this.options.client),
+    );
+    void Promise.all([fetchConfigSchema(this.options.client), document]).then(
+      ([descriptors, resolvedDocument]) => {
+        if (!resolvedDocument) {
+          this.pushInAppNotification(
+            "Config open failed",
+            "The connected host did not return a config document.",
+            "error",
+          );
+          return;
+        }
+        if (descriptors.length > 0) {
+          this.wasmAdapter?.editorSetConfigDescriptors?.(
+            JSON.stringify(descriptors),
+          );
+        }
+        const path = "neoism://host-config/config.json";
+        let tabIndex = this.bufferTabs.findIndex(
+          (tab) => tab.configDisplayPath !== undefined,
+        );
+        if (tabIndex < 0) {
+          tabIndex = this.bufferTabs.length;
+          this.bufferTabs.push({ title: "config.json", kind: "file", path });
+        }
+        const tab = this.bufferTabs[tabIndex];
+        tab.configRevision = resolvedDocument.revision;
+        tab.configDisplayPath = resolvedDocument.display_path;
+        tab.configWritable = resolvedDocument.writable;
+        this.activeTabIndex = tabIndex;
+        this.assignActiveTabToFocusedEditorPane();
+        this.replayBufferTabs();
+        this.wasmAdapter?.setTabContent?.(
+          tabIndex,
+          resolvedDocument.content,
+          path,
+        );
+        this.wasmAdapter?.editorOpenFile?.(
+          tabIndex,
+          path,
+          resolvedDocument.content,
+        );
+        this.scheduleDraw();
+      });
   }
 
   /** Append (or re-activate) a chrome helper-page tab — the web twin
@@ -2628,9 +2692,10 @@ export class TerminalPanel {
           action.key,
           action.with,
         );
+      } else if (action.kind === "open_config_file") {
+        this.openWebConfigDocument();
       }
-      // "open_config_file" / "run_action" are fully handled inside
-      // the wasm bridge (toast / agent model picker).
+      // "run_action" is handled inside the wasm bridge (agent model picker).
     }
     if (actions.length > 0) this.scheduleDraw();
     const extRaw = adapter.drainExtensionsActions?.() ?? null;
@@ -3217,9 +3282,9 @@ export class TerminalPanel {
         this.toggleGitSidePanel();
         break;
       case "ConfigEditor":
-        // Same route as the top-bar hamburger's `open_settings`
-        // action: open the shared Settings overlay, then seed it
-        // with the daemon host's config.json.
+        this.openWebConfigDocument();
+        break;
+      case "OpenSettings":
         this.openWebSettingsPage();
         break;
       case "CreateNeoismNote":
@@ -3663,6 +3728,7 @@ export class TerminalPanel {
     if (this.activeEditorPaneKind() !== "code") return null;
     const tab = this.bufferTabs[this.activeTabIndex];
     if (tab?.kind !== "file" || !tab.path) return null;
+    if (tab.configRevision !== undefined) return null;
     return presenceBufferIdForPath(tab.path, this.options.workspaceRoot);
   }
 
@@ -3698,6 +3764,43 @@ export class TerminalPanel {
       editorMarkSaved?: (payload: string) => void;
     };
     if (!adapter?.editorRequestSave) return;
+    const configTab = this.bufferTabs[this.activeTabIndex];
+    if (configTab?.configRevision !== undefined) {
+      const payload = adapter.editorSavePayload?.();
+      if (payload == null || !configTab.configWritable) {
+        this.pushInAppNotification(
+          "Not saved",
+          "The connected host config is read-only.",
+          "error",
+        );
+        return;
+      }
+      const expectedRevision = configTab.configRevision;
+      void saveConfigDocument(
+        this.options.client,
+        payload,
+        expectedRevision,
+      ).then((document) => {
+        if (!document) {
+          this.pushInAppNotification(
+            "Config save failed",
+            "The file changed, is invalid JSONC, or is no longer writable. Reopen it and retry.",
+            "error",
+          );
+          return;
+        }
+        configTab.configRevision = document.revision;
+        configTab.configWritable = document.writable;
+        adapter.editorMarkSaved?.(payload);
+        this.pushInAppNotification(
+          "Saved",
+          `Wrote ${document.display_path}`,
+          "info",
+        );
+        this.scheduleDraw();
+      });
+      return;
+    }
     // Bind/flush first so a bound doc includes everything just typed.
     this.pumpCodeCrdt();
     // Format-on-save (code panes with a live LSP backend): the wasm

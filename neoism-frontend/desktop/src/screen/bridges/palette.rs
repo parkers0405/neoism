@@ -822,14 +822,10 @@ impl Screen<'_> {
             }
             PaletteAction::CloseCurrentSplitOrTab => self.close_split_or_tab(clipboard),
             PaletteAction::ConfigEditor => {
-                // Open the active config (config.json, or a legacy
-                // config.toml) as a tab in the nvim editor — create the
-                // default file first if neither exists.
-                let config_path = neoism_backend::config::config_file_path();
-                if !config_path.exists() {
-                    neoism_backend::config::create_config_file(None);
-                }
-                self.open_path_in_editor(config_path);
+                self.open_settings_config_tab();
+            }
+            PaletteAction::OpenSettings => {
+                self.open_settings_panel();
             }
             PaletteAction::WindowCreateNew => {
                 self.context_manager.create_new_window();
@@ -1535,9 +1531,7 @@ fn detach_hosted_daemon(command: &mut std::process::Command) {
     // flag site on this Command, so combining both here is correct.
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    command.creation_flags(
-        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | 0x0800_0000,
-    );
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | 0x0800_0000);
 }
 
 #[cfg(not(any(unix, windows)))]

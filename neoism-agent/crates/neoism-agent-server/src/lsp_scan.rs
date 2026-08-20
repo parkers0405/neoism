@@ -94,7 +94,7 @@ pub(super) fn detected_servers(
 }
 
 pub(super) fn normalized_root(root: &Path) -> PathBuf {
-    fs::canonicalize(root).unwrap_or_else(|_| {
+    crate::windows_process::canonicalize_path(root).unwrap_or_else(|_| {
         if root.is_absolute() {
             root.to_path_buf()
         } else {
@@ -111,7 +111,7 @@ pub(super) fn normalized_file(root: &Path, file: &Path) -> PathBuf {
     } else {
         root.join(file)
     };
-    fs::canonicalize(&candidate).unwrap_or(candidate)
+    crate::windows_process::canonicalize_path(&candidate).unwrap_or(candidate)
 }
 
 /// Resolve the workspace folder used to launch a file-scoped language
@@ -152,7 +152,7 @@ fn nearest_marker_root(
             .iter()
             .any(|marker| directory_has_marker(directory, marker))
         {
-            return fs::canonicalize(directory)
+            return crate::windows_process::canonicalize_path(directory)
                 .unwrap_or_else(|_| directory.to_path_buf());
         }
     }
@@ -197,7 +197,7 @@ fn cached_cargo_workspace_root_with<F>(
 where
     F: FnOnce(&Path) -> Option<PathBuf>,
 {
-    let manifest = fs::canonicalize(manifest).ok()?;
+    let manifest = crate::windows_process::canonicalize_path(manifest).ok()?;
     let modified = fs::metadata(&manifest).ok()?.modified().ok()?;
     let key = CargoRootCacheKey { manifest, modified };
     let cell = {
@@ -228,7 +228,7 @@ fn cargo_workspace_root_uncached(manifest: &Path) -> Option<PathBuf> {
     }
     let metadata: Value = serde_json::from_slice(&output.stdout).ok()?;
     let workspace_root = metadata.get("workspace_root")?.as_str()?;
-    fs::canonicalize(workspace_root).ok()
+    crate::windows_process::canonicalize_path(Path::new(workspace_root)).ok()
 }
 
 fn directory_has_marker(directory: &Path, marker: &str) -> bool {

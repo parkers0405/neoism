@@ -48,6 +48,8 @@ regex-automata = "0.4.9"
 cursor-icon = { version = "1.1.0", default-features = false }
 smallvec = { version = "1.13.2", default-features = false }
 neoism-window = { workspace = true }
+neoism-protocol = { workspace = true }
+neoism-agent-core = { workspace = true }
 flate2 = { workspace = true }
 lazy_static = { workspace = true }
 

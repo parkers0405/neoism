@@ -1,4 +1,4 @@
-//! SIMD-accelerated UTF-8 validation and conversion utilities for Rio terminal.
+//! SIMD-accelerated UTF-8 validation and conversion utilities for Neoism.
 //!
 //! This module provides high-performance UTF-8 processing using the simdutf8 crate,
 //! which can be up to 23x faster than std library validation on non-ASCII text.

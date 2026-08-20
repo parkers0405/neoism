@@ -8,7 +8,10 @@
 //! file re-exports the items defined here so callers don't have to
 //! care which side of the split owns what.
 
-use sugarloaf::Sugarloaf;
+use sugarloaf::{
+    ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay, Sugarloaf,
+};
+use web_time::Instant;
 
 /// Synthetic panel id for chrome image overlays. Matches the desktop
 /// constant so cross-references through `Sugarloaf` keep the same
@@ -111,6 +114,72 @@ impl crate::panels::buffer_tabs::AgentLabel for AgentKind {
     fn display_name(&self) -> &str {
         AgentKind::display_name(*self)
     }
+}
+
+/// The Neoism mark, owned by the SHARED crate so a host without its own
+/// `AgentIconProvider` can still paint a real logo. `image_rs` is a
+/// non-gated dependency here (the splash wordmark already decodes a PNG
+/// this way on wasm), so this works in the browser build too.
+const NEOISM_PNG: &[u8] = include_bytes!("../../../assets/icons/neoism.png");
+
+/// Decode + upload the Neoism mark to sugarloaf's image store. Returns
+/// `true` once the image is available. Idempotent — safe to call every
+/// frame; later calls return immediately.
+///
+/// The desktop fork registers all four agent PNGs through its own
+/// `register_agent_icons`. Only the Neoism mark lives here, because a
+/// host whose `BufferTabs<A>` carries no agent identity (web runs
+/// `Chrome<()>`) can't distinguish Claude/Codex/OpenCode tabs anyway —
+/// but it CAN tell a Neoism agent tab from `neoism_agent_route_id`.
+pub fn register_neoism_icon(sugarloaf: &mut Sugarloaf) -> bool {
+    if sugarloaf.image_data.contains_key(&NEOISM_IMAGE_ID) {
+        return true;
+    }
+    let Ok(img) = image_rs::load_from_memory(NEOISM_PNG) else {
+        return false;
+    };
+    let img = img.to_rgba8();
+    let (width, height) = img.dimensions();
+    let entry = GraphicDataEntry::from_graphic_data(GraphicData {
+        id: GraphicId::new(NEOISM_IMAGE_ID as u64),
+        width: width as usize,
+        height: height as usize,
+        color_type: ColorType::Rgba,
+        pixels: img.into_raw(),
+        is_opaque: false,
+        resize: None,
+        display_width: None,
+        display_height: None,
+        transmit_time: Instant::now(),
+    });
+    sugarloaf.image_data.insert(NEOISM_IMAGE_ID, entry);
+    true
+}
+
+/// Paint the registered Neoism mark into the tab strip's icon slot.
+/// Mirrors the desktop `push_cropped_icon_overlay` call the shared
+/// buffer-tabs render makes through an `AgentIconProvider`.
+pub fn draw_neoism_tab_icon(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    source_rect: [f32; 4],
+) {
+    let scale = sugarloaf.scale_factor();
+    sugarloaf.push_image_overlay(
+        ICON_PANEL_ID,
+        GraphicOverlay {
+            image_id: NEOISM_IMAGE_ID,
+            x: x * scale,
+            y: y * scale,
+            width: width * scale,
+            height: height * scale,
+            z_index: 1,
+            source_rect,
+        },
+    );
 }
 
 // ── Stubs ──────────────────────────────────────────────────────────

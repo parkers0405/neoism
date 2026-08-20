@@ -1164,6 +1164,41 @@ pub(crate) async fn handle_show_questions(inner: Arc<AgentInner>, session_id: St
 /// as a typed [`AgentServerMessage::QuestionsUpdated`] snapshot. Fired
 /// on stream (re-)attach so a reloaded client recovers a `question`
 /// tool call that parked the run while no client was listening.
+/// Tell a freshly-attached client whether this session is CURRENTLY
+/// mid-run, so the composer's activity indicator ("Crafting…",
+/// "Tinkering…") lights up immediately instead of waiting for the next
+/// live `StreamingState` event — which, for a turn already in flight,
+/// may not arrive for a long time or at all.
+///
+/// Desktop gets this from `fetch_session_statuses` (`GET /session/status`)
+/// whenever it enters a session; this is the web twin, pushed over the
+/// same channel the live events use. Best-effort: a failed poll must
+/// never spam the transcript.
+pub(crate) async fn push_session_running_state(
+    inner: Arc<AgentInner>,
+    session_id: String,
+) {
+    let Ok(value) = http_get_json(&inner, "/session/status").await else {
+        return;
+    };
+    let Some(status) = value.get(&session_id) else {
+        return;
+    };
+    // Same live-run vocabulary the desktop status mapping uses.
+    let running = matches!(
+        status.get("type").and_then(Value::as_str).unwrap_or_default(),
+        "created" | "active" | "busy" | "running"
+    );
+    if !running {
+        return;
+    }
+    let _ = inner.tx.send(AgentServerMessage::StreamingState {
+        session_id,
+        state: neoism_protocol::agent::StreamingState::Working,
+        label: None,
+    });
+}
+
 pub(crate) async fn push_pending_questions(inner: Arc<AgentInner>, session_id: String) {
     let path = format!("/question?sessionID={}", percent_encode(&session_id));
     let Ok(value) = http_get_json(&inner, &path).await else {

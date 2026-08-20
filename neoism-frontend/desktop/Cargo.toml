@@ -195,5 +195,5 @@ assets = [
     ],
 ]
 extended-description = """\
-Neoism is a hardware-accelerated terminal-first editor workspace built from Rio's terminal foundation.
+Neoism is a hardware-accelerated terminal-first workspace for code, notes, agents, and multiplayer editing.
 The supported platforms currently consist of BSD, Linux, MacOS and Windows."""

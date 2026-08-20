@@ -287,6 +287,26 @@ export interface TerminalPanelOptions {
    */
   pty?: PtyService;
   workspaceRoot?: string | null;
+  /** Notes vault the host linked to this workspace
+   *  (`WorkspaceSummary.linked_vault_dir`). `null`/absent means no
+   *  linked vault - the notes sidebar then shows its empty state. Notes
+   *  never live under `workspaceRoot`, so this is a separate input. */
+  notesVaultRoot?: string | null;
+  /** Workspace the share QR should deep-link to. */
+  activeWorkspaceId?: string | null;
+  /** Rows for the shared servers palette:
+   *  `{id,name,address,local,status,active}` with status one of
+   *  `online|connecting|offline|unknown`. */
+  getServerEntries?(): Array<{
+    id: string;
+    name: string;
+    address: string;
+    local: boolean;
+    status: string;
+    active: boolean;
+  }>;
+  /** A server row was picked in the shared palette. */
+  onServerSelected?(id: string): void;
   /**
    * Fired once the wasm bridge has finished initialising. The host
    * binds protocol-level services (search, …) at this point because
@@ -564,6 +584,10 @@ export class TerminalPanel {
           if (this.options.workspaceRoot) {
             adapter.setWorkspaceRoot?.(this.options.workspaceRoot);
           }
+          // Same replay reason as the workspace root above: a vault
+          // that arrived while wasm was still loading only updated
+          // `options.notesVaultRoot`.
+          adapter.setNotesVaultRoot?.(this.options.notesVaultRoot ?? null);
           adapter.refreshFileTree?.();
           // Align sugarloaf's clear color, the chrome panels, and the
           // terminal cell palette to one source so the web frontend
@@ -1237,7 +1261,29 @@ export class TerminalPanel {
   editorReply(payload: unknown): void {
     const adapter = this.wasmAdapter as {
       editorLspReply?: (json: string) => boolean;
+      codeSetHighlightSpans?: (
+        path: string,
+        revision: number,
+        spansJson: string,
+      ) => boolean;
     };
+    // Daemon-computed tree-sitter spans. The browser has no parser at
+    // all (every grammar is gated off wasm), so this is the only way the
+    // code pane sees block comments / multi-line strings correctly.
+    if (payload && typeof payload === "object" && "HighlightSpans" in payload) {
+      const reply = (payload as {
+        HighlightSpans: { path: string; revision: number; spans: unknown[] };
+      }).HighlightSpans;
+      if (adapter?.codeSetHighlightSpans) {
+        const applied = adapter.codeSetHighlightSpans(
+          reply.path,
+          reply.revision,
+          JSON.stringify(reply.spans),
+        );
+        if (applied) this.scheduleDraw();
+      }
+      return;
+    }
     if (!adapter?.editorLspReply) return;
     let changed = false;
     try {
@@ -1248,6 +1294,29 @@ export class TerminalPanel {
     this.processEditorLspHostActions();
     if (changed) this.scheduleDraw();
   }
+
+  /** Ask the daemon to tree-sitter-highlight the open code buffer.
+   *  Debounced: a reparse per keystroke is wasted work, and the reply
+   *  carries the revision so a late one is dropped rather than painted
+   *  against text that has moved. */
+  private requestCodeHighlight(path: string, text: string): void {
+    if (this.codeHighlightTimer !== null) {
+      clearTimeout(this.codeHighlightTimer);
+    }
+    this.codeHighlightTimer = setTimeout(() => {
+      this.codeHighlightTimer = null;
+      const adapter = this.wasmAdapter as {
+        codeBufferRevision?: () => number;
+      };
+      const revision = adapter?.codeBufferRevision?.() ?? 0;
+      this.options.client.sendEditor(
+        { HighlightBuffer: { path, text, revision } },
+        this.options.workspaceRoot ?? null,
+      );
+    }, 120);
+  }
+
+  private codeHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 
   /// Drain + execute host actions queued by the wasm LSP session
   /// (cross-file definition jumps, the rename prompt, finishing a
@@ -1624,7 +1693,7 @@ export class TerminalPanel {
         this.options.client.sendFiles(
           requestId,
           { ListDir: { path: daemonPath } },
-          this.options.workspaceRoot ?? null,
+          this.filesRootForPath(path),
         );
       },
       readFile: (requestId, path) => {
@@ -1645,7 +1714,7 @@ export class TerminalPanel {
         this.options.client.sendFiles(
           requestId,
           { ReadFile: { path: daemonPath } },
-          this.options.workspaceRoot ?? null,
+          this.filesRootForPath(path),
         );
       },
       writeFile: (requestId, path, bytes) => {
@@ -1656,7 +1725,7 @@ export class TerminalPanel {
         this.options.client.sendFiles(
           requestId,
           { WriteFile: { path: daemonPath, bytes: Array.from(bytes) } },
-          this.options.workspaceRoot ?? null,
+          this.filesRootForPath(path),
         );
       },
       stat: (requestId, path) => {
@@ -1667,7 +1736,7 @@ export class TerminalPanel {
         this.options.client.sendFiles(
           requestId,
           { Stat: { path: daemonPath } },
-          this.options.workspaceRoot ?? null,
+          this.filesRootForPath(path),
         );
       },
       clipboardRead: (requestId) => {
@@ -1752,10 +1821,32 @@ export class TerminalPanel {
     });
   }
 
+  /** Files-plane root override to use when requesting `path`.
+   *
+   *  Notes live in the linked vault (`~/Neoism/Vaults/...`), which sits
+   *  OUTSIDE the workspace root, so a note request must be rooted at the
+   *  vault - the daemon rejects an absolute path that escapes the root
+   *  it was given ("absolute paths are not allowed"). Every other path
+   *  keeps using the workspace root, so this is a no-op for the file
+   *  tree, the editor and the finder. */
+  private filesRootForPath(path: string | null | undefined): string | null {
+    const vault = (this.options.notesVaultRoot ?? "").replace(/\/+$/, "");
+    if (vault.length > 0) {
+      const normalized = (path ?? "").trim().replace(/\\/g, "/");
+      if (normalized === vault || normalized.startsWith(`${vault}/`)) {
+        return vault;
+      }
+    }
+    return this.options.workspaceRoot ?? null;
+  }
+
+  /** Make `path` relative to whichever root it will be requested against
+   *  (see [`filesRootForPath`]), so the path and the root override always
+   *  agree. */
   private toDaemonWorkspacePath(path: string | null | undefined): string {
     const input = (path ?? "").trim();
     if (input.length === 0 || input === ".") return "";
-    const root = (this.options.workspaceRoot ?? "").replace(/\/+$/, "");
+    const root = (this.filesRootForPath(input) ?? "").replace(/\/+$/, "");
     const normalized = input.replace(/\\/g, "/");
     if (root.length > 0) {
       const normalizedRoot = root.replace(/\\/g, "/");
@@ -2387,13 +2478,34 @@ export class TerminalPanel {
         case "open_agent":
           this.openNeoismAgentTab();
           break;
-        case "open_servers":
-          // Web connection ownership lives above TerminalPanel; use the
-          // existing host-provided workplace/server surface there.
-          this.options.onShowWorkplaces?.();
+        case "open_servers": {
+          // Desktop parity: open the SHARED servers palette
+          // (`command_palette.enter_servers_mode`) instead of the
+          // web-only DOM workplace overlay, so both frontends show the
+          // same server manager. Falls back to the overlay when the host
+          // supplies no entries (older bundle / no registry yet).
+          const entries = this.options.getServerEntries?.();
+          if (entries && entries.length > 0 && this.wasmAdapter?.openServersPalette) {
+            this.wasmAdapter.openServersPalette(JSON.stringify(entries));
+            this.scheduleDraw();
+          } else {
+            this.options.onShowWorkplaces?.();
+          }
           break;
+        }
         case "open_workspaces":
           window.setTimeout(() => this.openWorkspacesModal(), 80);
+          break;
+        case "share_with_phone":
+          // Ask the daemon for a phone-reachable URL first — this page
+          // only knows the origin it was served from, which for a local
+          // session is loopback and useless to a phone. The reply comes
+          // back as `ShareTarget` and is pushed into the shared sheet.
+          this.options.client.sendWorkspace({
+            RequestShareTarget: {
+              workspace_id: this.options.activeWorkspaceId ?? null,
+            },
+          });
           break;
         case "start_web_server":
           window.open(window.location.origin, "_blank", "noopener,noreferrer");
@@ -2715,23 +2827,48 @@ export class TerminalPanel {
     }
   }
 
-  /** Recursively list the active workspace's Neoism notes dir through the
-   *  daemon and push the tree into the shared notes sidebar. Desktop resolves
-   *  this from the active workspace root; web follows the daemon-owned root
-   *  that desktop publishes for the main terminal. */
+  /** Recursively list the workspace's linked notes VAULT through the
+   *  daemon and push the tree into the shared notes sidebar.
+   *
+   *  This lists exactly what the desktop sidebar lists: the host's
+   *  `linked_vault_dir` (`~/Neoism/Vaults/...`), passed as the files
+   *  request's root override with a root-relative walk - the same shape
+   *  as desktop's `WalkTree { path: "" }` + `Some(vault_root)`.
+   *
+   *  Two bugs used to live here. It listed `<workspace_root>/notes`, a
+   *  directory the vault model never writes - so notes created from the
+   *  web (which the daemon correctly puts in the vault) were invisible.
+   *  And it pushed workspace-relative paths, while
+   *  `set_entries_from_host` expects daemon-ABSOLUTE paths and derives
+   *  each row's depth/parent by `strip_prefix`-ing the vault root, so
+   *  even a correct listing would have rendered flat. Paths are
+   *  absolute here for that reason. */
   private async refreshNotesSidebarEntries(): Promise<void> {
     const adapter = this.wasmAdapter;
     if (!adapter?.notesSetEntries) return;
-    const root = this.options.workspaceRoot;
-    if (!root) return;
-    const entries: Array<{ path: string; is_dir: boolean }> = [];
+    const vault = this.options.notesVaultRoot;
+    if (!vault) {
+      // No linked vault: clear rather than leave the previous vault's
+      // rows on screen. The sidebar shows its "no linked vault" state.
+      adapter.notesSetEntries(JSON.stringify([]));
+      this.scheduleDraw();
+      return;
+    }
+    const base = vault.replace(/\/+$/, "");
+    const entries: Array<{
+      path: string;
+      is_dir: boolean;
+      icon?: string;
+    }> = [];
+    // `dir` is vault-relative ("" is the vault root); the pushed path is
+    // absolute.
     const listDir = async (dir: string, depth: number): Promise<boolean> => {
       if (depth > 6 || entries.length > 800) return true;
       let reply: unknown;
       try {
         reply = await this.options.client.requestFiles(
           { ListDir: { path: dir } },
-          this.options.workspaceRoot ?? null,
+          base,
         );
       } catch {
         return false;
@@ -2740,25 +2877,32 @@ export class TerminalPanel {
         return false;
       }
       const listing = (reply as {
-        DirListing: { entries: Array<{ name: string; is_dir: boolean }> };
+        DirListing: {
+          entries: Array<{ name: string; is_dir: boolean; icon?: string }>;
+        };
       }).DirListing.entries;
       for (const entry of listing) {
         if (entry.name.startsWith(".")) continue;
-        const path = `${dir}/${entry.name}`;
-        entries.push({ path, is_dir: entry.is_dir });
+        const rel = dir.length > 0 ? `${dir}/${entry.name}` : entry.name;
+        // `icon` is the daemon-resolved markdown frontmatter icon: the
+        // browser has no filesystem, so it cannot read it itself.
+        entries.push({
+          path: `${base}/${rel}`,
+          is_dir: entry.is_dir,
+          icon: entry.icon,
+        });
         if (entry.is_dir) {
-          await listDir(path, depth + 1);
+          await listDir(rel, depth + 1);
         }
       }
       return true;
     };
-    let ok = await listDir("notes", 0);
+    let ok = await listDir("", 0);
     if (!ok) {
-      // No notes dir yet. The legacy per-project scaffold action is
-      // gone (Vaults are the only notes model); one delayed retry
-      // covers a vault that is still being created server-side.
+      // One delayed retry covers a vault still being created host-side
+      // (the daemon creates it lazily on first note).
       await new Promise((resolve) => setTimeout(resolve, 350));
-      ok = await listDir("notes", 0);
+      ok = await listDir("", 0);
     }
     adapter.notesSetEntries(JSON.stringify(entries));
     this.scheduleDraw();
@@ -2868,6 +3012,13 @@ export class TerminalPanel {
         case "workspace":
           this.options.onWorkspaceSelected?.(intent.workspace_id);
           break;
+        case "server":
+          // Carries the picked server's id — the plain `action` intent
+          // drops it, so this variant exists to keep the payload.
+          if (intent.action === "SelectServer") {
+            this.options.onServerSelected?.(intent.id);
+          }
+          break;
       }
     }
     this.scheduleDraw();
@@ -2926,10 +3077,38 @@ export class TerminalPanel {
 
   setWorkspaceRoot(workspaceRoot: string | null): void {
     if (!workspaceRoot || workspaceRoot.length === 0) return;
-    const changed = this.options.workspaceRoot !== workspaceRoot;
     this.options.workspaceRoot = workspaceRoot;
     this.wasmAdapter?.setWorkspaceRoot?.(workspaceRoot);
     this.wasmAdapter?.refreshFileTree?.();
+    this.scheduleDraw();
+  }
+
+  /** Point the notes sidebar at the host-resolved vault. `null` (no
+   *  linked vault) is forwarded rather than ignored so the sidebar can
+   *  show its empty state instead of stale rows from a previous vault.
+   *  Moving the workspace root does NOT move the vault, so unlike the
+   *  file tree this is the only thing that re-lists notes. */
+  /** The workspace the share QR should deep-link to. */
+  setShareWorkspaceId(id: string | null): void {
+    this.options.activeWorkspaceId = id;
+  }
+
+  /** Show the "Share with phone" QR for a daemon-resolved URL. A null
+   *  url means the daemon had nothing reachable to offer; the sheet then
+   *  shows `hint` instead of a dead code. */
+  showShareTarget(url: string | null, hint: string | null): void {
+    const adapter = this.wasmAdapter as {
+      shareSheetShow?: (url: string, hint?: string) => void;
+    };
+    adapter?.shareSheetShow?.(url ?? "", hint ?? undefined);
+    this.scheduleDraw();
+  }
+
+  setNotesVaultRoot(vault: string | null): void {
+    const next = vault && vault.length > 0 ? vault : null;
+    const changed = (this.options.notesVaultRoot ?? null) !== next;
+    this.options.notesVaultRoot = next;
+    this.wasmAdapter?.setNotesVaultRoot?.(next);
     if (changed) void this.refreshNotesSidebarEntries();
     this.scheduleDraw();
   }
@@ -3579,7 +3758,7 @@ export class TerminalPanel {
           bytes: Array.from(new TextEncoder().encode(payload)),
         },
       },
-      this.options.workspaceRoot ?? null,
+      this.filesRootForPath(path),
     );
   }
 
@@ -4907,10 +5086,11 @@ export class TerminalPanel {
 
   private refreshFileTreeAfterMutation(): void {
     this.wasmAdapter?.refreshFileTree?.();
-    // The notes vault lives under the same workspace root; a file op may
-    // have touched it. `refreshFileTree` flags the notes panel dirty in
-    // the wasm chrome; pump the side-panel refreshes so the open Alt+N
-    // panel re-fetches its listing this frame rather than next toggle.
+    // A file op may have touched the notes vault (it lives outside the
+    // workspace root, but agent/file actions still reach it).
+    // `refreshFileTree` flags the notes panel dirty in the wasm chrome;
+    // pump the side-panel refreshes so the open Alt+N panel re-fetches
+    // its listing this frame rather than next toggle.
     this.pumpSidePanelRefreshes();
     this.scheduleDraw();
   }
@@ -5225,6 +5405,10 @@ export class TerminalPanel {
           if (this.markdownLayerTabIndex === tabIdx) {
             this.clearMarkdownLayer();
           }
+          // Whole-buffer syntax spans from the daemon (the browser has
+          // no tree-sitter); safe to fire alongside the pane open since
+          // the reply is revision-checked.
+          this.requestCodeHighlight(path, decoded);
           // Route the fetched file into the chrome-hosted native
           // editor pane (code / notebook / draw) — desktop parity.
           // Re-opening the same path keeps live pane state (cursor,
@@ -5262,7 +5446,7 @@ export class TerminalPanel {
     this.options.client.sendFiles(
       requestId,
       { ReadFile: { path: this.toDaemonWorkspacePath(path) } },
-      this.options.workspaceRoot ?? null,
+      this.filesRootForPath(path),
     );
   }
 
@@ -5309,7 +5493,7 @@ export class TerminalPanel {
     this.options.client.sendFiles(
       requestId,
       { ReadFile: { path: this.toDaemonWorkspacePath(path) } },
-      this.options.workspaceRoot ?? null,
+      this.filesRootForPath(path),
     );
   }
 
@@ -7053,6 +7237,14 @@ export class TerminalPanel {
     if (event.pointerType === "touch") return;
     if (this.updateBufferTabDrag(event)) return;
     if (this.paneGridHandlePointerMove(event)) return;
+    // An agent-timeline selection drag owns the pointer until release —
+    // same precedence desktop gives `drag_selection_to`.
+    if (this.agentSelectionActive) {
+      const { x, y } = this.canvasLogicalPoint(event);
+      this.wasmAdapter?.agentSelectionDrag?.(x, y);
+      this.scheduleDraw();
+      return;
+    }
     this.updateCustomCursorFromPointer(event, true);
     if (this.activeEditorPaneKind() !== null) {
       // Editor-pane drags: code selection / scrollbar, draw gestures
@@ -7484,6 +7676,18 @@ export class TerminalPanel {
     this.stopTerminalSelectionAutoscroll();
     if (this.endBufferTabDrag(event)) return;
     if (this.paneGridHandlePointerUp(event)) return;
+    // Finish an agent-timeline selection and put it on the clipboard —
+    // desktop copies on release (`end_selection` -> clipboard). A plain
+    // click returns null and simply clears the drag.
+    if (this.agentSelectionActive) {
+      this.agentSelectionActive = false;
+      const text = this.wasmAdapter?.agentSelectionEnd?.();
+      if (text) {
+        void this.writeClipboard(text);
+      }
+      this.scheduleDraw();
+      return;
+    }
     this.updateCustomCursorFromPointer(event, true);
     if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
       // Markdown pointer release: drop a reordered block / finish the
@@ -7723,9 +7927,15 @@ export class TerminalPanel {
    *  panel, permission buttons, links, tool-card expand) and execute
    *  the host-side effects it returns. Shared by the mouse pointer
    *  path and the touch tap path. */
+  /** A drag-to-select is in flight over the agent timeline; the pointer
+   *  belongs to it until release. Set by `agentPointerDownAt` when the
+   *  wasm click chain reports `selecting`. */
+  private agentSelectionActive = false;
+
   private agentPointerDownAt(x: number, y: number): boolean {
     const result = this.wasmAdapter?.agentPointerDown?.(x, y);
     if (!result?.handled) return false;
+    this.agentSelectionActive = result.selecting === true;
     if (result.copy) {
       void this.writeClipboard(result.copy);
     }
@@ -8579,6 +8789,33 @@ export class TerminalPanel {
         ? -event.deltaY * 42
         : -wheelDeltaYPixels(event);
     if (Math.abs(deltaY) < 0.5) return false;
+    // Desktop-parity path: hand the RAW delta + deltaMode to the shared
+    // `agent_timeline_wheel` policy, which turns a notch into a smooth
+    // 3x-line-height glide and leaves trackpad pixels raw. Sign is
+    // negated for the same winit convention noted above. Falls back to
+    // the older pixel route on bundles without the bridge.
+    const wheelAdapter = adapter as {
+      agentScrollWheelAt?: (
+        x: number,
+        y: number,
+        deltaY: number,
+        deltaMode: number,
+      ) => boolean;
+    };
+    if (wheelAdapter.agentScrollWheelAt) {
+      const { x, y } = this.canvasLogicalPoint(event);
+      const moved = wheelAdapter.agentScrollWheelAt(
+        x,
+        y,
+        -event.deltaY,
+        event.deltaMode,
+      );
+      if (moved) {
+        this.scheduleDraw();
+        return true;
+      }
+      return false;
+    }
     // Position-aware: pickers, the side panel, and diff/code cards
     // under the cursor scroll themselves before the timeline moves.
     if (adapter.agentScrollAt) {

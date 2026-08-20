@@ -413,6 +413,12 @@ impl NeoismAgentPane {
                     branch_status,
                     status.started_at,
                 );
+            } else if entry.id != session_id {
+                // `/session/status` is the live run set. A tracked child
+                // omitted from a successful snapshot is idle, not unknown —
+                // otherwise a missed terminal SSE leaves the footer/sidebar
+                // latched on "working" after the child has already finished.
+                self.note_subagent_runtime(entry.id.clone(), BranchStatus::Completed, None);
             }
         }
         for (child_id, status) in statuses.iter().filter(|(_, status)| {
@@ -689,6 +695,22 @@ impl NeoismAgentPane {
             self.active_subagent_ids.remove(&session_id);
             self.active_subagent_started_at.remove(&session_id);
         }
+    }
+
+    pub(crate) fn settle_tracked_subagents(&mut self, status: BranchStatus) {
+        let child_ids = self
+            .side_panel
+            .subagents()
+            .iter()
+            .skip(1)
+            .map(|entry| entry.id.clone())
+            .chain(self.active_subagent_ids.iter().cloned())
+            .filter(|id| Some(id.as_str()) != self.session_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        for child_id in child_ids {
+            self.note_subagent_runtime(child_id, status, None);
+        }
+        self.sync_subagent_waiting_clock();
     }
 
     /// Part-level activity for a child (raw text/reasoning/tool delta),

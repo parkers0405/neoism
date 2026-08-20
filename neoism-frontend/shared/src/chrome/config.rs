@@ -123,6 +123,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             pending_notes_refresh: false,
             last_viewport: None,
             workspace_root_path: None,
+            notes_vault_root: None,
+            share_sheet: crate::panels::share_sheet::ShareSheet::new(),
             last_draw_time: None,
         }
     }
@@ -167,11 +169,29 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             TopBarAction::OpenServers => {
                 self.pending_top_bar_action = Some(TopBarAction::OpenServers);
             }
+            TopBarAction::ShareWithPhone => {
+                // The host has to resolve a reachable URL from the daemon
+                // before anything can be drawn, so this is queued rather
+                // than handled here.
+                self.pending_top_bar_action = Some(TopBarAction::ShareWithPhone);
+            }
             TopBarAction::OpenNotes => {
-                if !self.notes_sidebar.is_visible() {
+                // Strict visibility toggle, same contract as
+                // `TogglePanel` above: click 1 opens, click 2 closes.
+                // This used to be open-ONLY (`if !visible { toggle }`),
+                // so the notes button could never close the sidebar it
+                // had just opened. `toggle_notes_sidebar` on its own is
+                // focus-aware (`toggle_focus_or_visibility`) and would
+                // only move focus for an already-open panel, which is
+                // why the close path is spelled out here.
+                if self.notes_sidebar.is_visible() {
+                    self.notes_sidebar.set_visible(false);
+                    self.notes_sidebar.set_focused(false);
+                    self.relayout();
+                } else {
                     self.toggle_notes_sidebar();
+                    self.pending_notes_refresh = true;
                 }
-                self.pending_notes_refresh = true;
             }
             other => {
                 // No shared-hosted surface yet — store for the bridge to

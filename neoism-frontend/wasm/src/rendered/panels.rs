@@ -129,6 +129,42 @@ impl ChromeBridge {
         self.chrome.toggle_notes_sidebar()
     }
 
+    /// Show the "Share with phone" QR sheet for `url`. The JS host asks
+    /// the daemon for a phone-reachable address first (`RequestShareTarget`)
+    /// — the browser only knows the origin it was served from, which for a
+    /// local session is loopback and useless to a phone.
+    pub fn share_sheet_show(&mut self, url: String, hint: Option<String>) {
+        if url.is_empty() {
+            self.chrome.share_sheet.show_message(
+                hint.unwrap_or_else(|| "No shareable address.".to_string()),
+            );
+        } else {
+            self.chrome.share_sheet.show(url, hint);
+        }
+    }
+
+    /// Dismiss the sheet (click / Escape). True when it was open and
+    /// therefore consumed the input.
+    pub fn share_sheet_dismiss(&mut self) -> bool {
+        self.chrome.dismiss_share_sheet_if_open()
+    }
+
+    pub fn share_sheet_visible(&self) -> bool {
+        self.chrome.share_sheet.is_visible()
+    }
+
+    /// Point the notes sidebar at the host's linked vault. JS passes the
+    /// daemon-absolute `WorkspaceSummary::linked_vault_dir`, or `None`
+    /// when the workspace links no vault (drives the "no linked vault"
+    /// empty state). Notes never live under `<workspace_root>/notes`, so
+    /// this cannot be derived from `set_workspace_root`.
+    pub fn set_notes_vault_root(&mut self, vault: Option<String>) {
+        let vault = vault
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        self.chrome.set_notes_vault_root(vault);
+    }
+
     /// One-shot: true when the git side panel wants fresh data.
     pub fn take_git_panel_refresh(&mut self) -> bool {
         self.chrome.take_git_panel_refresh()
@@ -293,15 +329,21 @@ impl ChromeBridge {
         struct WireEntry {
             path: String,
             is_dir: bool,
+            /// Daemon-resolved markdown page icon; the browser cannot read
+            /// frontmatter itself.
+            #[serde(default)]
+            icon: Option<String>,
         }
         let Ok(entries) = serde_json::from_str::<Vec<WireEntry>>(&entries_json) else {
             return;
         };
         let entries = entries
             .into_iter()
-            .map(|e| (PathBuf::from(e.path), e.is_dir))
+            .map(|e| (PathBuf::from(e.path), e.is_dir, e.icon))
             .collect();
-        self.chrome.notes_sidebar.set_entries_from_host(entries);
+        self.chrome
+            .notes_sidebar
+            .set_entries_from_host_with_icons(entries);
     }
 
     /// Drain note / git-panel rows the user activated; JS opens

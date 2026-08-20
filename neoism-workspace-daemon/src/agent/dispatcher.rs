@@ -66,6 +66,10 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             // is answered, so a reloaded page must learn about it even
             // though the `question.asked` SSE event is long gone.
             tokio::spawn(async move {
+                // Also surface whether the session is mid-run right now,
+                // so an attach during a live turn shows the activity
+                // indicator instead of looking idle.
+                push_session_running_state(inner.clone(), session_id.clone()).await;
                 push_pending_questions(inner, session_id).await;
             });
         }

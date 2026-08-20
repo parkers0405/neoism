@@ -76,6 +76,25 @@ pub(crate) fn mark_interrupted_tool_parts(parts: &mut [Part]) -> Vec<Part> {
     updated
 }
 
+pub(crate) fn finish_open_reasoning_parts(parts: &mut [Part]) -> Vec<Part> {
+    let mut updated = Vec::new();
+    let open_ids = parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Reasoning(reasoning) if reasoning.time.end.is_none() => {
+                Some(reasoning.id.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for part_id in open_ids {
+        if let Some(part) = finish_text_part(parts, &part_id, None) {
+            updated.push(part);
+        }
+    }
+    updated
+}
+
 fn interrupted_tool_metadata(existing: Option<Value>) -> Value {
     let mut metadata = match existing {
         Some(Value::Object(map)) => Value::Object(map),
@@ -278,5 +297,66 @@ pub(crate) fn tool_state_start(state: &ToolState) -> Option<u64> {
         | ToolState::Completed { time, .. }
         | ToolState::Error { time, .. } => Some(time.start),
         ToolState::Pending { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neoism_agent_core::{IdKind, ReasoningPart};
+
+    #[test]
+    fn fatal_stream_cleanup_settles_running_tool_and_open_reasoning() {
+        let session_id = Id::ascending(IdKind::Session);
+        let message_id = Id::ascending(IdKind::Message);
+        let mut parts = vec![
+            Part::Reasoning(ReasoningPart {
+                id: Id::ascending(IdKind::Part),
+                session_id: session_id.clone(),
+                message_id: message_id.clone(),
+                text: "looking around".to_string(),
+                time: PartTime {
+                    start: 1,
+                    end: None,
+                },
+                metadata: None,
+            }),
+            Part::Tool(ToolPart {
+                id: Id::ascending(IdKind::Part),
+                session_id,
+                message_id,
+                tool: "read".to_string(),
+                call_id: "call-1".to_string(),
+                state: ToolState::Running {
+                    input: json!({ "filePath": "Memory/feature_workspace_detach.md" }),
+                    time: PartTime {
+                        start: 2,
+                        end: None,
+                    },
+                },
+                metadata: None,
+            }),
+        ];
+
+        let tools = mark_interrupted_tool_parts(&mut parts);
+        let reasoning = finish_open_reasoning_parts(&mut parts);
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(reasoning.len(), 1);
+        match &parts[0] {
+            Part::Reasoning(part) => assert!(part.time.end.is_some()),
+            other => panic!("expected reasoning, got {other:?}"),
+        }
+        match &parts[1] {
+            Part::Tool(part) => match &part.state {
+                ToolState::Error { error, time, .. } => {
+                    assert_eq!(error, "Tool execution aborted");
+                    assert!(time.end.is_some());
+                    assert_eq!(part.metadata, Some(json!({ "interrupted": true })));
+                }
+                other => panic!("expected error tool, got {other:?}"),
+            },
+            other => panic!("expected tool, got {other:?}"),
+        }
     }
 }

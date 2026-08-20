@@ -207,7 +207,7 @@ export class ProtocolClient {
 
     let socket: WebSocket;
     try {
-      socket = new WebSocket(this.options.url);
+      socket = new WebSocket(websocketUrl(this.options.url, this.options.authToken));
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       this.setStatus("errored", detail);
@@ -741,5 +741,20 @@ export class ProtocolClient {
       return;
     }
     this.handlers.onServiceReply?.(requestId, payload);
+  }
+}
+
+function websocketUrl(url: string, authToken?: string): string {
+  const token = authToken?.trim();
+  if (!token) return url;
+  try {
+    const parsed = new URL(url);
+    if (!parsed.searchParams.has("token")) {
+      parsed.searchParams.set("token", token);
+    }
+    return parsed.toString();
+  } catch {
+    const joiner = url.includes("?") ? "&" : "?";
+    return `${url}${joiner}token=${encodeURIComponent(token)}`;
   }
 }

@@ -259,7 +259,15 @@ fn bootstrap_hosts() -> HashMap<String, HostSummary> {
     // remote clients resolve this host_id to a reachable URL for re-dial.
     let daemon_url = std::env::var("NEOISM_HOST_URL")
         .ok()
-        .filter(|url| !url.trim().is_empty());
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            std::env::var("NEOISM_DAEMON_TCP_PORT")
+                .ok()
+                .and_then(|value| value.trim().parse::<u16>().ok())
+                .filter(|port| *port != 0)
+                .map(|port| format!("ws://127.0.0.1:{port}/session"))
+        });
     let mut hosts = HashMap::new();
     hosts.insert(
         host_id.clone(),
@@ -363,6 +371,25 @@ pub(crate) fn resolve_linked_vault_dir(root: &Path) -> Option<PathBuf> {
     vault.is_dir().then_some(vault)
 }
 
+/// Resolve the vault a workspace's notes actually land in, mirroring the
+/// desktop's `notes_workspace_for_root_or_default`: the linked scope when
+/// there is one, otherwise the user's default vault. Advertised over
+/// `WorkspaceSummary::notes_vault_dir` so a client looking at its OWN
+/// host lists exactly what that host's desktop sidebar lists.
+///
+/// Deliberately NOT gated on the directory existing - desktop shows a
+/// not-yet-created default vault as an empty "+ New note" state, and the
+/// note-create path (`shell_ops::create_neoism_note`) makes the directory
+/// on first use.
+pub(crate) fn resolve_notes_vault_dir(root: &Path) -> PathBuf {
+    neoism_workspace_index::linked_project_for_code_dir(root)
+        .ok()
+        .flatten()
+        .filter(|workspace| workspace.config.notes.enabled)
+        .unwrap_or_else(neoism_workspace_index::default_notes_workspace)
+        .notes_workspace_dir()
+}
+
 /// Fill an empty/None `root_dir` with the daemon's default so a workspace
 /// summary never reaches a client without a directory to root at. Used on
 /// read paths to normalize legacy records.
@@ -382,6 +409,7 @@ fn ensure_workspace_dir(mut workspace: WorkspaceSummary) -> WorkspaceSummary {
     // changes, not per frame.
     if let Some(root) = workspace.root_dir.as_deref() {
         workspace.linked_vault_dir = resolve_linked_vault_dir(root);
+        workspace.notes_vault_dir = Some(resolve_notes_vault_dir(root));
     }
     workspace
 }

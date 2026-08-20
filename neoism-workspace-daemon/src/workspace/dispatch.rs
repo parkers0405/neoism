@@ -186,6 +186,9 @@ fn handle_inner(
         WorkspaceClientMessage::CreateWorkspaceVault { workspace_id } => {
             DispatchOutcome::just(create_workspace_vault(manager, conn, &workspace_id))
         },
+        WorkspaceClientMessage::RequestShareTarget { workspace_id } => {
+            DispatchOutcome::just(vec![share_target(workspace_id.as_deref())])
+        },
         WorkspaceClientMessage::ShareWorkspace { workspace_id } => match manager
             .set_host_workspace_visibility(
                 &workspace_id,
@@ -444,7 +447,7 @@ fn handle_inner(
                 WorkspaceWindowKind::ConfigEditor,
                 workspace_id,
                 None,
-                Some("Rio Settings".into()),
+                Some("Neoism Settings".into()),
             ))
         }
         WorkspaceClientMessage::RequestCloseWindow { window_id } => {
@@ -805,4 +808,102 @@ fn request_full_snapshot(
     }
 
     replies
+}
+
+/// Build a URL another device on the network can open to reach this
+/// daemon, for the "Share with phone" sheet.
+///
+/// The browser cannot work this out for itself: it only knows the origin
+/// it was served from, which for a local session is `127.0.0.1` and
+/// means nothing to a phone. The daemon knows its own routable address,
+/// so it answers here.
+///
+/// The token is included because the socket is token-gated; without it
+/// the phone connects and is rejected. That does put a bearer secret in
+/// a URL, which is the same escape hatch the desktop uses today — the
+/// pairing flow (`POST /pair` + `/pair/claim`, already implemented
+/// server-side) is the better long-term answer.
+fn share_target(workspace_id: Option<&str>) -> WorkspaceServerMessage {
+    let Some(ip) = primary_lan_ipv4() else {
+        return WorkspaceServerMessage::ShareTarget {
+            url: None,
+            hint: Some(
+                "No network address to share — this machine looks offline."
+                    .to_string(),
+            ),
+        };
+    };
+    let port = std::env::var("NEOISM_DAEMON_ADDR")
+        .ok()
+        .and_then(|addr| addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()))
+        .unwrap_or(7878);
+    let mut url = format!("http://{ip}:{port}/");
+    let mut query: Vec<String> = Vec::new();
+    if let Ok(token) = std::env::var("NEOISM_DAEMON_TOKEN") {
+        if !token.is_empty() {
+            query.push(format!("token={token}"));
+        }
+    }
+    if let Some(id) = workspace_id.filter(|id| !id.is_empty()) {
+        query.push(format!("workspace={id}"));
+    }
+    if !query.is_empty() {
+        url.push('?');
+        url.push_str(&query.join("&"));
+    }
+    WorkspaceServerMessage::ShareTarget {
+        url: Some(url),
+        hint: Some("Scan on a phone on the same Wi-Fi.".to_string()),
+    }
+}
+
+/// This machine's routable IPv4, or `None` when offline / loopback-only.
+///
+/// Connecting a UDP socket transmits nothing — it just asks the routing
+/// table which local interface would carry traffic to that destination,
+/// which picks the *routable* interface instead of the first one found.
+fn primary_lan_ipv4() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    socket.connect(("192.0.2.1", 9)).ok()?;
+    let addr = socket.local_addr().ok()?.ip();
+    match addr {
+        std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => {
+            Some(addr)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod share_target_tests {
+    use super::*;
+
+    #[test]
+    fn share_target_carries_workspace_and_is_http() {
+        let WorkspaceServerMessage::ShareTarget { url, hint } = share_target(Some("ws-1"))
+        else {
+            panic!("expected ShareTarget");
+        };
+        // Offline machines legitimately have no URL; assert the shape of
+        // whichever branch this environment took.
+        match url {
+            Some(url) => {
+                assert!(url.starts_with("http://"), "got {url}");
+                assert!(url.contains("workspace=ws-1"), "got {url}");
+                assert!(!url.contains("127.0.0.1"), "never share loopback: {url}");
+            }
+            None => assert!(hint.is_some(), "a missing url must explain itself"),
+        }
+    }
+
+    #[test]
+    fn empty_workspace_id_is_omitted() {
+        let WorkspaceServerMessage::ShareTarget { url, .. } = share_target(Some(""))
+        else {
+            panic!("expected ShareTarget");
+        };
+        if let Some(url) = url {
+            assert!(!url.contains("workspace="), "got {url}");
+        }
+    }
 }

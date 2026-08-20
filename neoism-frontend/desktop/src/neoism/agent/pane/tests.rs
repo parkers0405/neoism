@@ -799,6 +799,38 @@ fn stale_runtime_poll_cannot_overwrite_newer_live_state() {
 }
 
 #[test]
+fn omitted_child_from_runtime_status_snapshot_settles_working_latch() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("parent", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "Map frontend", "explore")
+            .with_runtime_status(Some("running".to_string())),
+    ]);
+    pane.note_subagent_runtime("child".to_string(), BranchStatus::Active, None);
+    pane.sync_subagent_waiting_clock();
+    assert_eq!(pane.active_subagent_count(), 1);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
+
+    pane.apply_runtime_status_for_session("parent", &HashMap::new());
+
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert!(pane.subagent_waiting_started_at.is_none());
+    pane.side_panel
+        .rewind_status_display_hold(STATUS_LABEL_GRACE);
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert_eq!(
+        pane.side_panel
+            .branch_activity("child")
+            .map(|activity| activity.status),
+        Some(BranchStatus::Completed)
+    );
+}
+
+#[test]
 fn terminal_child_stragglers_update_text_without_resurrecting_runtime() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root".to_string());

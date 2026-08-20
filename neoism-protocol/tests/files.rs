@@ -64,11 +64,13 @@ fn server_dir_listing_roundtrip() {
                 name: "lib.rs".into(),
                 is_dir: false,
                 size: Some(1024),
+                icon: None,
             },
             DirEntry {
                 name: "submod".into(),
                 is_dir: true,
                 size: None,
+                icon: None,
             },
         ],
     });
@@ -144,6 +146,7 @@ fn server_stat_roundtrip() {
             name: "lib.rs".into(),
             is_dir: false,
             size: Some(2048),
+            icon: None,
         },
     });
 }

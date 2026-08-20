@@ -383,9 +383,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                     visibility: Default::default(),
                     main_session_id: None,
                     root_dir: root,
-                    // Local summaries never advertise a linked vault; the
-                    // daemon resolves it for served/joined workspaces.
+                    // Local summaries never advertise a vault; the daemon
+                    // resolves both for served/joined workspaces, and a
+                    // local desktop resolves its own notes directly.
                     linked_vault_dir: None,
+                    notes_vault_dir: None,
                     active_tab_id: Some(desktop_tab_id(self.window_id, active_route_id)),
                     running_on_host_id: Some(host_id.clone()),
                     controlled_by_host_id: Some(host_id.clone()),

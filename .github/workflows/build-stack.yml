@@ -87,6 +87,14 @@ jobs:
              target/release/neoism-workspace-daemon \
              target/release/neoism-agent \
              "stage/$OUT/"
+          # Ship the built web UI NEXT TO the binaries. The daemon's
+          # `web::web_root()` probes `<exe dir>/web` first, so an untarred
+          # release serves the web app from its own origin and the top-bar
+          # "Start Web Server" opens it directly - no npm, no port 5173, no
+          # repo checkout. Without this the tarball carried binaries only,
+          # `web_root()` found nothing, and Start Web Server fell through to
+          # the dev path and reported "web UI is not installed".
+          cp -a neoism-frontend/web/dist "stage/$OUT/web"
           tar -C stage -czf "$OUT.tar.gz" "$OUT"
           sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256"
 

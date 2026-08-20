@@ -390,6 +390,10 @@ fn apply_subagent_runtime_snapshot(
             .and_then(|status| normalize_explicit_runtime_status(&status.kind))
         {
             entry.runtime_status = Some(status.to_string());
+        } else {
+            // Successful `/session/status` is the live run set. A listed
+            // child omitted from it is idle, not unknown.
+            entry.runtime_status = Some("completed".to_string());
         }
     }
 }
@@ -572,7 +576,20 @@ mod subagent_runtime_snapshot_tests {
     }
 
     #[test]
-    fn missing_active_status_is_unknown_not_completed() {
+    fn listed_child_omitted_from_status_snapshot_is_completed() {
+        let mut entries = vec![
+            NeoismAgentSessionEntry::new("root", "main session", "return"),
+            NeoismAgentSessionEntry::new("child", "child", "explore")
+                .with_runtime_status(Some("running".to_string())),
+        ];
+
+        apply_subagent_runtime_snapshot(&mut entries, &HashMap::new());
+
+        assert_eq!(entries[1].runtime_status.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn missing_active_status_on_session_json_is_unknown() {
         let session = serde_json::json!({
             "id": "child",
             "title": "child"

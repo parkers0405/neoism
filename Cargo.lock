@@ -1174,8 +1174,6 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
 dependencies = [
- "serde",
- "termcolor",
  "unicode-width 0.2.2",
 ]
 
@@ -1244,7 +1242,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "copa"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "arrayvec",
  "criterion",
@@ -1270,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "corcovado"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "bytes",
  "cfg-if 0.1.10",
@@ -3152,6 +3150,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-range-header"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4620,6 +4624,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
+
+[[package]]
 name = "minicov"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4780,7 +4794,7 @@ checksum = "7a2f6120a8da26bea3587731072111062c5d8c51ca3a3a75a716bd8b735d5882"
 
 [[package]]
 name = "neoism"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "ahash",
  "base64",
@@ -4854,7 +4868,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "anyhow",
  "base64",
@@ -4876,7 +4890,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-core"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "rand 0.8.5",
  "serde",
@@ -4886,7 +4900,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-server"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4894,6 +4908,7 @@ dependencies = [
  "base64",
  "clap",
  "dirs 6.0.0",
+ "dunce",
  "fff-search",
  "futures",
  "futures-core",
@@ -4923,7 +4938,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-backend"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
@@ -4963,7 +4978,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-extensions"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "bzip2",
  "dirs 5.0.1",
@@ -4977,6 +4992,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "ureq",
+ "windows-sys 0.60.2",
  "xz2",
  "zip",
  "zstd",
@@ -4984,7 +5000,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-grapheme-width"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "phf 0.13.1",
  "ucd-trie",
@@ -4992,7 +5008,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-neoworld"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "anyhow",
  "neoism-neoworld-core",
@@ -5004,11 +5020,11 @@ dependencies = [
 
 [[package]]
 name = "neoism-neoworld-core"
-version = "0.7.48"
+version = "0.7.49"
 
 [[package]]
 name = "neoism-notifier"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "block2 0.5.1",
  "objc-rs 0.3.1",
@@ -5021,7 +5037,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-proc-macros"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5029,7 +5045,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-protocol"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "serde",
  "serde_json",
@@ -5040,7 +5056,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-remarkable"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "neoism-sync",
  "neoism-ui",
@@ -5049,14 +5065,14 @@ dependencies = [
 
 [[package]]
 name = "neoism-rm-agent"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "neoism-sync",
 ]
 
 [[package]]
 name = "neoism-sync"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "loro",
  "mdns-sd",
@@ -5067,7 +5083,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-core"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
@@ -5097,7 +5113,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-pty"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "corcovado",
  "libc",
@@ -5109,7 +5125,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-wasm"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",
@@ -5132,7 +5148,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-ui"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
@@ -5145,6 +5161,7 @@ dependencies = [
  "neoism-terminal-core",
  "neoism-workspace-index",
  "pulldown-cmark",
+ "qrcode",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
@@ -5177,12 +5194,13 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "web-time",
+ "windows-sys 0.60.2",
  "yrs",
 ]
 
 [[package]]
 name = "neoism-window"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "ahash",
  "atomic-waker",
@@ -5237,7 +5255,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-daemon"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "axum",
  "base64",
@@ -5271,6 +5289,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -5281,7 +5300,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-index"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "dirs 6.0.0",
  "notify 8.2.0",
@@ -6520,6 +6539,12 @@ name = "pxfm"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5a041e753da8b807c9255f28de81879c78c876392ff2469cde94799b2896b9d"
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quick-error"
@@ -8054,7 +8079,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sugarloaf"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "approx",
  "ash",
@@ -8378,7 +8403,7 @@ dependencies = [
 
 [[package]]
 name = "teletypewriter"
-version = "0.7.48"
+version = "0.7.49"
 dependencies = [
  "corcovado",
  "dirs 6.0.0",
@@ -8412,15 +8437,6 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "termcolor"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
-dependencies = [
- "winapi-util",
 ]
 
 [[package]]
@@ -8775,10 +8791,19 @@ checksum = "68d6fdd9f81c2819c9a8b0e0cd91660e7746a8e6ea2ba7c6b2b057985f6bcb51"
 dependencies = [
  "bitflags 2.11.0",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
+ "http-range-header",
+ "httpdate",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
@@ -9953,7 +9978,6 @@ dependencies = [
  "hashbrown 0.16.1",
  "js-sys",
  "log 0.4.29",
- "naga",
  "parking_lot",
  "portable-atomic",
  "profiling",
@@ -9961,7 +9985,6 @@ dependencies = [
  "smallvec",
  "static_assertions",
  "wasm-bindgen",
- "wasm-bindgen-futures",
  "web-sys",
  "wgpu-core",
  "wgpu-hal",

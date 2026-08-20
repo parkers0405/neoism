@@ -19,8 +19,22 @@ pub(super) fn existing_project_path(
     } else {
         base.join(raw)
     };
-    let path = crate::windows_process::canonicalize_path(&candidate)
-        .with_context(|| format!("failed to resolve path {}", candidate.display()))?;
+    let path = match crate::windows_process::canonicalize_path(&candidate) {
+        Ok(path) => path,
+        Err(error) => {
+            // Memory lives in the linked vault, not the workspace, so a
+            // `Memory/MEMORY.md` read has no project file to hit. Resolve it
+            // where memory actually is instead of reporting a missing path.
+            if let Some(memory) =
+                crate::mcp_memory::memory_file_for_workspace_path(&base, raw)
+            {
+                return Ok(memory);
+            }
+            return Err(error).with_context(|| {
+                format!("failed to resolve path {}", candidate.display())
+            });
+        }
+    };
     if !path.starts_with(&base) {
         context.ensure_explicit_allowed(
             "external_directory",

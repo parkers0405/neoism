@@ -539,7 +539,37 @@ fn embedded_tcp_bind_addrs() -> Vec<(&'static str, IpAddr)> {
             addrs.push(("tailscale", tailscale_ip));
         }
     }
+    // LAN, so a phone on the same Wi-Fi can reach this daemon ("Share
+    // with phone"). Previously the daemon listened on loopback + tailnet
+    // ONLY, which is why a QR pointing at a LAN address would have been
+    // dead on arrival. Same exposure class as the tailnet bind above, and
+    // the socket is still token-gated — `auth::verify` fails CLOSED in
+    // release builds when `NEOISM_DAEMON_TOKEN` is unset.
+    if let Some(lan_ip) = primary_lan_ipv4() {
+        if !addrs.iter().any(|(_, addr)| *addr == lan_ip) {
+            addrs.push(("lan", lan_ip));
+        }
+    }
     addrs
+}
+
+/// The address this machine would use to reach the local network, or
+/// `None` when it is offline / loopback-only.
+///
+/// Uses the standard UDP-connect trick: connecting a datagram socket
+/// sends NOTHING on the wire, it just asks the routing table which local
+/// interface would carry traffic to that destination. That avoids a
+/// dependency on an interface-enumeration crate and picks the *routable*
+/// interface rather than the first one alphabetically.
+pub(crate) fn primary_lan_ipv4() -> Option<IpAddr> {
+    let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    // Any routable address works; nothing is transmitted.
+    socket.connect(("192.0.2.1", 9)).ok()?;
+    let addr = socket.local_addr().ok()?.ip();
+    match addr {
+        IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => Some(addr),
+        _ => None,
+    }
 }
 
 impl Drop for EmbeddedDaemonHandle {

@@ -106,6 +106,20 @@ pub struct WorkspaceSummary {
     /// on every `HostWorkspaceTree`/`HostWorkspaceUpserted`.
     #[serde(default)]
     pub linked_vault_dir: Option<PathBuf>,
+    /// The vault this workspace's notes ACTUALLY resolve to on the host,
+    /// with the desktop's full fallback: the linked scope when there is
+    /// one, otherwise the user's default vault. This is what the host's
+    /// own desktop sidebar lists, so a client viewing its OWN host should
+    /// use this and match desktop exactly.
+    ///
+    /// Distinct from [`Self::linked_vault_dir`] on purpose: a GUEST must
+    /// keep using `linked_vault_dir`, because falling back here would
+    /// expose the host's personal default vault to someone who only
+    /// joined one project. Unlike `linked_vault_dir` this is not gated on
+    /// the directory existing - desktop lists a not-yet-created vault as
+    /// an empty "+ New note" state, and creating the first note makes it.
+    #[serde(default)]
+    pub notes_vault_dir: Option<PathBuf>,
     #[serde(default)]
     pub active_tab_id: Option<String>,
     #[serde(default)]

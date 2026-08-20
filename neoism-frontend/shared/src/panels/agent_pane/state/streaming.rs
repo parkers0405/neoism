@@ -248,6 +248,22 @@ impl NeoismAgentPane {
         }
     }
 
+    pub fn settle_tracked_subagents(&mut self, status: BranchStatus) {
+        let child_ids = self
+            .side_panel
+            .subagents()
+            .iter()
+            .skip(1)
+            .map(|entry| entry.id.clone())
+            .chain(self.active_subagent_ids.iter().cloned())
+            .filter(|id| Some(id.as_str()) != self.session_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        for child_id in child_ids {
+            self.note_subagent_runtime(child_id, status, None);
+        }
+        self.sync_subagent_waiting_clock();
+    }
+
     /// Part-level activity update for a child (raw text/reasoning/tool
     /// delta). Subordinate to authoritative lifecycle status: if the
     /// branch already latched a terminal state it stays finished, and

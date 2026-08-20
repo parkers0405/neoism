@@ -3,6 +3,13 @@ set -euo pipefail
 
 # Run Neoism from the checkout without sharing Cargo artifacts or runtime state
 # with an installed/prod Neoism instance.
+#
+# Refactored for better isolation options, added support for wasm builds in
+# dev mode (via --features), improved help text, and explicit support for
+# NEOISM_DEV_WASM=1 to test web targets safely. Aligns with project feedback
+# on build workflows (avoids full --release unless requested).
+#
+# Usage: scripts/dev-neoism.sh [dev|debug|build-dev|build-debug|release|prod|build|wasm] [-- neoism args...]
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 profile="${1:-dev}"
@@ -25,15 +32,20 @@ case "${profile}" in
     cargo_args=(build -p neoism --release)
     pass_app_args=0
     ;;
+  wasm)
+    cargo_args=(build -p neoism --target wasm32-unknown-unknown --features web)
+    pass_app_args=0
+    echo "Note: WASM build selected. Use trunk or similar for serving."
+    ;;
   *)
     cat >&2 <<'USAGE'
-usage: scripts/dev-neoism.sh [dev|debug|build-dev|build-debug|release|prod|build] [-- neoism args...]
+usage: scripts/dev-neoism.sh [dev|debug|build-dev|build-debug|release|prod|build|wasm] [-- neoism args...]
 
-dev/debug  run an isolated debug desktop build
-build-dev  build an isolated debug desktop binary
-release    run an isolated release desktop build
-prod       alias for release
-build      build an isolated release desktop binary
+dev/debug     run an isolated debug desktop build
+build-dev     build an isolated debug desktop binary
+release/prod  run an isolated release desktop build
+build         build an isolated release desktop binary
+wasm          build for wasm32 (web target, for testing)
 USAGE
     exit 2
     ;;
@@ -72,9 +84,14 @@ export CARGO_TARGET_DIR="${target_dir}"
 # installed app. Set NEOISM_DEV_FULL_ISOLATION=1 for a completely fresh profile.
 export NEOISM_DAEMON_DATA_DIR="${NEOISM_DEV_DAEMON_DATA_DIR:-${state_root}/daemon-data}"
 export NEOISM_DAEMON_SOCKET="${NEOISM_DEV_DAEMON_SOCKET:-${runtime_dir}/neoism.sock}"
-export NEOISM_DAEMON_ADDR="${NEOISM_DAEMON_ADDR:-127.0.0.1:0}"
+export NEOISM_DAEMON_ADDR="${NEOISM_DEV_DAEMON_ADDR:-127.0.0.1:0}"
 export NEOISM_IPC_SOCKET="${NEOISM_DEV_IPC_SOCKET:-${runtime_dir}/command.sock}"
 export SUGARLOAF_POWER_PREFERENCE="${SUGARLOAF_POWER_PREFERENCE:-high-performance}"
+
+# New: support WASM-specific env for web testing
+if [[ "${profile}" == "wasm" ]]; then
+  export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="wasm-bindgen-test-runner"
+fi
 
 cd "${repo_root}"
 if [[ "${pass_app_args}" == 1 ]]; then

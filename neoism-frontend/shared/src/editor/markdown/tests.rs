@@ -2044,6 +2044,12 @@ mod tests {
     #[test]
     fn click_near_end_of_single_line_task_moves_to_source_line_end() {
         let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
         pane.lines = vec!["- [ ] finish the markdown hit test".to_string()];
         pane.register_block_rect(
             0,
@@ -2071,6 +2077,12 @@ mod tests {
     #[test]
     fn click_near_end_of_single_line_list_item_moves_to_source_line_end() {
         let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
         pane.lines = vec!["- finish the markdown hit test".to_string()];
         pane.register_block_rect(
             0,
@@ -2097,6 +2109,12 @@ mod tests {
     #[test]
     fn click_near_end_of_wrapped_markdown_line_uses_wrapped_visual_end() {
         let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
         pane.lines = vec!["### very long heading text that wraps here".to_string()];
         pane.register_block_rect(
             0,
@@ -2146,6 +2164,12 @@ mod tests {
     #[test]
     fn click_heading_uses_measured_hit_stops_even_when_unwrapped() {
         let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
         pane.lines = vec!["### Wide heading".to_string()];
         pane.register_block_rect(
             0,
@@ -2183,6 +2207,12 @@ mod tests {
     #[test]
     fn click_wrapped_body_uses_measured_hit_stops_for_visual_row() {
         let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
         pane.lines = vec!["- [ ] alpha beta gamma delta epsilon".to_string()];
         pane.register_block_rect(
             0,
@@ -2232,6 +2262,12 @@ mod tests {
     #[test]
     fn click_code_fence_line_enters_insert_at_source_column() {
         let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
         pane.lines = vec![
             "```rust".to_string(),
             "let value = 1;".to_string(),
@@ -2262,6 +2298,12 @@ mod tests {
     #[test]
     fn click_horizontal_rule_enters_insert_at_rule_end() {
         let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
         pane.lines = vec!["---".to_string()];
         pane.register_block_rect(
             0,
@@ -2285,6 +2327,12 @@ mod tests {
     fn click_divider_variants_enter_insert_at_source_end() {
         for divider in ["***", "___", "  ***  "] {
             let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
             pane.lines = vec![divider.to_string()];
             pane.register_block_rect(
                 0,
@@ -2310,6 +2358,12 @@ mod tests {
     #[test]
     fn click_quote_line_maps_after_quote_marker() {
         let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
         pane.lines = vec!["> quoted words".to_string()];
         pane.register_block_rect(
             0,
@@ -2353,6 +2407,12 @@ mod tests {
     #[test]
     fn click_wrapped_task_line_maps_to_visual_row() {
         let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
         pane.lines = vec!["- [ ] alpha beta gamma delta epsilon zeta".to_string()];
         pane.register_block_rect(
             0,
@@ -2414,6 +2474,12 @@ mod tests {
         // content ("delta"), not many words away — the old uniform estimate
         // mis-mapped this.
         let mut pane = pane_for_test();
+        // These cases assert the NON-vim click behaviour (click enters
+        // Insert at the mapped column). `pane_for_test` defaults
+        // `vim_enabled: true`, where a click correctly moves the caret
+        // and STAYS in Normal — so opt out explicitly rather than
+        // asserting a mode the vim path never produces.
+        pane.vim_enabled = false;
         pane.lines = vec!["- [ ] alpha beta gamma delta epsilon".to_string()];
         pane.register_block_rect(
             0,

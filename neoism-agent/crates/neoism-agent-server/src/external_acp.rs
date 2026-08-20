@@ -599,7 +599,7 @@ impl AcpTerminalManager {
                 }
             }
         }
-        crate::tool::process::set_new_process_group(&mut child_cmd);
+        crate::windows_process::hide_std_command(&mut child_cmd);
 
         let mut child = child_cmd.spawn().map_err(|err| AcpRpcError {
             code: -32000,

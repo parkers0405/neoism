@@ -76,9 +76,27 @@ fn background_completion_card(fallback_id: &str, text: &str) -> NeoismAgentMessa
     card
 }
 
+/// The notice's own opening line. Live `message.part.updated` events
+/// carry the part, not the parent message's `info`, so the `system`
+/// marker can be absent and `messageID` can still be empty on the first
+/// delta. Without a text-based check the part fell through to
+/// `agent_message_user` and painted a USER BUBBLE for a frame or two,
+/// which the next history refresh then re-mapped to a hidden System row
+/// - the "it shows up and then gets torn out while I'm looking at it"
+/// flicker. Matching the text too keeps live and history agreeing from
+/// the very first frame.
+const SUBTASK_COMPLETION_TEXT_MARKER: &str = "Subagent finished.";
+
 fn is_subtask_completion(system: &str, message_id: &str) -> bool {
     system.contains(SUBTASK_COMPLETION_SYSTEM_MARKER)
         || message_id.starts_with(SUBTASK_COMPLETION_MESSAGE_PREFIX)
+}
+
+/// `is_subtask_completion`, plus the text fallback for live parts whose
+/// envelope carries neither marker yet.
+fn is_subtask_completion_text(system: &str, message_id: &str, text: &str) -> bool {
+    is_subtask_completion(system, message_id)
+        || text.trim_start().starts_with(SUBTASK_COMPLETION_TEXT_MARKER)
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -660,7 +678,7 @@ fn message_blocks_with_start(
             // history refresh under the same identity.
             return vec![background_completion_card(&id, &text)];
         }
-        let message = if is_subtask_completion(system, &id) {
+        let message = if is_subtask_completion_text(system, &id, &text) {
             agent_message_system("Subagent", text)
         } else {
             agent_message_user(text)
@@ -1248,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn subtask_completion_notification_renders_as_system_message() {
+    fn subtask_completion_notification_renders_as_a_hidden_system_notice() {
         let message = json!({
             "info": {
                 "id": "msg-subtask-done",
@@ -1267,7 +1285,62 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].kind, NeoismAgentMessageKind::System);
         assert_eq!(blocks[0].title, "Subagent");
-        assert_eq!(blocks[0].text, "Subagent finished.\ntask_id: ses_child");
+    }
+
+    /// The live broadcast and the history reload must classify the
+    /// subagent notice the SAME way. If live renders it as a user bubble
+    /// (visible) and history as a System notice (hidden), the block flashes
+    /// onto the screen and is torn away on the next refresh.
+    #[test]
+    fn subtask_completion_is_hidden_on_the_first_live_frame_too() {
+        let text = "Subagent finished. task_id: ses_abc agent: @explore status: completed";
+
+        // Worst case: the live part carries NEITHER the system marker nor a
+        // message id (first delta of the stream).
+        let bare = part_block(&json!({
+            "id": "prt-live",
+            "type": "text",
+            "role": "user",
+            "text": text,
+        }))
+        .expect("live part maps to a block");
+        assert_eq!(bare.kind, NeoismAgentMessageKind::System);
+
+        // With the id present it must classify identically.
+        let tagged = part_block(&json!({
+            "id": "prt-live",
+            "type": "text",
+            "messageID": "msg_subtask_completion_ses_abc",
+            "role": "user",
+            "text": text,
+        }))
+        .expect("live part maps to a block");
+
+        let history = message_blocks(&json!({
+            "info": {
+                "id": "msg_subtask_completion_ses_abc",
+                "role": "user",
+                "system": SUBTASK_COMPLETION_SYSTEM_MARKER,
+            },
+            "parts": [{"id": "prt-hist", "type": "text", "text": text}]
+        }));
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(tagged.kind, history[0].kind);
+        assert_eq!(history[0].kind, NeoismAgentMessageKind::System);
+    }
+
+    /// A normal user prompt must NOT be swallowed by the text heuristic.
+    #[test]
+    fn ordinary_user_text_is_still_a_user_bubble() {
+        let block = part_block(&json!({
+            "id": "prt-user",
+            "type": "text",
+            "role": "user",
+            "text": "Subagent finished? tell me about it",
+        }))
+        .expect("user part maps to a block");
+        assert_eq!(block.kind, NeoismAgentMessageKind::User);
     }
 
     #[test]
@@ -1577,20 +1650,28 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if let Some(text) = part.get("text").and_then(Value::as_str) {
+                // Both completion cards return EARLY on purpose: the tail of
+                // this function rewrites `message.id` to the parent message
+                // id for any user-role text part, which would clobber the
+                // card's durable identity and break the replace-in-place
+                // contract with `message_blocks`.
+                let fallback_id = if message_id.is_empty() {
+                    id.as_str()
+                } else {
+                    message_id
+                };
                 if is_background_task_completion(system, message_id) {
                     // Same durable completion card as `message_blocks` — the
                     // live broadcast and the history reload must agree on the
                     // card's identity so refreshes replace instead of wipe.
-                    let fallback_id = if message_id.is_empty() {
-                        id.as_str()
-                    } else {
-                        message_id
-                    };
                     return Some(background_completion_card(fallback_id, text));
                 }
             }
             part.get("text").and_then(Value::as_str).map(|text| {
-                if is_subtask_completion(system, message_id) {
+                if is_subtask_completion_text(system, message_id, text) {
+                    // Hidden system notice, same as `message_blocks`. It must
+                    // be classified this way on the FIRST frame; anything
+                    // visible here gets torn away by the next refresh.
                     agent_message_system("Subagent", text)
                 } else {
                     agent_message_user(text)

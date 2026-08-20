@@ -2020,6 +2020,47 @@ fn subagent_composer_status_tracks_only_active_children() {
     assert!(!pane.has_status_activity());
 }
 
+/// Force-stop / last-child-finished must not leave the parent footer on
+/// "Sub-agents working". The children themselves are already idle; the
+/// GUI roster was the thing still claiming they were Active.
+#[test]
+fn abort_settles_stale_working_subagents() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel.ensure_subagent_main_entry("parent");
+    pane.side_panel
+        .upsert_subagent("child-1", "Map frontend", "explore");
+    pane.side_panel
+        .upsert_subagent("child-2", "Map backend", "explore");
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Active, None);
+    pane.note_subagent_runtime("child-2".to_string(), BranchStatus::Active, None);
+    pane.sync_subagent_waiting_clock();
+    assert_eq!(pane.active_subagent_count(), 2);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::WaitingSubagents
+    );
+    assert!(pane.subagent_waiting_started_at.is_some());
+
+    pane.abort_session();
+
+    assert_eq!(pane.active_subagent_count(), 0);
+    assert!(pane.subagent_waiting_started_at.is_none());
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert_eq!(
+        pane.side_panel
+            .branch_activity("child-1")
+            .map(|activity| activity.status),
+        Some(BranchStatus::Stopped)
+    );
+    assert_eq!(
+        pane.side_panel
+            .branch_activity("child-2")
+            .map(|activity| activity.status),
+        Some(BranchStatus::Stopped)
+    );
+}
+
 /// A subagent conversation is an EXTENSION of the main chat: entering a
 /// child must keep the parent-keyed roster (names, statuses, running
 /// count) alive in the sidebar instead of clearing it.
@@ -2151,6 +2192,71 @@ fn task_card_expansion_clears_on_subagent_round_trip() {
     );
     assert!(!pane.tool_expand_animating("task-card"));
     assert!(!pane.any_tool_expand_animating());
+}
+
+/// Leave-and-return collapses the live-trace window. A parked parent
+/// layout from the previous visit still contains the tool rows that
+/// were visible while you were inside the child; restoring that cache
+/// would paint leftover titles that vanish on click. The restore must
+/// drop the parked layout and hide settled tools.
+#[test]
+fn settled_tool_titles_hide_after_subagent_round_trip() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.side_panel.ensure_subagent_main_entry("parent");
+    pane.side_panel
+        .upsert_subagent("child-1", "Fix the tests", "explore");
+    pane.messages = vec![
+        NeoismAgentMessage::user("look around"),
+        NeoismAgentMessage::tool(
+            "Read(src/lib.rs)",
+            "Read preview",
+            "completed",
+            "read",
+            NeoismAgentOutputKind::Text,
+            "",
+            Vec::new(),
+        )
+        .with_id("read-1"),
+        NeoismAgentMessage::assistant("done"),
+    ];
+    pane.timeline_live_trace_start = Some(1);
+    pane.timeline_live_trace_anchor = Some(pane.messages[0].id.clone());
+    *pane.timeline_layout_cache.borrow_mut() = Some(TimelineLayoutCache {
+        epoch: pane.timeline_layout_epoch,
+        source_len: pane.messages.len(),
+        width_bucket: 0,
+        scale_bucket: 0,
+        gap_bucket: 0,
+        content_height: 120.0,
+        pages: Vec::new(),
+        rows: vec![TimelineLayoutRow {
+            source_index: 1,
+            source_end_index: 1,
+            top: 40.0,
+            height: 30.0,
+            display_text: Some("Read(src/lib.rs)".to_string()),
+            display_message: Some(pane.messages[1].clone()),
+            markdown_blocks: None,
+            tool_diff_sections: None,
+            is_edit_tool: false,
+        }],
+    });
+
+    pane.apply_history_to_cache(
+        "child-1",
+        vec![NeoismAgentMessage::user("go")],
+        None,
+    );
+    pane.switch_session("child-1".to_string());
+    pane.switch_session("parent".to_string());
+
+    assert_eq!(pane.timeline_live_trace_start, None);
+    assert!(pane.timeline_layout_cache.borrow().is_none());
+    assert!(
+        pane.tool_archived("read-1"),
+        "settled tools must stay archived after leave-and-return"
+    );
 }
 
 #[test]

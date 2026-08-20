@@ -46,7 +46,10 @@ pub struct RasterizedGlyph<'a> {
     pub height: u16,
     pub bearing_x: i16,
     pub bearing_y: i16,
-    /// R8 pixels, row-major, length `width * height`. No row stride —
-    /// the atlas upload uses `bytes_per_row = width`.
+    /// Tightly packed pixels, row-major, length
+    /// `width * height * bytes_per_pixel`. Backends that cannot upload
+    /// an unaligned row pitch (WebGL `UNPACK_ALIGNMENT`, WebGPU
+    /// `bytesPerRow`) pad a temporary buffer; the slot size stays
+    /// `width x height`.
     pub bytes: &'a [u8],
 }

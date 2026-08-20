@@ -69,6 +69,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             self.buffer_tabs.set_focused(false);
             self.blur(PanelKey::BufferTabs);
         }
+        // Agent-logo overlays are immediate-mode: `push_image_overlay`
+        // APPENDS to a per-panel Vec, so the strip must drop last frame's
+        // pushes or every repaint would stack another copy forever. The
+        // desktop host does the same through its own `clear_icon_overlays`
+        // (it doesn't go through `Chrome`, so this clear is web-only).
+        sugarloaf.clear_image_overlays_for(
+            crate::panels::agent_pane::icon::ICON_PANEL_ID,
+        );
         self.buffer_tabs.draw(
             sugarloaf,
             &PanelLayout {
@@ -84,13 +92,26 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // properly overlays labels from the file tree, buffer tabs,
         // breadcrumbs, etc. Painting it here would let later panel
         // text bleed through the open menu.
-        let status_palette = status_palette_from_theme(&theme);
-        self.status_line.render(
+        // Desktop parity: paint through the SAME entry point the native
+        // host uses (`render_with_ide_theme_in_content_bounds`, see
+        // `host/run.rs`) with the real `IdeTheme`.
+        //
+        // This used to build a `StatusPalette` out of `ChromeTheme` via
+        // `status_palette_from_theme`, which remaps to DIFFERENT palette
+        // slots than desktop's conversion does — `surface<-bg_elevated`,
+        // `muted<-fg_dim`, `red<-error`, `green<-success` and notably
+        // `blue<-accent`. Same widget, different numbers, so the web
+        // status bar came out a different color than the desktop one.
+        // The content-bounds variant also starts the pills at the editor
+        // column instead of x=0, which is the other half of the mismatch.
+        self.status_line.render_with_ide_theme_in_content_bounds(
             sugarloaf,
             layout.status_line.x,
             layout.status_line.y,
             layout.status_line.w,
-            &status_palette,
+            layout.terminal.x,
+            layout.terminal.w,
+            &self.ide_theme,
         );
 
         // 2. File tree sidebar.
@@ -738,6 +759,23 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.trail_cursor
                         .set_cursor_shape(neoism_terminal_core::ansi::CursorShape::Block);
                     self.trail_cursor.set_destination(x, y, w, h);
+                    // `set_destination` only records where the caret is
+                    // headed; `draw_quad` builds its triangles from the
+                    // spring-animated `corners[i].x/.y`, which ONLY
+                    // `animate`/`snap_to_destination` ever write. Without
+                    // this advance the quad stayed at its initial (0,0)
+                    // zero-area state, so the agent composer's caret was
+                    // never visible even though focus and typing worked -
+                    // and since this is the only arm taken while the agent
+                    // tab is active, nothing else advanced it either. Every
+                    // other target animates (see
+                    // `draw_block_trail_cursor_rect` /
+                    // `draw_content_trail_cursor_rect`); this arm was the
+                    // lone outlier. It also re-arms `is_animating()`, so the
+                    // caret counts as an animation owner in
+                    // `animations_active()` and the host keeps pumping
+                    // frames for it.
+                    self.trail_cursor.animate(w, h, dt);
                     sugarloaf.set_late_overlay_mode(true);
                     self.trail_cursor.draw_always(sugarloaf, 1.0, cursor_color);
                     sugarloaf.set_late_overlay_mode(false);
@@ -931,6 +969,26 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // overlay pass, so no earlier text can bleed through (the
         // same layering desktop gives its settings overlay + modal).
         self.draw_chrome_overlays(sugarloaf);
+
+        // "Share with phone" QR — genuinely last, above even the chrome
+        // overlays, because it is a modal the user is pointing a camera at.
+        if self.share_sheet.is_visible() {
+            let viewport = [
+                0.0,
+                0.0,
+                layout.terminal.x + layout.terminal.w,
+                layout.status_line.y + layout.status_line.h,
+            ];
+            let ide_theme = self.ide_theme;
+            // MUST go through the late-overlay pass, same as the settings
+            // page and the About modal. Text is emitted in its own earlier
+            // pass, so a plain rect drawn here does NOT cover it — the
+            // sheet looked transparent with the timeline showing through.
+            sugarloaf.set_late_overlay_mode(true);
+            self.share_sheet
+                .render(sugarloaf, viewport, &ide_theme, self.chrome_scale);
+            sugarloaf.set_late_overlay_mode(false);
+        }
     }
 
     /// Render every UNFOCUSED visible pane's surface while the grid is

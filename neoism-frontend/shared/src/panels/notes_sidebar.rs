@@ -430,6 +430,39 @@ impl NotesSidebar {
     /// filesystem, which is a no-op on wasm — the web host lists the
     /// notes tree through the daemon's Files service and stores the
     /// result back here. Depth/parent derive from `workspace_path`.
+    /// Host push carrying the daemon-resolved page icon per row.
+    /// `note_frontmatter_icon` reads the file directly, which is a silent
+    /// `None` on wasm (no filesystem), so a web host supplies the icon
+    /// from the daemon's listing instead of losing it.
+    pub fn set_entries_from_host_with_icons(
+        &mut self,
+        entries: Vec<(PathBuf, bool, Option<String>)>,
+    ) {
+        let host_icons: Vec<(PathBuf, Option<String>)> = entries
+            .iter()
+            .map(|(path, _, icon)| (path.clone(), icon.clone()))
+            .collect();
+        self.set_entries_from_host(
+            entries
+                .into_iter()
+                .map(|(path, is_dir, _)| (path, is_dir))
+                .collect(),
+        );
+        // Re-apply the host's icons over whatever the local (no-op on
+        // wasm) frontmatter read produced.
+        for (path, icon) in host_icons {
+            let Some(icon) = icon.filter(|icon| !icon.is_empty()) else {
+                continue;
+            };
+            if let Some(entry) =
+                self.all_entries.iter_mut().find(|entry| entry.path == path)
+            {
+                entry.icon = Some(icon);
+            }
+        }
+        self.rebuild_rows();
+    }
+
     pub fn set_entries_from_host(&mut self, entries: Vec<(PathBuf, bool)>) {
         let Some(root) = self.workspace_path.clone() else {
             return;

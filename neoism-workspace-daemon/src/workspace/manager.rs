@@ -523,6 +523,7 @@ impl WorkspaceManager {
                     main_session_id: None,
                     root_dir: None,
                     linked_vault_dir: None,
+                    notes_vault_dir: None,
                     active_tab_id: None,
                     running_on_host_id: Some(host_id.clone()),
                     controlled_by_host_id: None,
@@ -544,6 +545,7 @@ impl WorkspaceManager {
         // lists this project's notes from the exact vault dir over the
         // files plane — never the host's other vaults.
         workspace.linked_vault_dir = resolve_linked_vault_dir(&declared);
+        workspace.notes_vault_dir = Some(resolve_notes_vault_dir(&declared));
         workspace.root_dir = Some(declared);
         workspace.last_active = now;
         inner
@@ -628,10 +630,12 @@ impl WorkspaceManager {
         // Re-rooting the workspace re-resolves the linked vault: a `:cd`
         // into a differently-linked project must re-point notes too.
         let linked_vault_dir = resolve_linked_vault_dir(&dir);
+        let notes_vault_dir = Some(resolve_notes_vault_dir(&dir));
         let mut inner = self.inner.lock();
         let mut workspace = inner.host_workspaces.get(workspace_id)?.clone();
         workspace.root_dir = Some(dir);
         workspace.linked_vault_dir = linked_vault_dir;
+        workspace.notes_vault_dir = notes_vault_dir;
         workspace.last_active = now_secs();
         inner
             .host_workspaces
@@ -712,6 +716,7 @@ impl WorkspaceManager {
                 main_session_id: None,
                 root_dir: std::env::current_dir().ok(),
                 linked_vault_dir: None,
+                notes_vault_dir: None,
                 active_tab_id: None,
                 running_on_host_id: Some(fallback_host_id.clone()),
                 controlled_by_host_id: None,

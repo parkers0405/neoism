@@ -52,12 +52,6 @@ pub fn detach_std_command(command: &mut std::process::Command) {
     let _ = command;
 }
 
-pub fn std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
-    let mut command = std::process::Command::new(program);
-    hide_std_command(&mut command);
-    command
-}
-
 /// Canonicalize without the Windows `\\?\` verbatim prefix. FFF, git, and
 /// most command-line tools join `/`-separated relatives onto this base.
 pub fn canonicalize_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {

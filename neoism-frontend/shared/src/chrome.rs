@@ -530,6 +530,20 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// side panel and base for the `notes/` directory.
     workspace_root_path: Option<std::path::PathBuf>,
 
+    /// Vault directory the notes sidebar lists, as resolved by the HOST
+    /// (`linked_project_for_code_dir` -> `notes_workspace_dir()`, e.g.
+    /// `~/Neoism/Vaults/Personal/Projects/MyProject`). Notes live in
+    /// vaults, never in a workspace-local `notes/` folder, so this is
+    /// tracked separately from `workspace_root_path` and cannot be
+    /// derived from it. `None` means the host linked no vault, which
+    /// drives the sidebar's "no linked vault" empty state.
+    notes_vault_root: Option<std::path::PathBuf>,
+
+    /// "Share with phone" QR sheet. The host resolves the reachable URL
+    /// (only the daemon knows its routable address) and calls
+    /// `ShareSheet::show`; this panel only encodes and paints it.
+    pub share_sheet: crate::panels::share_sheet::ShareSheet,
+
     /// Previous-frame [`Chrome::draw`] timestamp. `None` on first frame
     /// so the trail cursor can teleport to the initial destination
     /// instead of animating from a stale origin. Used to compute the

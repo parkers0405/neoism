@@ -27,6 +27,8 @@ pub mod search;
 pub mod server;
 pub mod sessions;
 pub mod tailnet;
+/// Built web UI served from the daemon HTTP listener.
+pub mod web;
 /// Windows-only ACL hardening for secret files (unix uses mode bits).
 #[cfg(windows)]
 pub mod windows_acl;

@@ -21,6 +21,7 @@ parking_lot = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
+tower-http = { workspace = true, features = ["fs"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }

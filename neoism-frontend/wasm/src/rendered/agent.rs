@@ -1249,6 +1249,9 @@ impl ChromeBridge {
                 }
                 AgentProtocolMapping::Messages(messages) => {
                     for envelope in messages {
+                        // Session we just moved to, if any — it needs a
+                        // backfill (see below).
+                        let mut opened_session: Option<String> = None;
                         match &envelope {
                             neoism_protocol::agent::AgentClientMessage::SwitchThread {
                                 session_id,
@@ -1256,6 +1259,7 @@ impl ChromeBridge {
                                 self.agent_state.session_id = Some(session_id.clone());
                                 self.agent_state.requested_session_id =
                                     Some(session_id.clone());
+                                opened_session = Some(session_id.clone());
                             }
                             neoism_protocol::agent::AgentClientMessage::SubmitPrompt {
                                 text,
@@ -1267,6 +1271,40 @@ impl ChromeBridge {
                         }
                         if self.send_agent_envelope(&envelope) {
                             delivered = delivered.saturating_add(1);
+                        }
+                        // `SwitchThread` only BINDS the daemon's SSE stream,
+                        // so events flow from that instant onward and
+                        // anything the turn already produced is missing —
+                        // open a session mid-run (or reload the page during
+                        // one) and the timeline never caught up. Desktop
+                        // fetches the transcript over HTTP on entry; the web
+                        // twin is `GetHistory`, which the daemon answers with
+                        // a `HistoryChunk` that `apply_history` folds in.
+                        // Nothing in the web build sent either of these
+                        // before — they existed end-to-end and had zero
+                        // callers.
+                        //
+                        // `ResumeStream` additionally replays interactions
+                        // that were parked while no client was attached (a
+                        // `question` tool call blocks the run and its SSE
+                        // event is long gone by the time the page loads).
+                        if let Some(session_id) = opened_session {
+                            let history =
+                                neoism_protocol::agent::AgentClientMessage::GetHistory {
+                                    session_id: session_id.clone(),
+                                    cursor: None,
+                                    limit: None,
+                                };
+                            if self.send_agent_envelope(&history) {
+                                delivered = delivered.saturating_add(1);
+                            }
+                            let resume =
+                                neoism_protocol::agent::AgentClientMessage::ResumeStream {
+                                    session_id,
+                                };
+                            if self.send_agent_envelope(&resume) {
+                                delivered = delivered.saturating_add(1);
+                            }
                         }
                     }
                 }
@@ -1293,6 +1331,10 @@ impl ChromeBridge {
             handled: bool,
             copy: Option<String>,
             link: Option<String>,
+            /// A text selection just started under this press. The JS host
+            /// must now track pointermove -> `agent_selection_drag` and
+            /// pointerup -> `agent_selection_end` to finish the drag-copy.
+            selecting: bool,
         }
         let mut result = ClickResult::default();
         let mut relayout = false;
@@ -1411,6 +1453,15 @@ impl ChromeBridge {
                 result.handled = true;
                 break 'chain;
             }
+            // Nothing interactive under the press: start a text selection.
+            // Last link in the chain for the same reason desktop puts
+            // `begin_selection_at` last (`bridges/agent.rs`) - pickers,
+            // side-panel rows, links and tool toggles all outrank it.
+            if pane.begin_selection_at(x, y) {
+                result.handled = true;
+                result.selecting = true;
+                break 'chain;
+            }
         }
         if relayout {
             self.relayout_chrome();
@@ -1421,6 +1472,32 @@ impl ChromeBridge {
             let _ = self.drain_agent_outbound();
         }
         serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+    }
+
+    /// Extend the in-progress timeline text selection to `(x, y)`.
+    /// Driven by the JS host's pointermove while the button is held,
+    /// after `agent_pointer_down` reported `selecting: true`. Mirrors
+    /// desktop's `drag_selection_to` call in `bridges/agent.rs`.
+    pub fn agent_selection_drag(&mut self, x: f32, y: f32) -> bool {
+        let Some(pane) = self.chrome.agent_pane_mut() else {
+            return false;
+        };
+        pane.drag_selection_to(x, y)
+    }
+
+    /// Finish the drag and hand back the selected text so the host can
+    /// put it on the clipboard (desktop copies on mouse-up the same
+    /// way). Returns `None` when nothing was selected - a plain click.
+    pub fn agent_selection_end(&mut self) -> Option<String> {
+        let pane = self.chrome.agent_pane_mut()?;
+        pane.end_selection()
+    }
+
+    /// True while a timeline selection drag owns the pointer.
+    pub fn agent_has_active_selection(&self) -> bool {
+        self.chrome
+            .agent_pane()
+            .is_some_and(|pane| pane.has_active_selection())
     }
 
     /// Wheel routing over the agent pane with the desktop priority:
@@ -1450,6 +1527,73 @@ impl ChromeBridge {
             return pane.scroll_timeline_pixels(delta_pixels);
         }
         false
+    }
+
+    /// Desktop-parity agent wheel. `delta_mode` mirrors the DOM
+    /// `WheelEvent.deltaMode` (0 = pixels, 1 = lines, 2 = pages).
+    ///
+    /// Web used to feed the raw pixel delta straight into
+    /// `scroll_timeline_pixels`, so a mouse notch lurched by whatever
+    /// the browser reported (~100-120px on Chrome) with no smoothing,
+    /// while desktop runs every wheel through
+    /// `scroll_model::agent_timeline_wheel`: a NOTCH becomes
+    /// `clamp(±3) * line_height * 3` and scrolls SMOOTHLY, and only
+    /// trackpad pixel deltas go through raw. That policy difference is
+    /// the whole reason chat scrolling felt worse in the browser.
+    ///
+    /// Browsers report a mouse wheel in pixels on most platforms, so a
+    /// large quantised pixel delta is treated as a notch too — otherwise
+    /// the smooth path would only ever engage on Firefox.
+    pub fn agent_scroll_wheel_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        delta_y: f32,
+        delta_mode: u32,
+    ) -> bool {
+        use neoism_ui::editor::scroll_model::agent_timeline_wheel;
+        use neoism_ui::panels::completion_menu::ScrollDelta;
+        const LINE_HEIGHT: f32 = 24.0;
+        // A notch is either an explicit line/page delta, or a pixel
+        // delta big enough that no trackpad would emit it per event.
+        let notch_lines = match delta_mode {
+            1 => Some(delta_y),
+            2 => Some(delta_y * 3.0),
+            _ if delta_y.abs() >= 40.0 => Some(delta_y / 100.0),
+            _ => None,
+        };
+        let shared = match notch_lines {
+            Some(y) => ScrollDelta::Lines { x: 0.0, y },
+            None => ScrollDelta::Pixels {
+                x: 0.0,
+                y: delta_y,
+            },
+        };
+        let wheel = agent_timeline_wheel(&shared, LINE_HEIGHT);
+        let Some(pane) = self.chrome.agent_pane_mut() else {
+            return false;
+        };
+        // Picker / side panel / diff cards keep their own routing.
+        if pane.picker_contains_point(x, y) {
+            pane.scroll_picker_pixels(wheel.pixels);
+            return true;
+        }
+        if pane.side_panel().contains_point(x, y) {
+            let rows = pane.side_panel().last_panel_height_rows();
+            pane.side_panel_mut().scroll_pixels(wheel.pixels, rows);
+            return true;
+        }
+        if !pane.timeline_contains_point(x, y) {
+            return false;
+        }
+        if let Some(scrolled) = pane.scroll_diff_at(x, y, -wheel.pixels) {
+            return scrolled;
+        }
+        if wheel.smooth {
+            pane.scroll_timeline_wheel_pixels(wheel.pixels)
+        } else {
+            pane.scroll_timeline_pixels(wheel.pixels)
+        }
     }
 
     /// Horizontal wheel/trackpad routing for rendered Markdown code blocks

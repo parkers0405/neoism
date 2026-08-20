@@ -46,6 +46,13 @@ impl Screen<'_> {
                 self.start_web_frontend_server();
                 true
             }
+            Some(TopBarAction::ShareWithPhone) => {
+                // Web-only row (`TopBar::set_share_with_phone_enabled`),
+                // so desktop never surfaces it — the desktop IS the host.
+                // Matched explicitly to keep this dispatch exhaustive if
+                // the row is ever enabled here.
+                false
+            }
             Some(TopBarAction::OpenThemes) => {
                 // Mirror Cmd+P → Themes: searchable list + live preview.
                 self.open_theme_picker();
@@ -221,13 +228,23 @@ impl Screen<'_> {
     }
 
     pub fn start_web_frontend_server(&mut self) {
+        if let Some(url) = daemon_web_ui_url() {
+            self.renderer.notifications.push(
+                format!("Opening Neoism web on {url}"),
+                neoism_ui::panels::notifications::NotificationLevel::Info,
+            );
+            open_url_in_browser(&url);
+            self.mark_dirty();
+            return;
+        }
+
         let web_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|path| path.parent())
             .map(|repo| repo.join("neoism-frontend/web"));
         let Some(web_dir) = web_dir else {
             self.renderer.notifications.push(
-                "Could not locate neoism-frontend/web.",
+                "Neoism web UI is not installed. Rebuild with the web assets or set NEOISM_WEB_ROOT.",
                 neoism_ui::panels::notifications::NotificationLevel::Error,
             );
             self.mark_dirty();
@@ -237,40 +254,41 @@ impl Screen<'_> {
         let dist_index = web_dir.join("dist/index.html");
         if !dist_index.is_file() {
             self.renderer.notifications.push(
-                "Neoism web build is missing. Run `npm run build` in neoism-frontend/web first.",
+                "Neoism web UI is not installed. Rebuild with the web assets or set NEOISM_WEB_ROOT.",
                 neoism_ui::panels::notifications::NotificationLevel::Error,
             );
             self.mark_dirty();
             return;
         }
 
-        let url = "http://127.0.0.1:5173";
+        let daemon_ws = loopback_daemon_ws_url();
+        let url = format!("http://127.0.0.1:5173/?daemon={daemon_ws}");
         if !web_frontend_port_listening() {
-        let child = {
-            let mut command = std::process::Command::new("npm");
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                command.creation_flags(
-                    windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
-                        | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
-                );
-            }
-            command
-                .arg("run")
-                .arg("preview")
-                .arg("--")
-                .arg("--host")
-                .arg("0.0.0.0")
-                .arg("--port")
-                .arg("5173")
-                .arg("--strictPort")
-                .current_dir(&web_dir)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-        };
+            let child = {
+                let mut command = std::process::Command::new("npm");
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    command.creation_flags(
+                        windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                            | windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+                    );
+                }
+                command
+                    .arg("run")
+                    .arg("preview")
+                    .arg("--")
+                    .arg("--host")
+                    .arg("0.0.0.0")
+                    .arg("--port")
+                    .arg("5173")
+                    .arg("--strictPort")
+                    .current_dir(&web_dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+            };
             let mut child = match child {
                 Ok(child) => child,
                 Err(err) => {
@@ -333,12 +351,31 @@ impl Screen<'_> {
         }
 
         self.renderer.notifications.push(
-            "Neoism web build is ready on http://127.0.0.1:5173.",
+            format!("Neoism web is ready on {url}"),
             neoism_ui::panels::notifications::NotificationLevel::Info,
         );
-        open_url_in_browser(url);
+        open_url_in_browser(&url);
         self.mark_dirty();
     }
+}
+
+fn daemon_web_ui_url() -> Option<String> {
+    neoism_workspace_daemon::web::web_root()?;
+    Some(loopback_web_origin())
+}
+
+fn loopback_web_origin() -> String {
+    format!(
+        "http://127.0.0.1:{}",
+        crate::embedded_daemon::default_tcp_port()
+    )
+}
+
+fn loopback_daemon_ws_url() -> String {
+    format!(
+        "ws://127.0.0.1:{}/session",
+        crate::embedded_daemon::default_tcp_port()
+    )
 }
 
 fn web_frontend_port_listening() -> bool {

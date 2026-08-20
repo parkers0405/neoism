@@ -400,6 +400,12 @@ export interface EditorLspFileEdit {
 
 export type EditorClientMessage =
   | {
+      /** Ask the daemon to tree-sitter-highlight this text. The browser
+       *  has no parser (all grammars are gated off wasm), so this is how
+       *  the code pane gets whole-buffer spans. */
+      HighlightBuffer: { path: string; text: string; revision: number };
+    }
+  | {
       OpenBuffer: {
         path: string;
         /** Authoritative live buffer text (native-editor LSP sync). */
@@ -1411,6 +1417,20 @@ export interface WorkspaceSummary {
   visibility?: "private" | "shared" | "team";
   main_session_id?: string | null;
   root_dir?: string | null;
+  /** The notes vault the HOST linked to this workspace's code dir, fully
+   *  resolved where the vaults physically live (e.g.
+   *  `~/Neoism/Vaults/Personal/Projects/MyProject`). This is the ONLY
+   *  directory notes live in - there is no `<root_dir>/notes`. `null`
+   *  when the host linked no vault, which drives the sidebar's
+   *  "no linked vault" empty state. */
+  linked_vault_dir?: string | null;
+  /** The vault this workspace's notes actually resolve to on the host,
+   *  with desktop's full fallback (linked scope, else the user's default
+   *  vault). Use this when viewing your OWN host so an unlinked project
+   *  shows the same notes desktop shows; a guest must use
+   *  `linked_vault_dir` instead, which stays `null` unless the host
+   *  explicitly linked a vault to this project. */
+  notes_vault_dir?: string | null;
   active_tab_id?: string | null;
   running_on_host_id?: string | null;
   controlled_by_host_id?: string | null;
@@ -1567,6 +1587,7 @@ export type WorkspaceClientMessage =
   | { CloseHostWorkspace: { workspace_id: string } }
   | { SwitchHostWorkspace: { workspace_id: string } }
   | { SetWorkspaceRoot: { workspace_id: string; root_dir: string } }
+  | { RequestShareTarget: { workspace_id: string | null } }
   | { ShareWorkspace: { workspace_id: string } }
   | { StopSharingWorkspace: { workspace_id: string } }
   | { SendWorkspaceToDockerSandbox: { workspace_id: string } }
@@ -1732,6 +1753,7 @@ export type WorkspaceServerMessage =
         reason: InitialWorkspaceReason;
       };
     }
+  | { ShareTarget: { url: string | null; hint: string | null } }
   | { HostWorkspaceUpserted: { workspace: WorkspaceSummary } }
   | { HostWorkspaceChanged: { host_id: string; workspace_id?: string | null } }
   | { WorkspaceControlChanged: { workspace: WorkspaceSummary } }

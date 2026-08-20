@@ -438,6 +438,14 @@ impl<A: Copy> BufferTabs<A> {
                     None
                 }
             });
+            // No host `AgentIconProvider` (the web host runs `Chrome<()>`,
+            // whose `A` carries no agent identity): fall back to the
+            // Neoism mark the SHARED crate owns rather than the bare "n"
+            // Nerd-Font glyph. A Neoism agent tab is identifiable without
+            // an `A` value via `neoism_agent_route_id`.
+            let neoism_builtin_icon = agent_for_tab.is_none()
+                && tab.neoism_agent_route_id.is_some()
+                && crate::panels::agent_pane::icon::register_neoism_icon(sugarloaf);
             let icon_label = tab
                 .path
                 .as_ref()
@@ -544,7 +552,7 @@ impl<A: Copy> BufferTabs<A> {
                 ..DrawOpts::default()
             };
 
-            if agent_for_tab.is_none() {
+            if agent_for_tab.is_none() && !neoism_builtin_icon {
                 draw_icon_centered_with_occlusion(
                     sugarloaf,
                     icon_x,
@@ -564,7 +572,7 @@ impl<A: Copy> BufferTabs<A> {
                 &title_opts,
                 occlusion_rects,
             );
-            if let Some(agent) = agent_for_tab {
+            if agent_for_tab.is_some() || neoism_builtin_icon {
                 // Unlike Nerd Font glyphs, agent logos are PNG squares and
                 // have no ascent/baseline.  Centre the square on the actual
                 // ink of the title's leading capital instead of the nominal
@@ -598,16 +606,27 @@ impl<A: Copy> BufferTabs<A> {
                     // so logos don't bleed through the card.
                     let icon_rect =
                         [icon_left, agent_icon_y, icon_right - icon_left, icon_size];
-                    if let Some(provider) = icon_provider {
-                        if !rect_occluded(icon_rect, occlusion_rects) {
-                            provider.draw_agent_icon(
+                    if !rect_occluded(icon_rect, occlusion_rects) {
+                        match (icon_provider, agent_for_tab) {
+                            (Some(provider), Some(agent)) => provider.draw_agent_icon(
                                 sugarloaf,
                                 agent,
                                 icon_left,
                                 agent_icon_y,
                                 icon_right - icon_left,
                                 [source_left, 0.0, source_right, 1.0],
-                            );
+                            ),
+                            _ if neoism_builtin_icon => {
+                                crate::panels::agent_pane::icon::draw_neoism_tab_icon(
+                                    sugarloaf,
+                                    icon_left,
+                                    agent_icon_y,
+                                    icon_right - icon_left,
+                                    icon_size,
+                                    [source_left, 0.0, source_right, 1.0],
+                                );
+                            }
+                            _ => {}
                         }
                     }
                 }

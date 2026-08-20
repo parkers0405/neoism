@@ -598,7 +598,15 @@ impl FontLibraryData {
         if let Some(symbol_maps) = &self.symbol_maps {
             for symbol_map in symbol_maps {
                 if symbol_map.range.contains(&ch) {
-                    return Some((symbol_map.font_index, false));
+                    // Report the mapped font's REAL colour-ness. This used
+                    // to hardcode `false`, which meant a COLR/CBDT emoji
+                    // font reached through a symbol map was rasterised on
+                    // the monochrome path and lost its colour layers.
+                    let is_color = self
+                        .inner
+                        .get(&symbol_map.font_index)
+                        .is_some_and(|font| font.is_emoji);
+                    return Some((symbol_map.font_index, is_color));
                 }
             }
         }
@@ -659,7 +667,15 @@ impl FontLibraryData {
         if let Some(symbol_maps) = &self.symbol_maps {
             for symbol_map in symbol_maps {
                 if symbol_map.range.contains(&ch) {
-                    return Some((symbol_map.font_index, false));
+                    // Report the mapped font's REAL colour-ness. This used
+                    // to hardcode `false`, which meant a COLR/CBDT emoji
+                    // font reached through a symbol map was rasterised on
+                    // the monochrome path and lost its colour layers.
+                    let is_color = self
+                        .inner
+                        .get(&symbol_map.font_index)
+                        .is_some_and(|font| font.is_emoji);
+                    return Some((symbol_map.font_index, is_color));
                 }
             }
         }

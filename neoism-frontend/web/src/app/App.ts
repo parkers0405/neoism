@@ -36,8 +36,11 @@ import type {
   WorkspacesModalPeerHost,
   WorkspacesModalWorkspace,
 } from "../terminal/createTerminal";
-
-const DEFAULT_DAEMON_URL = "ws://127.0.0.1:7878/session";
+import {
+  DEFAULT_DAEMON_URL,
+  resolveDaemonTarget,
+  viteInjectedDaemonUrl,
+} from "./daemonTarget";
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 const WEB_CONTROLLER_HOST_ID = "web-controller";
@@ -85,6 +88,11 @@ export class App {
   private workspaceGateSatisfied = false;
   /** Daemon workspace root used to absolutize relative tab paths. */
   private activeWorkspaceRootPath: string | null = null;
+  /** Notes vault the active workspace's HOST linked, straight off
+   *  `WorkspaceSummary.linked_vault_dir`. Notes live only in vaults, so
+   *  this is tracked separately from `activeWorkspaceRootPath` and is
+   *  never derived from it. */
+  private activeWorkspaceVaultPath: string | null = null;
   /** Browser-local tab views. Workspace root/host state is shared by the
    *  daemon; open tabs/focus remain local only while this page is alive. */
   private workspaceStrips = new Map<string, WorkspaceStripSnapshot>();
@@ -135,7 +143,24 @@ export class App {
       }
       this.terminalPanel?.applyWorkplacePreferences(event.prefs);
     });
+    const target = this.bootDaemonTarget();
+    if (target.autoConnect) {
+      this.connectManual(target.url, target.token ?? "");
+      return;
+    }
     this.showConnectionScreen();
+  }
+
+  private bootDaemonTarget() {
+    return resolveDaemonTarget(
+      {
+        protocol: window.location.protocol,
+        host: window.location.host,
+        port: window.location.port,
+        search: window.location.search,
+      },
+      viteInjectedDaemonUrl(),
+    );
   }
 
   private showConnectionScreen(): void {
@@ -155,14 +180,22 @@ export class App {
     };
   }
 
-  /** Pick a sensible URL to pre-fill the connection screen with. Falls
-   *  back to `DEFAULT_DAEMON_URL` if the registry is empty. */
+  /** Prefer an explicit `?daemon=` / same-origin daemon, then the last
+   *  workplace, then the head default. Query URLs must win so a debug
+   *  desktop can target its ephemeral port instead of :7878. */
   private defaultConnectionUrl(): string {
+    const target = this.bootDaemonTarget();
+    if (target.fromQuery || target.autoConnect) return target.url;
+    const lastId = this.workplaceService.getLastActiveId();
+    if (lastId) {
+      const last = this.workplaceService
+        .listWorkplaces()
+        .find((entry) => entry.id === lastId);
+      if (last) return last.url;
+    }
     const entries = this.workplaceService.listWorkplaces();
-    if (entries.length === 0) return DEFAULT_DAEMON_URL;
-    // Most recently added is at the tail of insertion order; sorted
-    // listing is alphabetical so we look up the raw map via `find`.
-    return entries[0].url;
+    if (entries.length > 0) return entries[0].url;
+    return target.url || DEFAULT_DAEMON_URL;
   }
 
   /**
@@ -459,6 +492,7 @@ export class App {
       return false;
     }
     this.activeHostWorkspaceId = tab.workspace_id;
+    this.syncShareWorkspaceId();
     this.syncCommandPaletteWorkspaceVisibility();
     this.handlePtyCreated(tab.session_id, tab.cwd ?? null);
     const workspace = tree?.workspaces.find(
@@ -552,6 +586,8 @@ export class App {
       },
       onFontSizeChanged: (fontSize) => this.persistActiveFontSize(fontSize),
       onShowWorkplaces: () => this.showWorkplaceSwitcherOverlay(),
+      getServerEntries: () => this.buildServerPaletteEntries(),
+      onServerSelected: (id) => this.handleServerPalettePick(id),
       getWorkspacesModalPayload: () => this.buildWorkspacesModalPayload(),
       onWorkspaceSelected: (workspaceId) =>
         this.switchToWorkspaceById(workspaceId),
@@ -664,6 +700,15 @@ export class App {
    */
   private installWorkspaceTreeSubscription(): void {
     this.workspaceService?.subscribe((msg) => {
+      if ("ShareTarget" in msg) {
+        // Daemon answered `RequestShareTarget` with a phone-reachable URL
+        // (or an explanation when it has none).
+        this.terminalPanel?.showShareTarget(
+          msg.ShareTarget.url,
+          msg.ShareTarget.hint,
+        );
+        return;
+      }
       if ("HostWorkspaceUpserted" in msg) {
         const workspaceId = msg.HostWorkspaceUpserted.workspace.id;
         if (this.pendingCreateWorkspaceId === workspaceId) {
@@ -738,11 +783,8 @@ export class App {
 
     const activeHost = wsUrlHost(this.workplaceService.getActiveUrl());
     const hostIndex = new Map(tree.hosts.map((host) => [host.id, host]));
-    const isLocalHost = (hostId: string): boolean => {
-      const url = hostIndex.get(hostId)?.daemon_url;
-      const host = wsUrlHost(url ?? null);
-      return host !== null && activeHost !== null && host === activeHost;
-    };
+    const isLocalHost = (hostId: string): boolean =>
+      this.isOwnHostWorkspace(hostId);
 
     const workspaces: WorkspacesModalWorkspace[] = tree.workspaces.map(
       (workspace) => {
@@ -828,6 +870,7 @@ export class App {
   ): void {
     this.rememberCurrentStrip();
     this.activeHostWorkspaceId = workspace.id;
+    this.syncShareWorkspaceId();
     this.addWorkspaceSubscription(workspace.id);
     this.persistWorkspaceSubscriptions();
     this.syncCommandPaletteWorkspaceVisibility();
@@ -853,6 +896,7 @@ export class App {
       this.activeWorkspaceRootPath = newRoot;
       this.terminalPanel?.setWorkspaceRoot(newRoot);
     }
+    this.applyNotesVault(workspace);
     this.terminalPanel?.applyWorkspaceLayoutSnapshot(workspace.layout_snapshot);
     // Daemon tabs are the source of truth on workspace entry/reload. A
     // browser-local strip is only an in-memory fallback for workspaces that
@@ -888,14 +932,80 @@ export class App {
   private maybeReRootActiveWorkspace(): void {
     const id = this.activeHostWorkspaceId;
     if (!id) return;
-    const root =
-      this.workspaceService
-        ?.getHostWorkspaceTree()
-        .workspaces.find((w) => w.id === id)?.root_dir ?? null;
+    const summary = this.workspaceService
+      ?.getHostWorkspaceTree()
+      .workspaces.find((w) => w.id === id);
+    const root = summary?.root_dir ?? null;
     if (root && root.startsWith("/") && root !== this.activeWorkspaceRootPath) {
       this.activeWorkspaceRootPath = root;
       this.terminalPanel?.setWorkspaceRoot(root);
     }
+    // The daemon re-resolves the link on every broadcast, so a vault
+    // linked/unlinked while we're connected lands here too.
+    this.applyNotesVault(summary);
+  }
+
+  /** True when `hostId` is the daemon we are directly connected to -
+   *  i.e. this workspace belongs to OUR host, not a peer's. Compares the
+   *  host's advertised daemon URL against the active connection. */
+  /** True only when we can PROVE `hostId` is a different daemon than the
+   *  one we're connected to. Anything unknown (no host tree yet, host
+   *  advertises no url) answers false — "assume ours", which is the safe
+   *  default for notes: the worst case is showing your own vault. */
+  private isForeignHostWorkspace(hostId: string): boolean {
+    const tree = this.workspaceService?.getHostWorkspaceTree();
+    if (!tree) return false;
+    const activeHost = wsUrlHost(this.workplaceService.getActiveUrl());
+    const url = tree.hosts.find((host) => host.id === hostId)?.daemon_url;
+    const host = wsUrlHost(url ?? null);
+    if (host === null || activeHost === null) return false;
+    return host !== activeHost;
+  }
+
+  private isOwnHostWorkspace(hostId: string): boolean {
+    const tree = this.workspaceService?.getHostWorkspaceTree();
+    if (!tree) return false;
+    const activeHost = wsUrlHost(this.workplaceService.getActiveUrl());
+    const url = tree.hosts.find((host) => host.id === hostId)?.daemon_url;
+    const host = wsUrlHost(url ?? null);
+    return host !== null && activeHost !== null && host === activeHost;
+  }
+
+  /** Push the notes vault for `workspace` down to the notes sidebar.
+   *
+   *  Mirrors desktop's split. Viewing our OWN host, we take
+   *  `notes_vault_dir` - the host's full desktop resolution, which falls
+   *  back to the user's default vault when the project links none, so an
+   *  unlinked directory shows the same notes the desktop sidebar shows.
+   *  Joined to somebody ELSE's workspace we take `linked_vault_dir`,
+   *  which is `null` unless they explicitly linked a vault to this
+   *  project - a guest must not be shown the host's personal default
+   *  vault. `null` is meaningful (it selects the "no linked vault" empty
+   *  state), so it is forwarded rather than skipped. */
+  /** Keep the terminal panel's copy of the active workspace id current so
+   *  the "Share with phone" QR deep-links to what is actually on screen. */
+  private syncShareWorkspaceId(): void {
+    this.terminalPanel?.setShareWorkspaceId(this.activeHostWorkspaceId ?? null);
+  }
+
+  private applyNotesVault(workspace: WorkspaceSummary | undefined): void {
+    // Default to OUR host's full resolution and only fall back to the
+    // guest-safe `linked_vault_dir` when we can POSITIVELY tell this
+    // workspace belongs to a different daemon. `isOwnHostWorkspace` also
+    // answers false when the host tree hasn't arrived yet or the host
+    // advertises no `daemon_url` - treating that "unknown" as a guest is
+    // what left the sidebar empty on a plain local browser session even
+    // though the Default vault was right there.
+    const foreign = workspace
+      ? this.isForeignHostWorkspace(workspace.host_id)
+      : false;
+    const vault = foreign
+      ? (workspace?.linked_vault_dir ?? null)
+      : (workspace?.notes_vault_dir ?? workspace?.linked_vault_dir ?? null);
+    const next = vault && vault.startsWith("/") ? vault : null;
+    if (next === this.activeWorkspaceVaultPath) return;
+    this.activeWorkspaceVaultPath = next;
+    this.terminalPanel?.setNotesVaultRoot(next);
   }
 
   /** Daemon-pushed live cwd for a PTY session (the shell `cd`'d, or it
@@ -1322,6 +1432,51 @@ export class App {
       `Workspace moved — following to ${event.targetUrl ?? event.newHostId}...`,
     );
     client.connect();
+  }
+
+  /** Rows for the SHARED servers palette — the same surface desktop's
+   *  top-right corner opens. "Local Server" mirrors desktop's synthetic
+   *  first row so the list reads identically on both frontends. */
+  private buildServerPaletteEntries(): Array<{
+    id: string;
+    name: string;
+    address: string;
+    local: boolean;
+    status: string;
+    active: boolean;
+  }> {
+    const service = this.workplaceService;
+    const activeId = service.getActiveId();
+    const rows = service.listWorkplaces().map((entry) => ({
+      id: entry.id,
+      name: entry.label,
+      address: entry.url,
+      local: false,
+      status: entry.id === activeId ? "online" : "unknown",
+      active: entry.id === activeId,
+    }));
+    return [
+      {
+        id: "local",
+        name: "Local Server",
+        address: service.getActiveUrl() ?? "local daemon",
+        local: true,
+        status: activeId === null ? "online" : "unknown",
+        active: activeId === null,
+      },
+      ...rows,
+    ];
+  }
+
+  /** A row was picked in the shared servers palette. Routes through the
+   *  same `handleSwitchTo` the DOM switcher uses, so connection
+   *  ownership stays in one place. */
+  private handleServerPalettePick(id: string): void {
+    if (id === "local") return;
+    const entry = this.workplaceService
+      .listWorkplaces()
+      .find((candidate) => candidate.id === id);
+    if (entry) this.handleSwitchTo(entry);
   }
 
   private showWorkplaceSwitcherOverlay(): void {

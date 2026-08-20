@@ -15,10 +15,49 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Syntax token classes carried over the wire. Mirrors
+/// `neoism_ui::syntax::SynTok` variant-for-variant; kept here so the
+/// protocol crate doesn't depend on the UI crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SyntaxToken {
+    Plain,
+    Keyword,
+    Type,
+    String,
+    Number,
+    Comment,
+    Function,
+    Punct,
+}
+
+/// One highlighted run: `(token, start_byte, end_byte)` over the WHOLE
+/// buffer text the request carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyntaxSpan {
+    pub token: SyntaxToken,
+    pub start: u32,
+    pub end: u32,
+}
+
 /// Messages the client (web bridge) sends to drive the embedded nvim
 /// session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditorClientMessage {
+    /// Ask the daemon to tree-sitter-highlight `text`.
+    ///
+    /// Every `tree-sitter*` crate is gated `cfg(not(target_arch =
+    /// "wasm32"))`, so a browser build has no parser at all and falls
+    /// back to a per-line lexer that cannot see block comments or
+    /// multi-line strings. The daemon is native and already links the UI
+    /// crate, so it runs the real parse and returns the spans.
+    ///
+    /// `revision` is echoed back so a reply that lost the race against
+    /// further typing can be dropped instead of painted onto moved text.
+    HighlightBuffer {
+        path: PathBuf,
+        text: String,
+        revision: u64,
+    },
     /// Open `path` (workspace-relative) in the embedded nvim. Equivalent
     /// to `:edit <path>` after path-traversal validation on the daemon.
     OpenBuffer {
@@ -356,6 +395,14 @@ pub struct EditorLspCompletionItem {
 /// from nvim's `ext_linegrid` UI surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditorServerMessage {
+    /// Reply to `HighlightBuffer`. Empty `spans` means the daemon has no
+    /// grammar for this file type — the client keeps its per-line
+    /// fallback rather than painting nothing.
+    HighlightSpans {
+        path: PathBuf,
+        revision: u64,
+        spans: Vec<SyntaxSpan>,
+    },
     /// One atomic nvim redraw notification. Desktop used to receive
     /// `grid_scroll` and its matching edge `grid_line`s in the same
     /// in-process batch; the daemon must preserve that boundary over
@@ -761,6 +808,8 @@ impl EditorClientMessage {
             | EditorClientMessage::ApplyLspCodeActionAt { surface_id, .. }
             | EditorClientMessage::LspHoverAt { surface_id, .. }
             | EditorClientMessage::DidSave { surface_id, .. } => surface_id.as_deref(),
+            // Highlighting is keyed by path, not by a pane route.
+            EditorClientMessage::HighlightBuffer { .. } => None,
             EditorClientMessage::Close => None,
         }
     }

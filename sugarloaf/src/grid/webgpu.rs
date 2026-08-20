@@ -20,6 +20,15 @@ use crate::renderer::image_cache::atlas::AtlasAllocator;
 const FRAMES_IN_FLIGHT: usize = 3;
 const CURSOR_ROW_SLOTS: usize = 2;
 const ATLAS_SIZE: u32 = 2048;
+const ATLAS_MAX_SIZE: u32 = 8192;
+
+fn atlas_size_limit(device: &wgpu::Device) -> u32 {
+    device.limits().max_texture_dimension_2d.min(ATLAS_MAX_SIZE).max(1)
+}
+
+fn atlas_start_size(device: &wgpu::Device) -> u32 {
+    ATLAS_SIZE.min(atlas_size_limit(device)).max(1)
+}
 
 pub struct WgpuGlyphAtlas {
     texture: wgpu::Texture,
@@ -28,6 +37,8 @@ pub struct WgpuGlyphAtlas {
     slots: FxHashMap<GlyphKey, AtlasSlot>,
     queue: wgpu::Queue,
     bytes_per_pixel: u32,
+    format: wgpu::TextureFormat,
+    label: &'static str,
 }
 
 impl WgpuGlyphAtlas {
@@ -58,29 +69,69 @@ impl WgpuGlyphAtlas {
         bytes_per_pixel: u32,
         label: &'static str,
     ) -> Self {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width: ATLAS_SIZE,
-                height: ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        let size = atlas_start_size(device);
+        let texture = create_atlas_texture(device, format, size, label);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         Self {
             texture,
             view,
-            allocator: AtlasAllocator::new(ATLAS_SIZE as u16, ATLAS_SIZE as u16),
+            allocator: AtlasAllocator::new(size as u16, size as u16),
             slots: FxHashMap::default(),
             queue,
             bytes_per_pixel,
+            format,
+            label,
         }
+    }
+
+    /// Double the atlas texture, blitting existing texels into the
+    /// top-left. Existing `AtlasSlot`s stay valid. Returns `false` when
+    /// the device `max_texture_dimension_2d` is already reached (WebGL
+    /// is typically 2048). The caller must rebuild any bind group that
+    /// sampled the previous view.
+    pub fn grow(&mut self, device: &wgpu::Device) -> bool {
+        let (old_w, old_h) = self.allocator.dimensions();
+        let limit = atlas_size_limit(device);
+        if old_w as u32 >= limit {
+            return false;
+        }
+        let new_size = (old_w as u32).saturating_mul(2).min(limit);
+        if new_size <= old_w as u32 {
+            return false;
+        }
+
+        let new_texture = create_atlas_texture(device, self.format, new_size, self.label);
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("grid.atlas_grow"),
+            });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &new_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: old_w as u32,
+                height: old_h as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        self.texture = new_texture;
+        self.view = self
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.allocator.grow_to(new_size as u16, new_size as u16);
+        true
     }
 
     #[inline]
@@ -116,29 +167,15 @@ impl WgpuGlyphAtlas {
             bearing_y: glyph.bearing_y,
         };
         self.slots.insert(key, slot);
-
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: x as u32,
-                    y: y as u32,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
+        write_atlas_texture(
+            &self.queue,
+            &self.texture,
+            x as u32,
+            y as u32,
+            glyph.width as u32,
+            glyph.height as u32,
+            self.bytes_per_pixel,
             glyph.bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(glyph.width as u32 * self.bytes_per_pixel),
-                rows_per_image: Some(glyph.height as u32),
-            },
-            wgpu::Extent3d {
-                width: glyph.width as u32,
-                height: glyph.height as u32,
-                depth_or_array_layers: 1,
-            },
         );
         Some(slot)
     }
@@ -189,13 +226,11 @@ pub struct WgpuGridRenderer {
     bg_bind_group: wgpu::BindGroup,
     bg_pipeline: wgpu::RenderPipeline,
 
-    // text pipeline. The bind-group-layout fields are retained for
-    // Phase 2 (recreating the atlas bind group when we grow/rotate
-    // the atlas texture); hence `#[allow(dead_code)]` for now.
+    // text pipeline. Atlas bind-group layout is kept so grow() can
+    // rebuild `text_atlas_bg` against the new texture views.
     #[allow(dead_code)]
     text_uniform_bgl: wgpu::BindGroupLayout,
     text_uniform_bg: wgpu::BindGroup,
-    #[allow(dead_code)]
     text_atlas_bgl: wgpu::BindGroupLayout,
     text_atlas_bg: wgpu::BindGroup,
     text_pipeline: wgpu::RenderPipeline,
@@ -592,6 +627,14 @@ impl WgpuGridRenderer {
         key: GlyphKey,
         glyph: RasterizedGlyph<'_>,
     ) -> Option<AtlasSlot> {
+        if let Some(slot) = self.atlas_grayscale.insert(key, glyph) {
+            return Some(slot);
+        }
+        if self.atlas_grayscale.grow(&self.device) {
+            self.rebuild_text_atlas_bg();
+            return self.atlas_grayscale.insert(key, glyph);
+        }
+        self.atlas_grayscale.clear();
         self.atlas_grayscale.insert(key, glyph)
     }
 
@@ -600,7 +643,24 @@ impl WgpuGridRenderer {
         key: GlyphKey,
         glyph: RasterizedGlyph<'_>,
     ) -> Option<AtlasSlot> {
+        if let Some(slot) = self.atlas_color.insert(key, glyph) {
+            return Some(slot);
+        }
+        if self.atlas_color.grow(&self.device) {
+            self.rebuild_text_atlas_bg();
+            return self.atlas_color.insert(key, glyph);
+        }
+        self.atlas_color.clear();
         self.atlas_color.insert(key, glyph)
+    }
+
+    fn rebuild_text_atlas_bg(&mut self) {
+        self.text_atlas_bg = create_text_atlas_bg(
+            &self.device,
+            &self.text_atlas_bgl,
+            self.atlas_grayscale.view(),
+            self.atlas_color.view(),
+        );
     }
 
     /// Record bg pass + text pass against the caller's `render_pass`.
@@ -666,6 +726,94 @@ impl WgpuGridRenderer {
 }
 
 // ---------- buffer / layout / pipeline helpers ----------
+
+fn create_atlas_texture(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    size: u32,
+    label: &'static str,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+/// Pad each source row so `bytes_per_row` is legal on WebGL and WebGPU.
+///
+/// WebGL2 `texSubImage2D` still honors the default `UNPACK_ALIGNMENT`
+/// of 4 unless the implementation sets it to 1 (wgpu-hal does that
+/// only on native GLES). A 6- or 7-wide R8 glyph therefore uploads
+/// as empty / garbled texels while the slot and advance stay valid —
+/// letters vanish, spacing remains. WebGPU additionally requires
+/// `bytesPerRow` to be a multiple of 256 whenever it is specified.
+/// Native `Queue::write_texture` will re-pad internally; doing it
+/// here keeps every backend on one code path.
+fn write_atlas_texture(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    bytes_per_pixel: u32,
+    src: &[u8],
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let unpadded = width.saturating_mul(bytes_per_pixel);
+    let padded = unpadded
+        .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        .saturating_mul(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        .max(unpadded);
+    let owned;
+    let bytes: &[u8] = if padded == unpadded {
+        src
+    } else {
+        let mut buf = vec![0u8; padded as usize * height as usize];
+        for row in 0..height as usize {
+            let src_off = row * unpadded as usize;
+            let dst_off = row * padded as usize;
+            buf[dst_off..dst_off + unpadded as usize]
+                .copy_from_slice(&src[src_off..src_off + unpadded as usize]);
+        }
+        owned = buf;
+        &owned
+    };
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(padded),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+}
 
 fn alloc_bg_buffer(device: &wgpu::Device, cols: u32, rows: u32) -> wgpu::Buffer {
     let size = (cols as u64)

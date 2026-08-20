@@ -355,10 +355,10 @@ pub fn vault_notes_workspace(name: &str) -> NeoismWorkspace {
 
 pub fn normalize_root(root: &Path) -> std::io::Result<PathBuf> {
     if root.exists() {
-        root.canonicalize()
+        crate::path::canonicalize(root)
     } else {
         let parent = root.parent().unwrap_or_else(|| Path::new("."));
-        let parent = parent.canonicalize()?;
+        let parent = crate::path::canonicalize(parent)?;
         Ok(parent.join(root.file_name().unwrap_or_default()))
     }
 }
@@ -671,7 +671,7 @@ pub fn vault_project_links_for_note(
 }
 
 fn comparable_code_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::path::canonicalize_lossy(path)
 }
 
 fn remove_exact_link_from_other_vaults(

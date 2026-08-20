@@ -36,7 +36,7 @@ pub fn platform_key_bindings(
         "-", ModifiersState::CONTROL;  Action::DecreaseFontSize;
         "-", ModifiersState::CONTROL;  Action::DecreaseFontSize;
         "n", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::WindowCreateNew;
-        ",", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::ConfigEditor;
+        ",", ModifiersState::ALT; Action::ConfigEditor;
         "p", ModifiersState::ALT; Action::OpenCommandPalette;
         "p", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::OpenCommandPalette;
 

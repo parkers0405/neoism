@@ -96,7 +96,9 @@ fn is_subtask_completion(system: &str, message_id: &str) -> bool {
 /// envelope carries neither marker yet.
 fn is_subtask_completion_text(system: &str, message_id: &str, text: &str) -> bool {
     is_subtask_completion(system, message_id)
-        || text.trim_start().starts_with(SUBTASK_COMPLETION_TEXT_MARKER)
+        || text
+            .trim_start()
+            .starts_with(SUBTASK_COMPLETION_TEXT_MARKER)
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -1293,7 +1295,8 @@ mod tests {
     /// onto the screen and is torn away on the next refresh.
     #[test]
     fn subtask_completion_is_hidden_on_the_first_live_frame_too() {
-        let text = "Subagent finished. task_id: ses_abc agent: @explore status: completed";
+        let text =
+            "Subagent finished. task_id: ses_abc agent: @explore status: completed";
 
         // Worst case: the live part carries NEITHER the system marker nor a
         // message id (first delta of the stream).

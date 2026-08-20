@@ -393,7 +393,9 @@ impl NeoismAgentPane {
         let mut scored: Vec<(i64, &str)> = self
             .file_mention_candidates
             .iter()
-            .filter_map(|path| fuzzy_score(path, query).map(|score| (score, path.as_str())))
+            .filter_map(|path| {
+                fuzzy_score(path, query).map(|score| (score, path.as_str()))
+            })
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
         scored

@@ -16,6 +16,7 @@ It is not an Electron IDE or a web terminal wrapper. The desktop app owns a nati
 - **Agent-native**: persistent local agent sessions, parallel sub-agents, LSP, shell and file tools, permissions, checkpoints, undo trees, and durable memory.
 - **Multiplayer and remote**: a workspace daemon owns PTYs and shared state so the same workspace can be used from desktop, web, phone, or another laptop over Tailscale.
 - **Local-first**: your files, terminals, notes, agents, and credentials stay on machines you control.
+- **Discoverable configuration**: `Alt+,` opens the active host's JSONC config with completion for every setting and host-aware suggestions for fonts, agents, models, extensions, and language servers.
 
 Neoism combines a native desktop app, a shared Rust UI, a Rust/WASM web renderer, a workspace daemon, and a standalone agent server. The terminal remains the center while every other surface participates in the same workspace.
 

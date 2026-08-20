@@ -90,7 +90,14 @@ pub fn buffer_id_for_notebook_render_path(path: &std::path::Path) -> String {
 }
 
 fn canonical_buffer_path(path: &std::path::Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    #[cfg(windows)]
+    {
+        dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
 }
 
 impl Screen<'_> {
@@ -613,7 +620,7 @@ fn markdown_text_to_lines(text: &str) -> Vec<String> {
 }
 
 fn normalize_markdown_reload_path(path: PathBuf) -> PathBuf {
-    fs::canonicalize(&path).unwrap_or(path)
+    canonical_buffer_path(&path)
 }
 
 #[cfg(test)]

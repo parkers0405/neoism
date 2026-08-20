@@ -20,6 +20,7 @@ pub mod handshake;
 pub mod hosts;
 pub mod language_server;
 pub mod pairing;
+mod path;
 pub mod permissions;
 pub mod persistence;
 mod process;
@@ -57,7 +58,9 @@ pub fn hidden_std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process:
     command
 }
 
-pub fn hidden_tokio_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+pub fn hidden_tokio_command(
+    program: impl AsRef<std::ffi::OsStr>,
+) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(program);
     #[cfg(windows)]
     hide_tokio_command(&mut command);

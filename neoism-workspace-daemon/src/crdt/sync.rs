@@ -279,7 +279,7 @@ impl CrdtSyncHub {
     /// as authoritative after its bytes differ from the last bytes we observed
     /// or wrote ourselves.
     pub fn reconcile_disk_path(&self, path: &std::path::Path) -> bool {
-        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = crate::path::canonicalize_lossy(path);
         let buffer_id = crate::crdt::crdt_buffer_id_for_path(&path);
         if !self.buffers.has_buffer(&buffer_id) {
             return false;

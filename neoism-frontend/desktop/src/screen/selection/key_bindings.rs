@@ -560,7 +560,7 @@ impl Screen<'_> {
                         self.move_divider_right();
                     }
                     Act::ConfigEditor => {
-                        self.context_manager.switch_to_settings();
+                        self.open_settings_config_tab();
                     }
                     Act::WindowCreateNew => {
                         self.context_manager.create_new_window();

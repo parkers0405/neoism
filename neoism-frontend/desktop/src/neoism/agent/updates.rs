@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use neoism_ui::panels::agent_pane::stream_events::{
-    classify_session_event, ChunkedDecoder, SessionEventUpdate, SessionEventUpdateState,
-    SseDecoder,
+    classify_session_event, matches_session, ChunkedDecoder, SessionEventUpdate,
+    SessionEventUpdateState, SseDecoder,
 };
 
 use super::api::{
@@ -24,6 +24,7 @@ use super::side_panel::SessionGoal;
 
 const CONNECT_HEADER_TIMEOUT: Duration = Duration::from_secs(3);
 const RECONNECT_DELAY: Duration = Duration::from_millis(500);
+const PENDING_UNKNOWN_SESSION_EVENT_LIMIT: usize = 512;
 
 pub(super) enum AgentSessionUpdate {
     Messages {
@@ -429,9 +430,8 @@ fn run_event_stream(
                             // `/session/status` is the live run set. A known
                             // child omitted from a successful snapshot is idle.
                             let (status, started_at) =
-                                reconnect_child_status(statuses, &child_id).unwrap_or_else(
-                                    || ("completed".to_string(), None),
-                                );
+                                reconnect_child_status(statuses, &child_id)
+                                    .unwrap_or_else(|| ("completed".to_string(), None));
                             if tx
                                 .send(AgentSessionUpdate::SubagentStatus {
                                     session_id: child_id.clone(),
@@ -537,6 +537,7 @@ fn read_event_stream(
     let mut chunked = ChunkedDecoder::new(connection.chunked);
     let mut sse = SseDecoder::default();
     let mut state = SessionEventUpdateState::default();
+    let mut pending_unknown_events = VecDeque::new();
     if let Ok(known) = known_child_session_ids.lock() {
         state.track_child_sessions(known.iter().cloned());
     }
@@ -551,6 +552,7 @@ fn read_event_stream(
                 &tx,
                 &mut state,
                 &known_child_session_ids,
+                &mut pending_unknown_events,
             ) {
                 return;
             }
@@ -571,6 +573,7 @@ fn read_event_stream(
                         &tx,
                         &mut state,
                         &known_child_session_ids,
+                        &mut pending_unknown_events,
                     ) {
                         return;
                     }
@@ -600,16 +603,75 @@ fn process_sse_bytes(
     tx: &Sender<AgentSessionUpdate>,
     state: &mut SessionEventUpdateState,
     known_child_session_ids: &Arc<Mutex<HashSet<String>>>,
+    pending_unknown_events: &mut VecDeque<Value>,
 ) -> bool {
     for event in sse.feed(bytes) {
-        if send_event_updates(event, server, session_id, tx, state).is_err() {
+        sync_tracked_child_sessions(state, known_child_session_ids);
+        if replay_known_session_events(
+            pending_unknown_events,
+            server,
+            session_id,
+            tx,
+            state,
+        )
+        .is_err()
+        {
             return true;
+        }
+        if matches_session(&event, session_id, state.child_session_ids()) {
+            if send_event_updates(event, server, session_id, tx, state).is_err() {
+                return true;
+            }
+        } else {
+            if pending_unknown_events.len() == PENDING_UNKNOWN_SESSION_EVENT_LIMIT {
+                pending_unknown_events.pop_front();
+            }
+            pending_unknown_events.push_back(event);
         }
         if let Ok(mut known) = known_child_session_ids.lock() {
             known.extend(state.child_session_ids().iter().cloned());
         }
+        if replay_known_session_events(
+            pending_unknown_events,
+            server,
+            session_id,
+            tx,
+            state,
+        )
+        .is_err()
+        {
+            return true;
+        }
     }
     false
+}
+
+fn sync_tracked_child_sessions(
+    state: &mut SessionEventUpdateState,
+    known_child_session_ids: &Arc<Mutex<HashSet<String>>>,
+) {
+    if let Ok(known) = known_child_session_ids.lock() {
+        state.track_child_sessions(known.iter().cloned());
+    }
+}
+
+fn replay_known_session_events(
+    pending: &mut VecDeque<Value>,
+    server: &str,
+    session_id: &str,
+    tx: &Sender<AgentSessionUpdate>,
+    state: &mut SessionEventUpdateState,
+) -> Result<(), mpsc::SendError<AgentSessionUpdate>> {
+    let mut still_unknown = VecDeque::with_capacity(pending.len());
+    while let Some(event) = pending.pop_front() {
+        if matches_session(&event, session_id, state.child_session_ids()) {
+            send_event_updates(event, server, session_id, tx, state)?;
+        } else {
+            still_unknown.push_back(event);
+        }
+    }
+    *pending = still_unknown;
+    Ok(())
 }
 
 fn send_event_updates(
@@ -880,6 +942,36 @@ fn desktop_permission_from_shared(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_child_event_replays_after_late_tree_discovery() {
+        let event = serde_json::json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionId": "child",
+                "messageID": "message",
+                "partID": "part",
+                "partType": "text",
+                "field": "text",
+                "delta": "live after discovery"
+            }
+        });
+        let known = Arc::new(Mutex::new(HashSet::new()));
+        let mut state = SessionEventUpdateState::default();
+        let mut pending = VecDeque::from([event]);
+        let (tx, rx) = mpsc::channel();
+
+        known.lock().unwrap().insert("child".to_string());
+        sync_tracked_child_sessions(&mut state, &known);
+        replay_known_session_events(&mut pending, "", "root", &tx, &mut state).unwrap();
+
+        assert!(pending.is_empty());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AgentSessionUpdate::ChildPartDelta { session_id, delta, .. })
+                if session_id == "child" && delta == "live after discovery"
+        ));
+    }
 
     #[test]
     fn reconnect_status_omission_is_unknown_not_completion() {

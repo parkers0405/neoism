@@ -9,6 +9,8 @@ repository.workspace = true
 anyhow.workspace = true
 async-stream.workspace = true
 axum = { workspace = true, features = ["ws"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = "0.10.4"
 clap.workspace = true
 base64.workspace = true
 fff-search.workspace = true

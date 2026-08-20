@@ -214,8 +214,13 @@ impl NeoismAgentPane {
         if count == 0 {
             return;
         }
-        if let Some(start) = &mut self.timeline_live_trace_start {
-            *start = start.saturating_add(count);
+        let reveals_full_ongoing_subagent = self.is_subagent_session()
+            && self.is_streaming()
+            && self.timeline_live_trace_start == Some(0);
+        if !reveals_full_ongoing_subagent {
+            if let Some(start) = &mut self.timeline_live_trace_start {
+                *start = start.saturating_add(count);
+            }
         }
         self.pending_timeline_prepend_count =
             Some(self.pending_timeline_prepend_count.unwrap_or(0) + count);
@@ -397,6 +402,9 @@ impl NeoismAgentPane {
         }
         self.abort_requested_at = None;
         if !was_streaming {
+            if let Some(session_id) = self.session_id.as_ref() {
+                self.terminal_idle_sessions.remove(session_id);
+            }
             self.note_streaming(NeoismAgentStreamingState::Thinking, None);
         }
         match self.send_prompt(&text, !was_streaming) {

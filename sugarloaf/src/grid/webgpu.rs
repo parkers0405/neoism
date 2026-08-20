@@ -23,7 +23,11 @@ const ATLAS_SIZE: u32 = 2048;
 const ATLAS_MAX_SIZE: u32 = 8192;
 
 fn atlas_size_limit(device: &wgpu::Device) -> u32 {
-    device.limits().max_texture_dimension_2d.min(ATLAS_MAX_SIZE).max(1)
+    device
+        .limits()
+        .max_texture_dimension_2d
+        .min(ATLAS_MAX_SIZE)
+        .max(1)
 }
 
 fn atlas_start_size(device: &wgpu::Device) -> u32 {

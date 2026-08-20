@@ -463,8 +463,7 @@ impl ChromeBridge {
         else {
             return false;
         };
-        let suggestions =
-            neoism_ui::editor::markdown::spelling_suggestions(&target.word);
+        let suggestions = neoism_ui::editor::markdown::spelling_suggestions(&target.word);
         let mut items = suggestions
             .into_iter()
             .map(|replacement| {
@@ -806,9 +805,7 @@ fn queue_markdown_open_intent(intent: MarkdownWebOpenIntent) {
 }
 
 fn markdown_target_is_external(raw: &str) -> bool {
-    raw.starts_with("http://")
-        || raw.starts_with("https://")
-        || raw.starts_with("www.")
+    raw.starts_with("http://") || raw.starts_with("https://") || raw.starts_with("www.")
 }
 
 impl ChromeBridge {
@@ -895,8 +892,7 @@ impl ChromeBridge {
     /// `yank_contact_link`); everything else queues a host open.
     fn route_markdown_external_target(&mut self, target: String) {
         use neoism_ui::panels::notifications::NotificationLevel;
-        if let Some(value) =
-            neoism_ui::editor::markdown::markdown_contact_value(&target)
+        if let Some(value) = neoism_ui::editor::markdown::markdown_contact_value(&target)
         {
             let value = value.trim().to_string();
             set_markdown_clipboard_cache(&value);
@@ -1011,13 +1007,7 @@ impl ChromeBridge {
                 replacement,
             } => {
                 if let Some(pane) = self.chrome.markdown_pane_mut() {
-                    pane.replace_spelling_word(
-                        line,
-                        start,
-                        end,
-                        &expected,
-                        &replacement,
-                    );
+                    pane.replace_spelling_word(line, start, end, &expected, &replacement);
                 }
             }
             Action::MarkdownSpellingIgnore(word) => {
@@ -1062,9 +1052,15 @@ impl ChromeBridge {
         let (x, y) = cursor_rect
             .map(|[x, y, _w, h]| (x, y + h + 6.0))
             .unwrap_or((win_w * 0.35, win_h * 0.3));
-        self.chrome
-            .context_menu
-            .open_markdown_block("Add block", items, query, x, y, win_w, win_h);
+        self.chrome.context_menu.open_markdown_block(
+            "Add block",
+            items,
+            query,
+            x,
+            y,
+            win_w,
+            win_h,
+        );
         if let Some([_, row_y, _, row_h]) = cursor_rect {
             // Never let the window-bottom clamp shove the menu onto
             // the line being typed — flip it above the row instead.
@@ -1349,8 +1345,7 @@ impl ChromeBridge {
             } else if let Some(pane) = self.chrome.markdown_pane_mut() {
                 pane.search_cancel();
             }
-        } else if let Some(term) =
-            self.chrome.command_palette.get_selected_search_term()
+        } else if let Some(term) = self.chrome.command_palette.get_selected_search_term()
         {
             self.chrome.command_palette.set_enabled(false);
             if !term.is_empty() {

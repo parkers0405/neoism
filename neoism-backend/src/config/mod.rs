@@ -4,6 +4,8 @@ pub mod colors;
 pub mod defaults;
 pub mod effects;
 pub mod hints;
+pub mod intelligence;
+mod jsonc_edit;
 pub mod keyboard;
 pub mod layout;
 pub mod mashup;
@@ -28,10 +30,10 @@ use crate::config::window::Window;
 use colors::Colors;
 use neoism_terminal_core::ansi::CursorShape;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::default::Default;
+use std::io::{Error, ErrorKind, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use std::{default::Default, fs::File};
 use sugarloaf::font::fonts::SugarloafFonts;
 use theme::{AdaptiveColors, AdaptiveTheme, AppearanceTheme, Theme};
 use tracing::warn;
@@ -514,49 +516,148 @@ pub fn config_file_content() -> String {
 }
 
 #[inline]
-pub fn create_config_file(path: Option<PathBuf>) {
-    let default_file_path = path.clone().unwrap_or(config_file_path());
+pub fn create_config_file(path: Option<PathBuf>) -> std::io::Result<PathBuf> {
+    let default_file_path = path.unwrap_or_else(config_file_path);
     if default_file_path.exists() {
         tracing::info!(
             "configuration file already exists at {}",
             default_file_path.display()
         );
-        return;
+        return Ok(default_file_path);
     }
 
-    if path.is_none() {
-        let default_dir_path = config_dir_path();
-        match std::fs::create_dir_all(&default_dir_path) {
-            Ok(_) => {
-                tracing::info!(
-                    "configuration path created {}",
-                    default_dir_path.display()
-                );
-            }
-            Err(err_message) => {
-                tracing::error!("could not create config directory: {err_message}");
-            }
+    let parent = default_file_path.parent().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "config path has no parent directory",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let mut created_file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&default_file_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            return Ok(default_file_path)
         }
-    }
+        Err(error) => return Err(error),
+    };
+    writeln!(created_file, "{}", config_file_content())?;
+    created_file.sync_all()?;
+    tracing::info!("configuration file created {}", default_file_path.display());
+    Ok(default_file_path)
+}
 
-    match File::create(&default_file_path) {
-        Err(err_message) => {
-            tracing::error!(
-                "could not create config file {}: {err_message}",
-                default_file_path.display()
-            )
-        }
-        Ok(mut created_file) => {
-            tracing::info!("configuration file created {}", default_file_path.display());
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigDocumentSnapshot {
+    pub content: String,
+    pub display_path: String,
+    pub revision: String,
+    pub writable: bool,
+}
 
-            if let Err(err_message) = writeln!(created_file, "{}", config_file_content())
-            {
-                tracing::error!(
-                    "could not update config file with defaults: {err_message}"
-                )
-            }
-        }
+/// Read the raw active JSONC document. This does not create a missing file.
+pub fn read_config_document() -> std::io::Result<ConfigDocumentSnapshot> {
+    read_config_document_at(&config_file_path())
+}
+
+/// Ensure the canonical JSONC file exists, then return its raw document.
+pub fn ensure_config_document() -> std::io::Result<ConfigDocumentSnapshot> {
+    let path = create_config_file(None)?;
+    read_config_document_at(&path)
+}
+
+fn read_config_document_at(path: &Path) -> std::io::Result<ConfigDocumentSnapshot> {
+    let content = std::fs::read_to_string(path)?;
+    let writable = std::fs::metadata(path)
+        .map(|metadata| !metadata.permissions().readonly())
+        .unwrap_or(false);
+    Ok(ConfigDocumentSnapshot {
+        revision: config_revision(&content),
+        content,
+        display_path: path.display().to_string(),
+        writable,
+    })
+}
+
+/// Validate JSONC syntax and the grouped application fields. Unknown agent
+/// fields remain valid because the application config intentionally ignores them.
+pub fn validate_config_document(content: &str) -> Result<(), String> {
+    let cleaned = strip_trailing_commas(&strip_json_comments(content));
+    let value: serde_json::Value = serde_json::from_str(if cleaned.trim().is_empty() {
+        "{}"
+    } else {
+        &cleaned
+    })
+    .map_err(|error| error.to_string())?;
+    if !value.is_object() {
+        return Err("config root must be a JSON object".into());
     }
+    deserialize_config(content)?;
+    if let Some(agent) = value.get("agent") {
+        serde_json::from_value::<neoism_agent_core::api::NeoismConfig>(agent.clone())
+            .map_err(|error| format!("agent config: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Save a complete JSONC document if `expected_revision` still names the file
+/// currently on disk. The replacement is validated and atomically renamed.
+pub fn save_config_document(
+    content: &str,
+    expected_revision: &str,
+) -> std::io::Result<ConfigDocumentSnapshot> {
+    let path = config_file_path();
+    save_config_document_at(&path, content, expected_revision)
+}
+
+fn save_config_document_at(
+    path: &Path,
+    content: &str,
+    expected_revision: &str,
+) -> std::io::Result<ConfigDocumentSnapshot> {
+    let current = std::fs::read_to_string(&path)?;
+    let actual_revision = config_revision(&current);
+    if actual_revision != expected_revision {
+        return Err(Error::new(
+            ErrorKind::AlreadyExists,
+            format!("config revision conflict: expected {expected_revision}, current {actual_revision}"),
+        ));
+    }
+    validate_config_document(content)
+        .map_err(|message| Error::new(ErrorKind::InvalidData, message))?;
+    let parent = path.parent().ok_or_else(|| {
+        Error::new(ErrorKind::InvalidInput, "config path has no parent")
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".config.json.{}.tmp", std::process::id()));
+    let result: std::io::Result<()> = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result?;
+    read_config_document_at(&path)
+}
+
+fn config_revision(content: &str) -> String {
+    // Stable FNV-1a; the revision is an opaque concurrency token, not a security hash.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in content.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 pub fn write_neoism_preferences(
@@ -585,81 +686,6 @@ pub fn write_neoism_preferences(
     write_settings(&updates)
 }
 
-/// Load `config.json` as a root object, apply `mutate`, and write it back
-/// (pretty-printed + trailing newline). A missing, blank, or non-object
-/// file starts from an empty object. Hand-written JSONC comments are lost
-/// on any programmatic write.
-fn edit_config_document(
-    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
-) -> std::io::Result<()> {
-    edit_config_document_if(|root| {
-        mutate(root);
-        true
-    })
-}
-
-/// Edit the active config and write it only when `mutate` returns true.
-/// Insert-if-absent callers use this to leave an existing config document
-/// completely untouched, including its formatting and comments.
-fn edit_config_document_if(
-    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> bool,
-) -> std::io::Result<()> {
-    let config_dir = config_dir_path();
-    std::fs::create_dir_all(&config_dir)?;
-    let path = config_file_path();
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let cleaned = strip_trailing_commas(&strip_json_comments(&content));
-    let mut root = if cleaned.trim().is_empty() {
-        serde_json::Value::Object(serde_json::Map::new())
-    } else {
-        serde_json::from_str::<serde_json::Value>(&cleaned).map_err(|err| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("failed to parse {}: {err}", path.display()),
-            )
-        })?
-    };
-    if !root.is_object() {
-        root = serde_json::Value::Object(serde_json::Map::new());
-    }
-    if !mutate(root.as_object_mut().expect("root forced to object above")) {
-        return Ok(());
-    }
-    let mut out = serde_json::to_string_pretty(&root).map_err(|err| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
-    })?;
-    out.push('\n');
-    std::fs::write(path, out)
-}
-
-/// Insert `value` at a dotted `path`, creating intermediate objects as
-/// needed and replacing any non-object encountered along the way.
-fn set_nested(
-    map: &mut serde_json::Map<String, serde_json::Value>,
-    path: &[&str],
-    value: serde_json::Value,
-) {
-    match path {
-        [] => {}
-        [leaf] => {
-            map.insert((*leaf).to_string(), value);
-        }
-        [head, rest @ ..] => {
-            let entry = map
-                .entry((*head).to_string())
-                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-            if !entry.is_object() {
-                *entry = serde_json::Value::Object(serde_json::Map::new());
-            }
-            set_nested(
-                entry.as_object_mut().expect("entry forced to object"),
-                rest,
-                value,
-            );
-        }
-    }
-}
-
 /// Persist one setting to `config.json` for the GUI settings panel. The
 /// dotted `key` is the golden grouped path (`appearance.fonts.family`,
 /// `ui.window.opacity`, `editor.vim-mode`) and each segment nests an
@@ -677,62 +703,42 @@ pub fn write_setting_if_absent(
     key: &str,
     value: serde_json::Value,
 ) -> std::io::Result<bool> {
-    let path: Vec<&str> = key.split('.').collect();
-    let mut inserted = false;
-    edit_config_document_if(|root| {
-        inserted = set_nested_if_absent(root, &path, value);
-        inserted
-    })?;
-    Ok(inserted)
-}
-
-fn set_nested_if_absent(
-    map: &mut serde_json::Map<String, serde_json::Value>,
-    path: &[&str],
-    value: serde_json::Value,
-) -> bool {
-    match path {
-        [] => false,
-        [leaf] => {
-            let is_absent = map.get(*leaf).is_none_or(|current| {
-                current.is_null()
-                    || current
-                        .as_str()
-                        .is_some_and(|current| current.trim().is_empty())
-            });
-            if is_absent {
-                map.insert((*leaf).to_string(), value);
-            }
-            is_absent
-        }
-        [head, rest @ ..] => match map.get_mut(*head) {
-            Some(serde_json::Value::Object(child)) => {
-                set_nested_if_absent(child, rest, value)
-            }
-            Some(_) => false,
-            None => {
-                let mut child = serde_json::Map::new();
-                let inserted = set_nested_if_absent(&mut child, rest, value);
-                if inserted {
-                    map.insert((*head).to_string(), serde_json::Value::Object(child));
-                }
-                inserted
-            }
-        },
+    let root = load_config_json_value();
+    let mut current = &root;
+    for segment in key.split('.') {
+        let Some(next) = current.get(segment) else {
+            write_setting(key, value)?;
+            return Ok(true);
+        };
+        current = next;
+    }
+    if current.is_null()
+        || current
+            .as_str()
+            .is_some_and(|value| value.trim().is_empty())
+    {
+        write_setting(key, value)?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
-/// Persist several golden-path settings in a single `config.json` rewrite.
+/// Persist several golden-path settings with targeted JSONC edits.
 fn write_settings(updates: &[(&str, serde_json::Value)]) -> std::io::Result<()> {
     if updates.is_empty() {
         return Ok(());
     }
-    edit_config_document(|root| {
-        for (key, value) in updates {
-            let path: Vec<&str> = key.split('.').collect();
-            set_nested(root, &path, value.clone());
-        }
-    })
+    let path = create_config_file(None)?;
+    let mut content = std::fs::read_to_string(&path)?;
+    for (key, value) in updates {
+        content = jsonc_edit::set_path(
+            &content,
+            &key.split('.').collect::<Vec<_>>(),
+            value.clone(),
+        )?;
+    }
+    std::fs::write(path, content)
 }
 
 /// Upsert (or clear) a `keybinds.keys` binding override for `action` in
@@ -741,44 +747,13 @@ fn write_settings(updates: &[(&str, serde_json::Value)]) -> std::io::Result<()> 
 /// the built-in default applies again. Bindings are read at launch, so a
 /// change here takes effect on the next start.
 pub fn write_keybind(action: &str, key: &str, with: &str) -> std::io::Result<()> {
-    edit_config_document(|obj| {
-        let keybinds = obj
-            .entry("keybinds".to_string())
-            .or_insert_with(|| serde_json::json!({ "keys": [] }));
-        if !keybinds.is_object() {
-            *keybinds = serde_json::json!({ "keys": [] });
-        }
-        let keys = keybinds
-            .as_object_mut()
-            .expect("keybinds forced to object")
-            .entry("keys".to_string())
-            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-        if !keys.is_array() {
-            *keys = serde_json::Value::Array(Vec::new());
-        }
-        let arr = keys.as_array_mut().expect("keys forced to array");
-        arr.retain(|entry| {
-            entry.get("action").and_then(serde_json::Value::as_str) != Some(action)
-        });
-        if !key.is_empty() {
-            let mut entry = serde_json::Map::new();
-            entry.insert(
-                "key".to_string(),
-                serde_json::Value::String(key.to_string()),
-            );
-            if !with.is_empty() {
-                entry.insert(
-                    "with".to_string(),
-                    serde_json::Value::String(with.to_string()),
-                );
-            }
-            entry.insert(
-                "action".to_string(),
-                serde_json::Value::String(action.to_string()),
-            );
-            arr.push(serde_json::Value::Object(entry));
-        }
-    })
+    let path = create_config_file(None)?;
+    let content = std::fs::read_to_string(&path)?;
+    let output = jsonc_edit::edit_keybind(&content, action, key, with)?;
+    if output != content {
+        std::fs::write(path, output)?;
+    }
+    Ok(())
 }
 
 /// Load the active `config.json` as a raw JSON value (all keys — terminal
@@ -1115,7 +1090,6 @@ impl Default for CursorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     fn parse(json: &str) -> Config {
         deserialize_config(json).expect("config should parse")
@@ -1236,61 +1210,60 @@ mod tests {
     }
 
     #[test]
-    fn set_nested_builds_group_objects_preserving_siblings() {
-        // The golden write path: nesting a leaf must not clobber siblings.
-        let mut root = serde_json::Map::new();
-        set_nested(
-            &mut root,
-            &["appearance", "fonts", "family"],
-            serde_json::json!("Geist Mono"),
+    fn create_config_file_creates_custom_parent_and_never_truncates() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-config-create-{}-{}",
+            std::process::id(),
+            config_revision(module_path!())
+        ));
+        let path = root.join("nested/config.json");
+        assert_eq!(create_config_file(Some(path.clone())).unwrap(), path);
+        std::fs::write(&path, "// user content\n{}\n").unwrap();
+        create_config_file(Some(path.clone())).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "// user content\n{}\n"
         );
-        set_nested(
-            &mut root,
-            &["appearance", "fonts", "size"],
-            serde_json::json!(16),
-        );
-        set_nested(&mut root, &["editor", "vim-mode"], serde_json::json!(false));
-        let value = serde_json::Value::Object(root);
-        assert_eq!(value["appearance"]["fonts"]["family"], "Geist Mono");
-        assert_eq!(value["appearance"]["fonts"]["size"], 16);
-        assert_eq!(value["editor"]["vim-mode"], false);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn set_nested_if_absent_preserves_existing_agent_defaults() {
-        let mut root = serde_json::json!({
-            "agent": {
-                "model": "anthropic/claude-existing",
-                "variant": "high"
-            }
-        })
-        .as_object()
-        .unwrap()
-        .clone();
+    fn raw_document_validation_accepts_jsonc_and_rejects_bad_grouped_values() {
+        assert!(validate_config_document(
+            "// hello\n{ \"editor\": { \"vim-mode\": true, }, }"
+        )
+        .is_ok());
+        assert!(
+            validate_config_document("{ \"editor\": { \"vim-mode\": \"yes\" } }")
+                .is_err()
+        );
+        assert!(validate_config_document(
+            "{ \"agent\": { \"enabled-providers\": \"all\" } }"
+        )
+        .is_err());
+        assert!(validate_config_document("[]").is_err());
+    }
 
-        assert!(!set_nested_if_absent(
-            &mut root,
-            &["agent", "model"],
-            serde_json::json!("openai/gpt-new"),
+    #[test]
+    fn raw_document_save_checks_revision_and_preserves_jsonc() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-config-save-{}-{}",
+            std::process::id(),
+            config_revision("raw-document-save")
         ));
-        assert!(!set_nested_if_absent(
-            &mut root,
-            &["agent", "variant"],
-            serde_json::json!("xhigh"),
-        ));
-        assert_eq!(root["agent"]["model"], "anthropic/claude-existing");
-        assert_eq!(root["agent"]["variant"], "high");
-
-        root.get_mut("agent")
-            .and_then(serde_json::Value::as_object_mut)
-            .unwrap()
-            .remove("model");
-        assert!(set_nested_if_absent(
-            &mut root,
-            &["agent", "model"],
-            serde_json::json!("openai/gpt-first"),
-        ));
-        assert_eq!(root["agent"]["model"], "openai/gpt-first");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        let original = "// original\n{ \"editor\": { \"vim-mode\": true } }\n";
+        std::fs::write(&path, original).unwrap();
+        let revision = config_revision(original);
+        let replacement =
+            "// replacement survives\n{ \"editor\": { \"vim-mode\": false, }, }\n";
+        let saved = save_config_document_at(&path, replacement, &revision).unwrap();
+        assert_eq!(saved.content, replacement);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), replacement);
+        let conflict = save_config_document_at(&path, "{}", &revision).unwrap_err();
+        assert_eq!(conflict.kind(), ErrorKind::AlreadyExists);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

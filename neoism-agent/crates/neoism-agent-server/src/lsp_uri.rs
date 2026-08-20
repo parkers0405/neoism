@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 pub(super) fn path_to_file_uri(path: &Path) -> String {
+    let path = crate::windows_process::strip_verbatim_prefix(path);
     let rendered = path.display().to_string();
     let mut uri = String::from("file://");
     if !rendered.starts_with('/') {
@@ -56,4 +57,17 @@ fn percent_decode(path: &str) -> Option<String> {
         }
     }
     String::from_utf8(decoded).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbatim_drive_path_has_a_standard_file_uri() {
+        assert_eq!(
+            path_to_file_uri(Path::new(r"\\?\C:\src\main.rs")),
+            "file:///C:/src/main.rs"
+        );
+    }
 }

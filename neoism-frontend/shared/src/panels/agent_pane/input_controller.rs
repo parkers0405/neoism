@@ -465,12 +465,21 @@ pub fn mime_for_path(path: &std::path::Path) -> &'static str {
 }
 
 pub fn file_url(path: &std::path::Path) -> String {
-    let absolute = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .replace(' ', "%20");
-    format!("file://{absolute}")
+    let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(windows)]
+    let absolute = {
+        let text = absolute.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            std::path::PathBuf::from(format!(r"\\{rest}"))
+        } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+            std::path::PathBuf::from(rest)
+        } else {
+            absolute
+        }
+    };
+    url::Url::from_file_path(&absolute)
+        .map(String::from)
+        .unwrap_or_else(|_| format!("file://{}", absolute.to_string_lossy()))
 }
 
 pub fn previous_char_boundary(value: &str, byte: usize) -> usize {

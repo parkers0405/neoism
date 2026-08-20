@@ -1,4 +1,6 @@
 use neoism_agent_core::{MessageInfo, MessageWithParts, Part, SessionInfo};
+#[cfg(windows)]
+use std::path::Path;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -6,6 +8,17 @@ use crate::SessionListQuery;
 
 pub(crate) fn filter_sessions(sessions: &mut Vec<SessionInfo>, query: &SessionListQuery) {
     if let Some(directory) = &query.directory {
+        #[cfg(windows)]
+        {
+            let directory =
+                crate::windows_process::canonicalize_path_lossy(Path::new(directory));
+            sessions.retain(|session| {
+                crate::windows_process::canonicalize_path_lossy(Path::new(
+                    &session.directory,
+                )) == directory
+            });
+        }
+        #[cfg(not(windows))]
         sessions.retain(|session| &session.directory == directory);
     }
     if let Some(path) = &query.path {

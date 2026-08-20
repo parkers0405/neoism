@@ -206,10 +206,14 @@ fn web_capabilities_hide_unsupported_commands_and_keep_order() {
         "Draw on Note",
         "Leave Workspace",
     ] {
-        assert!(!listed.contains(&hidden.to_string()), "{hidden} should hide on web");
+        assert!(
+            !listed.contains(&hidden.to_string()),
+            "{hidden} should hide on web"
+        );
     }
     for kept in [
         "NeoWorld",
+        "Open Neoism Config",
         "Settings",
         "Go to Line…",
         "Toggle Word Wrap",
@@ -220,7 +224,10 @@ fn web_capabilities_hide_unsupported_commands_and_keep_order() {
         "Write File",
         "Theme Picker",
     ] {
-        assert!(listed.contains(&kept.to_string()), "{kept} should stay on web");
+        assert!(
+            listed.contains(&kept.to_string()),
+            "{kept} should stay on web"
+        );
     }
 
     // Ordering: the web list is a strict subsequence of the desktop
@@ -263,7 +270,10 @@ fn web_notebook_surface_keeps_pane_local_cell_ops() {
         "Run All Cells",
         "Run Current Cell And Below",
     ] {
-        assert!(!listed.contains(&hidden.to_string()), "{hidden} should hide on web");
+        assert!(
+            !listed.contains(&hidden.to_string()),
+            "{hidden} should hide on web"
+        );
     }
     for kept in [
         "Run Current Cell",
@@ -272,7 +282,10 @@ fn web_notebook_surface_keeps_pane_local_cell_ops() {
         "Move Cell Up",
         "Clear All Outputs",
     ] {
-        assert!(listed.contains(&kept.to_string()), "{kept} should stay on web");
+        assert!(
+            listed.contains(&kept.to_string()),
+            "{kept} should stay on web"
+        );
     }
 }
 

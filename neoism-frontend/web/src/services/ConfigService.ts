@@ -10,6 +10,8 @@
 // registry + installed index + live language-server adapter state).
 
 import type {
+  ConfigDescriptor,
+  ConfigDocument,
   ConfigServerMessage,
   ExtensionSummary,
 } from "../workspace/types";
@@ -18,6 +20,69 @@ import type {
  *  hard import cycle with the workspace client. */
 export interface ConfigClientLike {
   requestConfig(message: unknown): Promise<ConfigServerMessage>;
+}
+
+/** Ensure and fetch the connected daemon host's raw JSONC document. */
+export async function ensureConfigDocument(
+  client: ConfigClientLike,
+): Promise<ConfigDocument | null> {
+  try {
+    const reply = await client.requestConfig("EnsureConfigDocument");
+    if (reply && typeof reply === "object" && "ConfigDocument" in reply) {
+      return reply.ConfigDocument.document;
+    }
+  } catch {
+    // The caller presents a host-scoped open error.
+  }
+  return null;
+}
+
+/** Fetch without requiring create/write permission. */
+export async function fetchConfigDocument(
+  client: ConfigClientLike,
+): Promise<ConfigDocument | null> {
+  try {
+    const reply = await client.requestConfig("GetConfigDocument");
+    if (reply && typeof reply === "object" && "ConfigDocument" in reply) {
+      return reply.ConfigDocument.document;
+    }
+  } catch {
+    // Missing files fall through to the write-gated ensure operation.
+  }
+  return null;
+}
+
+/** Save raw JSONC with optimistic revision protection. */
+export async function saveConfigDocument(
+  client: ConfigClientLike,
+  content: string,
+  expectedRevision: string,
+): Promise<ConfigDocument | null> {
+  try {
+    const reply = await client.requestConfig({
+      SaveConfigDocument: { content, expected_revision: expectedRevision },
+    });
+    if (reply && typeof reply === "object" && "ConfigDocumentSaved" in reply) {
+      return reply.ConfigDocumentSaved.document;
+    }
+  } catch {
+    // Conflict and validation details are surfaced by the caller.
+  }
+  return null;
+}
+
+export async function fetchConfigSchema(
+  client: ConfigClientLike,
+): Promise<ConfigDescriptor[]> {
+  try {
+    const reply = await client.requestConfig("GetConfigSchema");
+    if (reply && typeof reply === "object" && "ConfigSchema" in reply) {
+      return reply.ConfigSchema.descriptors;
+    }
+  } catch {
+    // Completion remains unavailable until the next open retries.
+  }
+  return [];
 }
 
 /** One settings action drained out of the wasm settings overlay

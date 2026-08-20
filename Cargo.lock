@@ -1054,6 +1054,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono-tz"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
+dependencies = [
+ "chrono",
+ "phf 0.12.1",
+]
+
+[[package]]
 name = "ciborium"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1242,7 +1252,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "copa"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "arrayvec",
  "criterion",
@@ -1268,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "corcovado"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "bytes",
  "cfg-if 0.1.10",
@@ -4794,7 +4804,7 @@ checksum = "7a2f6120a8da26bea3587731072111062c5d8c51ca3a3a75a716bd8b735d5882"
 
 [[package]]
 name = "neoism"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "ahash",
  "base64",
@@ -4868,7 +4878,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "anyhow",
  "base64",
@@ -4890,7 +4900,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-core"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "rand 0.8.5",
  "serde",
@@ -4900,12 +4910,14 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-server"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "anyhow",
  "async-stream",
  "axum",
  "base64",
+ "chrono",
+ "chrono-tz",
  "clap",
  "dirs 6.0.0",
  "dunce",
@@ -4938,7 +4950,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-backend"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
@@ -4953,7 +4965,9 @@ dependencies = [
  "lazy_static",
  "libc",
  "memchr",
+ "neoism-agent-core",
  "neoism-grapheme-width",
+ "neoism-protocol",
  "neoism-terminal-core",
  "neoism-terminal-pty",
  "neoism-window",
@@ -4978,7 +4992,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-extensions"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "bzip2",
  "dirs 5.0.1",
@@ -5000,7 +5014,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-grapheme-width"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "phf 0.13.1",
  "ucd-trie",
@@ -5008,7 +5022,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-neoworld"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "anyhow",
  "neoism-neoworld-core",
@@ -5020,11 +5034,11 @@ dependencies = [
 
 [[package]]
 name = "neoism-neoworld-core"
-version = "0.7.51"
+version = "0.7.52"
 
 [[package]]
 name = "neoism-notifier"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "block2 0.5.1",
  "objc-rs 0.3.1",
@@ -5037,7 +5051,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-proc-macros"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5045,7 +5059,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-protocol"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "serde",
  "serde_json",
@@ -5056,7 +5070,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-remarkable"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "neoism-sync",
  "neoism-ui",
@@ -5065,14 +5079,14 @@ dependencies = [
 
 [[package]]
 name = "neoism-rm-agent"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "neoism-sync",
 ]
 
 [[package]]
 name = "neoism-sync"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "loro",
  "mdns-sd",
@@ -5083,7 +5097,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-core"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
@@ -5113,7 +5127,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-pty"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "corcovado",
  "libc",
@@ -5125,7 +5139,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-wasm"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",
@@ -5148,7 +5162,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-ui"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
@@ -5191,6 +5205,7 @@ dependencies = [
  "tree-sitter-yaml",
  "unicode-segmentation",
  "unicode-width-16",
+ "url",
  "wasm-bindgen",
  "web-sys",
  "web-time",
@@ -5200,7 +5215,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-window"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "ahash",
  "atomic-waker",
@@ -5255,13 +5270,14 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-daemon"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "axum",
  "base64",
  "clap",
  "dashmap",
  "dirs 5.0.1",
+ "dunce",
  "futures",
  "gethostname",
  "git2",
@@ -5300,9 +5316,10 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-index"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "dirs 6.0.0",
+ "dunce",
  "notify 8.2.0",
  "serde",
  "serde_json",
@@ -6159,6 +6176,15 @@ dependencies = [
 
 [[package]]
 name = "phf"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
+dependencies = [
+ "phf_shared 0.12.1",
+]
+
+[[package]]
+name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
@@ -6195,6 +6221,15 @@ name = "phf_shared"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
 dependencies = [
  "siphasher",
 ]
@@ -8079,7 +8114,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sugarloaf"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "approx",
  "ash",
@@ -8403,7 +8438,7 @@ dependencies = [
 
 [[package]]
 name = "teletypewriter"
-version = "0.7.51"
+version = "0.7.52"
 dependencies = [
  "corcovado",
  "dirs 6.0.0",

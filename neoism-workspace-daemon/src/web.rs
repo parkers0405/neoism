@@ -34,8 +34,6 @@ pub fn candidate_web_roots() -> Vec<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         out.push(home.join(".local/share/neoism/web"));
     }
-    out.push(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../neoism-frontend/web/dist"),
-    );
+    out.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../neoism-frontend/web/dist"));
     out
 }

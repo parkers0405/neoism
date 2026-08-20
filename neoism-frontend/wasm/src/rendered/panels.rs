@@ -159,9 +159,7 @@ impl ChromeBridge {
     /// empty state). Notes never live under `<workspace_root>/notes`, so
     /// this cannot be derived from `set_workspace_root`.
     pub fn set_notes_vault_root(&mut self, vault: Option<String>) {
-        let vault = vault
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from);
+        let vault = vault.filter(|v| !v.is_empty()).map(PathBuf::from);
         self.chrome.set_notes_vault_root(vault);
     }
 

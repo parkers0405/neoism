@@ -263,7 +263,9 @@ pub fn drain_link_dir_requests() -> Vec<PathBuf> {
 /// Answer of [`link_path_existence`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinkPathExistence {
-    Exists { is_dir: bool },
+    Exists {
+        is_dir: bool,
+    },
     Missing,
     /// The parent directory has no cached listing yet; a request was
     /// queued (once per dir) for the host to satisfy.
@@ -295,7 +297,9 @@ pub fn link_path_existence(path: &Path) -> LinkPathExistence {
     let Some(parent) = normalized.parent().map(Path::to_path_buf) else {
         return LinkPathExistence::Unknown;
     };
-    let Some(name) = normalized.file_name().map(|n| n.to_string_lossy().into_owned())
+    let Some(name) = normalized
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
     else {
         return LinkPathExistence::Unknown;
     };
@@ -324,13 +328,28 @@ pub fn link_path_existence(path: &Path) -> LinkPathExistence {
 /// URI schemes recognized as URL-shaped hint text (mirrors the scheme
 /// branch of the desktop `DEFAULT_URL_REGEX`).
 pub const HINT_URL_SCHEMES: &[&str] = &[
-    "https://", "http://", "mailto:", "ftp://", "file:", "ssh://", "ssh:", "git://",
-    "tel:", "magnet:", "ipfs://", "ipns://", "gemini://", "gopher://", "news:",
+    "https://",
+    "http://",
+    "mailto:",
+    "ftp://",
+    "file:",
+    "ssh://",
+    "ssh:",
+    "git://",
+    "tel:",
+    "magnet:",
+    "ipfs://",
+    "ipns://",
+    "gemini://",
+    "gopher://",
+    "news:",
 ];
 
 /// Whether hint/link text should be treated as a URL for opening.
 pub fn hint_text_is_url(text: &str) -> bool {
-    HINT_URL_SCHEMES.iter().any(|scheme| text.starts_with(scheme))
+    HINT_URL_SCHEMES
+        .iter()
+        .any(|scheme| text.starts_with(scheme))
 }
 
 /// Approximate the desktop hint regex (`DEFAULT_URL_REGEX`) without a
@@ -633,7 +652,10 @@ mod tests {
             split_file_link_line_suffix("src/main.rs:42:7"),
             ("src/main.rs", Some(42))
         );
-        assert_eq!(split_file_link_line_suffix("src/main.rs"), ("src/main.rs", None));
+        assert_eq!(
+            split_file_link_line_suffix("src/main.rs"),
+            ("src/main.rs", None)
+        );
         assert_eq!(split_file_link_line_suffix("v1.2"), ("v1.2", None));
         assert_eq!(split_file_link_line_suffix(":42"), (":42", None));
     }

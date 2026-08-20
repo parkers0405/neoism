@@ -53,6 +53,7 @@ hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "service
 # Owner+SYSTEM-only DACLs on secret files — the Windows counterpart of the
 # unix 0o600/0o700 tightening (see src/windows_acl.rs).
 [target.'cfg(windows)'.dependencies]
+dunce = { workspace = true }
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Security",

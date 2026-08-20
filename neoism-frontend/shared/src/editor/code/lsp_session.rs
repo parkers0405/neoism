@@ -34,6 +34,8 @@ use super::buffer::CodeTextEdit;
 use super::layout::byte_for_utf16_col;
 use super::types::CodePane;
 use super::{CodeDiagnosticSeverity, CodeLineDiagnostic};
+use neoism_protocol::config::ConfigDescriptor;
+use neoism_protocol::config_intelligence::complete_config;
 
 /// Fallback trigger characters used until a server-advertised set is
 /// known (rust-analyzer & friends all advertise at least these).
@@ -77,6 +79,26 @@ pub fn completion_prefix(line: &str, anchor: usize, cursor: usize) -> Option<Str
     }
     let slice = line.get(anchor..cursor)?;
     slice.chars().all(is_ident_char).then(|| slice.to_string())
+}
+
+fn is_host_config(path: &Path) -> bool {
+    path.to_string_lossy().starts_with("neoism://host-config/")
+}
+
+fn completion_prefix_for_path(
+    path: &Path,
+    line: &str,
+    anchor: usize,
+    cursor: usize,
+) -> Option<String> {
+    if !is_host_config(path) {
+        return completion_prefix(line, anchor, cursor);
+    }
+    let slice = line.get(anchor..cursor)?;
+    slice
+        .chars()
+        .all(|c| is_ident_char(c) || c == '-')
+        .then(|| slice.to_string())
 }
 
 /// Strip LSP snippet placeholders (`$0`, `$1`, `${2:default}`) from an
@@ -422,7 +444,10 @@ impl LspDiagnosticsStore {
         server: String,
         items: Vec<LspStoredDiagnostic>,
     ) {
-        self.files.entry(file.clone()).or_default().insert(server, items);
+        self.files
+            .entry(file.clone())
+            .or_default()
+            .insert(server, items);
         *self.publish_seq.entry(file).or_insert(0) += 1;
         self.version = self.version.wrapping_add(1).max(1);
     }
@@ -431,9 +456,7 @@ impl LspDiagnosticsStore {
     /// the stored ranges by the line-span delta of each edit). Port of
     /// desktop `reanchor_diagnostics`, on 0-based store lines.
     pub fn reanchor(&mut self, file: &Path, current: &[String]) {
-        let prev = self
-            .prev_lines
-            .insert(file.to_path_buf(), current.to_vec());
+        let prev = self.prev_lines.insert(file.to_path_buf(), current.to_vec());
         let Some(prev) = prev else {
             return;
         };
@@ -542,7 +565,10 @@ impl LspDiagnosticsStore {
     /// Exact per-diagnostic counts for the file from the raw store
     /// (the pane's per-line span map would overcount multi-line
     /// diagnostics). Desktop: `code_diagnostic_counts`.
-    pub fn counts_for(&self, file: &Path) -> crate::panels::status_line::DiagnosticCounts {
+    pub fn counts_for(
+        &self,
+        file: &Path,
+    ) -> crate::panels::status_line::DiagnosticCounts {
         let mut counts = crate::panels::status_line::DiagnosticCounts::default();
         if let Some(by_server) = self.files.get(file) {
             for diags in by_server.values() {
@@ -824,9 +850,16 @@ pub struct CodeLspUi {
     /// Per-file server-advertised trigger characters (web currently
     /// leaves this empty → `DEFAULT_TRIGGERS`).
     pub triggers: HashMap<PathBuf, Vec<String>>,
+    /// Canonical schema plus connected-host suggestions for the virtual
+    /// config document. Empty until the host fetches `GetConfigSchema`.
+    config_descriptors: Vec<ConfigDescriptor>,
 }
 
 impl CodeLspUi {
+    pub fn set_config_descriptors(&mut self, descriptors: Vec<ConfigDescriptor>) {
+        self.config_descriptors = descriptors;
+    }
+
     pub fn install_service(&mut self, service: Arc<dyn LspService>) {
         self.service = Some(service);
     }
@@ -1021,11 +1054,7 @@ impl CodeLspUi {
     /// Pointer moved over the pane text area: arm/refresh the
     /// mouse-idle hover candidate. Pass `None` when the pointer is
     /// outside the pane. Desktop: `note_code_mouse_hover`.
-    pub fn note_mouse_move(
-        &mut self,
-        pane: &CodePane,
-        pos: Option<(f32, f32)>,
-    ) -> bool {
+    pub fn note_mouse_move(&mut self, pane: &CodePane, pos: Option<(f32, f32)>) -> bool {
         let Some((mx, my)) = pos else {
             let mut dirty = self.mouse_hover.take().is_some();
             if self.hover.as_ref().is_some_and(|card| card.from_mouse) {
@@ -1058,9 +1087,11 @@ impl CodeLspUi {
         }
         // Pointer moved to a new cell: any mouse card dies with it.
         let mut dirty = false;
-        if self.hover.as_ref().is_some_and(|card| {
-            card.from_mouse && (card.line != line || card.col != col)
-        }) {
+        if self
+            .hover
+            .as_ref()
+            .is_some_and(|card| card.from_mouse && (card.line != line || card.col != col))
+        {
             self.hover = None;
             dirty = true;
         }
@@ -1168,6 +1199,31 @@ impl CodeLspUi {
                 });
             }
         }
+        if is_host_config(&pane.path) && !self.config_descriptors.is_empty() {
+            let text = pane.buffer.text();
+            let offset = pane.buffer.lines[..cursor.line]
+                .iter()
+                .map(|line| line.len() + 1)
+                .sum::<usize>()
+                + cursor.col;
+            let items = complete_config(&text, offset, &self.config_descriptors)
+                .into_iter()
+                .map(|item| LspCompletionData {
+                    server_id: Some("neoism-config".to_string()),
+                    label: item.label,
+                    kind: "property".to_string(),
+                    detail: Some(item.detail),
+                    documentation: Some(item.documentation),
+                    insert_text: item.insert_text,
+                    filter_text: None,
+                    sort_text: None,
+                    preselect: false,
+                    payload: serde_json::json!({ "insertTextFormat": 2 }),
+                })
+                .collect();
+            let _ = self.on_completion_result(pane, seq, &pane.path, items);
+            return;
+        }
         self.fire(LspRequest::Completion {
             path: pane.path.clone(),
             line: cursor.line as u32,
@@ -1202,6 +1258,31 @@ impl CodeLspUi {
             lines: Vec::new(),
             from_mouse,
         });
+        if is_host_config(&pane.path) && !self.config_descriptors.is_empty() {
+            let text = pane.buffer.text();
+            let offset = pane.buffer.lines[..line.min(pane.buffer.lines.len())]
+                .iter()
+                .map(|line| line.len() + 1)
+                .sum::<usize>()
+                + col;
+            let contents = neoism_protocol::config_intelligence::descriptor_at(
+                &text,
+                offset.min(text.len()),
+                &self.config_descriptors,
+            )
+            .map(|descriptor| {
+                vec![format!(
+                    "**{}** (`{}`)\n\n{}\n\nDefault: `{}`",
+                    descriptor.label,
+                    descriptor.path,
+                    descriptor.description,
+                    descriptor.default
+                )]
+            })
+            .unwrap_or_default();
+            let _ = self.on_hover_result(seq, &pane.path, &contents);
+            return;
+        }
         self.fire(LspRequest::Hover {
             path: pane.path.clone(),
             line: line as u32,
@@ -1557,10 +1638,9 @@ impl CodeLspUi {
             if let Some((offset, len)) = first_stop {
                 let before = &insert[..offset.min(insert.len())];
                 let line_delta = before.matches('\n').count();
-                let stop_line = (session.line as i64
-                    + line_delta as i64
-                    + import_line_shift)
-                    .max(0) as usize;
+                let stop_line =
+                    (session.line as i64 + line_delta as i64 + import_line_shift).max(0)
+                        as usize;
                 let stop_col = if line_delta == 0 {
                     start + before.len()
                 } else {
@@ -1609,7 +1689,12 @@ impl CodeLspUi {
             self.completion = None;
             return;
         }
-        let keep = match completion_prefix(&line_text, session.anchor_col, cursor.col) {
+        let keep = match completion_prefix_for_path(
+            &pane.path,
+            &line_text,
+            session.anchor_col,
+            cursor.col,
+        ) {
             Some(prefix) => {
                 if session.items.is_empty() {
                     // Results still in flight; the install path filters
@@ -1647,9 +1732,12 @@ impl CodeLspUi {
                         self.request_signature_help(pane);
                     }
                 }
-                if let Some(trigger) = self.completion_trigger(&pane.path, c) {
+                let config_document = is_host_config(&pane.path);
+                if config_document && matches!(c, '"' | '{' | ',' | ':') {
+                    self.request_completion(pane, Some(c.to_string()));
+                } else if let Some(trigger) = self.completion_trigger(&pane.path, c) {
                     self.request_completion(pane, Some(trigger));
-                } else if is_ident_char(c) {
+                } else if is_ident_char(c) || (config_document && c == '-') {
                     if session_open {
                         self.refilter_completion(pane);
                     } else {
@@ -1709,14 +1797,18 @@ impl CodeLspUi {
             ka.cmp(kb).then_with(|| a.label.cmp(&b.label))
         });
         session.items = items;
-        let installed =
-            match completion_prefix(&line_text, session.anchor_col, cursor.col) {
-                Some(prefix) => {
-                    rebuild_completion_filter(session, &prefix);
-                    !session.filtered.is_empty()
-                }
-                None => false,
-            };
+        let installed = match completion_prefix_for_path(
+            &pane.path,
+            &line_text,
+            session.anchor_col,
+            cursor.col,
+        ) {
+            Some(prefix) => {
+                rebuild_completion_filter(session, &prefix);
+                !session.filtered.is_empty()
+            }
+            None => false,
+        };
         if !installed {
             self.completion = None;
         }
@@ -1726,7 +1818,12 @@ impl CodeLspUi {
     /// `contents` is the per-server hover contents (already fetched);
     /// empty ⇒ dismiss the card. Also serves signature-help results
     /// (they ride the hover card, desktop parity).
-    pub fn on_hover_result(&mut self, seq: u64, path: &Path, contents: &[String]) -> bool {
+    pub fn on_hover_result(
+        &mut self,
+        seq: u64,
+        path: &Path,
+        contents: &[String],
+    ) -> bool {
         let Some(card) = self.hover.as_mut() else {
             return false;
         };

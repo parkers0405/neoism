@@ -332,9 +332,7 @@ impl ChromeBridge {
             // chrome-side (desktop `open_finder_selection` parity) —
             // their rows carry no file to hand to JS.
             FinderMode::BufferLines => return self.confirm_finder_buffer_search_web(),
-            FinderMode::BufferReplace => {
-                return self.confirm_finder_buffer_replace_web()
-            }
+            FinderMode::BufferReplace => return self.confirm_finder_buffer_replace_web(),
             FinderMode::References => return self.confirm_finder_reference_jump_web(),
             // Symbols has no data source on web yet (GoToSymbol is
             // hidden by the host-capability filter).
@@ -723,7 +721,9 @@ impl ChromeBridge {
             }
             substitute_outcome_message(&pattern, outcome)
         };
-        self.chrome.notifications.push(notice, NotificationLevel::Info);
+        self.chrome
+            .notifications
+            .push(notice, NotificationLevel::Info);
         true
     }
 
@@ -823,8 +823,9 @@ impl ChromeBridge {
         let in_buffer_mode = self.chrome.finder.is_visible()
             && matches!(mode, FinderMode::BufferLines | FinderMode::BufferReplace);
         if !in_buffer_mode {
-            let was_active =
-                BUFFER_SEARCH_SYNC.with(|cell| cell.borrow_mut().take()).is_some();
+            let was_active = BUFFER_SEARCH_SYNC
+                .with(|cell| cell.borrow_mut().take())
+                .is_some();
             if was_active {
                 if let Some(pane) = self.chrome.code_pane_mut() {
                     if let Some((line, col)) = pane.search_origin.take() {
@@ -898,7 +899,8 @@ impl ChromeBridge {
                 vim_search_forward(&pane.buffer.lines, start, &query, false)
             };
             if let Some(found) = found {
-                pane.buffer.set_cursor_position(found.line, found.col, false);
+                pane.buffer
+                    .set_cursor_position(found.line, found.col, false);
                 pane.buffer.follow_cursor = true;
             }
         } else {
@@ -981,7 +983,12 @@ impl ChromeBridge {
                 pane.buffer.follow_cursor = true;
                 let wrap = pane.wrap;
                 self.chrome.notifications.push(
-                    if wrap { "Word wrap on" } else { "Word wrap off" }.to_string(),
+                    if wrap {
+                        "Word wrap on"
+                    } else {
+                        "Word wrap off"
+                    }
+                    .to_string(),
                     NotificationLevel::Info,
                 );
                 true
@@ -1007,7 +1014,12 @@ impl ChromeBridge {
                     pane.buffer.clear_selection();
                 }
                 self.chrome.notifications.push(
-                    if entering { "Vim mode on" } else { "Vim mode off" }.to_string(),
+                    if entering {
+                        "Vim mode on"
+                    } else {
+                        "Vim mode off"
+                    }
+                    .to_string(),
                     NotificationLevel::Info,
                 );
                 true
@@ -1097,8 +1109,7 @@ impl ChromeBridge {
         if let Ok(line) = trimmed.parse::<usize>() {
             let line = line.max(1);
             if let Some(pane) = self.chrome.code_pane_mut() {
-                let line_ix =
-                    (line - 1).min(pane.buffer.lines.len().saturating_sub(1));
+                let line_ix = (line - 1).min(pane.buffer.lines.len().saturating_sub(1));
                 pane.buffer.set_cursor_position(line_ix, 0, false);
                 pane.buffer.follow_cursor = true;
                 if pane.input_mode == CodeInputMode::Vim
@@ -1157,16 +1168,16 @@ impl ChromeBridge {
                     Some(pane.insert_cell_below(NotebookCellType::Code).map(|_| ()))
                 }
                 "InsertNotebookMarkdownCellAbove" => Some(
-                    pane.insert_cell_above(NotebookCellType::Markdown).map(|_| ()),
+                    pane.insert_cell_above(NotebookCellType::Markdown)
+                        .map(|_| ()),
                 ),
                 "InsertNotebookMarkdownCellBelow" => Some(
-                    pane.insert_cell_below(NotebookCellType::Markdown).map(|_| ()),
+                    pane.insert_cell_below(NotebookCellType::Markdown)
+                        .map(|_| ()),
                 ),
                 "DeleteNotebookCell" => Some(pane.delete_current_cell().map(|_| ())),
                 "MoveNotebookCellUp" => Some(pane.move_current_cell_up().map(|_| ())),
-                "MoveNotebookCellDown" => {
-                    Some(pane.move_current_cell_down().map(|_| ()))
-                }
+                "MoveNotebookCellDown" => Some(pane.move_current_cell_down().map(|_| ())),
                 "ClearNotebookCellOutput" => {
                     Some(pane.clear_current_output().map(|_| ()))
                 }
@@ -1178,7 +1189,9 @@ impl ChromeBridge {
             None => false,
             Some(Ok(())) => true,
             Some(Err(err)) => {
-                self.chrome.notifications.push(err, NotificationLevel::Error);
+                self.chrome
+                    .notifications
+                    .push(err, NotificationLevel::Error);
                 true
             }
         }
@@ -1206,8 +1219,7 @@ impl ChromeBridge {
                     Severity::Info => "info",
                     Severity::Hint => "hint",
                 };
-                let mut message =
-                    item.message.lines().next().unwrap_or("").to_string();
+                let mut message = item.message.lines().next().unwrap_or("").to_string();
                 if message.chars().count() > 160 {
                     message = message.chars().take(160).collect();
                 }
@@ -1220,10 +1232,9 @@ impl ChromeBridge {
             }
         }
         if rows.is_empty() {
-            self.chrome.notifications.push(
-                "No problems reported".to_string(),
-                NotificationLevel::Info,
-            );
+            self.chrome
+                .notifications
+                .push("No problems reported".to_string(), NotificationLevel::Info);
             return;
         }
         rows.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));

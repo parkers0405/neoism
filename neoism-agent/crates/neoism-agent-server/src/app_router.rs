@@ -78,6 +78,10 @@ use crate::vcs_routes::{vcs_apply, vcs_diff, vcs_diff_raw, vcs_get, vcs_status};
 use crate::worktree_routes::{
     worktree_create, worktree_list, worktree_remove, worktree_reset,
 };
+use crate::workflow::{
+    workflow_activate, workflow_get, workflow_history, workflow_list, workflow_pause,
+    workflow_preview, workflow_run_now,
+};
 
 pub fn app(state: AppState) -> Router {
     Router::new()
@@ -100,6 +104,13 @@ pub fn app(state: AppState) -> Router {
         .route("/agent", get(agent_list))
         .route("/agent/:name", get(agent_get))
         .route("/skill", get(skill_list))
+        .route("/workflow", get(workflow_list))
+        .route("/workflow/:workflow_id", get(workflow_get))
+        .route("/workflow/:workflow_id/activate", post(workflow_activate))
+        .route("/workflow/:workflow_id/pause", post(workflow_pause))
+        .route("/workflow/:workflow_id/run", post(workflow_run_now))
+        .route("/workflow/:workflow_id/preview", get(workflow_preview))
+        .route("/workflow/:workflow_id/runs", get(workflow_history))
         .route("/plugin", get(plugin_status))
         .route("/lsp", get(lsp_status))
         .route("/lsp/hover", get(lsp_hover))

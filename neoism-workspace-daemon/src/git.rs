@@ -178,9 +178,9 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
         // web and desktop observe identical semantics. All of them run
         // against the repo's TOPLEVEL workdir — the panel's paths are
         // repo-relative, and the workspace root may sit below it.
-        GitClientMessage::ChangedFiles => with_workdir(&repo, |wd| {
-            vec![changed_files_reply(wd, None)]
-        }),
+        GitClientMessage::ChangedFiles => {
+            with_workdir(&repo, |wd| vec![changed_files_reply(wd, None)])
+        }
         GitClientMessage::Stage { path } => with_workdir(&repo, |wd| {
             if let Err(e) = resolve_path(wd, &path) {
                 return err(e);
@@ -831,9 +831,7 @@ mod tests {
             Permission::WriteFiles
         ));
         assert!(matches!(
-            required_permission(&GitClientMessage::Checkout {
-                branch: "b".into()
-            }),
+            required_permission(&GitClientMessage::Checkout { branch: "b".into() }),
             Permission::WriteFiles
         ));
         assert!(matches!(

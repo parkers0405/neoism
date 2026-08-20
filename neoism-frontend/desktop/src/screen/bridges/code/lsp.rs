@@ -34,14 +34,14 @@ use neoism_ui::editor::code::layout::byte_for_utf16_col;
 // (`neoism_ui::editor::code::lsp_session`) so the web frontend runs the
 // exact same logic; desktop delegates instead of keeping copies.
 pub(crate) use neoism_ui::editor::code::lsp_session::is_ident_char;
+/// One selectable row of the code-action popup — the shared session
+/// type; `action` is the raw LSP CodeAction/Command payload.
+pub use neoism_ui::editor::code::lsp_session::LspCodeActionData as CodeActionItem;
 use neoism_ui::editor::code::lsp_session::{
     action_kind_label, completion_prefix, flatten_code_actions, map_severity,
     parse_lsp_text_edits, snippet_with_first_stop, word_start_col,
     workspace_edit_file_edits,
 };
-/// One selectable row of the code-action popup — the shared session
-/// type; `action` is the raw LSP CodeAction/Command payload.
-pub use neoism_ui::editor::code::lsp_session::LspCodeActionData as CodeActionItem;
 use neoism_ui::editor::code::{CodeDiagnosticSeverity, CodeLineDiagnostic};
 use neoism_ui::editor_snapshot::{PopupMenu, PopupMenuItem};
 use std::collections::HashMap;
@@ -49,6 +49,69 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
+
+fn is_neoism_config_path(path: &Path) -> bool {
+    path == neoism_backend::config::config_file_path()
+}
+
+fn completion_prefix_for_path(
+    path: &Path,
+    line: &str,
+    anchor: usize,
+    cursor: usize,
+) -> Option<String> {
+    if !is_neoism_config_path(path) {
+        return completion_prefix(line, anchor, cursor);
+    }
+    let slice = line.get(anchor..cursor)?;
+    slice
+        .chars()
+        .all(|c| is_ident_char(c) || c == '-')
+        .then(|| slice.to_string())
+}
+
+fn config_descriptors() -> &'static [neoism_protocol::config::ConfigDescriptor] {
+    static DESCRIPTORS: OnceLock<Vec<neoism_protocol::config::ConfigDescriptor>> =
+        OnceLock::new();
+    DESCRIPTORS.get_or_init(neoism_backend::config::intelligence::config_descriptors)
+}
+
+fn text_offset_for_position(text: &str, line: u32, character: u32) -> usize {
+    (text
+        .split_inclusive('\n')
+        .take(line as usize)
+        .map(str::len)
+        .sum::<usize>()
+        + character as usize)
+        .min(text.len())
+}
+
+fn config_completion_items(
+    text: &str,
+    line: u32,
+    character: u32,
+) -> Vec<engine::LspCompletionItem> {
+    let offset = text_offset_for_position(text, line, character);
+    neoism_protocol::config_intelligence::complete_config(
+        text,
+        offset,
+        config_descriptors(),
+    )
+    .into_iter()
+    .map(|item| engine::LspCompletionItem {
+        server_id: Some("neoism-config".to_string()),
+        label: item.label,
+        kind: "property".to_string(),
+        detail: Some(item.detail),
+        documentation: Some(item.documentation),
+        insert_text: item.insert_text,
+        filter_text: None,
+        sort_text: None,
+        preselect: false,
+        payload: serde_json::json!({ "insertTextFormat": 2 }),
+    })
+    .collect()
+}
 
 enum CodeLspJob {
     Sync {
@@ -72,6 +135,7 @@ enum CodeLspJob {
     Hover {
         root: PathBuf,
         file: PathBuf,
+        text: String,
         line: u32,
         character: u32,
         seq: u64,
@@ -202,7 +266,14 @@ fn diag_publish_seq() -> &'static Mutex<HashMap<PathBuf, u64>> {
 /// pane's path in symlinks/normalization — a raw string match silently
 /// drops every diagnostic.
 fn canonical_key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    #[cfg(windows)]
+    {
+        dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
 }
 
 /// Latest result per query kind, written by the worker and drained by
@@ -969,14 +1040,18 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                 if newest_completion != Some(ix) {
                                     continue;
                                 }
-                                let items = engine::completion_with_trigger(
-                                    root,
-                                    file,
-                                    *line,
-                                    *character,
-                                    Some(text),
-                                    trigger.as_deref(),
-                                );
+                                let items = if is_neoism_config_path(file) {
+                                    config_completion_items(text, *line, *character)
+                                } else {
+                                    engine::completion_with_trigger(
+                                        root,
+                                        file,
+                                        *line,
+                                        *character,
+                                        Some(text),
+                                        trigger.as_deref(),
+                                    )
+                                };
                                 if lsp_log() {
                                     eprintln!(
                                         "neoism::lsp code completion result: seq={seq} items={} at {line}:{character}",
@@ -993,6 +1068,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                             CodeLspJob::Hover {
                                 root,
                                 file,
+                                text,
                                 line,
                                 character,
                                 seq,
@@ -1000,8 +1076,31 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                 if newest_hover != Some(ix) {
                                     continue;
                                 }
-                                let hovers =
-                                    engine::hover(root, file, *line, *character);
+                                let hovers = if is_neoism_config_path(file) {
+                                    neoism_protocol::config_intelligence::descriptor_at(
+                                        text,
+                                        text_offset_for_position(text, *line, *character),
+                                        config_descriptors(),
+                                    )
+                                    .map(|descriptor| {
+                                        vec![engine::LspHover {
+                                            path: file.to_string_lossy().into_owned(),
+                                            contents: format!(
+                                                "**{}** (`{}`)\n\n{}\n\nDefault: `{}`",
+                                                descriptor.label,
+                                                descriptor.path,
+                                                descriptor.description,
+                                                descriptor.default
+                                            ),
+                                            kind: Some("markdown".to_string()),
+                                            range: None,
+                                            language: Some("jsonc".to_string()),
+                                        }]
+                                    })
+                                    .unwrap_or_default()
+                                } else {
+                                    engine::hover(root, file, *line, *character)
+                                };
                                 if lsp_log() {
                                     eprintln!(
                                         "neoism::lsp code hover result: seq={seq} hovers={} at {line}:{character}",
@@ -2055,7 +2154,8 @@ impl Screen<'_> {
                         ka.cmp(kb).then_with(|| a.label.cmp(&b.label))
                     });
                     session.items = items;
-                    let installed = match completion_prefix(
+                    let installed = match completion_prefix_for_path(
+                        &file,
                         &line_text,
                         session.anchor_col,
                         cursor.col,
@@ -2853,6 +2953,13 @@ impl Screen<'_> {
         let Some((root, file)) = self.code_lsp_target() else {
             return;
         };
+        let text = self
+            .context_manager
+            .current()
+            .code
+            .as_ref()
+            .map(|code| code.buffer.text())
+            .unwrap_or_default();
         let seq = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
         if lsp_log() {
             eprintln!("neoism::lsp code hover request: seq={seq} at {line}:{col}");
@@ -2869,6 +2976,7 @@ impl Screen<'_> {
         let _ = shared.jobs.send(CodeLspJob::Hover {
             root,
             file,
+            text,
             line: line as u32,
             character: col as u32,
             seq,
@@ -3506,7 +3614,12 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        let keep = match completion_prefix(&line_text, session.anchor_col, cursor.col) {
+        let keep = match completion_prefix_for_path(
+            &path,
+            &line_text,
+            session.anchor_col,
+            cursor.col,
+        ) {
             Some(prefix) => {
                 if session.items.is_empty() {
                     // Results still in flight; the pump filters at
@@ -3569,9 +3682,17 @@ impl Screen<'_> {
                         self.request_code_signature_help();
                     }
                 }
-                if let Some(trigger) = self.code_completion_trigger(c) {
+                let config_document = self
+                    .context_manager
+                    .current()
+                    .code
+                    .as_ref()
+                    .is_some_and(|code| is_neoism_config_path(&code.path));
+                if config_document && matches!(c, '"' | '{' | ',' | ':') {
+                    self.request_code_completion(Some(c.to_string()));
+                } else if let Some(trigger) = self.code_completion_trigger(c) {
                     self.request_code_completion(Some(trigger));
-                } else if is_ident_char(c) {
+                } else if is_ident_char(c) || (config_document && c == '-') {
                     if session_open {
                         self.refilter_code_completion();
                     } else {

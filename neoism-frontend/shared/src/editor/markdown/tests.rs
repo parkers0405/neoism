@@ -2327,12 +2327,12 @@ mod tests {
     fn click_divider_variants_enter_insert_at_source_end() {
         for divider in ["***", "___", "  ***  "] {
             let mut pane = pane_for_test();
-        // These cases assert the NON-vim click behaviour (click enters
-        // Insert at the mapped column). `pane_for_test` defaults
-        // `vim_enabled: true`, where a click correctly moves the caret
-        // and STAYS in Normal — so opt out explicitly rather than
-        // asserting a mode the vim path never produces.
-        pane.vim_enabled = false;
+            // These cases assert the NON-vim click behaviour (click enters
+            // Insert at the mapped column). `pane_for_test` defaults
+            // `vim_enabled: true`, where a click correctly moves the caret
+            // and STAYS in Normal — so opt out explicitly rather than
+            // asserting a mode the vim path never produces.
+            pane.vim_enabled = false;
             pane.lines = vec![divider.to_string()];
             pane.register_block_rect(
                 0,

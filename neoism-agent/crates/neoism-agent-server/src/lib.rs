@@ -107,6 +107,7 @@ mod vcs_routes;
 mod windows_acl;
 pub(crate) mod windows_process;
 mod workspace_runtime;
+mod workflow;
 mod worktree;
 mod worktree_routes;
 

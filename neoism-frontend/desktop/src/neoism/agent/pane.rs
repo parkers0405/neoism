@@ -237,6 +237,8 @@ pub(super) struct CachedAgentSession {
     pub timeline_scroll_px: f32,
     pub timeline_follow_bottom: bool,
     pub timeline_content_height_px: f32,
+    pub timeline_live_trace_start: Option<usize>,
+    pub timeline_live_trace_anchor: Option<String>,
     pub timeline_layout_epoch: u64,
     pub timeline_layout_cache: Option<TimelineLayoutCache>,
     pub timeline_dirty_message_ids: BTreeSet<String>,
@@ -258,6 +260,8 @@ impl CachedAgentSession {
             timeline_scroll_px: 0.0,
             timeline_follow_bottom: true,
             timeline_content_height_px: 0.0,
+            timeline_live_trace_start: None,
+            timeline_live_trace_anchor: None,
             timeline_layout_epoch: 0,
             timeline_layout_cache: None,
             timeline_dirty_message_ids: BTreeSet::new(),
@@ -772,6 +776,10 @@ pub struct NeoismAgentPane {
     pub(super) runtime_status_requests: HashMap<String, u64>,
     pub(super) session_runtime_revisions: HashMap<String, u64>,
     pub(super) runtime_hydrated_sessions: BTreeSet<String>,
+    /// Sessions with an authoritative idle edge. Late part reconciliation may
+    /// update their transcript, but cannot resurrect activity chrome until a
+    /// real busy/retry/new-prompt edge starts another run.
+    pub(super) terminal_idle_sessions: BTreeSet<String>,
     pub(super) session_goal_cache: HashMap<String, (Option<SessionGoal>, u64)>,
     background_tx: Sender<NeoismAgentBackgroundUpdate>,
     background_rx: Receiver<NeoismAgentBackgroundUpdate>,
@@ -901,7 +909,8 @@ pub struct NeoismAgentPane {
     /// a delayed reasoning-end event can use the same order as final history.
     live_part_parent_ids: HashMap<String, String>,
     /// First source row whose trace was observed live during this visit to the
-    /// session. It is cleared on session navigation, never persisted.
+    /// session. Family-local navigation parks it with the transcript; leaving
+    /// the full conversation clears it and settles the trace.
     timeline_live_trace_start: Option<usize>,
     /// Id of the user message the live-trace window is anchored after; kept
     /// alongside the index so list replacements/prepends re-derive the same
@@ -1051,6 +1060,7 @@ impl Default for NeoismAgentPane {
             runtime_status_requests: HashMap::new(),
             session_runtime_revisions: HashMap::new(),
             runtime_hydrated_sessions: BTreeSet::new(),
+            terminal_idle_sessions: BTreeSet::new(),
             session_goal_cache: HashMap::new(),
             background_tx,
             background_rx,

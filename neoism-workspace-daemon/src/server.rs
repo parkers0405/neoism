@@ -85,7 +85,7 @@ fn resolve_request_workspace_root(
     if !path.is_dir() {
         return Err(format!("workspace_root is not a directory: {root}"));
     }
-    path.canonicalize()
+    crate::path::canonicalize(&path)
         .map_err(|err| format!("workspace_root cannot be resolved: {root}: {err}"))
 }
 

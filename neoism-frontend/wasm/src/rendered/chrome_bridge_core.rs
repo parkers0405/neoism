@@ -512,8 +512,7 @@ impl ChromeBridge {
         // Label chips through the late-overlay layer so they read
         // over the underlying glyphs (rects in the base pass always
         // draw under text on this host).
-        let placements =
-            hint_label_placements(true, &match_starts, &visible_labels);
+        let placements = hint_label_placements(true, &match_starts, &visible_labels);
         if placements.is_empty() {
             return;
         }
@@ -524,12 +523,9 @@ impl ChromeBridge {
             let Some(display_row) = display_row_for(placement.position.row) else {
                 continue;
             };
-            let cell_x =
-                terminal_rect.x + placement.position.col.0 as f32 * cell_w;
+            let cell_x = terminal_rect.x + placement.position.col.0 as f32 * cell_w;
             let row_y = terminal_rect.y + display_row as f32 * cell_h;
-            let Some(chip) =
-                intersect_rect([cell_x, row_y, cell_w, cell_h], clip)
-            else {
+            let Some(chip) = intersect_rect([cell_x, row_y, cell_w, cell_h], clip) else {
                 continue;
             };
             sugarloaf.rect(
@@ -538,7 +534,8 @@ impl ChromeBridge {
                 chip[1],
                 chip[2],
                 chip[3],
-                theme.f32_alpha(theme.yellow, if placement.is_first { 1.0 } else { 0.88 }),
+                theme
+                    .f32_alpha(theme.yellow, if placement.is_first { 1.0 } else { 0.88 }),
                 0.0,
                 0,
             );
@@ -550,7 +547,9 @@ impl ChromeBridge {
                 clip_rect: Some(chip),
                 ..DrawOpts::default()
             };
-            sugarloaf.text_mut().draw(cell_x, row_y + text_y_pad, &label, &opts);
+            sugarloaf
+                .text_mut()
+                .draw(cell_x, row_y + text_y_pad, &label, &opts);
         }
         sugarloaf.set_late_overlay_mode(false);
     }

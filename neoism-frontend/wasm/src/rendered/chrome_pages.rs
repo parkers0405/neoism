@@ -23,7 +23,9 @@
 use super::*;
 
 use neoism_neoworld_core::{Emotions, PetId, PetMode, PetState, Vec2};
-use neoism_protocol::config::{ExtensionStatusSummary, ExtensionSummary};
+use neoism_protocol::config::{
+    ConfigDescriptor, ExtensionStatusSummary, ExtensionSummary,
+};
 use neoism_ui::panels::extensions_page::{ExtensionEntry, ExtensionStatus, PaneAction};
 use neoism_ui::panels::neoworld::NeoWorldPane;
 use neoism_ui::panels::settings_page::SettingsAction;
@@ -107,6 +109,19 @@ impl ChromeBridge {
         Ok(())
     }
 
+    /// Seed canonical setting metadata returned by `GetConfigSchema`.
+    pub fn set_settings_descriptors(
+        &mut self,
+        descriptors_json: &str,
+    ) -> Result<(), JsValue> {
+        let descriptors: Vec<ConfigDescriptor> = serde_json::from_str(descriptors_json)
+            .map_err(|e| {
+            JsValue::from_str(&format!("config descriptors parse: {e}"))
+        })?;
+        self.chrome.settings_page.set_descriptors(descriptors);
+        Ok(())
+    }
+
     pub fn settings_page_active(&self) -> bool {
         self.chrome.settings_page.is_active()
     }
@@ -133,7 +148,7 @@ impl ChromeBridge {
                     self.hot_apply_setting(key, value);
                     out.push(serde_json::json!({
                         "kind": "set",
-                        "key": *key,
+                        "key": key,
                         "value": value,
                     }));
                 }
@@ -146,12 +161,7 @@ impl ChromeBridge {
                     }));
                 }
                 SettingsAction::OpenConfigFile => {
-                    // The raw config.json lives on the daemon host's
-                    // disk — the web editor can't open it in place.
-                    self.chrome.notifications.push(
-                        "config.json lives on the daemon host — open it from the Neoism desktop app.",
-                        neoism_ui::panels::notifications::NotificationLevel::Info,
-                    );
+                    self.chrome.close_settings_page();
                     out.push(serde_json::json!({ "kind": "open_config_file" }));
                 }
                 SettingsAction::RunAction(name) => {
@@ -239,9 +249,7 @@ impl ChromeBridge {
                 categories: summary.categories,
                 languages: summary.languages,
                 status: match summary.status {
-                    ExtensionStatusSummary::NotInstalled => {
-                        ExtensionStatus::NotInstalled
-                    }
+                    ExtensionStatusSummary::NotInstalled => ExtensionStatus::NotInstalled,
                     ExtensionStatusSummary::BuiltIn => ExtensionStatus::BuiltIn,
                     ExtensionStatusSummary::Detected => ExtensionStatus::Detected,
                     ExtensionStatusSummary::Unavailable => ExtensionStatus::Unavailable,

@@ -9,6 +9,133 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Machine-readable description of one supported config leaf.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfigDescriptor {
+    /// Canonical dotted JSON path (for example `appearance.fonts.family`).
+    pub path: String,
+    pub label: String,
+    pub description: String,
+    pub value_kind: ConfigValueKind,
+    pub default: serde_json::Value,
+    /// Stable suggestions shipped by Neoism.
+    #[serde(default)]
+    pub static_suggestions: Vec<String>,
+    /// Suggestions discovered on the daemon host (fonts, shells, custom themes, ...).
+    #[serde(default)]
+    pub runtime_suggestions: Vec<String>,
+    /// Typed choices used by both the Settings UI and JSONC completion.
+    /// Unlike legacy suggestions, these preserve numbers, booleans and null.
+    #[serde(default)]
+    pub options: Vec<ConfigOption>,
+    /// Host catalog responsible for dynamic choices. Hosts return this even
+    /// after resolving it so clients can explain where choices came from.
+    #[serde(default)]
+    pub provider: Option<ConfigSuggestionProvider>,
+    /// Validation and presentation hints for free-form values.
+    #[serde(default)]
+    pub constraints: ConfigConstraints,
+    /// Additional JSON kinds accepted by union-shaped settings.
+    #[serde(default)]
+    pub accepted_kinds: Vec<ConfigValueKind>,
+    /// Whether values outside the suggestions are valid.
+    pub extensible: bool,
+    pub category: ConfigCategory,
+    pub control: ConfigControl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfigOption {
+    pub value: serde_json::Value,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ConfigConstraints {
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub step: Option<f64>,
+    #[serde(default)]
+    pub unit: Option<String>,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+    #[serde(default)]
+    pub nullable: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigSuggestionProvider {
+    SystemFonts,
+    IdeThemes,
+    TerminalPalettes,
+    MashupPacks,
+    Shells,
+    Executables,
+    AgentNames,
+    ProviderIds,
+    Models,
+    LspAdapters,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigValueKind {
+    Boolean,
+    Integer,
+    Number,
+    String,
+    Array,
+    Object,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigCategory {
+    General,
+    Appearance,
+    Editor,
+    Terminal,
+    Ui,
+    Presence,
+    Keybinds,
+    Agent,
+    Platform,
+    Renderer,
+    Developer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ConfigControl {
+    Toggle,
+    Select,
+    Text,
+    Number,
+    FontFamily,
+    Color,
+    Keybinding,
+    StringList,
+    Object,
+}
+
+/// Raw JSONC document plus the metadata needed by a remote editor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigDocument {
+    pub content: String,
+    /// User-facing host path; not intended as a remotely addressable path.
+    pub display_path: String,
+    /// Opaque content revision. Clients must return it when saving.
+    pub revision: String,
+    pub writable: bool,
+}
+
 /// Inbound config-plane messages.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConfigClientMessage {
@@ -16,6 +143,17 @@ pub enum ConfigClientMessage {
     /// value (comments/trailing commas already stripped). The reply is
     /// [`ConfigServerMessage::Config`].
     GetConfig,
+    /// Fetch canonical config descriptors, including host-derived suggestions.
+    GetConfigSchema,
+    /// Fetch the raw JSONC file without creating it.
+    GetConfigDocument,
+    /// Create the config file if absent, then fetch its raw document.
+    EnsureConfigDocument,
+    /// Validate and atomically save a complete raw JSONC document.
+    SaveConfigDocument {
+        content: String,
+        expected_revision: String,
+    },
     /// Persist one setting at a golden dotted path
     /// (`appearance.fonts.family`, `editor.vim-mode`, ...). Exactly the
     /// contract of `neoism_backend::config::write_setting`; the daemon
@@ -43,14 +181,33 @@ pub enum ConfigClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConfigServerMessage {
     /// The full config document.
-    Config { value: serde_json::Value },
+    Config {
+        value: serde_json::Value,
+    },
+    ConfigSchema {
+        descriptors: Vec<ConfigDescriptor>,
+    },
+    ConfigDocument {
+        document: ConfigDocument,
+    },
+    ConfigDocumentSaved {
+        document: ConfigDocument,
+    },
     /// A `SetSetting` landed on disk.
-    SettingWritten { key: String },
+    SettingWritten {
+        key: String,
+    },
     /// A `SetKeybind` landed on disk.
-    KeybindWritten { action: String },
+    KeybindWritten {
+        action: String,
+    },
     /// Reply to `ListExtensions`.
-    Extensions { entries: Vec<ExtensionSummary> },
-    Error { message: String },
+    Extensions {
+        entries: Vec<ExtensionSummary>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Lifecycle state of one extension row, as the daemon host sees it.
@@ -107,6 +264,13 @@ mod tests {
     fn config_messages_roundtrip() {
         let msgs = vec![
             ConfigClientMessage::GetConfig,
+            ConfigClientMessage::GetConfigSchema,
+            ConfigClientMessage::GetConfigDocument,
+            ConfigClientMessage::EnsureConfigDocument,
+            ConfigClientMessage::SaveConfigDocument {
+                content: "{}\n".into(),
+                expected_revision: "rev".into(),
+            },
             ConfigClientMessage::SetSetting {
                 key: "appearance.theme".into(),
                 value: serde_json::json!("tokyo_night"),
@@ -123,6 +287,50 @@ mod tests {
             let back: ConfigClientMessage = serde_json::from_str(&json).unwrap();
             assert_eq!(back, msg);
         }
+    }
+
+    #[test]
+    fn descriptor_and_document_roundtrip() {
+        let reply = ConfigServerMessage::ConfigSchema {
+            descriptors: vec![ConfigDescriptor {
+                path: "editor.vim-mode".into(),
+                label: "Vim mode".into(),
+                description: "Use Vim keybindings.".into(),
+                value_kind: ConfigValueKind::Boolean,
+                default: serde_json::json!(true),
+                static_suggestions: vec![],
+                runtime_suggestions: vec![],
+                options: vec![ConfigOption {
+                    value: serde_json::json!(true),
+                    label: Some("Enabled".into()),
+                    description: Some("Use Vim keybindings.".into()),
+                }],
+                provider: None,
+                constraints: ConfigConstraints::default(),
+                accepted_kinds: vec![],
+                extensible: false,
+                category: ConfigCategory::Editor,
+                control: ConfigControl::Toggle,
+            }],
+        };
+        let encoded = serde_json::to_string(&reply).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ConfigServerMessage>(&encoded).unwrap(),
+            reply
+        );
+
+        let document = ConfigDocument {
+            content: "// config\n{}\n".into(),
+            display_path: "~/.config/neoism/config.json".into(),
+            revision: "abc".into(),
+            writable: true,
+        };
+        let reply = ConfigServerMessage::ConfigDocumentSaved { document };
+        let encoded = serde_json::to_string(&reply).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ConfigServerMessage>(&encoded).unwrap(),
+            reply
+        );
     }
 
     #[test]

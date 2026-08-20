@@ -583,9 +583,9 @@ impl NeoismAgentPane {
         // Mirrors `streaming_state` precedence so label scramble
         // animations restart on the same edges the displayed word does.
         if self.is_streaming() {
-            return self.streaming_state_changed_at.map(|t| {
-                Instant::now().saturating_duration_since(t).as_secs_f32()
-            });
+            return self
+                .streaming_state_changed_at
+                .map(|t| Instant::now().saturating_duration_since(t).as_secs_f32());
         }
         if self.active_subagent_count() > 0 {
             return self.subagent_waiting_started_at.map(|started| {

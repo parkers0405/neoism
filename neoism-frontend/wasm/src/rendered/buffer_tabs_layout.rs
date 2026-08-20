@@ -537,9 +537,7 @@ impl ChromeBridge {
     /// 8 = a per-pane tab-strip interaction was queued (drain via
     /// `drain_pane_tab_intents`).
     pub fn pane_grid_pointer_down(&mut self, x: f32, y: f32) -> u32 {
-        if !self.chrome.pane_grid.is_split()
-            || self.chrome.is_neoism_agent_tab_active()
-        {
+        if !self.chrome.pane_grid.is_split() || self.chrome.is_neoism_agent_tab_active() {
             return 0;
         }
         // Per-pane tab strips sit on top of the pane bodies; a strip
@@ -741,17 +739,14 @@ impl ChromeBridge {
         let id = external_id as u64;
         let cell_w = self.rendered.cell_w.max(1.0);
         let cell_h = self.rendered.cell_h.max(1.0);
-        let rect = self
-            .chrome
-            .pane_content_rect(id)
-            .or_else(|| {
-                self.chrome
-                    .pane_grid
-                    .panes()
-                    .iter()
-                    .find(|p| p.external_id == Some(id))
-                    .map(|p| p.rect)
-            });
+        let rect = self.chrome.pane_content_rect(id).or_else(|| {
+            self.chrome
+                .pane_grid
+                .panes()
+                .iter()
+                .find(|p| p.external_id == Some(id))
+                .map(|p| p.rect)
+        });
         let theme = *self.chrome.ide_theme();
         let term = self.pane_terminals.entry(id).or_insert_with(|| {
             let cols = rect
@@ -917,7 +912,9 @@ impl ChromeBridge {
     /// the reorder endpoints, `index`/`release` classify a tear-out
     /// through the shared `tab_drag_release_kind` policy.
     pub fn buffer_tab_end_drag(&mut self) -> Result<JsValue, JsValue> {
-        use neoism_ui::panels::buffer_tabs::{tab_drag_release_kind, DragRelease, TabDragReleaseKind};
+        use neoism_ui::panels::buffer_tabs::{
+            tab_drag_release_kind, DragRelease, TabDragReleaseKind,
+        };
 
         #[derive(serde::Serialize)]
         struct JsTabDragRelease {
@@ -1168,9 +1165,7 @@ impl ChromeBridge {
     /// Returns true when the split pipeline owned the frame — the
     /// caller's full-rect terminal pipeline must stand down.
     pub(crate) fn draw_split_terminal_panes(&mut self) -> bool {
-        if !self.chrome.pane_grid.is_split()
-            || self.chrome.is_neoism_agent_tab_active()
-        {
+        if !self.chrome.pane_grid.is_split() || self.chrome.is_neoism_agent_tab_active() {
             self.chrome.set_host_drawn_panes(Vec::new());
             return false;
         }

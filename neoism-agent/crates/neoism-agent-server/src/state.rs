@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{Acquire as _, SqlitePool};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use turso::Value as SqlValue;
 
 use crate::auth_store::AuthStore;
@@ -51,6 +51,7 @@ pub(crate) struct InnerState {
     pub(crate) todos: RwLock<HashMap<String, Vec<TodoInfo>>>,
     pub(crate) ptys: RwLock<HashMap<String, PtyInfo>>,
     pub(crate) pty_connect_tokens: RwLock<crate::pty::ConnectTokens>,
+    pub(crate) workflow_notify: Notify,
     events: broadcast::Sender<EventPayload>,
     event_writer: mpsc::UnboundedSender<(EventPayload, bool)>,
 }
@@ -199,6 +200,14 @@ impl DbRow {
         match self.value(name)? {
             SqlValue::Integer(value) => Ok(*value),
             other => anyhow::bail!("column `{name}` is not an integer: {other:?}"),
+        }
+    }
+
+    fn get_opt_i64(&self, name: &str) -> anyhow::Result<Option<i64>> {
+        match self.value(name)? {
+            SqlValue::Integer(value) => Ok(Some(*value)),
+            SqlValue::Null => Ok(None),
+            other => anyhow::bail!("column `{name}` is not an integer or null: {other:?}"),
         }
     }
 
@@ -527,6 +536,7 @@ impl AppState {
                 todos: RwLock::new(HashMap::new()),
                 ptys: RwLock::new(HashMap::new()),
                 pty_connect_tokens: RwLock::new(crate::pty::ConnectTokens::default()),
+                workflow_notify: Notify::new(),
                 events,
                 event_writer,
             }),
@@ -551,6 +561,7 @@ impl AppState {
         });
         crate::session_queue::resume_prompt_queues(state.clone()).await?;
         crate::session_actions::resume_pending_subtask_completions(&state).await;
+        crate::workflow::spawn_scheduler(state.clone());
         Ok(state)
     }
 
@@ -870,6 +881,47 @@ impl SessionStore {
         self.db
             .execute(
                 r#"
+            CREATE TABLE IF NOT EXISTS workflows (
+                activation_id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                workspace_root TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                definition_json TEXT NOT NULL,
+                active INTEGER NOT NULL,
+                activated_at INTEGER NOT NULL,
+                last_scheduled_at INTEGER,
+                updated INTEGER NOT NULL,
+                UNIQUE(workflow_id, workspace_root)
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS workflow_runs (
+                id TEXT PRIMARY KEY,
+                activation_id TEXT NOT NULL,
+                workflow_id TEXT NOT NULL,
+                scheduled_at INTEGER NOT NULL,
+                started_at INTEGER,
+                finished_at INTEGER,
+                session_id TEXT,
+                status TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                error TEXT,
+                created INTEGER NOT NULL,
+                UNIQUE(activation_id, scheduled_at)
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -1029,6 +1081,18 @@ impl SessionStore {
         self.db
             .execute(
                 "CREATE INDEX IF NOT EXISTS idx_session_runs_session_updated ON session_runs(session_id, updated)",
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_workflows_active ON workflows(active, updated)",
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_workflow_runs_history ON workflow_runs(activation_id, scheduled_at DESC)",
                 Vec::new(),
             )
             .await?;
@@ -1667,6 +1731,214 @@ impl SessionStore {
             )
             .await?;
         Ok(())
+    }
+
+    pub(crate) async fn upsert_workflow(
+        &self,
+        projection: &crate::workflow::WorkflowProjection,
+    ) -> anyhow::Result<()> {
+        self.db
+            .execute(
+                r#"INSERT INTO workflows
+                (activation_id, workflow_id, workspace_root, source_path, source_hash,
+                 definition_json, active, activated_at, last_scheduled_at, updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(activation_id) DO UPDATE SET
+                  source_path = excluded.source_path,
+                  source_hash = excluded.source_hash,
+                  definition_json = excluded.definition_json,
+                  active = excluded.active,
+                  updated = excluded.updated"#,
+                vec![
+                    text(&projection.activation_id),
+                    text(&projection.workflow_id),
+                    text(&projection.workspace_root),
+                    text(&projection.source_path),
+                    text(&projection.source_hash),
+                    text(serde_json::to_string(&projection.definition)?),
+                    int(i64::from(projection.active)),
+                    int(sqlite_i64(projection.activated_at)),
+                    projection
+                        .last_scheduled_at
+                        .map(|value| int(sqlite_i64(value)))
+                        .unwrap_or(SqlValue::Null),
+                    int(sqlite_i64(projection.updated)),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn set_workflow_active(
+        &self,
+        activation_id: &str,
+        active: bool,
+        updated: u64,
+    ) -> anyhow::Result<bool> {
+        Ok(self
+            .db
+            .execute(
+                "UPDATE workflows SET active = ?, updated = ? WHERE activation_id = ?",
+                vec![
+                    int(i64::from(active)),
+                    int(sqlite_i64(updated)),
+                    text(activation_id),
+                ],
+            )
+            .await?
+            > 0)
+    }
+
+    pub(crate) async fn update_workflow_cursor(
+        &self,
+        activation_id: &str,
+        scheduled_at: u64,
+    ) -> anyhow::Result<()> {
+        self.db
+            .execute(
+                "UPDATE workflows SET last_scheduled_at = ?, updated = ? WHERE activation_id = ?",
+                vec![
+                    int(sqlite_i64(scheduled_at)),
+                    int(sqlite_i64(crate::now_millis())),
+                    text(activation_id),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn get_workflow(
+        &self,
+        activation_id: &str,
+    ) -> anyhow::Result<Option<crate::workflow::WorkflowProjection>> {
+        let row = self
+            .db
+            .fetch_optional(
+                "SELECT * FROM workflows WHERE activation_id = ?",
+                vec![text(activation_id)],
+            )
+            .await?;
+        row.map(decode_workflow_projection).transpose()
+    }
+
+    pub(crate) async fn list_active_workflows(
+        &self,
+    ) -> anyhow::Result<Vec<crate::workflow::WorkflowProjection>> {
+        self.db
+            .fetch_all(
+                "SELECT * FROM workflows WHERE active = 1 ORDER BY workflow_id",
+                Vec::new(),
+            )
+            .await?
+            .into_iter()
+            .map(decode_workflow_projection)
+            .collect()
+    }
+
+    pub(crate) async fn list_workflows(
+        &self,
+    ) -> anyhow::Result<Vec<crate::workflow::WorkflowProjection>> {
+        self.db
+            .fetch_all("SELECT * FROM workflows ORDER BY workflow_id", Vec::new())
+            .await?
+            .into_iter()
+            .map(decode_workflow_projection)
+            .collect()
+    }
+
+    pub(crate) async fn claim_workflow_run(
+        &self,
+        run: &crate::workflow::WorkflowRun,
+    ) -> anyhow::Result<bool> {
+        Ok(self
+            .db
+            .execute(
+                r#"INSERT OR IGNORE INTO workflow_runs
+                (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
+                 session_id, status, trigger, error, created)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                vec![
+                    text(&run.id),
+                    text(&run.activation_id),
+                    text(&run.workflow_id),
+                    int(sqlite_i64(run.scheduled_at)),
+                    run.started_at.map(|v| int(sqlite_i64(v))).unwrap_or(SqlValue::Null),
+                    run.finished_at.map(|v| int(sqlite_i64(v))).unwrap_or(SqlValue::Null),
+                    opt_text(run.session_id.clone()),
+                    text(&run.status),
+                    text(&run.trigger),
+                    opt_text(run.error.clone()),
+                    int(sqlite_i64(run.created)),
+                ],
+            )
+            .await?
+            > 0)
+    }
+
+    pub(crate) async fn update_workflow_run(
+        &self,
+        run_id: &str,
+        status: &str,
+        session_id: Option<&str>,
+        error: Option<&str>,
+        finished: bool,
+    ) -> anyhow::Result<()> {
+        let now = crate::now_millis();
+        self.db
+            .execute(
+                "UPDATE workflow_runs SET status = ?, session_id = COALESCE(?, session_id), started_at = COALESCE(started_at, ?), finished_at = ?, error = ? WHERE id = ?",
+                vec![
+                    text(status),
+                    session_id.map(text).unwrap_or(SqlValue::Null),
+                    int(sqlite_i64(now)),
+                    finished.then(|| int(sqlite_i64(now))).unwrap_or(SqlValue::Null),
+                    error.map(text).unwrap_or(SqlValue::Null),
+                    text(run_id),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn workflow_has_running(&self, activation_id: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .db
+            .fetch_scalar_i64(
+                "SELECT COUNT(*) FROM workflow_runs WHERE activation_id = ? AND status IN ('queued', 'running')",
+                vec![text(activation_id)],
+            )
+            .await?
+            > 0)
+    }
+
+    pub(crate) async fn list_workflow_runs(
+        &self,
+        activation_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::workflow::WorkflowRun>> {
+        self.db
+            .fetch_all(
+                "SELECT * FROM workflow_runs WHERE activation_id = ? ORDER BY scheduled_at DESC LIMIT ?",
+                vec![text(activation_id), int(limit.min(200) as i64)],
+            )
+            .await?
+            .into_iter()
+            .map(decode_workflow_run)
+            .collect()
+    }
+
+    pub(crate) async fn list_unfinished_workflow_runs(
+        &self,
+    ) -> anyhow::Result<Vec<crate::workflow::WorkflowRun>> {
+        self.db
+            .fetch_all(
+                "SELECT * FROM workflow_runs WHERE status IN ('pending', 'queued', 'running') ORDER BY scheduled_at",
+                Vec::new(),
+            )
+            .await?
+            .into_iter()
+            .map(decode_workflow_run)
+            .collect()
     }
 
     pub(crate) async fn update_session(&self, info: &SessionInfo) -> anyhow::Result<()> {
@@ -2462,6 +2734,39 @@ impl SessionStore {
 
 fn decode_json<T: DeserializeOwned>(raw: String) -> anyhow::Result<T> {
     serde_json::from_str(&raw).context("failed to decode persisted JSON")
+}
+
+fn decode_workflow_projection(
+    row: DbRow,
+) -> anyhow::Result<crate::workflow::WorkflowProjection> {
+    Ok(crate::workflow::WorkflowProjection {
+        activation_id: row.get_str("activation_id")?,
+        workflow_id: row.get_str("workflow_id")?,
+        workspace_root: row.get_str("workspace_root")?,
+        source_path: row.get_str("source_path")?,
+        source_hash: row.get_str("source_hash")?,
+        definition: decode_json(row.get_str("definition_json")?)?,
+        active: row.get_i64("active")? != 0,
+        activated_at: row.get_i64("activated_at")?.max(0) as u64,
+        last_scheduled_at: row.get_opt_i64("last_scheduled_at")?.map(|v| v.max(0) as u64),
+        updated: row.get_i64("updated")?.max(0) as u64,
+    })
+}
+
+fn decode_workflow_run(row: DbRow) -> anyhow::Result<crate::workflow::WorkflowRun> {
+    Ok(crate::workflow::WorkflowRun {
+        id: row.get_str("id")?,
+        activation_id: row.get_str("activation_id")?,
+        workflow_id: row.get_str("workflow_id")?,
+        scheduled_at: row.get_i64("scheduled_at")?.max(0) as u64,
+        started_at: row.get_opt_i64("started_at")?.map(|v| v.max(0) as u64),
+        finished_at: row.get_opt_i64("finished_at")?.map(|v| v.max(0) as u64),
+        session_id: row.get_opt_str("session_id")?,
+        status: row.get_str("status")?,
+        trigger: row.get_str("trigger")?,
+        error: row.get_opt_str("error")?,
+        created: row.get_i64("created")?.max(0) as u64,
+    })
 }
 
 fn message_id(message: &MessageWithParts) -> String {

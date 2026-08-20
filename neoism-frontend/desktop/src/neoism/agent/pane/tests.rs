@@ -103,7 +103,10 @@ fn main_agent_verb_wins_while_it_streams_over_running_subagents() {
     // is responding): its own verb always wins over the aggregate
     // sub-agents label while it is actively streaming.
     pane.note_streaming(NeoismAgentStreamingState::Generating, None);
-    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    assert_eq!(
+        pane.streaming_state(),
+        NeoismAgentStreamingState::Generating
+    );
     assert_eq!(pane.streaming_label(), "Crafting");
 
     // The main agent stops while the same child keeps running: only now
@@ -718,6 +721,135 @@ fn warm_switch_activates_cached_session_without_outbound_or_network_repair() {
 }
 
 #[test]
+fn subagent_visit_preserves_parent_live_tool_trace() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    pane.messages = vec![
+        NeoismAgentMessage::user("question").with_id("user-root"),
+        task_tool_message("child", "completed"),
+    ];
+    pane.timeline_live_trace_start = Some(1);
+    pane.timeline_live_trace_anchor = Some("user-root".to_string());
+    let mut child = CachedAgentSession::live_only();
+    child.hydrated = true;
+    child.state.parent_id = Some("root".to_string());
+    child.messages = vec![NeoismAgentMessage::assistant("child answer")];
+    pane.session_cache.insert("child".to_string(), child);
+    pane.runtime_hydrated_sessions
+        .extend(["root".to_string(), "child".to_string()]);
+
+    pane.switch_session("child".to_string());
+    pane.switch_session("root".to_string());
+
+    assert_eq!(pane.timeline_live_trace_start, Some(1));
+    assert_eq!(
+        pane.timeline_live_trace_anchor.as_deref(),
+        Some("user-root")
+    );
+}
+
+#[test]
+fn leaving_conversation_family_settles_live_tool_trace() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root-a".to_string());
+    pane.messages = vec![
+        NeoismAgentMessage::user("question").with_id("user-a"),
+        task_tool_message("child-a", "completed"),
+    ];
+    pane.timeline_live_trace_start = Some(1);
+    pane.timeline_live_trace_anchor = Some("user-a".to_string());
+    let mut other = CachedAgentSession::live_only();
+    other.hydrated = true;
+    other.messages = vec![NeoismAgentMessage::assistant("other conversation")];
+    pane.session_cache.insert("root-b".to_string(), other);
+    pane.runtime_hydrated_sessions
+        .extend(["root-a".to_string(), "root-b".to_string()]);
+
+    pane.switch_session("root-b".to_string());
+    pane.switch_session("root-a".to_string());
+
+    assert_eq!(pane.timeline_live_trace_start, None);
+    assert_eq!(pane.timeline_live_trace_anchor, None);
+}
+
+#[test]
+fn opening_ongoing_child_reveals_already_emitted_tool_history() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    let mut child = CachedAgentSession::live_only();
+    child.hydrated = true;
+    child.state.parent_id = Some("root".to_string());
+    child.messages = vec![
+        NeoismAgentMessage::user("first investigation"),
+        NeoismAgentMessage::tool(
+            "Read(src/lib.rs)",
+            "src/lib.rs",
+            "completed",
+            "read",
+            NeoismAgentOutputKind::Text,
+            "rust",
+            Vec::new(),
+        ),
+        NeoismAgentMessage::user("continue the investigation"),
+        NeoismAgentMessage::reasoning("checking prior state"),
+    ];
+    child
+        .runtime
+        .note_streaming(NeoismAgentStreamingState::Working, Some("Read".to_string()));
+    pane.session_cache.insert("child".to_string(), child);
+    pane.runtime_hydrated_sessions.insert("child".to_string());
+
+    pane.switch_session("child".to_string());
+
+    assert_eq!(pane.timeline_live_trace_start, Some(0));
+    assert_eq!(pane.messages.len(), 4);
+}
+
+#[test]
+fn cold_runtime_hydration_reveals_ongoing_child_tool_history() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".to_string());
+    pane.parent_session_id = Some("root".to_string());
+    pane.messages = vec![
+        NeoismAgentMessage::user("investigate"),
+        NeoismAgentMessage::tool(
+            "Grep(query)",
+            "query",
+            "running",
+            "grep",
+            NeoismAgentOutputKind::Text,
+            "text",
+            Vec::new(),
+        ),
+    ];
+    let statuses = HashMap::from([(
+        "child".to_string(),
+        super::super::api::SessionStatusSnapshot {
+            kind: "busy".to_string(),
+            ..Default::default()
+        },
+    )]);
+
+    pane.apply_runtime_status_for_session("child", &statuses);
+
+    assert_eq!(pane.timeline_live_trace_start, Some(0));
+}
+
+#[test]
+fn older_pages_stay_visible_for_ongoing_child_inspector() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".to_string());
+    pane.parent_session_id = Some("root".to_string());
+    pane.note_streaming(NeoismAgentStreamingState::Working, None);
+    pane.timeline_live_trace_start = Some(0);
+
+    pane.note_timeline_prepend(40);
+
+    assert_eq!(pane.timeline_live_trace_start, Some(0));
+    assert_eq!(pane.take_timeline_prepend(), Some(40));
+}
+
+#[test]
 fn offscreen_root_stream_is_live_before_switching_back() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("child".to_string());
@@ -770,6 +902,99 @@ fn offscreen_root_stream_is_live_before_switching_back() {
         Some("keep shipping")
     );
     assert!(pane.runtime_status_requests.get("root").is_none());
+}
+
+#[test]
+fn child_completion_and_parent_continuation_stay_live_during_child_view() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".to_string());
+    pane.parent_session_id = Some("root".to_string());
+    pane.session_tree_root_id = Some("root".to_string());
+    pane.messages = vec![NeoismAgentMessage::assistant("child transcript")];
+    let mut root = CachedAgentSession::live_only();
+    root.hydrated = true;
+    root.messages = vec![task_tool_message("child", "running")];
+    pane.session_cache.insert("root".to_string(), root);
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [
+            AgentSessionUpdate::SubagentCompleted {
+                task_id: "child".to_string(),
+                status: "completed".to_string(),
+                title: None,
+                agent: None,
+            },
+            AgentSessionUpdate::PartDelta {
+                message_id: Some("parent-answer".to_string()),
+                part_id: Some("answer".to_string()),
+                kind: Some("text".to_string()),
+                delta: "parent resumed while child was open".to_string(),
+            },
+        ],
+    ));
+
+    pane.drain_server_updates();
+    pane.switch_session("root".to_string());
+
+    let task = pane
+        .messages
+        .iter()
+        .find(|message| message.tool == "task")
+        .expect("parent task card");
+    assert_eq!(task.status, "completed");
+    assert!(task.detail.contains("status: completed"));
+    assert!(pane
+        .messages
+        .iter()
+        .any(|message| message.text == "parent resumed while child was open"));
+}
+
+#[test]
+fn late_completed_tool_part_cannot_resurrect_idle_parent_status() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".to_string());
+    pane.note_streaming(NeoismAgentStreamingState::Working, Some("Task".to_string()));
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [
+            AgentSessionUpdate::SessionIdle,
+            AgentSessionUpdate::PartUpdated {
+                message: task_tool_message("child", "completed"),
+                parent_message_id: Some("assistant-message".to_string()),
+            },
+        ],
+    ));
+
+    pane.drain_server_updates();
+
+    assert!(!pane.is_streaming());
+    assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Idle);
+    assert!(pane
+        .messages
+        .iter()
+        .any(|message| message.tool == "task" && message.status == "completed"));
+}
+
+#[test]
+fn switching_families_replaces_stale_event_stream_root() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root-a".to_string());
+    pane.session_tree_root_id = Some("root-a".to_string());
+    let mut child = CachedAgentSession::live_only();
+    child.hydrated = true;
+    child.state.parent_id = Some("root-b".to_string());
+    pane.session_cache.insert("child-b".to_string(), child);
+    pane.runtime_hydrated_sessions.insert("child-b".to_string());
+
+    pane.switch_session("child-b".to_string());
+
+    assert_eq!(pane.session_tree_root_id.as_deref(), Some("root-b"));
+    assert_eq!(
+        pane.event_stream
+            .as_ref()
+            .map(AgentSessionEventStream::session_id),
+        Some("root-b")
+    );
 }
 
 #[test]
@@ -1681,7 +1906,7 @@ fn session_cache_preserves_each_transcripts_scroll_state() {
     pane.timeline_scroll_px = 240.0;
     pane.timeline_follow_bottom = false;
 
-    pane.cache_current_session();
+    pane.cache_current_session(false);
 
     let cached = pane.session_cache.get("ses-root").expect("root cache");
     assert_eq!(cached.timeline_scroll_px, 240.0);

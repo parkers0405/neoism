@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::client::{emit, AcpRpcError, AcpShared, AcpUiEvent, PROMPT_TIMEOUT};
+use super::paths::canonicalize_path;
 
 const DEFAULT_TERMINAL_OUTPUT_LIMIT: usize = 1024 * 1024;
 
@@ -341,11 +342,11 @@ fn acp_exit_signal(_status: &std::process::ExitStatus) -> Option<String> {
 }
 
 fn normalize_terminal_cwd(workspace: &Path, cwd: &Path) -> Result<PathBuf, AcpRpcError> {
-    let cwd = cwd.canonicalize().map_err(|err| AcpRpcError {
+    let cwd = canonicalize_path(cwd).map_err(|err| AcpRpcError {
         code: -32000,
         message: format!("Could not resolve terminal cwd {}: {err}", cwd.display()),
     })?;
-    let workspace = workspace.canonicalize().map_err(|err| AcpRpcError {
+    let workspace = canonicalize_path(workspace).map_err(|err| AcpRpcError {
         code: -32000,
         message: format!("Could not resolve workspace {}: {err}", workspace.display()),
     })?;

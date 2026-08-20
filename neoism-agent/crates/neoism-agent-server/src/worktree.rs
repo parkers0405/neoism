@@ -288,7 +288,7 @@ fn resolve_existingish_path(root: &Path, path: &str) -> PathBuf {
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::windows_process::canonicalize_path_lossy(path)
 }
 
 fn path_text(path: &Path) -> String {

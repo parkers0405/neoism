@@ -9,7 +9,7 @@ use crate::primitives::draw_text_with_occlusion;
 use crate::primitives::geom::intersect_rect;
 use crate::primitives::ide_theme::IdeTheme;
 
-use super::state::{point_in, Category, Control, NeoismSettingsPane, KEYBINDS, SETTINGS};
+use super::state::{point_in, Category, NeoismSettingsPane, RowControl, KEYBINDS};
 
 const DEPTH: f32 = 0.0;
 const ORDER_SCRIM: u8 = 40;
@@ -360,8 +360,8 @@ pub(crate) fn render(
     let mut dropdown: Option<([f32; 4], usize)> = None;
     if let Some(open_idx) = pane.open_dropdown() {
         let is_menu = matches!(
-            SETTINGS[open_idx].control,
-            Control::Select { .. } | Control::FontFamily
+            pane.row(open_idx).control,
+            RowControl::Select | RowControl::FontFamily
         );
         if let Some(pos) = visible
             .iter()
@@ -375,8 +375,8 @@ pub(crate) fn render(
             let pyr = row_ry - 2.0 * s;
             let opt_h = 28.0 * s;
             let dd_pad = 4.0 * s;
-            // The (long) font dropdown reserves a search box at the top.
-            let search_h = if matches!(SETTINGS[open_idx].control, Control::FontFamily) {
+            // Long dynamic catalogs reserve an auto-focused search box.
+            let search_h = if pane.open_dropdown_is_searchable() {
                 30.0 * s
             } else {
                 0.0
@@ -407,30 +407,45 @@ pub(crate) fn render(
             ry += setting_row_h;
             continue;
         }
-        let def = SETTINGS[idx];
+        let def = pane.row(idx).clone();
         let label_opts = DrawOpts {
             font_size: 14.0 * s,
             clip_rect: Some(content_clip),
             ..base
         };
-        draw_text_with_occlusion(sugarloaf, cx, ry, def.label, &label_opts, row_occ);
+        draw_text_with_occlusion(sugarloaf, cx, ry, &def.label, &label_opts, row_occ);
         let desc_opts = DrawOpts {
             font_size: 12.0 * s,
             color: theme.u8(theme.dim),
             clip_rect: Some(content_clip),
             ..base
         };
+        let mut detail = format!("{}  ·  {}", def.path, def.description);
+        if def.constraints.min.is_some() || def.constraints.max.is_some() {
+            let range = match (def.constraints.min, def.constraints.max) {
+                (Some(min), Some(max)) => format!("{min}-{max}"),
+                (Some(min), None) => format!(">= {min}"),
+                (None, Some(max)) => format!("<= {max}"),
+                (None, None) => String::new(),
+            };
+            detail.push_str("  ·  ");
+            detail.push_str(&range);
+            if let Some(unit) = def.constraints.unit.as_deref() {
+                detail.push(' ');
+                detail.push_str(unit);
+            }
+        }
         draw_text_with_occlusion(
             sugarloaf,
             cx,
             ry + 20.0 * s,
-            def.description,
+            &detail,
             &desc_opts,
             row_occ,
         );
 
         match def.control {
-            Control::Toggle { .. } => {
+            RowControl::Toggle => {
                 let on = pane.bool_at(idx);
                 let tw = 40.0 * s;
                 let th = 22.0 * s;
@@ -460,7 +475,7 @@ pub(crate) fn render(
                 );
                 pane.push_control_rect([tx, ty, tw, th], idx);
             }
-            Control::Select { .. } | Control::FontFamily => {
+            RowControl::Select | RowControl::FontFamily => {
                 let raw = pane.string_at(idx);
                 let value = if raw.is_empty() {
                     "Default".to_string()
@@ -514,7 +529,80 @@ pub(crate) fn render(
                 );
                 pane.push_control_rect([pxr, pyr, pill_w, pill_h], idx);
             }
-            Control::Action { button, .. } => {
+            RowControl::Text => {
+                let pxr = cx + cw - pill_w;
+                let pyr = ry - 2.0 * s;
+                let editing = pane.is_editing(idx);
+                let value = if editing {
+                    pane.edit_buffer().to_string()
+                } else {
+                    let current = pane.string_at(idx);
+                    if current.is_empty() {
+                        "Default".to_string()
+                    } else {
+                        current
+                    }
+                };
+                clip_rrect(
+                    sugarloaf,
+                    [pxr, pyr, pill_w, pill_h],
+                    content_clip,
+                    theme.f32(if editing || pane.hover_control == Some(idx) {
+                        theme.hover
+                    } else {
+                        theme.surface
+                    }),
+                    6.0 * s,
+                    ORDER_CTRL,
+                );
+                let value_opts = DrawOpts {
+                    font_size: 12.5 * s,
+                    clip_rect: Some(
+                        intersect_rect([pxr, pyr, pill_w, pill_h], content_clip)
+                            .unwrap_or(content_clip),
+                    ),
+                    ..base
+                };
+                draw_text_with_occlusion(
+                    sugarloaf,
+                    pxr + 10.0 * s,
+                    pyr + (pill_h - 12.0 * s) * 0.5,
+                    &value,
+                    &value_opts,
+                    row_occ,
+                );
+                if editing {
+                    let width = sugarloaf.text_mut().measure(&value, &value_opts);
+                    sugarloaf.rect(
+                        None,
+                        (pxr + 10.0 * s + width).min(pxr + pill_w - 5.0 * s),
+                        pyr + 5.0 * s,
+                        1.5 * s,
+                        pill_h - 10.0 * s,
+                        theme.f32(theme.accent),
+                        DEPTH,
+                        ORDER_TEXT,
+                    );
+                }
+                pane.push_control_rect([pxr, pyr, pill_w, pill_h], idx);
+            }
+            RowControl::Keybinding => {
+                let value_opts = DrawOpts {
+                    font_size: 12.0 * s,
+                    color: theme.u8(theme.dim),
+                    clip_rect: Some(content_clip),
+                    ..base
+                };
+                draw_text_with_occlusion(
+                    sugarloaf,
+                    cx + cw - 140.0 * s,
+                    ry + 4.0 * s,
+                    "Shortcuts below",
+                    &value_opts,
+                    row_occ,
+                );
+            }
+            RowControl::Action { button, .. } => {
                 let bw = 130.0 * s;
                 let bh = 28.0 * s;
                 let bx = cx + cw - bw;
@@ -571,9 +659,9 @@ pub(crate) fn render(
         pane.set_content_metrics(visible.len() as f32 * setting_row_h, viewport_h);
     }
 
-    // ── Keybinds list (its own scrollable rows; this category has no
-    //    SettingDefs, so `visible` above is empty). Click a shortcut pill
-    //    to capture a new chord; the reset glyph clears an override. ──
+    // ── Keybinds list (below its canonical descriptor row). Click a
+    //    shortcut pill to capture a new chord; the reset glyph clears an
+    //    override. ──
     if pane.is_keybinds() {
         let kb_row_h = 46.0 * s;
         let header_h = 52.0 * s;
@@ -581,7 +669,8 @@ pub(crate) fn render(
         // Section titles render in the bundled Press Start 2P pixel face
         // (same treatment as the notes / agent-panel section headers).
         let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
-        let start_y = content_top + pad - scroll;
+        let descriptor_h = visible.len() as f32 * setting_row_h;
+        let start_y = content_top + pad - scroll + descriptor_h;
         let mut ky = start_y;
         let mut last_group: Option<super::state::KeyGroup> = None;
         for idx in 0..KEYBINDS.len() {
@@ -786,7 +875,7 @@ pub(crate) fn render(
             }
             ky += kb_row_h;
         }
-        pane.set_content_metrics(ky - start_y, viewport_h);
+        pane.set_content_metrics(descriptor_h + ky - start_y, viewport_h);
     }
 
     // ── Dropdown popover (drawn last, on top; row text under it is
@@ -807,11 +896,10 @@ pub(crate) fn render(
             ORDER_DROPDOWN_BG,
         );
 
-        // Font dropdown: a search box pinned to the top filters the list.
-        // It is auto-focused, so typing narrows the fonts immediately.
-        let is_font = matches!(SETTINGS[idx].control, Control::FontFamily);
-        let search_h = if is_font { 30.0 * s } else { 0.0 };
-        if is_font {
+        // Searchable catalog: typing immediately narrows fonts/themes/etc.
+        let is_searchable = pane.open_dropdown_is_searchable();
+        let search_h = if is_searchable { 30.0 * s } else { 0.0 };
+        if is_searchable {
             let sb = [dd_x + dd_pad, dd_y + dd_pad, dd_w - dd_pad * 2.0, 26.0 * s];
             pane.dropdown_search_rect = sb;
             sugarloaf.rounded_rect(
@@ -851,7 +939,11 @@ pub(crate) fn render(
                     sugarloaf,
                     qx,
                     qy,
-                    "Search fonts\u{2026}",
+                    if pane.row(idx).control == RowControl::FontFamily {
+                        "Search fonts\u{2026}"
+                    } else {
+                        "Filter options\u{2026}"
+                    },
                     &ph,
                     occ,
                 );
@@ -880,7 +972,7 @@ pub(crate) fn render(
         }
 
         let options = pane.dropdown_options(idx);
-        if is_font && options.is_empty() {
+        if is_searchable && options.is_empty() {
             let nm = DrawOpts {
                 font_size: 12.0 * s,
                 color: theme.u8(theme.dim),
@@ -890,7 +982,7 @@ pub(crate) fn render(
                 sugarloaf,
                 dd_x + 14.0 * s,
                 dd_y + dd_pad + search_h + (opt_h - 12.0 * s) * 0.5,
-                "No matching fonts",
+                "No matching options",
                 &nm,
                 occ,
             );

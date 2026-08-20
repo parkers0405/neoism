@@ -379,10 +379,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_set_title(inner, session_id, title).await;
             });
         }
-        AgentClientMessage::SetPinned {
-            session_id,
-            pinned,
-        } => {
+        AgentClientMessage::SetPinned { session_id, pinned } => {
             tokio::spawn(async move {
                 handle_set_pinned(inner, session_id, pinned).await;
             });

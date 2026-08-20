@@ -171,7 +171,9 @@ fn session_created_without_parent_stays_a_raw_envelope() {
     );
 
     match rx.try_recv().expect("raw envelope") {
-        AgentServerMessage::SessionEvent { session_id, kind, .. } => {
+        AgentServerMessage::SessionEvent {
+            session_id, kind, ..
+        } => {
             assert_eq!(session_id, "sess-root");
             assert_eq!(kind, "session.created");
         }

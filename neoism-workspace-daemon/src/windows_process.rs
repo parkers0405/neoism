@@ -12,7 +12,8 @@ const DETACHED_PROCESS: u32 = windows_sys::Win32::System::Threading::DETACHED_PR
 pub const HIDDEN_CONSOLE: u32 = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
 
 #[cfg(windows)]
-pub const DETACHED_HIDDEN: u32 = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+pub const DETACHED_HIDDEN: u32 =
+    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
 
 #[cfg(windows)]
 pub fn hide_std_command(command: &mut std::process::Command) {

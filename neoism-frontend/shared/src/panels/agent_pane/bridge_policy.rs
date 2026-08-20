@@ -451,9 +451,7 @@ fn question_key_decision(
         AgentBridgeKey::Named(AgentBridgeNamedKey::Backspace) => {
             intents.push(AgentKeyIntent::QuestionBackspace);
         }
-        AgentBridgeKey::Character(_)
-            if !mods.control && !mods.alt && !mods.super_key =>
-        {
+        AgentBridgeKey::Character(_) if !mods.control && !mods.alt && !mods.super_key => {
             if !event.text.is_empty() && !event.text.chars().any(char::is_control) {
                 intents.push(AgentKeyIntent::QuestionInput(event.text.clone()));
             }
@@ -725,8 +723,12 @@ mod tests {
         };
 
         assert_eq!(
-            agent_key_decision(&character("a", "a"), AgentBridgeModifiers::default(), ctx)
-                .intents,
+            agent_key_decision(
+                &character("a", "a"),
+                AgentBridgeModifiers::default(),
+                ctx
+            )
+            .intents,
             vec![AgentKeyIntent::QuestionInput("a".to_string())]
         );
         assert_eq!(
@@ -859,8 +861,12 @@ mod tests {
         };
 
         assert_eq!(
-            agent_key_decision(&character("x", "x"), AgentBridgeModifiers::default(), ctx)
-                .intents,
+            agent_key_decision(
+                &character("x", "x"),
+                AgentBridgeModifiers::default(),
+                ctx
+            )
+            .intents,
             vec![AgentKeyIntent::SessionRenameInput("x".to_string())]
         );
         assert_eq!(

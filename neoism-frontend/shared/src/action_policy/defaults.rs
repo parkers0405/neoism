@@ -804,7 +804,7 @@ pub fn platform_key_bindings_unix<H>(
     );
     add(
         char_key(","),
-        ActionModifiersState::CONTROL | ActionModifiersState::SHIFT,
+        ActionModifiersState::ALT,
         empty.clone(),
         empty.clone(),
         Action::<H>::ConfigEditor,

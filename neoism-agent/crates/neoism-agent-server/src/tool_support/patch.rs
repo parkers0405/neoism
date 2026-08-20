@@ -19,6 +19,7 @@ pub(crate) struct V4AChunk {
     pub(crate) old_lines: Vec<String>,
     pub(crate) new_lines: Vec<String>,
     pub(crate) change_context: Option<String>,
+    pub(crate) is_end_of_file: bool,
 }
 
 pub(crate) struct PatchedContent {
@@ -105,6 +106,7 @@ pub(crate) fn parse_v4a_patch(text: &str) -> anyhow::Result<Vec<V4AHunk>> {
                     {
                         let l = lines[i];
                         if l == "*** End of File" {
+                            chunk.is_end_of_file = true;
                             i += 1;
                             break;
                         }
@@ -183,9 +185,11 @@ fn compute_replacements(
     for chunk in chunks {
         if let Some(context) = &chunk.change_context {
             let context_line = context_line(context);
-            if let Some(index) = seek_sequence(lines, &[context_line.to_string()], 0) {
-                cursor = index + 1;
-            } else if let Some(index) = seek_sequence_trimmed(lines, &[context_line], 0) {
+            if let Some(index) =
+                seek_sequence(lines, &[context_line.to_string()], cursor, false).or_else(
+                    || seek_sequence(lines, &[context_line.to_string()], 0, false),
+                )
+            {
                 cursor = index + 1;
             } else {
                 anyhow::bail!("patch context not found: {context}");
@@ -195,34 +199,11 @@ fn compute_replacements(
         if chunk.old_lines.is_empty() {
             let insertion = cursor.min(lines.len());
             replacements.push((insertion, 0, chunk.new_lines.clone()));
-            cursor = insertion.saturating_add(chunk.new_lines.len());
+            cursor = insertion;
             continue;
         }
 
-        let start = seek_sequence(lines, &chunk.old_lines, cursor)
-            .or_else(|| seek_sequence(lines, &chunk.old_lines, 0))
-            .or_else(|| {
-                seek_sequence_trimmed(
-                    lines,
-                    &chunk
-                        .old_lines
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>(),
-                    cursor,
-                )
-            })
-            .or_else(|| {
-                seek_sequence_trimmed(
-                    lines,
-                    &chunk
-                        .old_lines
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>(),
-                    0,
-                )
-            })
+        let start = seek_sequence(lines, &chunk.old_lines, cursor, chunk.is_end_of_file)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "patch context not found:\n{}",
@@ -236,7 +217,10 @@ fn compute_replacements(
                 )
             })?;
         replacements.push((start, chunk.old_lines.len(), chunk.new_lines.clone()));
-        cursor = start.saturating_add(chunk.new_lines.len());
+        // All hunks are located against the original file. Advancing by the
+        // replacement length can skip later original context after an
+        // expansion; advance by the consumed original lines instead.
+        cursor = start.saturating_add(chunk.old_lines.len());
     }
     replacements.sort_by_key(|(start, _, _)| *start);
     for pair in replacements.windows(2) {
@@ -257,21 +241,11 @@ fn context_line(context: &str) -> &str {
         .trim()
 }
 
-fn seek_sequence(lines: &[String], needle: &[String], start: usize) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(start.min(lines.len()));
-    }
-    if needle.len() > lines.len() {
-        return None;
-    }
-    (start.min(lines.len())..=lines.len().saturating_sub(needle.len()))
-        .find(|index| sequence_matches(lines, needle, *index))
-}
-
-fn seek_sequence_trimmed(
+fn seek_sequence(
     lines: &[String],
-    needle: &[&str],
+    needle: &[String],
     start: usize,
+    end_of_file: bool,
 ) -> Option<usize> {
     if needle.is_empty() {
         return Some(start.min(lines.len()));
@@ -279,20 +253,70 @@ fn seek_sequence_trimmed(
     if needle.len() > lines.len() {
         return None;
     }
-    (start.min(lines.len())..=lines.len().saturating_sub(needle.len())).find(|index| {
-        needle.iter().enumerate().all(|(offset, wanted)| {
-            lines
-                .get(index + offset)
-                .is_some_and(|line| line.trim_start() == wanted.trim_start())
+    try_match(lines, needle, start, end_of_file, |actual, wanted| {
+        actual == wanted
+    })
+    .or_else(|| {
+        try_match(lines, needle, start, end_of_file, |actual, wanted| {
+            actual.trim_end() == wanted.trim_end()
+        })
+    })
+    .or_else(|| {
+        try_match(lines, needle, start, end_of_file, |actual, wanted| {
+            actual.trim() == wanted.trim()
+        })
+    })
+    .or_else(|| {
+        try_match(lines, needle, start, end_of_file, |actual, wanted| {
+            normalize_unicode(actual.trim()) == normalize_unicode(wanted.trim())
         })
     })
 }
 
-fn sequence_matches(lines: &[String], needle: &[String], start: usize) -> bool {
-    needle
-        .iter()
-        .enumerate()
-        .all(|(offset, wanted)| lines.get(start + offset) == Some(wanted))
+fn try_match(
+    lines: &[String],
+    needle: &[String],
+    start: usize,
+    end_of_file: bool,
+    compare: impl Fn(&str, &str) -> bool,
+) -> Option<usize> {
+    let start = start.min(lines.len());
+    if end_of_file {
+        let from_end = lines.len().saturating_sub(needle.len());
+        if from_end >= start && sequence_matches(lines, needle, from_end, &compare) {
+            return Some(from_end);
+        }
+    }
+    (start..=lines.len().saturating_sub(needle.len()))
+        .find(|index| sequence_matches(lines, needle, *index, &compare))
+}
+
+fn sequence_matches(
+    lines: &[String],
+    needle: &[String],
+    start: usize,
+    compare: &impl Fn(&str, &str) -> bool,
+) -> bool {
+    needle.iter().enumerate().all(|(offset, wanted)| {
+        lines
+            .get(start + offset)
+            .is_some_and(|actual| compare(actual, wanted))
+    })
+}
+
+fn normalize_unicode(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' => '\'',
+            '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' => '"',
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}'
+            | '\u{2015}' => '-',
+            '\u{00a0}' => ' ',
+            other => other,
+        })
+        .collect::<String>()
+        .replace('\u{2026}', "...")
 }
 
 fn apply_replacements(
@@ -330,6 +354,7 @@ mod tests {
             old_lines: vec!["old".to_string()],
             new_lines: vec!["new".to_string()],
             change_context: None,
+            is_end_of_file: false,
         };
         let patched = apply_chunks("\u{feff}old\n", &[chunk]).unwrap();
         assert!(patched.bom);
@@ -343,15 +368,41 @@ mod tests {
                 old_lines: vec!["fn main() {".to_string()],
                 new_lines: vec!["fn main() {".to_string()],
                 change_context: None,
+                is_end_of_file: false,
             },
             V4AChunk {
                 old_lines: Vec::new(),
                 new_lines: vec!["    println!(\"hi\");".to_string()],
                 change_context: Some("fn main() {".to_string()),
+                is_end_of_file: false,
             },
         ];
         let patched = apply_chunks("fn main() {\n}\n", &chunks).unwrap();
         assert_eq!(patched.text, "fn main() {\n    println!(\"hi\");\n}\n");
+    }
+
+    #[test]
+    fn apply_chunks_matches_opencode_whitespace_and_unicode_tolerance() {
+        let chunk = V4AChunk {
+            old_lines: vec!["// \"smart\" - value".to_string()],
+            new_lines: vec!["// normalized".to_string()],
+            change_context: None,
+            is_end_of_file: false,
+        };
+        let patched = apply_chunks("    // “smart” — value   \n", &[chunk]).unwrap();
+        assert_eq!(patched.text, "// normalized\n");
+    }
+
+    #[test]
+    fn apply_chunks_honors_end_of_file_anchor() {
+        let chunk = V4AChunk {
+            old_lines: vec!["same".to_string()],
+            new_lines: vec!["last".to_string()],
+            change_context: None,
+            is_end_of_file: true,
+        };
+        let patched = apply_chunks("same\nmiddle\nsame\n", &[chunk]).unwrap();
+        assert_eq!(patched.text, "same\nmiddle\nlast\n");
     }
 
     #[test]

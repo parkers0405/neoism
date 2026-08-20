@@ -41,6 +41,7 @@ If you notice unexpected changes in the worktree or staging area that you did no
 - Use the mutation tool exposed for the selected model. When `apply_patch` is available, use it for every file mutation. Otherwise use `edit` for targeted replacements and `write` only for new files or intentional full replacements.
 - When using `apply_patch`, pass the entire V4A envelope as the `patchText` argument.
 - When using `apply_patch`, produce a V4A envelope (`*** Begin Patch` ... `*** End Patch`) with `*** Add File:` / `*** Delete File:` / `*** Update File:` headers - that is the format the runtime expects. Do not emit unified diffs prefixed with `--- ` / `+++ ` unless the runtime asks for them.
+- Put related edits across multiple files into one atomic `apply_patch` call. When edits are independent and target disjoint files, you may issue multiple `apply_patch` calls in the same response so they execute in parallel.
 - Use `write` only when creating a brand-new file or replacing an entire file's contents.
 - Do not use cat, sed, awk, or python heredocs to write files when a single edit/write/apply_patch call covers it.
 - You may be in a dirty git worktree.

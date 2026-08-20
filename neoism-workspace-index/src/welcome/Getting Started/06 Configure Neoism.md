@@ -8,9 +8,19 @@ macOS    ~/.config/neoism/config.json
 Windows  %LOCALAPPDATA%\neoism\config.json
 ```
 
-On Linux, `NEOISM_CONFIG_HOME` or `$XDG_CONFIG_HOME/neoism` can relocate it. Open the file with **Settings** from the command palette or with `Ctrl + Shift + ,` (`Cmd + ,` on macOS).
+On Linux, `NEOISM_CONFIG_HOME` or `$XDG_CONFIG_HOME/neoism` can relocate it. Press `Alt + ,` or choose **Open Neoism Config** from the command palette. Neoism creates the file on first open and opens it in the native editor without changing your workspace root or terminal directory.
 
 JSONC permits `//` and `/* ... */` comments and trailing commas. Neoism hot-reloads the file after a save. Keys use **kebab-case**, and every setting belongs inside a domain block; there are no loose top-level settings.
+
+## Use config completion
+
+`config.json` has built-in Neoism completion. Completion describes every supported object and key, shows its documentation and default, and suggests valid values while you type. Value suggestions include both fixed choices and capabilities reported by the host that owns the config, such as installed fonts, themes, agents, models, shells, extensions, and language servers.
+
+Dynamic values are suggestions rather than restrictions when a setting accepts custom input. For example, you can type a font family or executable path that is not currently installed, which keeps configurations portable between hosts.
+
+The graphical **Settings** page and the raw JSONC editor are two views of this same file. They use the same setting descriptions and available-value catalog, and a change made in either place updates `config.json`. Programmatic Settings changes preserve existing JSONC comments and formatting.
+
+For a local desktop, `Alt + ,` opens that machine's config. In a web or joined remote workspace it opens the connected daemon host's config, because fonts, tools, agents, and models are resolved on that host.
 
 ## Start with a small configuration
 
@@ -97,6 +107,6 @@ Choose a model through the agent model picker before hard-coding `agent.model`; 
 - `~/.config/neoism/agent/`, `mode/`, and `command/` contain Markdown agent definitions.
 - `NEOISM_DISPLAY_NAME`, `NEOISM_NOTES_HOME`, `NEOISM_LOG_LEVEL`, `NEOISM_LOG_FILE`, and `NEOISM_REQUIRE_AUTH` provide targeted environment overrides.
 
-Changes made by Neoism's preferences, theme picker, or `/hints` command are written back into the matching domain block in this same file.
+Changes made by Neoism's Settings page, preferences, theme picker, or `/hints` command are written back into the matching domain block in this same file.
 
 Next: [[07 Essential Keybindings|Essential Keybindings]].

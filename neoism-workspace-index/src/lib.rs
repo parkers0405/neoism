@@ -9,6 +9,7 @@ pub mod frontmatter;
 pub mod graph_db;
 pub mod link_repair;
 pub mod notes;
+mod path;
 pub mod query;
 pub mod vaults;
 pub mod watcher;

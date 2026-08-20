@@ -164,8 +164,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.open_chrome_modal(ModalSpec {
             title: "New File".to_string(),
             body: format!("Create a file under `{label}`."),
-            meta: "Relative paths are allowed; parent folders are created."
-                .to_string(),
+            meta: "Relative paths are allowed; parent folders are created.".to_string(),
             input: Some(ModalInputSpec {
                 value: String::new(),
                 placeholder: "src/new_file.rs".to_string(),
@@ -445,10 +444,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 self.relayout();
             }
             Ok(RenameTarget::Target(_)) => {
-                self.modal.queue_host_action(ModalHostAction::FileTreeRename {
-                    path,
-                    name: name.trim().to_string(),
-                });
+                self.modal
+                    .queue_host_action(ModalHostAction::FileTreeRename {
+                        path,
+                        name: name.trim().to_string(),
+                    });
                 self.modal.close();
                 self.relayout();
             }
@@ -624,14 +624,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         if self.settings_page.is_active() {
             let scale = self.chrome_scale;
             sugarloaf.set_late_overlay_mode(true);
-            self.settings_page.render(
-                sugarloaf,
-                viewport.w,
-                viewport.h,
-                &theme,
-                scale,
-                None,
-            );
+            self.settings_page
+                .render(sugarloaf, viewport.w, viewport.h, &theme, scale, None);
             sugarloaf.set_late_overlay_mode(false);
         }
         if self.modal.is_active() {
@@ -804,8 +798,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     return;
                 }
                 let selected = self.modal.selected_action();
-                let action = if matches!(selected, Some(ModalAction::ServerFormSubmit))
-                {
+                let action = if matches!(selected, Some(ModalAction::ServerFormSubmit)) {
                     self.modal.submit_form()
                 } else {
                     selected
@@ -856,8 +849,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 }
                 self.modal.set_selected_index(index);
                 let selected = self.modal.selected_action();
-                let action = if matches!(selected, Some(ModalAction::ServerFormSubmit))
-                {
+                let action = if matches!(selected, Some(ModalAction::ServerFormSubmit)) {
                     self.modal.submit_form()
                 } else {
                     selected
@@ -908,6 +900,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     }
                     LogicalKey::Named(NamedKey::Backspace) => {
                         self.settings_page.backspace();
+                    }
+                    LogicalKey::Named(NamedKey::Enter) => {
+                        if let Some(action) = self.settings_page.commit_edit() {
+                            self.queue_settings_action(action);
+                        }
                     }
                     LogicalKey::Character(text) => {
                         for ch in text.chars().filter(|ch| !ch.is_control()) {

@@ -45,8 +45,8 @@ impl SessionTree {
         let first = *leaves
             .first()
             .ok_or(SessionTreeError::FocusMissing(SessionTreeLeafId(0)))?;
-        let focus = leaf_for_external(&root, snapshot.focused_pane_external_id)
-            .unwrap_or(first);
+        let focus =
+            leaf_for_external(&root, snapshot.focused_pane_external_id).unwrap_or(first);
 
         let mut tree = Self::from_root(root, focus)?;
         // Reveal the focused leaf through any ancestor tab stacks so the
@@ -68,7 +68,10 @@ fn leaf_for_external(node: &SessionTreeNode, external: u64) -> Option<SessionTre
     }
 }
 
-fn lower(node: &PaneLayoutSnapshotNode, next_leaf_id: &mut u64) -> Option<SessionTreeNode> {
+fn lower(
+    node: &PaneLayoutSnapshotNode,
+    next_leaf_id: &mut u64,
+) -> Option<SessionTreeNode> {
     match node {
         PaneLayoutSnapshotNode::Leaf {
             pane_external_id,
@@ -128,10 +131,8 @@ fn lower(node: &PaneLayoutSnapshotNode, next_leaf_id: &mut u64) -> Option<Sessio
             // Cumulative-shares model (see `geometry::ratios_to_shares`):
             // derive per-child shares first so dropped children can be
             // removed without skewing the survivors' proportions.
-            let shares = crate::session_layout::geometry::ratios_to_shares(
-                ratios,
-                children.len(),
-            );
+            let shares =
+                crate::session_layout::geometry::ratios_to_shares(ratios, children.len());
             let mut kept_shares = Vec::with_capacity(children.len());
             let mut lowered = Vec::with_capacity(children.len());
             for (index, child) in children.iter().enumerate() {

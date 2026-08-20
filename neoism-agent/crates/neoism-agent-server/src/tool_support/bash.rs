@@ -103,12 +103,13 @@ pub(super) async fn bash_tool(
     } else {
         context.cwd.clone()
     };
-    let project_root = context.cwd.canonicalize().with_context(|| {
-        format!(
-            "failed to resolve project directory {}",
-            context.cwd.display()
-        )
-    })?;
+    let project_root = crate::windows_process::canonicalize_path(&context.cwd)
+        .with_context(|| {
+            format!(
+                "failed to resolve project directory {}",
+                context.cwd.display()
+            )
+        })?;
     let scan = shell_scan::scan(
         &command,
         &cwd,

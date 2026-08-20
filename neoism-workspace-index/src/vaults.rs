@@ -340,7 +340,7 @@ fn absolute_path(path: &Path) -> PathBuf {
 }
 
 fn comparable_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| absolute_path(path))
+    crate::path::canonicalize(path).unwrap_or_else(|_| absolute_path(path))
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {

@@ -16,6 +16,7 @@ neoism-neoworld-core = { workspace = true }
 sugarloaf = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+url = { workspace = true }
 smol_str = { workspace = true, features = ["serde"] }
 bitflags = { workspace = true, features = ["serde"] }
 tracing = { workspace = true }

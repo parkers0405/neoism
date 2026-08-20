@@ -74,9 +74,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // pushes or every repaint would stack another copy forever. The
         // desktop host does the same through its own `clear_icon_overlays`
         // (it doesn't go through `Chrome`, so this clear is web-only).
-        sugarloaf.clear_image_overlays_for(
-            crate::panels::agent_pane::icon::ICON_PANEL_ID,
-        );
+        sugarloaf
+            .clear_image_overlays_for(crate::panels::agent_pane::icon::ICON_PANEL_ID);
         self.buffer_tabs.draw(
             sugarloaf,
             &PanelLayout {
@@ -789,9 +788,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     .markdown_pane
                     .as_ref()
                     .filter(|_| markdown_active)
-                    .or_else(|| {
-                        self.notebook_pane.as_ref().map(|pane| &pane.markdown)
-                    })
+                    .or_else(|| self.notebook_pane.as_ref().map(|pane| &pane.markdown))
                     .and_then(|pane| {
                         pane.cursor_rect.map(|rect| (rect, pane.cursor_shape()))
                     });
@@ -1016,9 +1013,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             .iter()
             .filter(|p| !p.focused)
             .filter_map(|p| {
-                p.external_id.map(|id| {
-                    (id, p.rect, self.pane_content_rect(id).unwrap_or(p.rect))
-                })
+                p.external_id
+                    .map(|id| (id, p.rect, self.pane_content_rect(id).unwrap_or(p.rect)))
             })
             .collect();
         if panes.is_empty() {
@@ -1077,7 +1073,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     );
                     rendered = true;
                 } else if let Some(pane) = self.parked_draw_panes.get_mut(&path) {
-                    crate::editor::neodraw::render_pane(sugarloaf, pane, rect_arr, &theme);
+                    crate::editor::neodraw::render_pane(
+                        sugarloaf, pane, rect_arr, &theme,
+                    );
                     rendered = true;
                 } else if !focused_claims_live_slots {
                     // Focused pane is a terminal — the live hosted slot
@@ -1157,8 +1155,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     .or_else(|| {
                         info.as_ref().and_then(|i| {
                             i.path.as_ref().and_then(|p| {
-                                p.file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
+                                p.file_name().map(|n| n.to_string_lossy().into_owned())
                             })
                         })
                     })
@@ -1244,10 +1241,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 let r = div.rect;
                 let is_active = active_divider.map_or(false, |a| a == r)
                     || (!divider_dragging && r.contains(px, py));
-                let horizontal = matches!(
-                    div.axis,
-                    crate::session_layout::SplitAxis::Horizontal
-                );
+                let horizontal =
+                    matches!(div.axis, crate::session_layout::SplitAxis::Horizontal);
                 let (line_w, color) = if is_active {
                     (3.0, accent)
                 } else {
@@ -1430,7 +1425,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let ide_theme = self.ide_theme;
         // The pill popup ticks its own fade and early-returns while
         // closed, so the unconditional call matches the desktop layer.
-        self.lsp_popup.render(sugarloaf, &ide_theme, self.chrome_scale);
+        self.lsp_popup
+            .render(sugarloaf, &ide_theme, self.chrome_scale);
 
         if input_modal_active || !self.code_lsp_pane_active() {
             return;

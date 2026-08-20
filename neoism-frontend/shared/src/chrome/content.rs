@@ -185,9 +185,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     pub fn focused_content_rect(&self) -> crate::layout::Rect {
         if self.pane_grid.is_split() {
             if let Some(pane) = self.pane_grid.panes().iter().find(|p| p.focused) {
-                if let Some(content) = pane
-                    .external_id
-                    .and_then(|ext| self.pane_content_rect(ext))
+                if let Some(content) =
+                    pane.external_id.and_then(|ext| self.pane_content_rect(ext))
                 {
                     return content;
                 }
@@ -236,10 +235,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         match active_path {
             Some(path) => {
                 let root = self.workspace_root_path.clone();
-                let crumbs =
-                    self.pane_breadcrumbs.entry(external_id).or_insert_with(|| {
-                        crate::panels::breadcrumbs::Breadcrumbs::new()
-                    });
+                let crumbs = self
+                    .pane_breadcrumbs
+                    .entry(external_id)
+                    .or_insert_with(|| crate::panels::breadcrumbs::Breadcrumbs::new());
                 crumbs.set_scale(chrome_scale);
                 crumbs.set_from_path(&path, root.as_deref());
             }
@@ -252,8 +251,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
     /// Drop pane strips (and breadcrumbs) whose panes went away.
     pub fn retain_pane_tabs(&mut self, keep: &[u64]) {
-        let before =
-            self.pane_tabs.len() + self.pane_breadcrumbs.len();
+        let before = self.pane_tabs.len() + self.pane_breadcrumbs.len();
         self.pane_tabs.retain(|id, _| keep.contains(id));
         self.pane_breadcrumbs.retain(|id, _| keep.contains(id));
         if before != self.pane_tabs.len() + self.pane_breadcrumbs.len() {
@@ -466,16 +464,15 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 };
                 if reseed {
                     use crate::editor::notebook::{NotebookDocument, NotebookPane};
-                    self.notebook_pane =
-                        Some(match NotebookDocument::from_json(text) {
-                            Ok(document) => NotebookPane::from_document(
-                                PathBuf::from(path),
-                                document,
-                                text.to_string(),
-                                None,
-                            ),
-                            Err(err) => NotebookPane::error(PathBuf::from(path), err),
-                        });
+                    self.notebook_pane = Some(match NotebookDocument::from_json(text) {
+                        Ok(document) => NotebookPane::from_document(
+                            PathBuf::from(path),
+                            document,
+                            text.to_string(),
+                            None,
+                        ),
+                        Err(err) => NotebookPane::error(PathBuf::from(path), err),
+                    });
                 }
             }
             EditorPaneKind::Draw => {
@@ -487,11 +484,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     None => true,
                 };
                 if reseed {
-                    self.draw_pane =
-                        Some(crate::editor::neodraw::DrawPane::from_source(
-                            PathBuf::from(path),
-                            text,
-                        ));
+                    self.draw_pane = Some(crate::editor::neodraw::DrawPane::from_source(
+                        PathBuf::from(path),
+                        text,
+                    ));
                 }
             }
             EditorPaneKind::Code => {

@@ -1702,8 +1702,7 @@ fn attachment_url_for_path(path: &std::path::Path, mime: &str) -> String {
         if let Ok(metadata) = std::fs::metadata(path) {
             if metadata.len() <= MAX_INLINE_ATTACHMENT_BYTES {
                 if let Ok(bytes) = std::fs::read(path) {
-                    let encoded =
-                        base64::engine::general_purpose::STANDARD.encode(bytes);
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
                     return format!("data:{mime};base64,{encoded}");
                 }
             }

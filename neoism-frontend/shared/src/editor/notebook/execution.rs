@@ -33,7 +33,12 @@ pub(crate) fn command_for_language(
     language: &str,
 ) -> Result<std::process::Command, String> {
     let normalized = language.trim().to_ascii_lowercase();
-    let command = if is_shell_language(&normalized) {
+    // `mut` exists solely for the `#[cfg(windows)]` block below, which
+    // sets the console-suppression creation flags on the built command.
+    // Every other target never mutates it, so silence the unused-mut
+    // warning there instead of letting non-Windows builds carry it.
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut command = if is_shell_language(&normalized) {
         let shell = match normalized.as_str() {
             "bash" => "bash",
             "zsh" => "zsh",

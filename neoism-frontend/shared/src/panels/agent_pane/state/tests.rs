@@ -3704,6 +3704,54 @@ fn history_chunk_for_cached_session_merges_like_desktop() {
 }
 
 #[test]
+fn returning_from_child_keeps_parent_subagent_notice_in_place() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("sess-child".to_string()));
+    for message in [
+        NeoismAgentMessage::user("oldest").with_id("u-1"),
+        NeoismAgentMessage::assistant("before task").with_id("a-1"),
+        NeoismAgentMessage::system(
+            "Subagent",
+            "Subagent finished.\ntask_id: sess-child\nstatus: completed",
+        )
+        .with_id("msg_subtask_completion_sess-child"),
+        NeoismAgentMessage::user("after task").with_id("u-2"),
+        NeoismAgentMessage::assistant("newest").with_id("a-2"),
+    ] {
+        pane.cache_upsert_part_message("sess-main", message);
+    }
+
+    // Reopening the parent fetches only its newest page. The completion
+    // notice already streamed into the parent while the child was visible.
+    pane.apply_history_to_cache(
+        "sess-main",
+        vec![
+            NeoismAgentMessage::assistant("before task").with_id("a-1"),
+            NeoismAgentMessage::user("after task").with_id("u-2"),
+            NeoismAgentMessage::assistant("newest").with_id("a-2"),
+        ],
+        Some("older-cursor".to_string()),
+    );
+    pane.switch_session("sess-main".to_string());
+
+    let ids = pane
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            "u-1",
+            "a-1",
+            "msg_subtask_completion_sess-child",
+            "u-2",
+            "a-2"
+        ]
+    );
+}
+
+#[test]
 fn cold_switch_seeds_from_background_streamed_parts() {
     let mut pane = NeoismAgentPane::default();
     pane.set_session_id(Some("sess-a".to_string()));

@@ -1440,31 +1440,95 @@ pub(super) fn merge_session_snapshot(
     snapshot: Vec<NeoismAgentMessage>,
     live: Vec<NeoismAgentMessage>,
 ) -> Vec<NeoismAgentMessage> {
-    let mut live = live.into_iter().map(Some).collect::<Vec<_>>();
-    let live_indices = live
+    if snapshot.is_empty() || live.is_empty() {
+        return if snapshot.is_empty() { live } else { snapshot };
+    }
+
+    let mut snapshot = snapshot.into_iter().map(Some).collect::<Vec<_>>();
+    let snapshot_indices = snapshot
         .iter()
         .enumerate()
         .filter_map(|(index, message)| {
             session_message_identity(message.as_ref()?).map(|identity| (identity, index))
         })
         .collect::<HashMap<_, _>>();
-    let mut seen = HashSet::with_capacity(snapshot.len().saturating_add(live.len()));
-    let mut merged = Vec::with_capacity(snapshot.len().max(live.len()));
-    for incoming in snapshot {
-        let identity = session_message_identity(&incoming);
-        let existing = identity
-            .as_ref()
-            .and_then(|identity| live_indices.get(identity))
-            .and_then(|index| live[*index].take());
-        if let Some(identity) = identity {
-            seen.insert(identity);
+    let mut live = live.into_iter().map(Some).collect::<Vec<_>>();
+
+    // Shared identities are chronological anchors. Unmatched cached rows are
+    // kept in the interval where they originally appeared instead of all being
+    // appended after a partial newest-page snapshot.
+    let mut anchors = Vec::new();
+    let mut next_snapshot_index = 0usize;
+    for (live_index, message) in live.iter().enumerate() {
+        let Some(message) = message.as_ref() else {
+            continue;
+        };
+        let Some(snapshot_index) = session_message_identity(message)
+            .and_then(|identity| snapshot_indices.get(&identity).copied())
+        else {
+            continue;
+        };
+        if snapshot_index < next_snapshot_index {
+            continue;
         }
-        merged.push(match existing {
-            Some(existing) => merge_part_message(existing, incoming),
-            None => incoming,
-        });
+        anchors.push((live_index, snapshot_index));
+        next_snapshot_index = snapshot_index + 1;
     }
-    for message in live.into_iter().flatten() {
+
+    let mut live_slots = vec![Vec::new(); snapshot.len() + 1];
+    if anchors.is_empty() {
+        live_slots[snapshot.len()].extend(live.iter_mut().filter_map(Option::take));
+    } else {
+        let first_live_index = anchors[0].0;
+        for message in live[..first_live_index].iter_mut().filter_map(Option::take) {
+            if session_message_identity(&message)
+                .is_none_or(|identity| !snapshot_indices.contains_key(&identity))
+            {
+                live_slots[0].push(message);
+            }
+        }
+        for (anchor_index, &(live_index, snapshot_index)) in anchors.iter().enumerate() {
+            let existing = live[live_index].take().expect("live anchor");
+            let incoming = snapshot[snapshot_index].take().expect("snapshot anchor");
+            snapshot[snapshot_index] = Some(merge_part_message(existing, incoming));
+
+            let range_start = live_index + 1;
+            let (range_end, slot) = anchors
+                .get(anchor_index + 1)
+                .map(|(next_live_index, _)| (*next_live_index, snapshot_index + 1))
+                .unwrap_or((live.len(), snapshot.len()));
+            for message in live[range_start..range_end]
+                .iter_mut()
+                .filter_map(Option::take)
+            {
+                if session_message_identity(&message)
+                    .is_none_or(|identity| !snapshot_indices.contains_key(&identity))
+                {
+                    live_slots[slot].push(message);
+                }
+            }
+        }
+    }
+
+    let mut seen = HashSet::with_capacity(snapshot.len().saturating_add(live.len()));
+    let mut merged = Vec::with_capacity(snapshot.len().saturating_add(live.len()));
+    for (index, incoming) in snapshot.into_iter().enumerate() {
+        for message in std::mem::take(&mut live_slots[index]) {
+            if session_message_identity(&message)
+                .is_none_or(|identity| seen.insert(identity))
+            {
+                merged.push(message);
+            }
+        }
+        if let Some(incoming) = incoming {
+            if session_message_identity(&incoming)
+                .is_none_or(|identity| seen.insert(identity))
+            {
+                merged.push(incoming);
+            }
+        }
+    }
+    for message in live_slots.pop().unwrap_or_default() {
         if session_message_identity(&message).is_none_or(|identity| seen.insert(identity))
         {
             merged.push(message);

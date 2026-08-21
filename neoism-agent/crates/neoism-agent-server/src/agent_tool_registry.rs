@@ -370,6 +370,37 @@ pub(crate) async fn execute_mcp_gateway(
                 .get("tool")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("execute action=call requires tool"))?;
+            if !tools.iter().any(|tool| {
+                mcp_canonical_path(tool) == path
+                    || mcp::tool_runtime_id(&tool.client, &tool.name) == path
+            }) {
+                let namespace = path
+                    .split_once('.')
+                    .map(|(namespace, _)| namespace.to_string())
+                    .or_else(|| mcp_path(path).map(|(namespace, _)| namespace));
+                if let Some(name) = config::load(directory).ok().and_then(|loaded| {
+                    loaded
+                        .info
+                        .mcp
+                        .keys()
+                        .find(|name| {
+                            namespace.as_deref().is_some_and(|namespace| {
+                                mcp_canonical_namespace(name)
+                                    .eq_ignore_ascii_case(namespace)
+                            })
+                        })
+                        .cloned()
+                }) {
+                    let mut requested = mcp::tools_with_state(
+                        directory,
+                        &name,
+                        &mcp_auth::McpAuthStore::from_env(),
+                        state.clone(),
+                    )
+                    .await?;
+                    tools.append(&mut requested);
+                }
+            }
             let selected = tools
                 .iter()
                 .find(|tool| {

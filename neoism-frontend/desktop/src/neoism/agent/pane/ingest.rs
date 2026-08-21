@@ -55,26 +55,8 @@ impl NeoismAgentPane {
                     let messages = self.merge_pending_user_prompts(messages);
                     let mut messages = self.preserve_streamed_response_text(messages);
                     if self.timeline_history.oldest_loaded_cursor.is_some() {
-                        let overlap = messages.iter().position(|incoming| {
-                            !incoming.id.is_empty()
-                                && self
-                                    .messages
-                                    .iter()
-                                    .any(|existing| existing.id == incoming.id)
-                        });
-                        if let Some(overlap) = overlap {
-                            let first_overlap_id = messages[overlap].id.clone();
-                            if let Some(existing_overlap) = self
-                                .messages
-                                .iter()
-                                .position(|message| message.id == first_overlap_id)
-                            {
-                                let mut merged =
-                                    self.messages[..existing_overlap].to_vec();
-                                merged.extend(messages);
-                                messages = merged;
-                            }
-                        }
+                        messages =
+                            merge_session_snapshot(messages, self.messages.clone());
                     }
                     // Landed background-task completion cards survive the
                     // snapshot replacement (runs last so the dedupe check

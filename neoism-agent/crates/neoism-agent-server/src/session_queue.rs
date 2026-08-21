@@ -482,6 +482,18 @@ async fn wait_until_session_not_running(state: &AppState, session_id: &str) {
 }
 
 pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
+    // Main-session queue semantics remain unchanged. This bit only gives a
+    // child worker an in-memory completion obligation, so a concurrent stale
+    // SessionInfo write cannot strand the parent by erasing the durable marker.
+    let is_subtask = state
+        .inner
+        .store
+        .get_session(&session_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|session| session.parent_id.is_some());
+    let mut processed_subtask_prompt = false;
     loop {
         wait_until_session_not_running(&state, &session_id).await;
         let Some((request, delivery, remaining)) =
@@ -497,6 +509,7 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
             }
             break;
         };
+        processed_subtask_prompt |= is_subtask;
         publish_prompt_queue_changed(
             &state,
             &session_id,
@@ -565,6 +578,7 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
     crate::session_actions::publish_deferred_subtask_completion_if_idle(
         &state,
         &session_id,
+        processed_subtask_prompt,
     )
     .await;
 }

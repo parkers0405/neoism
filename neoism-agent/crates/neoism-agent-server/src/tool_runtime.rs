@@ -446,7 +446,7 @@ async fn execute_stateful_tool_call(
             };
             if session_is_running(state, &child_session_id).await {
                 if continuing_existing_task {
-                    let queue_len = queue_child_task_prompt(
+                    let queue_len = steer_child_task_prompt(
                         state,
                         &child_session_id,
                         &prompt,
@@ -812,7 +812,7 @@ async fn session_is_running(state: &AppState, session_id: &str) -> bool {
     state.inner.runs.read().await.contains_key(session_id)
 }
 
-async fn queue_child_task_prompt(
+async fn steer_child_task_prompt(
     state: &AppState,
     child_session_id: &str,
     prompt: &str,
@@ -833,13 +833,18 @@ async fn queue_child_task_prompt(
     };
     let event_request = request.clone();
     let (start_worker, queue_len) =
-        crate::session_queue::enqueue_prompt_request(state, child_session_id, request)
-            .await
-            .map_err(|error| error.to_string())?;
-    // The queued prompt runs through the generic queue worker — no spawn
-    // wrapper publishes its completion. Mark the child so its next true-idle
-    // point notifies the parent (the fix for "told the subagent to wrap up,
-    // it finished, main model never heard back").
+        crate::session_queue::enqueue_prompt_request_with_delivery(
+            state,
+            child_session_id,
+            request,
+            "steer",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    // Match a human steering the main agent: the active child absorbs this at
+    // its next step boundary. If its run ends first, the same durable row falls
+    // back to the worker as a new turn. Keep the child completion obligation
+    // across both paths.
     crate::session_actions::mark_subtask_notify_on_idle(state, child_session_id)
         .await
         .map_err(|error| error.to_string())?;
@@ -848,7 +853,7 @@ async fn queue_child_task_prompt(
         child_session_id,
         "enqueue",
         Some(&event_request),
-        Some("queue"),
+        Some("steer"),
         0,
     )
     .await;

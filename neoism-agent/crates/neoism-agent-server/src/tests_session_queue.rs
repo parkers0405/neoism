@@ -1127,14 +1127,14 @@ async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
     };
     state.inner.store.insert_session(&child).await.unwrap();
 
-    // The task tool queues the continue-prompt and sets the marker.
+    // The task tool queues the steer prompt and sets the marker.
     crate::session_actions::mark_subtask_notify_on_idle(&state, child_id.as_str())
         .await
         .unwrap();
     state
         .inner
         .store
-        .enqueue_prompt(
+        .enqueue_prompt_with_delivery(
             child_id.as_str(),
             &PromptRequest {
                 message_id: None,
@@ -1148,6 +1148,7 @@ async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
                     text: "wrap up with what you have".to_string(),
                 }],
             },
+            "steer",
         )
         .await
         .unwrap();
@@ -1192,6 +1193,139 @@ async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
             .and_then(serde_json::Value::as_bool),
         Some(false)
     );
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn queued_child_prompt_defers_terminal_event_and_survives_lost_marker() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-child-queue-race-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let parent: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/session?directory={}", root.to_string_lossy()),
+                Some(json!({})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let child_id = neoism_agent_core::new_session_id();
+    let child = SessionInfo {
+        id: child_id.clone(),
+        slug: "queued-race-child".to_string(),
+        project_id: parent.project_id.clone(),
+        workspace_id: parent.workspace_id.clone(),
+        directory: parent.directory.clone(),
+        path: parent.path.clone(),
+        parent_id: Some(parent.id.clone()),
+        title: "Queued race child".to_string(),
+        agent: Some("build".to_string()),
+        model: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        time: TimeInfo {
+            created: 1,
+            updated: 1,
+            compacting: None,
+            archived: None,
+        },
+        permission: None,
+        extra: BTreeMap::new(),
+    };
+    state.inner.store.insert_session(&child).await.unwrap();
+    crate::session_actions::mark_subtask_notify_on_idle(&state, child_id.as_str())
+        .await
+        .unwrap();
+    state
+        .inner
+        .store
+        .enqueue_prompt_with_delivery(
+            child_id.as_str(),
+            &PromptRequest {
+                message_id: None,
+                model: None,
+                agent: None,
+                no_reply: true,
+                system: None,
+                tools: None,
+                author: None,
+                parts: vec![PromptPart::Text {
+                    text: "follow up before finishing".to_string(),
+                }],
+            },
+            "steer",
+        )
+        .await
+        .unwrap();
+    assert!(
+        state
+            .inner
+            .session_coordinator
+            .wake(child_id.as_str())
+            .await
+    );
+
+    // The first run's wrapper must not terminalize a child whose continuation
+    // worker is already waiting.
+    crate::session_actions::publish_background_subtask_finished(
+        &state,
+        child_id.as_str(),
+        "completed",
+        "first result, not final",
+    )
+    .await;
+    let mut stored_child = state
+        .inner
+        .store
+        .get_session(child_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored_child.extra.get("subtaskCompletion").is_none());
+    assert!(state
+        .inner
+        .store
+        .list_queued_prompt_entries(parent.id.as_str())
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Reproduce the old whole-SessionInfo lost update. The worker's explicit
+    // child obligation must still deliver after it drains.
+    stored_child.extra.remove("subtaskNotifyOnIdle");
+    state
+        .inner
+        .store
+        .update_session(&stored_child)
+        .await
+        .unwrap();
+    crate::session_queue::drain_prompt_queue(state.clone(), child_id.to_string()).await;
+
+    let queued = state
+        .inner
+        .store
+        .list_queued_prompt_entries(parent.id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1, "parent must receive final completion");
+    assert_eq!(queued[0].1, "continue");
+    assert!(matches!(
+        queued[0].0.parts.first(),
+        Some(PromptPart::Text { text })
+            if text.contains("Subagent finished.") && text.contains(child_id.as_str())
+    ));
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);

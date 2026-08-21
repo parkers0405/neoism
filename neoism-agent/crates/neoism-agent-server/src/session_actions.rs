@@ -248,12 +248,23 @@ pub(crate) async fn publish_background_subtask_finished(
     status: &str,
     text: &str,
 ) {
-    let Ok(Some(child)) = state.inner.store.get_session(child_id).await else {
+    let Ok(Some(mut child)) = state.inner.store.get_session(child_id).await else {
         return;
     };
     let Some(parent_id) = child.parent_id.as_ref().map(ToString::to_string) else {
         return;
     };
+    // A task continuation can already be waiting behind the run whose wrapper
+    // called us. Completion is authoritative only after the child has drained
+    // that work; otherwise the UI terminal-locks a child that is still active
+    // and the parent can receive the first result instead of the final one.
+    if subtask_has_active_work(state, child_id).await {
+        return;
+    }
+    // Clear the deferred obligation in the same whole-session write that
+    // persists its completion. A separate clear introduced a crash window
+    // where neither marker nor completion survived.
+    child.extra.remove(SUBTASK_NOTIFY_ON_IDLE_KEY);
     let inline_result = subtask_result_inline(text);
     let child =
         match mark_subtask_completion_pending(state, child, status, &inline_result).await
@@ -392,22 +403,30 @@ pub(crate) async fn mark_subtask_notify_on_idle(
 pub(crate) async fn publish_deferred_subtask_completion_if_idle(
     state: &AppState,
     session_id: &str,
+    worker_processed_subtask_prompt: bool,
 ) {
     let child = match state.inner.store.get_session(session_id).await {
         Ok(Some(child)) => child,
         _ => return,
     };
-    if child.parent_id.is_none()
-        || !child
-            .extra
-            .get(SUBTASK_NOTIFY_ON_IDLE_KEY)
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
+    let marked = child
+        .extra
+        .get(SUBTASK_NOTIFY_ON_IDLE_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if child.parent_id.is_none() || (!marked && !worker_processed_subtask_prompt) {
         return;
     }
-    if state.inner.runs.read().await.contains_key(session_id) {
+    if subtask_has_active_work(state, session_id).await {
         return;
+    }
+    let result = last_assistant_text(state, session_id).await;
+    publish_background_subtask_finished(state, session_id, "completed", &result).await;
+}
+
+async fn subtask_has_active_work(state: &AppState, session_id: &str) -> bool {
+    if state.inner.runs.read().await.contains_key(session_id) {
+        return true;
     }
     if state
         .inner
@@ -415,26 +434,15 @@ pub(crate) async fn publish_deferred_subtask_completion_if_idle(
         .worker_active(session_id)
         .await
     {
-        return;
+        return true;
     }
-    if state
+    state
         .inner
         .store
         .queued_prompt_count(session_id)
         .await
-        .unwrap_or(0)
+        .unwrap_or(1)
         > 0
-    {
-        return;
-    }
-    let mut cleared = child.clone();
-    cleared.extra.remove(SUBTASK_NOTIFY_ON_IDLE_KEY);
-    if let Err(error) = state.inner.store.update_session(&cleared).await {
-        tracing::warn!(session_id = %session_id, %error, "failed to clear deferred subtask notify marker");
-        return;
-    }
-    let result = last_assistant_text(state, session_id).await;
-    publish_background_subtask_finished(state, session_id, "completed", &result).await;
 }
 
 /// Last assistant text part in the child's transcript — the result the
@@ -492,7 +500,7 @@ pub(crate) async fn reconcile_parent_subtask_completions_for_child(
     // A queued continue-prompt owes its completion at the child's next
     // idle point — check before forwarding, so the freshly-published
     // pending entry rides the same delivery attempt below.
-    publish_deferred_subtask_completion_if_idle(state, child_id).await;
+    publish_deferred_subtask_completion_if_idle(state, child_id, false).await;
     let parent_id = match state.inner.store.get_session(child_id).await {
         Ok(Some(child)) => child.parent_id.map(|parent| parent.to_string()),
         Ok(None) => None,
@@ -515,6 +523,23 @@ pub(crate) async fn reconcile_parent_subtask_completions_for_child(
 /// a shutdown (or by an older build). This makes the completion outbox truly
 /// durable: reopening Neoism delivers the result instead of orphaning it.
 pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
+    let deferred = match state
+        .inner
+        .store
+        .list_sessions_with_extra_key(SUBTASK_NOTIFY_ON_IDLE_KEY)
+        .await
+    {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            tracing::warn!(%error, "failed to scan deferred subtask completions at startup");
+            Vec::new()
+        }
+    };
+    for child in deferred {
+        publish_deferred_subtask_completion_if_idle(state, child.id.as_str(), false)
+            .await;
+    }
+
     let sessions = match state
         .inner
         .store
@@ -1071,6 +1096,47 @@ mod tests {
             .into_iter()
             .find(|session| session.parent_id.as_ref() == Some(&parent.id))
             .expect("stored child");
+        assert_eq!(
+            stored_child.extra[SUBTASK_COMPLETION_EXTRA_KEY]["pending"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_finalizes_idle_deferred_child() {
+        let db_path = std::env::temp_dir().join(format!(
+            "neoism-agent-subtask-deferred-resume-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(db_path).await.unwrap();
+        let mut parent = test_child_session();
+        parent.parent_id = None;
+        let mut child = test_child_session();
+        child.parent_id = Some(parent.id.clone());
+        insert_session(&state, &parent).await;
+        insert_session(&state, &child).await;
+        mark_subtask_notify_on_idle(&state, child.id.as_str())
+            .await
+            .unwrap();
+
+        resume_pending_subtask_completions(&state).await;
+
+        let queued = state
+            .inner
+            .store
+            .list_queued_prompt_entries(parent.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].1, "continue");
+        let stored_child = state
+            .inner
+            .store
+            .get_session(child.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored_child.extra.get(SUBTASK_NOTIFY_ON_IDLE_KEY).is_none());
         assert_eq!(
             stored_child.extra[SUBTASK_COMPLETION_EXTRA_KEY]["pending"].as_bool(),
             Some(false)

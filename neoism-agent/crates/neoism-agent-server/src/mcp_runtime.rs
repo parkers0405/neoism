@@ -252,7 +252,7 @@ impl McpRuntimeManager {
                 let client = remote.client.as_ref().ok_or_else(|| {
                     anyhow!("MCP remote server {name} is not connected")
                 })?;
-                match client
+                client
                     .request(
                         "tools/call",
                         json!({
@@ -261,28 +261,9 @@ impl McpRuntimeManager {
                         }),
                     )
                     .await
-                {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let status = McpStatus::Failed {
-                            error: error.to_string(),
-                        };
-                        self.connect_remote_status(directory, name, &remote.url, status);
-                        tracing::warn!(
-                            mcp = name,
-                            tool,
-                            url = %remote.url,
-                            error = %error,
-                            "remote MCP tool call failed; status marked failed for reconnect diagnostics"
-                        );
-                        return Err(error).with_context(|| {
-                            format!(
-                                "failed to call remote MCP tool {tool} on {}",
-                                remote.url
-                            )
-                        });
-                    }
-                }
+                    .with_context(|| {
+                        format!("failed to call remote MCP tool {tool} on {}", remote.url)
+                    })?
             }
         };
         serde_json::from_value(result).context("failed to parse MCP tools/call result")

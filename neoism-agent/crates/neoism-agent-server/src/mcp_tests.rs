@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use axum::{
@@ -303,6 +304,68 @@ async fn remote_http_runtime_lists_and_calls_tools_with_headers_and_bearer_token
 }
 
 #[tokio::test]
+async fn remote_tool_failure_keeps_connection_and_catalog() {
+    let root = temp_dir("remote-tool-failure");
+    let mock = RemoteMockState::default();
+    mock.fail_tool_calls.store(true, Ordering::Relaxed);
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("failed to bind remote MCP test server: {error}"),
+    };
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let app = Router::new()
+        .route("/mcp", post(remote_mcp_handler))
+        .with_state(mock.clone());
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    fs::write(
+        root.join("neoism.json"),
+        format!(
+            r#"{{"mcp":{{"remote":{{"type":"remote","url":"{url}","timeout":2000}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    let directory = root.to_str().unwrap();
+
+    connect(directory, "remote", &store).await.unwrap();
+    let error = call_tool(directory, "remote", "echo", json!({}), &store)
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("forced tool failure"));
+    assert!(matches!(
+        status(directory, &store).unwrap()["remote"],
+        McpStatus::Connected
+    ));
+    assert_eq!(
+        tools(directory, "remote", &store).await.unwrap()[0].name,
+        "echo"
+    );
+    assert_eq!(
+        mock.methods
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|method| method.as_str() == "initialize")
+            .count(),
+        1
+    );
+
+    assert!(disconnect(directory, "remote").await.unwrap());
+    let _ = shutdown_tx.send(());
+    let _ = server.await;
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn remote_http_connect_invalidates_stale_bearer_token_on_unauthorized() {
     let root = temp_dir("remote-http-stale-token");
     let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -502,6 +565,7 @@ done
 struct RemoteMockState {
     methods: Arc<StdMutex<Vec<String>>>,
     headers: Arc<StdMutex<Vec<SeenHeaders>>>,
+    fail_tool_calls: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Default)]
@@ -564,7 +628,14 @@ async fn remote_mcp_handler(
     if method == "initialize" {
         response_headers.insert("mcp-session-id", "session-1".parse().unwrap());
     }
-    let body = if let Some(id) = request.get("id") {
+    let body = if method == "tools/call" && state.fail_tool_calls.load(Ordering::Relaxed)
+    {
+        Json(json!({
+            "jsonrpc": "2.0",
+            "id": request.get("id"),
+            "error": { "code": -32000, "message": "forced tool failure" }
+        }))
+    } else if let Some(id) = request.get("id") {
         Json(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
     } else {
         Json(json!({ "jsonrpc": "2.0", "result": result }))

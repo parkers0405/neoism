@@ -260,7 +260,7 @@ async fn connect_config(
                                     mcp = name,
                                     url,
                                     cleared,
-                                    error = %error,
+                                    error = ?error,
                                     "remote MCP rejected stored credentials; credentials invalidated"
                                 );
                                 McpStatus::NeedsAuth
@@ -268,11 +268,11 @@ async fn connect_config(
                                 tracing::warn!(
                                     mcp = name,
                                     url,
-                                    error = %error,
+                                    error = ?error,
                                     "remote MCP connection failed"
                                 );
                                 McpStatus::Failed {
-                                    error: error.to_string(),
+                                    error: format!("{error:#}"),
                                 }
                             };
                             runtime_manager().connect_remote_status(

@@ -74,7 +74,7 @@ async fn execute_tool_call_with_env_and_cancel(
         state.cloned(),
     )
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| format!("{error:#}"))?
     {
         let result = settle_direct_tool_result(result, state.is_none())?;
         log_tool_perf(
@@ -96,7 +96,7 @@ async fn execute_tool_call_with_env_and_cancel(
         state.cloned(),
     )
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| format!("{error:#}"))?
     {
         let result = settle_direct_tool_result(result, state.is_none())?;
         log_tool_perf("mcp", directory, tool_name, input_bytes, &result, started);

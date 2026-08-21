@@ -1841,6 +1841,44 @@ fn child_hydration_merges_snapshot_without_losing_streamed_prefix() {
 }
 
 #[test]
+fn partial_snapshot_keeps_cached_history_and_subagent_notice_in_order() {
+    let notice = NeoismAgentMessage::system(
+        "Subagent",
+        "Subagent finished.\ntask_id: ses-child\nstatus: completed",
+    )
+    .with_id("msg_subtask_completion_ses-child");
+    let live = vec![
+        NeoismAgentMessage::user("oldest").with_id("u-1"),
+        NeoismAgentMessage::assistant("before task").with_id("a-1"),
+        notice,
+        NeoismAgentMessage::user("after task").with_id("u-2"),
+        NeoismAgentMessage::assistant("newest").with_id("a-2"),
+    ];
+    let snapshot = vec![
+        NeoismAgentMessage::assistant("before task").with_id("a-1"),
+        NeoismAgentMessage::user("after task").with_id("u-2"),
+        NeoismAgentMessage::assistant("newest").with_id("a-2"),
+    ];
+
+    let merged = merge_session_snapshot(snapshot, live);
+    let ids = merged
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ids,
+        vec![
+            "u-1",
+            "a-1",
+            "msg_subtask_completion_ses-child",
+            "u-2",
+            "a-2"
+        ]
+    );
+}
+
+#[test]
 fn runtime_completion_rehydrate_does_not_append_cached_part_at_bottom() {
     let live = crate::neoism::agent::api::part_block(&json!({
         "id": "prt-background-done",

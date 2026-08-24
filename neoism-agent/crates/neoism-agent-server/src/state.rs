@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use neoism_agent_core::{
-    EventPayload, Id, IdKind, MessageInfo, MessageWithParts, PermissionRequestInfo,
+    ArtifactInfo, AuditEntry, EventPayload, Id, IdKind, MessageInfo, MessageWithParts, PermissionRequestInfo,
     PermissionRule, PromptRequest, PtyInfo, QuestionRequestInfo, SessionInfo,
     SessionStatus, TodoInfo,
 };
@@ -28,6 +28,7 @@ pub struct AppState {
 
 pub(crate) struct InnerState {
     pub(crate) store: SessionStore,
+    pub(crate) artifact_root: PathBuf,
     pub(crate) auth_store: AuthStore,
     /// Embeddings provider for semantic transcript search; `None` when no
     /// API key is configured (semantic search reports unavailable).
@@ -35,6 +36,7 @@ pub(crate) struct InnerState {
     pub(crate) providers: ProviderRegistry,
     pub(crate) provider_catalog: ProviderCatalog,
     pub(crate) provider_oauth: RwLock<HashMap<String, ProviderOAuthPending>>,
+    pub(crate) plugin_host: neoism_agent_plugin_api::PluginHost,
     pub(crate) plugins: PluginRegistry,
     pub(crate) workspace_runtimes: crate::workspace_runtime::WorkspaceRuntimeRegistry,
     pub(crate) statuses: RwLock<HashMap<String, SessionStatus>>,
@@ -510,6 +512,7 @@ pub(crate) struct PersistedEvent {
     pub(crate) aggregate_id: String,
     pub(crate) aggregate_seq: i64,
     pub(crate) owner_id: Option<String>,
+    pub(crate) created: i64,
     pub(crate) payload: EventPayload,
 }
 
@@ -522,28 +525,39 @@ pub(crate) struct AggregateSequence {
 impl AppState {
     pub async fn open_default() -> anyhow::Result<Self> {
         let store = SessionStore::open_default().await?;
-        Self::from_store(store).await
+        let artifact_root = PathBuf::from(crate::default_state_dir()).join("artifacts");
+        Self::from_store(store, artifact_root).await
     }
 
     pub async fn open_database(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
-        let store = SessionStore::open(path.into()).await?;
-        Self::from_store(store).await
+        let path = path.into();
+        let artifact_root = path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("artifacts");
+        let store = SessionStore::open(path).await?;
+        Self::from_store(store, artifact_root).await
     }
 
-    async fn from_store(store: SessionStore) -> anyhow::Result<Self> {
+    async fn from_store(store: SessionStore, artifact_root: PathBuf) -> anyhow::Result<Self> {
+        tokio::fs::create_dir_all(&artifact_root).await?;
         let (events, _) = broadcast::channel(1024);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
         let auth_store = AuthStore::from_env();
         let permission_approvals = store.list_permission_approvals().await?;
+        let durable_permissions = store.list_pending_permissions().await?;
+        let durable_questions = store.list_pending_questions().await?;
         store.interrupt_stale_runs().await?;
         let state = Self {
             inner: Arc::new(InnerState {
                 store,
+                artifact_root,
                 providers: ProviderRegistry::from_env(auth_store.clone()),
                 semantic: crate::semantic::EmbeddingsClient::from_env(&auth_store),
                 auth_store,
                 provider_catalog: ProviderCatalog::from_env(),
                 provider_oauth: RwLock::new(HashMap::new()),
+                plugin_host: crate::plugins::build_host()?,
                 plugins: PluginRegistry::default(),
                 workspace_runtimes: Default::default(),
                 statuses: RwLock::new(HashMap::new()),
@@ -553,10 +567,20 @@ impl AppState {
                 subtask_parent_locks: Mutex::new(HashMap::new()),
                 background_jobs: RwLock::new(HashMap::new()),
                 background_job_cancellations: RwLock::new(HashMap::new()),
-                permissions: RwLock::new(HashMap::new()),
+                permissions: RwLock::new(
+                    durable_permissions
+                        .into_iter()
+                        .map(|request| (request.id.clone(), request))
+                        .collect(),
+                ),
                 permission_waiters: RwLock::new(HashMap::new()),
                 permission_approvals: RwLock::new(permission_approvals),
-                questions: RwLock::new(HashMap::new()),
+                questions: RwLock::new(
+                    durable_questions
+                        .into_iter()
+                        .map(|request| (request.id.clone(), request))
+                        .collect(),
+                ),
                 question_waiters: RwLock::new(HashMap::new()),
                 todos: RwLock::new(HashMap::new()),
                 ptys: RwLock::new(HashMap::new()),
@@ -908,6 +932,55 @@ impl SessionStore {
         self.db
             .execute(
                 r#"
+            CREATE TABLE IF NOT EXISTS interaction_requests (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                state TEXT NOT NULL,
+                response_json TEXT,
+                created INTEGER NOT NULL,
+                updated INTEGER NOT NULL
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS artifacts (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                session_id TEXT,
+                tenant_id TEXT NOT NULL DEFAULT 'local',
+                created INTEGER NOT NULL
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                status INTEGER NOT NULL,
+                created INTEGER NOT NULL
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
             CREATE TABLE IF NOT EXISTS workflows (
                 activation_id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
@@ -1051,6 +1124,7 @@ impl SessionStore {
             )
             .await?;
         self.ensure_event_columns().await?;
+        self.ensure_artifact_columns().await?;
         self.ensure_prompt_queue_columns().await?;
         self.db
             .execute(
@@ -1662,6 +1736,18 @@ impl SessionStore {
                     )
                     .await?;
             }
+        }
+        Ok(())
+    }
+
+    async fn ensure_artifact_columns(&self) -> anyhow::Result<()> {
+        if !self.table_has_column("artifacts", "tenant_id").await? {
+            self.db
+                .execute(
+                    "ALTER TABLE artifacts ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'local'",
+                    Vec::new(),
+                )
+                .await?;
         }
         Ok(())
     }
@@ -2696,14 +2782,14 @@ impl SessionStore {
         let rows = if let Some(session_id) = session_id {
             self.db
                 .fetch_all(
-                    "SELECT seq, aggregate_id, aggregate_seq, owner_id, event_json FROM events WHERE seq > ? AND session_id = ? ORDER BY seq ASC LIMIT ?",
+                    "SELECT seq, aggregate_id, aggregate_seq, owner_id, created, event_json FROM events WHERE seq > ? AND session_id = ? ORDER BY seq ASC LIMIT ?",
                     vec![int(since), text(session_id), int(limit)],
                 )
                 .await?
         } else {
             self.db
                 .fetch_all(
-                    "SELECT seq, aggregate_id, aggregate_seq, owner_id, event_json FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+                    "SELECT seq, aggregate_id, aggregate_seq, owner_id, created, event_json FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?",
                     vec![int(since), int(limit)],
                 )
                 .await?
@@ -2715,9 +2801,273 @@ impl SessionStore {
                     aggregate_id: row.get_str("aggregate_id")?,
                     aggregate_seq: row.get_i64("aggregate_seq")?,
                     owner_id: row.get_opt_str("owner_id")?,
+                    created: row.get_i64("created")?,
                     payload: decode_json(row.get_str("event_json")?)?,
                 })
             })
+            .collect()
+    }
+
+    pub(crate) async fn latest_event_sequence(&self) -> anyhow::Result<u64> {
+        Ok(self
+            .db
+            .fetch_scalar_i64("SELECT COALESCE(MAX(seq), 0) FROM events", vec![])
+            .await?
+            .max(0) as u64)
+    }
+
+    pub(crate) async fn insert_artifact(
+        &self,
+        artifact: &ArtifactInfo,
+        tenant_id: &str,
+    ) -> anyhow::Result<()> {
+        self.db
+            .execute(
+                "INSERT INTO artifacts (id, filename, media_type, size, sha256, session_id, tenant_id, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                vec![
+                    text(&artifact.id),
+                    text(&artifact.filename),
+                    text(&artifact.media_type),
+                    int(i64::try_from(artifact.size).unwrap_or(i64::MAX)),
+                    text(&artifact.sha256),
+                    opt_text(artifact.session_id.clone()),
+                    text(tenant_id),
+                    int(sqlite_i64(artifact.created)),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn get_artifact(&self, id: &str) -> anyhow::Result<Option<ArtifactInfo>> {
+        self.db
+            .fetch_optional(
+                "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE id = ?",
+                vec![text(id)],
+            )
+            .await?
+            .map(artifact_from_row)
+            .transpose()
+    }
+
+    pub(crate) async fn list_artifacts(
+        &self,
+        session_id: Option<&str>,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Vec<ArtifactInfo>> {
+        let (sql, params) = match (session_id, tenant_id) {
+            (Some(session_id), Some(tenant_id)) => (
+                "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE session_id = ? AND tenant_id = ? ORDER BY created DESC",
+                vec![text(session_id), text(tenant_id)],
+            ),
+            (Some(session_id), None) => (
+                "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE session_id = ? ORDER BY created DESC",
+                vec![text(session_id)],
+            ),
+            (None, Some(tenant_id)) => (
+                "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE tenant_id = ? ORDER BY created DESC",
+                vec![text(tenant_id)],
+            ),
+            (None, None) => (
+                "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts ORDER BY created DESC",
+                Vec::new(),
+            ),
+        };
+        let rows = self.db.fetch_all(sql, params).await?;
+        rows.into_iter().map(artifact_from_row).collect()
+    }
+
+    pub(crate) async fn artifact_tenant(&self, id: &str) -> anyhow::Result<Option<String>> {
+        let row = self
+            .db
+            .fetch_optional(
+                "SELECT tenant_id FROM artifacts WHERE id = ?",
+                vec![text(id)],
+            )
+            .await?;
+        row.map(|row| row.get_str("tenant_id")).transpose()
+    }
+
+    pub(crate) async fn delete_artifact(&self, id: &str) -> anyhow::Result<()> {
+        self.db
+            .execute("DELETE FROM artifacts WHERE id = ?", vec![text(id)])
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn append_audit(&self, entry: &AuditEntry) -> anyhow::Result<()> {
+        self.db
+            .execute(
+                "INSERT INTO audit_log (id, tenant_id, method, path, status, created) VALUES (?, ?, ?, ?, ?, ?)",
+                vec![
+                    text(&entry.id),
+                    text(&entry.tenant_id),
+                    text(&entry.method),
+                    text(&entry.path),
+                    int(entry.status.into()),
+                    int(sqlite_i64(entry.created)),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn list_audit(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<AuditEntry>> {
+        let rows = self
+            .db
+            .fetch_all(
+                "SELECT id, tenant_id, method, path, status, created FROM audit_log WHERE tenant_id = ? ORDER BY created DESC LIMIT ?",
+                vec![text(tenant_id), int(limit.min(1000) as i64)],
+            )
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(AuditEntry {
+                    id: row.get_str("id")?,
+                    tenant_id: row.get_str("tenant_id")?,
+                    method: row.get_str("method")?,
+                    path: row.get_str("path")?,
+                    status: row.get_i64("status")?.clamp(0, u16::MAX as i64) as u16,
+                    created: row.get_i64("created")?.max(0) as u64,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) async fn save_permission_request(
+        &self,
+        request: &PermissionRequestInfo,
+    ) -> anyhow::Result<()> {
+        self.save_interaction_request(
+            &request.id,
+            "permission",
+            &request.session_id,
+            serde_json::to_string(request)?,
+        )
+        .await
+    }
+
+    pub(crate) async fn save_question_request(
+        &self,
+        request: &QuestionRequestInfo,
+    ) -> anyhow::Result<()> {
+        self.save_interaction_request(
+            &request.id,
+            "question",
+            &request.session_id,
+            serde_json::to_string(request)?,
+        )
+        .await
+    }
+
+    async fn save_interaction_request(
+        &self,
+        id: &str,
+        kind: &str,
+        session_id: &str,
+        payload_json: String,
+    ) -> anyhow::Result<()> {
+        let now = sqlite_i64(crate::now_millis());
+        self.db
+            .execute(
+                r#"
+                INSERT INTO interaction_requests (id, kind, session_id, payload_json, state, response_json, created, updated)
+                VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                "#,
+                vec![
+                    text(id),
+                    text(kind),
+                    text(session_id),
+                    text(payload_json),
+                    int(now),
+                    int(now),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn resolve_interaction(
+        &self,
+        id: &str,
+        state: &str,
+        response: Value,
+    ) -> anyhow::Result<bool> {
+        let affected = self
+            .db
+            .execute(
+                "UPDATE interaction_requests SET state = ?, response_json = ?, updated = ? WHERE id = ? AND state = 'pending'",
+                vec![
+                    text(state),
+                    text(response.to_string()),
+                    int(sqlite_i64(crate::now_millis())),
+                    text(id),
+                ],
+            )
+            .await?;
+        Ok(affected > 0)
+    }
+
+    pub(crate) async fn cancel_session_interactions(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<u64> {
+        self.db
+            .execute(
+                "UPDATE interaction_requests SET state = 'cancelled', response_json = ?, updated = ? WHERE session_id = ? AND state = 'pending'",
+                vec![
+                    text(json!({ "reason": "session cancelled" }).to_string()),
+                    int(sqlite_i64(crate::now_millis())),
+                    text(session_id),
+                ],
+            )
+            .await
+    }
+
+    pub(crate) async fn interaction_session_id(
+        &self,
+        request_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let row = self
+            .db
+            .fetch_optional(
+                "SELECT session_id FROM interaction_requests WHERE id = ?",
+                vec![text(request_id)],
+            )
+            .await?;
+        row.map(|row| row.get_str("session_id")).transpose()
+    }
+
+    pub(crate) async fn list_pending_permissions(
+        &self,
+    ) -> anyhow::Result<Vec<PermissionRequestInfo>> {
+        self.list_pending_interactions("permission").await
+    }
+
+    pub(crate) async fn list_pending_questions(
+        &self,
+    ) -> anyhow::Result<Vec<QuestionRequestInfo>> {
+        self.list_pending_interactions("question").await
+    }
+
+    async fn list_pending_interactions<T: DeserializeOwned>(
+        &self,
+        kind: &str,
+    ) -> anyhow::Result<Vec<T>> {
+        let rows = self
+            .db
+            .fetch_all(
+                "SELECT payload_json FROM interaction_requests WHERE kind = ? AND state = 'pending' ORDER BY created ASC",
+                vec![text(kind)],
+            )
+            .await?;
+        rows.into_iter()
+            .map(|row| decode_json(row.get_str("payload_json")?))
             .collect()
     }
 
@@ -2798,6 +3148,19 @@ impl SessionStore {
             Db::Turso { .. } => {}
         }
     }
+}
+
+fn artifact_from_row(row: DbRow) -> anyhow::Result<ArtifactInfo> {
+    Ok(ArtifactInfo {
+        id: row.get_str("id")?,
+        filename: row.get_str("filename")?,
+        media_type: row.get_str("media_type")?,
+        size: row.get_i64("size")?.max(0) as u64,
+        sha256: row.get_str("sha256")?,
+        session_id: row.get_opt_str("session_id")?,
+        created: row.get_i64("created")?.max(0) as u64,
+        download_url: String::new(),
+    })
 }
 
 fn decode_json<T: DeserializeOwned>(raw: String) -> anyhow::Result<T> {

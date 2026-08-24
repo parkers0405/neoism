@@ -69,6 +69,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Print the canonical V2 OpenAPI document without starting a server.
+    Openapi,
     Serve {
         #[arg(long, default_value = "4096")]
         port: u16,
@@ -341,6 +343,13 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     match Cli::parse().command {
+        Command::Openapi => {
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            serde_json::to_writer_pretty(&mut output, &neoism_agent_server::canonical_openapi())?;
+            writeln!(output)?;
+        }
         Command::Serve {
             port,
             hostname,

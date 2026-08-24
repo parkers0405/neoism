@@ -4689,7 +4689,7 @@ export class TerminalPanel {
     if (!adapter?.agentAttach) return;
     this.agentLastAttachAt = now;
     const directory = adapter.fileTreeWorkspaceRoot?.() ?? null;
-    adapter.agentAttach(directory);
+    adapter.agentAttach(directory, this.presenceIdentity.displayName);
   }
 
   private drainFileTreeOpens(): void {

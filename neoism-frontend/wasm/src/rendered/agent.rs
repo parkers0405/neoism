@@ -301,6 +301,7 @@ impl ChromeBridge {
             session_id,
             message_id: prompt.message_id,
             text: prompt.text,
+            author: prompt.author,
             attachments: prompt.attachments,
             mode: prompt.mode,
             model: prompt.model,
@@ -843,6 +844,7 @@ impl ChromeBridge {
         self.agent_state.pending_prompt = Some(PendingAgentPrompt {
             message_id: neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
             text: trimmed.to_string(),
+            author: self.agent_state.local_presence_name.clone(),
             attachments: Vec::new(),
             mode,
             model,
@@ -988,6 +990,7 @@ impl ChromeBridge {
                 message_id:
                     neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
                 text: prompt_text.to_string(),
+                author: self.agent_state.local_presence_name.clone(),
                 attachments,
                 mode,
                 model,
@@ -999,6 +1002,7 @@ impl ChromeBridge {
                 message_id:
                     neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
                 text: prompt_text.to_string(),
+                author: self.agent_state.local_presence_name.clone(),
                 attachments,
                 mode,
                 model,
@@ -1151,15 +1155,22 @@ impl ChromeBridge {
     /// creating a new session. Mirrors desktop's agent-pane open:
     /// start/connect the server and load session/provider catalogs;
     /// actual session creation waits until first prompt.
-    pub fn agent_attach(&mut self, directory: Option<String>) {
+    pub fn agent_attach(
+        &mut self,
+        directory: Option<String>,
+        presence_name: Option<String>,
+    ) {
         use neoism_protocol::agent::AgentClientMessage;
 
+        self.agent_state.local_presence_name =
+            presence_name.filter(|name| !name.trim().is_empty());
         self.agent_state.default_directory = directory
             .as_ref()
             .filter(|dir| !dir.trim().is_empty())
             .cloned();
         if let Some(pane) = self.chrome.agent_pane_mut() {
             pane.set_directory(self.agent_state.default_directory.clone());
+            pane.set_local_presence_name(self.agent_state.local_presence_name.clone());
         }
         self.send_agent_envelope(&AgentClientMessage::ListThreads {
             directory: self.agent_state.default_directory.clone(),
@@ -1262,6 +1273,7 @@ impl ChromeBridge {
                 default_agent: self.agent_state.default_agent.clone(),
                 default_model: self.agent_state.default_model.clone(),
                 default_thinking: self.agent_state.default_thinking.clone(),
+                local_author: self.agent_state.local_presence_name.clone(),
             };
             match map_outbound_command(command, &context) {
                 AgentProtocolMapping::EnsureSession => {
@@ -1282,6 +1294,7 @@ impl ChromeBridge {
                     self.agent_state.pending_prompt = Some(PendingAgentPrompt {
                         message_id: prompt.message_id,
                         text: prompt.text,
+                        author: prompt.author,
                         attachments: prompt.attachments,
                         mode: prompt.mode,
                         model: prompt.model,

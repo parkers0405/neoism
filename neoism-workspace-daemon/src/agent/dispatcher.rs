@@ -80,6 +80,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             session_id,
             message_id,
             text,
+            author,
             attachments,
             mode,
             model,
@@ -92,6 +93,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                     session_id,
                     message_id,
                     text,
+                    author,
                     attachments,
                     mode,
                     model,
@@ -106,7 +108,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             let inner = inner.clone();
             tokio::spawn(async move {
                 let _ =
-                    post_no_body(&inner, &format!("/session/{session_id}/abort")).await;
+                    post_no_body(&inner, &format!("/v2/sessions/{session_id}/abort")).await;
             });
         }
         AgentClientMessage::ClearQueue { session_id } => {
@@ -118,7 +120,7 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             tokio::spawn(async move {
                 if let Err(err) = http_delete(
                     &inner,
-                    &format!("/session/{session_id}/background-task/{job_id}"),
+                    &format!("/v2/sessions/{session_id}/jobs/{job_id}"),
                 )
                 .await
                 {

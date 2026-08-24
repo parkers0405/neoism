@@ -123,6 +123,9 @@ pub enum AgentClientMessage {
         session_id: String,
         message_id: String,
         text: String,
+        /// Display name of the peer that submitted this prompt.
+        #[serde(default)]
+        author: Option<String>,
         #[serde(default)]
         attachments: Vec<Attachment>,
         /// Override the session's mode for this turn (e.g.
@@ -869,6 +872,9 @@ pub struct HistoryMessage {
     pub id: String,
     pub role: Role,
     pub kind: HistoryMessageKind,
+    /// Display name of the peer that authored a shared user message.
+    #[serde(default)]
+    pub author: Option<String>,
     #[serde(default)]
     pub title: String,
     #[serde(default)]

@@ -12,6 +12,8 @@ const BASE62: &[u8; 62] =
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdKind {
     Account,
+    Artifact,
+    Audit,
     Entry,
     Event,
     Message,
@@ -29,6 +31,8 @@ impl IdKind {
     pub const fn prefix(self) -> &'static str {
         match self {
             Self::Account => "act",
+            Self::Artifact => "art",
+            Self::Audit => "aud",
             Self::Entry => "ent",
             Self::Event => "evt",
             Self::Message => "msg",

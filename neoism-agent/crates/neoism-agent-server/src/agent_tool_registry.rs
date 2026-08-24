@@ -23,6 +23,9 @@ pub(crate) async fn configured_mcp_tools_with_state(
     directory: &str,
     state: Option<AppState>,
 ) -> Vec<McpToolInfo> {
+    if !crate::plugins::enabled(directory, "dev.neoism.mcp") {
+        return Vec::new();
+    }
     let config = config::load(directory)
         .map(|loaded| loaded.info.mcp)
         .unwrap_or_default();
@@ -56,6 +59,29 @@ pub(crate) async fn available_tools_for_directory(
         .await;
     let directory = runtime.root.to_string_lossy();
     let mut tools = tool::list();
+    tools.retain(|tool| {
+        crate::plugins::builtin_tool_plugin(&tool.id)
+            .is_none_or(|plugin_id| crate::plugins::enabled(&directory, plugin_id))
+    });
+    if !crate::plugins::subagents::enabled(&directory) {
+        tools.retain(|tool| !crate::plugins::subagents::TOOL_IDS.contains(&tool.id.as_str()));
+    }
+    let snapshot = state.inner.plugin_host.snapshot();
+    for (id, tool) in &snapshot.runtime_tools {
+        let Some(contribution) = snapshot.contributions.get(&format!("Tool:{id}")) else {
+            continue;
+        };
+        if !crate::plugins::enabled(&directory, &contribution.plugin_id) {
+            continue;
+        }
+        let definition = tool.definition();
+        tools.push(ToolListItem {
+            id: definition.id,
+            description: definition.description,
+            parameters: definition.parameters,
+            output_schema: Some(definition.output_schema),
+        });
+    }
     tools.extend(crate::custom_tool::list(&directory));
     tools.extend(
         configured_mcp_tools_with_state(&directory, Some(state.clone()))
@@ -95,12 +121,13 @@ pub(crate) async fn provider_tools_for_agent(
     if !mcp.is_empty() {
         visible.push(mcp_gateway_tool(&mcp));
     }
-    append_task_agent_descriptions(directory, permissions, &mut visible)?;
+    append_task_agent_descriptions(state, directory, permissions, &mut visible)?;
     visible.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(visible)
 }
 
 fn append_task_agent_descriptions(
+    state: &AppState,
     directory: &str,
     permissions: &[PermissionRule],
     tools: &mut [ToolListItem],
@@ -108,7 +135,7 @@ fn append_task_agent_descriptions(
     let Some(task) = tools.iter_mut().find(|tool| tool.id == "task") else {
         return Ok(());
     };
-    let catalog = AgentCatalog::load(directory)
+    let catalog = crate::plugins::agent_catalog(state, directory)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let description = task_agent_description(&catalog, permissions);
     if !description.is_empty() {

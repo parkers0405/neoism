@@ -790,6 +790,13 @@ impl Screen<'_> {
             &mut self.sugarloaf,
             directory,
         )?;
+        let local_presence_name = crate::screen::presence::local_presence_identity(
+            self.presence_display_name_override.as_deref(),
+        )
+        .1;
+        if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            agent.set_local_presence_name(Some(local_presence_name));
+        }
         self.renderer.buffer_tabs.open_neoism_agent(route_id);
         // A freshly-created agent pane defaults to the LOCAL agent server.
         // If the current workspace is a joined guest, point it at the HOST's

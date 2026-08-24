@@ -50,7 +50,8 @@ pub(crate) mod truncate;
 #[path = "tool_support/web.rs"]
 mod web;
 
-use web::{webfetch_tool, websearch_tool};
+use web::webfetch_tool;
+pub(crate) use web::websearch;
 
 type ToolFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<ToolExecutionResult>> + Send>>;
@@ -291,12 +292,14 @@ fn webfetch_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(webfetch_tool(context, arguments))
 }
 
-fn websearch_handler(context: ToolContext, arguments: Value) -> ToolFuture {
-    Box::pin(websearch_tool(context, arguments))
-}
-
 fn notes_handler(context: ToolContext, arguments: Value) -> ToolFuture {
-    Box::pin(async move { notes::notes_tool(context, arguments) })
+    Box::pin(async move {
+        let directory = context.cwd.to_string_lossy();
+        if !crate::plugins::enabled(&directory, "dev.neoism.tools.notes") {
+            anyhow::bail!("Notes plugin is disabled for the workspace");
+        }
+        notes::notes_tool(context, arguments)
+    })
 }
 
 fn skill_handler(context: ToolContext, arguments: Value) -> ToolFuture {
@@ -304,7 +307,13 @@ fn skill_handler(context: ToolContext, arguments: Value) -> ToolFuture {
 }
 
 fn lsp_handler(context: ToolContext, arguments: Value) -> ToolFuture {
-    Box::pin(crate::lsp::lsp_tool(context, arguments))
+    Box::pin(async move {
+        let directory = context.cwd.to_string_lossy();
+        if !crate::plugins::enabled(&directory, "dev.neoism.lsp") {
+            anyhow::bail!("LSP plugin is disabled for the workspace");
+        }
+        crate::lsp::lsp_tool(context, arguments).await
+    })
 }
 
 fn stateful_handler(_context: ToolContext, _arguments: Value) -> ToolFuture {
@@ -419,11 +428,54 @@ pub(crate) async fn execute(
     context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
-    let tool = registry::definitions()
+    if let Some(plugin_id) = crate::plugins::builtin_tool_plugin(id) {
+        if !crate::plugins::enabled(&context.cwd.to_string_lossy(), plugin_id) {
+            anyhow::bail!("plugin {plugin_id} is disabled for this workspace");
+        }
+    }
+    if let Some(tool) = registry::definitions()
         .iter()
         .find(|tool| tool.id == id)
+    {
+        return tool.execute(context, arguments).await;
+    }
+    let state = context
+        .state
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("unknown tool {id}"))?;
-    tool.execute(context, arguments).await
+    let snapshot = state.inner.plugin_host.snapshot();
+    let contribution = snapshot
+        .contributions
+        .get(&format!("Tool:{id}"))
+        .ok_or_else(|| anyhow::anyhow!("unknown tool {id}"))?;
+    if !crate::plugins::enabled(&context.cwd.to_string_lossy(), &contribution.plugin_id) {
+        anyhow::bail!("plugin {} is disabled for this workspace", contribution.plugin_id);
+    }
+    let tool = snapshot
+        .runtime_tools
+        .get(id)
+        .ok_or_else(|| anyhow::anyhow!("unknown tool {id}"))?;
+    let definition = tool.definition();
+    if let Some(permission) = definition.permission {
+        let target = arguments
+            .get(&permission.argument)
+            .and_then(Value::as_str)
+            .unwrap_or("*");
+        context.ensure_allowed(&permission.permission, target)?;
+    }
+    let result = tool
+        .execute(neoism_agent_plugin_api::PluginToolInvocation {
+            directory: context.cwd.to_string_lossy().into_owned(),
+            session_id: context.session_id,
+            arguments,
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(ToolExecutionResult {
+        title: result.title,
+        output: result.output,
+        metadata: result.metadata,
+    })
 }
 
 #[cfg(test)]

@@ -9,17 +9,13 @@ use neoism_agent_core::{
 };
 use serde_json::{json, Value};
 
-use crate::agent::AgentCatalog;
 use crate::error::ApiError;
 use crate::project_routes::project_info;
-use crate::session_actions::{
-    append_child_subtask_prompt, create_subtask_session, spawn_background_subtask_prompt,
-};
+use crate::session_actions::append_child_subtask_prompt;
 use crate::state::{AppState, QuestionPending};
 use crate::{
     ask_permission_for_tool, execute_mcp_gateway, execute_mcp_tool_by_runtime_id,
     now_millis, parse_permission_required_error, permission, plugin, tool,
-    user_model_from_model_ref,
 };
 
 #[allow(dead_code)]
@@ -279,6 +275,12 @@ async fn execute_stateful_tool_call(
             };
             state
                 .inner
+                .store
+                .save_question_request(&request)
+                .await
+                .map_err(|error| error.to_string())?;
+            state
+                .inner
                 .question_waiters
                 .write()
                 .await
@@ -350,193 +352,23 @@ async fn execute_stateful_tool_call(
             let agent_name = string_arg(&input, "subagent_type")
                 .ok_or_else(|| "tool argument subagent_type is required".to_string())?;
             ensure_tool_permission(permissions, "task", &agent_name)?;
-            let prompt = string_arg(&input, "prompt")
-                .ok_or_else(|| "tool argument prompt is required".to_string())?;
-            let description = string_arg(&input, "description")
-                .unwrap_or_else(|| prompt.chars().take(48).collect::<String>());
-            let command =
-                string_arg(&input, "command").unwrap_or_else(|| description.clone());
-            let background = bool_arg(&input, "background").unwrap_or(true);
-            let parent = state
-                .inner
-                .store
-                .get_session(session_id.as_str())
-                .await
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("session {session_id} not found"))?;
-            let task_id = string_arg(&input, "task_id");
-            let continuing_existing_task = task_id.is_some();
-            if !continuing_existing_task {
-                let depth = session_subtask_depth(state, &parent).await;
-                if depth + 1 > MAX_SUBTASK_DEPTH {
-                    return Err(format!(
-                        "subagent depth limit reached ({MAX_SUBTASK_DEPTH}): this session is already {depth} level(s) deep in the subagent tree. Do the remaining work directly in this session instead of spawning further subagents."
-                    ));
-                }
-            }
-            if crate::external_agent::is_external_agent(&agent_name) {
-                return crate::external_agent::execute_external_task(
-                    state,
-                    &parent,
-                    &agent_name,
-                    &command,
-                    &description,
-                    prompt,
-                    task_id,
-                    background,
-                    cancel.clone(),
-                )
-                .await
-                .map(Some);
-            }
-            let agents = AgentCatalog::load(&parent.directory)
-                .map_err(|error| error.to_string())?;
-            let agent = agents.get(&agent_name).ok_or_else(|| {
-                let available = agents
-                    .list()
-                    .into_iter()
-                    .filter(|agent| agent.mode == "subagent")
-                    .map(|agent| agent.name)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "Unknown agent type: {agent_name} is not a valid agent type. Available subagents: {available}"
-                )
-            })?;
-            let child_model = agent
-                .model
-                .as_ref()
-                .or(parent.model.as_ref())
-                .map(user_model_from_model_ref);
-            let child_session_id = if let Some(task_id) = task_id.as_deref() {
-                if let Some(child) = state
-                    .inner
-                    .store
-                    .get_session(task_id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                {
-                    ensure_child_task_belongs_to_parent(state, &parent, &child).await?;
-                    child.id.to_string()
-                } else {
-                    let child = create_subtask_session(
-                        state,
-                        &parent,
-                        &command,
-                        &description,
-                        &agent.name,
-                        child_model.clone(),
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
-                    child.id.to_string()
-                }
-            } else {
-                let child = create_subtask_session(
-                    state,
-                    &parent,
-                    &command,
-                    &description,
-                    &agent.name,
-                    child_model.clone(),
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                child.id.to_string()
-            };
-            if session_is_running(state, &child_session_id).await {
-                if continuing_existing_task {
-                    let queue_len = steer_child_task_prompt(
-                        state,
-                        &child_session_id,
-                        &prompt,
-                        &agent.name,
-                        child_model,
-                    )
-                    .await?;
-                    return Ok(Some(tool::ToolExecutionResult {
-                        title: description,
-                        output: task_queued_output(&child_session_id, queue_len),
-                        metadata: Some(task_metadata(
-                            &child_session_id,
-                            &agent.name,
-                            "queued",
-                            true,
-                        )),
-                    }));
-                }
-                return Ok(Some(tool::ToolExecutionResult {
-                    title: description,
-                    output: task_running_output(&child_session_id),
-                    metadata: Some(task_metadata(
-                        &child_session_id,
-                        &agent.name,
-                        "running",
-                        background,
-                    )),
-                }));
-            }
-            if background {
-                let generation = Id::ascending(IdKind::Message);
-                crate::session_actions::mark_subtask_notify_on_idle(
-                    state,
-                    &child_session_id,
-                    &generation,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                spawn_background_subtask_prompt(
-                    state.clone(),
-                    child_session_id.clone(),
-                    generation,
-                    prompt,
-                    agent.name.clone(),
-                    child_model,
-                );
-                return Ok(Some(tool::ToolExecutionResult {
-                    title: description,
-                    output: task_started_output(&child_session_id),
-                    metadata: Some(task_metadata(
-                        &child_session_id,
-                        &agent.name,
-                        "running",
-                        true,
-                    )),
-                }));
-            }
-            let result = run_child_task_prompt_with_cancel(
+            crate::plugins::subagents::start_task_tool(
                 state,
-                &child_session_id,
-                Id::ascending(IdKind::Message),
-                &prompt,
-                agent.name.clone(),
-                child_model,
+                session_id,
+                input,
                 cancel.clone(),
             )
             .await
-            .map_err(|error| error.to_string())?;
-            Ok(Some(tool::ToolExecutionResult {
-                title: description,
-                output: task_result_output(
-                    &child_session_id,
-                    last_text_part(&result).unwrap_or_default(),
-                ),
-                metadata: Some(task_metadata(
-                    &child_session_id,
-                    &agent.name,
-                    "completed",
-                    false,
-                )),
-            }))
+            .map(Some)
         }
         "task_result" => {
             ensure_tool_permission(permissions, "task_result", "*")?;
-            let result = task_result_tool(state, session_id, input).await?;
+            let result = crate::plugins::subagents::task_result_tool(state, session_id, input).await?;
             Ok(Some(result))
         }
         "stop_task" => {
             ensure_tool_permission(permissions, "stop_task", "*")?;
-            let result = stop_task_tool(state, session_id, input).await?;
+            let result = crate::plugins::subagents::stop_task_tool(state, session_id, input).await?;
             Ok(Some(result))
         }
         "complete_goal" => {
@@ -553,6 +385,9 @@ async fn execute_stateful_tool_call(
                 .await
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("session {session_id} not found"))?;
+            if !crate::plugins::enabled(&info.directory, "dev.neoism.goals") {
+                return Err("Goal plugin is disabled for the workspace".to_string());
+            }
             let Some(mut goal) = info.goal() else {
                 return Ok(Some(tool::ToolExecutionResult {
                     title: "No active goal".to_string(),
@@ -667,10 +502,10 @@ async fn execute_stateful_tool_call(
 /// permission-based guard: a session more than this many levels deep in the
 /// parent chain may not spawn further subagents. (Codex defaults to depth 1;
 /// we leave headroom for agents whose config explicitly grants `task`.)
-const MAX_SUBTASK_DEPTH: usize = 3;
+pub(crate) const MAX_SUBTASK_DEPTH: usize = 3;
 
 /// Number of ancestors above `session` in the subagent tree (root => 0).
-async fn session_subtask_depth(state: &AppState, session: &SessionInfo) -> usize {
+pub(crate) async fn session_subtask_depth(state: &AppState, session: &SessionInfo) -> usize {
     let mut depth = 0usize;
     let mut ancestor = session.parent_id.clone();
     // Bounded walk so malformed parent links can never loop forever.
@@ -719,10 +554,6 @@ fn string_arg(input: &Value, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn bool_arg(input: &Value, key: &str) -> Option<bool> {
-    input.get(key).and_then(Value::as_bool)
-}
-
 fn last_text_part(message: &MessageWithParts) -> Option<String> {
     message.parts.iter().rev().find_map(|part| match part {
         Part::Text(text) => Some(text.text.clone()),
@@ -758,7 +589,7 @@ fn last_assistant_text(message: &MessageWithParts) -> Option<String> {
 /// real work this session caused (a subagent's own subagents), and the model
 /// must be able to inspect and stop them; matching direct children only left
 /// nested subagent trees invisible and unstoppable from the root session.
-async fn ensure_child_task_belongs_to_parent(
+pub(crate) async fn ensure_child_task_belongs_to_parent(
     state: &AppState,
     parent: &SessionInfo,
     child: &SessionInfo,
@@ -786,7 +617,7 @@ async fn ensure_child_task_belongs_to_parent(
 
 /// Every session in the subagent tree rooted at `root_id` (children,
 /// grandchildren, ...), breadth-first.
-async fn descendant_sessions(
+pub(crate) async fn descendant_sessions(
     state: &AppState,
     root_id: &str,
 ) -> Result<Vec<SessionInfo>, String> {
@@ -818,11 +649,11 @@ async fn descendant_sessions(
     Ok(descendants)
 }
 
-async fn session_is_running(state: &AppState, session_id: &str) -> bool {
+pub(crate) async fn session_is_running(state: &AppState, session_id: &str) -> bool {
     state.inner.runs.read().await.contains_key(session_id)
 }
 
-async fn steer_child_task_prompt(
+pub(crate) async fn steer_child_task_prompt(
     state: &AppState,
     child_session_id: &str,
     prompt: &str,
@@ -884,7 +715,7 @@ async fn steer_child_task_prompt(
     Ok(queue_len)
 }
 
-fn task_metadata(
+pub(crate) fn task_metadata(
     child_session_id: &str,
     agent: &str,
     status: &str,
@@ -898,7 +729,7 @@ fn task_metadata(
     })
 }
 
-fn task_started_output(child_session_id: &str) -> String {
+pub(crate) fn task_started_output(child_session_id: &str) -> String {
     [
         format!("task_id: {child_session_id} (use this to check or continue the subagent task)"),
         "status: running".to_string(),
@@ -909,7 +740,7 @@ fn task_started_output(child_session_id: &str) -> String {
     .join("\n")
 }
 
-fn task_running_output(child_session_id: &str) -> String {
+pub(crate) fn task_running_output(child_session_id: &str) -> String {
     [
         format!("task_id: {child_session_id}"),
         "status: running".to_string(),
@@ -920,7 +751,7 @@ fn task_running_output(child_session_id: &str) -> String {
     .join("\n")
 }
 
-fn task_queued_output(child_session_id: &str, queue_len: usize) -> String {
+pub(crate) fn task_queued_output(child_session_id: &str, queue_len: usize) -> String {
     [
         format!("task_id: {child_session_id}"),
         "status: queued".to_string(),
@@ -932,168 +763,7 @@ fn task_queued_output(child_session_id: &str, queue_len: usize) -> String {
     .join("\n")
 }
 
-async fn task_result_tool(
-    state: &AppState,
-    session_id: &Id,
-    input: Value,
-) -> Result<tool::ToolExecutionResult, String> {
-    let parent = state
-        .inner
-        .store
-        .get_session(session_id.as_str())
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("session {session_id} not found"))?;
-    if let Some(task_id) = string_arg(&input, "task_id") {
-        let child = state
-            .inner
-            .store
-            .get_session(&task_id)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("task_id {task_id} not found"))?;
-        ensure_child_task_belongs_to_parent(state, &parent, &child).await?;
-        let (status, output) = task_result_output_for_child(state, &child).await?;
-        return Ok(tool::ToolExecutionResult {
-            title: child.title,
-            output,
-            metadata: Some(json!({
-                "sessionId": task_id,
-                "agent": child.agent,
-                "status": status,
-            })),
-        });
-    }
-
-    let mut children = descendant_sessions(state, parent.id.as_str()).await?;
-    children.sort_by(|left, right| right.time.updated.cmp(&left.time.updated));
-    if children.is_empty() {
-        return Ok(tool::ToolExecutionResult {
-            title: "Subagent tasks".to_string(),
-            output: "No subagent tasks exist for this session yet.".to_string(),
-            metadata: Some(json!({ "tasks": [] })),
-        });
-    }
-
-    let mut lines =
-        vec!["Subagent tasks for this session (including nested subagents):".to_string()];
-    let mut metadata = Vec::new();
-    for child in children {
-        let status = task_status_for_child(state, &child).await?;
-        let agent = child.agent.as_deref().unwrap_or("subagent");
-        let nested =
-            child.parent_id.as_ref().map(|id| id.as_str()) != Some(parent.id.as_str());
-        lines.push(format!(
-            "task_id: {} status: {} agent: {} title: {}{}",
-            child.id,
-            status,
-            agent,
-            child.title,
-            if nested { " (nested)" } else { "" }
-        ));
-        metadata.push(json!({
-            "sessionId": child.id,
-            "agent": child.agent,
-            "status": status,
-            "title": child.title,
-            "nested": nested,
-        }));
-    }
-    Ok(tool::ToolExecutionResult {
-        title: "Subagent tasks".to_string(),
-        output: lines.join("\n"),
-        metadata: Some(json!({ "tasks": metadata })),
-    })
-}
-
-/// Stops one subagent (by `task_id`) or every running subagent for this
-/// session (when `task_id` is omitted). Cancelling aborts the in-flight run and
-/// clears any queued follow-up prompts so they do not start after the stop.
-async fn stop_task_tool(
-    state: &AppState,
-    session_id: &Id,
-    input: Value,
-) -> Result<tool::ToolExecutionResult, String> {
-    let parent = state
-        .inner
-        .store
-        .get_session(session_id.as_str())
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("session {session_id} not found"))?;
-
-    if let Some(task_id) = string_arg(&input, "task_id") {
-        let child = state
-            .inner
-            .store
-            .get_session(&task_id)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("task_id {task_id} not found"))?;
-        ensure_child_task_belongs_to_parent(state, &parent, &child).await?;
-        let was_running = session_is_running(state, &task_id).await;
-        crate::session_actions::abort_session_run(state, &task_id).await;
-        let cleared =
-            crate::session_queue::clear_session_prompt_queue(state, &task_id).await;
-        // Stopping a subtree root must also stop everything it spawned, or
-        // its own subagents keep running (and spawning) as orphans.
-        let mut nested_stopped = 0usize;
-        for descendant in descendant_sessions(state, &task_id).await? {
-            let descendant_id = descendant.id.as_str();
-            if session_is_running(state, descendant_id).await {
-                crate::session_actions::abort_session_run(state, descendant_id).await;
-                crate::session_queue::clear_session_prompt_queue(state, descendant_id)
-                    .await;
-                nested_stopped += 1;
-            }
-        }
-        let status = if was_running {
-            "stopped"
-        } else {
-            "not running"
-        };
-        return Ok(tool::ToolExecutionResult {
-            title: format!("Stopped subagent: {}", child.title),
-            output: format!(
-                "task_id: {task_id}\nstatus: {status}\nCleared {cleared} queued prompt(s). Stopped {nested_stopped} nested subagent(s)."
-            ),
-            metadata: Some(json!({
-                "sessionId": task_id,
-                "stopped": was_running,
-                "clearedQueue": cleared,
-                "nestedStopped": nested_stopped,
-            })),
-        });
-    }
-
-    let children = descendant_sessions(state, parent.id.as_str()).await?;
-
-    let mut stopped = Vec::new();
-    for child in &children {
-        let child_id = child.id.as_str();
-        if session_is_running(state, child_id).await {
-            crate::session_actions::abort_session_run(state, child_id).await;
-            crate::session_queue::clear_session_prompt_queue(state, child_id).await;
-            stopped.push(json!({ "sessionId": child.id, "title": child.title }));
-        }
-    }
-
-    let output = if stopped.is_empty() {
-        "No running subagents to stop for this session.".to_string()
-    } else {
-        format!(
-            "Stopped {} running subagent(s) (including nested).",
-            stopped.len()
-        )
-    };
-    Ok(tool::ToolExecutionResult {
-        title: "Stopped subagents".to_string(),
-        output,
-        metadata: Some(json!({ "stopped": stopped })),
-    })
-}
-
-async fn task_result_output_for_child(
+pub(crate) async fn task_result_output_for_child(
     state: &AppState,
     child: &SessionInfo,
 ) -> Result<(String, String), String> {
@@ -1139,7 +809,7 @@ async fn task_result_output_for_child(
     ))
 }
 
-async fn task_status_for_child(
+pub(crate) async fn task_status_for_child(
     state: &AppState,
     child: &SessionInfo,
 ) -> Result<String, String> {
@@ -1147,7 +817,7 @@ async fn task_status_for_child(
     Ok(status)
 }
 
-fn task_result_output(child_session_id: &str, text: String) -> String {
+pub(crate) fn task_result_output(child_session_id: &str, text: String) -> String {
     [
         format!(
             "task_id: {child_session_id} (for resuming to continue this task if needed)"
@@ -1161,7 +831,7 @@ fn task_result_output(child_session_id: &str, text: String) -> String {
     .join("\n")
 }
 
-async fn run_child_task_prompt_with_cancel(
+pub(crate) async fn run_child_task_prompt_with_cancel(
     state: &AppState,
     child_id: &str,
     generation: MessageId,

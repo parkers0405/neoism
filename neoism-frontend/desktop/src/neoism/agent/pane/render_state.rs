@@ -721,9 +721,9 @@ impl NeoismAgentPane {
     }
 
     /// Push the local peer's presence display name (the same seed the
-    /// editor caret / top-chrome orb use). Used as the fallback author
-    /// for user messages with no explicit `author`, so the local user's
-    /// own messages render their own presence orb.
+    /// editor caret / top-chrome orb use). Native prompt submission sends
+    /// this as the explicit author and the renderer uses it to distinguish
+    /// this peer from remote senders.
     pub fn set_local_presence_name(&mut self, name: Option<String>) {
         let name = name.and_then(|name| {
             let trimmed = name.trim();
@@ -735,7 +735,7 @@ impl NeoismAgentPane {
     }
 
     /// The local peer's presence display name, if the screen has published
-    /// one — the fallback orb seed for authorless user messages.
+    /// one.
     pub fn local_presence_name(&self) -> Option<&str> {
         self.local_presence_name.as_deref()
     }

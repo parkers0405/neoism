@@ -1,0 +1,15 @@
+{
+  "name": "@neoism/sdk-all",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist"],
+  "dependencies": {
+    "@neoism/sdk-core": "0.1.0",
+    "@neoism/sdk-http": "0.1.0",
+    "@neoism/sdk-plugin-subagents": "0.1.0"
+  }
+}

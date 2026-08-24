@@ -10,11 +10,14 @@ use std::sync::Arc;
 
 mod agent;
 mod agent_tool_registry;
+mod artifact_routes;
 mod app_router;
 mod app_routes;
 pub mod auth_cli;
 mod auth_store;
+mod audit_routes;
 mod background_job;
+mod caller;
 mod command_routes;
 mod compat_routes;
 mod config;
@@ -46,12 +49,14 @@ mod message_model;
 mod message_part_mutation;
 mod model_selection;
 mod openapi;
+pub use openapi::canonical_openapi;
 mod perf;
 mod permission;
 mod permission_runtime;
 pub mod picker_registry;
 mod platform_shell;
 mod plugin;
+mod plugins;
 mod project;
 mod project_routes;
 mod provider;
@@ -221,6 +226,15 @@ pub async fn listen(options: ServerOptions) -> anyhow::Result<SocketAddr> {
                 options.hostname, options.port
             )
         })?;
+    if !address.ip().is_loopback()
+        && std::env::var_os("NEOISM_AGENT_TOKEN").is_none()
+        && std::env::var_os("NEOISM_AGENT_AUTH_CONFIG").is_none()
+        && std::env::var("NEOISM_AGENT_ALLOW_UNAUTHENTICATED_REMOTE").as_deref() != Ok("1")
+    {
+        anyhow::bail!(
+            "refusing unauthenticated non-loopback agent server; set NEOISM_AGENT_TOKEN or explicitly set NEOISM_AGENT_ALLOW_UNAUTHENTICATED_REMOTE=1"
+        );
+    }
     tracing::info!(
         target: "neoism_agent::perf",
         host = %options.hostname,
@@ -247,7 +261,7 @@ pub async fn listen(options: ServerOptions) -> anyhow::Result<SocketAddr> {
         total_start_ms = crate::perf::elapsed_ms(started),
         "server state opened"
     );
-    let result = axum::serve(listener, app(state)).await;
+    let result = axum::serve(listener, app_router::app_with_cors(state, &options.cors)).await;
     tracing::warn!(
         target: "neoism_agent::perf",
         listen_addr = %actual,

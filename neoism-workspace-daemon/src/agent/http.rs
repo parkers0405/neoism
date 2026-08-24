@@ -7,8 +7,7 @@ pub(crate) async fn http_get_json(
     wait_for_local_agent_server(inner).await?;
     let url = format!("{}{}", inner.agent_server, path);
     let resp = inner
-        .http
-        .get(&url)
+        .authorize_agent_request(inner.http.get(&url))
         .send()
         .await
         .map_err(|err| format!("agent-server GET {path}: {err}"))?;
@@ -34,9 +33,7 @@ pub(crate) async fn http_post_json(
     wait_for_local_agent_server(inner).await?;
     let url = format!("{}{}", inner.agent_server, path);
     let resp = inner
-        .http
-        .post(&url)
-        .json(body)
+        .authorize_agent_request(inner.http.post(&url).json(body))
         .send()
         .await
         .map_err(|err| format!("agent-server POST {path}: {err}"))?;
@@ -64,9 +61,7 @@ pub(crate) async fn http_patch_json(
     wait_for_local_agent_server(inner).await?;
     let url = format!("{}{}", inner.agent_server, path);
     let resp = inner
-        .http
-        .patch(&url)
-        .json(body)
+        .authorize_agent_request(inner.http.patch(&url).json(body))
         .send()
         .await
         .map_err(|err| format!("agent-server PATCH {path}: {err}"))?;
@@ -96,9 +91,7 @@ pub(crate) async fn http_put_json(
     wait_for_local_agent_server(inner).await?;
     let url = format!("{}{}", inner.agent_server, path);
     let resp = inner
-        .http
-        .put(&url)
-        .json(body)
+        .authorize_agent_request(inner.http.put(&url).json(body))
         .send()
         .await
         .map_err(|err| format!("agent-server PUT {path}: {err}"))?;
@@ -122,8 +115,7 @@ pub(crate) async fn http_delete(inner: &AgentInner, path: &str) -> Result<(), St
     wait_for_local_agent_server(inner).await?;
     let url = format!("{}{}", inner.agent_server, path);
     let resp = inner
-        .http
-        .delete(&url)
+        .authorize_agent_request(inner.http.delete(&url))
         .send()
         .await
         .map_err(|err| format!("agent-server DELETE {path}: {err}"))?;

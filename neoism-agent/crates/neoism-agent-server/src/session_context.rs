@@ -10,7 +10,6 @@ use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use tokio_stream::StreamExt;
 
-use crate::agent::AgentCatalog;
 use crate::error::ApiError;
 use crate::model_selection::{default_user_model, user_model_from_model_ref};
 use crate::session_loop::wait_for_cancellation;
@@ -415,7 +414,7 @@ async fn generate_model_compaction_summary(
     if model_compaction_disabled() || messages.is_empty() {
         return None;
     }
-    let model = compaction_model(info, model);
+    let model = compaction_model(state, info, model);
     let providers = state
         .inner
         .provider_catalog
@@ -530,10 +529,11 @@ fn should_keep_partial_compaction_output(raw: &str) -> bool {
 }
 
 fn compaction_model(
+    state: &AppState,
     info: &SessionInfo,
     fallback: &neoism_agent_core::UserModel,
 ) -> neoism_agent_core::UserModel {
-    AgentCatalog::load(&info.directory)
+    crate::plugins::agent_catalog(state, &info.directory)
         .ok()
         .and_then(|catalog| catalog.get("compaction"))
         .and_then(|agent| compaction_model_from_agent(&agent))
@@ -1118,6 +1118,9 @@ fn session_summary_message(messages: &[MessageWithParts]) -> Option<ProviderMess
 /// it; only the injection stops. Blocked goals stay injected so the model can
 /// re-evaluate whether the user's next message unblocks it.
 fn goal_system_message(info: &SessionInfo) -> Option<ProviderMessage> {
+    if !crate::plugins::enabled(&info.directory, "dev.neoism.goals") {
+        return None;
+    }
     let goal = info.goal()?;
     let text = goal.text.trim();
     if text.is_empty() {

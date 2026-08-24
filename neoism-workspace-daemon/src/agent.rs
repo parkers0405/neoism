@@ -171,6 +171,7 @@ pub(crate) struct AgentInner {
     /// once on spawn so per-envelope dispatch doesn't re-read the
     /// env var.
     agent_server: String,
+    agent_server_token: Option<String>,
     /// Per-agent-server-session SSE forwarder handles. Inserted by
     /// `start_event_stream`, dropped on `stop_event_stream` /
     /// session-shutdown.
@@ -222,6 +223,9 @@ impl AgentSession {
                 history: Mutex::new(Vec::new()),
                 current: Mutex::new(None),
                 agent_server: configured_agent_server(),
+                agent_server_token: std::env::var("NEOISM_AGENT_TOKEN")
+                    .ok()
+                    .filter(|token| !token.trim().is_empty()),
                 stream_handles: Mutex::new(HashMap::new()),
                 inflight: Mutex::new(HashMap::new()),
             }),
@@ -263,6 +267,18 @@ impl AgentSession {
     pub fn cancel(&self) {
         if let Some(prev) = self.inner.current.lock().take() {
             prev.abort();
+        }
+    }
+}
+
+impl AgentInner {
+    pub(crate) fn authorize_agent_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        match &self.agent_server_token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
         }
     }
 }

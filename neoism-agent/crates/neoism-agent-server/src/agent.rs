@@ -69,6 +69,19 @@ impl AgentCatalog {
         &self.default_agent
     }
 
+    pub(crate) fn from_runtime(
+        agents: Vec<AgentInfo>,
+        default_agent: String,
+    ) -> Self {
+        Self {
+            agents: agents
+                .into_iter()
+                .map(|agent| (agent.name.clone(), agent))
+                .collect(),
+            default_agent,
+        }
+    }
+
     fn with_default(
         agents: BTreeMap<String, AgentInfo>,
         configured: Option<String>,

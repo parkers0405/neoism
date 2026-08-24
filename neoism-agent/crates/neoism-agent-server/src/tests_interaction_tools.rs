@@ -827,6 +827,20 @@ async fn v2_prompt_accepts_subtask_parts_and_children_page() {
 
 #[tokio::test]
 async fn permission_and_question_replies_publish_events() {
+    async fn next_matching_event(
+        events: &mut tokio::sync::broadcast::Receiver<EventPayload>,
+        expected: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if events.recv().await.unwrap().kind == expected {
+                    return;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("event {expected} was not published"));
+    }
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-events-{}.sqlite3",
         Id::ascending(IdKind::Event)
@@ -876,10 +890,7 @@ async fn permission_and_question_replies_publish_events() {
     )
     .await;
     assert!(ok);
-    assert_eq!(
-        events.recv().await.unwrap().kind,
-        event_type::PERMISSION_REPLIED
-    );
+    next_matching_event(&mut events, event_type::PERMISSION_REPLIED).await;
 
     let ok: bool = response_json(
         app.clone()
@@ -893,10 +904,7 @@ async fn permission_and_question_replies_publish_events() {
     )
     .await;
     assert!(ok);
-    assert_eq!(
-        events.recv().await.unwrap().kind,
-        event_type::QUESTION_REPLIED
-    );
+    next_matching_event(&mut events, event_type::QUESTION_REPLIED).await;
 
     let ok: bool = response_json(
         app.clone()
@@ -910,10 +918,7 @@ async fn permission_and_question_replies_publish_events() {
     )
     .await;
     assert!(ok);
-    assert_eq!(
-        events.recv().await.unwrap().kind,
-        event_type::QUESTION_REJECTED
-    );
+    next_matching_event(&mut events, event_type::QUESTION_REJECTED).await;
 
     cleanup_sqlite_files(&path);
 }

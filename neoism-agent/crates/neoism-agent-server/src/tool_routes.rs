@@ -28,6 +28,9 @@ pub(crate) async fn tool_ids(
             .register_configured_plugins(&loaded.info, &directory);
     }
     let mut ids = tool::ids();
+    if let Ok(items) = available_tools_for_directory(&state, &directory).await {
+        ids.extend(items.into_iter().map(|tool| tool.id));
+    }
     ids.extend(
         crate::custom_tool::list(&directory)
             .into_iter()

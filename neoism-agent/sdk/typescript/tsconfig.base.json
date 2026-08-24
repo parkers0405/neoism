@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@neoism/sdk-core": ["packages/core/src/index.ts"],
+      "@neoism/sdk-http": ["packages/http/src/index.ts"],
+      "@neoism/sdk-node": ["packages/node/src/index.ts"],
+      "@neoism/sdk-plugin-subagents": ["packages/plugin-subagents/src/index.ts"]
+    },
+    "strict": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "verbatimModuleSyntax": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "skipLibCheck": true
+  }
+}

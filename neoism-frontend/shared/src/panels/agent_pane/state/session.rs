@@ -503,6 +503,7 @@ impl NeoismAgentPane {
         if transcript_echo {
             let mut message =
                 NeoismAgentMessage::user(echo_prompt.clone()).with_id(message_id.clone());
+            message.author = self.local_presence_name.clone();
             message.images = self.input_images();
             self.messages.push(message);
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));

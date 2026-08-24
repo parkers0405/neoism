@@ -11,7 +11,6 @@ use neoism_agent_core::{
 use serde_json::{json, Value};
 use tokio_stream::StreamExt;
 
-use crate::agent::AgentCatalog;
 use crate::error::ApiError;
 use crate::message_part_mutation::{
     set_tool_completed, set_tool_error, set_tool_running,
@@ -108,7 +107,7 @@ pub(crate) async fn append_prompt(
         let trimmed = name.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     });
-    let agents = AgentCatalog::load(&info.directory)?;
+    let agents = crate::plugins::agent_catalog(state, &info.directory)?;
     let agent_name = agent
         .or_else(|| info.agent.clone())
         .unwrap_or_else(|| agents.default_agent().to_string());
@@ -751,6 +750,9 @@ fn active_goal_should_continue(
     step_number: u64,
     step_limit: u64,
 ) -> bool {
+    if !crate::plugins::enabled(&info.directory, "dev.neoism.goals") {
+        return false;
+    }
     if step_number >= step_limit {
         return false;
     }

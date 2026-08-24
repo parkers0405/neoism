@@ -1,0 +1,17 @@
+{
+  "name": "@neoism/sdk-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "contract:print": "cargo run --quiet --manifest-path ../../../Cargo.toml -p neoism-agent -- openapi",
+    "contract:check": "bash ../../scripts/openapi.sh check",
+    "contract:update": "bash ../../scripts/openapi.sh update",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

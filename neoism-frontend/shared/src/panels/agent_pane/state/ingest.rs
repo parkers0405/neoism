@@ -47,28 +47,44 @@ impl NeoismAgentPane {
         let pending = std::mem::take(&mut self.pending_user_prompts);
         let mut unresolved = Vec::new();
         let mut inserts = Vec::new();
+        let mut consumed_server = vec![false; server_messages.len()];
+        let mut consumed_previous = vec![false; previous_messages.len()];
 
         for prompt in pending {
-            if let Some(server_index) = server_messages
-                .iter()
-                .position(|message| is_user_prompt(message, &prompt))
+            if let Some(server_index) =
+                server_messages
+                    .iter()
+                    .enumerate()
+                    .position(|(index, message)| {
+                        !consumed_server[index] && is_user_prompt(message, &prompt)
+                    })
             {
+                consumed_server[server_index] = true;
                 if let Some(previous_index) = previous_messages
                     .iter()
-                    .rposition(|message| is_user_prompt(message, &prompt))
-                    .filter(|previous_index| *previous_index < server_index)
+                    .enumerate()
+                    .position(|(index, message)| {
+                        !consumed_previous[index] && is_user_prompt(message, &prompt)
+                    })
                 {
-                    let message = server_messages.remove(server_index);
-                    server_messages
-                        .insert(previous_index.min(server_messages.len()), message);
+                    consumed_previous[previous_index] = true;
                 }
                 continue;
             }
-            let previous_index = previous_messages
-                .iter()
-                .rposition(|message| is_user_prompt(message, &prompt))
-                .unwrap_or(server_messages.len());
-            inserts.push((previous_index, NeoismAgentMessage::user(prompt.clone())));
+            let previous_index =
+                previous_messages
+                    .iter()
+                    .enumerate()
+                    .position(|(index, message)| {
+                        !consumed_previous[index] && is_user_prompt(message, &prompt)
+                    });
+            let message = previous_index
+                .map(|index| {
+                    consumed_previous[index] = true;
+                    previous_messages[index].clone()
+                })
+                .unwrap_or_else(|| NeoismAgentMessage::user(prompt.clone()));
+            inserts.push((previous_index.unwrap_or(server_messages.len()), message));
             unresolved.push(prompt);
         }
 

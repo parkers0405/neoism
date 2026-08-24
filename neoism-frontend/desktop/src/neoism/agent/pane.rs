@@ -22,6 +22,7 @@ use neoism_ui::panels::agent_pane::state::{
 use neoism_ui::panels::agent_pane::status_policy;
 use neoism_ui::panels::agent_pane::timeline_scroll_policy::ctrl_u_d_scroll_delta;
 use neoism_ui::panels::agent_pane::usage_policy::{self, UsageSnapshot};
+use neoism_ui::panels::agent_pane::view::timeline::TimelineViewAnchorKey;
 use serde_json::{json, Value};
 
 use super::api::{
@@ -34,7 +35,8 @@ use super::api::{
 use super::commands::slash_options;
 use super::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
 use super::side_panel::{
-    BranchStatus, NeoismAgentSessionEntry, NeoismAgentSidePanel, SessionGoal,
+    BranchStatus, BranchStatusTransition, NeoismAgentSessionEntry, NeoismAgentSidePanel,
+    SessionGoal,
 };
 use super::updates::{
     start_session_event_stream, AgentSessionEventStream, AgentSessionUpdate,
@@ -210,7 +212,7 @@ pub(crate) struct TimelineAnchor {
 
 #[derive(Clone, Debug)]
 struct TimelineViewAnchor {
-    message_id: String,
+    key: TimelineViewAnchorKey,
     screen_offset: f32,
 }
 
@@ -1555,20 +1557,27 @@ pub(super) fn reconcile_cached_pending_user_prompts(
             message.text = echo.clone();
         }
     }
-    pending.retain(|prompt| {
-        let resolved = snapshot.iter().any(|message| {
-            message.kind == NeoismAgentMessageKind::User
+    let mut consumed_snapshot = vec![false; snapshot.len()];
+    let mut unresolved = Vec::new();
+    for prompt in std::mem::take(pending) {
+        let resolved = snapshot.iter().enumerate().position(|(index, message)| {
+            !consumed_snapshot[index]
+                && message.kind == NeoismAgentMessageKind::User
                 && message.text.trim() == prompt.trim()
         });
-        if resolved {
-            live.retain(|message| {
-                !(message.kind == NeoismAgentMessageKind::User
-                    && message.id.is_empty()
-                    && message.text.trim() == prompt.trim())
-            });
+        let Some(snapshot_index) = resolved else {
+            unresolved.push(prompt);
+            continue;
+        };
+        consumed_snapshot[snapshot_index] = true;
+        if let Some(live_index) = live.iter().position(|message| {
+            message.kind == NeoismAgentMessageKind::User
+                && message.text.trim() == prompt.trim()
+        }) {
+            live.remove(live_index);
         }
-        !resolved
-    });
+    }
+    *pending = unresolved;
 }
 
 fn session_message_identity(message: &NeoismAgentMessage) -> Option<String> {

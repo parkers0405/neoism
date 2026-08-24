@@ -17,7 +17,7 @@ pub const PROJECT_METADATA_FILE: &str = "project.json";
 /// Pre-JSON vault metadata file, read once to upgrade in place.
 const PROJECT_METADATA_FILE_LEGACY: &str = "project.toml";
 pub(crate) const DEFAULT_NOTES_WORKSPACE_ID: &str = "neoism-notes-default-v1";
-const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v6";
+const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v10";
 
 const REPLACED_WELCOME_PATHS: &[&str] = &[
     "Getting Started.md",
@@ -1064,7 +1064,7 @@ fn seed_welcome_docs(default_vault: &Path) -> std::io::Result<()> {
     }
 
     let welcome = default_vault.join(WELCOME_DIR);
-    // v4 replaces the old flat handbook. Remove only paths Neoism shipped;
+    // Version bumps replace the old managed handbook. Remove only paths Neoism shipped;
     // unrelated notes in Welcome remain user-owned.
     for replaced in REPLACED_WELCOME_PATHS {
         let path = welcome.join(replaced);
@@ -1076,7 +1076,7 @@ fn seed_welcome_docs(default_vault: &Path) -> std::io::Result<()> {
     }
     // A marker bump is a one-time managed-doc migration: replaced paths are
     // removed, every current bundled page is installed/refreshed, and unrelated
-    // user notes remain untouched. Once the v4 marker exists this function
+    // user notes remain untouched. Once the current marker exists this function
     // returns early, so later user edits and deletions are honored.
     for doc in crate::docs::BUNDLED_DOCS {
         let page = welcome.join(doc.path);

@@ -1,8 +1,36 @@
 use super::draw::{
     draw_subagent_spinner, intersect_rect, push_provider_icon_clipped,
-    render_back_button, set_back_cursor_if_focused,
+    render_back_button, render_scramble_text, set_back_cursor_if_focused,
 };
 use super::*;
+
+/// Compact token count for the context bar label (e.g. `32.1k`, `1.2m`).
+fn format_count_short(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}m", value as f64 / 1_000_000.0)
+    } else if value >= 10_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+pub(super) fn context_fill_fraction(total: u64, limit: Option<u64>) -> f32 {
+    match limit.filter(|limit| *limit > 0) {
+        Some(limit) => total as f32 / limit as f32,
+        // A missing provider limit still gets a readable level indicator.
+        None => 0.35,
+    }
+    .clamp(0.0, 1.0)
+}
+
+pub(super) fn context_count_label(total: u64, limit: Option<u64>) -> String {
+    let total = format_count_short(total);
+    match limit.filter(|limit| *limit > 0) {
+        Some(limit) => format!("{} / {} tokens", total, format_count_short(limit)),
+        None => format!("{total} tokens"),
+    }
+}
 
 /// H3-heading font size for the agent side-panel section titles. Mirrors the
 /// Markdown renderer's `heading_level_font_size(3)` (22.5px, on the 17px
@@ -334,15 +362,10 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     );
 
     // --- Usage ---
-    // Pulls already-formatted lines from `usage_detail_lines()`:
-    //   [0] "Context X%   Y / Z tokens"  (or "Context Y tokens" if no limit)
-    //   [1] "Total price $X.XX"
-    //   [2] "Last turn $X.XX"
-    // We render the first three — anything past that (input/output/
-    // cache/etc.) is already reachable via the usage chip's context
-    // menu and would crowd the panel.
-    let usage_lines = pane.usage_detail_lines();
-    if !usage_lines.is_empty() {
+    // Compact System 7-style context meter. Its square, two-step bevel and
+    // quiet platinum face deliberately read as a control strip rather than a
+    // modern pill; token/cost calculations remain owned by the usage policy.
+    if let Some((context_total, limit)) = pane.context_usage() {
         y += 6.0 * s;
         y = render_section_header(
             sugarloaf,
@@ -354,24 +377,95 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
             clip,
             occlusion_rects,
         );
-        for (ix, line) in usage_lines.iter().take(3).enumerate() {
-            let color = if ix == 0 {
-                theme.u8(theme.fg)
-            } else {
-                theme.u8(theme.dim)
+        pane.side_panel_mut()
+            .update_usage_meter(context_total, limit);
+        let stroke = (1.0 * s).max(1.0);
+        let bar_h = (11.0 * s).max(9.0);
+        let bar_y = y + 2.0 * s;
+        let track_w = text_w;
+
+        // Black keyline, pale top/left highlight, then a recessed cool-gray
+        // well. The unrounded corners and exact one-pixel steps are the
+        // characteristic Platinum control-strip silhouette.
+        sugarloaf.quad(
+            None,
+            text_x,
+            bar_y,
+            track_w,
+            bar_h,
+            [0.18, 0.19, 0.19, 1.0],
+            [0.0; 4],
+            DEPTH,
+            ORDER_PANEL + 2,
+        );
+        sugarloaf.quad(
+            None,
+            text_x + stroke,
+            bar_y + stroke,
+            (track_w - stroke * 2.0).max(0.0),
+            (bar_h - stroke * 2.0).max(0.0),
+            [0.86, 0.85, 0.81, 1.0],
+            [0.0; 4],
+            DEPTH,
+            ORDER_PANEL + 3,
+        );
+        let well_x = text_x + stroke * 2.0;
+        let well_y = bar_y + stroke * 2.0;
+        let well_w = (track_w - stroke * 3.0).max(0.0);
+        let well_h = (bar_h - stroke * 3.0).max(0.0);
+        sugarloaf.quad(
+            None,
+            well_x,
+            well_y,
+            well_w,
+            well_h,
+            [0.42, 0.43, 0.42, 1.0],
+            [0.0; 4],
+            DEPTH,
+            ORDER_PANEL + 4,
+        );
+        let fill_w = well_w * context_fill_fraction(context_total, limit);
+        if fill_w > 0.0 {
+            sugarloaf.quad(
+                None,
+                well_x,
+                well_y,
+                fill_w,
+                well_h,
+                [0.69, 0.69, 0.65, 1.0],
+                [0.0; 4],
+                DEPTH,
+                ORDER_PANEL + 5,
+            );
+        }
+        y = bar_y + bar_h + 6.0 * s;
+        let label = context_count_label(context_total, limit);
+        if let Some(elapsed_ms) = pane.side_panel().usage_scramble_elapsed_ms() {
+            let opts = DrawOpts {
+                font_size: FONT_SIZE * s * 0.95,
+                color: theme.u8(theme.fg),
+                clip_rect: Some(clip),
+                ..DrawOpts::default()
             };
+            render_scramble_text(sugarloaf, text_x, y, &label, &opts, elapsed_ms);
+            y += FONT_SIZE * s * 1.5;
+        } else {
             y = render_text_line(
                 sugarloaf,
-                line,
+                &label,
                 text_x,
                 y,
                 text_w,
-                color,
+                theme.u8(theme.fg),
                 theme,
                 s,
                 clip,
                 occlusion_rects,
             );
+        }
+        let usage_rect = [text_x, bar_y, track_w, (y - bar_y).max(bar_h)];
+        if let Some(visible_rect) = intersect_rect(usage_rect, clip) {
+            pane.side_panel_mut().set_usage_rect(visible_rect);
         }
     }
 

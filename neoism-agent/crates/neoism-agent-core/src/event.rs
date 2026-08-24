@@ -70,4 +70,6 @@ pub mod event_type {
     pub const SESSION_SUBTASK_COMPLETED: &str = "session.subtask.completed";
     pub const SESSION_UPDATED: &str = "session.updated";
     pub const TODO_UPDATED: &str = "todo.updated";
+    pub const WORKFLOW_UPDATED: &str = "workflow.updated";
+    pub const WORKFLOW_RUN_UPDATED: &str = "workflow.run.updated";
 }

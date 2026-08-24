@@ -366,6 +366,7 @@ pub(crate) fn apply_agent_event_to_pane(
         }
         AgentServerMessage::ToolUseResult {
             tool_use_id,
+            session_id,
             status,
             output,
             error,
@@ -377,7 +378,7 @@ pub(crate) fn apply_agent_event_to_pane(
                 output,
                 error,
             );
-            pane.remove_pending_permission(&tool_use_id);
+            pane.note_permission_replied(&tool_use_id, Some(&session_id));
         }
 
         // -- Structured questions (the `question` tool) ----------

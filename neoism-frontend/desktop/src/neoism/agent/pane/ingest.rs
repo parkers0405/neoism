@@ -75,11 +75,7 @@ impl NeoismAgentPane {
                     let previous_len = self.messages.len();
                     let structural = previous_len != messages.len();
                     let stable_prefix = previous_len <= messages.len()
-                        && self
-                            .messages
-                            .iter()
-                            .zip(messages.iter())
-                            .all(|(existing, incoming)| existing.id == incoming.id);
+                        && stable_timeline_source_prefix(&self.messages, &messages);
                     let dirty_indices: Vec<usize> = if structural {
                         Vec::new()
                     } else {
@@ -445,16 +441,7 @@ impl NeoismAgentPane {
                     request_id,
                     session_id,
                 } => {
-                    if let Some(session_id) = session_id {
-                        if Some(session_id.as_str()) != self.session_id.as_deref() {
-                            self.side_panel.set_branch_activity_status(
-                                session_id,
-                                BranchStatus::Active,
-                            );
-                        }
-                    }
-                    if self.remove_pending_permission(&request_id) {
-                        self.sync_subagent_waiting_clock();
+                    if self.note_permission_replied(&request_id, session_id.as_deref()) {
                         changed = true;
                     }
                 }
@@ -2060,28 +2047,44 @@ impl NeoismAgentPane {
         let pending = std::mem::take(&mut self.pending_user_prompts);
         let mut unresolved = Vec::new();
         let mut inserts = Vec::new();
+        let mut consumed_server = vec![false; server_messages.len()];
+        let mut consumed_previous = vec![false; previous_messages.len()];
 
         for prompt in pending {
-            if let Some(server_index) = server_messages
-                .iter()
-                .position(|message| is_user_prompt(message, &prompt))
+            if let Some(server_index) =
+                server_messages
+                    .iter()
+                    .enumerate()
+                    .position(|(index, message)| {
+                        !consumed_server[index] && is_user_prompt(message, &prompt)
+                    })
             {
+                consumed_server[server_index] = true;
                 if let Some(previous_index) = previous_messages
                     .iter()
-                    .rposition(|message| is_user_prompt(message, &prompt))
-                    .filter(|previous_index| *previous_index < server_index)
+                    .enumerate()
+                    .position(|(index, message)| {
+                        !consumed_previous[index] && is_user_prompt(message, &prompt)
+                    })
                 {
-                    let message = server_messages.remove(server_index);
-                    server_messages
-                        .insert(previous_index.min(server_messages.len()), message);
+                    consumed_previous[previous_index] = true;
                 }
                 continue;
             }
-            let previous_index = previous_messages
-                .iter()
-                .rposition(|message| is_user_prompt(message, &prompt))
-                .unwrap_or(server_messages.len());
-            inserts.push((previous_index, NeoismAgentMessage::user(prompt.clone())));
+            let previous_index =
+                previous_messages
+                    .iter()
+                    .enumerate()
+                    .position(|(index, message)| {
+                        !consumed_previous[index] && is_user_prompt(message, &prompt)
+                    });
+            let message = previous_index
+                .map(|index| {
+                    consumed_previous[index] = true;
+                    previous_messages[index].clone()
+                })
+                .unwrap_or_else(|| NeoismAgentMessage::user(prompt.clone()));
+            inserts.push((previous_index.unwrap_or(server_messages.len()), message));
             unresolved.push(prompt);
         }
 
@@ -2391,6 +2394,29 @@ impl NeoismAgentPane {
             }
         }
     }
+}
+
+pub(super) fn stable_timeline_source_prefix(
+    previous: &[NeoismAgentMessage],
+    incoming: &[NeoismAgentMessage],
+) -> bool {
+    previous.iter().zip(incoming).all(|(existing, next)| {
+        if existing.id != next.id {
+            return false;
+        }
+        if existing.id.is_empty() {
+            return existing == next;
+        }
+        let previous_duplicates = previous
+            .iter()
+            .filter(|message| message.id == existing.id)
+            .count();
+        let incoming_duplicates = incoming
+            .iter()
+            .filter(|message| message.id == existing.id)
+            .count();
+        (previous_duplicates == 1 && incoming_duplicates == 1) || existing == next
+    })
 }
 
 fn move_grouped_assistant_after_reasoning(

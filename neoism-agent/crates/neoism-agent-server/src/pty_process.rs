@@ -960,7 +960,9 @@ mod conpty {
                 ptr::null(),
                 ptr::null(),
                 0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                EXTENDED_STARTUPINFO_PRESENT
+                    | CREATE_UNICODE_ENVIRONMENT
+                    | CREATE_NO_WINDOW,
                 env_block.as_mut_ptr() as *mut core::ffi::c_void,
                 cwd_wide
                     .as_ref()

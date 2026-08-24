@@ -396,8 +396,11 @@ impl NeoismAgentPane {
         }
         self.remember_sent_prompt(&text);
         let was_streaming = self.is_streaming();
+        let message_id =
+            neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
         if !was_streaming {
-            self.messages.push(NeoismAgentMessage::user(text.clone()));
+            self.messages
+                .push(NeoismAgentMessage::user(text.clone()).with_id(message_id.clone()));
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
         }
         self.abort_requested_at = None;
@@ -407,7 +410,8 @@ impl NeoismAgentPane {
             }
             self.note_streaming(NeoismAgentStreamingState::Thinking, None);
         }
-        match self.send_prompt(&text, !was_streaming) {
+        let prompt = self.expand_text_attachments(&text);
+        match self.send_prepared_prompt(prompt, !was_streaming, message_id) {
             Ok(()) => {}
             Err(error) => {
                 self.system_message("Prompt failed", error);
@@ -856,17 +860,20 @@ impl NeoismAgentPane {
             .rsplit_once(':')
             .filter(|(_, section)| section.parse::<usize>().is_ok())
             .map_or(id.as_str(), |(parent, _)| parent);
-        if let Some(viewport) = self.timeline_viewport_rect {
-            self.timeline_view_anchor = Some(TimelineViewAnchor {
-                message_id: parent_id.to_string(),
-                screen_offset: rect[1] - viewport[1],
-            });
-        }
         if let Some(index) = self
             .messages
             .iter()
             .position(|message| message.id == parent_id)
         {
+            if let (Some(viewport), Some(key)) = (
+                self.timeline_viewport_rect,
+                TimelineViewAnchorKey::for_source(&self.messages, index),
+            ) {
+                self.timeline_view_anchor = Some(TimelineViewAnchor {
+                    key,
+                    screen_offset: rect[1] - viewport[1],
+                });
+            }
             self.mark_timeline_message_and_next_dirty_at(index);
         } else {
             self.invalidate_timeline_layout();

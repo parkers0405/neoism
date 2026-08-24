@@ -1113,6 +1113,17 @@ impl Screen<'_> {
             self.mark_dirty();
             return true;
         }
+        let side_panel_usage_hit = self
+            .context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
+            .is_some_and(|agent| agent.side_panel().usage_contains(mx, my));
+        if side_panel_usage_hit {
+            self.open_neoism_agent_usage_menu(mx, my);
+            self.mark_dirty();
+            return true;
+        }
         // Side-panel hit test: focus on a body click, and if the click
         // landed on a row in home mode, resume that session. Has to win
         // over selection / scrollbar / link logic so a panel click never

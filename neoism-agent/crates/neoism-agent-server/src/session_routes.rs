@@ -94,9 +94,15 @@ pub(crate) async fn create_session_in_directory(
     let now = now_millis();
     let id = neoism_agent_core::new_session_id();
     let directory = crate::windows_process::canonicalize_path(FsPath::new(directory))
-        .map_err(|error| ApiError::bad_request(format!("workflow directory is not accessible: {error}")))?;
+        .map_err(|error| {
+            ApiError::bad_request(format!(
+                "workflow directory is not accessible: {error}"
+            ))
+        })?;
     if !directory.is_dir() {
-        return Err(ApiError::bad_request("workflow directory is not a directory"));
+        return Err(ApiError::bad_request(
+            "workflow directory is not a directory",
+        ));
     }
     let project_context = project::discover(directory);
     let directory = project_context.directory.clone();

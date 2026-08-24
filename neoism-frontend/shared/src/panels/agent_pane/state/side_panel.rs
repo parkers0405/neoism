@@ -192,6 +192,20 @@ pub enum BranchStatus {
     Stopped,
 }
 
+/// How much authority a branch-status transition has over a latched terminal
+/// state. Run lifecycle edges may represent a real continuation of the same
+/// child session; ancillary events may arrive late while cleaning up a run
+/// that has already finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchStatusTransition {
+    /// A real session/subtask lifecycle edge. Active states reopen a finished
+    /// child, while terminal states latch it closed.
+    AuthoritativeRun,
+    /// Permission cleanup or other non-run activity. It may refine a live
+    /// branch, but can never reopen a terminal-locked child.
+    AncillaryActivity,
+}
+
 impl BranchStatus {
     pub fn label(self) -> &'static str {
         match self {
@@ -579,6 +593,12 @@ pub struct NeoismAgentSidePanel {
     session_hover_scale: f32,
     last_hover_frame: Instant,
     back_scramble_started: Option<Instant>,
+    /// Hit target spanning the compact Usage meter and numeric label.
+    usage_rect: Option<[f32; 4]>,
+    /// Last values actually presented by the compact Usage surface.
+    usage_snapshot: Option<(u64, Option<u64>)>,
+    usage_scramble_started: Option<Instant>,
+    usage_scramble_revision: u64,
     /// See [`StatusDisplayHold`] / [`STATUS_LABEL_GRACE`].
     status_hold: std::cell::RefCell<Option<StatusDisplayHold>>,
 }
@@ -638,6 +658,10 @@ impl Default for NeoismAgentSidePanel {
             session_hover_scale: 0.0,
             last_hover_frame: Instant::now(),
             back_scramble_started: None,
+            usage_rect: None,
+            usage_snapshot: None,
+            usage_scramble_started: None,
+            usage_scramble_revision: 0,
             status_hold: std::cell::RefCell::new(None),
         }
     }
@@ -744,6 +768,41 @@ impl NeoismAgentSidePanel {
     pub fn back_scramble_elapsed_ms(&self) -> Option<f32> {
         let elapsed = self.back_scramble_started?.elapsed().as_secs_f32() * 1000.0;
         (elapsed < 320.0).then_some(elapsed)
+    }
+
+    /// Update the compact Usage surface and rearm its scramble only when the
+    /// displayed token tuple actually changes.
+    pub fn update_usage_meter(&mut self, used: u64, context_limit: Option<u64>) {
+        let snapshot = (used, context_limit);
+        if self.usage_snapshot == Some(snapshot) {
+            return;
+        }
+        self.usage_snapshot = Some(snapshot);
+        self.usage_scramble_started = Some(Instant::now());
+        self.usage_scramble_revision = self.usage_scramble_revision.wrapping_add(1);
+    }
+
+    pub fn usage_scramble_elapsed_ms(&self) -> Option<f32> {
+        let elapsed = self.usage_scramble_started?.elapsed().as_secs_f32() * 1000.0;
+        (elapsed < 320.0).then_some(elapsed)
+    }
+
+    pub fn usage_scramble_revision(&self) -> u64 {
+        self.usage_scramble_revision
+    }
+
+    pub fn set_usage_rect(&mut self, rect: [f32; 4]) {
+        self.usage_rect = Some(rect);
+    }
+
+    pub fn clear_usage_rect(&mut self) {
+        self.usage_rect = None;
+    }
+
+    pub fn usage_contains(&self, x: f32, y: f32) -> bool {
+        self.usage_rect.is_some_and(|[rx, ry, rw, rh]| {
+            x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+        })
     }
 
     /// Whether the selection cursor is on the "← Back" affordance. Only
@@ -1244,6 +1303,7 @@ impl NeoismAgentSidePanel {
         self.back_focused = false;
         self.focused = false;
         self.selected_cursor_rect = None;
+        self.usage_rect = None;
     }
 
     pub fn selected_cursor_rect(&self) -> Option<[f32; 4]> {
@@ -1727,7 +1787,31 @@ impl NeoismAgentSidePanel {
         session_id: impl Into<String>,
         status: BranchStatus,
     ) {
+        self.transition_branch_activity_status(
+            session_id,
+            status,
+            BranchStatusTransition::AuthoritativeRun,
+        );
+    }
+
+    /// Apply a branch status with explicit lifecycle semantics. Returns
+    /// `false` only when ancillary activity was rejected by a terminal lock.
+    pub fn transition_branch_activity_status(
+        &mut self,
+        session_id: impl Into<String>,
+        status: BranchStatus,
+        transition: BranchStatusTransition,
+    ) -> bool {
         let session_id = session_id.into();
+        if transition == BranchStatusTransition::AncillaryActivity
+            && matches!(
+                status,
+                BranchStatus::Active | BranchStatus::WaitingPermission
+            )
+            && self.branch_terminal_locked(&session_id)
+        {
+            return false;
+        }
         let terminal = matches!(status, BranchStatus::Completed | BranchStatus::Stopped);
         self.branch_activities
             .entry(session_id.clone())
@@ -1754,6 +1838,7 @@ impl NeoismAgentSidePanel {
         {
             entry.runtime_status = Some(status.runtime_status().to_string());
         }
+        true
     }
 
     /// Reconcile a bootstrap/reconnect status snapshot without allowing an
@@ -2265,6 +2350,7 @@ impl NeoismAgentSidePanel {
                 || (self.session_hover_target && self.session_hover_scale < 0.998)
                 || (!self.session_hover_target && self.session_hover_scale > 0.002)
                 || self.back_scramble_elapsed_ms().is_some()
+                || self.usage_scramble_elapsed_ms().is_some()
     }
 
     /// Map a window-space click to a row index. Returns `None` when

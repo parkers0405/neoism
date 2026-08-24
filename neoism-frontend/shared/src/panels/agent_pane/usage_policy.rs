@@ -129,6 +129,16 @@ mod tests {
     }
 
     #[test]
+    fn details_popover_retains_breakdown_and_cost_rows() {
+        let lines =
+            usage_detail_lines(usage(32_000, 10_000, Some(128_000)), 25_000, "gpt-x");
+        assert!(lines.iter().any(|line| line == "Input 12,345"));
+        assert!(lines.iter().any(|line| line == "Output 2,000"));
+        assert!(lines.iter().any(|line| line == "Total price $0.0250"));
+        assert!(lines.iter().any(|line| line == "Model gpt-x"));
+    }
+
+    #[test]
     fn detail_lines_match_agent_usage_chip_copy() {
         assert_eq!(
             usage_detail_lines(usage(32_000, 10_000, Some(128_000)), 25_000, "gpt-x"),

@@ -112,8 +112,32 @@ impl NeoismAgentPane {
         {
             return;
         }
-        self.side_panel
-            .set_branch_activity_status(permission.session_id.clone(), status);
+        self.side_panel.transition_branch_activity_status(
+            permission.session_id.clone(),
+            status,
+            BranchStatusTransition::AncillaryActivity,
+        );
+    }
+
+    pub(crate) fn note_permission_replied(
+        &mut self,
+        request_id: &str,
+        session_id: Option<&str>,
+    ) -> bool {
+        let changed = self.remove_pending_permission(request_id);
+        if changed {
+            if let Some(session_id) = session_id
+                .filter(|id| !id.is_empty() && Some(*id) != self.session_id.as_deref())
+            {
+                self.side_panel.transition_branch_activity_status(
+                    session_id.to_string(),
+                    BranchStatus::Active,
+                    BranchStatusTransition::AncillaryActivity,
+                );
+            }
+            self.sync_subagent_waiting_clock();
+        }
+        changed
     }
 
     pub fn submit_pending_permission(&mut self) -> bool {

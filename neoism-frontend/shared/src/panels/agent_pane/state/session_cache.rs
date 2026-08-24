@@ -319,20 +319,27 @@ pub(in crate::panels::agent_pane::state) fn reconcile_cached_pending_user_prompt
             message.text = echo.clone();
         }
     }
-    pending.retain(|prompt| {
-        let resolved = snapshot.iter().any(|message| {
-            message.kind == NeoismAgentMessageKind::User
+    let mut consumed_snapshot = vec![false; snapshot.len()];
+    let mut unresolved = Vec::new();
+    for prompt in std::mem::take(pending) {
+        let resolved = snapshot.iter().enumerate().position(|(index, message)| {
+            !consumed_snapshot[index]
+                && message.kind == NeoismAgentMessageKind::User
                 && message.text.trim() == prompt.trim()
         });
-        if resolved {
-            live.retain(|message| {
-                !(message.kind == NeoismAgentMessageKind::User
-                    && message.id.is_empty()
-                    && message.text.trim() == prompt.trim())
-            });
+        let Some(snapshot_index) = resolved else {
+            unresolved.push(prompt);
+            continue;
+        };
+        consumed_snapshot[snapshot_index] = true;
+        if let Some(live_index) = live.iter().position(|message| {
+            message.kind == NeoismAgentMessageKind::User
+                && message.text.trim() == prompt.trim()
+        }) {
+            live.remove(live_index);
         }
-        !resolved
-    });
+    }
+    *pending = unresolved;
 }
 
 fn session_message_identity(message: &NeoismAgentMessage) -> Option<String> {

@@ -67,6 +67,11 @@ pub trait AgentSidePanelPane {
     fn model(&self) -> &str;
     fn thinking_label(&self) -> &str;
     fn usage_detail_lines(&self) -> Vec<String>;
+
+    /// Latest turn's `(context tokens, context limit)` for the sidebar's
+    /// animated context bar.
+    fn context_usage(&self) -> Option<(u64, Option<u64>)>;
+
     fn messages(&self) -> &[Self::Message];
     fn session_id_str(&self) -> Option<&str>;
 }
@@ -167,6 +172,10 @@ macro_rules! neoism_ui_impl_agent_side_panel {
                 <$pane>::usage_detail_lines(self)
             }
 
+            fn context_usage(&self) -> Option<(u64, Option<u64>)> {
+                <$pane>::context_usage(self)
+            }
+
             fn messages(&self) -> &[Self::Message] {
                 <$pane>::messages(self)
             }
@@ -254,6 +263,11 @@ impl AgentSidePanelPane for NeoismAgentPane {
         NeoismAgentPane::usage_detail_lines(self)
     }
 
+    fn context_usage(&self) -> Option<(u64, Option<u64>)> {
+        let usage = self.latest_usage()?;
+        Some((usage.total, usage.context_limit))
+    }
+
     fn messages(&self) -> &[Self::Message] {
         NeoismAgentPane::messages(self)
     }
@@ -335,6 +349,9 @@ pub fn render_side_panel_with_icons<P, I>(
     P: AgentSidePanelPane,
     I: AgentSidePanelIconHost,
 {
+    // Every frame starts with no Usage target. Chat-mode rendering registers
+    // it again only when real usage is present; home/narrow views stay clear.
+    pane.side_panel_mut().clear_usage_rect();
     let [px, py, pw, ph] = panel_rect;
     if pw <= 8.0 || ph <= 8.0 {
         return;

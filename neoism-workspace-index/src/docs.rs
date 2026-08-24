@@ -105,6 +105,10 @@ pub const BUNDLED_DOCS: &[BundledDoc] = &[
         body: include_str!("welcome/Neoism Agent/Skills.md"),
     },
     BundledDoc {
+        path: "Neoism Agent/Scheduled Workflows.md",
+        body: include_str!("welcome/Neoism Agent/Scheduled Workflows.md"),
+    },
+    BundledDoc {
         path: "Neoism Agent/Instructions.md",
         body: include_str!("welcome/Neoism Agent/Instructions.md"),
     },

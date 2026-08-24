@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use neoism_agent_core::{
     event_type, AssistantMessage, AssistantPath, CompletedTime, CreatedTime,
-    EventPayload, Id, IdKind, MessageInfo, MessageWithParts, Part, PermissionAction,
-    PermissionRequestInfo, PermissionRule, ProviderGenerationResponse, SessionInfo,
-    TextPart, TimeInfo, TokenUsage, UserMessage, UserModel,
+    EventPayload, Id, IdKind, MessageId, MessageInfo, MessageWithParts, Part,
+    PermissionAction, PermissionRequestInfo, PermissionRule, ProviderGenerationResponse,
+    SessionInfo, TextPart, TimeInfo, TokenUsage, UserMessage, UserModel,
 };
 use serde_json::{json, Value};
 

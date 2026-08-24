@@ -44,7 +44,7 @@ use crate::panels::agent_pane::usage_policy::{
 
 use self::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
 pub use self::pickers_state::{mcp_action_options, mcp_options_from_status};
-use self::side_panel::{BranchStatus, NeoismAgentSidePanel};
+use self::side_panel::{BranchStatus, BranchStatusTransition, NeoismAgentSidePanel};
 
 use crate::panels::agent_pane::question_policy::NeoismAgentPendingQuestion;
 
@@ -295,7 +295,7 @@ struct TimelineAnchor {
 
 #[derive(Clone, Debug)]
 struct TimelineViewAnchor {
-    message_id: String,
+    key: crate::panels::agent_pane::view::timeline::TimelineViewAnchorKey,
     screen_offset: f32,
 }
 

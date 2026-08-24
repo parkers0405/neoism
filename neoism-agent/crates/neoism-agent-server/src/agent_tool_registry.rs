@@ -23,9 +23,11 @@ pub(crate) async fn configured_mcp_tools_with_state(
     directory: &str,
     state: Option<AppState>,
 ) -> Vec<McpToolInfo> {
-    let names = config::load(directory)
-        .map(|loaded| loaded.info.mcp.keys().cloned().collect::<Vec<_>>())
+    let config = config::load(directory)
+        .map(|loaded| loaded.info.mcp)
         .unwrap_or_default();
+    mcp::reconcile_configured_servers(directory, &config).await;
+    let names = config.keys().cloned().collect::<Vec<_>>();
     let mut tools = Vec::new();
     for name in names {
         let Ok(mut items) = mcp::tools_with_state(

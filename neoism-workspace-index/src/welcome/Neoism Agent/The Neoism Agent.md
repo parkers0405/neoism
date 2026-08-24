@@ -67,4 +67,5 @@ Prompts, attachments, tool results, and any instructions included in model conte
 - [[Providers]] and [[Models]] for connecting a model.
 - [[Agents and Subagents]] for delegation.
 - [[Sessions and Sharing]] for persistence and cross-device behavior.
+- [[Scheduled Workflows]] for date-driven and recurring agent automations.
 - [[Troubleshooting]] when startup, authentication, or tools fail.

@@ -148,6 +148,17 @@ fn status_line_constructs() {
 }
 
 #[test]
+fn global_status_line_has_no_agent_usage_surface() {
+    let source = include_str!("../src/panels/status_line.rs");
+    for forbidden in ["StatusUsage", "usage_pill", "ShowUsageDetails"] {
+        assert!(
+            !source.contains(forbidden),
+            "found {forbidden} in status line"
+        );
+    }
+}
+
+#[test]
 fn status_line_ignores_unrelated_events() {
     let mut s = StatusLine::new();
     s.set_info(StatusInfo {

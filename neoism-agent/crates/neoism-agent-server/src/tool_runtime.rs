@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use neoism_agent_core::{
-    event_type, EventPayload, Id, IdKind, MessageInfo, MessageWithParts, Part,
+    event_type, EventPayload, Id, IdKind, MessageId, MessageInfo, MessageWithParts, Part,
     PermissionAction, PermissionRule, PromptPart, PromptRequest, QuestionRequestInfo,
     SessionInfo, TodoInfo, UserModel,
 };
@@ -477,9 +477,18 @@ async fn execute_stateful_tool_call(
                 }));
             }
             if background {
+                let generation = Id::ascending(IdKind::Message);
+                crate::session_actions::mark_subtask_notify_on_idle(
+                    state,
+                    &child_session_id,
+                    &generation,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
                 spawn_background_subtask_prompt(
                     state.clone(),
                     child_session_id.clone(),
+                    generation,
                     prompt,
                     agent.name.clone(),
                     child_model,
@@ -498,6 +507,7 @@ async fn execute_stateful_tool_call(
             let result = run_child_task_prompt_with_cancel(
                 state,
                 &child_session_id,
+                Id::ascending(IdKind::Message),
                 &prompt,
                 agent.name.clone(),
                 child_model,
@@ -819,8 +829,9 @@ async fn steer_child_task_prompt(
     agent: &str,
     model: Option<UserModel>,
 ) -> Result<usize, String> {
+    let generation = Id::ascending(IdKind::Message);
     let request = PromptRequest {
-        message_id: None,
+        message_id: Some(generation.clone()),
         model,
         agent: Some(agent.to_string()),
         no_reply: false,
@@ -831,6 +842,14 @@ async fn steer_child_task_prompt(
             text: prompt.to_string(),
         }],
     };
+    // Persist the exact drain generation before the queue row can run.
+    crate::session_actions::mark_subtask_notify_on_idle(
+        state,
+        child_session_id,
+        &generation,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let event_request = request.clone();
     let (start_worker, queue_len) =
         crate::session_queue::enqueue_prompt_request_with_delivery(
@@ -845,9 +864,6 @@ async fn steer_child_task_prompt(
     // its next step boundary. If its run ends first, the same durable row falls
     // back to the worker as a new turn. Keep the child completion obligation
     // across both paths.
-    crate::session_actions::mark_subtask_notify_on_idle(state, child_session_id)
-        .await
-        .map_err(|error| error.to_string())?;
     crate::session_queue::publish_prompt_queue_changed(
         state,
         child_session_id,
@@ -1148,6 +1164,7 @@ fn task_result_output(child_session_id: &str, text: String) -> String {
 async fn run_child_task_prompt_with_cancel(
     state: &AppState,
     child_id: &str,
+    generation: MessageId,
     prompt: &str,
     agent: String,
     model: Option<UserModel>,
@@ -1163,7 +1180,9 @@ async fn run_child_task_prompt_with_cancel(
             crate::session_actions::abort_session_run(&state, &child_id).await;
         })
     });
-    let result = append_child_subtask_prompt(state, child_id, prompt, agent, model).await;
+    let result =
+        append_child_subtask_prompt(state, child_id, generation, prompt, agent, model)
+            .await;
     if let Some(task) = abort_task {
         task.abort();
     }
@@ -1192,12 +1211,16 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
     let workspace_directory = workspace.root.to_string_lossy().into_owned();
     let directory = workspace_directory.as_str();
     let mut one_time_rules = Vec::new();
-    let project_id = state
+    let session = state
         .inner
         .store
         .get_session(session_id.as_str())
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    let unattended = session
+        .as_ref()
+        .is_some_and(|session| session.extra.contains_key("workflowRunID"));
+    let project_id = session
         .map(|session| session.project_id)
         .unwrap_or_else(|| project_info(directory.to_string()).id);
     // Invocation hooks are part of one logical tool call. Approval may resume
@@ -1334,6 +1357,12 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
                     );
                     return Err(error);
                 };
+                if unattended {
+                    return Err(crate::permission_runtime::permission_denied(
+                        permission, target,
+                    )
+                    .to_string());
+                }
                 // `dangerouslySkipPermissions` converts every ASK into an
                 // automatic one-time allow. Explicit DENY rules never reach
                 // this branch (they fail with "is denied", which does not

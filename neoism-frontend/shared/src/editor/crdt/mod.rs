@@ -67,7 +67,7 @@ pub use presence::{
     PresenceRenderPeer, PresenceRenderSelection, PresenceUpdate,
 };
 pub use presence_avatar::{
-    avatar_cells, presence_orb_now_seconds, AvatarCell, AvatarProfile,
+    avatar_cells, avatar_cells_rect, presence_orb_now_seconds, AvatarCell, AvatarProfile,
 };
 pub use remote_presence::{
     peer_presence_from_wire, peer_presence_to_wire, presence_buffer_id_for_path,

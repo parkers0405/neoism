@@ -896,9 +896,17 @@ async fn run_parent_subtasks(
                 metadata.clone(),
             )
             .await?;
+            let generation = Id::ascending(IdKind::Message);
+            crate::session_actions::mark_subtask_notify_on_idle(
+                state,
+                &child_session_id,
+                &generation,
+            )
+            .await?;
             crate::session_actions::spawn_background_subtask_prompt(
                 state.clone(),
                 child_session_id.clone(),
+                generation,
                 subtask.prompt.clone(),
                 subtask.agent.clone(),
                 Some(task_model.clone()),

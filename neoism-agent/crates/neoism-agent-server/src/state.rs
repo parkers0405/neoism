@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,6 +40,13 @@ pub(crate) struct InnerState {
     pub(crate) statuses: RwLock<HashMap<String, SessionStatus>>,
     pub(crate) runs: RwLock<HashMap<String, SessionRun>>,
     pub(crate) session_coordinator: crate::session_coordinator::SessionCoordinator,
+    /// Keyed completion-state mutation locks. The map lock is held only long
+    /// enough to clone a child's lock; callers never await storage while
+    /// holding it and never acquire the same child lock recursively.
+    pub(crate) subtask_completion_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Serializes each parent's list/check/enqueue reconciliation so sibling
+    /// completions cannot race through queue dedupe.
+    pub(crate) subtask_parent_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub(crate) background_jobs:
         RwLock<HashMap<String, crate::background_job::BackgroundJob>>,
     pub(crate) background_job_cancellations: RwLock<HashMap<String, oneshot::Sender<()>>>,
@@ -51,7 +58,9 @@ pub(crate) struct InnerState {
     pub(crate) todos: RwLock<HashMap<String, Vec<TodoInfo>>>,
     pub(crate) ptys: RwLock<HashMap<String, PtyInfo>>,
     pub(crate) pty_connect_tokens: RwLock<crate::pty::ConnectTokens>,
-    pub(crate) workflow_notify: Notify,
+    pub(crate) workflow_workspaces: RwLock<BTreeSet<String>>,
+    pub(crate) workflow_reconcile: Mutex<()>,
+    pub(crate) workflow_notify: Arc<Notify>,
     events: broadcast::Sender<EventPayload>,
     event_writer: mpsc::UnboundedSender<(EventPayload, bool)>,
 }
@@ -207,7 +216,9 @@ impl DbRow {
         match self.value(name)? {
             SqlValue::Integer(value) => Ok(Some(*value)),
             SqlValue::Null => Ok(None),
-            other => anyhow::bail!("column `{name}` is not an integer or null: {other:?}"),
+            other => {
+                anyhow::bail!("column `{name}` is not an integer or null: {other:?}")
+            }
         }
     }
 
@@ -436,23 +447,25 @@ impl Db {
             .i64_at(0)
     }
 
-    async fn execute_transaction(
+    async fn execute_transaction_with_results(
         &self,
         statements: Vec<(String, Vec<SqlValue>)>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<u64>> {
         let _writer = self.lock_writer().await;
-        match self {
+        let results = match self {
             Db::Sqlite { pool, .. } => {
                 let mut connection = pool.acquire().await?;
                 let mut transaction = connection.begin().await?;
+                let mut results = Vec::with_capacity(statements.len());
                 for (sql, params) in statements {
                     let mut query = sqlx::query(&sql);
                     for param in params {
                         query = bind_value(query, param);
                     }
-                    query.execute(&mut *transaction).await?;
+                    results.push(query.execute(&mut *transaction).await?.rows_affected());
                 }
                 transaction.commit().await?;
+                results
             }
             Db::Turso { database, .. } => {
                 // Retrying only individual statements is unsafe here: a Busy
@@ -468,15 +481,25 @@ impl Db {
                                 turso::transaction::TransactionBehavior::Immediate,
                             )
                             .await?;
+                        let mut results = Vec::with_capacity(statements.len());
                         for (sql, params) in statements {
-                            transaction.execute(&sql, params).await?;
+                            results.push(transaction.execute(&sql, params).await?);
                         }
-                        transaction.commit().await
+                        transaction.commit().await?;
+                        Ok(results)
                     }
                 })
-                .await?;
+                .await?
             }
-        }
+        };
+        Ok(results)
+    }
+
+    async fn execute_transaction(
+        &self,
+        statements: Vec<(String, Vec<SqlValue>)>,
+    ) -> anyhow::Result<()> {
+        self.execute_transaction_with_results(statements).await?;
         Ok(())
     }
 }
@@ -526,6 +549,8 @@ impl AppState {
                 statuses: RwLock::new(HashMap::new()),
                 runs: RwLock::new(HashMap::new()),
                 session_coordinator: Default::default(),
+                subtask_completion_locks: Mutex::new(HashMap::new()),
+                subtask_parent_locks: Mutex::new(HashMap::new()),
                 background_jobs: RwLock::new(HashMap::new()),
                 background_job_cancellations: RwLock::new(HashMap::new()),
                 permissions: RwLock::new(HashMap::new()),
@@ -536,7 +561,9 @@ impl AppState {
                 todos: RwLock::new(HashMap::new()),
                 ptys: RwLock::new(HashMap::new()),
                 pty_connect_tokens: RwLock::new(crate::pty::ConnectTokens::default()),
-                workflow_notify: Notify::new(),
+                workflow_workspaces: RwLock::new(BTreeSet::new()),
+                workflow_reconcile: Mutex::new(()),
+                workflow_notify: Arc::new(Notify::new()),
                 events,
                 event_writer,
             }),
@@ -1789,24 +1816,6 @@ impl SessionStore {
             > 0)
     }
 
-    pub(crate) async fn update_workflow_cursor(
-        &self,
-        activation_id: &str,
-        scheduled_at: u64,
-    ) -> anyhow::Result<()> {
-        self.db
-            .execute(
-                "UPDATE workflows SET last_scheduled_at = ?, updated = ? WHERE activation_id = ?",
-                vec![
-                    int(sqlite_i64(scheduled_at)),
-                    int(sqlite_i64(crate::now_millis())),
-                    text(activation_id),
-                ],
-            )
-            .await?;
-        Ok(())
-    }
-
     pub(crate) async fn get_workflow(
         &self,
         activation_id: &str,
@@ -1855,24 +1864,94 @@ impl SessionStore {
             .execute(
                 r#"INSERT OR IGNORE INTO workflow_runs
                 (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
-                 session_id, status, trigger, error, created)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                  session_id, status, trigger, error, created)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM workflow_runs
+                  WHERE activation_id = ? AND status IN ('queued', 'running')
+                )"#,
                 vec![
                     text(&run.id),
                     text(&run.activation_id),
                     text(&run.workflow_id),
                     int(sqlite_i64(run.scheduled_at)),
-                    run.started_at.map(|v| int(sqlite_i64(v))).unwrap_or(SqlValue::Null),
-                    run.finished_at.map(|v| int(sqlite_i64(v))).unwrap_or(SqlValue::Null),
+                    run.started_at
+                        .map(|v| int(sqlite_i64(v)))
+                        .unwrap_or(SqlValue::Null),
+                    run.finished_at
+                        .map(|v| int(sqlite_i64(v)))
+                        .unwrap_or(SqlValue::Null),
                     opt_text(run.session_id.clone()),
                     text(&run.status),
                     text(&run.trigger),
                     opt_text(run.error.clone()),
                     int(sqlite_i64(run.created)),
+                    text(&run.activation_id),
                 ],
             )
             .await?
             > 0)
+    }
+
+    /// Atomically records a scheduled occurrence and advances its durable
+    /// cursor. A restart can therefore observe both writes or neither, never a
+    /// queued occurrence with a stale cursor. The cursor advances even when an
+    /// overlapping run suppresses the insert, preserving scheduler coalescing.
+    pub(crate) async fn claim_scheduled_workflow_run(
+        &self,
+        run: &crate::workflow::WorkflowRun,
+    ) -> anyhow::Result<bool> {
+        let results = self
+            .db
+            .execute_transaction_with_results(vec![
+                (
+                    r#"INSERT OR IGNORE INTO workflow_runs
+                    (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
+                      session_id, status, trigger, error, created)
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM workflow_runs
+                      WHERE activation_id = ? AND status IN ('queued', 'running')
+                    )"#
+                    .to_string(),
+                    vec![
+                        text(&run.id),
+                        text(&run.activation_id),
+                        text(&run.workflow_id),
+                        int(sqlite_i64(run.scheduled_at)),
+                        run.started_at
+                            .map(|v| int(sqlite_i64(v)))
+                            .unwrap_or(SqlValue::Null),
+                        run.finished_at
+                            .map(|v| int(sqlite_i64(v)))
+                            .unwrap_or(SqlValue::Null),
+                        opt_text(run.session_id.clone()),
+                        text(&run.status),
+                        text(&run.trigger),
+                        opt_text(run.error.clone()),
+                        int(sqlite_i64(run.created)),
+                        text(&run.activation_id),
+                    ],
+                ),
+                (
+                    r#"UPDATE workflows
+                    SET last_scheduled_at = CASE
+                          WHEN last_scheduled_at IS NULL OR last_scheduled_at < ? THEN ?
+                          ELSE last_scheduled_at
+                        END,
+                        updated = ?
+                    WHERE activation_id = ?"#
+                        .to_string(),
+                    vec![
+                        int(sqlite_i64(run.scheduled_at)),
+                        int(sqlite_i64(run.scheduled_at)),
+                        int(sqlite_i64(crate::now_millis())),
+                        text(&run.activation_id),
+                    ],
+                ),
+            ])
+            .await?;
+        Ok(results.first().copied().unwrap_or_default() > 0)
     }
 
     pub(crate) async fn update_workflow_run(
@@ -1900,17 +1979,6 @@ impl SessionStore {
         Ok(())
     }
 
-    pub(crate) async fn workflow_has_running(&self, activation_id: &str) -> anyhow::Result<bool> {
-        Ok(self
-            .db
-            .fetch_scalar_i64(
-                "SELECT COUNT(*) FROM workflow_runs WHERE activation_id = ? AND status IN ('queued', 'running')",
-                vec![text(activation_id)],
-            )
-            .await?
-            > 0)
-    }
-
     pub(crate) async fn list_workflow_runs(
         &self,
         activation_id: &str,
@@ -1932,7 +2000,7 @@ impl SessionStore {
     ) -> anyhow::Result<Vec<crate::workflow::WorkflowRun>> {
         self.db
             .fetch_all(
-                "SELECT * FROM workflow_runs WHERE status IN ('pending', 'queued', 'running') ORDER BY scheduled_at",
+                "SELECT * FROM workflow_runs WHERE status IN ('queued', 'running') ORDER BY scheduled_at",
                 Vec::new(),
             )
             .await?
@@ -2748,7 +2816,9 @@ fn decode_workflow_projection(
         definition: decode_json(row.get_str("definition_json")?)?,
         active: row.get_i64("active")? != 0,
         activated_at: row.get_i64("activated_at")?.max(0) as u64,
-        last_scheduled_at: row.get_opt_i64("last_scheduled_at")?.map(|v| v.max(0) as u64),
+        last_scheduled_at: row
+            .get_opt_i64("last_scheduled_at")?
+            .map(|v| v.max(0) as u64),
         updated: row.get_i64("updated")?.max(0) as u64,
     })
 }

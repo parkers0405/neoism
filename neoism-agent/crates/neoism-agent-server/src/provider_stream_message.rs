@@ -380,9 +380,8 @@ pub(crate) async fn finish_provider_stream_with_error(
         // running tools and open reasoning. User abort already did this;
         // stream timeout / provider error left the chat frozen mid-tool.
         interrupted_parts = mark_interrupted_tool_parts(&mut assistant_message.parts);
-        interrupted_parts.extend(finish_open_reasoning_parts(
-            &mut assistant_message.parts,
-        ));
+        interrupted_parts
+            .extend(finish_open_reasoning_parts(&mut assistant_message.parts));
         finish_text_part(&mut assistant_message.parts, text_part_id, None);
         // Terminate the step even on error/abort. Without a StepFinish the
         // stored message ends on an open StepStart bracket, which readers

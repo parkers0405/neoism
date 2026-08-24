@@ -82,6 +82,170 @@ pub struct TimelineDirtyMarks {
     pub indices: BTreeSet<usize>,
 }
 
+/// Stable identity for the timeline row held under a reader during relayout.
+///
+/// Message ids alone are not identities here: optimistic messages can have an
+/// empty id, ids can be duplicated, and an optimistic id can become durable
+/// while the model is streaming. The source position makes those cases
+/// unambiguous; the id ordinals and source length let the same message be found
+/// again when history is inserted around it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimelineViewAnchorKey {
+    source_index: usize,
+    source_len: usize,
+    message_id: String,
+    id_ordinal_from_start: usize,
+    id_ordinal_from_end: usize,
+    id_count: usize,
+    message_kind: Option<AgentTimelineMessageKind>,
+    title: String,
+    text: String,
+    tool: String,
+}
+
+impl TimelineViewAnchorKey {
+    pub fn at_source(
+        source_index: usize,
+        source_len: usize,
+        message_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            source_index,
+            source_len,
+            message_id: message_id.into(),
+            id_ordinal_from_start: 0,
+            id_ordinal_from_end: 0,
+            id_count: 1,
+            message_kind: None,
+            title: String::new(),
+            text: String::new(),
+            tool: String::new(),
+        }
+    }
+
+    pub fn for_source<M: AgentTimelineMessage>(
+        messages: &[M],
+        source_index: usize,
+    ) -> Option<Self> {
+        let message = messages.get(source_index)?;
+        let message_id = message.id().to_string();
+        Some(Self {
+            source_index,
+            source_len: messages.len(),
+            message_id: message_id.clone(),
+            id_ordinal_from_start: messages[..source_index]
+                .iter()
+                .filter(|candidate| candidate.id() == message_id)
+                .count(),
+            id_ordinal_from_end: messages[source_index + 1..]
+                .iter()
+                .filter(|candidate| candidate.id() == message_id)
+                .count(),
+            id_count: messages
+                .iter()
+                .filter(|candidate| candidate.id() == message_id)
+                .count(),
+            message_kind: Some(message.kind()),
+            title: message.title().to_string(),
+            text: message.text().to_string(),
+            tool: message.tool().to_string(),
+        })
+    }
+}
+
+fn matches_anchor_signature<M: AgentTimelineMessage>(
+    message: &M,
+    key: &TimelineViewAnchorKey,
+) -> bool {
+    key.message_kind.is_some_and(|kind| kind == message.kind())
+        && key.title == message.title()
+        && key.tool == message.tool()
+        // Assistant/reasoning text can grow while the anchor is held.
+        && (key.text == message.text()
+            || message.text().starts_with(&key.text)
+            || key.text.starts_with(message.text()))
+}
+
+fn nth_message_with_id<M: AgentTimelineMessage>(
+    messages: &[M],
+    id: &str,
+    ordinal: usize,
+) -> Option<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.id() == id)
+        .nth(ordinal)
+        .map(|(index, _)| index)
+}
+
+pub(crate) fn resolve_timeline_view_anchor<M: AgentTimelineMessage>(
+    messages: &[M],
+    key: &TimelineViewAnchorKey,
+) -> Option<usize> {
+    if key.message_id.is_empty() {
+        if key.message_kind.is_none() {
+            return (messages.len() == key.source_len)
+                .then_some(key.source_index)
+                .filter(|index| *index < messages.len());
+        }
+        // Legacy optimistic rows may move and acquire a server id. Signature
+        // matching is safe only when exactly one row can be the old bubble.
+        let mut candidates = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| matches_anchor_signature(*message, key));
+        let candidate = candidates.next().map(|(index, _)| index)?;
+        return candidates.next().is_none().then_some(candidate);
+    }
+
+    let id_candidates = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.id() == key.message_id)
+        .collect::<Vec<_>>();
+    if id_candidates.len() == 1 && key.id_count == 1 {
+        return Some(id_candidates[0].0);
+    }
+    if id_candidates.is_empty() {
+        return None;
+    }
+
+    let signature_matches = id_candidates
+        .iter()
+        .filter(|(_, message)| matches_anchor_signature(*message, key))
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    if signature_matches.len() == 1 {
+        return Some(signature_matches[0]);
+    }
+
+    let from_start =
+        nth_message_with_id(messages, &key.message_id, key.id_ordinal_from_start);
+    let from_end = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, message)| message.id() == key.message_id)
+        .nth(key.id_ordinal_from_end)
+        .map(|(index, _)| index);
+    match (from_start, from_end) {
+        (Some(start), Some(end)) if start == end => {
+            signature_matches.contains(&start).then_some(start)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn timeline_row_for_anchor_source<M>(
+    rows: &[TimelineLayoutRow<M>],
+    source_index: usize,
+) -> Option<&TimelineLayoutRow<M>> {
+    rows.iter().find(|row| {
+        row.source_index <= source_index && source_index <= row.source_end_index
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentTimelineMessageKind {
     User,
@@ -210,13 +374,13 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
         _prepend_height: f32,
     ) {
     }
-    fn timeline_view_anchor(&self) -> Option<(String, f32)> {
+    fn timeline_view_anchor(&self) -> Option<(TimelineViewAnchorKey, f32)> {
         None
     }
     fn restore_timeline_view_anchor(&mut self, _content_y: f32, _screen_offset: f32) {}
     fn set_timeline_view_anchor(
         &mut self,
-        _message_id: Option<String>,
+        _key: Option<TimelineViewAnchorKey>,
         _screen_offset: f32,
     ) {
     }
@@ -543,7 +707,12 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
                 <$pane>::set_measured_timeline_prepend(self, content_height, prepend_height)
             }
 
-            fn timeline_view_anchor(&self) -> Option<(String, f32)> {
+            fn timeline_view_anchor(
+                &self,
+            ) -> Option<(
+                $crate::panels::agent_pane::view::timeline::TimelineViewAnchorKey,
+                f32,
+            )> {
                 <$pane>::timeline_view_anchor(self)
             }
 
@@ -553,10 +722,12 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
 
             fn set_timeline_view_anchor(
                 &mut self,
-                message_id: Option<String>,
+                key: Option<
+                    $crate::panels::agent_pane::view::timeline::TimelineViewAnchorKey,
+                >,
                 screen_offset: f32,
             ) {
-                <$pane>::set_timeline_view_anchor(self, message_id, screen_offset)
+                <$pane>::set_timeline_view_anchor(self, key, screen_offset)
             }
 
             fn any_tool_expand_animating(&self) -> bool {

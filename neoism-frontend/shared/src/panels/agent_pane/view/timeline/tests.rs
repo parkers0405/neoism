@@ -435,6 +435,97 @@ fn virtual_source_range_maps_to_grouped_timeline_rows() {
 }
 
 #[test]
+fn anchor_distinguishes_duplicate_optimistic_empty_ids() {
+    let messages = vec![
+        text_message("", NeoismAgentMessageKind::User, "first"),
+        text_message("", NeoismAgentMessageKind::User, "second"),
+    ];
+    let key = TimelineViewAnchorKey::for_source(&messages, 1).expect("anchor key");
+
+    assert_eq!(resolve_timeline_view_anchor(&messages, &key), Some(1));
+}
+
+#[test]
+fn optimistic_anchor_survives_durable_id_transition() {
+    let before = vec![
+        text_message("", NeoismAgentMessageKind::User, "optimistic"),
+        text_message("", NeoismAgentMessageKind::User, "other"),
+    ];
+    let key = TimelineViewAnchorKey::for_source(&before, 0).expect("anchor key");
+    let after = vec![
+        text_message("message-1", NeoismAgentMessageKind::User, "optimistic"),
+        text_message("", NeoismAgentMessageKind::User, "other"),
+    ];
+
+    assert_eq!(resolve_timeline_view_anchor(&after, &key), Some(0));
+}
+
+#[test]
+fn duplicate_durable_anchor_does_not_jump_after_its_row_is_removed() {
+    let before = vec![
+        text_message("duplicate", NeoismAgentMessageKind::User, "first"),
+        text_message("duplicate", NeoismAgentMessageKind::User, "second"),
+    ];
+    let key = TimelineViewAnchorKey::for_source(&before, 1).expect("anchor key");
+    let after = vec![text_message(
+        "duplicate",
+        NeoismAgentMessageKind::User,
+        "first",
+    )];
+
+    assert_eq!(resolve_timeline_view_anchor(&after, &key), None);
+}
+
+#[test]
+fn legacy_optimistic_anchor_can_move_and_gain_a_durable_id() {
+    let before = vec![
+        text_message("", NeoismAgentMessageKind::User, "optimistic"),
+        text_message("other", NeoismAgentMessageKind::Assistant, "answer"),
+    ];
+    let key = TimelineViewAnchorKey::for_source(&before, 0).expect("anchor key");
+    let after = vec![
+        text_message("older", NeoismAgentMessageKind::User, "older"),
+        text_message("message-1", NeoismAgentMessageKind::User, "optimistic"),
+        text_message("other", NeoismAgentMessageKind::Assistant, "answer"),
+    ];
+
+    assert_eq!(resolve_timeline_view_anchor(&after, &key), Some(1));
+}
+
+#[test]
+fn anchor_resolution_distinguishes_tail_append_from_history_prepend_by_identity() {
+    let before = vec![
+        text_message("a", NeoismAgentMessageKind::User, "a"),
+        text_message("anchor", NeoismAgentMessageKind::Assistant, "held"),
+    ];
+    let key = TimelineViewAnchorKey::for_source(&before, 1).expect("anchor key");
+    let appended = vec![
+        before[0].clone(),
+        before[1].clone(),
+        text_message("tail", NeoismAgentMessageKind::Assistant, "tail"),
+    ];
+    let prepended = vec![
+        text_message("older", NeoismAgentMessageKind::User, "older"),
+        before[0].clone(),
+        before[1].clone(),
+    ];
+
+    assert_eq!(resolve_timeline_view_anchor(&appended, &key), Some(1));
+    assert_eq!(resolve_timeline_view_anchor(&prepended, &key), Some(2));
+}
+
+#[test]
+fn grouped_row_anchor_includes_final_child() {
+    let mut rows = vec![layout_row(2, 40.0, 20.0)];
+    rows[0].source_end_index = 4;
+
+    assert_eq!(
+        timeline_row_for_anchor_source(&rows, 4).map(|row| row.source_index),
+        Some(2)
+    );
+}
+
+#[test]
 fn stale_virtual_range_is_rejected_when_it_misses_registration_band() {
     let rows = vec![
         layout_row(0, 0.0, 20.0),

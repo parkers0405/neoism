@@ -244,6 +244,67 @@ async fn todowrite_tool_updates_session_todos_and_event() {
 }
 
 #[tokio::test]
+async fn workflow_permission_asks_are_denied_without_waiting() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-workflow-permission-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    cleanup_sqlite_files(&db_path);
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let mut session: SessionInfo = response_json(
+        app.oneshot(request(
+            Method::POST,
+            &format!("/session?directory={}", root.display()),
+            None,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    session
+        .extra
+        .insert("workflowRunID".to_string(), json!("run-test"));
+    state.inner.store.update_session(&session).await.unwrap();
+
+    for permissions in [
+        Vec::new(),
+        vec![PermissionRule {
+            permission: "bash".to_string(),
+            pattern: "*".to_string(),
+            action: PermissionAction::Ask,
+        }],
+    ] {
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            execute_tool_call_with_permission_wait(
+                &state,
+                &session.id,
+                &Id::ascending(IdKind::Message),
+                &session.directory,
+                permissions,
+                "call-workflow-permission",
+                "bash",
+                json!({ "command": "printf blocked", "description": "Blocked" }),
+            ),
+        )
+        .await
+        .expect("workflow permission should not wait")
+        .unwrap_err();
+        assert!(error.contains("tool permission bash"));
+        assert!(error.contains("is denied"));
+    }
+    assert!(state.inner.permission_waiters.read().await.is_empty());
+    assert!(state.inner.permissions.read().await.is_empty());
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn question_tool_waits_for_route_reply() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-question-{}",

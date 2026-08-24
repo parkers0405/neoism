@@ -20,7 +20,8 @@ pub const HIDDEN_CONSOLE: u32 = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
 
 /// Detach from the parent console/session without allocating a new one.
 #[cfg(windows)]
-pub const DETACHED_HIDDEN: u32 = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+pub const DETACHED_HIDDEN: u32 =
+    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
 
 pub fn std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program);

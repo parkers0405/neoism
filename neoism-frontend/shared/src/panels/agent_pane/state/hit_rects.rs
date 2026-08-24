@@ -397,17 +397,23 @@ impl NeoismAgentPane {
             .rsplit_once(':')
             .filter(|(_, section)| section.parse::<usize>().is_ok())
             .map_or(id.as_str(), |(parent, _)| parent);
-        if let Some(viewport) = self.timeline_viewport_rect {
-            self.timeline_view_anchor = Some(TimelineViewAnchor {
-                message_id: parent_id.to_string(),
-                screen_offset: rect[1] - viewport[1],
-            });
-        }
         if let Some(index) = self
             .messages
             .iter()
             .position(|message| message.id == parent_id)
         {
+            if let (Some(viewport), Some(key)) = (
+                self.timeline_viewport_rect,
+                crate::panels::agent_pane::view::timeline::TimelineViewAnchorKey::for_source(
+                    &self.messages,
+                    index,
+                ),
+            ) {
+                self.timeline_view_anchor = Some(TimelineViewAnchor {
+                    key,
+                    screen_offset: rect[1] - viewport[1],
+                });
+            }
             self.mark_timeline_message_and_next_dirty_at(index);
         } else {
             self.invalidate_timeline_layout();

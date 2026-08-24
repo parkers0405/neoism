@@ -196,6 +196,84 @@ async fn local_stdio_runtime_lists_and_calls_tools() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn killed_local_runtime_reconnects_before_the_next_call() {
+    let root = temp_dir("stdio-reconnect");
+    let server = configurable_mock_mcp_server(&root);
+    let pid_file = root.join("pids");
+    write_local_mock_config(&root, &server, &pid_file, "first", true);
+    let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    let directory = root.to_str().unwrap();
+
+    let first = call_tool(directory, "mock", "echo", json!({}), &store)
+        .await
+        .unwrap();
+    assert_eq!(tool_result_text(&first), "first");
+    let first_pid = wait_for_pid_count(&pid_file, 1)[0];
+    assert!(std::process::Command::new("kill")
+        .args(["-9", &first_pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+
+    let second = call_tool(directory, "mock", "echo", json!({}), &store)
+        .await
+        .unwrap();
+    assert_eq!(tool_result_text(&second), "first");
+    let pids = wait_for_pid_count(&pid_file, 2);
+    assert_ne!(pids[0], pids[1]);
+
+    assert!(disconnect(directory, "mock").await.unwrap());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn changed_local_config_restarts_the_runtime() {
+    let root = temp_dir("stdio-config-reload");
+    let server = configurable_mock_mcp_server(&root);
+    let pid_file = root.join("pids");
+    write_local_mock_config(&root, &server, &pid_file, "first", true);
+    let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    let directory = root.to_str().unwrap();
+
+    let first = call_tool(directory, "mock", "echo", json!({}), &store)
+        .await
+        .unwrap();
+    assert_eq!(tool_result_text(&first), "first");
+    write_local_mock_config(&root, &server, &pid_file, "second", true);
+
+    let second = call_tool(directory, "mock", "echo", json!({}), &store)
+        .await
+        .unwrap();
+    assert_eq!(tool_result_text(&second), "second");
+    let pids = wait_for_pid_count(&pid_file, 2);
+    assert_ne!(pids[0], pids[1]);
+
+    assert!(disconnect(directory, "mock").await.unwrap());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manually_disabled_local_config_disconnects_the_runtime() {
+    let root = temp_dir("stdio-disable-reload");
+    let server = configurable_mock_mcp_server(&root);
+    let pid_file = root.join("pids");
+    write_local_mock_config(&root, &server, &pid_file, "first", true);
+    let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    let directory = root.to_str().unwrap();
+
+    connect(directory, "mock", &store).await.unwrap();
+    write_local_mock_config(&root, &server, &pid_file, "first", false);
+    let error = tools(directory, "mock", &store).await.unwrap_err();
+
+    assert!(error.to_string().contains("disabled"));
+    assert!(!disconnect(directory, "mock").await.unwrap());
+    let _ = fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn remote_http_runtime_lists_and_calls_tools_with_headers_and_bearer_token() {
     let root = temp_dir("remote-http-runtime");
@@ -559,6 +637,80 @@ done
         fs::set_permissions(&path, permissions).unwrap();
     }
     path
+}
+
+#[cfg(unix)]
+fn configurable_mock_mcp_server(root: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = root.join("configurable-mock-mcp.sh");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+printf '%s\n' "$$" >> "$PID_FILE"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"notifications/initialized"'*) ;;
+    *'"method":"initialize"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}\n' "$id"
+      ;;
+    *'"method":"resources/list"'*|*'"method":"prompts/list"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"tools/call"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"%s"}],"isError":false}}\n' "$id" "$RESULT"
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).unwrap();
+    path
+}
+
+#[cfg(unix)]
+fn write_local_mock_config(
+    root: &std::path::Path,
+    server: &std::path::Path,
+    pid_file: &std::path::Path,
+    result: &str,
+    enabled: bool,
+) {
+    fs::write(
+        root.join("neoism.json"),
+        format!(
+            r#"{{"mcp":{{"mock":{{"type":"local","command":["{}"],"environment":{{"PID_FILE":"{}","RESULT":"{result}"}},"enabled":{enabled},"timeout":2000}}}}}}"#,
+            server.display(),
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn wait_for_pid_count(path: &std::path::Path, count: usize) -> Vec<u32> {
+    for _ in 0..100 {
+        let pids = fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.parse().ok())
+            .collect::<Vec<_>>();
+        if pids.len() >= count {
+            return pids;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("timed out waiting for {count} mock MCP process IDs");
 }
 
 #[derive(Clone, Default)]

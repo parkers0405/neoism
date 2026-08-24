@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -193,6 +193,7 @@ async fn connect_config(
     state: Option<AppState>,
 ) -> anyhow::Result<McpStatus> {
     if !is_enabled(config) {
+        let _ = runtime_manager().disconnect(directory, name).await;
         return Ok(McpStatus::Disabled);
     }
     if name == mcp_notes::NOTES_MCP_ID || name == mcp_memory::MEMORY_MCP_ID {
@@ -285,7 +286,16 @@ async fn connect_config(
                         }
                     }
                 }
-                other => Ok(other),
+                other => {
+                    let _ = runtime_manager().disconnect(directory, name).await;
+                    runtime_manager().connect_remote_status(
+                        directory,
+                        name,
+                        url,
+                        other.clone(),
+                    );
+                    Ok(other)
+                }
             }
         }
     }
@@ -476,13 +486,12 @@ async fn ensure_connected_with_state(
     auth_store: &McpAuthStore,
     state: Option<AppState>,
 ) -> anyhow::Result<()> {
-    if matches!(
-        runtime_manager().status(directory, name),
-        Some(McpStatus::Connected)
-    ) {
-        return Ok(());
-    }
-    match connect_with_state(directory, name, auth_store, state).await? {
+    let config = crate::config::load(directory)?.info.mcp;
+    let Some(entry) = config.get(name) else {
+        let _ = runtime_manager().disconnect(directory, name).await;
+        return Err(anyhow!("MCP server {name} is not configured"));
+    };
+    match connect_config(directory, name, entry, auth_store, state).await? {
         McpStatus::Connected => Ok(()),
         McpStatus::Disabled => Err(anyhow!("MCP server {name} is disabled")),
         McpStatus::NeedsAuth => {
@@ -492,6 +501,20 @@ async fn ensure_connected_with_state(
             Err(anyhow!(error))
         }
     }
+}
+
+pub(crate) async fn reconcile_configured_servers(
+    directory: &str,
+    config: &BTreeMap<String, McpConfig>,
+) {
+    let configured = config
+        .iter()
+        .filter(|(_, entry)| is_enabled(entry))
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    runtime_manager()
+        .disconnect_except(directory, &configured)
+        .await;
 }
 
 async fn refresh_remote_credentials_after_auth_error(

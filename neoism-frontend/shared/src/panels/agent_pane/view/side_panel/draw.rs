@@ -4,7 +4,7 @@ use super::*;
 const SCRAMBLE_MS: f32 = 320.0;
 const SCRAMBLE_GLYPHS: &[char] = &['#', '@', '%', '&', '*', '+', '?', '/', '~', '='];
 
-fn render_scramble_text(
+pub(crate) fn render_scramble_text(
     sugarloaf: &mut Sugarloaf,
     x: f32,
     y: f32,

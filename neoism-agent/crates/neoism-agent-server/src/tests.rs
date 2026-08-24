@@ -1644,6 +1644,7 @@ async fn neoism_headless_routes_are_registered() {
         (Method::GET, "/agent"),
         (Method::GET, "/agent/build"),
         (Method::GET, "/skill"),
+        (Method::GET, "/workflow"),
         (Method::GET, "/plugin"),
         (Method::GET, "/lsp"),
         (Method::GET, "/lsp/hover?file=src/lib.rs&line=1&character=1"),

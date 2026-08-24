@@ -58,12 +58,21 @@ pub(crate) async fn execute_external_task(
     }
 
     if background {
+        let generation = Id::ascending(IdKind::Message);
+        crate::session_actions::mark_subtask_notify_on_idle(
+            state,
+            child.id.as_str(),
+            &generation,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         update_external_session_status(state, child.id.as_str(), runtime, "running")
             .await
             .map_err(|error| error.to_string())?;
         spawn_background_external_subtask_prompt(
             state.clone(),
             child.id.to_string(),
+            generation,
             prompt,
             runtime,
         );
@@ -77,6 +86,7 @@ pub(crate) async fn execute_external_task(
     let result = run_external_subtask_prompt_with_cancel(
         state,
         child.id.as_str(),
+        Id::ascending(IdKind::Message),
         &prompt,
         runtime,
         cancel,
@@ -164,16 +174,26 @@ async fn create_external_subtask_session(
 fn spawn_background_external_subtask_prompt(
     state: AppState,
     child_id: String,
+    generation: MessageId,
     prompt: String,
     runtime: ExternalRuntime,
 ) {
     tokio::spawn(async move {
-        match run_external_subtask_prompt(&state, &child_id, &prompt, runtime).await {
+        match run_external_subtask_prompt(
+            &state,
+            &child_id,
+            generation.clone(),
+            &prompt,
+            runtime,
+        )
+        .await
+        {
             Ok(message) => {
                 let result = assistant_text(&message).unwrap_or_default();
                 publish_background_subtask_finished(
                     &state,
                     &child_id,
+                    &generation,
                     "completed",
                     &result,
                 )
@@ -186,8 +206,14 @@ fn spawn_background_external_subtask_prompt(
                     error = %message,
                     "external background subtask failed"
                 );
-                publish_background_subtask_finished(&state, &child_id, "error", &message)
-                    .await;
+                publish_background_subtask_finished(
+                    &state,
+                    &child_id,
+                    &generation,
+                    "error",
+                    &message,
+                )
+                .await;
             }
         }
     });
@@ -196,15 +222,20 @@ fn spawn_background_external_subtask_prompt(
 async fn run_external_subtask_prompt(
     state: &AppState,
     child_id: &str,
+    generation: MessageId,
     prompt: &str,
     runtime: ExternalRuntime,
 ) -> Result<MessageWithParts, ApiError> {
-    run_external_subtask_prompt_with_cancel(state, child_id, prompt, runtime, None).await
+    run_external_subtask_prompt_with_cancel(
+        state, child_id, generation, prompt, runtime, None,
+    )
+    .await
 }
 
 async fn run_external_subtask_prompt_with_cancel(
     state: &AppState,
     child_id: &str,
+    generation: MessageId,
     prompt: &str,
     runtime: ExternalRuntime,
     cancel: Option<Arc<AtomicBool>>,
@@ -221,7 +252,8 @@ async fn run_external_subtask_prompt_with_cancel(
     let cancellation = cancel.unwrap_or_else(|| run.cancel.clone());
     let model = external_model(runtime);
     let user_message =
-        append_external_user_message(state, &child, prompt, runtime, &model).await?;
+        append_external_user_message(state, &child, generation, prompt, runtime, &model)
+            .await?;
     let user_id = match &user_message.info {
         MessageInfo::User(user) => user.id.clone(),
         MessageInfo::Assistant(_) => Id::ascending(IdKind::Message),
@@ -303,12 +335,12 @@ async fn run_external_subtask_prompt_with_cancel(
 pub(crate) async fn append_external_user_message(
     state: &AppState,
     child: &SessionInfo,
+    message_id: MessageId,
     prompt: &str,
     runtime: ExternalRuntime,
     model: &UserModel,
 ) -> Result<MessageWithParts, ApiError> {
     touch_session(state, child.id.as_str()).await?;
-    let message_id = Id::ascending(IdKind::Message);
     let part = Part::Text(TextPart {
         id: Id::ascending(IdKind::Part),
         session_id: child.id.clone(),

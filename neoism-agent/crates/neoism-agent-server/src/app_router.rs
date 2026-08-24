@@ -75,12 +75,12 @@ use crate::v2_routes::{
     v2_session_children, v2_session_list, v2_wait,
 };
 use crate::vcs_routes::{vcs_apply, vcs_diff, vcs_diff_raw, vcs_get, vcs_status};
-use crate::worktree_routes::{
-    worktree_create, worktree_list, worktree_remove, worktree_reset,
-};
 use crate::workflow::{
     workflow_activate, workflow_get, workflow_history, workflow_list, workflow_pause,
     workflow_preview, workflow_run_now,
+};
+use crate::worktree_routes::{
+    worktree_create, worktree_list, worktree_remove, worktree_reset,
 };
 
 pub fn app(state: AppState) -> Router {

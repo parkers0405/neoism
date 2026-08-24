@@ -1,5 +1,44 @@
 use super::*;
 
+pub(super) fn open_agent_usage_menu(
+    bridge: &mut ChromeBridge,
+    lines: Vec<String>,
+    x: f32,
+    y: f32,
+) {
+    use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
+    use neoism_ui::widgets::modal::ModalAction;
+
+    if lines.is_empty() {
+        return;
+    }
+    let mut items = lines
+        .into_iter()
+        .map(|line| {
+            let mut item = ContextMenuItem::new(
+                line,
+                "",
+                ContextMenuAction::Modal(ModalAction::Close.into()),
+            );
+            item.enabled = false;
+            item
+        })
+        .collect::<Vec<_>>();
+    items.push(ContextMenuItem::new(
+        "Close",
+        "Esc",
+        ContextMenuAction::Modal(ModalAction::Close.into()),
+    ));
+    bridge.chrome.context_menu.open(
+        "Context usage",
+        items,
+        x,
+        y,
+        bridge.viewport.w,
+        bridge.viewport.h,
+    );
+}
+
 #[wasm_bindgen]
 impl ChromeBridge {
     // -------- agent pane ----------------------------------------
@@ -1345,6 +1384,7 @@ impl ChromeBridge {
         }
         let mut result = ClickResult::default();
         let mut relayout = false;
+        let mut usage_menu_lines = None;
         // The full-width chrome top bar paints above the agent pane.
         // Let clicks in its row fall through to the chrome event path
         // (top-bar panel toggles) instead of being eaten by the
@@ -1379,6 +1419,11 @@ impl ChromeBridge {
                 pane.side_panel_mut().toggle_visibility();
                 result.handled = true;
                 relayout = true;
+                break 'chain;
+            }
+            if pane.side_panel().usage_contains(x, y) {
+                usage_menu_lines = Some(pane.usage_detail_lines());
+                result.handled = true;
                 break 'chain;
             }
             if pane.side_panel().contains_point(x, y) {
@@ -1429,6 +1474,11 @@ impl ChromeBridge {
                 result.handled = true;
                 break 'chain;
             }
+            if pane.usage_chip_contains(x, y) {
+                usage_menu_lines = Some(pane.usage_detail_lines());
+                result.handled = true;
+                break 'chain;
+            }
             if let Some(chip) = pane.status_chip_at(x, y) {
                 pane.open_status_chip_picker(chip);
                 result.handled = true;
@@ -1472,6 +1522,9 @@ impl ChromeBridge {
         }
         if relayout {
             self.relayout_chrome();
+        }
+        if let Some(lines) = usage_menu_lines {
+            open_agent_usage_menu(self, lines, x, y);
         }
         if result.handled {
             // Picker commits / permission replies queue outbound

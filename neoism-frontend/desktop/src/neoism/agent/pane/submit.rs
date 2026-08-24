@@ -107,8 +107,10 @@ impl NeoismAgentPane {
             }
         }
         let was_streaming = self.is_streaming();
+        let message_id =
+            neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
         if !was_streaming {
-            let mut message = NeoismAgentMessage::user(text);
+            let mut message = NeoismAgentMessage::user(text).with_id(message_id.clone());
             message.images = self.input_images();
             self.messages.push(message);
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
@@ -125,7 +127,7 @@ impl NeoismAgentPane {
         // `expanded` may contain a large paste. Reuse the expansion already
         // computed for echo canonicalization instead of rebuilding it during
         // send on the event thread.
-        let send_result = self.send_prepared_prompt(expanded, !was_streaming);
+        let send_result = self.send_prepared_prompt(expanded, !was_streaming, message_id);
         self.input_attachments.clear();
         match send_result {
             Ok(()) => {}
@@ -148,8 +150,12 @@ impl NeoismAgentPane {
             return;
         }
         let was_streaming = self.is_streaming();
+        let message_id =
+            neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
         if !was_streaming {
-            self.messages.push(NeoismAgentMessage::user(prompt.clone()));
+            self.messages.push(
+                NeoismAgentMessage::user(prompt.clone()).with_id(message_id.clone()),
+            );
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
             if let Some(session_id) = self.session_id.as_ref() {
                 self.terminal_idle_sessions.remove(session_id);
@@ -157,7 +163,8 @@ impl NeoismAgentPane {
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
         self.abort_requested_at = None;
-        match self.send_prompt(&prompt, !was_streaming) {
+        let expanded = self.expand_text_attachments(&prompt);
+        match self.send_prepared_prompt(expanded, !was_streaming, message_id) {
             Ok(()) => {}
             Err(error) => {
                 self.system_message("Prompt failed", error);

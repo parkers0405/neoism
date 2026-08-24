@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -36,6 +36,7 @@ enum McpRuntimeEntry {
 }
 
 struct LocalMcpRuntime {
+    spec: LocalMcpRuntimeSpec,
     client: Arc<StdioJsonRpcClient>,
     tools: Vec<McpToolInfo>,
     resources: Vec<McpResource>,
@@ -43,12 +44,27 @@ struct LocalMcpRuntime {
 }
 
 struct RemoteMcpRuntime {
+    spec: Option<RemoteMcpRuntimeSpec>,
     url: String,
     client: Option<Arc<HttpJsonRpcClient>>,
     tools: Vec<McpToolInfo>,
     resources: Vec<McpResource>,
     prompts: Vec<McpPromptInfo>,
     status: McpStatus,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct LocalMcpRuntimeSpec {
+    command: Vec<String>,
+    environment: Option<BTreeMap<String, String>>,
+    request_timeout: Duration,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct RemoteMcpRuntimeSpec {
+    url: String,
+    headers: Option<BTreeMap<String, String>>,
+    request_timeout: Duration,
 }
 
 impl McpRuntimeManager {
@@ -61,8 +77,19 @@ impl McpRuntimeManager {
         request_timeout: Duration,
         state: Option<AppState>,
     ) -> anyhow::Result<McpStatus> {
-        if matches!(self.status(directory, name), Some(McpStatus::Connected)) {
-            return Ok(McpStatus::Connected);
+        let spec = LocalMcpRuntimeSpec {
+            command: command.to_vec(),
+            environment: environment.cloned(),
+            request_timeout,
+        };
+        let existing = self.runtime(directory, name);
+        if let Some(runtime) = existing {
+            if let McpRuntimeEntry::Local(local) = runtime.as_ref() {
+                if local.spec == spec && local.client.is_running().await {
+                    return Ok(McpStatus::Connected);
+                }
+            }
+            self.disconnect(directory, name).await?;
         }
 
         let client = Arc::new(
@@ -86,6 +113,7 @@ impl McpRuntimeManager {
         };
 
         let runtime = Arc::new(McpRuntimeEntry::Local(LocalMcpRuntime {
+            spec,
             client,
             tools,
             resources,
@@ -108,8 +136,20 @@ impl McpRuntimeManager {
         request_timeout: Duration,
         state: Option<AppState>,
     ) -> anyhow::Result<McpStatus> {
-        if matches!(self.status(directory, name), Some(McpStatus::Connected)) {
-            return Ok(McpStatus::Connected);
+        let spec = RemoteMcpRuntimeSpec {
+            url: url.to_string(),
+            headers: headers.cloned(),
+            request_timeout,
+        };
+        if let Some(runtime) = self.runtime(directory, name) {
+            if let McpRuntimeEntry::Remote(remote) = runtime.as_ref() {
+                if remote.spec.as_ref() == Some(&spec)
+                    && matches!(remote.status, McpStatus::Connected)
+                {
+                    return Ok(McpStatus::Connected);
+                }
+            }
+            self.disconnect(directory, name).await?;
         }
 
         let client = Arc::new(HttpJsonRpcClient::new(
@@ -122,6 +162,7 @@ impl McpRuntimeManager {
         let (tools, resources, prompts) = load_remote_snapshot(name, &client).await?;
 
         let runtime = Arc::new(McpRuntimeEntry::Remote(RemoteMcpRuntime {
+            spec: Some(spec),
             url: url.to_string(),
             client: Some(client.clone()),
             tools,
@@ -145,6 +186,7 @@ impl McpRuntimeManager {
         status: McpStatus,
     ) {
         let runtime = Arc::new(McpRuntimeEntry::Remote(RemoteMcpRuntime {
+            spec: None,
             url: url.to_string(),
             client: None,
             tools: Vec::new(),
@@ -184,6 +226,33 @@ impl McpRuntimeManager {
             McpRuntimeEntry::Local(_) => McpStatus::Connected,
             McpRuntimeEntry::Remote(remote) => remote.status.clone(),
         })
+    }
+
+    pub(super) async fn disconnect_except(
+        &self,
+        directory: &str,
+        configured: &BTreeSet<String>,
+    ) {
+        let prefix = format!("{directory}\0");
+        let removed = {
+            let mut clients = self.clients.write().expect("mcp runtime lock poisoned");
+            let keys = clients
+                .keys()
+                .filter(|key| {
+                    key.strip_prefix(&prefix)
+                        .is_some_and(|name| !configured.contains(name))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| clients.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        for runtime in removed {
+            if let McpRuntimeEntry::Local(local) = runtime.as_ref() {
+                local.client.shutdown().await;
+            }
+        }
     }
 
     pub(super) fn tools(&self, directory: &str, name: &str) -> Option<Vec<McpToolInfo>> {
@@ -234,7 +303,7 @@ impl McpRuntimeManager {
         };
         let result = match runtime.as_ref() {
             McpRuntimeEntry::Local(local) => {
-                local
+                let result = local
                     .client
                     .request(
                         "tools/call",
@@ -243,7 +312,11 @@ impl McpRuntimeManager {
                             "arguments": arguments
                         }),
                     )
-                    .await?
+                    .await;
+                if result.is_err() {
+                    self.invalidate_if_same(directory, name, &runtime).await;
+                }
+                result?
             }
             McpRuntimeEntry::Remote(remote) => {
                 if !matches!(remote.status, McpStatus::Connected) {
@@ -303,6 +376,7 @@ impl McpRuntimeManager {
                     }
                 };
                 Arc::new(McpRuntimeEntry::Local(LocalMcpRuntime {
+                    spec: local.spec.clone(),
                     client: local.client.clone(),
                     tools,
                     resources,
@@ -333,6 +407,7 @@ impl McpRuntimeManager {
                     }
                 };
                 Arc::new(McpRuntimeEntry::Remote(RemoteMcpRuntime {
+                    spec: remote.spec.clone(),
                     url: remote.url.clone(),
                     client: remote.client.clone(),
                     tools,
@@ -347,6 +422,39 @@ impl McpRuntimeManager {
             .expect("mcp runtime lock poisoned")
             .insert(runtime_key(directory, name), refreshed);
         Ok(())
+    }
+
+    fn runtime(&self, directory: &str, name: &str) -> Option<Arc<McpRuntimeEntry>> {
+        self.clients
+            .read()
+            .expect("mcp runtime lock poisoned")
+            .get(&runtime_key(directory, name))
+            .cloned()
+    }
+
+    async fn invalidate_if_same(
+        &self,
+        directory: &str,
+        name: &str,
+        failed: &Arc<McpRuntimeEntry>,
+    ) {
+        let removed = {
+            let mut clients = self.clients.write().expect("mcp runtime lock poisoned");
+            let key = runtime_key(directory, name);
+            if clients
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, failed))
+            {
+                clients.remove(&key)
+            } else {
+                None
+            }
+        };
+        if let Some(runtime) = removed {
+            if let McpRuntimeEntry::Local(local) = runtime.as_ref() {
+                local.client.shutdown().await;
+            }
+        }
     }
 }
 

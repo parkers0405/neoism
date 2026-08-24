@@ -8,12 +8,13 @@ pub(super) fn existing_project_path(
     context: &ToolContext,
     raw: &str,
 ) -> anyhow::Result<PathBuf> {
-    let base = crate::windows_process::canonicalize_path(&context.cwd).with_context(|| {
-        format!(
-            "failed to resolve project directory {}",
-            context.cwd.display()
-        )
-    })?;
+    let base =
+        crate::windows_process::canonicalize_path(&context.cwd).with_context(|| {
+            format!(
+                "failed to resolve project directory {}",
+                context.cwd.display()
+            )
+        })?;
     let candidate = if Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else {
@@ -48,12 +49,13 @@ pub(super) fn project_path_for_write(
     context: &ToolContext,
     raw: &str,
 ) -> anyhow::Result<PathBuf> {
-    let base = crate::windows_process::canonicalize_path(&context.cwd).with_context(|| {
-        format!(
-            "failed to resolve project directory {}",
-            context.cwd.display()
-        )
-    })?;
+    let base =
+        crate::windows_process::canonicalize_path(&context.cwd).with_context(|| {
+            format!(
+                "failed to resolve project directory {}",
+                context.cwd.display()
+            )
+        })?;
     let candidate = if Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else {
@@ -66,9 +68,10 @@ pub(super) fn project_path_for_write(
             anyhow::anyhow!("path {} has no existing ancestor", candidate.display())
         })?;
     }
-    let ancestor = crate::windows_process::canonicalize_path(ancestor).with_context(|| {
-        format!("failed to resolve existing ancestor {}", ancestor.display())
-    })?;
+    let ancestor =
+        crate::windows_process::canonicalize_path(ancestor).with_context(|| {
+            format!("failed to resolve existing ancestor {}", ancestor.display())
+        })?;
     if !ancestor.is_dir() && ancestor != candidate {
         anyhow::bail!(
             "cannot create {} below non-directory {}",
@@ -108,7 +111,8 @@ pub(super) fn directory_entries(path: &Path) -> anyhow::Result<Vec<String>> {
                 Ok(entry) => entry,
                 Err(error) => return Some(Err(error)),
             };
-            let resolved = match crate::windows_process::canonicalize_path(&entry.path()) {
+            let resolved = match crate::windows_process::canonicalize_path(&entry.path())
+            {
                 Ok(resolved) if resolved.starts_with(&root) => resolved,
                 Ok(_) | Err(_) => return None,
             };

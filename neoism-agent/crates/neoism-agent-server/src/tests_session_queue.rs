@@ -1051,7 +1051,7 @@ async fn held_subtask_completion_delivers_when_parent_turn_ends() {
         Some(PromptPart::Text { text }) if text.contains("the last subagent result")
     ));
 
-    // And the durable outbox entry is marked sent — no duplicate later.
+    // Queue admission is not delivery: the durable outbox remains pending.
     let stored_child = state
         .inner
         .store
@@ -1065,7 +1065,7 @@ async fn held_subtask_completion_delivers_when_parent_turn_ends() {
             .get("subtaskCompletion")
             .and_then(|value| value.get("pending"))
             .and_then(serde_json::Value::as_bool),
-        Some(false)
+        Some(true)
     );
 
     cleanup_sqlite_files(&db_path);
@@ -1128,16 +1128,21 @@ async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
     state.inner.store.insert_session(&child).await.unwrap();
 
     // The task tool queues the steer prompt and sets the marker.
-    crate::session_actions::mark_subtask_notify_on_idle(&state, child_id.as_str())
-        .await
-        .unwrap();
+    let generation = Id::ascending(IdKind::Message);
+    crate::session_actions::mark_subtask_notify_on_idle(
+        &state,
+        child_id.as_str(),
+        &generation,
+    )
+    .await
+    .unwrap();
     state
         .inner
         .store
         .enqueue_prompt_with_delivery(
             child_id.as_str(),
             &PromptRequest {
-                message_id: None,
+                message_id: Some(generation),
                 model: None,
                 agent: None,
                 no_reply: true,
@@ -1154,11 +1159,13 @@ async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
         .unwrap();
 
     // The child's queue worker runs the prompt and exits at true idle.
-    assert!(state
-        .inner
-        .session_coordinator
-        .wake(child_id.as_str())
-        .await);
+    assert!(
+        state
+            .inner
+            .session_coordinator
+            .wake(child_id.as_str())
+            .await
+    );
     crate::session_queue::drain_prompt_queue(state.clone(), child_id.to_string()).await;
 
     // Parent got the completion notification.
@@ -1176,7 +1183,8 @@ async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
             if text.contains("Subagent finished.") && text.contains(child_id.as_str())
     ));
 
-    // Marker cleared, outbox entry marked sent — no double delivery.
+    // Marker clears at true idle, but queue admission does not acknowledge the
+    // durable completion before append/model delivery succeeds.
     let stored_child = state
         .inner
         .store
@@ -1188,10 +1196,12 @@ async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
     assert_eq!(
         stored_child
             .extra
-            .get("subtaskCompletion")
+            .get("subtaskCompletions")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| items.first())
             .and_then(|value| value.get("pending"))
             .and_then(serde_json::Value::as_bool),
-        Some(false)
+        Some(true)
     );
 
     cleanup_sqlite_files(&db_path);
@@ -1199,7 +1209,7 @@ async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
 }
 
 #[tokio::test]
-async fn queued_child_prompt_defers_terminal_event_and_survives_lost_marker() {
+async fn queued_child_prompt_supersedes_older_wrapper_and_notifies_at_final_idle() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-child-queue-race-{}",
         Id::ascending(IdKind::Event)
@@ -1245,16 +1255,21 @@ async fn queued_child_prompt_defers_terminal_event_and_survives_lost_marker() {
         extra: BTreeMap::new(),
     };
     state.inner.store.insert_session(&child).await.unwrap();
-    crate::session_actions::mark_subtask_notify_on_idle(&state, child_id.as_str())
-        .await
-        .unwrap();
+    let queued_generation = Id::ascending(IdKind::Message);
+    crate::session_actions::mark_subtask_notify_on_idle(
+        &state,
+        child_id.as_str(),
+        &queued_generation,
+    )
+    .await
+    .unwrap();
     state
         .inner
         .store
         .enqueue_prompt_with_delivery(
             child_id.as_str(),
             &PromptRequest {
-                message_id: None,
+                message_id: Some(queued_generation),
                 model: None,
                 agent: None,
                 no_reply: true,
@@ -1282,11 +1297,12 @@ async fn queued_child_prompt_defers_terminal_event_and_survives_lost_marker() {
     crate::session_actions::publish_background_subtask_finished(
         &state,
         child_id.as_str(),
+        &Id::ascending(IdKind::Message),
         "completed",
         "first result, not final",
     )
     .await;
-    let mut stored_child = state
+    let stored_child = state
         .inner
         .store
         .get_session(child_id.as_str())
@@ -1302,15 +1318,6 @@ async fn queued_child_prompt_defers_terminal_event_and_survives_lost_marker() {
         .unwrap()
         .is_empty());
 
-    // Reproduce the old whole-SessionInfo lost update. The worker's explicit
-    // child obligation must still deliver after it drains.
-    stored_child.extra.remove("subtaskNotifyOnIdle");
-    state
-        .inner
-        .store
-        .update_session(&stored_child)
-        .await
-        .unwrap();
     crate::session_queue::drain_prompt_queue(state.clone(), child_id.to_string()).await;
 
     let queued = state

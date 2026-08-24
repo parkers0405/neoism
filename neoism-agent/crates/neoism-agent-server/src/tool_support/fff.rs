@@ -413,17 +413,19 @@ fn grep_tool_sync(
         next_file_offset,
         used_mode,
     ) = match search {
-        Ok((items, files_with_matches, total_files_searched, next_file_offset, used_mode))
-            if !items.is_empty() || total_files_searched > 0 =>
-        {
-            (
-                items,
-                files_with_matches,
-                total_files_searched,
-                next_file_offset,
-                used_mode,
-            )
-        }
+        Ok((
+            items,
+            files_with_matches,
+            total_files_searched,
+            next_file_offset,
+            used_mode,
+        )) if !items.is_empty() || total_files_searched > 0 => (
+            items,
+            files_with_matches,
+            total_files_searched,
+            next_file_offset,
+            used_mode,
+        ),
         Ok(_) => {
             let remaining = timeout_ms
                 .saturating_sub(fff_started.elapsed().as_millis() as u64)
@@ -559,7 +561,12 @@ fn multi_grep_tool_sync(
             Ok((items, files_with_matches, total_files_searched, next_file_offset))
                 if !items.is_empty() || total_files_searched > 0 =>
             {
-                (items, files_with_matches, total_files_searched, next_file_offset)
+                (
+                    items,
+                    files_with_matches,
+                    total_files_searched,
+                    next_file_offset,
+                )
             }
             Ok(_) => {
                 let remaining = timeout_ms

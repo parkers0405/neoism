@@ -1,10 +1,15 @@
 use super::*;
 
 impl NeoismAgentPane {
-    pub fn timeline_view_anchor(&self) -> Option<(String, f32)> {
+    pub fn timeline_view_anchor(
+        &self,
+    ) -> Option<(
+        crate::panels::agent_pane::view::timeline::TimelineViewAnchorKey,
+        f32,
+    )> {
         self.timeline_view_anchor
             .as_ref()
-            .map(|anchor| (anchor.message_id.clone(), anchor.screen_offset))
+            .map(|anchor| (anchor.key.clone(), anchor.screen_offset))
     }
 
     pub fn restore_timeline_view_anchor(&mut self, content_y: f32, screen_offset: f32) {
@@ -12,19 +17,21 @@ impl NeoismAgentPane {
             return;
         }
         let max_scroll = self.max_timeline_scroll();
+        let before = self.timeline_scroll_px;
         let scroll_top = (content_y - screen_offset).clamp(0.0, max_scroll);
         self.timeline_scroll_px = max_scroll - scroll_top;
+        if let Some(target) = self.timeline_wheel_target_px.as_mut() {
+            *target = (*target + self.timeline_scroll_px - before).clamp(0.0, max_scroll);
+        }
     }
 
     pub fn set_timeline_view_anchor(
         &mut self,
-        message_id: Option<String>,
+        key: Option<crate::panels::agent_pane::view::timeline::TimelineViewAnchorKey>,
         screen_offset: f32,
     ) {
-        self.timeline_view_anchor = message_id.map(|message_id| TimelineViewAnchor {
-            message_id,
-            screen_offset,
-        });
+        self.timeline_view_anchor =
+            key.map(|key| TimelineViewAnchor { key, screen_offset });
     }
 
     fn shift_timeline_view_anchor_for_scroll(&mut self, scroll_offset_delta: f32) {

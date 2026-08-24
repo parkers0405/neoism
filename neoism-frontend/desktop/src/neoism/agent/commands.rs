@@ -836,22 +836,11 @@ impl NeoismAgentPane {
         self.pending_session_switch = None;
     }
 
-    pub(super) fn send_prompt(
-        &mut self,
-        text: &str,
-        transcript_echo: bool,
-    ) -> Result<(), String> {
-        if self.is_subagent_session() {
-            return Err("subagent sessions are view-only".to_string());
-        }
-        let prompt = self.expand_text_attachments(text);
-        self.send_prepared_prompt(prompt, transcript_echo)
-    }
-
     pub(super) fn send_prepared_prompt(
         &mut self,
         prompt: String,
         transcript_echo: bool,
+        message_id: String,
     ) -> Result<(), String> {
         if self.is_subagent_session() {
             return Err("subagent sessions are view-only".to_string());
@@ -859,7 +848,7 @@ impl NeoismAgentPane {
         let parts = self.prompt_parts_for(&prompt);
         let system = self.prompt_system_for(&prompt);
         self.push_outbound(OutboundAgentCommand::SendPrompt {
-            message_id: neoism_ui::panels::agent_pane::outbound::next_prompt_message_id(),
+            message_id,
             text: prompt,
             parts,
             system,
@@ -899,7 +888,8 @@ impl NeoismAgentPane {
         // attached client, and a remote peer renders THIS name + its
         // deterministic presence orb (instead of a generic "You"). The local
         // sender's own bubble still reads "You" — its optimistic echo carries
-        // no author and the server echo is deduped onto it by text.
+        // no author and uses this dispatch's MessageId, so the server echo is
+        // reconciled by durable identity rather than prompt text.
         let author = self.local_presence_name().map(str::to_string);
         let transcript_echo = if transcript_echo {
             // Pending prompts must match the transcript echo, which uses

@@ -499,8 +499,10 @@ impl NeoismAgentPane {
         transcript_echo: bool,
     ) -> Result<(), String> {
         let echo_prompt = echo_prompt.to_string();
+        let message_id = crate::panels::agent_pane::outbound::next_prompt_message_id();
         if transcript_echo {
-            let mut message = NeoismAgentMessage::user(echo_prompt.clone());
+            let mut message =
+                NeoismAgentMessage::user(echo_prompt.clone()).with_id(message_id.clone());
             message.images = self.input_images();
             self.messages.push(message);
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
@@ -518,7 +520,7 @@ impl NeoismAgentPane {
         let parts = self.prompt_parts_for(prompt);
         let system = self.prompt_system_for(prompt);
         self.push_outbound(OutboundAgentCommand::SendPrompt {
-            message_id: crate::panels::agent_pane::outbound::next_prompt_message_id(),
+            message_id,
             text: prompt.to_string(),
             parts,
             system,

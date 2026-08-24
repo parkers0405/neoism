@@ -106,8 +106,8 @@ mod vcs_routes;
 #[cfg(windows)]
 mod windows_acl;
 pub(crate) mod windows_process;
-mod workspace_runtime;
 mod workflow;
+mod workspace_runtime;
 mod worktree;
 mod worktree_routes;
 

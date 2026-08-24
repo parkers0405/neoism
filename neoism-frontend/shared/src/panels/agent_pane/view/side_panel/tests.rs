@@ -45,6 +45,10 @@ impl AgentSidePanelPane for TestPane {
         Vec::new()
     }
 
+    fn context_usage(&self) -> Option<(u64, Option<u64>)> {
+        None
+    }
+
     fn messages(&self) -> &[Self::Message] {
         &self.messages
     }
@@ -52,6 +56,53 @@ impl AgentSidePanelPane for TestPane {
     fn session_id_str(&self) -> Option<&str> {
         None
     }
+}
+
+#[test]
+fn context_meter_fraction_preserves_usage_policy_edges() {
+    assert_eq!(sections::context_fill_fraction(100, Some(400)), 0.25);
+    assert_eq!(sections::context_fill_fraction(500, Some(400)), 1.0);
+    assert_eq!(sections::context_fill_fraction(100, Some(0)), 0.35);
+    assert_eq!(sections::context_fill_fraction(100, None), 0.35);
+}
+
+#[test]
+fn context_meter_uses_compact_monochrome_label() {
+    let label = sections::context_count_label(32_100, Some(400_000));
+    assert_eq!(label, "32.1k / 400.0k tokens");
+    assert!(!label.to_ascii_uppercase().contains("INPUT"));
+    assert!(!label.to_ascii_uppercase().contains("OUTPUT"));
+    assert_eq!(
+        sections::context_count_label(1_200_000, None),
+        "1.2m tokens"
+    );
+}
+
+#[test]
+fn usage_scramble_rearms_only_for_changed_values() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.update_usage_meter(32_100, Some(400_000));
+    let revision = panel.usage_scramble_revision();
+    assert!(panel.usage_scramble_elapsed_ms().is_some());
+
+    panel.update_usage_meter(32_100, Some(400_000));
+    assert_eq!(panel.usage_scramble_revision(), revision);
+
+    panel.update_usage_meter(32_101, Some(400_000));
+    assert_eq!(panel.usage_scramble_revision(), revision + 1);
+
+    panel.update_usage_meter(32_101, Some(128_000));
+    assert_eq!(panel.usage_scramble_revision(), revision + 2);
+}
+
+#[test]
+fn usage_meter_hit_rect_is_dedicated_and_clearable() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_usage_rect([10.0, 20.0, 100.0, 30.0]);
+    assert!(panel.usage_contains(50.0, 35.0));
+    assert!(!panel.usage_contains(5.0, 35.0));
+    panel.clear_usage_rect();
+    assert!(!panel.usage_contains(50.0, 35.0));
 }
 
 #[test]

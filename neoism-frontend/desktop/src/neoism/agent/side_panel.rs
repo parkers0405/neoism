@@ -12,7 +12,7 @@
 
 #[allow(unused_imports)]
 pub use neoism_ui::panels::agent_pane::state::side_panel::{
-    BranchActivity, BranchStatus, GoalStatus, NeoismAgentSessionEntry,
-    NeoismAgentSidePanel, SessionGoal, SidePanelMode, FONT_SIZE, FRAME_RADIUS,
-    FRAME_STROKE, ROW_HEIGHT, ROW_PADDING_X, SIDE_PANEL_MIN_PANE_WIDTH,
+    BranchActivity, BranchStatus, BranchStatusTransition, GoalStatus,
+    NeoismAgentSessionEntry, NeoismAgentSidePanel, SessionGoal, SidePanelMode, FONT_SIZE,
+    FRAME_RADIUS, FRAME_STROKE, ROW_HEIGHT, ROW_PADDING_X, SIDE_PANEL_MIN_PANE_WIDTH,
 };

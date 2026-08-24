@@ -56,7 +56,8 @@ impl StdioJsonRpcClient {
             .current_dir(directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
         if let Some(environment) = environment {
             process.envs(environment);
         }
@@ -153,6 +154,11 @@ impl StdioJsonRpcClient {
         let mut connection = self.connection.lock().await;
         let _ = connection.child.start_kill();
         let _ = timeout(Duration::from_secs(2), connection.child.wait()).await;
+    }
+
+    pub(crate) async fn is_running(&self) -> bool {
+        let mut connection = self.connection.lock().await;
+        matches!(connection.child.try_wait(), Ok(None))
     }
 }
 

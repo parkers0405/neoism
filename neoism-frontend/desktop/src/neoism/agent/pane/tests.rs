@@ -63,6 +63,90 @@ fn viewed_subagent_terminal_status_clears_and_latches_activity() {
     assert!(!pane.child_part_can_drive_streaming("child-1"));
 }
 
+fn child_permission(id: &str) -> NeoismAgentPendingPermission {
+    NeoismAgentPendingPermission {
+        id: id.to_string(),
+        session_id: "child-1".to_string(),
+        parent_session_id: Some("parent".to_string()),
+        source_agent: None,
+        source_title: None,
+        title: "Run command".to_string(),
+        permission: "bash".to_string(),
+        patterns: Vec::new(),
+        selected: 0,
+        responding: false,
+    }
+}
+
+#[test]
+fn completed_child_ignores_late_permission_reply_event() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.enqueue_pending_permission(child_permission("perm-1"));
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "parent",
+        [AgentSessionUpdate::PermissionReplied {
+            request_id: "perm-1".to_string(),
+            session_id: Some("child-1".to_string()),
+        }],
+    ));
+
+    pane.drain_server_updates();
+
+    assert_eq!(
+        pane.side_panel.branch_activity("child-1").map(|a| a.status),
+        Some(BranchStatus::Completed)
+    );
+    assert!(pane.side_panel.branch_terminal_locked("child-1"));
+}
+
+#[test]
+fn completed_child_ignores_stale_permission_request_event() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "parent",
+        [AgentSessionUpdate::PermissionAsked(child_permission(
+            "perm-late",
+        ))],
+    ));
+
+    pane.drain_server_updates();
+
+    assert_eq!(
+        pane.side_panel.branch_activity("child-1").map(|a| a.status),
+        Some(BranchStatus::Completed)
+    );
+    assert!(pane.side_panel.branch_terminal_locked("child-1"));
+}
+
+#[test]
+fn authoritative_busy_child_event_reopens_completed_branch() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.note_subagent_runtime("child-1".to_string(), BranchStatus::Completed, None);
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "parent",
+        [AgentSessionUpdate::SubagentStatus {
+            session_id: "child-1".to_string(),
+            status: "busy".to_string(),
+            started_at: Some(2),
+            title: None,
+            agent: None,
+        }],
+    ));
+
+    pane.drain_server_updates();
+
+    assert_eq!(
+        pane.side_panel.branch_activity("child-1").map(|a| a.status),
+        Some(BranchStatus::Active)
+    );
+    assert!(!pane.side_panel.branch_terminal_locked("child-1"));
+}
+
 #[test]
 fn active_subagent_part_updates_do_not_restart_waiting_clock() {
     let mut pane = NeoismAgentPane::default();
@@ -1293,6 +1377,7 @@ fn submit_prompt_queues_send_prompt_for_runtime() {
     assert_eq!(drained.len(), 1);
     match &drained[0] {
         OutboundAgentCommand::SendPrompt {
+            message_id,
             text,
             agent,
             model,
@@ -1301,6 +1386,7 @@ fn submit_prompt_queues_send_prompt_for_runtime() {
             ..
         } => {
             assert_eq!(text, "ship it");
+            assert_eq!(pane.messages[0].id.as_str(), message_id);
             assert_eq!(agent.as_deref(), Some(DEFAULT_AGENT));
             assert_eq!(model, DEFAULT_MODEL);
             assert_eq!(thinking, &None);
@@ -2717,6 +2803,55 @@ fn timeline_growth_preserves_reader_position_when_scrolled_up() {
 }
 
 #[test]
+fn anchor_restore_shifts_active_wheel_target_by_actual_scroll_delta() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 900.0, 300.0);
+    pane.timeline_follow_bottom = false;
+    pane.timeline_scroll_px = 200.0;
+    pane.timeline_wheel_target_px = Some(250.0);
+
+    pane.restore_timeline_view_anchor(300.0, 0.0);
+
+    assert_eq!(pane.timeline_scroll_px, 300.0);
+    assert_eq!(pane.timeline_wheel_target_px, Some(350.0));
+}
+
+#[test]
+fn identical_pending_prompts_consume_server_occurrences_one_to_one() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("same").with_id("local-1"),
+        NeoismAgentMessage::user("same").with_id("local-2"),
+    ];
+    pane.pending_user_prompts = vec!["same".to_string(), "same".to_string()];
+
+    let merged = pane.merge_pending_user_prompts(vec![
+        NeoismAgentMessage::user("same").with_id("server-1")
+    ]);
+
+    assert_eq!(merged.len(), 2);
+    assert_eq!(pane.pending_user_prompts, vec!["same"]);
+    assert!(merged.iter().any(|message| message.id == "local-2"));
+}
+
+#[test]
+fn duplicate_id_structural_snapshot_is_not_a_stable_source_prefix() {
+    let previous = vec![
+        NeoismAgentMessage::user("first").with_id("duplicate"),
+        NeoismAgentMessage::user("second").with_id("duplicate"),
+    ];
+    let incoming = vec![
+        NeoismAgentMessage::user("second").with_id("duplicate"),
+        NeoismAgentMessage::user("replacement").with_id("duplicate"),
+        NeoismAgentMessage::assistant("tail").with_id("tail"),
+    ];
+
+    assert!(!super::ingest::stable_timeline_source_prefix(
+        &previous, &incoming
+    ));
+}
+
+#[test]
 fn mouse_wheel_notch_uses_a_fixed_spring_target() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
@@ -2747,7 +2882,10 @@ fn consecutive_mouse_wheel_notches_accumulate_a_deterministic_target() {
 fn active_scroll_advances_stream_layout_anchor_with_reader() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
-    pane.set_timeline_view_anchor(Some("visible-message".to_string()), 24.0);
+    pane.set_timeline_view_anchor(
+        Some(TimelineViewAnchorKey::at_source(0, 1, "visible-message")),
+        24.0,
+    );
 
     assert!(pane.scroll_timeline_wheel_pixels(24.0));
     let (_, immediate_offset) = pane.timeline_view_anchor().expect("anchor");

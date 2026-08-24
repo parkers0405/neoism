@@ -422,7 +422,15 @@ async fn ensure_nested_external_session(
         json!({ "sessionID": child.id, "info": child }),
     ));
     let model = external_model(ctx.runtime);
-    append_external_user_message(&ctx.state, &child, prompt, ctx.runtime, &model).await?;
+    append_external_user_message(
+        &ctx.state,
+        &child,
+        Id::ascending(IdKind::Message),
+        prompt,
+        ctx.runtime,
+        &model,
+    )
+    .await?;
     ctx.collector
         .lock()
         .await

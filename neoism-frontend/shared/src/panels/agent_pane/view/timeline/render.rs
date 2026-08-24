@@ -58,16 +58,12 @@ pub fn render_timeline_with<P, D>(
     }
     pane.set_timeline_metrics(rect, content_h, viewport_h);
     if did_layout_work {
-        if let Some((message_id, screen_offset)) = pane.timeline_view_anchor() {
-            if let Some(row) = layout.rows.iter().find(|row| {
-                (row.source_index..row.source_end_index.max(row.source_index + 1)).any(
-                    |source_index| {
-                        pane.messages()
-                            .get(source_index)
-                            .is_some_and(|message| message.id() == message_id)
-                    },
-                )
-            }) {
+        if let Some((key, screen_offset)) = pane.timeline_view_anchor() {
+            if let Some(row) = resolve_timeline_view_anchor(pane.messages(), &key)
+                .and_then(|source_index| {
+                    timeline_row_for_anchor_source(&layout.rows, source_index)
+                })
+            {
                 pane.restore_timeline_view_anchor(row.top, screen_offset);
             }
         }
@@ -176,11 +172,8 @@ pub fn render_timeline_with<P, D>(
     let anchor_range =
         visible_timeline_row_range(&layout.rows, scroll_top, scroll_top + viewport_h);
     if let Some(row) = layout.rows.get(anchor_range.start) {
-        let message_id = pane
-            .messages()
-            .get(row.source_index)
-            .map(|message| message.id().to_string());
-        pane.set_timeline_view_anchor(message_id, row.top - scroll_top);
+        let key = TimelineViewAnchorKey::for_source(pane.messages(), row.source_index);
+        pane.set_timeline_view_anchor(key, row.top - scroll_top);
     } else {
         pane.set_timeline_view_anchor(None, 0.0);
     }

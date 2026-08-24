@@ -146,6 +146,72 @@ impl AvatarProfile {
         }
     }
 
+    /// The ORB itself, unmasked: the exact same grid, per-cell four-sine
+    /// plasma formula, palette, and rim shading as [`Self::cells`] — only
+    /// the unit-circle skip is dropped so the plasma fills an arbitrary
+    /// `w`×`h` rectangle. This is what progress-bar fills should use when
+    /// they want to read as the profile pic's living pixels, not an
+    /// approximation of them.
+    pub fn cells_rect(
+        &self,
+        ox: f32,
+        oy: f32,
+        w: f32,
+        h: f32,
+        t: f32,
+        mut push: impl FnMut(AvatarCell),
+    ) {
+        if w <= 1.0 || h <= 1.0 {
+            return;
+        }
+        // Square-ish cells at the orb's chunky resolution: same grid count
+        // across as the circular avatar, extra rows derived from the aspect.
+        let cols = self.grid;
+        let cell = w / cols as f32;
+        let rows = ((h / cell).ceil() as u32).max(1);
+        let cw = w / cols as f32;
+        let chh = h / rows as f32;
+        let gc = cols as f32;
+        let gr = rows as f32;
+        for j in 0..rows {
+            let y0 = (oy + j as f32 * chh).round();
+            let y1 = (oy + (j as f32 + 1.0) * chh).round();
+            if y1 - y0 < 1.0 {
+                continue;
+            }
+            let ny = ((j as f32 + 0.5) / gr) * 2.0 - 1.0;
+            for i in 0..cols {
+                let x0 = (ox + i as f32 * cw).round();
+                let x1 = (ox + (i as f32 + 1.0) * cw).round();
+                if x1 - x0 < 1.0 {
+                    continue;
+                }
+                let nx = ((i as f32 + 0.5) / gc) * 2.0 - 1.0;
+                let dist = (nx * nx + ny * ny).sqrt();
+                // Identical field to the orb, rim included.
+                let mut p = (nx * self.f1 + t * self.s1 + self.p1).sin()
+                    + (ny * self.f2 - t * self.s2 + self.p2).sin()
+                    + ((nx + ny) * self.f3 + t * self.s3).sin()
+                    + (dist * self.f4 - t * self.s4).sin();
+                p = (p + 4.0) / 8.0; // -> 0..1
+                let idx = p * self.hues.len() as f32;
+                let lo = idx.floor() as usize;
+                let hue = lerp_hue(
+                    self.hues[lo % self.hues.len()],
+                    self.hues[(lo + 1) % self.hues.len()],
+                    idx - lo as f32,
+                );
+                let rim = 1.0 - (((dist - 0.62) / 0.38).max(0.0)) * 0.55;
+                let lightness = ((34.0 + p * 40.0) * rim) / 100.0;
+                let color = hsl_to_rgba(hue, 0.88, lightness);
+                push(AvatarCell {
+                    rect: [x0, y0, x1 - x0, y1 - y0],
+                    color,
+                });
+            }
+        }
+    }
+
     /// Grid resolution (cells across / down).
     pub fn grid(&self) -> u32 {
         self.grid
@@ -213,6 +279,20 @@ impl AvatarProfile {
             }
         }
     }
+}
+
+/// Convenience: build a profile from `seed` and fill an arbitrary rect with
+/// the orb's unmasked pixel plasma (see [`AvatarProfile::cells_rect`]).
+pub fn avatar_cells_rect(
+    seed: &str,
+    ox: f32,
+    oy: f32,
+    w: f32,
+    h: f32,
+    t: f32,
+    push: impl FnMut(AvatarCell),
+) {
+    AvatarProfile::from_seed(seed).cells_rect(ox, oy, w, h, t, push);
 }
 
 /// Convenience: build the profile and emit cells in one call (for one-off

@@ -1183,7 +1183,7 @@ async fn sync_history_replays_persisted_events() {
     .unwrap();
 
     let events: Vec<Value> = response_json(
-        app.oneshot(request(
+        app.clone().oneshot(request(
             Method::POST,
             "/sync/history",
             Some(json!({ "since": 0, "sessionID": session_id })),
@@ -2350,6 +2350,151 @@ async fn plugin_status_loads_configured_rust_native_plugins() {
 }
 
 #[tokio::test]
+async fn runtime_source_plugins_are_workspace_disableable() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-skills-disabled-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("neoism.json"),
+        r#"{ "plugins": {
+            "dev.neoism.skills": { "enabled": false },
+            "dev.neoism.commands": { "enabled": false },
+            "dev.neoism.websearch": { "enabled": false },
+            "dev.neoism.agents": { "enabled": false },
+            "dev.neoism.mcp": { "enabled": false },
+            "dev.neoism.lsp": { "enabled": false },
+            "dev.neoism.workflows": { "enabled": false },
+            "dev.neoism.tools.notes": { "enabled": false },
+            "dev.neoism.tools.workspace": { "enabled": false },
+            "dev.neoism.semantic": { "enabled": false },
+            "dev.neoism.goals": { "enabled": false },
+            "dev.neoism.vcs": { "enabled": false },
+            "dev.neoism.pty": { "enabled": false }
+        } }"#,
+    )
+    .unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let directory = root.to_string_lossy();
+
+    let capabilities: Vec<neoism_agent_core::CapabilityInfo> = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/v2/capabilities?directory={directory}"),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let skills = capabilities
+        .iter()
+        .find(|capability| capability.plugin_id.as_deref() == Some("dev.neoism.skills"))
+        .expect("skills capability");
+    assert!(skills.disableable);
+    assert!(!skills.enabled);
+
+    let listed: Vec<neoism_agent_core::SkillInfo> = response_json(
+        app.clone().oneshot(request(
+            Method::GET,
+            &format!("/v2/skills?directory={directory}"),
+            None,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(listed.is_empty());
+    let websearch = capabilities
+        .iter()
+        .find(|capability| capability.plugin_id.as_deref() == Some("dev.neoism.websearch"))
+        .expect("websearch capability");
+    assert!(websearch.disableable);
+    assert!(!websearch.enabled);
+    let tools: Vec<neoism_agent_core::ToolListItem> = response_json(
+        app.clone().oneshot(request(
+            Method::GET,
+            &format!("/v2/tools?directory={directory}"),
+            None,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(!tools.iter().any(|tool| tool.id == "websearch"));
+    assert!(!tools.iter().any(|tool| tool.id == "lsp"));
+    assert!(!tools.iter().any(|tool| tool.id == "notes"));
+    assert!(!tools.iter().any(|tool| tool.id == "skill"));
+    assert!(!tools.iter().any(|tool| tool.id == "read"));
+    assert!(!tools.iter().any(|tool| tool.id == "complete_goal"));
+    let agents = capabilities
+        .iter()
+        .find(|capability| capability.plugin_id.as_deref() == Some("dev.neoism.agents"))
+        .expect("agents capability");
+    assert!(agents.disableable);
+    assert!(!agents.enabled);
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/v2/agents?directory={directory}"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    let commands = capabilities
+        .iter()
+        .find(|capability| capability.plugin_id.as_deref() == Some("dev.neoism.commands"))
+        .expect("commands capability");
+    assert!(commands.disableable);
+    assert!(!commands.enabled);
+    for (plugin_id, path) in [
+        ("dev.neoism.semantic", "/v2/plugins/dev.neoism.semantic/search"),
+        ("dev.neoism.workflows", "/v2/plugins/dev.neoism.workflows"),
+        ("dev.neoism.lsp", "/v2/plugins/dev.neoism.lsp"),
+        ("dev.neoism.mcp", "/v2/plugins/dev.neoism.mcp"),
+        ("dev.neoism.vcs", "/v2/plugins/dev.neoism.vcs"),
+        ("dev.neoism.pty", "/v2/plugins/dev.neoism.pty/shells"),
+    ] {
+        let capability = capabilities
+            .iter()
+            .find(|capability| capability.plugin_id.as_deref() == Some(plugin_id))
+            .expect("route plugin capability");
+        assert!(capability.disableable);
+        assert!(!capability.enabled);
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("{path}?directory={directory}"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let listed: Vec<neoism_agent_core::CommandInfo> = response_json(
+        app.oneshot(request(
+            Method::GET,
+            &format!("/v2/commands?directory={directory}"),
+            None,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(listed.is_empty());
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-dynamic-plugin-{}",
@@ -3082,6 +3227,252 @@ async fn append_snapshot_test_messages(
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn v2_discovers_protocol_capabilities_and_internal_plugins() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-v2-discovery-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let router = app(state.clone());
+
+    let meta: neoism_agent_core::ApiMeta = response_json(
+        router
+            .clone()
+            .oneshot(Request::get("/v2/meta").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(meta.api_version, neoism_agent_core::API_VERSION);
+
+    let capabilities: Vec<neoism_agent_core::CapabilityInfo> = response_json(
+        router
+            .clone()
+            .oneshot(
+                Request::get("/v2/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(capabilities
+        .iter()
+        .any(|capability| capability.id == "neoism.sessions"));
+    assert!(capabilities.iter().any(|capability| {
+        capability.id == "neoism.subagents"
+            && capability.plugin_id.as_deref() == Some("dev.neoism.subagents")
+    }));
+
+    let plugins: Vec<neoism_agent_core::PluginManifestInfo> = response_json(
+        router
+            .oneshot(Request::get("/v2/plugins").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(plugins
+        .iter()
+        .any(|plugin| plugin.id == "dev.neoism.subagents"));
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn v2_openapi_describes_the_sdk_discovery_surface() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-v2-openapi-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let document: serde_json::Value = response_json(
+        app(state)
+            .oneshot(
+                Request::get("/v2/openapi.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(document["paths"]["/v2/events"].is_object());
+    assert!(document["components"]["schemas"]["EventEnvelope"].is_object());
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn v2_artifacts_round_trip_binary_content() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-v2-artifact-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let router = app(state.clone());
+    let payload = b"neoism artifact".to_vec();
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/v2/artifacts")
+                .header("content-type", "text/plain")
+                .header("x-neoism-filename", "note.txt")
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let artifact: neoism_agent_core::ArtifactInfo = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(artifact.filename, "note.txt");
+    assert_eq!(artifact.size, payload.len() as u64);
+    assert_eq!(artifact.sha256.len(), 64);
+    assert_eq!(
+        state
+            .inner
+            .store
+            .artifact_tenant(&artifact.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("local")
+    );
+    let audit = neoism_agent_core::AuditEntry {
+        id: Id::ascending(IdKind::Audit).to_string(),
+        tenant_id: "local".to_string(),
+        method: "POST".to_string(),
+        path: "/v2/artifacts".to_string(),
+        status: StatusCode::CREATED.as_u16(),
+        created: crate::now_millis(),
+    };
+    state.inner.store.append_audit(&audit).await.unwrap();
+    let entries = state.inner.store.list_audit("local", 10).await.unwrap();
+    assert_eq!(entries.first().map(|entry| entry.id.as_str()), Some(audit.id.as_str()));
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(format!("/v2/artifacts/{}/content", artifact.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let downloaded = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(downloaded.as_ref(), payload.as_slice());
+
+    let response = router
+        .oneshot(
+            Request::delete(format!("/v2/artifacts/{}", artifact.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn pending_interactions_restore_after_restart() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-interaction-restore-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let permission = PermissionRequestInfo {
+        id: Id::ascending(IdKind::Permission).to_string(),
+        session_id: Id::ascending(IdKind::Session).to_string(),
+        message_id: Id::ascending(IdKind::Message).to_string(),
+        title: "Allow read".to_string(),
+        permission: "read".to_string(),
+        patterns: vec!["file.txt".to_string()],
+        always: vec!["file.txt".to_string()],
+        tool: None,
+        metadata: None,
+    };
+    let question = QuestionRequestInfo {
+        id: Id::ascending(IdKind::Question).to_string(),
+        session_id: permission.session_id.clone(),
+        message_id: permission.message_id.clone(),
+        questions: vec![json!({ "question": "Continue?" })],
+    };
+    state
+        .inner
+        .store
+        .save_permission_request(&permission)
+        .await
+        .unwrap();
+    state
+        .inner
+        .store
+        .save_question_request(&question)
+        .await
+        .unwrap();
+    state.inner.store.close().await;
+    drop(state);
+
+    let restored = AppState::open_database(db_path.clone()).await.unwrap();
+    assert!(restored
+        .inner
+        .permissions
+        .read()
+        .await
+        .contains_key(&permission.id));
+    assert!(restored
+        .inner
+        .questions
+        .read()
+        .await
+        .contains_key(&question.id));
+    assert!(restored
+        .inner
+        .store
+        .resolve_interaction(&permission.id, "once", json!({ "reply": "once" }))
+        .await
+        .unwrap());
+    assert!(!restored
+        .inner
+        .store
+        .resolve_interaction(&permission.id, "once", json!({ "reply": "once" }))
+        .await
+        .unwrap());
+    crate::interaction::cancel_session_interactions(&restored, &permission.session_id).await;
+    assert!(restored.inner.permissions.read().await.is_empty());
+    assert!(restored.inner.questions.read().await.is_empty());
+    assert!(!restored
+        .inner
+        .store
+        .resolve_interaction(&question.id, "answered", json!({ "answers": [] }))
+        .await
+        .unwrap());
+    restored.inner.store.close().await;
+
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 async fn response_json<T: DeserializeOwned>(response: Response) -> T {

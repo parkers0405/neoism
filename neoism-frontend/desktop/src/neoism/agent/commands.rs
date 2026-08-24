@@ -887,10 +887,13 @@ impl NeoismAgentPane {
         // persists this on the user message and re-broadcasts it to every
         // attached client, and a remote peer renders THIS name + its
         // deterministic presence orb (instead of a generic "You"). The local
-        // sender's own bubble still reads "You" — its optimistic echo carries
-        // no author and uses this dispatch's MessageId, so the server echo is
-        // reconciled by durable identity rather than prompt text.
-        let author = self.local_presence_name().map(str::to_string);
+        // sender's own bubble still reads "You" because its author matches the
+        // pane's local presence name. The server echo is reconciled by durable
+        // message identity rather than prompt text.
+        // Never emit `author: null` from a native desktop. Pane identity is
+        // normally installed when the tab opens; the system-derived fallback
+        // keeps attribution intact if submission races pane initialization.
+        let author = Some(native_prompt_author(self.local_presence_name()));
         let transcript_echo = if transcript_echo {
             // Pending prompts must match the transcript echo, which uses
             // the compact composer form for pasted attachments.
@@ -1769,6 +1772,29 @@ impl NeoismAgentPane {
         self.session_tree_root_id = Some(id.clone());
         self.side_panel.set_viewed_session_id(Some(id.clone()));
         Ok(id)
+    }
+}
+
+pub(super) fn native_prompt_author(local_presence_name: Option<&str>) -> String {
+    local_presence_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::screen::presence::local_presence_identity(None).1)
+}
+
+#[cfg(test)]
+mod native_prompt_author_tests {
+    use super::native_prompt_author;
+
+    #[test]
+    fn uses_published_presence_name() {
+        assert_eq!(native_prompt_author(Some("  Parker  ")), "Parker");
+    }
+
+    #[test]
+    fn system_identity_prevents_missing_native_author() {
+        assert!(!native_prompt_author(None).trim().is_empty());
     }
 }
 

@@ -12,7 +12,9 @@ pub(crate) async fn session_abort(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Json<bool> {
-    Json(abort_session_run(&state, &session_id).await)
+    let aborted = abort_session_run(&state, &session_id).await;
+    crate::interaction::cancel_session_interactions(&state, &session_id).await;
+    Json(aborted)
 }
 
 pub(crate) async fn session_init(

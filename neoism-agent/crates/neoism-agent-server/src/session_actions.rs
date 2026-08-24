@@ -11,7 +11,6 @@ use neoism_agent_core::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::agent::AgentCatalog;
 use crate::command_routes::{expand_command_template, find_command};
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -135,7 +134,7 @@ pub(crate) async fn create_subtask_session(
     agent: &str,
     model: Option<UserModel>,
 ) -> Result<SessionInfo, ApiError> {
-    let agents = AgentCatalog::load(&parent.directory)?;
+    let agents = crate::plugins::agent_catalog(state, &parent.directory)?;
     let agent_info = agents.get(agent).ok_or_else(|| {
         let available = agents
             .list()
@@ -1219,7 +1218,7 @@ fn subtask_result_inline(text: &str) -> String {
     preview
 }
 
-fn last_text_part(message: &MessageWithParts) -> Option<String> {
+pub(crate) fn last_text_part(message: &MessageWithParts) -> Option<String> {
     if !matches!(message.info, MessageInfo::Assistant(_)) {
         return None;
     }
@@ -2355,8 +2354,8 @@ pub(crate) async fn session_command(
     Json(request): Json<SessionCommandRequest>,
 ) -> Result<Json<MessageWithParts>, ApiError> {
     let session = ensure_session(&state, &session_id).await?;
-    let command = find_command(&session.directory, &request.command)?;
-    let agents = AgentCatalog::load(&session.directory)?;
+    let command = find_command(&state, &session.directory, &request.command)?;
+    let agents = crate::plugins::agent_catalog(&state, &session.directory)?;
     let text = command
         .as_ref()
         .and_then(|command| command.template.as_deref())

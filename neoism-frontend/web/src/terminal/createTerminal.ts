@@ -658,7 +658,7 @@ export interface TerminalAdapter {
      *  `(requestId: number, envelopeJson: string)`. */
     setAgentSend?(cb: (requestId: number, envelopeJson: string) => void): void;
     /** Wake/list the daemon-backed agent server without creating a session. */
-    agentAttach?(directory?: string | null): void;
+    agentAttach?(directory?: string | null, presenceName?: string | null): void;
     /** Drive the bridge's "send a SendMessage" path; under the hood the
      *  bridge fires `agent_send` with a fresh request id. */
     agentSendMessage?(text: string): void;
@@ -1493,7 +1493,7 @@ interface ChromeBridgeInstance {
     agent_submit_permission(): boolean;
     agent_reply_permission(decision: string): boolean;
     set_agent_send(cb: (requestId: number, envelopeJson: string) => void): void;
-    agent_attach?(directory?: string | null): void;
+    agent_attach?(directory?: string | null, presenceName?: string | null): void;
     agent_send_message(text: string): void;
     agent_send_message_with_attachments?(text: string, attachmentsJson: string): void;
     agent_insert_paste?(text: string): boolean;
@@ -3042,8 +3042,8 @@ class ChromeAdapter implements TerminalAdapter {
     setAgentSend(cb: (requestId: number, envelopeJson: string) => void): void {
         this.inner.set_agent_send(cb);
     }
-    agentAttach(directory?: string | null): void {
-        this.inner.agent_attach?.(directory ?? undefined);
+    agentAttach(directory?: string | null, presenceName?: string | null): void {
+        this.inner.agent_attach?.(directory ?? undefined, presenceName ?? undefined);
     }
     agentSendMessage(text: string): void {
         this.inner.agent_send_message(text);

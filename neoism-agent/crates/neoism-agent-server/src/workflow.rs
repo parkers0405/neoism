@@ -1355,6 +1355,11 @@ async fn execute_run_inner(
     extra.insert("workflowScheduledAt".to_string(), json!(run.scheduled_at));
     extra.insert("workflowTrigger".to_string(), json!(run.trigger));
     let execution_directory = workflow_execution_directory(projection)?;
+    if !crate::plugins::enabled(&execution_directory, "dev.neoism.workflows") {
+        return Err(ApiError::not_found(
+            "Workflow plugin is disabled for the workspace",
+        ));
+    }
     extra.insert("workflowDirectory".to_string(), json!(execution_directory));
     let session = crate::session_routes::create_session_in_directory(
         state,

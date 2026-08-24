@@ -1626,6 +1626,8 @@ struct AgentBridgeState {
     default_agent: Option<String>,
     default_model: Option<String>,
     default_thinking: Option<String>,
+    /// Stable browser presence name stamped onto shared user messages.
+    local_presence_name: Option<String>,
     /// Prompt submitted before an agent-server session id exists.
     /// Desktop queues `EnsureSession` followed by `SendPrompt`; web
     /// mirrors that by sending `CreateThread`, then flushing this as
@@ -1661,6 +1663,7 @@ struct AgentBridgeState {
 struct PendingAgentPrompt {
     message_id: String,
     text: String,
+    author: Option<String>,
     attachments: Vec<neoism_protocol::agent::Attachment>,
     mode: Option<String>,
     model: Option<String>,

@@ -17,6 +17,7 @@ members = [
     "neoism-terminal-pty",
     "neoism-frontend/shared",
     "neoism-agent/crates/neoism-agent-core",
+    "neoism-agent/crates/neoism-agent-plugin-api",
     "neoism-agent/crates/neoism-agent-server",
     "neoism-agent/crates/neoism-agent-cli",
     "neoism-frontend/desktop",
@@ -57,6 +58,7 @@ neoism-notifier = { path = "neoism-notifier", version = "0.7.55" }
 neoism-grapheme-width = { path = "neoism-grapheme-width", version = "0.7.55" }
 sugarloaf = { path = "sugarloaf", version = "0.7.55" }
 neoism-agent-core = { path = "neoism-agent/crates/neoism-agent-core", version = "0.7.55" }
+neoism-agent-plugin-api = { path = "neoism-agent/crates/neoism-agent-plugin-api", version = "0.7.55" }
 neoism-agent-server = { path = "neoism-agent/crates/neoism-agent-server", version = "0.7.55" }
 neoism-extensions = { path = "neoism-extensions", version = "0.7.55" }
 neoism-sync = { path = "neoism-sync", version = "0.7.55" }

@@ -22,6 +22,7 @@ ignore.workspace = true
 iana-time-zone = "0.1.65"
 libc.workspace = true
 neoism-agent-core.workspace = true
+neoism-agent-plugin-api.workspace = true
 neoism-extensions.workspace = true
 neoism-workspace-index.workspace = true
 notify = "8.2.0"
@@ -38,6 +39,7 @@ turso.workspace = true
 tokio-stream.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+url.workspace = true
 dirs = "6"
 dunce.workspace = true
 

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path as FsPath, PathBuf};
 
 use axum::extract::{Path, Query, State};
+use axum::Extension;
 use axum::http::HeaderMap;
 use axum::Json;
 use neoism_agent_core::{
@@ -11,7 +12,6 @@ use neoism_agent_core::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::agent::AgentCatalog;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::{
@@ -59,8 +59,12 @@ pub(crate) struct ForkSessionRequest {
 pub(crate) async fn session_list(
     State(state): State<AppState>,
     Query(query): Query<SessionListQuery>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Json<Vec<SessionInfo>>, ApiError> {
     let mut sessions = state.inner.store.list_sessions().await?;
+    if let Some(Extension(claims)) = claims {
+        sessions.retain(|session| crate::caller::session_tenant(session) == claims.tenant_id);
+    }
     filter_sessions(&mut sessions, &query);
     Ok(Json(sessions))
 }
@@ -69,6 +73,7 @@ pub(crate) async fn session_create(
     State(state): State<AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
     body: Option<Json<CreateSessionRequest>>,
 ) -> Result<Json<SessionInfo>, ApiError> {
     let request = body.map(|Json(body)| body).unwrap_or(CreateSessionRequest {
@@ -80,16 +85,39 @@ pub(crate) async fn session_create(
         workspace_id: None,
     });
     let directory = resolve_directory(query.directory, &headers);
-    Ok(Json(
-        create_session_in_directory(&state, &directory, request, BTreeMap::new()).await?,
-    ))
+    let mut extra = BTreeMap::new();
+    if let Some(Extension(claims)) = claims {
+        if !crate::caller::allows_directory(&claims, &directory) {
+            return Err(ApiError::forbidden(
+                "The caller is not authorized for this directory",
+            ));
+        }
+        if let Some(limit) = claims.max_sessions {
+            let count = state
+                .inner
+                .store
+                .list_sessions()
+                .await?
+                .iter()
+                .filter(|session| crate::caller::session_tenant(session) == claims.tenant_id)
+                .count();
+            if count >= limit {
+                return Err(ApiError::too_many_requests("Session quota exceeded"));
+            }
+        }
+        extra.insert(
+            crate::caller::TENANT_EXTRA_KEY.to_string(),
+            Value::String(claims.tenant_id),
+        );
+    }
+    Ok(Json(create_session_in_directory(&state, &directory, request, extra).await?))
 }
 
 pub(crate) async fn create_session_in_directory(
     state: &AppState,
     directory: &str,
     request: CreateSessionRequest,
-    extra: BTreeMap<String, Value>,
+    mut extra: BTreeMap<String, Value>,
 ) -> Result<SessionInfo, ApiError> {
     let now = now_millis();
     let id = neoism_agent_core::new_session_id();
@@ -107,8 +135,30 @@ pub(crate) async fn create_session_in_directory(
     let project_context = project::discover(directory);
     let directory = project_context.directory.clone();
     let loaded_config = config::load(&directory)?;
-    let agents = AgentCatalog::from_config(&loaded_config.info);
+    let agents = crate::plugins::agent_catalog(state, &directory)?;
     let is_child = request.parent_id.is_some();
+    if let Some(parent_id) = request.parent_id.as_ref() {
+        let parent = state
+            .inner
+            .store
+            .get_session(parent_id.as_str())
+            .await?
+            .ok_or_else(|| ApiError::not_found("Parent session not found"))?;
+        let parent_tenant = crate::caller::session_tenant(&parent);
+        if let Some(tenant) = extra
+            .get(crate::caller::TENANT_EXTRA_KEY)
+            .and_then(Value::as_str)
+        {
+            if tenant != parent_tenant {
+                return Err(ApiError::forbidden("Parent session belongs to another tenant"));
+            }
+        } else if parent_tenant != "local" {
+            extra.insert(
+                crate::caller::TENANT_EXTRA_KEY.to_string(),
+                Value::String(parent_tenant.to_string()),
+            );
+        }
+    }
     let info = SessionInfo {
         id: id.clone(),
         slug: slug(),
@@ -169,6 +219,7 @@ pub(crate) async fn session_delete(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<bool>, ApiError> {
+    crate::interaction::cancel_session_interactions(&state, &session_id).await;
     if !state.inner.store.delete_session(&session_id).await? {
         return Err(ApiError::not_found("Session not found"));
     }

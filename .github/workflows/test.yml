@@ -10,6 +10,9 @@ on:
       - '**/*.rs'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - 'neoism-agent/openapi/**'
+      - 'neoism-agent/scripts/**'
+      - 'neoism-agent/sdk/typescript/**'
       - '.github/workflows/test.yml'
   workflow_dispatch:
 
@@ -38,6 +41,9 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -yq && sudo apt-get install -yq libasound2-dev libfontconfig1-dev glslang-tools
       - run: cargo fetch
+      - name: Check Agent API contract drift
+        if: runner.os == 'Linux'
+        run: bash neoism-agent/scripts/openapi.sh check
       - run: cargo fmt -- --check --color always
       - run: cargo clippy --all-targets --all-features
       - name: Check Windows terminal/daemon packages

@@ -609,6 +609,7 @@ fn map_history(
     NeoismAgentMessage {
         id: m.id,
         kind,
+        author: m.author,
         title: m.title,
         text: m.text,
         status: m.status,
@@ -626,7 +627,6 @@ fn map_history(
             .collect(),
         detail: m.detail,
         usage: m.usage.map(map_usage),
-        author: None,
         // The daemon's HistoryMessage carries no attachment list;
         // image parts arrive through the live part stream instead.
         images: Vec::new(),

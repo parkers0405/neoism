@@ -75,12 +75,8 @@ pub(super) async fn webfetch_tool(
     })
 }
 
-pub(super) async fn websearch_tool(
-    context: ToolContext,
-    arguments: Value,
-) -> anyhow::Result<ToolExecutionResult> {
+pub(crate) async fn websearch(arguments: Value) -> anyhow::Result<ToolExecutionResult> {
     let query = required_string(&arguments, "query")?;
-    context.ensure_allowed("websearch", query)?;
     let endpoint = std::env::var("NEOISM_AGENT_WEBSEARCH_ENDPOINT")
         .unwrap_or_else(|_| "https://duckduckgo.com/html/".to_string());
     let response = web_client()?

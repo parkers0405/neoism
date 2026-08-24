@@ -29,11 +29,15 @@ pub(crate) fn stop_event_stream(inner: &Arc<AgentInner>, session_id: &str) {
 pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String) {
     use futures::StreamExt;
     let url = format!(
-        "{}/event?sessionID={}&since=9223372036854775807&limit=1",
+        "{}/v2/events?sessionId={}&tail=true",
         inner.agent_server,
         percent_encode(&session_id),
     );
-    let resp = match inner.http.get(&url).send().await {
+    let resp = match inner
+        .authorize_agent_request(inner.http.get(&url))
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(err) => {
             emit_error(&inner.tx, format!("agent-server SSE {url}: {err}"));
@@ -67,7 +71,11 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
                         continue;
                     }
                     if let Ok(value) = serde_json::from_str::<Value>(payload) {
-                        forward_agent_server_event(&inner.tx, &session_id, value);
+                        forward_agent_server_event(
+                            &inner.tx,
+                            &session_id,
+                            normalize_v2_event(value),
+                        );
                     }
                 }
             }
@@ -78,6 +86,16 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
     let _ = inner.tx.send(AgentServerMessage::SessionIdle {
         session_id: session_id.clone(),
     });
+}
+
+fn normalize_v2_event(event: Value) -> Value {
+    if event.get("properties").is_some() {
+        return event;
+    }
+    json!({
+        "type": event.get("type").cloned().unwrap_or(Value::Null),
+        "properties": event.get("data").cloned().unwrap_or(Value::Null),
+    })
 }
 
 pub(crate) fn forward_agent_server_event(

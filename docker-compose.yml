@@ -106,6 +106,9 @@ services:
     environment:
       NEOISM_DAEMON_ADDR: 0.0.0.0:9876
       NEOISM_DAEMON_TOKEN: ${NEOISM_SERVE_TOKEN:-}
+      # The daemon forwards this bearer token to the co-hosted agent.
+      # Reuse the serve token so the published agent port is never open.
+      NEOISM_AGENT_TOKEN: ${NEOISM_SERVE_TOKEN:?set NEOISM_SERVE_TOKEN}
       # Provider keys for the co-hosted agent — set in .env or the
       # shell; empty is fine (connect via /connect later, auth lands in
       # the state volume's config dir).

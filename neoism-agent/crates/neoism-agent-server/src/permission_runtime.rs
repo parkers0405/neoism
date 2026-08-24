@@ -112,6 +112,12 @@ pub(crate) async fn ask_permission_for_tool(
             "error": error,
         })),
     };
+    state
+        .inner
+        .store
+        .save_permission_request(&request)
+        .await
+        .map_err(|error| error.to_string())?;
     state.inner.permission_waiters.write().await.insert(
         request.id.clone(),
         PermissionPending {

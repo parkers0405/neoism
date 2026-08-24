@@ -6,6 +6,7 @@ pub mod mcp;
 pub mod permission;
 pub mod provider;
 pub mod session;
+pub mod v2;
 
 pub use api::*;
 pub use auth::*;
@@ -15,3 +16,4 @@ pub use mcp::*;
 pub use permission::*;
 pub use provider::*;
 pub use session::*;
+pub use v2::*;

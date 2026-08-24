@@ -43,6 +43,14 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn too_many_requests(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            name: "QuotaExceededError",
+            message: message.into(),
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn not_implemented(feature: impl Into<String>) -> Self {
         Self {
@@ -82,9 +90,27 @@ impl std::fmt::Display for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let code = match self.status {
+            StatusCode::BAD_REQUEST => "request.invalid",
+            StatusCode::NOT_FOUND => "resource.not_found",
+            StatusCode::CONFLICT => "resource.conflict",
+            StatusCode::FORBIDDEN => "request.forbidden",
+            StatusCode::NOT_IMPLEMENTED => "feature.not_implemented",
+            _ => "server.internal",
+        };
+        let retryable = self.status.is_server_error();
         (
             self.status,
-            Json(json!({ "name": self.name, "data": { "message": self.message } })),
+            Json(json!({
+                "code": code,
+                "message": self.message,
+                "retryable": retryable,
+                "details": {},
+                // Legacy fields remain until existing Neoism clients consume
+                // the canonical v2 error shape above.
+                "name": self.name,
+                "data": { "message": self.message }
+            })),
         )
             .into_response()
     }

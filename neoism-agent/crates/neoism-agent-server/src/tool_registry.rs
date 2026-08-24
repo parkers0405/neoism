@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use super::{
     apply_patch_handler, artifact_read_handler, artifact_search_handler, bash_handler,
     edit_handler, glob_handler, grep_handler, lsp_handler, notes_handler, read_handler,
-    skill_handler, stateful_handler, webfetch_handler, websearch_handler, write_handler,
+    skill_handler, stateful_handler, webfetch_handler, write_handler,
     BuiltinTool, ToolHandler,
 };
 
@@ -182,12 +182,6 @@ pub(super) fn definitions() -> &'static [BuiltinTool] {
                 "required": ["url"]
             }),
             webfetch_handler,
-        ),
-        tool(
-            "websearch",
-            "Search the web",
-            object_required(&[("query", "string")], &["query"]),
-            websearch_handler,
         ),
         tool(
             "notes",

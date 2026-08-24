@@ -1,18 +1,28 @@
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use neoism_agent_core::CommandInfo;
 
 use crate::error::ApiError;
+use crate::state::AppState;
 use crate::{config, resolve_directory, InstanceQuery};
 
 pub(crate) async fn command_list(
+    State(state): State<AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CommandInfo>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    let mut commands = builtin_commands();
-    commands.extend(config::load(&directory)?.info.command.into_values());
+    let mut commands = Vec::new();
+    if crate::plugins::enabled(&directory, "dev.neoism.commands") {
+        for source in state.inner.plugin_host.snapshot().command_sources.values() {
+            commands.extend(
+                source
+                    .list(&directory)
+                    .map_err(|error| ApiError::internal(error.to_string()))?,
+            );
+        }
+    }
     commands.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(Json(commands))
 }
@@ -40,13 +50,31 @@ fn builtin_commands() -> Vec<CommandInfo> {
     ]
 }
 
+pub(crate) fn load_commands(directory: &str) -> anyhow::Result<Vec<CommandInfo>> {
+    let mut commands = builtin_commands();
+    commands.extend(config::load(directory)?.info.command.into_values());
+    Ok(commands)
+}
+
 pub(crate) fn find_command(
+    state: &AppState,
     directory: &str,
     name: &str,
 ) -> anyhow::Result<Option<CommandInfo>> {
-    let mut commands = builtin_commands();
-    commands.extend(config::load(directory)?.info.command.into_values());
-    Ok(commands.into_iter().find(|command| command.name == name))
+    if !crate::plugins::enabled(directory, "dev.neoism.commands") {
+        return Ok(None);
+    }
+    for source in state.inner.plugin_host.snapshot().command_sources.values() {
+        if let Some(command) = source
+            .list(directory)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .into_iter()
+            .find(|command| command.name == name)
+        {
+            return Ok(Some(command));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn expand_command_template(template: &str, arguments: &str) -> String {

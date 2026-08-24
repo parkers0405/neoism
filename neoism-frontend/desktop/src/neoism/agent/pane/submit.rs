@@ -111,6 +111,9 @@ impl NeoismAgentPane {
             neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
         if !was_streaming {
             let mut message = NeoismAgentMessage::user(text).with_id(message_id.clone());
+            message.author = Some(crate::neoism::agent::commands::native_prompt_author(
+                self.local_presence_name(),
+            ));
             message.images = self.input_images();
             self.messages.push(message);
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));

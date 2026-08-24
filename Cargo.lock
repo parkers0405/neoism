@@ -4909,6 +4909,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "neoism-agent-plugin-api"
+version = "0.7.55"
+dependencies = [
+ "neoism-agent-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "neoism-agent-server"
 version = "0.7.55"
 dependencies = [
@@ -4930,6 +4940,7 @@ dependencies = [
  "ignore",
  "libc",
  "neoism-agent-core",
+ "neoism-agent-plugin-api",
  "neoism-extensions",
  "neoism-workspace-index",
  "notify 8.2.0",
@@ -4947,6 +4958,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "turso",
+ "url",
  "windows-sys 0.60.2",
 ]
 

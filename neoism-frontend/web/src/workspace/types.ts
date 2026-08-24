@@ -1021,6 +1021,7 @@ export interface HistoryMessage {
   id: string;
   role: Role;
   kind: HistoryMessageKind;
+  author?: string | null;
   title?: string;
   text?: string;
   status?: string;

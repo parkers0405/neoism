@@ -18,6 +18,7 @@ pub struct AgentProtocolMappingContext {
     pub default_agent: Option<String>,
     pub default_model: Option<String>,
     pub default_thinking: Option<String>,
+    pub local_author: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +33,7 @@ pub enum AgentProtocolMapping {
 pub struct PendingAgentProtocolPrompt {
     pub message_id: String,
     pub text: String,
+    pub author: Option<String>,
     /// Attachments extracted from the prompt's `file` parts. Carried so
     /// the no-session path (prompt queued until `ThreadCreated`) ships
     /// the same attachments a live-session `SubmitPrompt` would.
@@ -72,6 +74,7 @@ pub fn map_outbound_command(
                     session_id,
                     message_id,
                     text,
+                    author: context.local_author.clone(),
                     attachments,
                     mode,
                     model,
@@ -81,6 +84,7 @@ pub fn map_outbound_command(
                 None => Mapping::PendingPrompt(PendingAgentProtocolPrompt {
                     message_id,
                     text,
+                    author: context.local_author.clone(),
                     attachments,
                     mode,
                     model,
@@ -432,6 +436,10 @@ mod tests {
 
     #[test]
     fn send_prompt_without_session_becomes_pending_prompt() {
+        let context = AgentProtocolMappingContext {
+            local_author: Some("Parker".to_string()),
+            ..AgentProtocolMappingContext::default()
+        };
         let mapped = map_outbound_command(
             OutboundAgentCommand::SendPrompt {
                 message_id: crate::panels::agent_pane::outbound::next_prompt_message_id(),
@@ -444,9 +452,43 @@ mod tests {
                 delivery: neoism_protocol::agent::PromptDelivery::Steer,
                 transcript_echo: true,
             },
-            &AgentProtocolMappingContext::default(),
+            &context,
         );
-        assert!(matches!(mapped, AgentProtocolMapping::PendingPrompt(_)));
+        let AgentProtocolMapping::PendingPrompt(prompt) = mapped else {
+            panic!("expected pending prompt");
+        };
+        assert_eq!(prompt.author.as_deref(), Some("Parker"));
+    }
+
+    #[test]
+    fn send_prompt_with_session_carries_local_author() {
+        let context = AgentProtocolMappingContext {
+            active_session_id: Some("s1".to_string()),
+            local_author: Some("Remote peer".to_string()),
+            ..AgentProtocolMappingContext::default()
+        };
+        let mapped = map_outbound_command(
+            OutboundAgentCommand::SendPrompt {
+                message_id: crate::panels::agent_pane::outbound::next_prompt_message_id(),
+                text: "hello".to_string(),
+                parts: Vec::new(),
+                system: None,
+                agent: None,
+                model: String::new(),
+                thinking: None,
+                delivery: neoism_protocol::agent::PromptDelivery::Steer,
+                transcript_echo: true,
+            },
+            &context,
+        );
+        let AgentProtocolMapping::Messages(messages) = mapped else {
+            panic!("expected protocol message");
+        };
+        assert!(matches!(
+            &messages[0],
+            AgentClientMessage::SubmitPrompt { author, .. }
+                if author.as_deref() == Some("Remote peer")
+        ));
     }
 
     #[test]

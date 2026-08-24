@@ -29,9 +29,9 @@ pub(crate) async fn handle_create_thread(
     }
     let path = match directory.as_deref() {
         Some(dir) if !dir.is_empty() => {
-            format!("/session?directory={}", percent_encode(dir))
+            format!("/v2/sessions?directory={}", percent_encode(dir))
         }
-        _ => "/session".to_string(),
+        _ => "/v2/sessions".to_string(),
     };
     match http_post_json(&inner, &path, &Value::Object(body)).await {
         Ok(value) => {
@@ -78,7 +78,7 @@ pub(crate) async fn handle_create_thread(
 pub(crate) async fn handle_switch_thread(inner: Arc<AgentInner>, session_id: String) {
     // Verify the session exists; if it does, bind the SSE stream and
     // ack with `ThreadSwitched`.
-    match http_get_json(&inner, &format!("/session/{session_id}")).await {
+    match http_get_json(&inner, &format!("/v2/sessions/{session_id}")).await {
         Ok(_value) => {
             start_event_stream(&inner, &session_id);
             let _ = inner.tx.send(AgentServerMessage::ThreadSwitched {
@@ -92,7 +92,7 @@ pub(crate) async fn handle_switch_thread(inner: Arc<AgentInner>, session_id: Str
 pub(crate) async fn handle_delete_thread(inner: Arc<AgentInner>, session_id: String) {
     stop_event_stream(&inner, &session_id);
     cancel_inflight(&inner, &session_id);
-    match http_delete(&inner, &format!("/session/{session_id}")).await {
+    match http_delete(&inner, &format!("/v2/sessions/{session_id}")).await {
         Ok(()) => {
             let _ = inner
                 .tx
@@ -125,7 +125,7 @@ pub(crate) async fn handle_list_threads(
 }
 
 pub(crate) fn session_list_path(directory: Option<&str>) -> String {
-    let mut path = String::from("/session?roots=true");
+    let mut path = String::from("/v2/sessions?roots=true");
     if let Some(dir) = directory {
         path.push_str("&directory=");
         path.push_str(&percent_encode(dir));
@@ -139,6 +139,7 @@ pub(crate) fn thread_summaries_from_sessions(
 ) -> Vec<ThreadSummary> {
     value
         .as_array()
+        .or_else(|| value.get("items").and_then(Value::as_array))
         .map(|sessions| {
             let mut sessions = sessions.iter().collect::<Vec<_>>();
             sessions.sort_by(|a, b| {
@@ -231,11 +232,12 @@ pub(crate) async fn handle_get_history(
     // reasoning, subtasks) instead of flattening to plain text.
     let _ = cursor;
     let take = limit.unwrap_or(80).clamp(1, 200);
-    let path = format!("/session/{session_id}/message?order=desc&limit={take}&slim=true");
+    let path = format!("/v2/sessions/{session_id}/messages?order=desc&limit={take}&slim=true");
     match http_get_json(&inner, &path).await {
         Ok(value) => {
             let messages = value
                 .as_array()
+                .or_else(|| value.get("items").and_then(Value::as_array))
                 .map(|items| {
                     neoism_ui::panels::agent_pane::api_mapping::message_blocks_from_response(
                         items, true,
@@ -276,6 +278,7 @@ pub(crate) fn history_from_agent_message(
         id: message.id,
         role,
         kind,
+        author: message.author,
         title: message.title,
         text: message.text,
         status: message.status,
@@ -318,6 +321,7 @@ pub(crate) async fn handle_submit_prompt(
     session_id: String,
     message_id: String,
     text: String,
+    author: Option<String>,
     attachments: Vec<neoism_protocol::agent::Attachment>,
     mode: Option<String>,
     model: Option<String>,
@@ -342,6 +346,9 @@ pub(crate) async fn handle_submit_prompt(
     }
     body.insert("parts".to_string(), Value::Array(parts));
     body.insert("messageId".to_string(), Value::String(message_id));
+    if let Some(author) = author.filter(|author| !author.trim().is_empty()) {
+        body.insert("author".to_string(), Value::String(author));
+    }
     body.insert(
         "delivery".to_string(),
         Value::String(
@@ -369,7 +376,7 @@ pub(crate) async fn handle_submit_prompt(
     }
     if let Err(err) = http_post_json(
         &inner,
-        &format!("/api/session/{session_id}/prompt"),
+        &format!("/v2/sessions/{session_id}/prompt"),
         &Value::Object(body),
     )
     .await
@@ -379,7 +386,7 @@ pub(crate) async fn handle_submit_prompt(
 }
 
 pub(crate) async fn handle_clear_queue(inner: Arc<AgentInner>, session_id: String) {
-    if let Err(err) = http_delete(&inner, &format!("/session/{session_id}/queue")).await {
+    if let Err(err) = http_delete(&inner, &format!("/v2/sessions/{session_id}/queue")).await {
         emit_error(&inner.tx, err);
     }
 }
@@ -405,7 +412,7 @@ pub(crate) async fn handle_session_history(
     action: &str,
     title: &str,
 ) {
-    match post_no_body(&inner, &format!("/api/session/{session_id}/{action}")).await {
+    match post_no_body(&inner, &format!("/v2/sessions/{session_id}/{action}")).await {
         Ok(_) => {
             handle_get_history(inner.clone(), session_id.clone(), None, Some(80)).await;
             let _ = inner.tx.send(AgentServerMessage::Notice {
@@ -423,7 +430,7 @@ pub(crate) async fn handle_session_history(
 
 pub(crate) async fn handle_permission_reply(
     inner: Arc<AgentInner>,
-    session_id: String,
+    _session_id: String,
     request_id: String,
     decision: PermissionDecision,
 ) {
@@ -435,7 +442,7 @@ pub(crate) async fn handle_permission_reply(
     let body = json!({ "response": response });
     if let Err(err) = http_post_json(
         &inner,
-        &format!("/session/{session_id}/permissions/{request_id}"),
+        &format!("/v2/interactions/permissions/{request_id}/reply"),
         &body,
     )
     .await
@@ -483,7 +490,7 @@ pub(crate) async fn handle_set_model(
         }
     });
     let resolved_model = format!("{provider_id}/{model_id}");
-    match http_patch_json(&inner, &format!("/session/{session_id}"), &body).await {
+    match http_patch_json(&inner, &format!("/v2/sessions/{session_id}"), &body).await {
         Ok(value) => {
             let context_limit = value
                 .get("model")
@@ -512,7 +519,7 @@ pub(crate) async fn handle_set_agent(
     agent: String,
 ) {
     let body = json!({ "agent": agent });
-    match http_patch_json(&inner, &format!("/session/{session_id}"), &body).await {
+    match http_patch_json(&inner, &format!("/v2/sessions/{session_id}"), &body).await {
         Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ProviderState {
                 session_id,
@@ -534,7 +541,7 @@ pub(crate) async fn handle_set_thinking(
 ) {
     // The agent-server stores `variant` on `model`; fetch the active
     // model id and PATCH the variant only.
-    let session = match http_get_json(&inner, &format!("/session/{session_id}")).await {
+    let session = match http_get_json(&inner, &format!("/v2/sessions/{session_id}")).await {
         Ok(value) => value,
         Err(err) => {
             emit_error(&inner.tx, err);
@@ -554,7 +561,7 @@ pub(crate) async fn handle_set_thinking(
         }
     }
     let body = json!({ "model": model_obj });
-    match http_patch_json(&inner, &format!("/session/{session_id}"), &body).await {
+    match http_patch_json(&inner, &format!("/v2/sessions/{session_id}"), &body).await {
         Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ProviderState {
                 session_id,
@@ -573,7 +580,7 @@ pub(crate) async fn handle_set_thinking(
 }
 
 pub(crate) async fn handle_list_providers(inner: Arc<AgentInner>) {
-    match http_get_json(&inner, "/config/providers").await {
+    match http_get_json(&inner, "/v2/providers/configured").await {
         Ok(value) => {
             let providers = value
                 .get("providers")
@@ -605,14 +612,14 @@ pub(crate) async fn handle_connect_list_providers(
     inner: Arc<AgentInner>,
     _directory: Option<String>,
 ) {
-    let providers = match http_get_json(&inner, "/provider").await {
+    let providers = match http_get_json(&inner, "/v2/providers").await {
         Ok(value) => value,
         Err(err) => {
             emit_error(&inner.tx, err);
             return;
         }
     };
-    let auth = match http_get_json(&inner, "/provider/auth").await {
+    let auth = match http_get_json(&inner, "/v2/providers/auth-methods").await {
         Ok(value) => value,
         Err(err) => {
             emit_error(&inner.tx, err);
@@ -633,7 +640,7 @@ pub(crate) async fn handle_connect_store_api_key(
     key: String,
 ) {
     let body = json!({ "type": "api", "key": key });
-    match http_put_json(&inner, &format!("/auth/{provider_id}"), &body).await {
+    match http_put_json(&inner, &format!("/v2/providers/{provider_id}/auth"), &body).await {
         Ok(_) => {
             let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
                 provider: provider_id,
@@ -653,7 +660,7 @@ pub(crate) async fn handle_connect_disconnect(
     inner: Arc<AgentInner>,
     provider_id: String,
 ) {
-    match http_delete(&inner, &format!("/auth/{provider_id}")).await {
+    match http_delete(&inner, &format!("/v2/providers/{provider_id}/auth")).await {
         Ok(()) => {
             let _ = inner.tx.send(AgentServerMessage::ConnectFinished {
                 provider: provider_id,
@@ -679,7 +686,7 @@ pub(crate) async fn handle_connect_oauth_authorize(
     let body = json!({ "method": method_index, "inputs": {} });
     match http_post_json(
         &inner,
-        &format!("/provider/{provider_id}/oauth/authorize"),
+        &format!("/v2/providers/{provider_id}/oauth/authorize"),
         &body,
     )
     .await
@@ -728,7 +735,7 @@ pub(crate) async fn handle_connect_oauth_callback(
     };
     match http_post_json(
         &inner,
-        &format!("/provider/{provider_id}/oauth/callback"),
+        &format!("/v2/providers/{provider_id}/oauth/callback"),
         &body,
     )
     .await
@@ -1135,7 +1142,7 @@ fn emit_mcp_changed(inner: &AgentInner, name: String, result: Result<Value, Stri
 }
 
 pub(crate) async fn handle_show_permissions(inner: Arc<AgentInner>, session_id: String) {
-    let path = format!("/permission?sessionID={}", percent_encode(&session_id));
+    let path = format!("/v2/interactions/permissions?sessionId={}", percent_encode(&session_id));
     emit_command_result(
         &inner,
         Some(session_id),
@@ -1145,7 +1152,7 @@ pub(crate) async fn handle_show_permissions(inner: Arc<AgentInner>, session_id: 
 }
 
 pub(crate) async fn handle_show_questions(inner: Arc<AgentInner>, session_id: String) {
-    let path = format!("/question?sessionID={}", percent_encode(&session_id));
+    let path = format!("/v2/interactions/questions?sessionId={}", percent_encode(&session_id));
     let result = http_get_json(&inner, &path).await;
     // Typed snapshot first so the pane's pending-question state syncs
     // (the prompt picker uses this); the human-readable listing keeps
@@ -1178,7 +1185,7 @@ pub(crate) async fn push_session_running_state(
     inner: Arc<AgentInner>,
     session_id: String,
 ) {
-    let Ok(value) = http_get_json(&inner, "/session/status").await else {
+    let Ok(value) = http_get_json(&inner, "/v2/sessions/status").await else {
         return;
     };
     let Some(status) = value.get(&session_id) else {
@@ -1203,7 +1210,7 @@ pub(crate) async fn push_session_running_state(
 }
 
 pub(crate) async fn push_pending_questions(inner: Arc<AgentInner>, session_id: String) {
-    let path = format!("/question?sessionID={}", percent_encode(&session_id));
+    let path = format!("/v2/interactions/questions?sessionId={}", percent_encode(&session_id));
     let Ok(value) = http_get_json(&inner, &path).await else {
         // Recovery is best-effort; a failed poll must not spam the
         // transcript with errors on every reconnect.
@@ -1237,7 +1244,7 @@ pub(crate) async fn handle_slash_command(
             return;
         }
         let body = json!({ "directory": directory });
-        match http_patch_json(&inner, &format!("/session/{session_id}"), &body).await {
+        match http_patch_json(&inner, &format!("/v2/sessions/{session_id}"), &body).await {
             Ok(value) => {
                 let resolved = value
                     .get("directory")
@@ -1254,7 +1261,7 @@ pub(crate) async fn handle_slash_command(
         }
         return;
     }
-    let path = format!("/session/{session_id}/cmd");
+    let path = format!("/v2/sessions/{session_id}/commands");
     let body = json!({ "command": text });
     emit_command_result(
         &inner,
@@ -1271,14 +1278,14 @@ pub(crate) async fn handle_queue(
 ) {
     let result = match action.as_deref() {
         Some("clear") => {
-            post_no_body(&inner, &format!("/session/{session_id}/queue/clear"))
+            http_delete(&inner, &format!("/v2/sessions/{session_id}/queue"))
                 .await
                 .map(|_| Value::String("queue cleared".to_string()))
         }
-        Some("pop") => post_no_body(&inner, &format!("/session/{session_id}/queue/pop"))
+        Some("pop") => post_no_body(&inner, &format!("/v2/sessions/{session_id}/queue/pop"))
             .await
             .map(|_| Value::String("queue popped".to_string())),
-        _ => http_get_json(&inner, &format!("/session/{session_id}/queue")).await,
+        _ => http_get_json(&inner, &format!("/v2/sessions/{session_id}/queue")).await,
     };
     emit_command_result(&inner, Some(session_id), "Queue", result);
 }
@@ -1291,7 +1298,7 @@ pub(crate) async fn handle_permit(
 ) {
     let request_id = match request_id {
         Some(id) => id,
-        None => match first_interaction_id(&inner, "/permission", &session_id).await {
+        None => match first_interaction_id(&inner, "/v2/interactions/permissions", &session_id).await {
             Ok(Some(id)) => id,
             Ok(None) => {
                 emit_command_output(
@@ -1313,7 +1320,7 @@ pub(crate) async fn handle_permit(
         &inner,
         Some(session_id),
         "Permission",
-        http_post_json(&inner, &format!("/permission/{request_id}/reply"), &body).await,
+        http_post_json(&inner, &format!("/v2/interactions/permissions/{request_id}/reply"), &body).await,
     );
 }
 
@@ -1322,7 +1329,7 @@ pub(crate) async fn handle_answer(
     session_id: String,
     answer: String,
 ) {
-    let Some(item) = first_interaction_value(&inner, "/question", &session_id)
+    let Some(item) = first_interaction_value(&inner, "/v2/interactions/questions", &session_id)
         .await
         .unwrap_or_else(|err| {
             emit_error(&inner.tx, err);
@@ -1347,7 +1354,7 @@ pub(crate) async fn handle_answer(
         &inner,
         Some(session_id),
         "Question",
-        http_post_json(&inner, &format!("/question/{id}/reply"), &body).await,
+        http_post_json(&inner, &format!("/v2/interactions/questions/{id}/reply"), &body).await,
     );
 }
 
@@ -1361,20 +1368,20 @@ pub(crate) async fn handle_reject(
             &inner,
             Some(session_id),
             "Reject",
-            post_no_body(&inner, &format!("/question/{id}/reject"))
+            post_no_body(&inner, &format!("/v2/interactions/questions/{id}/reject"))
                 .await
                 .map(|_| Value::String(format!("rejected {id}"))),
         );
         return;
     }
 
-    match first_interaction_id(&inner, "/question", &session_id).await {
+    match first_interaction_id(&inner, "/v2/interactions/questions", &session_id).await {
         Ok(Some(id)) => {
             emit_command_result(
                 &inner,
                 Some(session_id.clone()),
                 "Question",
-                post_no_body(&inner, &format!("/question/{id}/reject"))
+                post_no_body(&inner, &format!("/v2/interactions/questions/{id}/reject"))
                     .await
                     .map(|_| Value::String(format!("rejected {id}"))),
             );
@@ -1387,14 +1394,14 @@ pub(crate) async fn handle_reject(
         }
     }
 
-    match first_interaction_id(&inner, "/permission", &session_id).await {
+    match first_interaction_id(&inner, "/v2/interactions/permissions", &session_id).await {
         Ok(Some(id)) => {
             let body = json!({ "reply": "reject" });
             emit_command_result(
                 &inner,
                 Some(session_id.clone()),
                 "Permission",
-                http_post_json(&inner, &format!("/permission/{id}/reply"), &body).await,
+                http_post_json(&inner, &format!("/v2/interactions/permissions/{id}/reply"), &body).await,
             );
         }
         Ok(None) => emit_command_output(
@@ -1422,7 +1429,7 @@ pub(crate) async fn handle_answer_question(
     answers: Vec<Vec<String>>,
 ) {
     let body = json!({ "answers": answers });
-    let path = format!("/question/{}/reply", percent_encode(&request_id));
+    let path = format!("/v2/interactions/questions/{}/reply", percent_encode(&request_id));
     match http_post_json(&inner, &path, &body).await {
         Ok(_) => {
             let _ = inner.tx.send(AgentServerMessage::QuestionRemoved {
@@ -1445,7 +1452,7 @@ pub(crate) async fn handle_reject_question(
     session_id: String,
     request_id: String,
 ) {
-    let path = format!("/question/{}/reject", percent_encode(&request_id));
+    let path = format!("/v2/interactions/questions/{}/reject", percent_encode(&request_id));
     match post_no_body(&inner, &path).await {
         Ok(_) => {
             let _ = inner.tx.send(AgentServerMessage::QuestionRemoved {
@@ -1478,7 +1485,7 @@ pub(crate) async fn first_interaction_value(
 ) -> Result<Option<Value>, String> {
     let value = http_get_json(
         inner,
-        &format!("{base_path}?sessionID={}", percent_encode(session_id)),
+        &format!("{base_path}?sessionId={}", percent_encode(session_id)),
     )
     .await?;
     Ok(value.as_array().and_then(|items| items.first()).cloned())
@@ -1549,7 +1556,7 @@ pub(crate) async fn handle_start_subagent(
     );
     if let Err(err) = http_post_json(
         &inner,
-        &format!("/session/{session_id}/message"),
+        &format!("/v2/sessions/{session_id}/prompt"),
         &Value::Object(body),
     )
     .await
@@ -1562,7 +1569,7 @@ pub(crate) async fn handle_start_subagent(
 
 pub(crate) async fn handle_compact(inner: Arc<AgentInner>, session_id: String) {
     if let Err(err) =
-        post_no_body(&inner, &format!("/session/{session_id}/summarize")).await
+        post_no_body(&inner, &format!("/v2/sessions/{session_id}/compact")).await
     {
         emit_error(&inner.tx, err);
     }
@@ -1574,7 +1581,7 @@ pub(crate) async fn handle_set_title(
     title: String,
 ) {
     let body = json!({ "title": title });
-    match http_patch_json(&inner, &format!("/session/{session_id}"), &body).await {
+    match http_patch_json(&inner, &format!("/v2/sessions/{session_id}"), &body).await {
         Ok(_) => {
             // Ack AFTER the upstream mutation lands so clients can
             // re-request the thread list without racing the rename.
@@ -1597,7 +1604,7 @@ pub(crate) async fn handle_set_pinned(
     pinned: bool,
 ) {
     let body = json!({ "pinned": pinned });
-    match http_post_json(&inner, &format!("/session/{session_id}/pin"), &body).await {
+    match http_post_json(&inner, &format!("/v2/sessions/{session_id}/pin"), &body).await {
         Ok(value) => {
             let resolved = value
                 .get("pinned")

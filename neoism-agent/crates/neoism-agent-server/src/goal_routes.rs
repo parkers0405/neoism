@@ -37,6 +37,7 @@ pub(crate) async fn session_goal_get(
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let info = ensure_session(&state, &session_id).await?;
+    require_enabled(&info)?;
     Ok(Json(goal_response(&info)))
 }
 
@@ -51,6 +52,7 @@ pub(crate) async fn session_goal_set(
 ) -> Result<Json<Value>, ApiError> {
     let request = body.map(|Json(body)| body).unwrap_or_default();
     let mut info = ensure_session(&state, &session_id).await?;
+    require_enabled(&info)?;
 
     if request.text.trim().is_empty() {
         info.clear_goal();
@@ -103,6 +105,7 @@ pub(crate) async fn session_goal_clear(
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let mut info = ensure_session(&state, &session_id).await?;
+    require_enabled(&info)?;
     info.clear_goal();
     persist(&state, &mut info).await?;
     Ok(Json(goal_response(&info)))
@@ -122,13 +125,14 @@ pub(crate) async fn session_goal_research(
     Path(session_id): Path<String>,
     Json(request): Json<GoalResearchRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let mut info = ensure_session(&state, &session_id).await?;
+    require_enabled(&info)?;
     if !firecrawl::firecrawl_enabled() {
         return Err(ApiError::bad_request(format!(
             "web research is disabled: set {} to enable firecrawl",
             firecrawl::FIRECRAWL_API_KEY_ENV
         )));
     }
-    let mut info = ensure_session(&state, &session_id).await?;
     let mut goal = info.goal().ok_or_else(|| {
         ApiError::bad_request("no active goal; set one with /goal first")
     })?;
@@ -142,6 +146,16 @@ pub(crate) async fn session_goal_research(
     info.set_goal(&goal);
     persist(&state, &mut info).await?;
     Ok(Json(goal_response(&info)))
+}
+
+fn require_enabled(info: &SessionInfo) -> Result<(), ApiError> {
+    if crate::plugins::enabled(&info.directory, "dev.neoism.goals") {
+        Ok(())
+    } else {
+        Err(ApiError::not_found(
+            "Goal plugin is disabled for the workspace",
+        ))
+    }
 }
 
 fn research_note(page: FirecrawlPage, now: u64) -> GoalResearchNote {

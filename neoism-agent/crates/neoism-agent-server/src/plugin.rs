@@ -1,19 +1,26 @@
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use neoism_agent_core::{
     EventPayload, NeoismConfig, PluginConfig, PluginScope, PluginSource,
     PluginStatusInfo, ProviderMessage, ToolListItem,
 };
-use serde::Deserialize;
+use neoism_agent_plugin_api::{
+    ProcessHookRequest, ProcessHookResponse, PROCESS_PLUGIN_PROTOCOL,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::tool::ToolExecutionResult;
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ChatHookContext {
     pub(crate) session_id: String,
     pub(crate) agent: String,
@@ -22,7 +29,8 @@ pub(crate) struct ChatHookContext {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ShellEnvContext {
     pub(crate) cwd: String,
     pub(crate) session_id: Option<String>,
@@ -30,13 +38,15 @@ pub(crate) struct ShellEnvContext {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ToolDefinitionContext {
     pub(crate) tool_id: String,
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ToolExecutionContext {
     pub(crate) tool_id: String,
     pub(crate) directory: String,
@@ -139,6 +149,23 @@ struct DeclarativePlugin {
     headers: BTreeMap<String, String>,
     options: BTreeMap<String, Value>,
     shell_env: BTreeMap<String, String>,
+    process: Option<ProcessPlugin>,
+}
+
+#[derive(Clone)]
+struct ProcessPlugin {
+    command: Vec<String>,
+    timeout: Duration,
+    working_directory: PathBuf,
+    sandbox: SandboxPolicy,
+    network: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SandboxPolicy {
+    Off,
+    Auto,
+    Required,
 }
 
 impl NativePlugin for DeclarativePlugin {
@@ -152,6 +179,9 @@ impl NativePlugin for DeclarativePlugin {
         headers: &mut BTreeMap<String, String>,
     ) -> anyhow::Result<()> {
         headers.extend(self.headers.clone());
+        if let Some(value) = self.invoke("chat.headers", _ctx, &*headers)? {
+            *headers = serde_json::from_value(value)?;
+        }
         Ok(())
     }
 
@@ -161,6 +191,9 @@ impl NativePlugin for DeclarativePlugin {
         options: &mut BTreeMap<String, Value>,
     ) -> anyhow::Result<()> {
         options.extend(self.options.clone());
+        if let Some(value) = self.invoke("chat.options", _ctx, &*options)? {
+            *options = serde_json::from_value(value)?;
+        }
         Ok(())
     }
 
@@ -170,8 +203,227 @@ impl NativePlugin for DeclarativePlugin {
         env: &mut BTreeMap<String, String>,
     ) -> anyhow::Result<()> {
         env.extend(self.shell_env.clone());
+        if let Some(value) = self.invoke("shell.env", _ctx, &*env)? {
+            *env = serde_json::from_value(value)?;
+        }
         Ok(())
     }
+
+    fn chat_messages_transform(
+        &self,
+        ctx: &ChatHookContext,
+        messages: &mut Vec<ProviderMessage>,
+    ) -> anyhow::Result<()> {
+        if let Some(value) = self.invoke("chat.messages", ctx, &*messages)? {
+            *messages = serde_json::from_value(value)?;
+        }
+        Ok(())
+    }
+
+    fn tool_definition(
+        &self,
+        ctx: &ToolDefinitionContext,
+        tool: &mut ToolListItem,
+    ) -> anyhow::Result<()> {
+        if let Some(value) = self.invoke("tool.definition", ctx, &*tool)? {
+            *tool = serde_json::from_value(value)?;
+        }
+        Ok(())
+    }
+
+    fn tool_execute_before(
+        &self,
+        ctx: &ToolExecutionContext,
+        args: &mut Value,
+    ) -> anyhow::Result<()> {
+        if let Some(value) = self.invoke("tool.before", ctx, &*args)? {
+            *args = value;
+        }
+        Ok(())
+    }
+
+    fn tool_execute_after(
+        &self,
+        ctx: &ToolExecutionContext,
+        result: &mut ToolExecutionResult,
+    ) -> anyhow::Result<()> {
+        if let Some(value) = self.invoke("tool.after", ctx, &*result)? {
+            *result = serde_json::from_value(value)?;
+        }
+        Ok(())
+    }
+}
+
+impl DeclarativePlugin {
+    fn invoke<C: Serialize, T: Serialize>(
+        &self,
+        hook: &str,
+        context: &C,
+        value: &T,
+    ) -> anyhow::Result<Option<Value>> {
+        let Some(process) = &self.process else {
+            return Ok(None);
+        };
+        process.invoke(ProcessHookRequest {
+            protocol: PROCESS_PLUGIN_PROTOCOL.to_string(),
+            hook: hook.to_string(),
+            context: serde_json::to_value(context)?,
+            value: serde_json::to_value(value)?,
+        }).map(Some)
+    }
+}
+
+impl ProcessPlugin {
+    fn invoke(&self, request: ProcessHookRequest) -> anyhow::Result<Value> {
+        const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+        let (program, arguments) = self
+            .command
+            .split_first()
+            .ok_or_else(|| anyhow::anyhow!("plugin command is empty"))?;
+        let mut command = self.command(program, arguments)?;
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to start plugin process {program}"))?;
+        let mut stdin = child.stdin.take().expect("piped plugin stdin");
+        serde_json::to_writer(&mut stdin, &request)?;
+        stdin.write_all(b"\n")?;
+        drop(stdin);
+
+        let stdout = child.stdout.take().expect("piped plugin stdout");
+        let reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            stdout.take(MAX_RESPONSE_BYTES + 1).read_to_end(&mut output)?;
+            Ok::<_, std::io::Error>(output)
+        });
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                let output = reader
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("plugin output reader panicked"))??;
+                if !status.success() {
+                    anyhow::bail!("plugin process exited with {status}");
+                }
+                if output.len() as u64 > MAX_RESPONSE_BYTES {
+                    anyhow::bail!("plugin response exceeds {MAX_RESPONSE_BYTES} bytes");
+                }
+                let response: ProcessHookResponse = serde_json::from_slice(&output)
+                    .context("plugin returned invalid JSON")?;
+                if response.protocol != PROCESS_PLUGIN_PROTOCOL {
+                    anyhow::bail!("unsupported plugin protocol {}", response.protocol);
+                }
+                if !response.ok {
+                    anyhow::bail!(response.error.unwrap_or_else(|| "plugin hook failed".to_string()));
+                }
+                return Ok(response.value);
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                anyhow::bail!("plugin process timed out after {} ms", self.timeout.as_millis());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn command(&self, program: &str, arguments: &[String]) -> anyhow::Result<Command> {
+        #[cfg(target_os = "linux")]
+        if !matches!(self.sandbox, SandboxPolicy::Off) {
+            if let Some(bwrap) = find_executable("bwrap") {
+                let mut command = Command::new(bwrap);
+                command.args([
+                    "--die-with-parent",
+                    "--new-session",
+                    "--unshare-pid",
+                    "--unshare-ipc",
+                    "--unshare-uts",
+                    "--unshare-cgroup",
+                    "--tmpfs",
+                    "/",
+                    "--dir",
+                    "/etc",
+                ]);
+                if !self.network {
+                    command.arg("--unshare-net");
+                }
+                for path in [
+                    "/usr",
+                    "/bin",
+                    "/lib",
+                    "/lib64",
+                    "/etc/ssl",
+                    "/etc/resolv.conf",
+                ] {
+                    if Path::new(path).exists() {
+                        command.args(["--ro-bind", path, path]);
+                    }
+                }
+                let mut ancestors = self
+                    .working_directory
+                    .ancestors()
+                    .skip(1)
+                    .filter(|path| *path != Path::new("/"))
+                    .collect::<Vec<_>>();
+                ancestors.reverse();
+                for ancestor in ancestors {
+                    command.args(["--dir", ancestor.to_string_lossy().as_ref()]);
+                }
+                let directory = self.working_directory.to_string_lossy();
+                command.args(["--ro-bind", directory.as_ref(), directory.as_ref()]);
+                if let Some(parent) = Path::new(program).parent().filter(|path| {
+                    path.is_absolute()
+                        && !path.starts_with(&self.working_directory)
+                        && !["/usr", "/bin", "/lib", "/lib64"]
+                            .iter()
+                            .any(|root| path.starts_with(root))
+                }) {
+                    let mut ancestors = parent
+                        .ancestors()
+                        .skip(1)
+                        .filter(|path| *path != Path::new("/"))
+                        .collect::<Vec<_>>();
+                    ancestors.reverse();
+                    for ancestor in ancestors {
+                        command.args(["--dir", ancestor.to_string_lossy().as_ref()]);
+                    }
+                    let parent = parent.to_string_lossy();
+                    command.args(["--ro-bind", parent.as_ref(), parent.as_ref()]);
+                }
+                command.args([
+                    "--tmpfs",
+                    "/tmp",
+                    "--proc",
+                    "/proc",
+                    "--dev",
+                    "/dev",
+                    "--chdir",
+                    directory.as_ref(),
+                    "--",
+                    program,
+                ]);
+                command.args(arguments);
+                return Ok(command);
+            }
+        }
+        if matches!(self.sandbox, SandboxPolicy::Required) {
+            anyhow::bail!("plugin sandbox is required but bubblewrap is unavailable");
+        }
+        let mut command = Command::new(program);
+        command.args(arguments).current_dir(&self.working_directory);
+        Ok(command)
+    }
+}
+
+fn find_executable(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH")?
+        .to_string_lossy()
+        .split(if cfg!(windows) { ';' } else { ':' })
+        .map(|directory| Path::new(directory).join(name))
+        .find(|path| path.is_file())
 }
 
 #[derive(Clone)]
@@ -361,18 +613,37 @@ impl PluginRegistry {
             .retain(|plugin| plugin.id != id);
     }
 
-    fn plugins(&self) -> Vec<Arc<dyn NativePlugin>> {
+    fn entries(&self) -> Vec<RegisteredPlugin> {
         self.plugins
             .read()
             .expect("plugin registry lock poisoned")
-            .iter()
-            .map(|entry| entry.plugin.clone())
-            .collect()
+            .clone()
+    }
+
+    fn observe<T>(
+        &self,
+        entry: &RegisteredPlugin,
+        hook: &str,
+        result: anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        match result {
+            Ok(value) => {
+                self.record_status(entry.status());
+                Ok(value)
+            }
+            Err(error) => {
+                let mut status = entry.status();
+                status.active = false;
+                status.reason = Some(format!("{hook} failed: {error}"));
+                self.record_status(status);
+                Err(error).with_context(|| format!("plugin {} {hook} failed", entry.id))
+            }
+        }
     }
 
     pub(crate) fn publish_event(&self, event: &EventPayload) {
-        for plugin in self.plugins() {
-            plugin.event(event);
+        for entry in self.entries() {
+            entry.plugin.event(event);
         }
     }
 
@@ -381,12 +652,12 @@ impl PluginRegistry {
         ctx: &ChatHookContext,
         messages: &mut Vec<ProviderMessage>,
     ) -> anyhow::Result<()> {
-        for plugin in self.plugins() {
-            plugin
-                .chat_messages_transform(ctx, messages)
-                .with_context(|| {
-                    format!("plugin {} chat_messages_transform failed", plugin.name())
-                })?;
+        for entry in self.entries() {
+            self.observe(
+                &entry,
+                "chat_messages_transform",
+                entry.plugin.chat_messages_transform(ctx, messages),
+            )?;
         }
         Ok(())
     }
@@ -397,10 +668,8 @@ impl PluginRegistry {
         ctx: &ChatHookContext,
         headers: &mut BTreeMap<String, String>,
     ) -> anyhow::Result<()> {
-        for plugin in self.plugins() {
-            plugin.chat_headers(ctx, headers).with_context(|| {
-                format!("plugin {} chat_headers failed", plugin.name())
-            })?;
+        for entry in self.entries() {
+            self.observe(&entry, "chat_headers", entry.plugin.chat_headers(ctx, headers))?;
         }
         Ok(())
     }
@@ -410,10 +679,8 @@ impl PluginRegistry {
         ctx: &ChatHookContext,
         options: &mut BTreeMap<String, Value>,
     ) -> anyhow::Result<()> {
-        for plugin in self.plugins() {
-            plugin.chat_options(ctx, options).with_context(|| {
-                format!("plugin {} chat_options failed", plugin.name())
-            })?;
+        for entry in self.entries() {
+            self.observe(&entry, "chat_options", entry.plugin.chat_options(ctx, options))?;
         }
         Ok(())
     }
@@ -422,10 +689,12 @@ impl PluginRegistry {
         let ctx = ToolDefinitionContext {
             tool_id: tool.id.clone(),
         };
-        for plugin in self.plugins() {
-            plugin.tool_definition(&ctx, tool).with_context(|| {
-                format!("plugin {} tool_definition failed", plugin.name())
-            })?;
+        for entry in self.entries() {
+            self.observe(
+                &entry,
+                "tool_definition",
+                entry.plugin.tool_definition(&ctx, tool),
+            )?;
         }
         Ok(())
     }
@@ -435,10 +704,12 @@ impl PluginRegistry {
         ctx: &ToolExecutionContext,
         args: &mut Value,
     ) -> anyhow::Result<()> {
-        for plugin in self.plugins() {
-            plugin.tool_execute_before(ctx, args).with_context(|| {
-                format!("plugin {} tool_execute_before failed", plugin.name())
-            })?;
+        for entry in self.entries() {
+            self.observe(
+                &entry,
+                "tool_execute_before",
+                entry.plugin.tool_execute_before(ctx, args),
+            )?;
         }
         Ok(())
     }
@@ -448,10 +719,12 @@ impl PluginRegistry {
         ctx: &ToolExecutionContext,
         result: &mut ToolExecutionResult,
     ) -> anyhow::Result<()> {
-        for plugin in self.plugins() {
-            plugin.tool_execute_after(ctx, result).with_context(|| {
-                format!("plugin {} tool_execute_after failed", plugin.name())
-            })?;
+        for entry in self.entries() {
+            self.observe(
+                &entry,
+                "tool_execute_after",
+                entry.plugin.tool_execute_after(ctx, result),
+            )?;
         }
         Ok(())
     }
@@ -461,10 +734,8 @@ impl PluginRegistry {
         ctx: &ShellEnvContext,
         env: &mut BTreeMap<String, String>,
     ) -> anyhow::Result<()> {
-        for plugin in self.plugins() {
-            plugin
-                .shell_env(ctx, env)
-                .with_context(|| format!("plugin {} shell_env failed", plugin.name()))?;
+        for entry in self.entries() {
+            self.observe(&entry, "shell_env", entry.plugin.shell_env(ctx, env))?;
         }
         Ok(())
     }
@@ -532,6 +803,14 @@ struct DeclarativePluginFile {
     provider: BTreeMap<String, Value>,
     #[serde(default)]
     shell: BTreeMap<String, Value>,
+    #[serde(default)]
+    command: Option<Value>,
+    #[serde(default, alias = "timeout_ms")]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    sandbox: Option<bool>,
+    #[serde(default)]
+    network: bool,
 }
 
 fn load_declarative_plugin(
@@ -567,6 +846,21 @@ fn load_declarative_plugin(
     ));
     let mut shell_env = manifest.shell_env;
     shell_env.extend(string_map(manifest.shell.get("env")));
+    let process = manifest
+        .command
+        .as_ref()
+        .map(process_plugin)
+        .transpose()?
+        .map(|command| ProcessPlugin {
+            command,
+            timeout: Duration::from_millis(manifest.timeout_ms.unwrap_or(10_000).clamp(100, 120_000)),
+            working_directory: path
+                .parent()
+                .unwrap_or_else(|| Path::new(directory))
+                .to_path_buf(),
+            sandbox: sandbox_policy(manifest.sandbox),
+            network: manifest.network,
+        });
     Ok(DeclarativePlugin {
         id: manifest
             .id
@@ -576,7 +870,40 @@ fn load_declarative_plugin(
         headers,
         options: chat_options,
         shell_env,
+        process,
     })
+}
+
+fn sandbox_policy(configured: Option<bool>) -> SandboxPolicy {
+    match configured {
+        Some(false) => SandboxPolicy::Off,
+        Some(true) => SandboxPolicy::Required,
+        None if std::env::var_os("NEOISM_AGENT_AUTH_CONFIG").is_some() => SandboxPolicy::Required,
+        None => match std::env::var("NEOISM_AGENT_PLUGIN_SANDBOX").as_deref() {
+            Ok("required" | "1" | "true") => SandboxPolicy::Required,
+            Ok("off" | "0" | "false") => SandboxPolicy::Off,
+            _ => SandboxPolicy::Auto,
+        },
+    }
+}
+
+fn process_plugin(value: &Value) -> anyhow::Result<Vec<String>> {
+    let command = match value {
+        Value::String(program) => vec![program.clone()],
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| {
+                part.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("plugin command entries must be strings"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        _ => anyhow::bail!("plugin command must be a string or string array"),
+    };
+    if command.first().is_none_or(|program| program.trim().is_empty()) {
+        anyhow::bail!("plugin command is empty");
+    }
+    Ok(command)
 }
 
 fn resolve_plugin_manifest(
@@ -646,6 +973,109 @@ fn discovered_plugin_configs(directory: &str) -> Vec<PluginConfig> {
         }
     }
     configs
+}
+
+#[cfg(all(test, unix))]
+mod process_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn subprocess_hook_uses_versioned_json_protocol() {
+        let process = ProcessPlugin {
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat >/dev/null; printf '{\"protocol\":\"neoism-plugin/1\",\"ok\":true,\"value\":{\"loaded\":true}}'".to_string(),
+            ],
+            timeout: Duration::from_secs(2),
+            working_directory: std::env::current_dir().unwrap(),
+            sandbox: SandboxPolicy::Off,
+            network: false,
+        };
+        let value = process
+            .invoke(ProcessHookRequest {
+                protocol: PROCESS_PLUGIN_PROTOCOL.to_string(),
+                hook: "test".to_string(),
+                context: Value::Null,
+                value: Value::Null,
+            })
+            .unwrap();
+        assert_eq!(value["loaded"], true);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn subprocess_hook_runs_in_required_bubblewrap_sandbox() {
+        if find_executable("bwrap").is_none() {
+            return;
+        }
+        let process = ProcessPlugin {
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat >/dev/null; printf '{\"protocol\":\"neoism-plugin/1\",\"ok\":true,\"value\":true}'".to_string(),
+            ],
+            timeout: Duration::from_secs(2),
+            working_directory: std::env::current_dir().unwrap(),
+            sandbox: SandboxPolicy::Required,
+            network: false,
+        };
+        let value = process
+            .invoke(ProcessHookRequest {
+                protocol: PROCESS_PLUGIN_PROTOCOL.to_string(),
+                hook: "test".to_string(),
+                context: Value::Null,
+                value: Value::Null,
+            })
+            .unwrap();
+        assert_eq!(value, true);
+    }
+
+    struct RecoveringPlugin {
+        failing: Arc<AtomicBool>,
+    }
+
+    impl NativePlugin for RecoveringPlugin {
+        fn name(&self) -> &str {
+            "test.recovering"
+        }
+
+        fn shell_env(
+            &self,
+            _ctx: &ShellEnvContext,
+            _env: &mut BTreeMap<String, String>,
+        ) -> anyhow::Result<()> {
+            if self.failing.load(Ordering::SeqCst) {
+                anyhow::bail!("intentional failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hook_failures_update_health_and_success_recovers() {
+        let registry = PluginRegistry::default();
+        let failing = Arc::new(AtomicBool::new(true));
+        registry.register(RecoveringPlugin {
+            failing: failing.clone(),
+        });
+        let context = ShellEnvContext {
+            cwd: "/tmp".to_string(),
+            session_id: None,
+            call_id: None,
+        };
+        assert!(registry.shell_env(&context, &mut BTreeMap::new()).is_err());
+        let status = registry.statuses().pop().unwrap();
+        assert!(!status.active);
+        assert!(status.reason.unwrap().contains("intentional failure"));
+
+        failing.store(false, Ordering::SeqCst);
+        registry.shell_env(&context, &mut BTreeMap::new()).unwrap();
+        let status = registry.statuses().pop().unwrap();
+        assert!(status.active);
+        assert!(status.reason.is_none());
+    }
 }
 
 fn string_map(value: Option<&Value>) -> BTreeMap<String, String> {

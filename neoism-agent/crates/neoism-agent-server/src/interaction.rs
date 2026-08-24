@@ -1,5 +1,5 @@
-use axum::extract::{Path, State};
-use axum::Json;
+use axum::extract::{Path, Query, State};
+use axum::{Extension, Json};
 use neoism_agent_core::{
     event_type, EventPayload, PermissionRequestInfo, QuestionRequestInfo,
 };
@@ -22,9 +22,18 @@ pub(crate) struct QuestionReplyRequest {
     pub(crate) answers: Vec<Vec<String>>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct InteractionListQuery {
+    #[serde(alias = "sessionID")]
+    pub(crate) session_id: Option<String>,
+}
+
 pub(crate) async fn permission_list(
     State(state): State<AppState>,
+    Query(query): Query<InteractionListQuery>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Json<Vec<PermissionRequestInfo>> {
+    let allowed_sessions = allowed_sessions(&state, claims.as_ref().map(|Extension(claims)| claims)).await;
     Json(
         state
             .inner
@@ -32,6 +41,8 @@ pub(crate) async fn permission_list(
             .read()
             .await
             .values()
+            .filter(|request| query.session_id.as_ref().is_none_or(|id| &request.session_id == id))
+            .filter(|request| allowed_sessions.as_ref().is_none_or(|ids| ids.contains(&request.session_id)))
             .cloned()
             .collect(),
     )
@@ -54,6 +65,14 @@ pub(crate) async fn permission_reply(
         .await
         .remove(&request_id);
     let removed = state.inner.permissions.write().await.remove(&request_id);
+    let durable_resolved = state
+        .inner
+        .store
+        .resolve_interaction(&request_id, &reply_kind, json!(reply))
+        .await?;
+    if !durable_resolved && pending.is_none() && removed.is_none() {
+        return Ok(Json(true));
+    }
     let mut publish = Vec::new();
     let mut sends = Vec::new();
 
@@ -172,7 +191,10 @@ pub(crate) async fn permission_reply(
 
 pub(crate) async fn question_list(
     State(state): State<AppState>,
+    Query(query): Query<InteractionListQuery>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Json<Vec<QuestionRequestInfo>> {
+    let allowed_sessions = allowed_sessions(&state, claims.as_ref().map(|Extension(claims)| claims)).await;
     Json(
         state
             .inner
@@ -180,7 +202,24 @@ pub(crate) async fn question_list(
             .read()
             .await
             .values()
+            .filter(|request| query.session_id.as_ref().is_none_or(|id| &request.session_id == id))
+            .filter(|request| allowed_sessions.as_ref().is_none_or(|ids| ids.contains(&request.session_id)))
             .cloned()
+            .collect(),
+    )
+}
+
+async fn allowed_sessions(
+    state: &AppState,
+    claims: Option<&crate::caller::CallerClaims>,
+) -> Option<std::collections::HashSet<String>> {
+    let claims = claims?;
+    let sessions = state.inner.store.list_sessions().await.ok()?;
+    Some(
+        sessions
+            .into_iter()
+            .filter(|session| crate::caller::session_tenant(session) == claims.tenant_id)
+            .map(|session| session.id.to_string())
             .collect(),
     )
 }
@@ -191,13 +230,28 @@ pub(crate) async fn question_reply(
     Json(reply): Json<QuestionReplyRequest>,
 ) -> Json<bool> {
     let removed = state.inner.questions.write().await.remove(&request_id);
-    if let Some(pending) = state
+    let pending = state
         .inner
         .question_waiters
         .write()
         .await
-        .remove(&request_id)
+        .remove(&request_id);
+    let durable_resolved = match state
+        .inner
+        .store
+        .resolve_interaction(&request_id, "answered", json!(reply))
+        .await
     {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(request_id, %error, "failed to persist question resolution");
+            false
+        }
+    };
+    if !durable_resolved && pending.is_none() && removed.is_none() {
+        return Json(true);
+    }
+    if let Some(pending) = pending {
         let _ = pending.sender.send(Ok(reply.answers.clone()));
     }
     state.publish(EventPayload::new(
@@ -212,13 +266,28 @@ pub(crate) async fn question_reject(
     Path(request_id): Path<String>,
 ) -> Json<bool> {
     let removed = state.inner.questions.write().await.remove(&request_id);
-    if let Some(pending) = state
+    let pending = state
         .inner
         .question_waiters
         .write()
         .await
-        .remove(&request_id)
+        .remove(&request_id);
+    let durable_resolved = match state
+        .inner
+        .store
+        .resolve_interaction(&request_id, "rejected", json!({ "rejected": true }))
+        .await
     {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(request_id, %error, "failed to persist question rejection");
+            false
+        }
+    };
+    if !durable_resolved && pending.is_none() && removed.is_none() {
+        return Json(true);
+    }
+    if let Some(pending) = pending {
         let _ = pending
             .sender
             .send(Err("question request was rejected".to_string()));
@@ -228,4 +297,57 @@ pub(crate) async fn question_reject(
         json!({ "requestID": request_id, "info": removed }),
     ));
     Json(true)
+}
+
+pub(crate) async fn cancel_session_interactions(state: &AppState, session_id: &str) {
+    if let Err(error) = state
+        .inner
+        .store
+        .cancel_session_interactions(session_id)
+        .await
+    {
+        tracing::warn!(session_id, %error, "failed to persist interaction cancellation");
+    }
+
+    let permission_ids = state
+        .inner
+        .permissions
+        .read()
+        .await
+        .iter()
+        .filter(|(_, request)| request.session_id == session_id)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    for id in permission_ids {
+        let request = state.inner.permissions.write().await.remove(&id);
+        if let Some(waiter) = state.inner.permission_waiters.write().await.remove(&id) {
+            let _ = waiter.sender.send(Err("Session cancelled".to_string()));
+        }
+        state.publish(EventPayload::new(
+            event_type::PERMISSION_REPLIED,
+            json!({ "requestID": id, "reply": "cancelled", "info": request }),
+        ));
+    }
+
+    let question_ids = state
+        .inner
+        .questions
+        .read()
+        .await
+        .iter()
+        .filter(|(_, request)| request.session_id == session_id)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    for id in question_ids {
+        let request = state.inner.questions.write().await.remove(&id);
+        if let Some(waiter) = state.inner.question_waiters.write().await.remove(&id) {
+            let _ = waiter
+                .sender
+                .send(Err("Session cancelled".to_string()));
+        }
+        state.publish(EventPayload::new(
+            event_type::QUESTION_REJECTED,
+            json!({ "requestID": id, "reason": "cancelled", "info": request }),
+        ));
+    }
 }

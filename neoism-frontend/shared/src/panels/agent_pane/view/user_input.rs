@@ -686,9 +686,9 @@ pub struct UserMessageOrbIdentity {
 /// hook, so the author stays a plain name string.
 ///
 /// `local_name` is the local peer's presence display name (the same seed
-/// the editor caret / top-chrome orb use). A message with no explicit
-/// author is the local user's own message, so it seeds off `local_name`
-/// — matching your caret orb — and labels the tooltip "You".
+/// the editor caret / top-chrome orb use). Only an explicit author matching
+/// that name is labelled "You". Missing author metadata cannot prove that
+/// this peer sent the message, so it is rendered as an unknown user.
 ///
 /// [`NeoismAgentMessage::author`]:
 ///   crate::panels::agent_pane::state::NeoismAgentMessage
@@ -697,23 +697,49 @@ pub fn user_message_orb_identity(
     local_name: Option<&str>,
 ) -> UserMessageOrbIdentity {
     match author.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name)
+            if local_name.map(str::trim).filter(|local| !local.is_empty())
+                == Some(name) =>
+        {
+            UserMessageOrbIdentity {
+                seed: name.to_string(),
+                label: "You".to_string(),
+            }
+        }
         Some(name) => UserMessageOrbIdentity {
             seed: name.to_string(),
             label: name.to_string(),
         },
-        None => {
-            let seed = local_name
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                // No presence name published — a stable generic seed so
-                // the orb is still deterministic (and never empty).
-                .unwrap_or("you")
-                .to_string();
-            UserMessageOrbIdentity {
-                seed,
-                label: "You".to_string(),
-            }
-        }
+        None => UserMessageOrbIdentity {
+            seed: "unknown-user".to_string(),
+            label: "Unknown user".to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod orb_identity_tests {
+    use super::user_message_orb_identity;
+
+    #[test]
+    fn explicit_local_author_is_you() {
+        let identity = user_message_orb_identity(Some("Parker"), Some("Parker"));
+        assert_eq!(identity.seed, "Parker");
+        assert_eq!(identity.label, "You");
+    }
+
+    #[test]
+    fn explicit_remote_author_keeps_its_name() {
+        let identity = user_message_orb_identity(Some("Remote peer"), Some("Parker"));
+        assert_eq!(identity.seed, "Remote peer");
+        assert_eq!(identity.label, "Remote peer");
+    }
+
+    #[test]
+    fn missing_author_is_not_assumed_local() {
+        let identity = user_message_orb_identity(None, Some("Parker"));
+        assert_eq!(identity.seed, "unknown-user");
+        assert_eq!(identity.label, "Unknown user");
     }
 }
 

@@ -1104,58 +1104,7 @@ fn session_summary_message(messages: &[MessageWithParts]) -> Option<ProviderMess
     ))
 }
 
-/// Builds a durable system message from the session's persistent goal, mirroring
-/// Codex's "goal" behaviour: an active (or blocked) goal — and any research notes
-/// gathered for it — is re-injected into the model context on every turn so the
-/// agent keeps working toward it across the whole session.
-///
-/// A *completed* goal is retired from the model's context entirely: it's done, so
-/// re-feeding it on every later turn is just stale noise that pollutes unrelated
-/// requests. The stored goal record is left untouched so the sidebar still shows
-/// it; only the injection stops. Blocked goals stay injected so the model can
-/// re-evaluate whether the user's next message unblocks it.
-fn goal_system_message(info: &SessionInfo) -> Option<ProviderMessage> {
-    let goal = info.goal()?;
-    let text = goal.text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let mut content = match goal.status {
-        neoism_agent_core::GoalStatus::Complete => return None,
-        neoism_agent_core::GoalStatus::Blocked => format!(
-            "Persistent goal for this session (currently marked BLOCKED — you reported \
-             you cannot proceed without the user). Re-evaluate whether the latest \
-             message unblocks you.\n\nGoal: {text}"
-        ),
-        neoism_agent_core::GoalStatus::Active => format!(
-            "Persistent goal for this session. Keep working toward it across every turn, \
-             even if the latest message does not restate it. If a request conflicts with \
-             the goal, flag the conflict before proceeding. When the goal is fully \
-             accomplished, call the complete_goal tool (status=complete) with a thorough \
-             summary; if you get stuck, call it with status=blocked and explain what you \
-             need. Do not silently stop — use the tool so the loop ends cleanly.\n\nGoal: {text}"
-        ),
-    };
-    if !goal.summary.trim().is_empty() {
-        content.push_str(&format!(
-            "\n\nYour last status note ({}): {}",
-            goal.status.label(),
-            goal.summary.trim()
-        ));
-    }
-    if !goal.research.is_empty() {
-        content.push_str("\n\nResearch gathered for this goal:");
-        for note in &goal.research {
-            let snippet = note.content.trim();
-            if snippet.is_empty() {
-                continue;
-            }
-            content.push_str(&format!("\n\nSource: {}\n{snippet}", note.source));
-        }
-    }
-    Some(ProviderMessage::text(ProviderRole::System, content))
-}
-
+#[cfg(test)]
 pub(crate) fn provider_messages_for_session(
     info: &SessionInfo,
     messages: &[MessageWithParts],
@@ -1163,17 +1112,39 @@ pub(crate) fn provider_messages_for_session(
     run_system: Option<&str>,
     goals_enabled: bool,
 ) -> Vec<ProviderMessage> {
+    let host = neoism_agent_plugin_api::PluginHost::default();
+    let snapshot = host
+        .install(
+            vec![Box::new(
+                neoism_agent_builtins::plugin::SystemPromptPlugin,
+            )],
+            &[],
+        )
+        .expect("test system prompt plugin installs");
+    provider_messages_for_session_with_plugins(
+        &snapshot,
+        info,
+        messages,
+        model_id,
+        run_system,
+        goals_enabled,
+    )
+}
+
+pub(crate) fn provider_messages_for_session_with_plugins(
+    plugins: &neoism_agent_plugin_api::RegistrySnapshot,
+    info: &SessionInfo,
+    messages: &[MessageWithParts],
+    model_id: &str,
+    run_system: Option<&str>,
+    goals_enabled: bool,
+) -> Vec<ProviderMessage> {
     let mut provider_messages = Vec::new();
-    provider_messages.push(workspace_system_message(info, model_id));
+    provider_messages.extend(plugin_system_messages(plugins, info, model_id, goals_enabled));
     if let Some(update) = context_epoch_update_message(info) {
         provider_messages.push(update);
     }
-    if goals_enabled {
-        if let Some(goal) = goal_system_message(info) {
-            provider_messages.push(goal);
-        }
-    }
-    if let Some(system) = run_system_message(run_system) {
+    if let Some(system) = plugin_run_system_message(plugins, info, run_system) {
         provider_messages.push(system);
     }
     if let Some(summary) = session_summary_message(messages) {
@@ -1222,17 +1193,6 @@ fn context_epoch_update_message(info: &SessionInfo) -> Option<ProviderMessage> {
     })
 }
 
-fn run_system_message(run_system: Option<&str>) -> Option<ProviderMessage> {
-    let system = run_system?.trim();
-    if system.is_empty() {
-        return None;
-    }
-    Some(ProviderMessage::text(
-        ProviderRole::System,
-        format!("Active agent instructions for this run:\n{system}"),
-    ))
-}
-
 fn message_id(message: &MessageWithParts) -> String {
     match &message.info {
         MessageInfo::User(message) => message.id.to_string(),
@@ -1240,34 +1200,75 @@ fn message_id(message: &MessageWithParts) -> String {
     }
 }
 
-fn workspace_system_message(info: &SessionInfo, model_id: &str) -> ProviderMessage {
-    let editing_tools = if use_apply_patch_for_model(model_id) {
-        "Use apply_patch with a patchText V4A envelope for every file mutation."
-    } else {
-        "Use edit for targeted replacements and write only for brand-new files or intentional full replacements."
-    };
-    let mut content = format!(
-        "You are an interactive coding agent running in a real workspace.\n\
-         Workspace directory: {}\n\
-         You can inspect and modify this workspace with tools. grep searches file contents and glob finds files with fuzzy path and query constraints. Search before reading large files, and issue independent searches or reads together so they execute in parallel. read also lists directories. \
-         {editing_tools} Use bash for project commands, and ask before risky or unclear actions. \
-         Keep CLI responses concise and directly useful.",
-        info.directory
-    );
+fn plugin_system_messages(
+    plugins: &neoism_agent_plugin_api::RegistrySnapshot,
+    info: &SessionInfo,
+    model_id: &str,
+    goals_enabled: bool,
+) -> Vec<ProviderMessage> {
+    let mut instructions = Vec::new();
+    let mut service_fragments = Vec::new();
     if let Some(epoch) = crate::context_epoch::from_session(info) {
-        if let Some(instructions) = epoch.snapshot.sources.get("instructions").and_then(Value::as_array) {
-            let instructions = instructions.iter().filter_map(Value::as_str).collect::<Vec<_>>();
-            if !instructions.is_empty() { content.push_str("\n\n"); content.push_str(&instructions.join("\n\n")); }
+        if let Some(values) = epoch.snapshot.sources.get("instructions").and_then(Value::as_array) {
+            instructions.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
         }
         for (id, value) in &epoch.snapshot.sources {
             if !id.starts_with("service:") { continue; }
             if let Some(fragment) = value.as_str().filter(|value| !value.is_empty()) {
-                content.push_str("\n\n");
-                content.push_str(fragment);
+                service_fragments.push(fragment.to_string());
             }
         }
     }
-    ProviderMessage::text(ProviderRole::System, content)
+    let mut options = std::collections::BTreeMap::from([
+        (
+            "editingTool".to_string(),
+            Value::String(if use_apply_patch_for_model(model_id) { "apply_patch" } else { "edit" }.into()),
+        ),
+        ("instructions".to_string(), serde_json::json!(instructions)),
+        ("serviceFragments".to_string(), serde_json::json!(service_fragments)),
+    ]);
+    if goals_enabled {
+        options.insert("goal".into(), serde_json::to_value(info.goal()).unwrap_or(Value::Null));
+    }
+    let request = neoism_agent_plugin_api::ServiceRequest {
+        workspace_id: info.workspace_id.as_ref().map(ToString::to_string),
+        directory: Some(info.directory.clone()),
+        options,
+    };
+    plugins
+        .system_context_services
+        .values()
+        .flat_map(|service| service.sections(&request).unwrap_or_default())
+        .map(|section| ProviderMessage::text(ProviderRole::System, section.content))
+        .collect()
+}
+
+fn plugin_run_system_message(
+    plugins: &neoism_agent_plugin_api::RegistrySnapshot,
+    info: &SessionInfo,
+    run_system: Option<&str>,
+) -> Option<ProviderMessage> {
+    let instructions = run_system?.trim();
+    if instructions.is_empty() {
+        return None;
+    }
+    let request = neoism_agent_plugin_api::PromptRequest {
+        prompt_id: "active-run".into(),
+        variables: std::collections::BTreeMap::from([(
+            "instructions".into(),
+            Value::String(instructions.into()),
+        )]),
+        service: neoism_agent_plugin_api::ServiceRequest {
+            workspace_id: info.workspace_id.as_ref().map(ToString::to_string),
+            directory: Some(info.directory.clone()),
+            options: Default::default(),
+        },
+    };
+    plugins.prompt_services.values().find_map(|service| {
+        service.render(&request).ok().map(|prompt| {
+            ProviderMessage::text(ProviderRole::System, prompt.content)
+        })
+    })
 }
 
 #[cfg(test)]

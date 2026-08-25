@@ -275,6 +275,14 @@ pub(crate) fn build_host(
             services.clone(),
         )) as Box<dyn AgentPlugin>,
     ];
+    if enabled_in(
+        &config,
+        neoism_agent_builtins::plugin::system_prompt::ID,
+    ) {
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::SystemPromptPlugin,
+        ));
+    }
     plugins.extend(INTERNAL_PLUGINS
             .iter()
             .copied()

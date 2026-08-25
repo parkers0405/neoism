@@ -92,10 +92,10 @@ pub struct SystemContextSection {
     pub content: String,
 }
 pub trait SystemContextService: Send + Sync + 'static {
-    fn sections<'a>(
-        &'a self,
-        request: ServiceRequest,
-    ) -> PluginFuture<'a, Vec<SystemContextSection>>;
+    fn sections(
+        &self,
+        request: &ServiceRequest,
+    ) -> Result<Vec<SystemContextSection>, crate::PluginRuntimeError>;
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -115,7 +115,10 @@ pub struct RenderedPrompt {
     pub system: bool,
 }
 pub trait PromptService: Send + Sync + 'static {
-    fn render<'a>(&'a self, request: PromptRequest) -> PluginFuture<'a, RenderedPrompt>;
+    fn render(
+        &self,
+        request: &PromptRequest,
+    ) -> Result<RenderedPrompt, crate::PluginRuntimeError>;
 }
 
 pub struct ServiceContribution<T: ?Sized> {

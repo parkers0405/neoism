@@ -30,7 +30,7 @@ use crate::provider_stream_processor::{
 use crate::server_util::now_millis;
 use crate::session_context::{
     compact_session_context_for_run, is_default_session_title,
-    provider_messages_for_session, title_from_parts,
+    provider_messages_for_session_with_plugins, title_from_parts,
 };
 use crate::session_retry;
 use crate::session_run::{finish_session_run, start_session_run};
@@ -44,8 +44,6 @@ const CONTINUE_AFTER_LENGTH_MESSAGE: &str =
     "Continue exactly where the previous response stopped. Do not repeat completed content.";
 const CONTINUE_AFTER_COMPACTION_MESSAGE: &str =
     "The earlier conversation was compacted into the summary above. Continue the task from where it left off using that summary as context. Do not restart or repeat already-completed work.";
-const CONTINUE_ACTIVE_GOAL_MESSAGE: &str =
-    "Continue working toward the active persistent goal. Do not stop just because one batch of work is done; keep going until the goal is genuinely accomplished. When it is fully done, call the complete_goal tool (status=complete) with a thorough summary instead of replying with plain text — that is the only way to end this loop. If you are truly stuck and need the user, call complete_goal with status=blocked and explain exactly what you need.";
 const COMPACTION_BUFFER_TOKENS: u64 = 20_000;
 const DEFAULT_OUTPUT_TOKEN_MAX: u64 = 32_000;
 const FALLBACK_AUTO_COMPACTION_THRESHOLD: u64 = 120_000;
@@ -387,7 +385,9 @@ pub(crate) async fn append_prompt(
     if compacted_before_first_step {
         history = state.inner.store.list_messages(&session_id_text).await?;
     }
-    let mut provider_messages = provider_messages_for_session(
+    let plugin_snapshot = workspace.snapshot();
+    let mut provider_messages = provider_messages_for_session_with_plugins(
+        &plugin_snapshot,
         &info,
         &history,
         &reply_model.model_id,
@@ -529,7 +529,8 @@ pub(crate) async fn append_prompt(
                 "in-run tool-output pruning failed"
             );
         }
-        let mut provider_messages = provider_messages_for_session(
+        let mut provider_messages = provider_messages_for_session_with_plugins(
+            &plugin_snapshot,
             &info,
             &history,
             &reply_model.model_id,
@@ -552,10 +553,13 @@ pub(crate) async fn append_prompt(
                 CONTINUE_AFTER_LENGTH_MESSAGE,
             ));
         } else if matches!(followup, FollowupReason::ActiveGoal) {
-            provider_messages.push(ProviderMessage::text(
-                ProviderRole::User,
-                CONTINUE_ACTIVE_GOAL_MESSAGE,
-            ));
+            if let Some(content) = render_plugin_prompt(
+                &plugin_snapshot,
+                "active-goal-continuation",
+                &info,
+            ) {
+                provider_messages.push(ProviderMessage::text(ProviderRole::User, content));
+            }
         }
             plugin::chat_messages_transform(&workspace.snapshot(), &chat_hook_ctx, &mut provider_messages)
             .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -600,6 +604,26 @@ pub(crate) async fn append_prompt(
         }
     });
     Ok(final_assistant_message)
+}
+
+fn render_plugin_prompt(
+    plugins: &neoism_agent_plugin_api::RegistrySnapshot,
+    prompt_id: &str,
+    session: &SessionInfo,
+) -> Option<String> {
+    let request = neoism_agent_plugin_api::PromptRequest {
+        prompt_id: prompt_id.into(),
+        variables: Default::default(),
+        service: neoism_agent_plugin_api::ServiceRequest {
+            workspace_id: session.workspace_id.as_ref().map(ToString::to_string),
+            directory: Some(session.directory.clone()),
+            options: Default::default(),
+        },
+    };
+    plugins
+        .prompt_services
+        .values()
+        .find_map(|service| service.render(&request).ok().map(|prompt| prompt.content))
 }
 
 async fn prune_old_tool_outputs(

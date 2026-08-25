@@ -1,6 +1,7 @@
 //! Transport-neutral plugin route contracts.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,18 @@ pub enum RouteMethod {
     Put,
     Patch,
     Delete,
+}
+
+impl RouteMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -44,7 +57,9 @@ pub struct RouteDescriptor {
 #[serde(rename_all = "camelCase")]
 pub struct RouteRequest {
     pub workspace_id: Option<String>,
+    pub workspace: Option<PathBuf>,
     pub session_id: Option<String>,
+    pub actor: Option<String>,
     pub path: BTreeMap<String, String>,
     pub query: BTreeMap<String, Vec<String>>,
     pub headers: BTreeMap<String, String>,
@@ -80,6 +95,12 @@ pub struct RouteContribution {
     pub metadata: crate::ContributionMetadata,
     pub descriptor: RouteDescriptor,
     pub handler: Arc<dyn RouteHandler>,
+}
+
+#[derive(Clone)]
+pub struct RegisteredRouteContribution {
+    pub plugin_id: String,
+    pub route: RouteContribution,
 }
 
 impl RouteDescriptor {

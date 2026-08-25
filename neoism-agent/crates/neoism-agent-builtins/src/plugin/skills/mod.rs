@@ -4,7 +4,11 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use neoism_agent_core::SkillInfo;
-use neoism_agent_plugin_api::{AgentPlugin, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar, PluginRuntimeError, SkillSource};
+use neoism_agent_plugin_api::{
+    AgentPlugin, PluginFuture, PluginHostError, PluginManifest, PluginRegistrar,
+    ContributionMetadata, PluginRuntimeError, RouteContribution, RouteDescriptor, RouteHandler,
+    RouteMethod, RouteRequest, RouteResponse, RouteScope, SkillSource,
+};
 use neoism_agent_service_api::AgentServices;
 use serde::Deserialize;
 
@@ -38,10 +42,38 @@ impl AgentPlugin for SkillsPlugin {
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        registrar.route("skills");
+        registrar.runtime_route(RouteContribution {
+            descriptor: RouteDescriptor {
+                id: "v2.skills.list".into(),
+                method: RouteMethod::Get,
+                path: "/v2/skills".into(),
+                scope: RouteScope::Workspace,
+                request_schema: None,
+                response_schema: None,
+            },
+            metadata: ContributionMetadata::default(),
+            handler: Arc::new(SkillsRoute(self.services.clone())),
+        });
         registrar.skill_source_runtime("workspace-skills", Arc::new(WorkspaceSkills(self.services.clone())));
         self.host.register_tools(registrar);
         Ok(())
+    }
+}
+
+struct SkillsRoute(AgentServices);
+
+impl RouteHandler for SkillsRoute {
+    fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
+        Box::pin(async move {
+            let directory = request.workspace.unwrap_or_default();
+            let directory = directory.to_string_lossy();
+            let skills = list(&self.0, &directory)
+                .await
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            let body = serde_json::to_value(skills)
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            Ok(RouteResponse::json(200, body))
+        })
     }
 }
 

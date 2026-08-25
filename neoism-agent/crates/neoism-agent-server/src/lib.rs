@@ -28,7 +28,6 @@ mod executable;
 mod external_acp;
 mod external_agent;
 mod global_routes;
-mod goal_routes;
 mod instruction;
 mod interaction;
 pub mod language_server;
@@ -93,7 +92,6 @@ mod tool_selection;
 mod utility_runtime;
 mod v2_routes;
 mod vcs;
-mod vcs_routes;
 #[cfg(windows)]
 mod windows_acl;
 pub(crate) mod windows_process;

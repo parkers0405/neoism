@@ -4,9 +4,13 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use neoism_agent_core::{GoalResearchNote, GoalStatus, SessionGoal};
-use neoism_agent_plugin_api::{AgentPlugin, PluginHostError, PluginManifest, PluginRegistrar};
-use serde::Deserialize;
-use serde_json::json;
+use neoism_agent_plugin_api::{
+    AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest,
+    PluginRegistrar, PluginRuntimeError, RouteContribution, RouteDescriptor, RouteHandler,
+    RouteMethod, RouteRequest, RouteResponse, RouteScope,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 pub const ID: &str = "dev.neoism.goals";
 pub const FIRECRAWL_API_KEY_ENV: &str = "FIRECRAWL_API_KEY";
@@ -15,6 +19,12 @@ const MAX_CONTENT_CHARS: usize = 8_000;
 /// Persistence and kernel tool dispatch remain server responsibilities.
 pub trait GoalsHost: Send + Sync + 'static {
     fn register_tools(&self, registrar: &mut PluginRegistrar);
+    fn load<'a>(&'a self, session_id: &'a str) -> PluginFuture<'a, Option<SessionGoal>>;
+    fn save<'a>(
+        &'a self,
+        session_id: &'a str,
+        goal: Option<SessionGoal>,
+    ) -> PluginFuture<'a, Option<SessionGoal>>;
 }
 
 pub struct GoalsPlugin { host: Arc<dyn GoalsHost> }
@@ -32,10 +42,135 @@ impl AgentPlugin for GoalsPlugin {
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        registrar.route("goals");
+        for (id, method, suffix, action) in [
+            ("v2.plugins.goals.get", RouteMethod::Get, "", GoalRouteAction::Get),
+            ("v2.plugins.goals.set", RouteMethod::Post, "", GoalRouteAction::Set),
+            ("v2.plugins.goals.clear", RouteMethod::Delete, "", GoalRouteAction::Clear),
+            ("v2.plugins.goals.research", RouteMethod::Post, "/research", GoalRouteAction::Research),
+        ] {
+            registrar.runtime_route(RouteContribution {
+                descriptor: RouteDescriptor {
+                    id: id.into(),
+                    method,
+                    path: format!("/v2/plugins/{ID}/:session_id{suffix}"),
+                    scope: RouteScope::Session,
+                    request_schema: None,
+                    response_schema: None,
+                },
+                metadata: ContributionMetadata::default(),
+                handler: Arc::new(GoalRoute { host: self.host.clone(), action }),
+            });
+        }
         self.host.register_tools(registrar);
         Ok(())
     }
+}
+
+#[derive(Clone, Copy)]
+enum GoalRouteAction {
+    Get,
+    Set,
+    Clear,
+    Research,
+}
+
+struct GoalRoute {
+    host: Arc<dyn GoalsHost>,
+    action: GoalRouteAction,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetGoalRequest {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    research_urls: Vec<String>,
+    #[serde(default)]
+    paused: bool,
+}
+
+#[derive(Deserialize)]
+struct GoalResearchRequest {
+    url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoalResponse {
+    goal: Option<SessionGoal>,
+    research_enabled: bool,
+}
+
+impl RouteHandler for GoalRoute {
+    fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
+        Box::pin(async move {
+            let session_id = request
+                .session_id
+                .as_deref()
+                .ok_or_else(|| PluginRuntimeError::new("goal route requires session_id"))?;
+            let goal = match self.action {
+                GoalRouteAction::Get => self.host.load(session_id).await?,
+                GoalRouteAction::Clear => self.host.save(session_id, None).await?,
+                GoalRouteAction::Set => {
+                    let request: SetGoalRequest = serde_json::from_value(request.body)
+                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+                    if request.text.trim().is_empty() {
+                        self.host.save(session_id, None).await?
+                    } else {
+                        let now = now_millis();
+                        let mut goal = set(
+                            self.host.load(session_id).await?,
+                            &request.text,
+                            request.paused,
+                            now,
+                        )
+                        .expect("non-empty goal was checked");
+                        if research_enabled() {
+                            for url in request.research_urls {
+                                if let Ok(page) = scrape_url(&url).await {
+                                    goal.research.push(research_note(page, now));
+                                }
+                            }
+                        }
+                        self.host.save(session_id, Some(goal)).await?
+                    }
+                }
+                GoalRouteAction::Research => {
+                    if !research_enabled() {
+                        return Ok(RouteResponse::json(
+                            400,
+                            json!({ "message": format!("web research is disabled: set {FIRECRAWL_API_KEY_ENV}") }),
+                        ));
+                    }
+                    let request: GoalResearchRequest = serde_json::from_value(request.body)
+                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+                    let Some(goal) = self.host.load(session_id).await? else {
+                        return Ok(RouteResponse::json(400, json!({ "message": "no active goal" })));
+                    };
+                    let page = scrape_url(&request.url)
+                        .await
+                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+                    self.host
+                        .save(session_id, Some(attach_research(goal, page, now_millis())))
+                        .await?
+                }
+            };
+            let body = serde_json::to_value(GoalResponse {
+                goal,
+                research_enabled: research_enabled(),
+            })
+            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            Ok(RouteResponse::json(200, body))
+        })
+    }
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 pub fn set(existing: Option<SessionGoal>, text: &str, paused: bool, now: u64) -> Option<SessionGoal> {

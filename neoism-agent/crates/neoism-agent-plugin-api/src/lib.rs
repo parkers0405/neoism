@@ -242,6 +242,7 @@ pub struct PluginRegistrar {
     runtime_tools: BTreeMap<String, Arc<dyn RuntimeTool>>,
     agent_sources: BTreeMap<String, Arc<dyn AgentSource>>,
     runtime_hooks: Vec<Arc<dyn RuntimeHook>>,
+    runtime_routes: Vec<RouteContribution>,
 }
 
 impl PluginRegistrar {
@@ -321,6 +322,11 @@ impl PluginRegistrar {
         self.item(ContributionKind::Route, id);
     }
 
+    pub fn runtime_route(&mut self, route: RouteContribution) {
+        self.route(route.descriptor.id.clone());
+        self.runtime_routes.push(route);
+    }
+
     pub fn event(&mut self, id: impl Into<String>, schema: Option<Value>) {
         self.contributions.push(Contribution {
             kind: ContributionKind::Event,
@@ -373,6 +379,7 @@ pub struct RegistrySnapshot {
     pub runtime_tools: BTreeMap<String, Arc<dyn RuntimeTool>>,
     pub agent_sources: BTreeMap<String, Arc<dyn AgentSource>>,
     pub runtime_hooks: Vec<RegisteredRuntimeHook>,
+    pub runtime_routes: BTreeMap<String, RegisteredRouteContribution>,
 }
 
 impl RegistrySnapshot {
@@ -387,6 +394,7 @@ impl RegistrySnapshot {
             runtime_tools: BTreeMap::new(),
             agent_sources: BTreeMap::new(),
             runtime_hooks: Vec::new(),
+            runtime_routes: BTreeMap::new(),
         }
     }
 }
@@ -453,6 +461,7 @@ impl PluginHost {
         let mut runtime_tools = BTreeMap::new();
         let mut agent_sources = BTreeMap::new();
         let mut runtime_hooks = Vec::new();
+        let mut runtime_routes = BTreeMap::new();
         for id in order {
             let manifest = &manifests[&id];
             let requested_disabled = disabled.iter().any(|pattern| matches_pattern(pattern, &id));
@@ -519,6 +528,27 @@ impl PluginHost {
                         lifecycle: lifecycle.clone(),
                     });
                 }
+                for route in registrar.runtime_routes {
+                    let key = format!(
+                        "{} {}",
+                        route.descriptor.method.as_str(),
+                        route.descriptor.path
+                    );
+                    if runtime_routes
+                        .insert(
+                            key.clone(),
+                            RegisteredRouteContribution {
+                                plugin_id: id.clone(),
+                                route,
+                            },
+                        )
+                        .is_some()
+                    {
+                        return Err(PluginHostError::ContributionConflict(format!(
+                            "Route:{key}"
+                        )));
+                    }
+                }
             }
             // Disableable plugins are structurally absent. Consumers must not
             // infer availability from an inactive manifest that still leaked
@@ -567,6 +597,7 @@ impl PluginHost {
             runtime_tools,
             agent_sources,
             runtime_hooks,
+            runtime_routes,
         });
         *self.snapshot.write().expect("plugin host lock poisoned") = snapshot.clone();
         Ok(snapshot)

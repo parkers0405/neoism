@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use neoism_agent_core::AgentConfigDocument;
 use neoism_agent_plugin_api::{
-    AgentPlugin, ConfigDocument, ConfigService, PluginFuture, PluginHostError,
-    PluginManifest, PluginRegistrar, PluginRuntimeError, ServiceRequest,
+    AgentPlugin, ConfigDocument, ConfigService, ContributionMetadata, PluginFuture,
+    PluginHostError, PluginManifest, PluginRegistrar, PluginRuntimeError, RouteContribution,
+    RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope,
+    ServiceRequest,
 };
 use neoism_agent_service_api::{AgentServices, ConfigSnapshotRequest};
 use serde_json::Value;
@@ -13,12 +15,28 @@ pub const ID: &str = "dev.neoism.config";
 
 pub struct ConfigPlugin {
     services: AgentServices,
+    admin: Arc<dyn ConfigAdminHost>,
 }
 
 impl ConfigPlugin {
-    pub fn new(services: AgentServices) -> Self {
-        Self { services }
+    pub fn new(services: AgentServices, admin: Arc<dyn ConfigAdminHost>) -> Self {
+        Self { services, admin }
     }
+}
+
+#[derive(Clone, Copy)]
+pub enum ConfigAdminAction {
+    Get,
+    Update,
+    Validate,
+}
+
+pub trait ConfigAdminHost: Send + Sync + 'static {
+    fn execute<'a>(
+        &'a self,
+        action: ConfigAdminAction,
+        request: RouteRequest,
+    ) -> PluginFuture<'a, RouteResponse>;
 }
 
 impl AgentPlugin for ConfigPlugin {
@@ -42,7 +60,32 @@ impl AgentPlugin for ConfigPlugin {
             "workspace-config",
             Arc::new(WorkspaceConfig(self.services.clone())),
         );
+        for (id, method, path, action) in [
+            ("v2.config.get", RouteMethod::Get, "/v2/config", ConfigAdminAction::Get),
+            ("v2.config.update", RouteMethod::Patch, "/v2/config", ConfigAdminAction::Update),
+            ("v2.config.validate", RouteMethod::Get, "/v2/config/validate", ConfigAdminAction::Validate),
+        ] {
+            registrar.runtime_route(RouteContribution {
+                descriptor: RouteDescriptor {
+                    id: id.into(), method, path: path.into(), scope: RouteScope::Workspace,
+                    request_schema: None, response_schema: None,
+                },
+                metadata: ContributionMetadata::default(),
+                handler: Arc::new(ConfigAdminRoute { admin: self.admin.clone(), action }),
+            });
+        }
         Ok(())
+    }
+}
+
+struct ConfigAdminRoute {
+    admin: Arc<dyn ConfigAdminHost>,
+    action: ConfigAdminAction,
+}
+
+impl RouteHandler for ConfigAdminRoute {
+    fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
+        self.admin.execute(self.action, request)
     }
 }
 

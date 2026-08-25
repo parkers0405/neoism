@@ -14,7 +14,7 @@ use crate::artifact_routes::{
     artifact_content, artifact_create, artifact_delete, artifact_get, artifact_list,
 };
 use crate::audit_routes::audit_list;
-use crate::global_routes::{config_get, config_update, config_validate, global_health};
+use crate::global_routes::global_health;
 use crate::interaction::{
     permission_list, permission_reply, question_list, question_reject, question_reply,
 };
@@ -69,8 +69,6 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route("/v2/health", get(global_health))
         .route("/v2/meta", get(v2_meta))
         .route("/v2/openapi.json", get(canonical_openapi_doc))
-        .route("/v2/config", get(config_get).patch(config_update))
-        .route("/v2/config/validate", get(config_validate))
         .route("/v2/audit", get(audit_list))
         .route("/v2/capabilities", get(v2_capabilities))
         .route("/v2/plugins", get(v2_plugins))

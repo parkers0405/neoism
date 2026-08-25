@@ -52,6 +52,8 @@ pub(crate) struct InnerState {
     pub(crate) workflow_notify: Arc<Notify>,
     pub(crate) workflow_scheduler_started: AtomicBool,
     events: broadcast::Sender<EventPayload>,
+    durable_events: broadcast::Sender<()>,
+    live_events: broadcast::Sender<EventPayload>,
     event_writer: mpsc::UnboundedSender<(EventPayload, bool)>,
 }
 
@@ -370,6 +372,8 @@ impl AppState {
     ) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(&artifact_root).await?;
         let (events, _) = broadcast::channel(1024);
+        let (durable_events, _) = broadcast::channel(1024);
+        let (live_events, _) = broadcast::channel(1024);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
         let provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService> =
             Arc::new(neoism_agent_builtins::ProviderPlatform::from_env());
@@ -415,11 +419,14 @@ impl AppState {
                 workflow_notify: Arc::new(Notify::new()),
                 workflow_scheduler_started: AtomicBool::new(false),
                 events,
+                durable_events,
+                live_events,
                 event_writer,
             }),
         };
         let durable_store = state.inner.store.clone();
         let durable_events = state.inner.events.clone();
+        let durable_notifications = state.inner.durable_events.clone();
         let durable_state = state.clone();
         tokio::spawn(async move {
             while let Some((event, broadcast)) = event_reader.recv().await {
@@ -430,6 +437,7 @@ impl AppState {
                         }
                         if broadcast {
                             let _ = durable_events.send(event);
+                            let _ = durable_notifications.send(());
                         }
                     }
                     Err(error) => {
@@ -528,8 +536,17 @@ impl AppState {
         self.inner.events.subscribe()
     }
 
+    pub(crate) fn subscribe_durable(&self) -> broadcast::Receiver<()> {
+        self.inner.durable_events.subscribe()
+    }
+
+    pub(crate) fn subscribe_live(&self) -> broadcast::Receiver<EventPayload> {
+        self.inner.live_events.subscribe()
+    }
+
     pub(crate) fn publish(&self, event: EventPayload) {
-        let broadcast = self.inner.events.receiver_count() > 0;
+        let broadcast = self.inner.events.receiver_count() > 0
+            || self.inner.durable_events.receiver_count() > 0;
         if let Err(error) = self.inner.event_writer.send((event, broadcast)) {
             tracing::error!(event = %error.0.0.kind, "durable event writer stopped");
         }
@@ -540,7 +557,8 @@ impl AppState {
     /// writing every provider delta here stalls the provider and amplifies the
     /// growing message into thousands of database writes.
     pub(crate) fn publish_live(&self, event: EventPayload) {
-        let _ = self.inner.events.send(event);
+        let _ = self.inner.events.send(event.clone());
+        let _ = self.inner.live_events.send(event);
     }
 
     #[cfg(test)]
@@ -553,6 +571,7 @@ impl AppState {
             crate::plugin::publish_event(&runtime.snapshot(), &event);
         }
         let _ = self.inner.events.send(event);
+        let _ = self.inner.durable_events.send(());
         Ok(())
     }
 
@@ -565,6 +584,7 @@ impl AppState {
             }
         });
         let _ = self.inner.events.send(event);
+        let _ = self.inner.durable_events.send(());
     }
 
     pub(crate) async fn update_session_with_event(

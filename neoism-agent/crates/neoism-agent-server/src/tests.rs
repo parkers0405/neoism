@@ -4,6 +4,7 @@ use crate::tool_selection::provider_tool_map;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
+use futures::StreamExt;
 use neoism_agent_core::{
     AgentConfigDocument, AuthInfo, ProviderListResult, SessionUndoStatus, SessionUndoTree,
 };
@@ -1098,6 +1099,139 @@ async fn live_stream_events_broadcast_without_persistence() {
         .await
         .unwrap()
         .is_empty());
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn v2_root_event_stream_forwards_live_delta_from_child_created_after_connect() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-family-live-events-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let root_id = neoism_agent_core::new_session_id();
+    let child_id = neoism_agent_core::new_session_id();
+    let unrelated_id = neoism_agent_core::new_session_id();
+    let root = store_test_session(&root_id, now_millis());
+    let unrelated = store_test_session(&unrelated_id, now_millis());
+    state.inner.store.insert_session(&root).await.unwrap();
+    state.inner.store.insert_session(&unrelated).await.unwrap();
+
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v2/events?sessionId={}&tail=true&limit=1",
+                    root_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+
+    let mut child = store_test_session(&child_id, now_millis());
+    child.parent_id = Some(root_id.clone());
+    state.inner.store.insert_session(&child).await.unwrap();
+    state.publish_live(EventPayload::new(
+        event_type::MESSAGE_PART_DELTA,
+        json!({
+            "sessionID": unrelated_id,
+            "messageID": "message-unrelated",
+            "partID": "part-unrelated",
+            "field": "text",
+            "delta": "must-not-leak"
+        }),
+    ));
+    state.publish_live(EventPayload::new(
+        event_type::MESSAGE_PART_DELTA,
+        json!({
+            "sessionID": child_id,
+            "messageID": "message-child",
+            "partID": "part-child",
+            "field": "text",
+            "delta": "live-child-token"
+        }),
+    ));
+
+    let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("child delta should reach root SSE stream")
+        .expect("SSE body should remain open")
+        .expect("SSE body chunk should be readable");
+    let text = String::from_utf8_lossy(&chunk);
+    assert!(text.contains("message.part.delta"), "{text}");
+    assert!(text.contains("live-child-token"), "{text}");
+    assert!(text.contains(child_id.as_str()), "{text}");
+    assert!(!text.contains("must-not-leak"), "{text}");
+
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn v2_root_event_stream_replays_durable_child_events_only() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-family-replay-events-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let root_id = neoism_agent_core::new_session_id();
+    let child_id = neoism_agent_core::new_session_id();
+    let unrelated_id = neoism_agent_core::new_session_id();
+    let root = store_test_session(&root_id, now_millis());
+    let mut child = store_test_session(&child_id, now_millis());
+    child.parent_id = Some(root_id.clone());
+    let unrelated = store_test_session(&unrelated_id, now_millis());
+    state.inner.store.insert_session(&root).await.unwrap();
+    state.inner.store.insert_session(&child).await.unwrap();
+    state.inner.store.insert_session(&unrelated).await.unwrap();
+    state
+        .publish_persisted(EventPayload::new(
+            event_type::MESSAGE_PART_UPDATED,
+            json!({
+                "sessionID": unrelated_id,
+                "part": { "id": "unrelated-part", "text": "must-not-replay" }
+            }),
+        ))
+        .await
+        .unwrap();
+    state
+        .publish_persisted(EventPayload::new(
+            event_type::MESSAGE_PART_UPDATED,
+            json!({
+                "sessionID": child_id,
+                "part": { "id": "child-part", "text": "durable-child-update" }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/v2/events?sessionId={}&since=0&limit=1", root_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = response.into_body().into_data_stream();
+    let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("durable child event should replay")
+        .expect("SSE body should remain open")
+        .expect("SSE body chunk should be readable");
+    let text = String::from_utf8_lossy(&chunk);
+    assert!(text.contains("durable-child-update"), "{text}");
+    assert!(text.contains(child_id.as_str()), "{text}");
+    assert!(!text.contains("must-not-replay"), "{text}");
+
     cleanup_sqlite_files(&path);
 }
 

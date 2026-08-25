@@ -1,10 +1,75 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use neoism_agent_core::AgentConfigDocument;
+use neoism_agent_plugin_api::{
+    AgentPlugin, ConfigDocument, ConfigService, PluginFuture, PluginHostError,
+    PluginManifest, PluginRegistrar, PluginRuntimeError, ServiceRequest,
+};
 use neoism_agent_service_api::{AgentServices, ConfigSnapshotRequest};
 use serde_json::Value;
 
-pub(super) fn load(services: &AgentServices, directory: &str) -> anyhow::Result<(AgentConfigDocument, Vec<PathBuf>)> {
+pub const ID: &str = "dev.neoism.config";
+
+pub struct ConfigPlugin {
+    services: AgentServices,
+}
+
+impl ConfigPlugin {
+    pub fn new(services: AgentServices) -> Self {
+        Self { services }
+    }
+}
+
+impl AgentPlugin for ConfigPlugin {
+    fn manifest(&self) -> PluginManifest {
+        PluginManifest {
+            id: ID.into(),
+            name: "Configuration".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            internal: true,
+            disableable: false,
+            capabilities: vec!["neoism.config".into()],
+            requires: Vec::new(),
+            event_namespaces: vec!["config".into()],
+            api_prefix: Some("/v2/config".into()),
+            config: Default::default(),
+        }
+    }
+
+    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
+        registrar.config_service_runtime(
+            "workspace-config",
+            Arc::new(WorkspaceConfig(self.services.clone())),
+        );
+        Ok(())
+    }
+}
+
+struct WorkspaceConfig(AgentServices);
+
+impl ConfigService for WorkspaceConfig {
+    fn load<'a>(&'a self, request: ServiceRequest) -> PluginFuture<'a, ConfigDocument> {
+        Box::pin(async move {
+            let directory = request.directory.as_deref().unwrap_or_default();
+            let (document, _) = load(&self.0, directory)
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+            let values = serde_json::to_value(document)
+                .map_err(|error| PluginRuntimeError::new(error.to_string()))?
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            Ok(ConfigDocument {
+                values,
+                provenance: Default::default(),
+            })
+        })
+    }
+}
+
+pub fn load(services: &AgentServices, directory: &str) -> anyhow::Result<(AgentConfigDocument, Vec<PathBuf>)> {
     let snapshot = services
         .config
         .snapshot(&ConfigSnapshotRequest::new(directory))?;

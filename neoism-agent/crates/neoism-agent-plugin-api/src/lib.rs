@@ -243,6 +243,9 @@ pub struct PluginRegistrar {
     agent_sources: BTreeMap<String, Arc<dyn AgentSource>>,
     runtime_hooks: Vec<Arc<dyn RuntimeHook>>,
     runtime_routes: Vec<RouteContribution>,
+    config_services: BTreeMap<String, Arc<dyn ConfigService>>,
+    system_context_services: BTreeMap<String, Arc<dyn SystemContextService>>,
+    prompt_services: BTreeMap<String, Arc<dyn PromptService>>,
 }
 
 impl PluginRegistrar {
@@ -347,6 +350,36 @@ impl PluginRegistrar {
         self.item(ContributionKind::ConfigLoader, id);
     }
 
+    pub fn config_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn ConfigService>,
+    ) {
+        let id = id.into();
+        self.config_loader(id.clone());
+        self.config_services.insert(id, service);
+    }
+
+    pub fn system_context_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn SystemContextService>,
+    ) {
+        let id = id.into();
+        self.system_prompt(id.clone());
+        self.system_context_services.insert(id, service);
+    }
+
+    pub fn prompt_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn PromptService>,
+    ) {
+        let id = id.into();
+        self.system_prompt(id.clone());
+        self.prompt_services.insert(id, service);
+    }
+
     pub fn hook(&mut self, id: impl Into<String>) {
         self.item(ContributionKind::Hook, id);
     }
@@ -380,6 +413,9 @@ pub struct RegistrySnapshot {
     pub agent_sources: BTreeMap<String, Arc<dyn AgentSource>>,
     pub runtime_hooks: Vec<RegisteredRuntimeHook>,
     pub runtime_routes: BTreeMap<String, RegisteredRouteContribution>,
+    pub config_services: BTreeMap<String, Arc<dyn ConfigService>>,
+    pub system_context_services: BTreeMap<String, Arc<dyn SystemContextService>>,
+    pub prompt_services: BTreeMap<String, Arc<dyn PromptService>>,
 }
 
 impl RegistrySnapshot {
@@ -395,6 +431,9 @@ impl RegistrySnapshot {
             agent_sources: BTreeMap::new(),
             runtime_hooks: Vec::new(),
             runtime_routes: BTreeMap::new(),
+            config_services: BTreeMap::new(),
+            system_context_services: BTreeMap::new(),
+            prompt_services: BTreeMap::new(),
         }
     }
 }
@@ -462,6 +501,9 @@ impl PluginHost {
         let mut agent_sources = BTreeMap::new();
         let mut runtime_hooks = Vec::new();
         let mut runtime_routes = BTreeMap::new();
+        let mut config_services = BTreeMap::new();
+        let mut system_context_services = BTreeMap::new();
+        let mut prompt_services = BTreeMap::new();
         for id in order {
             let manifest = &manifests[&id];
             let requested_disabled = disabled.iter().any(|pattern| matches_pattern(pattern, &id));
@@ -549,6 +591,21 @@ impl PluginHost {
                         )));
                     }
                 }
+                merge_runtime_services(
+                    &mut config_services,
+                    registrar.config_services,
+                    "ConfigService",
+                )?;
+                merge_runtime_services(
+                    &mut system_context_services,
+                    registrar.system_context_services,
+                    "SystemContextService",
+                )?;
+                merge_runtime_services(
+                    &mut prompt_services,
+                    registrar.prompt_services,
+                    "PromptService",
+                )?;
             }
             // Disableable plugins are structurally absent. Consumers must not
             // infer availability from an inactive manifest that still leaked
@@ -598,6 +655,9 @@ impl PluginHost {
             agent_sources,
             runtime_hooks,
             runtime_routes,
+            config_services,
+            system_context_services,
+            prompt_services,
         });
         *self.snapshot.write().expect("plugin host lock poisoned") = snapshot.clone();
         Ok(snapshot)
@@ -609,6 +669,19 @@ impl PluginHost {
             .expect("plugin host lock poisoned")
             .clone()
     }
+}
+
+fn merge_runtime_services<T: ?Sized>(
+    target: &mut BTreeMap<String, Arc<T>>,
+    source: BTreeMap<String, Arc<T>>,
+    kind: &str,
+) -> Result<(), PluginHostError> {
+    for (id, service) in source {
+        if target.insert(id.clone(), service).is_some() {
+            return Err(PluginHostError::ContributionConflict(format!("{kind}:{id}")));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

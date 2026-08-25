@@ -268,43 +268,22 @@ fn workspace_runtime_optional_lifecycle_is_a_decreasing_ratchet() {
 }
 
 #[test]
-fn kernel_owned_user_tools_are_allowlisted_and_decreasing() {
+fn user_visible_kernel_tools_are_forbidden() {
     let source =
         fs::read_to_string(workspace_root().join(format!("{SERVER}tool_registry.rs")))
             .expect("read tool registry");
     let ids = ids_after_marker(&source, "ToolOwner::Kernel, owner,");
-    let allowed = [
-        "artifact_read",
-        "artifact_search",
-        "plan_enter",
-        "plan_exit",
-        "question",
-        "todowrite",
-    ]
-    .into_iter()
-    .collect::<BTreeSet<_>>();
-    let unknown = ids.difference(&allowed).copied().collect::<Vec<_>>();
-    assert!(unknown.is_empty(), "new user-visible ToolOwner::Kernel tools are forbidden: {unknown:?}; ship them as plugin tools");
-    assert!(
-        ids.len() <= 6,
-        "ToolOwner::Kernel tool count increased to {} (ceiling 6)",
-        ids.len()
-    );
+    assert!(ids.is_empty(), "user-visible kernel tools are forbidden: {ids:?}");
 }
 
 #[test]
 fn hardcoded_plugin_route_switches_are_allowlisted_and_decreasing() {
     let expected = [
-        "agents",
-        "commands",
-        "goals",
         "lsp",
         "mcp",
         "pty",
         "semantic-search",
-        "skills",
         "subagents",
-        "vcs",
         "workflows",
     ]
     .into_iter()
@@ -323,7 +302,7 @@ fn hardcoded_plugin_route_switches_are_allowlisted_and_decreasing() {
         &actual,
         &[(
             "neoism-agent/crates/neoism-agent-server/src/app_router.rs",
-            11,
+            6,
         )],
     );
 }

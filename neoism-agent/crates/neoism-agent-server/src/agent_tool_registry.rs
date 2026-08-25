@@ -61,10 +61,6 @@ pub(crate) fn plugin_present(snapshot: &RegistrySnapshot, plugin_id: &str) -> bo
     snapshot.manifests.iter().any(|manifest| manifest.id == plugin_id)
 }
 
-pub(crate) fn is_kernel_tool(tool_id: &str) -> bool {
-    tool::kernel_tools().iter().any(|tool| tool.id == tool_id)
-}
-
 async fn configured_mcp_tools_with_snapshot(
     directory: &str,
     runtime_state: AppState,
@@ -102,9 +98,6 @@ pub(crate) async fn available_tools_for_directory(
     let directory = workspace.directory;
     let snapshot = workspace.snapshot;
     let mut tools = Vec::new();
-    // Interaction and artifact operations are kernel run services rather than
-    // optional workspace plugins.
-    tools.extend(tool::kernel_tools());
     if state.services().notes.is_none() {
         tools.retain(|tool| tool.id != "notes");
     } else if let Some(notes) = state.services().notes.as_ref() {

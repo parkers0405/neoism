@@ -185,6 +185,22 @@ impl neoism_agent_builtins::plugin::skills::SkillsHost for ServerSkillsHost {
 
 struct ServerGoalsHost(crate::state::AppState);
 
+struct ServerArtifactsHost(crate::state::AppState);
+
+impl neoism_agent_builtins::plugin::artifacts::ArtifactsHost for ServerArtifactsHost {
+    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+        crate::tool::register_artifact_tools(registrar, &self.0);
+    }
+}
+
+struct ServerInteractionsHost(crate::state::AppState);
+
+impl neoism_agent_builtins::plugin::interactions::InteractionsHost for ServerInteractionsHost {
+    fn register_tools(&self, registrar: &mut PluginRegistrar) {
+        crate::tool::register_interaction_tools(registrar, &self.0);
+    }
+}
+
 impl neoism_agent_builtins::plugin::goals::GoalsHost for ServerGoalsHost {
     fn register_tools(&self, registrar: &mut PluginRegistrar) {
         crate::tool::register_goal_tools(registrar, &self.0);
@@ -254,6 +270,18 @@ pub(crate) fn build_host(
     ) {
         plugins.push(Box::new(
             neoism_agent_builtins::plugin::SystemPromptPlugin,
+        ));
+    }
+    if enabled_in(&config, neoism_agent_builtins::plugin::artifacts::ID) {
+        plugins.push(Box::new(neoism_agent_builtins::plugin::ArtifactsPlugin::new(
+            std::sync::Arc::new(ServerArtifactsHost(state.clone())),
+        )));
+    }
+    if enabled_in(&config, neoism_agent_builtins::plugin::interactions::ID) {
+        plugins.push(Box::new(
+            neoism_agent_builtins::plugin::InteractionsPlugin::new(std::sync::Arc::new(
+                ServerInteractionsHost(state.clone()),
+            )),
         ));
     }
     plugins.extend(INTERNAL_PLUGINS

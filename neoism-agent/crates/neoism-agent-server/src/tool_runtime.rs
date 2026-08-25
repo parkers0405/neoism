@@ -111,13 +111,7 @@ async fn execute_tool_call_with_env_and_cancel(
     let formatter = crate::config::load(&services, directory)
         .ok()
         .and_then(|loaded| crate::config::formatter_value(&loaded.info));
-    let runtime = snapshot.runtime_tools.get(tool_name).cloned().or_else(|| {
-        crate::agent_tool_registry::is_kernel_tool(tool_name)
-            .then(|| {
-                tool::kernel_runtime_tool(tool_name, state)
-            })
-            .flatten()
-    });
+    let runtime = snapshot.runtime_tools.get(tool_name).cloned();
     let runtime = runtime.ok_or_else(|| format!("unknown tool {tool_name}"))?;
     let definition = runtime.definition();
     if let Some(permission) = definition.permission {
@@ -886,9 +880,7 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
     )
     .await;
     let snapshot = workspace.snapshot;
-    if !crate::agent_tool_registry::is_kernel_tool(tool_name)
-        && crate::agent_tool_registry::tool_contribution(&snapshot, tool_name).is_none()
-    {
+    if crate::agent_tool_registry::tool_contribution(&snapshot, tool_name).is_none() {
         return Err(format!("unknown or disabled tool {tool_name}"));
     }
     let workspace = workspace.runtime;

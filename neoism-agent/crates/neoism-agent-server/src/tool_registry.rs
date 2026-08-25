@@ -8,7 +8,16 @@ use super::{
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum ToolOwner { Workspace, Notes, Skills, Lsp, Subagents, Goals, Kernel }
+pub(super) enum ToolOwner {
+    Workspace,
+    Notes,
+    Skills,
+    Lsp,
+    Subagents,
+    Goals,
+    Artifacts,
+    Interactions,
+}
 
 pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
     vec![
@@ -251,7 +260,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
             lsp_handler,
         ),
         tool(
-            ToolOwner::Kernel, owner,
+            ToolOwner::Artifacts, owner,
             "artifact_read",
             "Read lines from saved large tool output by artifact:// URI, artifact id, or runtime-managed output path.",
             json!({
@@ -266,7 +275,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
             artifact_read_handler,
         ),
         tool(
-            ToolOwner::Kernel, owner,
+            ToolOwner::Artifacts, owner,
             "artifact_search",
             "Search saved large tool output by artifact:// URI, artifact id, or runtime-managed output path.",
             json!({
@@ -305,7 +314,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
             stateful_handler,
         ),
         tool(
-            ToolOwner::Kernel, owner,
+            ToolOwner::Interactions, owner,
             "todowrite",
             "Update an agent-visible task list",
             json!({
@@ -393,7 +402,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
             stateful_handler,
         ),
         tool(
-            ToolOwner::Kernel, owner,
+            ToolOwner::Interactions, owner,
             "question",
             "Ask the user a structured question",
             json!({
@@ -429,14 +438,14 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
             stateful_handler,
         ),
         tool(
-            ToolOwner::Kernel, owner,
+            ToolOwner::Interactions, owner,
             "plan_enter",
             "Enter planning mode",
             json!({ "type": "object", "properties": {} }),
             stateful_handler,
         ),
         tool(
-            ToolOwner::Kernel, owner,
+            ToolOwner::Interactions, owner,
             "plan_exit",
             "Exit planning mode",
             json!({ "type": "object", "properties": {} }),

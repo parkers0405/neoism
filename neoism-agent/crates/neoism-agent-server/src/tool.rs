@@ -49,7 +49,6 @@ pub(crate) mod truncate;
 mod web;
 
 use web::webfetch_tool;
-pub(crate) use web::websearch;
 
 type ToolFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<ToolExecutionResult>> + Send>>;

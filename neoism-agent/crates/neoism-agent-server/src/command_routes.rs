@@ -27,10 +27,6 @@ pub(crate) async fn command_list(
     Ok(Json(commands))
 }
 
-pub(crate) fn load_commands(services: &neoism_agent_service_api::AgentServices, directory: &str) -> anyhow::Result<Vec<CommandInfo>> {
-    neoism_agent_builtins::plugin::commands::load(services, directory)
-}
-
 pub(crate) async fn find_command(
     state: &AppState,
     directory: &str,
@@ -53,6 +49,5 @@ pub(crate) fn expand_command_template(template: &str, arguments: &str) -> String
     neoism_agent_builtins::plugin::commands::expand_template(template, arguments)
 }
 
-pub(crate) fn command_arguments(arguments: &str) -> Vec<String> {
-    neoism_agent_builtins::plugin::commands::arguments_list(arguments)
-}
+#[cfg(test)]
+pub(crate) use neoism_agent_builtins::plugin::commands::arguments_list as command_arguments;

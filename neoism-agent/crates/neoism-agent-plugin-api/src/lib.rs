@@ -246,6 +246,7 @@ pub struct PluginRegistrar {
     config_services: BTreeMap<String, Arc<dyn ConfigService>>,
     system_context_services: BTreeMap<String, Arc<dyn SystemContextService>>,
     prompt_services: BTreeMap<String, Arc<dyn PromptService>>,
+    provider_services: BTreeMap<String, Arc<dyn ProviderService>>,
 }
 
 impl PluginRegistrar {
@@ -283,6 +284,16 @@ impl PluginRegistrar {
 
     pub fn provider(&mut self, id: impl Into<String>) {
         self.item(ContributionKind::Provider, id);
+    }
+
+    pub fn provider_service_runtime(
+        &mut self,
+        id: impl Into<String>,
+        service: Arc<dyn ProviderService>,
+    ) {
+        let id = id.into();
+        self.provider(id.clone());
+        self.provider_services.insert(id, service);
     }
 
     pub fn skill_source(&mut self, id: impl Into<String>) {
@@ -416,6 +427,7 @@ pub struct RegistrySnapshot {
     pub config_services: BTreeMap<String, Arc<dyn ConfigService>>,
     pub system_context_services: BTreeMap<String, Arc<dyn SystemContextService>>,
     pub prompt_services: BTreeMap<String, Arc<dyn PromptService>>,
+    pub provider_services: BTreeMap<String, Arc<dyn ProviderService>>,
 }
 
 impl RegistrySnapshot {
@@ -434,6 +446,7 @@ impl RegistrySnapshot {
             config_services: BTreeMap::new(),
             system_context_services: BTreeMap::new(),
             prompt_services: BTreeMap::new(),
+            provider_services: BTreeMap::new(),
         }
     }
 }
@@ -504,6 +517,7 @@ impl PluginHost {
         let mut config_services = BTreeMap::new();
         let mut system_context_services = BTreeMap::new();
         let mut prompt_services = BTreeMap::new();
+        let mut provider_services = BTreeMap::new();
         for id in order {
             let manifest = &manifests[&id];
             let requested_disabled = disabled.iter().any(|pattern| matches_pattern(pattern, &id));
@@ -606,6 +620,11 @@ impl PluginHost {
                     registrar.prompt_services,
                     "PromptService",
                 )?;
+                merge_runtime_services(
+                    &mut provider_services,
+                    registrar.provider_services,
+                    "ProviderService",
+                )?;
             }
             // Disableable plugins are structurally absent. Consumers must not
             // infer availability from an inactive manifest that still leaked
@@ -658,6 +677,7 @@ impl PluginHost {
             config_services,
             system_context_services,
             prompt_services,
+            provider_services,
         });
         *self.snapshot.write().expect("plugin host lock poisoned") = snapshot.clone();
         Ok(snapshot)

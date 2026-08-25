@@ -386,6 +386,12 @@ pub(crate) async fn append_prompt(
         history = state.inner.store.list_messages(&session_id_text).await?;
     }
     let plugin_snapshot = workspace.snapshot();
+    let provider_service = plugin_snapshot
+        .provider_services
+        .values()
+        .next()
+        .cloned()
+        .ok_or_else(|| ApiError::internal("no provider plugin is registered"))?;
     let mut provider_messages = provider_messages_for_session_with_plugins(
         &plugin_snapshot,
         &info,
@@ -446,6 +452,7 @@ pub(crate) async fn append_prompt(
     .await?;
     let provider_tool_map = provider_tool_map(&provider_tools);
     let mut final_assistant_message = run_provider_stream_step_with_retry(
+        &provider_service,
         &ProviderStreamEventContext {
             state,
             session_id: &session_id,
@@ -564,6 +571,7 @@ pub(crate) async fn append_prompt(
             plugin::chat_messages_transform(&workspace.snapshot(), &chat_hook_ctx, &mut provider_messages)
             .map_err(|error| ApiError::internal(error.to_string()))?;
         final_assistant_message = run_followup_assistant_step(
+            &provider_service,
             state,
             &session_id,
             &session_id_text,
@@ -1554,7 +1562,14 @@ async fn generate_model_title(
         None,
     )
     .await;
-    let Ok(stream) = state.inner.providers.stream(request) else {
+    let provider_runtime = state
+        .workspace_runtime(directory.as_deref().unwrap_or_default())
+        .await;
+    let snapshot = provider_runtime.snapshot();
+    let Some(provider) = snapshot.provider_services.values().next() else {
+        return;
+    };
+    let Ok(stream) = provider.stream(request) else {
         return;
     };
     let mut output = String::new();
@@ -2156,6 +2171,7 @@ mod tests {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_followup_assistant_step(
+    provider: &Arc<dyn neoism_agent_plugin_api::ProviderService>,
     state: &AppState,
     session_id: &Id,
     session_id_text: &str,
@@ -2200,6 +2216,7 @@ async fn run_followup_assistant_step(
         model_id: reply_model.model_id.clone(),
     };
     run_provider_stream_step_with_retry(
+        provider,
         &ProviderStreamEventContext {
             state,
             session_id,
@@ -2298,6 +2315,7 @@ async fn provider_generation_metadata(
 }
 
 async fn run_provider_stream_step_with_retry(
+    provider: &Arc<dyn neoism_agent_plugin_api::ProviderService>,
     ctx: &ProviderStreamEventContext<'_>,
     request: ProviderGenerationRequest,
     cancellation: &Arc<AtomicBool>,
@@ -2305,9 +2323,10 @@ async fn run_provider_stream_step_with_retry(
     let max_retries = session_retry::max_retries();
     let mut attempt = 0_u64;
     loop {
-        let provider_stream = match ctx.state.inner.providers.stream(request.clone()) {
+        let provider_stream = match provider.stream(request.clone()) {
             Ok(stream) => stream,
             Err(error) => {
+                let error = anyhow::anyhow!(error.to_string());
                 if attempt < max_retries
                     && !cancellation.load(Ordering::SeqCst)
                     && session_retry::retryable_error(&error)
@@ -2353,6 +2372,13 @@ async fn run_provider_stream_step_with_retry(
             }
         };
 
+        let provider_stream = crate::provider::ProviderStream {
+            provider_id: provider_stream.provider_id,
+            model_id: provider_stream.model_id,
+            events: Box::pin(provider_stream.events.map(|event| {
+                event.map_err(|error| anyhow::anyhow!(error.to_string()))
+            })),
+        };
         match run_provider_stream_step(ctx, provider_stream, cancellation).await {
             Ok(message) => return Ok(message),
             Err(error)

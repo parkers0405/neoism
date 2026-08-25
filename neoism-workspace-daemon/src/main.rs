@@ -78,6 +78,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "daemon token ready (read the secret from this file; never logged)",
     );
 
+    // Agent lifetime belongs to the workspace daemon. Boot the supervisor at
+    // daemon startup rather than waiting for the first WebSocket agent message.
+    neoism_workspace_daemon::agent::ensure_agent_server_started();
+
     let _pidfile_guard = match cli.pidfile {
         Some(path) => {
             let guard = persistence::PidfileGuard::create(path)?;

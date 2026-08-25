@@ -490,14 +490,14 @@ mod tests {
     fn workspace_config_can_disable_subagents() {
         let mut config = neoism_agent_core::AgentConfigDocument::default();
         config.plugins.insert(
-            PLUGIN_ID.to_string(),
+            neoism_agent_builtins::plugin::subagents::ID.to_string(),
             neoism_agent_core::PluginConfig {
                 enabled: false,
                 ..Default::default()
             },
         );
         assert!(!enabled_in_config(&config));
-        config.plugins.get_mut(PLUGIN_ID).unwrap().enabled = true;
+        config.plugins.get_mut(neoism_agent_builtins::plugin::subagents::ID).unwrap().enabled = true;
         assert!(enabled_in_config(&config));
     }
 }

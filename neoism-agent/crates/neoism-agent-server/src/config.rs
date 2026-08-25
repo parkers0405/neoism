@@ -128,6 +128,7 @@ mod mcp_write_tests {
 #[cfg(test)]
 mod service_boundary_tests {
     use super::*;
+    use serde_json::json;
     use neoism_agent_service_api::{
         ConfigDiscoveryRoot, ConfigLayer, ConfigSourceService, ConfigWritableTarget,
         ServiceError, ServiceFuture,

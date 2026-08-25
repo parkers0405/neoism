@@ -895,18 +895,28 @@ mod tests {
     const ROUTER_SOURCE: &str = include_str!("app_router.rs");
 
     #[test]
-    fn every_v2_router_method_is_in_openapi_and_vice_versa() {
+    fn every_central_v2_router_method_is_in_openapi_and_vice_versa() {
         let router = router_operations(ROUTER_SOURCE);
         let document = canonical_openapi();
         let mut spec = BTreeSet::new();
         for (path, item) in document["paths"].as_object().unwrap() {
             for method in ["get", "post", "put", "patch", "delete"] {
                 if item.get(method).is_some() {
-                    spec.insert((method.to_uppercase(), normalize_path(path)));
+                    let path = normalize_path(path);
+                    if !plugin_owned_path(&path) {
+                        spec.insert((method.to_uppercase(), path));
+                    }
                 }
             }
         }
         assert_eq!(router, spec, "the /v2 router and OpenAPI operations drifted");
+    }
+
+    fn plugin_owned_path(path: &str) -> bool {
+        path.starts_with("/v2/plugins/dev.neoism.")
+            || ["/v2/agents", "/v2/commands", "/v2/config", "/v2/providers", "/v2/skills"]
+                .iter()
+                .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
     }
 
     #[test]

@@ -268,6 +268,7 @@ async fn authenticate_request(
     };
     let mut request_guard = None;
     let mut audit_tenant = None;
+    let mut audit_subject = None;
     if let Some(claims) = claims {
         request_guard = match state.inner.caller_policy.begin_request(&claims) {
             Ok(guard) => Some(guard),
@@ -276,6 +277,7 @@ async fn authenticate_request(
             }
         };
         audit_tenant = Some(claims.tenant_id.clone());
+        audit_subject = Some(claims.subject.clone());
         let requested_directory = request_directory(&request);
         if let Some(directory) = requested_directory.as_deref() {
             if !crate::caller::allows_directory(&claims, &directory) {
@@ -362,6 +364,7 @@ async fn authenticate_request(
         let entry = neoism_agent_core::AuditEntry {
             id: neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Audit).to_string(),
             tenant_id,
+            subject: audit_subject,
             method,
             path,
             status: response.status().as_u16(),

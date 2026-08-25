@@ -30,6 +30,7 @@ fn attach_unconnected_daemon(
         client.handle(),
         runtime.handle().clone(),
         endpoint_str,
+        None,
         true,
     );
     runtime
@@ -115,6 +116,7 @@ fn adopted_workspace_identity_survives_active_server_cache_reset() {
         AdoptedWorkspaceBinding {
             workspace_id: "peer-workspace".to_string(),
             endpoint: "ws://100.64.0.8:9877/session".to_string(),
+            credential: Some("peer-secret".to_string()),
             is_peer: true,
         },
     );
@@ -135,7 +137,7 @@ fn adopted_workspace_identity_survives_active_server_cache_reset() {
         context_manager
             .agent_server_override_for_current()
             .as_deref(),
-        Some("http://100.64.0.8:9877/agent")
+        Some("http://100.64.0.8:9877/agent/workspaces/peer-workspace")
     );
     assert_eq!(
         context_manager.workspace_icon_kind_for_index(0).as_deref(),
@@ -159,6 +161,7 @@ fn joined_workspace_icon_survives_missing_terminal_title() {
         AdoptedWorkspaceBinding {
             workspace_id: "peer-workspace".to_string(),
             endpoint: "ws://peer.example/session".to_string(),
+            credential: None,
             is_peer: true,
         },
     );
@@ -195,6 +198,7 @@ fn self_hosted_adopted_workspace_is_collaborative_on_peer_link() {
         AdoptedWorkspaceBinding {
             workspace_id: "host-workspace".to_string(),
             endpoint: "ws://127.0.0.1:9877/session".to_string(),
+            credential: Some("host-secret".to_string()),
             is_peer: false,
         },
     );
@@ -222,6 +226,10 @@ fn self_hosted_adopted_workspace_is_collaborative_on_peer_link() {
 
     assert!(!context_manager.current_workspace_is_remote_joined());
     assert!(context_manager.current_workspace_is_collaborative());
+    assert_eq!(
+        context_manager.agent_server_override_for_current().as_deref(),
+        Some("http://127.0.0.1:9877/agent/workspaces/host-workspace")
+    );
 }
 
 #[test]

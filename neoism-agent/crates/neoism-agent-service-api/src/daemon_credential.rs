@@ -21,6 +21,7 @@ pub struct DaemonCredentialClaims {
     pub issuer: String,
     pub audience: String,
     pub subject: String,
+    pub workspace_id: String,
     pub tenant_id: String,
     pub directory_prefixes: Vec<String>,
     pub hosted: bool,
@@ -32,6 +33,7 @@ pub struct DaemonCredentialClaims {
 impl DaemonCredentialClaims {
     pub fn new(
         subject: impl Into<String>,
+        workspace_id: impl Into<String>,
         tenant_id: impl Into<String>,
         directory_prefixes: Vec<String>,
         hosted: bool,
@@ -45,6 +47,7 @@ impl DaemonCredentialClaims {
             issuer: ISSUER.into(),
             audience: AUDIENCE.into(),
             subject: subject.into(),
+            workspace_id: workspace_id.into(),
             tenant_id: tenant_id.into(),
             directory_prefixes,
             hosted,
@@ -120,7 +123,10 @@ fn validate_shape(claims: &DaemonCredentialClaims) -> Result<(), &'static str> {
     if claims.audience != AUDIENCE {
         return Err("invalid daemon credential audience");
     }
-    if claims.subject.trim().is_empty() || claims.tenant_id.trim().is_empty() {
+    if claims.subject.trim().is_empty()
+        || claims.workspace_id.trim().is_empty()
+        || claims.tenant_id.trim().is_empty()
+    {
         return Err("daemon credential identity is empty");
     }
     if claims.expires_at <= claims.issued_at {
@@ -162,6 +168,7 @@ mod tests {
         let key = b"daemon-key";
         let valid = DaemonCredentialClaims::new(
             "device:a",
+            "workspace-a",
             "tenant:a",
             vec!["/repo".into()],
             true,

@@ -873,6 +873,7 @@ impl SessionStore {
             CREATE TABLE IF NOT EXISTS audit_log (
                 id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL,
+                subject TEXT,
                 method TEXT NOT NULL,
                 path TEXT NOT NULL,
                 status INTEGER NOT NULL,
@@ -882,6 +883,14 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
+        // Existing stores predate actor-level audit identity.
+        let _ = self
+            .db
+            .execute(
+                "ALTER TABLE audit_log ADD COLUMN subject TEXT",
+                Vec::new(),
+            )
+            .await;
         self.db
             .execute(
                 r#"
@@ -2520,10 +2529,11 @@ impl SessionStore {
     pub(crate) async fn append_audit(&self, entry: &AuditEntry) -> anyhow::Result<()> {
         self.db
             .execute(
-                "INSERT INTO audit_log (id, tenant_id, method, path, status, created) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO audit_log (id, tenant_id, subject, method, path, status, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 vec![
                     text(&entry.id),
                     text(&entry.tenant_id),
+                    entry.subject.as_deref().map(text).unwrap_or(SqlValue::Null),
                     text(&entry.method),
                     text(&entry.path),
                     int(entry.status.into()),
@@ -2542,7 +2552,7 @@ impl SessionStore {
         let rows = self
             .db
             .fetch_all(
-                "SELECT id, tenant_id, method, path, status, created FROM audit_log WHERE tenant_id = ? ORDER BY created DESC LIMIT ?",
+                "SELECT id, tenant_id, subject, method, path, status, created FROM audit_log WHERE tenant_id = ? ORDER BY created DESC LIMIT ?",
                 vec![text(tenant_id), int(limit.min(1000) as i64)],
             )
             .await?;
@@ -2551,6 +2561,7 @@ impl SessionStore {
                 Ok(AuditEntry {
                     id: row.get_str("id")?,
                     tenant_id: row.get_str("tenant_id")?,
+                    subject: row.get_opt_str("subject")?,
                     method: row.get_str("method")?,
                     path: row.get_str("path")?,
                     status: row.get_i64("status")?.clamp(0, u16::MAX as i64) as u16,

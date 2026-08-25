@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -56,6 +57,36 @@ pub(crate) fn agent_reverse_proxy_for_daemon_endpoint(endpoint: &str) -> Option<
     endpoint.set_query(None);
     endpoint.set_fragment(None);
     Some(endpoint.to_string().trim_end_matches('/').to_string())
+}
+
+pub(crate) fn agent_reverse_proxy_for_daemon_workspace(
+    endpoint: &str,
+    workspace_id: &str,
+) -> Option<String> {
+    let base = agent_reverse_proxy_for_daemon_endpoint(endpoint)?;
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return None;
+    }
+    Some(format!("{base}/workspaces/{}", percent_encode(workspace_id)))
+}
+
+fn agent_server_credentials() -> &'static RwLock<HashMap<String, String>> {
+    static CREDENTIALS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+    CREDENTIALS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+pub(crate) fn register_agent_server_credential(server: &str, credential: Option<&str>) {
+    let key = server.trim().trim_end_matches('/').to_string();
+    let Ok(mut credentials) = agent_server_credentials().write() else { return; };
+    match credential.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(credential) => { credentials.insert(key, credential.to_string()); }
+        None => { credentials.remove(&key); }
+    }
+}
+
+fn agent_server_credential(server: &str) -> Option<String> {
+    agent_server_credentials().read().ok()?.get(server.trim().trim_end_matches('/')).cloned()
 }
 
 pub(super) fn fetch_model_options(
@@ -589,6 +620,25 @@ mod subagent_runtime_snapshot_tests {
             agent_reverse_proxy_for_daemon_endpoint("ws://127.0.0.1:7878/session/"),
             None
         );
+        assert_eq!(
+            agent_reverse_proxy_for_daemon_workspace(
+                "ws://127.0.0.1:7878/session",
+                "workspace/a"
+            ),
+            Some("http://127.0.0.1:7878/agent/workspaces/workspace%2Fa".to_string())
+        );
+    }
+
+    #[test]
+    fn joined_http_and_sse_authorization_uses_registered_daemon_credential() {
+        let server = "http://auth.test:7980/agent/workspaces/workspace-a";
+        register_agent_server_credential(server, Some("pair-secret"));
+        assert_eq!(
+            authorization_header(server),
+            "Authorization: Bearer pair-secret\r\n"
+        );
+        register_agent_server_credential(server, Some("bad\r\ninjected: yes"));
+        assert!(authorization_header(server).is_empty());
     }
 
     #[test]
@@ -1162,7 +1212,8 @@ pub(super) fn open_event_stream(
         ),
     );
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: text/event-stream\r\n{}Connection: keep-alive\r\n\r\n",
+        authorization_header(server)
     );
     stream.write_all(request.as_bytes()).map_err(|error| {
         format!("failed to write Neoism Agent event request: {error}")
@@ -1259,7 +1310,8 @@ fn http_request(
         .transpose()
         .map_err(|error| format!("failed to encode Neoism Agent request: {error}"))?;
     let mut request = format!(
-        "{method} {request_path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n"
+        "{method} {request_path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\n{}Connection: close\r\n",
+        authorization_header(server)
     );
     if let Some(body_text) = body_text.as_ref() {
         request.push_str("Content-Type: application/json\r\n");
@@ -1318,6 +1370,13 @@ fn http_request(
         return Err(format!("Neoism Agent HTTP {status} {reason}{suffix}"));
     }
     Ok(HttpResponse { body })
+}
+
+fn authorization_header(server: &str) -> String {
+    agent_server_credential(server)
+        .filter(|token| !token.contains(['\r', '\n']))
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default()
 }
 
 fn parse_http_server(server: &str) -> Result<(String, u16, String), String> {

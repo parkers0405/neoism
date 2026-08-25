@@ -217,12 +217,14 @@ impl Screen<'_> {
         handle: DaemonClientHandle,
         runtime: tokio::runtime::Handle,
         endpoint: String,
+        token: Option<String>,
         link_is_home: bool,
     ) {
         self.context_manager.attach_daemon_client_with_runtime(
             handle,
             runtime,
             endpoint,
+            token,
             link_is_home,
         );
     }

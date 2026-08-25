@@ -13,7 +13,7 @@
 //! router-wide layer stack (CORS + tracing) rather than a per-route auth guard —
 //! the agent-server applies no separate request-auth scheme today.
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
@@ -47,8 +47,14 @@ pub(crate) struct ImportSessionResponse {
 /// subsequent resume continues the conversation here.
 pub(crate) async fn session_import(
     State(state): State<AppState>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
     Json(request): Json<ImportSessionRequest>,
 ) -> Result<Json<ImportSessionResponse>, ApiError> {
+    if let Some(Extension(claims)) = claims {
+        if !crate::caller::allows_directory(&claims, &request.target_workspace_root) {
+            return Err(ApiError::forbidden("The caller cannot import into this workspace"));
+        }
+    }
     let session_id =
         import_session(&state, request.bundle, &request.target_workspace_root)
             .await

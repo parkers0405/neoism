@@ -28,7 +28,10 @@ pub(crate) mod perf {
     }
 }
 
-pub(crate) use api::{agent_reverse_proxy_for_daemon_endpoint, neoism_agent_server};
+pub(crate) use api::{
+    agent_reverse_proxy_for_daemon_endpoint, agent_reverse_proxy_for_daemon_workspace,
+    neoism_agent_server, register_agent_server_credential,
+};
 pub(crate) use pane::TimelineMeasureKey;
 pub use pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentNoticeLevel,

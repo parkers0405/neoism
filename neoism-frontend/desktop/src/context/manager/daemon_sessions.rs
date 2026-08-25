@@ -683,11 +683,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         // minting a desktop-flavored duplicate.
         if let Some(stable) = self.contexts[last_index].workspace_route_id() {
             let endpoint = self.daemon_endpoint().unwrap_or_default().to_string();
+            let credential = self
+                .daemon
+                .link
+                .as_ref()
+                .and_then(|link| link.credential.clone());
             self.adopted_workspaces.insert(
                 stable,
                 AdoptedWorkspaceBinding {
                     workspace_id: workspace_id.to_string(),
                     endpoint,
+                    credential,
                     is_peer: self.daemon.link_is_peer && !workspace_owned_locally,
                 },
             );

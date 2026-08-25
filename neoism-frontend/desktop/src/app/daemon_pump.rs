@@ -21,6 +21,7 @@ pub struct DesktopDaemonConnection {
     inbound_wake_pending: Arc<AtomicBool>,
     status_rx: tokio::sync::watch::Receiver<DaemonClientStatus>,
     endpoint: String,
+    token: Option<String>,
 }
 
 impl DesktopDaemonConnection {
@@ -39,7 +40,7 @@ impl DesktopDaemonConnection {
         let endpoint = crate::daemon_client::DaemonEndpoint::parse(endpoint)?;
         let endpoint_string = endpoint.normalized();
         let mut options = DaemonClientOptions::new(endpoint);
-        options.token = token;
+        options.token = token.clone();
         let client = runtime.block_on(DaemonClient::connect_with_options(options))?;
         let mut status_rx = client.status_receiver();
         runtime.block_on(async {
@@ -99,11 +100,16 @@ impl DesktopDaemonConnection {
             inbound_wake_pending,
             status_rx,
             endpoint: endpoint_string,
+            token,
         })
     }
 
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
     }
 
     pub fn handle(&self) -> DaemonClientHandle {

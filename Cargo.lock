@@ -4827,7 +4827,9 @@ dependencies = [
  "jupyter-zmq-client",
  "libc",
  "lru",
+ "neoism-agent-neoism-adapter",
  "neoism-agent-server",
+ "neoism-agent-service-api",
  "neoism-backend",
  "neoism-extensions",
  "neoism-neoworld",
@@ -4886,6 +4888,7 @@ dependencies = [
  "libc",
  "neoism-agent-core",
  "neoism-agent-server",
+ "neoism-agent-service-api",
  "reqwest",
  "serde",
  "serde_json",
@@ -4906,6 +4909,21 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "neoism-agent-neoism-adapter"
+version = "0.7.55"
+dependencies = [
+ "neoism-agent-server",
+ "neoism-agent-service-api",
+ "neoism-extensions",
+ "neoism-product-docs",
+ "neoism-workspace-index",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4941,8 +4959,7 @@ dependencies = [
  "libc",
  "neoism-agent-core",
  "neoism-agent-plugin-api",
- "neoism-extensions",
- "neoism-workspace-index",
+ "neoism-agent-service-api",
  "notify 8.2.0",
  "rand 0.8.5",
  "regex",
@@ -4951,7 +4968,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
- "sqlx",
  "tokio",
  "tokio-stream",
  "tower",
@@ -4960,6 +4976,17 @@ dependencies = [
  "turso",
  "url",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "neoism-agent-service-api"
+version = "0.7.55"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
 ]
 
 [[package]]
@@ -5070,6 +5097,10 @@ dependencies = [
  "proc-macro2",
  "quote",
 ]
+
+[[package]]
+name = "neoism-product-docs"
+version = "0.7.55"
 
 [[package]]
 name = "neoism-protocol"
@@ -5298,7 +5329,9 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "neoism-agent-neoism-adapter",
  "neoism-agent-server",
+ "neoism-agent-service-api",
  "neoism-backend",
  "neoism-extensions",
  "neoism-protocol",
@@ -5334,6 +5367,7 @@ version = "0.7.55"
 dependencies = [
  "dirs 6.0.0",
  "dunce",
+ "neoism-product-docs",
  "notify 8.2.0",
  "serde",
  "serde_json",

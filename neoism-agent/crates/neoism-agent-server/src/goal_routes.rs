@@ -31,17 +31,17 @@ pub(crate) struct SetGoalRequest {
     pub(crate) paused: bool,
 }
 
-/// `GET /session/:id/goal` — return the active goal (or `null`).
+/// Return the active goal (or `null`).
 pub(crate) async fn session_goal_get(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let info = ensure_session(&state, &session_id).await?;
-    require_enabled(&info)?;
+    require_enabled(state.services(), &info)?;
     Ok(Json(goal_response(&info)))
 }
 
-/// `POST /session/:id/goal` — set (or clear, when empty) the active goal.
+/// Set (or clear, when empty) the active goal.
 ///
 /// When `researchUrls` are provided and firecrawl is configured, each URL is
 /// scraped and attached to the goal as a research note.
@@ -52,7 +52,7 @@ pub(crate) async fn session_goal_set(
 ) -> Result<Json<Value>, ApiError> {
     let request = body.map(|Json(body)| body).unwrap_or_default();
     let mut info = ensure_session(&state, &session_id).await?;
-    require_enabled(&info)?;
+    require_enabled(state.services(), &info)?;
 
     if request.text.trim().is_empty() {
         info.clear_goal();
@@ -99,13 +99,13 @@ pub(crate) async fn session_goal_set(
     Ok(Json(goal_response(&info)))
 }
 
-/// `DELETE /session/:id/goal` — clear the active goal.
+/// Clear the active goal.
 pub(crate) async fn session_goal_clear(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let mut info = ensure_session(&state, &session_id).await?;
-    require_enabled(&info)?;
+    require_enabled(state.services(), &info)?;
     info.clear_goal();
     persist(&state, &mut info).await?;
     Ok(Json(goal_response(&info)))
@@ -118,7 +118,7 @@ pub(crate) struct GoalResearchRequest {
     pub(crate) url: String,
 }
 
-/// `POST /session/:id/goal/research` — scrape a URL via firecrawl and attach it
+/// Scrape a URL via firecrawl and attach it
 /// to the active goal as a research note.
 pub(crate) async fn session_goal_research(
     State(state): State<AppState>,
@@ -126,7 +126,7 @@ pub(crate) async fn session_goal_research(
     Json(request): Json<GoalResearchRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let mut info = ensure_session(&state, &session_id).await?;
-    require_enabled(&info)?;
+    require_enabled(state.services(), &info)?;
     if !firecrawl::firecrawl_enabled() {
         return Err(ApiError::bad_request(format!(
             "web research is disabled: set {} to enable firecrawl",
@@ -148,8 +148,8 @@ pub(crate) async fn session_goal_research(
     Ok(Json(goal_response(&info)))
 }
 
-fn require_enabled(info: &SessionInfo) -> Result<(), ApiError> {
-    if crate::plugins::enabled(&info.directory, "dev.neoism.goals") {
+fn require_enabled(services: &neoism_agent_service_api::AgentServices, info: &SessionInfo) -> Result<(), ApiError> {
+    if crate::plugins::enabled(services, &info.directory, "dev.neoism.goals") {
         Ok(())
     } else {
         Err(ApiError::not_found(

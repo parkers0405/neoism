@@ -77,7 +77,7 @@ pub(crate) async fn handle_chat_command(
                 if let Some(picked) = pick_session(client, server, dir, ui).await? {
                     let value = response_json(
                         client
-                            .get(format!("{server}/session/{picked}"))
+                            .get(format!("{server}/v2/sessions/{picked}"))
                             .send()
                             .await?,
                     )
@@ -258,7 +258,7 @@ pub(crate) async fn handle_chat_command(
         "/agent" => {
             if let Some(name) = parts.next() {
                 let _: Value = response_json(
-                    request_with_dir(client.get(format!("{server}/agent/{name}")), dir)
+                    request_with_dir(client.get(format!("{server}/v2/agents/{name}")), dir)
                         .send()
                         .await?,
                 )
@@ -283,7 +283,7 @@ pub(crate) async fn handle_chat_command(
                     current_agent.as_deref().unwrap_or("session default")
                 );
                 let value = response_json(
-                    request_with_dir(client.get(format!("{server}/agent")), dir)
+                    request_with_dir(client.get(format!("{server}/v2/agents")), dir)
                         .send()
                         .await?,
                 )
@@ -293,7 +293,7 @@ pub(crate) async fn handle_chat_command(
         }
         "/agents" => {
             let value = response_json(
-                request_with_dir(client.get(format!("{server}/agent")), dir)
+                request_with_dir(client.get(format!("{server}/v2/agents")), dir)
                     .send()
                     .await?,
             )
@@ -303,7 +303,7 @@ pub(crate) async fn handle_chat_command(
         "/sub-agent" | "/subagents" => {
             if let Some(id) = parts.next() {
                 let value = response_json(
-                    client.get(format!("{server}/session/{id}")).send().await?,
+                    client.get(format!("{server}/v2/sessions/{id}")).send().await?,
                 )
                 .await?;
                 *session_id = id.to_string();
@@ -321,7 +321,7 @@ pub(crate) async fn handle_chat_command(
                 {
                     let value = response_json(
                         client
-                            .get(format!("{server}/session/{}", picked.id))
+                            .get(format!("{server}/v2/sessions/{}", picked.id))
                             .send()
                             .await?,
                     )
@@ -367,14 +367,14 @@ pub(crate) async fn handle_chat_command(
             abort_session_if_busy(client, server, session_id).await?;
             ensure_empty_response(
                 client
-                    .post(format!("{server}/api/session/{session_id}/compact"))
+                    .post(format!("{server}/v2/sessions/{session_id}/compact"))
                     .send()
                     .await?,
             )
             .await?;
             let session = response_json(
                 client
-                    .get(format!("{server}/session/{session_id}"))
+                    .get(format!("{server}/v2/sessions/{session_id}"))
                     .send()
                     .await?,
             )
@@ -391,7 +391,7 @@ pub(crate) async fn handle_chat_command(
                 // Show the active goal.
                 let value = response_json(
                     client
-                        .get(format!("{server}/session/{session_id}/goal"))
+                        .get(format!("{server}/v2/plugins/dev.neoism.goals/{session_id}"))
                         .send()
                         .await?,
                 )
@@ -400,7 +400,7 @@ pub(crate) async fn handle_chat_command(
             } else if trimmed.eq_ignore_ascii_case("clear") {
                 let value = response_json(
                     client
-                        .delete(format!("{server}/session/{session_id}/goal"))
+                        .delete(format!("{server}/v2/plugins/dev.neoism.goals/{session_id}"))
                         .send()
                         .await?,
                 )
@@ -410,7 +410,7 @@ pub(crate) async fn handle_chat_command(
             } else {
                 let value = response_json(
                     client
-                        .post(format!("{server}/session/{session_id}/goal"))
+                        .post(format!("{server}/v2/plugins/dev.neoism.goals/{session_id}"))
                         .json(&json!({ "text": trimmed }))
                         .send()
                         .await?,
@@ -436,7 +436,7 @@ pub(crate) async fn handle_chat_command(
                 .unwrap_or_default();
             let _: Value = response_json(
                 client
-                    .post(format!("{server}/session/{session_id}/revert"))
+                    .post(format!("{server}/v2/sessions/{session_id}/revert"))
                     .json(&json!({ "messageID": message_id }))
                     .send()
                     .await?,
@@ -464,7 +464,7 @@ pub(crate) async fn handle_chat_command(
             if let Some(next_id) = next_redo_message_id(&tree, &revert_id) {
                 let _: Value = response_json(
                     client
-                        .post(format!("{server}/session/{session_id}/revert"))
+                        .post(format!("{server}/v2/sessions/{session_id}/revert"))
                         .json(&json!({ "messageID": next_id }))
                         .send()
                         .await?,
@@ -474,7 +474,7 @@ pub(crate) async fn handle_chat_command(
             } else {
                 let _: Value = response_json(
                     client
-                        .post(format!("{server}/session/{session_id}/unrevert"))
+                        .post(format!("{server}/v2/sessions/{session_id}/unrevert"))
                         .send()
                         .await?,
                 )
@@ -485,7 +485,7 @@ pub(crate) async fn handle_chat_command(
         "/tools" => {
             let value = response_json(
                 request_with_dir(
-                    client.get(format!("{server}/experimental/tool/ids")),
+                    client.get(format!("{server}/v2/tools")),
                     dir,
                 )
                 .send()
@@ -496,7 +496,7 @@ pub(crate) async fn handle_chat_command(
         }
         "/skills" | "/skill" => {
             let value = response_json(
-                request_with_dir(client.get(format!("{server}/skill")), dir)
+                request_with_dir(client.get(format!("{server}/v2/skills")), dir)
                     .send()
                     .await?,
             )
@@ -505,7 +505,7 @@ pub(crate) async fn handle_chat_command(
         }
         "/mcp" => {
             let value = response_json(
-                request_with_dir(client.get(format!("{server}/mcp")), dir)
+                request_with_dir(client.get(format!("{server}/v2/plugins/dev.neoism.mcp")), dir)
                     .send()
                     .await?,
             )
@@ -514,34 +514,28 @@ pub(crate) async fn handle_chat_command(
         }
         "/providers" => {
             let value =
-                response_json(client.get(format!("{server}/provider")).send().await?)
+                response_json(client.get(format!("{server}/v2/providers")).send().await?)
                     .await?;
             print_json(value)?;
         }
         "/auth" => {
             let mut value =
-                response_json(client.get(format!("{server}/auth/openai")).send().await?)
+                response_json(client.get(format!("{server}/v2/providers/openai/auth")).send().await?)
                     .await?;
             redact_secrets(&mut value);
             print_json(value)?;
         }
         "/doctor" => {
             let health = response_json(
-                client.get(format!("{server}/global/health")).send().await?,
+                client.get(format!("{server}/v2/health")).send().await?,
             )
             .await?;
-            let path = response_json(
-                request_with_dir(client.get(format!("{server}/path")), dir)
-                    .send()
-                    .await?,
-            )
-            .await?;
-            print_json(json!({ "server": server, "health": health, "path": path }))?;
+            print_json(json!({ "server": server, "health": health }))?;
         }
         "/abort" => {
             let value = response_json(
                 client
-                    .post(format!("{server}/session/{session_id}/abort"))
+                    .post(format!("{server}/v2/sessions/{session_id}/abort"))
                     .send()
                     .await?,
             )
@@ -556,7 +550,7 @@ pub(crate) async fn handle_chat_command(
             Some("clear") => {
                 let value = response_json(
                     client
-                        .delete(format!("{server}/session/{session_id}/queue"))
+                        .delete(format!("{server}/v2/sessions/{session_id}/queue"))
                         .send()
                         .await?,
                 )
@@ -566,7 +560,7 @@ pub(crate) async fn handle_chat_command(
             Some("pop") => {
                 let value = response_json(
                     client
-                        .post(format!("{server}/session/{session_id}/queue/pop"))
+                        .post(format!("{server}/v2/sessions/{session_id}/queue/pop"))
                         .send()
                         .await?,
                 )
@@ -768,7 +762,10 @@ fn print_tool_id_list(value: Value) -> anyhow::Result<()> {
     if let Some(items) = value.as_array() {
         println!("{BOLD}tools{RESET}");
         for item in items {
-            if let Some(tool) = item.as_str() {
+            if let Some(tool) = item
+                .as_str()
+                .or_else(|| item.get("id").and_then(Value::as_str))
+            {
                 println!("  {CYAN}{tool}{RESET}");
             } else {
                 println!("  {}", serde_json::to_string(item)?);

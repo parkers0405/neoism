@@ -277,7 +277,14 @@ fn run_formatter(cwd: &Path, path: &Path, formatter: &FormatterCommand) -> bool 
         return false;
     };
     let file = path.display().to_string();
-    let mut command = Command::new(program);
+    let request = neoism_agent_service_api::ExecutableRequest::new(
+        program,
+        neoism_agent_service_api::ExecutablePurpose::Formatter,
+    );
+    let Ok(resolved) = crate::lsp::agent_services().executables.resolve(&request) else {
+        return false;
+    };
+    let mut command = Command::new(resolved.path);
     command
         .args(args.iter().map(|arg| arg.replace("$FILE", &file)))
         .current_dir(cwd)
@@ -322,19 +329,15 @@ fn normalize_extension(value: &str) -> String {
 }
 
 fn which(program: &str) -> Option<String> {
-    if program.contains(std::path::MAIN_SEPARATOR) {
-        return Path::new(program).is_file().then(|| program.to_string());
-    }
-    crate::managed_lsp_path::managed_lsp_path_entries()
-        .into_iter()
-        .chain(
-            std::env::var_os("PATH")
-                .into_iter()
-                .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>()),
-        )
-        .map(|dir| dir.join(program))
-        .find(|path| path.is_file())
-        .map(|path| path.display().to_string())
+    let request = neoism_agent_service_api::ExecutableRequest::new(
+        program,
+        neoism_agent_service_api::ExecutablePurpose::Formatter,
+    );
+    crate::lsp::agent_services()
+        .executables
+        .resolve(&request)
+        .ok()
+        .map(|result| result.path.display().to_string())
 }
 
 fn find_up(start: &Path, name: &str) -> Option<PathBuf> {

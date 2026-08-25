@@ -18,7 +18,8 @@ use neoism_ui::primitives::look::{
     ScrollbarStyle,
 };
 
-/// Re-scan `ide-themes/*.toml` + pack `theme.toml`s into the shared
+/// Re-scan `ide-themes/*.json`, pack themes, and the active Omarchy
+/// palette into the shared
 /// theme registry. Cheap (a handful of small files), so it runs at
 /// every point where fresh files could be observed: startup, config
 /// reload, picker open, pack apply.

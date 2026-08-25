@@ -1,11 +1,11 @@
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
-use neoism_agent_core::{AgentInfo, PluginStatusInfo, SkillInfo};
+use neoism_agent_core::{AgentInfo, SkillInfo};
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::{config, resolve_directory, InstanceQuery};
+use crate::{resolve_directory, InstanceQuery};
 
 pub(crate) async fn agent_list(
     State(state): State<AppState>,
@@ -35,7 +35,7 @@ pub(crate) async fn skill_list(
     headers: HeaderMap,
 ) -> Result<Json<Vec<SkillInfo>>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
-    if !crate::plugins::enabled(&directory, "dev.neoism.skills") {
+    if !crate::plugins::enabled(state.services(), &directory, "dev.neoism.skills") {
         return Ok(Json(Vec::new()));
     }
     let snapshot = state.inner.plugin_host.snapshot();
@@ -49,18 +49,4 @@ pub(crate) async fn skill_list(
         );
     }
     Ok(Json(skills))
-}
-
-pub(crate) async fn plugin_status(
-    State(state): State<AppState>,
-    Query(query): Query<InstanceQuery>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<PluginStatusInfo>>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
-    let loaded = config::load(&directory)?;
-    state
-        .inner
-        .plugins
-        .register_configured_plugins(&loaded.info, &directory);
-    Ok(Json(state.inner.plugins.statuses()))
 }

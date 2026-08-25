@@ -41,16 +41,21 @@ impl ExternalRuntime {
         }
     }
 
-    pub(crate) fn acp_config(self, cwd: &str) -> AcpServerConfig {
+    pub(crate) fn acp_config(
+        self,
+        cwd: &str,
+        services: &neoism_agent_service_api::AgentServices,
+    ) -> AcpServerConfig {
         match self {
             Self::OpenCode => AcpServerConfig::new(
                 "opencode",
                 "OpenCode",
-                "opencode",
+                resolve_runtime(services, "opencode"),
                 PathBuf::from(cwd),
             )
             .args(["acp", "--cwd", cwd]),
             Self::Codex => package_acp_config(
+                services,
                 "codex",
                 "Codex",
                 "@zed-industries/codex-acp@latest",
@@ -58,13 +63,14 @@ impl ExternalRuntime {
             ),
             Self::Claude => {
                 let mut config = package_acp_config(
+                    services,
                     "claude",
                     "Claude",
                     "@agentclientprotocol/claude-agent-acp@latest",
                     cwd,
                 );
                 if std::env::var_os("CLAUDE_CODE_EXECUTABLE").is_none() {
-                    if let Some(path) = command_on_path("claude") {
+                    if let Some(path) = resolve_runtime_path(services, "claude") {
                         config
                             .env
                             .push(("CLAUDE_CODE_EXECUTABLE".to_string(), path));
@@ -81,21 +87,34 @@ pub(crate) fn is_external_agent(name: &str) -> bool {
 }
 
 fn package_acp_config(
+    services: &neoism_agent_service_api::AgentServices,
     id: &'static str,
     name: &'static str,
     package: &'static str,
     cwd: &str,
 ) -> AcpServerConfig {
-    AcpServerConfig::new(id, name, "npx", PathBuf::from(cwd)).args(["--yes", package])
+    AcpServerConfig::new(id, name, resolve_runtime(services, "npx"), PathBuf::from(cwd))
+        .args(["--yes", package])
 }
 
-fn command_on_path(name: &str) -> Option<String> {
-    let paths = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&paths) {
-        let path = dir.join(name);
-        if path.is_file() {
-            return Some(path.to_string_lossy().to_string());
-        }
-    }
-    None
+fn resolve_runtime(
+    services: &neoism_agent_service_api::AgentServices,
+    name: &str,
+) -> String {
+    resolve_runtime_path(services, name).unwrap_or_else(|| name.to_string())
+}
+
+fn resolve_runtime_path(
+    services: &neoism_agent_service_api::AgentServices,
+    name: &str,
+) -> Option<String> {
+    let request = neoism_agent_service_api::ExecutableRequest::new(
+        name,
+        neoism_agent_service_api::ExecutablePurpose::ExternalAgent,
+    );
+    services
+        .executables
+        .resolve(&request)
+        .ok()
+        .map(|result| result.path.to_string_lossy().into_owned())
 }

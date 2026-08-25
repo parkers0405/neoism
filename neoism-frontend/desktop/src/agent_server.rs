@@ -1,15 +1,11 @@
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 const DEFAULT_SERVER: &str = "http://127.0.0.1:4096";
 const DEFAULT_HOSTNAME: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 4096;
-const HEALTH_PATH: &str = "/global/health";
-static SERVER_PROCESS: OnceLock<
-    std::sync::Mutex<crate::service_process::ServiceProcess>,
-> = OnceLock::new();
+const HEALTH_PATH: &str = "/v2/health";
 
 pub(crate) fn ensure_started() {
     ensure_started_inner(false);
@@ -28,7 +24,7 @@ fn ensure_started_inner(wait_for_health: bool) {
         return;
     }
 
-    let Some((hostname, port)) = local_bind_target(&server) else {
+    let Some((_hostname, _port)) = local_bind_target(&server) else {
         tracing::warn!(
             target: "neoism::agent_server",
             server,
@@ -37,50 +33,12 @@ fn ensure_started_inner(wait_for_health: bool) {
         return;
     };
 
-    if SERVER_PROCESS.get().is_some() {
-        if wait_for_health && !wait_until_healthy(&server, Duration::from_millis(1500)) {
-            tracing::warn!(
-                target: "neoism::agent_server",
-                server,
-                "Neoism Agent server did not become healthy before request"
-            );
-        }
-        return;
-    }
-
-    // Import provider API keys (OPENROUTER_API_KEY, XAI_API_KEY, …) from the
-    // user's login shell before the embedded server reads the environment.
-    // The GUI is usually launched from a desktop session that does not inherit
-    // interactive-shell exports, so without this an env-authed provider is
-    // reported "not connected" and hidden from the `/model` picker.
-    hydrate_provider_env_from_login_shell();
-
-    tracing::info!(
-        target: "neoism::agent_server",
-        server = format_args!("http://{hostname}:{port}"),
-        "starting isolated Neoism Agent service process"
-    );
-
-    match crate::service_process::spawn_agent(&hostname, port) {
-        Ok(process) => {
-            let _ = SERVER_PROCESS.set(std::sync::Mutex::new(process));
-            if wait_for_health
-                && !wait_until_healthy(&server, Duration::from_millis(1500))
-            {
-                tracing::warn!(
-                    target: "neoism::agent_server",
-                    server,
-                    "Neoism Agent server did not become healthy before request"
-                );
-            }
-        }
-        Err(error) => {
-            tracing::error!(
-                target: "neoism::agent_server",
-                %error,
-                "failed to spawn Neoism Agent service process"
-            );
-        }
+    if wait_for_health && !wait_until_healthy(&server, Duration::from_millis(1500)) {
+        tracing::warn!(
+            target: "neoism::agent_server",
+            server,
+            "daemon-owned Neoism Agent server did not become healthy before request"
+        );
     }
 }
 

@@ -26,7 +26,7 @@ pub(crate) async fn fetch_sessions(
     let value = response_json(
         request_with_dir(
             client
-                .get(format!("{server}/session"))
+                .get(format!("{server}/v2/sessions"))
                 .query(&[("roots", "true")]),
             dir,
         )
@@ -34,7 +34,10 @@ pub(crate) async fn fetch_sessions(
         .await?,
     )
     .await?;
-    let array = value.as_array().context("session list not an array")?;
+    let array = value
+        .get("items")
+        .and_then(Value::as_array)
+        .context("session page has no items")?;
     let mut entries: Vec<SessionEntry> = array
         .iter()
         .filter_map(|item| {
@@ -95,7 +98,7 @@ async fn fetch_model_options(
 ) -> anyhow::Result<Vec<(String, String)>> {
     // Returns Vec<(provider/model, description)>
     let value =
-        response_json(client.get(format!("{server}/provider")).send().await?).await?;
+        response_json(client.get(format!("{server}/v2/providers")).send().await?).await?;
     let providers = value
         .get("all")
         .and_then(Value::as_array)
@@ -257,7 +260,7 @@ pub(crate) async fn pick_agent(
     current: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     let value = response_json(
-        request_with_dir(client.get(format!("{server}/agent")), dir)
+        request_with_dir(client.get(format!("{server}/v2/agents")), dir)
             .send()
             .await?,
     )
@@ -301,7 +304,7 @@ pub(crate) async fn fetch_subagent_sessions(
 ) -> anyhow::Result<Vec<SubagentSessionEntry>> {
     let current = response_json(
         client
-            .get(format!("{server}/session/{current_session_id}"))
+                .get(format!("{server}/v2/sessions/{current_session_id}"))
             .send()
             .await?,
     )
@@ -317,7 +320,7 @@ pub(crate) async fn fetch_subagent_sessions(
     } else {
         match response_json(
             client
-                .get(format!("{server}/session/{main_id}"))
+                    .get(format!("{server}/v2/sessions/{main_id}"))
                 .send()
                 .await?,
         )
@@ -329,7 +332,7 @@ pub(crate) async fn fetch_subagent_sessions(
     };
     let statuses = response_json(
         client
-            .get(format!("{server}/session/status"))
+            .get(format!("{server}/v2/sessions/status"))
             .send()
             .await?,
     )
@@ -337,7 +340,7 @@ pub(crate) async fn fetch_subagent_sessions(
     .unwrap_or(Value::Null);
     let children = response_json(
         client
-            .get(format!("{server}/api/session/{main_id}/children"))
+            .get(format!("{server}/v2/sessions/{main_id}/children"))
             .send()
             .await?,
     )

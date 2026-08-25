@@ -42,7 +42,7 @@ use lsp_languages::{LspOperation, WorkspaceScan, LANGUAGE_SPECS};
 #[cfg(test)]
 use lsp_query::query_workspace_symbols_with_command;
 use lsp_scan::{
-    adapter_endpoint_available, command_available, detected_servers,
+    adapter_endpoint_available, detected_servers,
     file_lifecycle_specs, file_query_specs, language_detected, normalized_file,
     normalized_root, operation_supported, scan_workspace, server_status_for_file,
 };
@@ -190,8 +190,15 @@ pub fn language_server_adapters() -> Vec<LspAdapterMetadata> {
 pub fn language_server_adapters_for(
     directory: impl AsRef<Path>,
 ) -> Vec<LspAdapterMetadata> {
+    language_server_adapters_for_with_services(&crate::standard_services(), directory)
+}
+
+pub fn language_server_adapters_for_with_services(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: impl AsRef<Path>,
+) -> Vec<LspAdapterMetadata> {
     let root = normalized_root(directory.as_ref());
-    adapters_for_root(&root)
+    lsp_adapters::adapters_for_root_with(services, &root)
         .iter()
         .map(adapter_metadata)
         .collect()
@@ -472,8 +479,15 @@ pub struct LspDocumentHighlight {
 }
 
 pub fn status(directory: impl AsRef<Path>) -> Vec<LspStatus> {
+    status_with_services(&crate::standard_services(), directory)
+}
+
+pub fn status_with_services(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: impl AsRef<Path>,
+) -> Vec<LspStatus> {
     let root = normalized_root(directory.as_ref());
-    let adapters = adapters_for_root(&root);
+    let adapters = lsp_adapters::adapters_for_root_with(services, &root);
     let scan = scan_workspace(&root, &adapters);
     detected_servers(&root, &scan, &adapters)
 }
@@ -544,7 +558,7 @@ pub fn language_id_for_path(file: impl AsRef<Path>) -> Option<&'static str> {
 }
 
 /// Workspace-aware language routing, including arbitrary adapters declared in
-/// `neoism.json`. This is the authoritative API for editor buffers.
+/// the canonical Agent config. This is the authoritative API for editor buffers.
 pub fn language_id_for_path_in(
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
@@ -676,45 +690,49 @@ fn dispatch_diagnostics(
 
 pub(crate) fn resolve_lsp_command(
     id: &str,
+    command: Vec<String>,
+) -> (Vec<String>, LspCommandSource) {
+    let services = lsp_service::service().services();
+    resolve_lsp_command_with(&services, id, command)
+}
+
+pub(crate) fn configure_services(services: neoism_agent_service_api::AgentServices) {
+    lsp_service::service().configure_services(services);
+}
+
+pub(crate) fn agent_services() -> neoism_agent_service_api::AgentServices {
+    lsp_service::service().services()
+}
+
+fn resolve_lsp_command_with(
+    services: &neoism_agent_service_api::AgentServices,
+    id: &str,
     mut command: Vec<String>,
 ) -> (Vec<String>, LspCommandSource) {
+    use neoism_agent_service_api::{
+        ExecutablePurpose, ExecutableRequest, ExecutableSource,
+    };
     let Some(first) = command.first_mut() else {
         return (command, LspCommandSource::Missing);
     };
-    if command_bin_is_explicit(first) {
-        let source = if command_available(first) {
-            LspCommandSource::Config
-        } else {
-            LspCommandSource::Missing
-        };
-        return (command, source);
-    }
-    if let Ok(managed_bins) = neoism_extensions::managed_bin::managed_bin_map() {
-        if let Some(managed_bin) = managed_bins
-            .get(id)
-            .or_else(|| managed_bins.get(first.as_str()))
-        {
-            // Only use the extension-installed binary if it ACTUALLY EXISTS.
-            // A stale/incomplete `installed.json` entry (managed bin path that
-            // isn't on disk) must NOT shadow a perfectly good system binary on
-            // PATH — otherwise the engine reports "Binary missing" for a server
-            // that is really running from PATH, and (if it ever spawned this
-            // path) would fail to launch.
-            if command_available(managed_bin) {
-                *first = managed_bin.clone();
-                return (command, LspCommandSource::Extension);
-            }
-        }
-    }
-    if command_available(first) {
-        return (command, LspCommandSource::Path);
-    }
-    (command, LspCommandSource::Missing)
-}
-
-fn command_bin_is_explicit(bin: &str) -> bool {
-    let path = Path::new(bin);
-    path.is_absolute() || path.components().count() > 1
+    let explicit = {
+        let path = Path::new(first);
+        path.is_absolute() || path.components().count() > 1
+    };
+    let request = ExecutableRequest::new(first.as_str(), ExecutablePurpose::LanguageServer)
+        .with_preferred_id(id);
+    let Ok(result) = services.executables.resolve(&request) else {
+        return (command, LspCommandSource::Missing);
+    };
+    *first = result.path.to_string_lossy().into_owned();
+    let source = if explicit {
+        LspCommandSource::Config
+    } else if matches!(result.source, ExecutableSource::Managed { .. }) {
+        LspCommandSource::Extension
+    } else {
+        LspCommandSource::Path
+    };
+    (command, source)
 }
 
 fn unavailable_lsp_error(

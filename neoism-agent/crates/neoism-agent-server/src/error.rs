@@ -6,7 +6,6 @@ use serde_json::json;
 #[derive(Debug)]
 pub(crate) struct ApiError {
     status: StatusCode,
-    name: &'static str,
     message: String,
 }
 
@@ -14,7 +13,6 @@ impl ApiError {
     pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            name: "BadRequestError",
             message: message.into(),
         }
     }
@@ -22,7 +20,6 @@ impl ApiError {
     pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            name: "NotFoundError",
             message: message.into(),
         }
     }
@@ -30,7 +27,6 @@ impl ApiError {
     pub(crate) fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
-            name: "ConflictError",
             message: message.into(),
         }
     }
@@ -38,7 +34,6 @@ impl ApiError {
     pub(crate) fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
-            name: "ForbiddenError",
             message: message.into(),
         }
     }
@@ -46,7 +41,6 @@ impl ApiError {
     pub(crate) fn too_many_requests(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
-            name: "QuotaExceededError",
             message: message.into(),
         }
     }
@@ -55,7 +49,6 @@ impl ApiError {
     pub(crate) fn not_implemented(feature: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_IMPLEMENTED,
-            name: "NotImplementedError",
             message: format!(
                 "{} is not implemented yet in the Rust runtime",
                 feature.into()
@@ -66,7 +59,6 @@ impl ApiError {
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            name: "InternalError",
             message: message.into(),
         }
     }
@@ -105,11 +97,7 @@ impl IntoResponse for ApiError {
                 "code": code,
                 "message": self.message,
                 "retryable": retryable,
-                "details": {},
-                // Legacy fields remain until existing Neoism clients consume
-                // the canonical v2 error shape above.
-                "name": self.name,
-                "data": { "message": self.message }
+                "details": {}
             })),
         )
             .into_response()

@@ -1,14 +1,18 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use fff_search::{
-    has_regex_metacharacters, AiGrepConfig, FilePicker, FuzzySearchOptions, GrepMode,
+    has_regex_metacharacters, AiGrepConfig, FuzzySearchOptions, GrepMode,
     GrepSearchOptions, PaginationArgs, QueryParser,
 };
-use serde::Serialize;
+use neoism_agent_service_api::{
+    DirectorySearchRequest, DirectorySearchResult, FindFilesRequest, FindFilesResult,
+    GrepWorkspaceRequest, GrepWorkspaceResult, WorkspaceFileMatch, WorkspaceGrepMatch,
+    WorkspaceSearchBounds, WorkspaceSearchMode,
+};
 use serde_json::{json, Value};
 
 use super::args::{optional_string, required_string, usize_arg};
@@ -30,35 +34,221 @@ pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
     ".tmp",
 ];
 
-pub(super) fn warm(root: &Path) {
-    if let Err(error) = crate::picker_registry::warm(root) {
-        tracing::warn!(
-            target: "neoism_agent::fff",
-            root = %root.display(),
-            %error,
-            "failed to warm shared FFF picker"
+pub(crate) fn find_files(
+    registry: &crate::picker_registry::PickerRegistry,
+    request: &FindFilesRequest,
+) -> anyhow::Result<FindFilesResult> {
+    let root = &request.root;
+    if request.query.trim().is_empty() {
+        let entries = directory_entries(root)?;
+        let total = entries.len();
+        let items = entries.into_iter().skip(request.offset).take(request.limit).map(|path| WorkspaceFileMatch {
+            path, score: 0, git_status: None, size: 0, modified: 0,
+        }).collect::<Vec<_>>();
+        return Ok(FindFilesResult {
+            bounds: WorkspaceSearchBounds {
+                total: Some(total), total_at_least: total,
+                next_cursor: (request.offset.saturating_add(items.len()) < total).then_some(request.offset.saturating_add(items.len())),
+                truncated: request.offset.saturating_add(items.len()) < total,
+                timed_out: false,
+            },
+            items,
+            engine: Some("directory".to_string()),
+            fallback_reason: None,
+        });
+    }
+    if super::streaming_search::root_requires_fallback(root) {
+        return super::streaming_search::find_files(request, "indexed search is disabled for home and filesystem roots");
+    }
+    let started = Instant::now();
+    let search = registry.with_picker(root, |picker| {
+        let parser = QueryParser::default();
+        let mut results = picker.fuzzy_search(
+            &parser.parse(&request.query),
+            None,
+            FuzzySearchOptions {
+                max_threads: 0,
+                current_file: None,
+                project_path: Some(root),
+                pagination: PaginationArgs { offset: request.offset, limit: request.limit },
+                ..Default::default()
+            },
         );
+        if results.items.is_empty() {
+            if let Some(token) = request.query.split_whitespace().filter(|token| token.len() >= 3).max_by_key(|token| token.len()) {
+                if token != request.query {
+                    results = picker.fuzzy_search(
+                        &parser.parse(token),
+                        None,
+                        FuzzySearchOptions {
+                            max_threads: 0,
+                            current_file: None,
+                            project_path: Some(root),
+                            pagination: PaginationArgs { offset: request.offset, limit: request.limit },
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+        let items = results.items.iter().zip(results.scores.iter()).map(|(item, score)| WorkspaceFileMatch {
+            path: item.relative_path(picker),
+            score: score.total,
+            git_status: item.git_status.map(git_status_label),
+            size: item.size,
+            modified: item.modified,
+        }).collect::<Vec<_>>();
+        (items, results.total_matched)
+    });
+    match search {
+        Ok((items, total)) => Ok(FindFilesResult {
+            bounds: WorkspaceSearchBounds {
+                total: Some(total),
+                total_at_least: total,
+                next_cursor: (request.offset.saturating_add(items.len()) < total)
+                    .then_some(request.offset.saturating_add(items.len())),
+                truncated: request.offset.saturating_add(items.len()) < total,
+                timed_out: false,
+            },
+            items,
+            engine: Some("fff".to_string()),
+            fallback_reason: None,
+        }),
+        Err(error) => {
+            let remaining = request.control.timeout_ms.saturating_sub(started.elapsed().as_millis() as u64).max(1);
+            let mut fallback = request.clone();
+            fallback.control.timeout_ms = fallback_timeout_ms(remaining);
+            super::streaming_search::find_files(&fallback, &error.to_string())
+        }
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FffFindItem {
-    path: String,
-    score: i32,
-    git_status: Option<String>,
-    size: u64,
-    modified: u64,
+pub(crate) fn search_directories(
+    registry: &crate::picker_registry::PickerRegistry,
+    request: &DirectorySearchRequest,
+) -> anyhow::Result<DirectorySearchResult> {
+    registry.with_picker(&request.root, |picker| {
+        let parser = QueryParser::new(fff_search::DirSearchConfig);
+        let results = picker.fuzzy_search_directories(
+            &parser.parse(&request.query),
+            FuzzySearchOptions {
+                max_threads: 0,
+                project_path: Some(&request.root),
+                pagination: PaginationArgs { offset: request.offset, limit: request.limit },
+                ..Default::default()
+            },
+        );
+        let paths = results.items.iter().map(|item| item.relative_path(picker)).collect::<Vec<_>>();
+        DirectorySearchResult {
+            bounds: WorkspaceSearchBounds {
+                total: Some(results.total_matched),
+                total_at_least: results.total_matched,
+                next_cursor: (request.offset.saturating_add(paths.len()) < results.total_matched)
+                    .then_some(request.offset.saturating_add(paths.len())),
+                truncated: request.offset.saturating_add(paths.len()) < results.total_matched,
+                timed_out: false,
+            },
+            paths,
+            engine: Some("fff".to_string()),
+        }
+    })
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FffGrepItem {
-    path: String,
-    line: u64,
-    text: String,
-    definition: bool,
-    fuzzy_score: Option<u16>,
+pub(crate) fn grep_workspace(
+    registry: &crate::picker_registry::PickerRegistry,
+    request: &GrepWorkspaceRequest,
+) -> anyhow::Result<GrepWorkspaceResult> {
+    let root = request.root.clone();
+    let exclude = request.excludes.join(" ");
+    let requested_mode = service_grep_mode(request.mode, request.patterns.first().map(String::as_str).unwrap_or(""));
+    if super::streaming_search::root_requires_fallback(&root) {
+        return super::streaming_search::grep_workspace(request, "indexed search is disabled for home and filesystem roots");
+    }
+    let query_text = grep_query_text(
+        &root,
+        &request.path,
+        &root,
+        request.include.as_deref(),
+        Some(&exclude),
+        if request.patterns.len() == 1 { &request.patterns[0] } else { "" },
+    );
+    let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
+    let query = parser.parse(&query_text);
+    let grep_budget_ms = request.control.timeout_ms.saturating_sub(2_000).max(500);
+    let options = |mode| GrepSearchOptions {
+        page_limit: request.limit,
+        mode,
+        smart_case: !request.case_sensitive,
+        before_context: request.context_lines,
+        after_context: request.context_lines,
+        classify_definitions: true,
+        trim_whitespace: false,
+        time_budget_ms: grep_budget_ms,
+        abort_signal: request.control.cancel.clone(),
+        ..Default::default()
+    };
+    let search = registry.with_picker(&root, |picker| {
+        let (results, used_mode) = if request.patterns.len() > 1 {
+            let refs = request.patterns.iter().map(String::as_str).collect::<Vec<_>>();
+            (picker.multi_grep(&refs, &query.constraints, &options(GrepMode::PlainText)), "multi".to_string())
+        } else {
+            let mut results = picker.grep(&query, &options(requested_mode));
+            let mut used = mode_label(requested_mode).to_string();
+            if results.matches.is_empty() && requested_mode != GrepMode::Fuzzy && request.patterns.first().is_some_and(|pattern| pattern.len() <= 1024) {
+                let fuzzy = picker.grep(&query, &options(GrepMode::Fuzzy));
+                if !fuzzy.matches.is_empty() {
+                    results = fuzzy;
+                    used = "fuzzy".to_string();
+                }
+            }
+            (results, used)
+        };
+        let items = results.matches.iter().filter_map(|item| {
+            let file = results.files.get(item.file_index)?;
+            Some(WorkspaceGrepMatch {
+                path: file.relative_path(picker),
+                line: item.line_number,
+                text: truncate_line(&item.line_content),
+                definition: item.is_definition,
+                fuzzy_score: item.fuzzy_score,
+            })
+        }).collect::<Vec<_>>();
+        (items, results.files_with_matches, results.total_files_searched, results.next_file_offset, used_mode)
+    });
+    match search {
+        Ok((mut items, files_with_matches, total_files_searched, next_file_offset, mode))
+            if !items.is_empty() || total_files_searched > 0 => {
+                let overflowed = items.len() > request.limit;
+                items.truncate(request.limit);
+                Ok(GrepWorkspaceResult {
+                    bounds: WorkspaceSearchBounds {
+                        total: None,
+                        total_at_least: items.len(),
+                        next_cursor: (next_file_offset != 0).then_some(next_file_offset),
+                        truncated: next_file_offset != 0 || overflowed || items.len() >= request.limit,
+                        timed_out: false,
+                    },
+                    items,
+                    files_with_matches,
+                    total_files_searched,
+                    mode,
+                    engine: Some("fff".to_string()),
+                    fallback_reason: None,
+                })
+            }
+        Ok(_) => super::streaming_search::grep_workspace(request, "indexed search returned no searchable files"),
+        Err(error) => super::streaming_search::grep_workspace(request, &error.to_string()),
+    }
+}
+
+fn service_grep_mode(mode: WorkspaceSearchMode, pattern: &str) -> GrepMode {
+    match mode {
+        WorkspaceSearchMode::Regex => GrepMode::Regex,
+        WorkspaceSearchMode::Fuzzy => GrepMode::Fuzzy,
+        WorkspaceSearchMode::Plain => GrepMode::PlainText,
+        WorkspaceSearchMode::Auto if has_regex_metacharacters(pattern) => GrepMode::Regex,
+        WorkspaceSearchMode::Auto => GrepMode::PlainText,
+    }
 }
 
 pub(super) async fn glob_tool(
@@ -87,91 +277,17 @@ fn glob_tool_sync(
     }
     let limit = usize_arg(&arguments, "limit").unwrap_or(50).max(1);
     let offset = usize_arg(&arguments, "offset").unwrap_or(0);
-    if query_text.is_empty() {
-        return glob_directory_fallback(&context, &path, limit, offset, timeout_ms);
-    }
-    if super::streaming_search::root_requires_fallback(&path) {
-        return super::streaming_search::glob(super::streaming_search::GlobRequest {
-            context: &context,
-            path: &path,
-            query: &query_text,
-            limit,
-            offset,
-            timeout_ms: fallback_timeout_ms(timeout_ms),
-            fallback_reason: "FFF indexing is disabled for home and filesystem roots"
-                .to_string(),
-        });
-    }
-    let fff_started = Instant::now();
-    let search = with_picker(&path, |picker| {
-        let parser = QueryParser::default();
-        let mut results = picker.fuzzy_search(
-            &parser.parse(&query_text),
-            None,
-            FuzzySearchOptions {
-                max_threads: 0,
-                current_file: None,
-                project_path: Some(&path),
-                pagination: PaginationArgs { offset, limit },
-                ..Default::default()
-            },
-        );
-        // An oversized / natural-language query fuzzy-matches no file PATH
-        // (paths don't contain sentences), so it came back empty. Retry on
-        // the single most distinctive token so we still surface the relevant
-        // files instead of returning nothing.
-        if results.items.is_empty() {
-            if let Some(token) = query_text
-                .split_whitespace()
-                .filter(|token| token.len() >= 3)
-                .max_by_key(|token| token.len())
-            {
-                if token != query_text.as_str() {
-                    results = picker.fuzzy_search(
-                        &parser.parse(token),
-                        None,
-                        FuzzySearchOptions {
-                            max_threads: 0,
-                            current_file: None,
-                            project_path: Some(&path),
-                            pagination: PaginationArgs { offset, limit },
-                            ..Default::default()
-                        },
-                    );
-                }
-            }
-        }
-        let items = results
-            .items
-            .iter()
-            .zip(results.scores.iter())
-            .map(|(item, score)| FffFindItem {
-                path: item.relative_path(picker),
-                score: score.total,
-                git_status: item.git_status.map(git_status_label),
-                size: item.size,
-                modified: item.modified,
-            })
-            .collect::<Vec<_>>();
-        (items, results.total_matched)
-    });
-    let (items, total_matched) = match search {
-        Ok(result) => result,
-        Err(error) => {
-            let remaining = timeout_ms
-                .saturating_sub(fff_started.elapsed().as_millis() as u64)
-                .max(1);
-            return super::streaming_search::glob(super::streaming_search::GlobRequest {
-                context: &context,
-                path: &path,
-                query: &query_text,
-                limit,
-                offset,
-                timeout_ms: fallback_timeout_ms(remaining),
-                fallback_reason: error.to_string(),
-            });
-        }
-    };
+    let result = context.services().workspace_search.find_files(&FindFilesRequest {
+        root: path.clone(),
+        query: query_text.clone(),
+        offset,
+        limit,
+        control: neoism_agent_service_api::WorkspaceSearchRequestControl {
+            timeout_ms,
+            cancel: context.cancel.clone(),
+        },
+    }).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let items = result.items;
     let mut output = items
         .iter()
         .map(|item| {
@@ -188,64 +304,22 @@ fn glob_tool_sync(
     }
 
     Ok(ToolExecutionResult {
-        title: format!("Glob {query_text}"),
+        title: if query_text.is_empty() { "Glob directory".to_string() } else { format!("Glob {query_text}") },
         output: output.join("\n"),
         metadata: Some(json!({
             "query": query_text,
             "offset": offset,
             "limit": limit,
-            "total": total_matched,
+            "total": result.bounds.total,
+            "totalAtLeast": result.bounds.total_at_least,
             "count": items.len(),
-            "truncated": offset.saturating_add(items.len()) < total_matched,
+            "truncated": result.bounds.truncated,
+            "timedOut": result.bounds.timed_out,
             "timeout": timeout_ms,
-            "engine": "fff",
-            "items": items,
-        })),
-    })
-}
-
-fn glob_directory_fallback(
-    context: &ToolContext,
-    path: &Path,
-    limit: usize,
-    offset: usize,
-    timeout_ms: u64,
-) -> anyhow::Result<ToolExecutionResult> {
-    let entries = directory_entries(path)?;
-    let items = entries
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .map(|entry| FffFindItem {
-            path: entry.clone(),
-            score: 0,
-            git_status: None,
-            size: 0,
-            modified: 0,
-        })
-        .collect::<Vec<_>>();
-    let mut output = items
-        .iter()
-        .map(|item| item.path.clone())
-        .collect::<Vec<_>>();
-    if output.is_empty() {
-        output.push("No files found".to_string());
-    }
-    let total = entries.len();
-    Ok(ToolExecutionResult {
-        title: "Glob directory".to_string(),
-        output: output.join("\n"),
-        metadata: Some(json!({
-            "query": "",
-            "offset": offset,
-            "limit": limit,
-            "total": total,
-            "count": items.len(),
-            "truncated": offset.saturating_add(items.len()) < total,
-            "timeout": timeout_ms,
-            "engine": "directory",
-            "path": display_path(&context.cwd, path),
-            "items": items,
+            "engine": result.engine,
+            "fallbackReason": result.fallback_reason,
+            "path": display_path(&context.cwd, &path),
+            "items": workspace_file_items_json(&items),
         })),
     })
 }
@@ -300,190 +374,47 @@ fn grep_tool_sync(
     } else {
         mode
     };
-    let root = grep_root(&path);
-    // A pure literal alternation (`a|b|c`) is an OR search. Route it through
-    // multi-pattern (Aho-Corasick) instead of compiling one wide regex: fff
-    // can hit "attempt to multiply with overflow" building/scoring a broad
-    // regex alternation (~35 branches), and multi-pattern is the correct and
-    // faster engine for a literal OR anyway.
     let alternation = literal_alternation_terms(&pattern);
-    // Constraint-only query (path + include + exclude, empty search term) for
-    // the multi-pattern route; the regex/plain route appends the pattern.
-    let constraint_text = grep_query_text(
-        &context.cwd,
-        &path,
-        &root,
-        include.as_deref(),
-        Some(exclude.as_str()),
-        "",
-    );
-    let query_text = grep_query_text(
-        &context.cwd,
-        &path,
-        &root,
-        include.as_deref(),
-        Some(exclude.as_str()),
-        &pattern,
-    );
-    // Bound each grep the way fff intends (and opencode does): return
-    // PARTIAL results at a time budget instead of grinding to the outer
-    // hard-kill with nothing. Kept a hair under the tool timeout so fff
-    // self-bounds first; also hand fff the cancel flag so it stops mid-
-    // search on abort rather than only when the outer select! fires.
-    let grep_budget_ms = timeout_ms.saturating_sub(2_000).max(500);
-    let abort = context.cancel.clone();
-    let fallback_patterns = alternation.clone().unwrap_or_else(|| vec![pattern.clone()]);
-    let fallback_mode = if alternation.is_some() {
-        GrepMode::PlainText
+    let patterns = alternation.clone().unwrap_or_else(|| vec![pattern.clone()]);
+    let service_mode = if alternation.is_some() {
+        WorkspaceSearchMode::Plain
     } else {
-        mode
+        workspace_mode(mode)
     };
-    if super::streaming_search::root_requires_fallback(&root) {
-        return super::streaming_search::grep(super::streaming_search::GrepRequest {
-            context: &context,
-            path: &path,
-            patterns: &fallback_patterns,
-            include: include.as_deref(),
-            exclude: &exclude,
-            context_lines,
-            case_sensitive,
-            mode: fallback_mode,
-            limit,
-            timeout_ms: fallback_timeout_ms(timeout_ms),
-            fallback_reason: "FFF indexing is disabled for home and filesystem roots"
-                .to_string(),
-        });
-    }
-    let fff_started = Instant::now();
-    let search = with_picker(&root, |picker| {
-        let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
-        let options = |grep_mode: GrepMode| GrepSearchOptions {
-            page_limit: limit,
-            mode: grep_mode,
-            smart_case: !case_sensitive,
-            before_context: context_lines,
-            after_context: context_lines,
-            classify_definitions: true,
-            trim_whitespace: false,
-            time_budget_ms: grep_budget_ms,
-            abort_signal: abort.clone(),
-            ..Default::default()
-        };
-        if let Some(terms) = &alternation {
-            let constraints = parser.parse(&constraint_text);
-            let refs: Vec<&str> = terms.iter().map(String::as_str).collect();
-            let results = picker.multi_grep(
-                &refs,
-                &constraints.constraints,
-                &options(GrepMode::PlainText),
-            );
-            return (
-                grep_items(picker, &results),
-                results.files_with_matches,
-                results.total_files_searched,
-                results.next_file_offset,
-                "multi",
-            );
-        }
-        let query = parser.parse(&query_text);
-        let mut results = picker.grep(&query, &options(mode));
-        let used_mode =
-            if results.matches.is_empty() && mode != GrepMode::Fuzzy && fuzzy_safe {
-                results = picker.grep(&query, &options(GrepMode::Fuzzy));
-                if results.matches.is_empty() {
-                    mode_label(mode)
-                } else {
-                    "fuzzy"
-                }
-            } else {
-                mode_label(mode)
-            };
-        (
-            grep_items(picker, &results),
-            results.files_with_matches,
-            results.total_files_searched,
-            results.next_file_offset,
-            used_mode,
-        )
-    });
-    let (
-        mut items,
-        files_with_matches,
-        total_files_searched,
-        next_file_offset,
-        used_mode,
-    ) = match search {
-        Ok((
-            items,
-            files_with_matches,
-            total_files_searched,
-            next_file_offset,
-            used_mode,
-        )) if !items.is_empty() || total_files_searched > 0 => (
-            items,
-            files_with_matches,
-            total_files_searched,
-            next_file_offset,
-            used_mode,
-        ),
-        Ok(_) => {
-            let remaining = timeout_ms
-                .saturating_sub(fff_started.elapsed().as_millis() as u64)
-                .max(1);
-            return super::streaming_search::grep(super::streaming_search::GrepRequest {
-                context: &context,
-                path: &path,
-                patterns: &fallback_patterns,
-                include: include.as_deref(),
-                exclude: &exclude,
-                context_lines,
-                case_sensitive,
-                mode: fallback_mode,
-                limit,
-                timeout_ms: fallback_timeout_ms(remaining),
-                fallback_reason: "FFF returned no searchable files".to_string(),
-            });
-        }
-        Err(error) => {
-            let remaining = timeout_ms
-                .saturating_sub(fff_started.elapsed().as_millis() as u64)
-                .max(1);
-            return super::streaming_search::grep(super::streaming_search::GrepRequest {
-                context: &context,
-                path: &path,
-                patterns: &fallback_patterns,
-                include: include.as_deref(),
-                exclude: &exclude,
-                context_lines,
-                case_sensitive,
-                mode: fallback_mode,
-                limit,
-                timeout_ms: fallback_timeout_ms(remaining),
-                fallback_reason: error.to_string(),
-            });
-        }
-    };
-    let overflowed_limit = items.len() > limit;
-    items.truncate(limit);
-    let output = render_grep_output("Grep", &items, files_with_matches, limit);
-
-    Ok(ToolExecutionResult {
+    let result = context.services().workspace_search.grep(&GrepWorkspaceRequest {
+        root: context.cwd.clone(),
+        path: path.clone(),
+        patterns,
+        include: include.clone(),
+        excludes: exclude.split([',', ' ']).map(str::trim).filter(|item| !item.is_empty()).map(|item| item.trim_start_matches('!').to_string()).collect(),
+        context_lines,
+        case_sensitive,
+        mode: service_mode,
+        limit,
+        control: neoism_agent_service_api::WorkspaceSearchRequestControl {
+            timeout_ms,
+            cancel: context.cancel.clone(),
+        },
+    }).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let output = render_workspace_grep_output("Grep", &result.items, result.files_with_matches, limit);
+    return Ok(ToolExecutionResult {
         title: format!("Grep {pattern}"),
         output,
         metadata: Some(json!({
             "pattern": pattern,
-            "query": query_text,
             "include": include,
             "exclude": exclude,
-            "mode": used_mode,
-            "engine": "fff",
-            "matches": items.len(),
-            "filesWithMatches": files_with_matches,
-            "totalFilesSearched": total_files_searched,
-            "nextFileOffset": next_file_offset,
-            "truncated": next_file_offset != 0 || overflowed_limit || items.len() >= limit,
+            "mode": result.mode,
+            "engine": result.engine,
+            "matches": result.items.len(),
+            "filesWithMatches": result.files_with_matches,
+            "totalFilesSearched": result.total_files_searched,
+            "nextFileOffset": result.bounds.next_cursor.unwrap_or(0),
+            "truncated": result.bounds.truncated,
+            "timedOut": result.bounds.timed_out,
             "timeout": timeout_ms,
-            "items": items,
+            "fallbackReason": result.fallback_reason,
+            "items": workspace_grep_items_json(&result.items),
         })),
     })
 }
@@ -501,118 +432,22 @@ fn multi_grep_tool_sync(
     let context_lines = usize_arg(&arguments, "context").unwrap_or(0);
     let exclude = merge_exclude(optional_string(&arguments, "exclude").as_deref());
     let include = optional_string(&arguments, "include");
-    let root = grep_root(&path);
-    let constraint_query = grep_query_text(
-        &context.cwd,
-        &path,
-        &root,
-        include.as_deref(),
-        Some(exclude.as_str()),
-        "",
-    );
-    let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
-    let query = parser.parse(&constraint_query);
-    let refs = patterns.iter().map(String::as_str).collect::<Vec<_>>();
-    // Use the same partial-result time budget and cancellation propagation as
-    // the single-pattern grep path.
-    let grep_budget_ms = timeout_ms.saturating_sub(2_000).max(500);
-    let abort = context.cancel.clone();
-    if super::streaming_search::root_requires_fallback(&root) {
-        return super::streaming_search::grep(super::streaming_search::GrepRequest {
-            context: &context,
-            path: &path,
-            patterns: &patterns,
-            include: include.as_deref(),
-            exclude: &exclude,
-            context_lines,
-            case_sensitive: false,
-            mode: GrepMode::PlainText,
-            limit,
-            timeout_ms: fallback_timeout_ms(timeout_ms),
-            fallback_reason: "FFF indexing is disabled for home and filesystem roots"
-                .to_string(),
-        });
-    }
-    let fff_started = Instant::now();
-    let search = with_picker(&root, |picker| {
-        let results = picker.multi_grep(
-            &refs,
-            &query.constraints,
-            &GrepSearchOptions {
-                page_limit: limit,
-                before_context: context_lines,
-                after_context: context_lines,
-                classify_definitions: true,
-                trim_whitespace: false,
-                time_budget_ms: grep_budget_ms,
-                abort_signal: abort.clone(),
-                ..Default::default()
-            },
-        );
-        (
-            grep_items(picker, &results),
-            results.files_with_matches,
-            results.total_files_searched,
-            results.next_file_offset,
-        )
-    });
-    let (mut items, files_with_matches, total_files_searched, next_file_offset) =
-        match search {
-            Ok((items, files_with_matches, total_files_searched, next_file_offset))
-                if !items.is_empty() || total_files_searched > 0 =>
-            {
-                (
-                    items,
-                    files_with_matches,
-                    total_files_searched,
-                    next_file_offset,
-                )
-            }
-            Ok(_) => {
-                let remaining = timeout_ms
-                    .saturating_sub(fff_started.elapsed().as_millis() as u64)
-                    .max(1);
-                return super::streaming_search::grep(
-                    super::streaming_search::GrepRequest {
-                        context: &context,
-                        path: &path,
-                        patterns: &patterns,
-                        include: include.as_deref(),
-                        exclude: &exclude,
-                        context_lines,
-                        case_sensitive: false,
-                        mode: GrepMode::PlainText,
-                        limit,
-                        timeout_ms: fallback_timeout_ms(remaining),
-                        fallback_reason: "FFF returned no searchable files".to_string(),
-                    },
-                );
-            }
-            Err(error) => {
-                let remaining = timeout_ms
-                    .saturating_sub(fff_started.elapsed().as_millis() as u64)
-                    .max(1);
-                return super::streaming_search::grep(
-                    super::streaming_search::GrepRequest {
-                        context: &context,
-                        path: &path,
-                        patterns: &patterns,
-                        include: include.as_deref(),
-                        exclude: &exclude,
-                        context_lines,
-                        case_sensitive: false,
-                        mode: GrepMode::PlainText,
-                        limit,
-                        timeout_ms: fallback_timeout_ms(remaining),
-                        fallback_reason: error.to_string(),
-                    },
-                );
-            }
-        };
-    let overflowed_limit = items.len() > limit;
-    items.truncate(limit);
-    let output = render_grep_output("Grep", &items, files_with_matches, limit);
-
+    let result = context.services().workspace_search.grep(&GrepWorkspaceRequest {
+        root: context.cwd.clone(),
+        path: path.clone(),
+        patterns: patterns.clone(),
+        include: include.clone(),
+        excludes: exclude.split([',', ' ']).map(str::trim).filter(|item| !item.is_empty()).map(|item| item.trim_start_matches('!').to_string()).collect(),
+        context_lines,
+        case_sensitive: false,
+        mode: WorkspaceSearchMode::Plain,
+        limit,
+        control: neoism_agent_service_api::WorkspaceSearchRequestControl {
+            timeout_ms,
+            cancel: context.cancel.clone(),
+        },
+    }).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let output = render_workspace_grep_output("Grep", &result.items, result.files_with_matches, limit);
     Ok(ToolExecutionResult {
         title: format!("Grep {}", patterns.join(", ")),
         output,
@@ -620,14 +455,17 @@ fn multi_grep_tool_sync(
             "patterns": patterns,
             "include": include,
             "exclude": exclude,
-            "engine": "fff",
-            "matches": items.len(),
-            "filesWithMatches": files_with_matches,
-            "totalFilesSearched": total_files_searched,
-            "nextFileOffset": next_file_offset,
-            "truncated": next_file_offset != 0 || overflowed_limit || items.len() >= limit,
+            "mode": result.mode,
+            "engine": result.engine,
+            "matches": result.items.len(),
+            "filesWithMatches": result.files_with_matches,
+            "totalFilesSearched": result.total_files_searched,
+            "nextFileOffset": result.bounds.next_cursor.unwrap_or(0),
+            "truncated": result.bounds.truncated,
+            "timedOut": result.bounds.timed_out,
             "timeout": timeout_ms,
-            "items": items,
+            "fallbackReason": result.fallback_reason,
+            "items": workspace_grep_items_json(&result.items),
         })),
     })
 }
@@ -699,13 +537,6 @@ fn fallback_timeout_ms(outer_timeout_ms: u64) -> u64 {
     outer_timeout_ms.saturating_sub(500).max(1)
 }
 
-fn with_picker<T>(
-    root: &Path,
-    operation: impl FnOnce(&FilePicker) -> T,
-) -> anyhow::Result<T> {
-    crate::picker_registry::with_picker(root, operation)
-}
-
 fn fff_perf_logging_enabled() -> bool {
     std::env::var_os("NEOISM_AGENT_PERF_LOG")
         .as_deref()
@@ -732,14 +563,6 @@ fn merge_exclude(existing: Option<&str>) -> String {
         );
     }
     parts.join(" ")
-}
-
-fn grep_root(path: &Path) -> PathBuf {
-    if path.is_dir() {
-        path.to_path_buf()
-    } else {
-        path.parent().unwrap_or(path).to_path_buf()
-    }
 }
 
 fn grep_query_text(
@@ -827,45 +650,48 @@ fn mode_label(mode: GrepMode) -> &'static str {
     }
 }
 
-fn grep_items(
-    picker: &FilePicker,
-    results: &fff_search::GrepResult<'_>,
-) -> Vec<FffGrepItem> {
-    results
-        .matches
-        .iter()
-        .filter_map(|item| {
-            let file = results.files.get(item.file_index)?;
-            Some(FffGrepItem {
-                path: file.relative_path(picker),
-                line: item.line_number,
-                text: truncate_line(&item.line_content),
-                definition: item.is_definition,
-                fuzzy_score: item.fuzzy_score,
-            })
-        })
-        .collect()
+fn workspace_mode(mode: GrepMode) -> WorkspaceSearchMode {
+    match mode {
+        GrepMode::PlainText => WorkspaceSearchMode::Plain,
+        GrepMode::Regex => WorkspaceSearchMode::Regex,
+        GrepMode::Fuzzy => WorkspaceSearchMode::Fuzzy,
+    }
 }
 
-fn render_grep_output(
+fn workspace_grep_items_json(items: &[WorkspaceGrepMatch]) -> Value {
+    Value::Array(items.iter().map(|item| json!({
+        "path": item.path,
+        "line": item.line,
+        "text": item.text,
+        "definition": item.definition,
+        "fuzzyScore": item.fuzzy_score,
+    })).collect())
+}
+
+fn workspace_file_items_json(items: &[WorkspaceFileMatch]) -> Value {
+    Value::Array(items.iter().map(|item| json!({
+        "path": item.path,
+        "score": item.score,
+        "gitStatus": item.git_status,
+        "size": item.size,
+        "modified": item.modified,
+    })).collect())
+}
+
+fn render_workspace_grep_output(
     label: &str,
-    items: &[FffGrepItem],
+    items: &[WorkspaceGrepMatch],
     files_with_matches: usize,
     limit: usize,
 ) -> String {
     if items.is_empty() {
         return "No files found".to_string();
     }
-    let mut output = vec![format!(
-        "{label}: Found {} matches in {files_with_matches} files",
-        items.len()
-    )];
+    let mut output = vec![format!("{label}: Found {} matches in {files_with_matches} files", items.len())];
     let mut current = "";
     for item in items {
         if current != item.path {
-            if current != "" {
-                output.push(String::new());
-            }
+            if !current.is_empty() { output.push(String::new()); }
             current = &item.path;
             output.push(format!("{}:", item.path));
         }
@@ -874,9 +700,7 @@ fn render_grep_output(
     }
     if items.len() >= limit {
         output.push(String::new());
-        output.push(format!(
-            "(Results may be truncated: showing first {limit} matches. Narrow the query or use nextFileOffset metadata.)"
-        ));
+        output.push(format!("(Results may be truncated: showing first {limit} matches. Narrow the query or use nextFileOffset metadata.)"));
     }
     output.join("\n")
 }

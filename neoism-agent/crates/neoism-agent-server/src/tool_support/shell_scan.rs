@@ -359,7 +359,7 @@ mod tests {
     fn scans_powershell_statements_and_paths() {
         let root = Path::new(r"C:\repo");
         let scan = scan(
-            r#"Set-Content "C:\Users\Parker\Desktop\neoism.json" '{}'; Get-Content .\Cargo.toml | Out-Null"#,
+            r#"Set-Content "C:\Users\Parker\Desktop\settings.json" '{}'; Get-Content .\Cargo.toml | Out-Null"#,
             root,
             root,
             ShellKind::PowerShell,

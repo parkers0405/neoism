@@ -31,6 +31,7 @@ impl WorkspaceRuntimeRegistry {
         &self,
         directory: &str,
         base_plugins: &PluginRegistry,
+        services: &neoism_agent_service_api::AgentServices,
     ) -> Arc<WorkspaceRuntime> {
         let root = canonical_location(directory);
         let now = Instant::now();
@@ -49,14 +50,14 @@ impl WorkspaceRuntimeRegistry {
             let runtime = entry.runtime.clone();
             drop(entries);
             if refresh {
-                refresh_plugins(&runtime);
+                refresh_plugins(&runtime, services);
             }
             return runtime;
         }
 
         let plugins = base_plugins.fork();
-        if let Ok(loaded) = crate::config::load(&root.to_string_lossy()) {
-            plugins.register_configured_plugins(&loaded.info, &root.to_string_lossy());
+        if let Ok(loaded) = crate::config::load(services, &root.to_string_lossy()) {
+            plugins.register_configured_plugins(services, &loaded.info, &root.to_string_lossy());
         }
         let runtime = Arc::new(WorkspaceRuntime {
             root: root.clone(),
@@ -74,11 +75,11 @@ impl WorkspaceRuntimeRegistry {
     }
 }
 
-fn refresh_plugins(runtime: &WorkspaceRuntime) {
-    if let Ok(loaded) = crate::config::load(&runtime.root.to_string_lossy()) {
+fn refresh_plugins(runtime: &WorkspaceRuntime, services: &neoism_agent_service_api::AgentServices) {
+    if let Ok(loaded) = crate::config::load(services, &runtime.root.to_string_lossy()) {
         runtime
             .plugins
-            .register_configured_plugins(&loaded.info, &runtime.root.to_string_lossy());
+            .register_configured_plugins(services, &loaded.info, &runtime.root.to_string_lossy());
     }
 }
 
@@ -109,11 +110,12 @@ mod tests {
         std::fs::create_dir_all(&other).unwrap();
         let registry = WorkspaceRuntimeRegistry::default();
         let plugins = PluginRegistry::default();
-        let first = registry.acquire(&root.to_string_lossy(), &plugins).await;
+        let services = crate::standard_services();
+        let first = registry.acquire(&root.to_string_lossy(), &plugins, &services).await;
         let alias = registry
-            .acquire(&root.join(".").to_string_lossy(), &plugins)
+            .acquire(&root.join(".").to_string_lossy(), &plugins, &services)
             .await;
-        let second = registry.acquire(&other.to_string_lossy(), &plugins).await;
+        let second = registry.acquire(&other.to_string_lossy(), &plugins, &services).await;
         assert!(Arc::ptr_eq(&first, &alias));
         assert!(!Arc::ptr_eq(&first, &second));
         let _ = std::fs::remove_dir_all(root);

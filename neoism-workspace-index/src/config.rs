@@ -1078,7 +1078,7 @@ fn seed_welcome_docs(default_vault: &Path) -> std::io::Result<()> {
     // removed, every current bundled page is installed/refreshed, and unrelated
     // user notes remain untouched. Once the current marker exists this function
     // returns early, so later user edits and deletions are honored.
-    for doc in crate::docs::BUNDLED_DOCS {
+    for doc in neoism_product_docs::BUNDLED_DOCS {
         let page = welcome.join(doc.path);
         if let Some(parent) = page.parent() {
             fs::create_dir_all(parent)?;

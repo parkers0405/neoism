@@ -138,8 +138,8 @@ pub(crate) fn thread_summaries_from_sessions(
     take: usize,
 ) -> Vec<ThreadSummary> {
     value
-        .as_array()
-        .or_else(|| value.get("items").and_then(Value::as_array))
+        .get("items")
+        .and_then(Value::as_array)
         .map(|sessions| {
             let mut sessions = sessions.iter().collect::<Vec<_>>();
             sessions.sort_by(|a, b| {
@@ -236,8 +236,8 @@ pub(crate) async fn handle_get_history(
     match http_get_json(&inner, &path).await {
         Ok(value) => {
             let messages = value
-                .as_array()
-                .or_else(|| value.get("items").and_then(Value::as_array))
+                .get("items")
+                .and_then(Value::as_array)
                 .map(|items| {
                     neoism_ui::panels::agent_pane::api_mapping::message_blocks_from_response(
                         items, true,
@@ -759,16 +759,14 @@ pub(crate) async fn handle_get_config_defaults(
     directory: Option<String>,
 ) {
     let path = match directory {
-        Some(dir) => format!("/config?directory={}", percent_encode(&dir)),
-        None => "/config".to_string(),
+        Some(dir) => format!("/v2/config?directory={}", percent_encode(&dir)),
+        None => "/v2/config".to_string(),
     };
     match http_get_json(&inner, &path).await {
         Ok(value) => {
             let _ = inner.tx.send(AgentServerMessage::ConfigDefaults {
                 agent: value
                     .get("default-agent")
-                    .or_else(|| value.get("defaultAgent"))
-                    .or_else(|| value.get("default_agent"))
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
@@ -779,19 +777,11 @@ pub(crate) async fn handle_get_config_defaults(
                     .filter(|s| !s.is_empty()),
                 thinking: value
                     .get("variant")
-                    .or_else(|| value.get("thinking"))
-                    .or_else(|| value.get("reasoning"))
-                    .or_else(|| value.get("reasoning-effort"))
-                    .or_else(|| value.get("reasoningEffort"))
-                    .or_else(|| value.get("reasoning_effort"))
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .filter(|s| !s.is_empty()),
                 input_help_visible: value
                     .get("input-hints")
-                    .or_else(|| value.get("agent-input-hints"))
-                    .or_else(|| value.get("agentInputHints"))
-                    .or_else(|| value.get("agent_input_hints"))
                     .and_then(Value::as_bool),
                 sidebar_visible: value.get("sidebar").and_then(Value::as_bool),
             });
@@ -829,8 +819,8 @@ pub(crate) async fn handle_persist_config_choice(
     thinking: Option<String>,
 ) {
     let path = match directory {
-        Some(dir) => format!("/config?directory={}", percent_encode(&dir)),
-        None => "/config".to_string(),
+        Some(dir) => format!("/v2/config?directory={}", percent_encode(&dir)),
+        None => "/v2/config".to_string(),
     };
     let Ok(current) = http_get_json(&inner, &path).await else {
         return;
@@ -846,8 +836,6 @@ pub(crate) async fn handle_persist_config_choice(
                 .is_some_and(|value| !value.trim().is_empty()),
             _ => current
                 .get("variant")
-                .or_else(|| current.get("thinking"))
-                .or_else(|| current.get("reasoning-effort"))
                 .and_then(Value::as_str)
                 .is_some_and(|value| !value.trim().is_empty()),
         };
@@ -910,8 +898,8 @@ pub(crate) async fn handle_list_agents(
     directory: Option<String>,
 ) {
     let path = match directory.as_deref().filter(|d| !d.is_empty()) {
-        Some(dir) => format!("/agent?directory={}", percent_encode(dir)),
-        None => "/agent".to_string(),
+        Some(dir) => format!("/v2/agents?directory={}", percent_encode(dir)),
+        None => "/v2/agents".to_string(),
     };
     match http_get_json(&inner, &path).await {
         Ok(value) => {
@@ -959,8 +947,8 @@ pub(crate) async fn handle_list_skills(
     directory: Option<String>,
 ) {
     let path = match directory.as_deref().filter(|d| !d.is_empty()) {
-        Some(dir) => format!("/skill?directory={}", percent_encode(dir)),
-        None => "/skill".to_string(),
+        Some(dir) => format!("/v2/skills?directory={}", percent_encode(dir)),
+        None => "/v2/skills".to_string(),
     };
     match http_get_json(&inner, &path).await {
         Ok(value) => {
@@ -999,8 +987,11 @@ pub(crate) fn skill_info_from_value(value: &Value) -> Option<SkillInfo> {
 
 pub(crate) async fn handle_list_mcp(inner: Arc<AgentInner>, directory: Option<String>) {
     let path = match directory.as_deref().filter(|d| !d.is_empty()) {
-        Some(dir) => format!("/mcp/catalog?directory={}", percent_encode(dir)),
-        None => "/mcp/catalog".to_string(),
+        Some(dir) => format!(
+            "/v2/plugins/dev.neoism.mcp/catalog?directory={}",
+            percent_encode(dir)
+        ),
+        None => "/v2/plugins/dev.neoism.mcp/catalog".to_string(),
     };
     match http_get_json(&inner, &path).await {
         Ok(status) => {
@@ -1024,7 +1015,10 @@ pub(crate) async fn handle_mcp_oauth_authorize(
         .filter(|directory| !directory.is_empty())
         .map(|directory| format!("?directory={}", percent_encode(directory)))
         .unwrap_or_default();
-    let path = format!("/mcp/{}/auth{query}", percent_encode(&name));
+    let path = format!(
+        "/v2/plugins/dev.neoism.mcp/{}/auth{query}",
+        percent_encode(&name)
+    );
     match http_post_json(&inner, &path, &json!({})).await {
         Ok(value) => match value.get("authorizationUrl").and_then(Value::as_str) {
             Some(url) => {
@@ -1063,7 +1057,7 @@ pub(crate) async fn handle_mcp_set_enabled(
     directory: Option<String>,
 ) {
     let path = format!(
-        "/mcp/{}/config{}",
+        "/v2/plugins/dev.neoism.mcp/{}/config{}",
         percent_encode(&name),
         mcp_directory_query(directory.as_deref())
     );
@@ -1081,14 +1075,14 @@ pub(crate) async fn handle_mcp_simple_action(
     action: &str,
 ) {
     let path = format!(
-        "/mcp/{}/{action}{}",
+        "/v2/plugins/dev.neoism.mcp/{}/{action}{}",
         percent_encode(&name),
         mcp_directory_query(directory.as_deref())
     );
     let result = http_post_json(&inner, &path, &json!({})).await;
     if action == "connect" && matches!(result.as_ref(), Ok(Value::Bool(false))) {
         let auth_path = format!(
-            "/mcp/{}/auth{}",
+            "/v2/plugins/dev.neoism.mcp/{}/auth{}",
             percent_encode(&name),
             mcp_directory_query(directory.as_deref())
         );
@@ -1119,7 +1113,7 @@ pub(crate) async fn handle_mcp_remove_auth(
     directory: Option<String>,
 ) {
     let path = format!(
-        "/mcp/{}/auth{}",
+        "/v2/plugins/dev.neoism.mcp/{}/auth{}",
         percent_encode(&name),
         mcp_directory_query(directory.as_deref())
     );
@@ -1617,5 +1611,24 @@ pub(crate) async fn handle_set_pinned(
             });
         }
         Err(err) => emit_error(&inner.tx, err),
+    }
+}
+
+#[cfg(test)]
+mod canonical_route_tests {
+    #[test]
+    fn daemon_agent_source_contains_no_deleted_http_routes() {
+        let source = include_str!("handlers.rs");
+        let event_source = include_str!("events.rs");
+        for route in [
+            "config", "agent", "skill", "event", "provider", "permission", "question",
+            "command", "mcp", "global/event",
+        ] {
+            let legacy = format!("format!(\"/{route}");
+            assert!(!source.contains(&legacy), "legacy daemon route remains: {legacy}");
+            let direct = format!("\"/{route}");
+            assert!(!source.contains(&direct), "legacy daemon route remains: {direct}");
+            assert!(!event_source.contains(&direct), "legacy daemon event route remains: {direct}");
+        }
     }
 }

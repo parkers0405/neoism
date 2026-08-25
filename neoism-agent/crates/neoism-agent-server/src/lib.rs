@@ -19,17 +19,13 @@ mod audit_routes;
 mod background_job;
 mod caller;
 mod command_routes;
-mod compat_routes;
 mod config;
 mod custom_tool;
 #[cfg(test)]
 mod edit_smoke_tests;
 mod error;
-mod event_routes;
-mod experimental_routes;
 mod external_acp;
 mod external_agent;
-mod file_routes;
 mod firecrawl;
 mod global_routes;
 mod goal_routes;
@@ -38,12 +34,8 @@ mod interaction;
 pub mod language_server;
 mod lsp;
 mod lsp_routes;
-mod managed_lsp_path;
 mod mcp;
 mod mcp_auth;
-mod mcp_docs;
-mod mcp_memory;
-mod mcp_notes;
 mod mcp_routes;
 mod message_model;
 mod message_part_mutation;
@@ -53,7 +45,7 @@ pub use openapi::canonical_openapi;
 mod perf;
 mod permission;
 mod permission_runtime;
-pub mod picker_registry;
+mod picker_registry;
 mod platform_shell;
 mod plugin;
 mod plugins;
@@ -72,13 +64,7 @@ mod provider_transform;
 mod pty;
 mod pty_routes;
 mod route_query;
-/// Compatibility export for older callers. New code should use
-/// [`language_server`].
-pub mod rust_lsp {
-    pub use crate::language_server::*;
-}
 mod context_epoch;
-mod search_routes;
 mod semantic;
 mod server_util;
 mod session_actions;
@@ -113,14 +99,12 @@ mod windows_acl;
 pub(crate) mod windows_process;
 mod workflow;
 mod workspace_runtime;
-mod worktree;
-mod worktree_routes;
 
 #[cfg(test)]
 use agent::AgentCatalog;
 pub(crate) use agent_tool_registry::{
-    available_tools_for_directory, configured_mcp_tools_with_state, execute_mcp_gateway,
-    execute_mcp_tool_by_runtime_id, provider_tools_for_agent,
+    available_tools_for_directory, execute_mcp_gateway, execute_mcp_tool_by_runtime_id,
+    provider_tools_for_agent,
 };
 use anyhow::Context;
 pub use app_router::app;
@@ -132,7 +116,7 @@ use message_part_mutation::{
     mark_interrupted_tool_parts, set_tool_completed, set_tool_running,
 };
 pub(crate) use model_selection::{
-    model_from_body, model_ref_from_config, model_ref_from_config_with_variant,
+    model_ref_from_config, model_ref_from_config_with_variant,
     model_ref_from_user_model, user_model_from_model_ref,
 };
 #[cfg(test)]
@@ -160,7 +144,7 @@ use serde_json::json;
 #[cfg(test)]
 use serde_json::Value;
 pub(crate) use server_util::{
-    default_cache_dir, default_config_dir, default_state_dir, now_millis,
+    default_cache_dir, default_state_dir, now_millis,
     resolve_directory, slug,
 };
 #[cfg(test)]
@@ -186,7 +170,8 @@ pub use session_transfer::{
     export_session, export_sessions_under_workspace_root, import_session, SessionBundle,
     SESSION_BUNDLE_VERSION,
 };
-use state::AppState;
+pub use state::AppState;
+pub use picker_registry::FffWorkspaceSearchService;
 #[cfg(test)]
 use state::SessionRun;
 use tokio::net::TcpListener;
@@ -198,6 +183,18 @@ use tool_runtime::execute_tool_call_with_permission_wait;
 #[cfg(test)]
 use tool_selection::normalize_provider_tool_name;
 use tool_selection::{tool_allowed_for_model, use_apply_patch_for_model};
+
+pub fn standard_workspace_search(
+) -> std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchService> {
+    std::sync::Arc::new(FffWorkspaceSearchService::new())
+}
+
+pub fn standard_services() -> neoism_agent_service_api::AgentServices {
+    neoism_agent_service_api::AgentServices::new(
+        std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService),
+        standard_workspace_search(),
+    )
+}
 
 #[derive(Clone)]
 pub struct ServerOptions {
@@ -216,7 +213,10 @@ impl Default for ServerOptions {
     }
 }
 
-pub async fn listen(options: ServerOptions) -> anyhow::Result<SocketAddr> {
+pub async fn listen(
+    options: ServerOptions,
+    services: neoism_agent_service_api::AgentServices,
+) -> anyhow::Result<SocketAddr> {
     let started = crate::perf::now();
     let address: SocketAddr = format!("{}:{}", options.hostname, options.port)
         .parse()
@@ -252,7 +252,7 @@ pub async fn listen(options: ServerOptions) -> anyhow::Result<SocketAddr> {
         "server socket bound"
     );
     let state_started = crate::perf::now();
-    let state = AppState::open_default().await?;
+    let state = AppState::open_default(services).await?;
     crate::semantic::spawn_indexer(state.clone());
     tracing::info!(
         target: "neoism_agent::perf",

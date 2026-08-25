@@ -48,7 +48,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Default agent-server base URL when `NEOISM_AGENT_SERVER` is unset.
 const DEFAULT_AGENT_SERVER: &str = "http://127.0.0.1:4096";
-const AGENT_SERVER_HEALTH_PATH: &str = "/global/health";
+const AGENT_SERVER_HEALTH_PATH: &str = "/v2/health";
 const AGENT_SERVER_READY_TIMEOUT: Duration = Duration::from_millis(1500);
 const AGENT_SERVER_READY_POLL: Duration = Duration::from_millis(50);
 
@@ -81,6 +81,8 @@ pub fn ensure_agent_server_started() {
     if AGENT_SERVER_STARTED.set(()).is_err() {
         return;
     }
+    let services = neoism_agent_neoism_adapter::neoism_services();
+    neoism_agent_server::language_server::configure_services(services.clone());
     // Supervisor rather than a one-shot: when another process (usually
     // the desktop app) already owns the port, `listen` exits with
     // AddrInUse immediately — that's fine while the desktop serves the
@@ -107,7 +109,12 @@ pub fn ensure_agent_server_started() {
                     port,
                     cors: Vec::new(),
                 };
-                if let Err(error) = neoism_agent_server::listen(options).await {
+                if let Err(error) = neoism_agent_server::listen(
+                    options,
+                    services.clone(),
+                )
+                .await
+                {
                     tracing::warn!(
                         target: "neoism_workspace_daemon::agent",
                         %error,

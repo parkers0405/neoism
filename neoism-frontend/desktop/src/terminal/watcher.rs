@@ -16,15 +16,24 @@ fn config_watcher_event_kind(kind: &EventKind) -> bool {
     )
 }
 
-fn config_update_paths_match(config_file_path: &Path, paths: &[PathBuf]) -> bool {
+fn config_update_paths_match(
+    config_dir: &Path,
+    omarchy_current_dir: Option<&Path>,
+    paths: &[PathBuf],
+) -> bool {
     if paths.is_empty() {
         return true;
     }
 
     paths.iter().any(|path| {
-        path == config_file_path
+        path.as_path() == config_dir.join("config.json")
             || path.file_name() == Some(std::ffi::OsStr::new("config.json"))
-            || path.file_name() == Some(std::ffi::OsStr::new("config.toml"))
+            || path.starts_with(config_dir.join("ide-themes"))
+            || path.starts_with(config_dir.join("packs"))
+            || omarchy_current_dir.is_some_and(|dir| {
+                path.as_path() == dir.join("theme.name")
+                    || path.starts_with(dir.join("theme"))
+            })
     })
 }
 
@@ -36,9 +45,9 @@ pub fn configuration_file_updates<
     event_proxy: T,
 ) -> notify::Result<()> {
     let config_dir = path.as_ref().to_path_buf();
-    // JSON is the primary config; the filename filter below also accepts
-    // a legacy config.toml so either format hot-reloads on save.
     let config_file_path = config_dir.join("config.json");
+    let omarchy_current_dir = neoism_backend::config::mashup::omarchy_current_dir()
+        .filter(|path| path.is_dir());
 
     std::thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -56,13 +65,19 @@ pub fn configuration_file_updates<
             }
         };
 
-        // Watch the config directory for config.toml creates/replaces, but
-        // filter events below so app state files in the same directory do not
-        // trigger full config reloads.
-        if let Err(err_message) = watcher.watch(&config_dir, RecursiveMode::NonRecursive)
-        {
+        // Runtime themes and packs live below the config directory, so watch
+        // recursively and filter unrelated app-state events below.
+        if let Err(err_message) = watcher.watch(&config_dir, RecursiveMode::Recursive) {
             tracing::warn!("unable to watch config directory {err_message:?}");
         };
+        if let Some(dir) = omarchy_current_dir.as_deref() {
+            if let Err(err_message) = watcher.watch(dir, RecursiveMode::Recursive) {
+                tracing::warn!(
+                    "unable to watch Omarchy theme directory {}: {err_message:?}",
+                    dir.display()
+                );
+            }
+        }
         tracing::info!(
             target: "neoism::config_watcher",
             config_dir = %config_dir.display(),
@@ -74,7 +89,11 @@ pub fn configuration_file_updates<
             match res {
                 Ok(event) => {
                     if config_watcher_event_kind(&event.kind) {
-                        if !config_update_paths_match(&config_file_path, &event.paths) {
+                        if !config_update_paths_match(
+                            &config_dir,
+                            omarchy_current_dir.as_deref(),
+                            &event.paths,
+                        ) {
                             tracing::debug!(
                                 target: "neoism::config_watcher",
                                 kind = ?event.kind,
@@ -113,17 +132,39 @@ mod tests {
 
     #[test]
     fn config_watcher_ignores_terminal_history_file() {
-        let config_file = PathBuf::from("/tmp/neoism/config.toml");
+        let config_dir = PathBuf::from("/tmp/neoism");
         let paths = vec![PathBuf::from("/tmp/neoism/terminal-history")];
 
-        assert!(!config_update_paths_match(&config_file, &paths));
+        assert!(!config_update_paths_match(&config_dir, None, &paths));
     }
 
     #[test]
-    fn config_watcher_accepts_config_toml_file() {
-        let config_file = PathBuf::from("/tmp/neoism/config.toml");
-        let paths = vec![config_file.clone()];
+    fn config_watcher_accepts_config_json_file() {
+        let config_dir = PathBuf::from("/tmp/neoism");
+        let paths = vec![config_dir.join("config.json")];
 
-        assert!(config_update_paths_match(&config_file, &paths));
+        assert!(config_update_paths_match(&config_dir, None, &paths));
+    }
+
+    #[test]
+    fn config_watcher_accepts_runtime_and_omarchy_themes() {
+        let config_dir = PathBuf::from("/tmp/neoism");
+        let omarchy_dir = PathBuf::from("/tmp/omarchy/current");
+
+        assert!(config_update_paths_match(
+            &config_dir,
+            Some(&omarchy_dir),
+            &[config_dir.join("ide-themes/custom.json")],
+        ));
+        assert!(config_update_paths_match(
+            &config_dir,
+            Some(&omarchy_dir),
+            &[omarchy_dir.join("theme/colors.toml")],
+        ));
+        assert!(config_update_paths_match(
+            &config_dir,
+            Some(&omarchy_dir),
+            &[omarchy_dir.join("theme")],
+        ));
     }
 }

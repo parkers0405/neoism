@@ -19,7 +19,6 @@ mod mcp_runtime;
 mod mcp_transport;
 #[path = "mcp_wire.rs"]
 mod mcp_wire;
-use crate::{mcp_docs, mcp_memory, mcp_notes};
 #[cfg(test)]
 use mcp_oauth::origin;
 pub(crate) use mcp_oauth::{auth_callback, auth_start, authenticate_status};
@@ -33,23 +32,34 @@ use mcp_transport::parse_http_rpc_response;
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
+#[cfg(test)]
 pub(crate) fn status(
     directory: &str,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<BTreeMap<String, McpStatus>> {
-    let config = crate::config::load(directory)?.info.mcp;
+    status_with_state(directory, auth_store, None)
+}
+
+pub(crate) fn status_with_state(
+    directory: &str,
+    auth_store: &McpAuthStore,
+    state: Option<&AppState>,
+) -> anyhow::Result<BTreeMap<String, McpStatus>> {
+    let config = configured_servers(directory, state)?;
     Ok(status_for_config_with_directory(
         Some(directory),
         &config,
         auth_store,
+        state,
     ))
 }
 
-pub(crate) fn catalog(
+pub(crate) fn catalog_with_state(
     directory: &str,
     auth_store: &McpAuthStore,
+    state: Option<&AppState>,
 ) -> anyhow::Result<BTreeMap<String, McpCatalogEntry>> {
-    let config = crate::config::load(directory)?.info.mcp;
+    let config = configured_servers(directory, state)?;
     Ok(config
         .iter()
         .map(|(name, entry)| {
@@ -58,7 +68,7 @@ pub(crate) fn catalog(
                 McpConfig::Remote { oauth, .. } if usable_oauth_config(oauth).is_some()
             );
             let status =
-                status_for_entry_with_directory(Some(directory), name, entry, auth_store);
+                status_for_entry_with_directory(Some(directory), name, entry, auth_store, state);
             let has_credentials =
                 auth_store.get(name).ok().flatten().is_some_and(|entry| {
                     entry.tokens.is_some() || entry.client_info.is_some()
@@ -71,12 +81,18 @@ pub(crate) fn catalog(
                     status,
                     oauth_capable,
                     has_credentials,
-                    config_writable: std::env::var("NEOISM_AGENT_CONFIG_CONTENT")
-                        .is_err(),
+                    config_writable: config_source_writable(directory, name, state),
                 },
             )
         })
         .collect())
+}
+
+fn config_source_writable(directory: &str, name: &str, state: Option<&AppState>) -> bool {
+    let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
+    crate::config::snapshot(&services, directory).ok().map(|snapshot| {
+        snapshot.layers.iter().rev().find(|layer| layer.document.get("mcp").and_then(|mcp| mcp.get(name)).is_some()).map(|layer| layer.writable).unwrap_or(true)
+    }).unwrap_or(false)
 }
 
 #[allow(dead_code)]
@@ -84,20 +100,21 @@ pub(crate) fn status_for_config(
     config: &BTreeMap<String, McpConfig>,
     auth_store: &McpAuthStore,
 ) -> BTreeMap<String, McpStatus> {
-    status_for_config_with_directory(None, config, auth_store)
+    status_for_config_with_directory(None, config, auth_store, None)
 }
 
 fn status_for_config_with_directory(
     directory: Option<&str>,
     config: &BTreeMap<String, McpConfig>,
     auth_store: &McpAuthStore,
+    state: Option<&AppState>,
 ) -> BTreeMap<String, McpStatus> {
     config
         .iter()
         .map(|(name, config)| {
             (
                 name.clone(),
-                status_for_entry_with_directory(directory, name, config, auth_store),
+                status_for_entry_with_directory(directory, name, config, auth_store, state),
             )
         })
         .collect()
@@ -108,7 +125,7 @@ pub(crate) fn status_for_entry(
     config: &McpConfig,
     auth_store: &McpAuthStore,
 ) -> McpStatus {
-    status_for_entry_with_directory(None, name, config, auth_store)
+    status_for_entry_with_directory(None, name, config, auth_store, None)
 }
 
 fn status_for_entry_with_directory(
@@ -116,8 +133,9 @@ fn status_for_entry_with_directory(
     name: &str,
     config: &McpConfig,
     auth_store: &McpAuthStore,
+    state: Option<&AppState>,
 ) -> McpStatus {
-    if name == mcp_notes::NOTES_MCP_ID || name == mcp_memory::MEMORY_MCP_ID {
+    if builtin_service(state, name).is_some() {
         return if is_enabled(config) {
             McpStatus::Connected
         } else {
@@ -178,7 +196,7 @@ pub(crate) async fn connect_with_state(
     auth_store: &McpAuthStore,
     state: Option<AppState>,
 ) -> anyhow::Result<McpStatus> {
-    let config = crate::config::load(directory)?.info.mcp;
+    let config = configured_servers(directory, state.as_ref())?;
     let entry = config
         .get(name)
         .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
@@ -196,7 +214,7 @@ async fn connect_config(
         let _ = runtime_manager().disconnect(directory, name).await;
         return Ok(McpStatus::Disabled);
     }
-    if name == mcp_notes::NOTES_MCP_ID || name == mcp_memory::MEMORY_MCP_ID {
+    if builtin_service(state.as_ref(), name).is_some() {
         return Ok(McpStatus::Connected);
     }
     match config {
@@ -320,14 +338,14 @@ pub(crate) async fn tools_with_state(
     auth_store: &McpAuthStore,
     state: Option<AppState>,
 ) -> anyhow::Result<Vec<McpToolInfo>> {
-    if name == mcp_notes::NOTES_MCP_ID {
-        return Ok(mcp_notes::tools());
-    }
-    if name == mcp_memory::MEMORY_MCP_ID {
-        return Ok(mcp_memory::tools());
-    }
-    if name == mcp_docs::DOCS_MCP_ID {
-        return Ok(mcp_docs::tools());
+    if let Some(service) = enabled_builtin_service(directory, name, state.as_ref())? {
+        return Ok(service.tools().into_iter().map(|tool| McpToolInfo {
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.input_schema,
+            client: name.to_string(),
+            annotations: tool.annotations,
+        }).collect());
     }
     ensure_connected_with_state(directory, name, auth_store, state).await?;
     runtime_manager()
@@ -350,14 +368,14 @@ pub(crate) async fn resources_with_state(
     auth_store: &McpAuthStore,
     state: Option<AppState>,
 ) -> anyhow::Result<Vec<McpResource>> {
-    if name == mcp_notes::NOTES_MCP_ID {
-        return Ok(Vec::new());
-    }
-    if name == mcp_memory::MEMORY_MCP_ID {
-        return Ok(Vec::new());
-    }
-    if name == mcp_docs::DOCS_MCP_ID {
-        return Ok(Vec::new());
+    if let Some(service) = enabled_builtin_service(directory, name, state.as_ref())? {
+        return Ok(service.resources().into_iter().map(|resource| McpResource {
+            name: resource.name,
+            uri: resource.uri,
+            description: resource.description,
+            mime_type: resource.mime_type,
+            client: name.to_string(),
+        }).collect());
     }
     ensure_connected_with_state(directory, name, auth_store, state).await?;
     runtime_manager()
@@ -380,14 +398,17 @@ pub(crate) async fn prompts_with_state(
     auth_store: &McpAuthStore,
     state: Option<AppState>,
 ) -> anyhow::Result<Vec<McpPromptInfo>> {
-    if name == mcp_notes::NOTES_MCP_ID {
-        return Ok(Vec::new());
-    }
-    if name == mcp_memory::MEMORY_MCP_ID {
-        return Ok(Vec::new());
-    }
-    if name == mcp_docs::DOCS_MCP_ID {
-        return Ok(Vec::new());
+    if let Some(service) = enabled_builtin_service(directory, name, state.as_ref())? {
+        return Ok(service.prompts().into_iter().map(|prompt| McpPromptInfo {
+            name: prompt.name,
+            description: prompt.description,
+            arguments: prompt.arguments.into_iter().map(|argument| neoism_agent_core::McpPromptArgument {
+                name: argument.name,
+                description: argument.description,
+                required: argument.required,
+            }).collect(),
+            client: name.to_string(),
+        }).collect());
     }
     ensure_connected_with_state(directory, name, auth_store, state).await?;
     runtime_manager()
@@ -414,20 +435,16 @@ pub(crate) async fn call_tool_with_state(
     auth_store: &McpAuthStore,
     state: Option<AppState>,
 ) -> anyhow::Result<McpToolCallResult> {
-    if client == mcp_notes::NOTES_MCP_ID {
-        return mcp_notes::call_tool(directory, tool, arguments);
-    }
-    if client == mcp_memory::MEMORY_MCP_ID {
-        return mcp_memory::call_tool_with_app_state(
-            state.as_ref(),
-            directory,
-            tool,
-            arguments,
-        )
-        .await;
-    }
-    if client == mcp_docs::DOCS_MCP_ID {
-        return mcp_docs::call_tool(tool, arguments);
+    if let Some(service) = enabled_builtin_service(directory, client, state.as_ref())? {
+        let result = service.call_tool_async(std::path::Path::new(directory), tool, arguments).await?;
+        return Ok(McpToolCallResult {
+            content: result.content.into_iter().map(|content| match content {
+                neoism_agent_service_api::BuiltinMcpContent::Text { text, annotations } => McpContent::Text { text, annotations },
+                neoism_agent_service_api::BuiltinMcpContent::Resource { resource, annotations } => McpContent::Resource { resource, annotations },
+                neoism_agent_service_api::BuiltinMcpContent::ResourceLink { uri, name, description, mime_type, annotations } => McpContent::ResourceLink { uri, name, description, mime_type, annotations },
+            }).collect(),
+            is_error: result.is_error,
+        });
     }
     ensure_connected_with_state(directory, client, auth_store, state.clone()).await?;
     let retry_arguments = arguments.clone();
@@ -436,7 +453,7 @@ pub(crate) async fn call_tool_with_state(
         .await;
     if let Err(error) = &result {
         if refresh_remote_credentials_after_auth_error(
-            directory, client, auth_store, error,
+            directory, client, auth_store, error, state.as_ref(),
         )
         .await?
         {
@@ -486,7 +503,7 @@ async fn ensure_connected_with_state(
     auth_store: &McpAuthStore,
     state: Option<AppState>,
 ) -> anyhow::Result<()> {
-    let config = crate::config::load(directory)?.info.mcp;
+    let config = configured_servers(directory, state.as_ref())?;
     let Some(entry) = config.get(name) else {
         let _ = runtime_manager().disconnect(directory, name).await;
         return Err(anyhow!("MCP server {name} is not configured"));
@@ -501,6 +518,49 @@ async fn ensure_connected_with_state(
             Err(anyhow!(error))
         }
     }
+}
+
+pub(crate) fn configured_servers(
+    directory: &str,
+    state: Option<&AppState>,
+) -> anyhow::Result<BTreeMap<String, McpConfig>> {
+    let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
+    let mut info = crate::config::load(&services, directory)?.info;
+    if let Some(state) = state {
+        crate::config::inject_builtin_mcp(&mut info, state.services());
+    }
+    Ok(info.mcp)
+}
+
+fn builtin_service<'a>(
+    state: Option<&'a AppState>,
+    id: &str,
+) -> Option<&'a std::sync::Arc<dyn neoism_agent_service_api::BuiltinMcpService>> {
+    state?.services().builtin_mcp(id)
+}
+
+fn enabled_builtin_service<'a>(
+    directory: &str,
+    id: &str,
+    state: Option<&'a AppState>,
+) -> anyhow::Result<Option<&'a std::sync::Arc<dyn neoism_agent_service_api::BuiltinMcpService>>> {
+    let Some(service) = builtin_service(state, id) else { return Ok(None); };
+    let config = configured_servers(directory, state)?;
+    let entry = config.get(id).ok_or_else(|| anyhow!("MCP server {id} is not configured"))?;
+    if !is_enabled(entry) {
+        return Err(anyhow!("MCP server {id} is disabled"));
+    }
+    Ok(Some(service))
+}
+
+pub(crate) fn builtin_enabled(directory: &str, id: &str, state: &AppState) -> bool {
+    if builtin_service(Some(state), id).is_none() {
+        return false;
+    }
+    configured_servers(directory, Some(state))
+        .ok()
+        .and_then(|config| config.get(id).cloned())
+        .is_some_and(|entry| is_enabled(&entry))
 }
 
 pub(crate) async fn reconcile_configured_servers(
@@ -522,11 +582,13 @@ async fn refresh_remote_credentials_after_auth_error(
     name: &str,
     auth_store: &McpAuthStore,
     error: &anyhow::Error,
+    state: Option<&AppState>,
 ) -> anyhow::Result<bool> {
     if !looks_like_http_auth_error(error) {
         return Ok(false);
     }
-    let config = crate::config::load(directory)?.info.mcp;
+    let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
+    let config = crate::config::load(&services, directory)?.info.mcp;
     let Some(McpConfig::Remote { url, oauth, .. }) = config.get(name) else {
         return Ok(false);
     };

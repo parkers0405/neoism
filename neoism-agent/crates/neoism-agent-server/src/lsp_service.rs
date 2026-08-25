@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::{Duration, Instant},
 };
 
@@ -25,8 +25,8 @@ use super::{
     TOUCH_DIAGNOSTIC_TIMEOUT,
 };
 
-#[derive(Default)]
 pub(super) struct LspService {
+    services: RwLock<neoism_agent_service_api::AgentServices>,
     clients: Mutex<HashMap<LspClientKey, Arc<Mutex<PersistentLspClient>>>>,
     /// Per-client initialization gates. Spawning and initializing happens
     /// outside `clients`, so unrelated servers never block each other, while
@@ -39,6 +39,20 @@ pub(super) struct LspService {
     /// Latest versioned publishDiagnostics payload accepted per document/server.
     diagnostic_versions: Mutex<HashMap<DiagnosticOwnerKey, i32>>,
     broken: Mutex<HashMap<LspClientKey, BrokenClientState>>,
+}
+
+impl Default for LspService {
+    fn default() -> Self {
+        Self {
+            services: RwLock::new(crate::standard_services()),
+            clients: Mutex::new(HashMap::new()),
+            initialization_gates: Mutex::new(HashMap::new()),
+            diagnostics: Mutex::new(HashMap::new()),
+            document_versions: Mutex::new(HashMap::new()),
+            diagnostic_versions: Mutex::new(HashMap::new()),
+            broken: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 const LSP_RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
@@ -138,6 +152,20 @@ pub(super) fn service() -> &'static LspService {
 }
 
 impl LspService {
+    pub(super) fn configure_services(
+        &self,
+        services: neoism_agent_service_api::AgentServices,
+    ) {
+        *self.services.write().expect("LSP services lock poisoned") = services;
+    }
+
+    pub(super) fn services(&self) -> neoism_agent_service_api::AgentServices {
+        self.services
+            .read()
+            .expect("LSP services lock poisoned")
+            .clone()
+    }
+
     /// Language ids that currently have a live (spawned + initialized) client
     /// under `root`. Lets the status pill show a server as "attached" rather
     /// than merely "available" once the engine has actually connected it.

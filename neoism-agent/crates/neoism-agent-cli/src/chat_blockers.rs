@@ -75,7 +75,7 @@ pub(crate) async fn submit_permission_reply(
 ) -> anyhow::Result<()> {
     ensure_success_response(
         client
-            .post(format!("{server}/permission/{id}/reply"))
+            .post(format!("{server}/v2/interactions/permissions/{id}/reply"))
             .json(&json!({ "reply": reply }))
             .send()
             .await?,
@@ -101,7 +101,7 @@ pub(crate) async fn submit_question_answer(
     };
     ensure_success_response(
         client
-            .post(format!("{server}/question/{id}/reply"))
+            .post(format!("{server}/v2/interactions/questions/{id}/reply"))
             .json(&json!({ "answers": answers }))
             .send()
             .await?,
@@ -117,7 +117,7 @@ pub(crate) async fn submit_question_reject(
 ) -> anyhow::Result<()> {
     ensure_success_response(
         client
-            .post(format!("{server}/question/{id}/reject"))
+            .post(format!("{server}/v2/interactions/questions/{id}/reject"))
             .send()
             .await?,
     )

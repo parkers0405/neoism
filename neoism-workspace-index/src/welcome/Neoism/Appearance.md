@@ -22,6 +22,22 @@ Neoism renders the terminal, editor, workspace chrome, panels, and overlays thro
 
 Open the hamburger menu and choose **Themes** to browse installed themes. UI changes are written back to the matching configuration domain.
 
+### Follow Omarchy
+
+On Omarchy, Neoism exposes an `omarchy` theme automatically from the active `colors.toml`. Select **Omarchy** in the theme picker once, or set:
+
+```jsonc
+{
+  "appearance": {
+    "theme": "omarchy"
+  }
+}
+```
+
+Neoism maps Omarchy's semantic background, foreground, accent, ANSI, and syntax colors across the terminal, editor, and workspace chrome. On Linux desktop it reads `$XDG_STATE_HOME/omarchy/current/theme/colors.toml`, falling back to `~/.local/state/omarchy/current/theme/colors.toml`.
+
+Future `omarchy-theme-set` changes are watched and applied live. Omarchy replaces its active theme atomically; Neoism follows that replacement without a generated Neoism theme, symlink, restart, or shell hook. The integration is currently native-desktop only because web/Wasm clients cannot read host theme files.
+
 ## Fonts and symbols
 
 Neoism supports a primary font plus fallback/symbol handling used across terminal and chrome. Choose a monospace font with the glyph coverage your shell, status line, and code require. Font size can be changed with platform zoom shortcuts.

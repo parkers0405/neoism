@@ -17,8 +17,8 @@ use crate::tool::ToolExecutionResult;
 pub(crate) const PLUGIN_ID: &str = "dev.neoism.subagents";
 pub(crate) const TOOL_IDS: &[&str] = &["task", "task_result", "stop_task"];
 
-pub(crate) fn enabled(directory: &str) -> bool {
-    crate::plugins::enabled(directory, PLUGIN_ID)
+pub(crate) fn enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> bool {
+    crate::plugins::enabled(services, directory, PLUGIN_ID)
 }
 
 #[cfg(test)]
@@ -40,8 +40,8 @@ fn enabled_in_config(config: &neoism_agent_core::NeoismConfig) -> bool {
     enabled
 }
 
-fn require_enabled(directory: &str) -> Result<(), String> {
-    enabled(directory)
+fn require_enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Result<(), String> {
+    enabled(services, directory)
         .then_some(())
         .ok_or_else(|| format!("plugin {PLUGIN_ID} is disabled for this workspace"))
 }
@@ -90,7 +90,7 @@ pub(crate) async fn start_task_tool(
     let parent = parent_session(state, session_id.as_str())
         .await
         .map_err(|error| error.to_string())?;
-    require_enabled(&parent.directory)?;
+    require_enabled(state.services(), &parent.directory)?;
     let task_id = string_arg(&input, "task_id");
     let continuing = task_id.is_some();
     if !continuing {
@@ -259,7 +259,7 @@ pub(crate) async fn list_tasks(
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<SubagentTaskInfo>>, ApiError> {
     let parent = parent_session(&state, &session_id).await?;
-    require_enabled(&parent.directory).map_err(ApiError::not_found)?;
+    require_enabled(state.services(), &parent.directory).map_err(ApiError::not_found)?;
     let mut children = crate::tool_runtime::descendant_sessions(&state, parent.id.as_str())
         .await
         .map_err(ApiError::internal)?;
@@ -277,7 +277,7 @@ pub(crate) async fn stop_tasks(
     Json(request): Json<StopSubagentsRequest>,
 ) -> Result<Json<StopSubagentsResult>, ApiError> {
     let parent = parent_session(&state, &session_id).await?;
-    require_enabled(&parent.directory).map_err(ApiError::not_found)?;
+    require_enabled(state.services(), &parent.directory).map_err(ApiError::not_found)?;
     let result = stop(&state, &parent, request.task_id.as_deref())
         .await
         .map_err(ApiError::bad_request)?;
@@ -292,7 +292,7 @@ pub(crate) async fn task_result_tool(
     let parent = parent_session(state, session_id.as_str())
         .await
         .map_err(|error| error.to_string())?;
-    require_enabled(&parent.directory)?;
+    require_enabled(state.services(), &parent.directory)?;
     if let Some(task_id) = input.get("task_id").and_then(Value::as_str) {
         let child = child_session(state, task_id).await?;
         crate::tool_runtime::ensure_child_task_belongs_to_parent(state, &parent, &child).await?;
@@ -355,7 +355,7 @@ pub(crate) async fn stop_task_tool(
     let parent = parent_session(state, session_id.as_str())
         .await
         .map_err(|error| error.to_string())?;
-    require_enabled(&parent.directory)?;
+    require_enabled(state.services(), &parent.directory)?;
     let task_id = input.get("task_id").and_then(Value::as_str);
     let result = stop(state, &parent, task_id).await?;
     let count = result.stopped.len();

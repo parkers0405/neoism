@@ -1,27 +1,4 @@
 use neoism_agent_core::UserModel;
-use serde_json::Value;
-
-pub(crate) fn model_from_body(body: &Value) -> Option<UserModel> {
-    let mut provider_id = body
-        .get("providerID")
-        .or_else(|| body.get("providerId"))
-        .and_then(Value::as_str)?
-        .to_string();
-    let model_id = body
-        .get("modelID")
-        .or_else(|| body.get("modelId"))
-        .and_then(Value::as_str)?;
-    if provider_id == "neoism" && model_id != "stub" {
-        provider_id = std::env::var("NEOISM_AGENT_PROVIDER")
-            .unwrap_or_else(|_| "neoism".to_string());
-    }
-    Some(UserModel {
-        provider_id,
-        model_id: model_id.to_string(),
-        variant: None,
-    })
-}
-
 pub(crate) fn user_model_from_model_ref(
     model: &neoism_agent_core::ModelRef,
 ) -> UserModel {

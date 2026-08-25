@@ -4,7 +4,7 @@ use neoism_agent_core::{
     ProviderGenerationRequest, ProviderMessage, ProviderRole, ProviderStreamEvent,
     SessionInfo, TextPart, TokenUsage, ToolState, UserMessage,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
@@ -15,7 +15,7 @@ use crate::model_selection::{default_user_model, user_model_from_model_ref};
 use crate::session_loop::wait_for_cancellation;
 use crate::state::{AppState, SessionRun};
 use crate::{
-    ensure_session, instruction, message_model, now_millis, use_apply_patch_for_model,
+    ensure_session, message_model, now_millis, use_apply_patch_for_model,
 };
 
 const DEFAULT_COMPACTION_TAIL_TURNS: usize = 2;
@@ -88,7 +88,7 @@ async fn compact_session_context_inner(
     reason: &str,
 ) -> Result<SessionInfo, ApiError> {
     let started = now_millis();
-    // Register a cancellable run so `/session/{id}/abort` (ESC in the GUI) can
+    // Register a cancellable run so the session abort endpoint can
     // interrupt a long compaction. When compaction fires from inside an active
     // agent loop (auto-compaction) a run already exists — reuse its cancel flag
     // so aborting the run also stops the summary. Otherwise (manual `/compact`)
@@ -224,7 +224,7 @@ async fn run_compaction(
     {
         Some(summary) => summary,
         None => {
-            // Distinguish a user-triggered abort (ESC / `/session/abort`) from a
+            // Distinguish a user-triggered abort from a
             // genuine model failure so the GUI shows the right thing and we
             // don't leave the session stuck in the "Compacting" state.
             let aborted = cancel.load(Ordering::SeqCst);
@@ -465,7 +465,7 @@ async fn generate_model_compaction_summary(
         model_id: model.model_id.clone(),
         session_id: Some(session_id.to_string()),
         variant: model.variant.clone(),
-        text_verbosity: crate::session_prompt::configured_text_verbosity(Some(
+        text_verbosity: crate::session_prompt::configured_text_verbosity(state.services(), Some(
             &info.directory,
         )),
         api: metadata.api,
@@ -482,7 +482,7 @@ async fn generate_model_compaction_summary(
     let mut events = stream.events;
     let mut raw = String::new();
     loop {
-        // A user abort (ESC / `/session/abort`) sets this flag; stop streaming
+        // A user abort sets this flag; stop streaming
         // immediately and discard the partial summary so we don't commit a
         // half-finished compaction.
         if cancel.load(Ordering::SeqCst) {
@@ -1118,9 +1118,6 @@ fn session_summary_message(messages: &[MessageWithParts]) -> Option<ProviderMess
 /// it; only the injection stops. Blocked goals stay injected so the model can
 /// re-evaluate whether the user's next message unblocks it.
 fn goal_system_message(info: &SessionInfo) -> Option<ProviderMessage> {
-    if !crate::plugins::enabled(&info.directory, "dev.neoism.goals") {
-        return None;
-    }
     let goal = info.goal()?;
     let text = goal.text.trim();
     if text.is_empty() {
@@ -1250,22 +1247,25 @@ fn workspace_system_message(info: &SessionInfo, model_id: &str) -> ProviderMessa
         "Use edit for targeted replacements and write only for brand-new files or intentional full replacements."
     };
     let mut content = format!(
-        "You are Neoism, an interactive coding agent running in a real workspace.\n\
+        "You are an interactive coding agent running in a real workspace.\n\
          Workspace directory: {}\n\
-         You can inspect and modify this workspace with tools. grep and glob use the FFF engine for content and fuzzy path search. Search before reading large files, and issue independent searches or reads together so they execute in parallel. read also lists directories. Use notes for Neoism Markdown note graph operations. \
+         You can inspect and modify this workspace with tools. grep searches file contents and glob finds files with fuzzy path and query constraints. Search before reading large files, and issue independent searches or reads together so they execute in parallel. read also lists directories. \
          {editing_tools} Use bash for project commands, and ask before risky or unclear actions. \
          Keep CLI responses concise and directly useful.",
         info.directory
     );
-    let instructions = instruction::system(&info.directory);
-    if !instructions.is_empty() {
-        content.push_str("\n\n");
-        content.push_str(&instructions.join("\n\n"));
-    }
-    let memory = crate::mcp_memory::system_memory_indexes(&info.directory);
-    if !memory.is_empty() {
-        content.push_str("\n\n");
-        content.push_str(&memory.join("\n\n"));
+    if let Some(epoch) = crate::context_epoch::from_session(info) {
+        if let Some(instructions) = epoch.snapshot.sources.get("instructions").and_then(Value::as_array) {
+            let instructions = instructions.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+            if !instructions.is_empty() { content.push_str("\n\n"); content.push_str(&instructions.join("\n\n")); }
+        }
+        for (id, value) in &epoch.snapshot.sources {
+            if !id.starts_with("service:") { continue; }
+            if let Some(fragment) = value.as_str().filter(|value| !value.is_empty()) {
+                content.push_str("\n\n");
+                content.push_str(fragment);
+            }
+        }
     }
     ProviderMessage::text(ProviderRole::System, content)
 }

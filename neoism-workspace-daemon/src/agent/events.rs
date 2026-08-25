@@ -89,9 +89,6 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
 }
 
 fn normalize_v2_event(event: Value) -> Value {
-    if event.get("properties").is_some() {
-        return event;
-    }
     json!({
         "type": event.get("type").cloned().unwrap_or(Value::Null),
         "properties": event.get("data").cloned().unwrap_or(Value::Null),

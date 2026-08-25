@@ -70,12 +70,8 @@ pub(crate) fn default_cache_dir() -> String {
     }
 }
 
-/// Windows has no XDG split: everything nests under the same
-/// `%USERPROFILE%\AppData\Local\neoism` root the terminal resolves via
-/// `config_dir_path()` (neoism-backend/src/config/mod.rs — identical
-/// construction, so terminal and agent share one config.json), with the
-/// state/cache trees as subdirectories standing in for the separate XDG
-/// roots used on unix.
+/// Windows state/cache trees use the application-local data root in place of
+/// Unix's separate XDG state and cache roots.
 #[cfg(windows)]
 fn windows_neoism_dir(subdir: &str, fallback: &str) -> String {
     let Some(home) = dirs::home_dir() else {
@@ -86,33 +82,6 @@ fn windows_neoism_dir(subdir: &str, fallback: &str) -> String {
         dir = dir.join(subdir);
     }
     dir.display().to_string()
-}
-
-pub(crate) fn default_config_dir() -> String {
-    // Shares `~/.config/neoism` with the app config — the agent reads
-    // its keys from the same `config.json` the terminal reads (each
-    // side ignores the other's keys; `NeoismConfig` has a flatten
-    // catch-all and the app's serde skips unknown fields). Skills live
-    // at `~/.config/neoism/skills`, markdown agent/mode/command
-    // definitions under `~/.config/neoism/{agent,mode,command}/*.md`.
-    // `NEOISM_AGENT_CONFIG_DIR` overrides everything — deployments and
-    // tests use it to pin (or isolate) the global config root.
-    if let Ok(dir) = std::env::var("NEOISM_AGENT_CONFIG_DIR") {
-        if !dir.trim().is_empty() {
-            return dir;
-        }
-    }
-    #[cfg(windows)]
-    {
-        return windows_neoism_dir("", ".neoism/config");
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var("XDG_CONFIG_HOME")
-            .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.config")))
-            .map(|base| format!("{base}/neoism"))
-            .unwrap_or_else(|_| ".neoism/config".to_string())
-    }
 }
 
 pub(crate) fn slug() -> String {

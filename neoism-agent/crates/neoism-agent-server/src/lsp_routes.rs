@@ -1,4 +1,4 @@
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use serde::Deserialize;
@@ -36,11 +36,12 @@ pub(crate) struct LspTouchRequest {
 }
 
 pub(crate) async fn lsp_status(
+    State(state): State<crate::state::AppState>,
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Json<Vec<lsp::LspStatus>> {
     let directory = resolve_directory(query.directory, &headers);
-    Json(lsp::status(directory))
+    Json(lsp::status_with_services(state.services(), directory))
 }
 
 pub(crate) async fn lsp_hover(

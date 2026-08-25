@@ -23,11 +23,11 @@ pub(crate) async fn configured_mcp_tools_with_state(
     directory: &str,
     state: Option<AppState>,
 ) -> Vec<McpToolInfo> {
-    if !crate::plugins::enabled(directory, "dev.neoism.mcp") {
+    let services = state.as_ref().map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
+    if !crate::plugins::enabled(&services, directory, "dev.neoism.mcp") {
         return Vec::new();
     }
-    let config = config::load(directory)
-        .map(|loaded| loaded.info.mcp)
+    let config = mcp::configured_servers(directory, state.as_ref())
         .unwrap_or_default();
     mcp::reconcile_configured_servers(directory, &config).await;
     let names = config.keys().cloned().collect::<Vec<_>>();
@@ -55,15 +55,25 @@ pub(crate) async fn available_tools_for_directory(
     let runtime = state
         .inner
         .workspace_runtimes
-        .acquire(directory, &state.inner.plugins)
+        .acquire(directory, &state.inner.plugins, state.services())
         .await;
     let directory = runtime.root.to_string_lossy();
     let mut tools = tool::list();
+    if state.services().notes.is_none() {
+        tools.retain(|tool| tool.id != "notes");
+    } else if let Some(notes) = state.services().notes.as_ref() {
+        if let Some(tool) = tools.iter_mut().find(|tool| tool.id == "notes") {
+            tool.description = notes.tool_description();
+            if let Some(operation) = tool.parameters.pointer_mut("/properties/operation") {
+                operation["enum"] = json!(["create", "list", "read", "write", "search", "tasks", "taskToggle"]);
+            }
+        }
+    }
     tools.retain(|tool| {
         crate::plugins::builtin_tool_plugin(&tool.id)
-            .is_none_or(|plugin_id| crate::plugins::enabled(&directory, plugin_id))
+            .is_none_or(|plugin_id| crate::plugins::enabled(state.services(), &directory, plugin_id))
     });
-    if !crate::plugins::subagents::enabled(&directory) {
+    if !crate::plugins::subagents::enabled(state.services(), &directory) {
         tools.retain(|tool| !crate::plugins::subagents::TOOL_IDS.contains(&tool.id.as_str()));
     }
     let snapshot = state.inner.plugin_host.snapshot();
@@ -71,7 +81,7 @@ pub(crate) async fn available_tools_for_directory(
         let Some(contribution) = snapshot.contributions.get(&format!("Tool:{id}")) else {
             continue;
         };
-        if !crate::plugins::enabled(&directory, &contribution.plugin_id) {
+        if !crate::plugins::enabled(state.services(), &directory, &contribution.plugin_id) {
             continue;
         }
         let definition = tool.definition();
@@ -82,7 +92,7 @@ pub(crate) async fn available_tools_for_directory(
             output_schema: Some(definition.output_schema),
         });
     }
-    tools.extend(crate::custom_tool::list(&directory));
+    tools.extend(crate::custom_tool::list(state.services(), &directory));
     tools.extend(
         configured_mcp_tools_with_state(&directory, Some(state.clone()))
             .await
@@ -106,8 +116,10 @@ pub(crate) async fn provider_tools_for_agent(
     permissions: &[PermissionRule],
     model_id: &str,
 ) -> Result<Vec<ToolListItem>, ApiError> {
-    tool::warm_search(std::path::Path::new(directory));
     let tools = available_tools_for_directory(state, directory).await?;
+    if tools.iter().any(|tool| matches!(tool.id.as_str(), "grep" | "glob")) {
+        tool::warm_search(state.services(), std::path::Path::new(directory));
+    }
     let ids = tools.iter().map(|tool| tool.id.clone()).collect::<Vec<_>>();
     let disabled = permission::disabled(&ids, permissions);
     let mut visible = tools
@@ -407,7 +419,8 @@ pub(crate) async fn execute_mcp_gateway(
                     .split_once('.')
                     .map(|(namespace, _)| namespace.to_string())
                     .or_else(|| mcp_path(path).map(|(namespace, _)| namespace));
-                if let Some(name) = config::load(directory).ok().and_then(|loaded| {
+                let services = state.as_ref().map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
+                if let Some(name) = config::load(&services, directory).ok().and_then(|loaded| {
                     loaded
                         .info
                         .mcp
@@ -721,18 +734,18 @@ mod tests {
     #[test]
     fn gateway_namespace_filter_accepts_advertised_sanitized_name() {
         let tools = vec![
-            mcp_tool("neoism-docs", "docs.search", "Search product documentation"),
+            mcp_tool("product-help", "docs.search", "Search product documentation"),
             mcp_tool("github", "search", "Search repositories"),
         ];
         let result = mcp_search_result(
             &tools,
             &json!({
-                "namespace": "neoism_docs",
+                "namespace": "product_help",
                 "query": "docs search read MCP server configuration skills SKILL.md"
             }),
         );
         let payload: Value = serde_json::from_str(&result.output).unwrap();
-        assert_eq!(payload["items"][0]["path"], "neoism_docs.docs_search");
+        assert_eq!(payload["items"][0]["path"], "product_help.docs_search");
         assert_eq!(payload["items"].as_array().unwrap().len(), 1);
     }
 }

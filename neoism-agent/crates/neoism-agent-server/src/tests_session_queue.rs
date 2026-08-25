@@ -31,7 +31,7 @@ async fn session_abort_cancels_active_run() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{session_id}/abort"),
+                &format!("/v2/sessions/{session_id}/abort"),
                 None,
             ))
             .await
@@ -138,7 +138,7 @@ async fn session_abort_cancels_running_bash_tool() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{session_id}/abort"),
+                &format!("/v2/sessions/{session_id}/abort"),
                 None,
             ))
             .await
@@ -172,7 +172,7 @@ async fn session_abort_cancels_running_bash_tool() {
 #[tokio::test]
 async fn prompt_async_preserves_the_sender_author_end_to_end() {
     // A guest sends a prompt carrying its presence-name `author`. The WHOLE
-    // server chain — the real `/session/{id}/prompt_async` HTTP route →
+    // server chain — the canonical asynchronous prompt route →
     // enqueue (serde round-trip through the store) → drain → append_prompt →
     // persisted user message — must carry it, so a remote viewer renders the
     // true sender instead of "You". This is the headless proof of the server
@@ -192,7 +192,7 @@ async fn prompt_async_preserves_the_sender_author_end_to_end() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 None,
             ))
             .await
@@ -204,7 +204,7 @@ async fn prompt_async_preserves_the_sender_author_end_to_end() {
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/session/{}/prompt_async", session.id),
+            &format!("/v2/sessions/{}/prompt-async", session.id),
             Some(json!({
                 "noReply": true,
                 "author": "piss-desktop",
@@ -266,7 +266,7 @@ async fn prompt_async_queues_while_session_is_running() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -289,7 +289,7 @@ async fn prompt_async_queues_while_session_is_running() {
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/session/{}/prompt_async", session.id),
+            &format!("/v2/sessions/{}/prompt-async", session.id),
             Some(json!({
                 "noReply": true,
                 "parts": [{ "type": "text", "text": "queued turn" }]
@@ -307,7 +307,7 @@ async fn prompt_async_queues_while_session_is_running() {
     );
     let statuses: HashMap<String, SessionStatus> = response_json(
         app.clone()
-            .oneshot(request(Method::GET, "/session/status", None))
+            .oneshot(request(Method::GET, "/v2/sessions/status", None))
             .await
             .unwrap(),
     )
@@ -390,7 +390,7 @@ async fn queued_prompt_can_be_appended_to_active_run() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -410,7 +410,7 @@ async fn queued_prompt_can_be_appended_to_active_run() {
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/api/session/{}/prompt", session.id),
+            &format!("/v2/sessions/{}/prompt", session.id),
             Some(json!({
                 "delivery": "steer",
                 "noReply": true,
@@ -492,7 +492,7 @@ async fn session_queue_routes_inspect_pop_and_clear() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -513,7 +513,7 @@ async fn session_queue_routes_inspect_pop_and_clear() {
             .clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/prompt_async", session.id),
+                &format!("/v2/sessions/{}/prompt-async", session.id),
                 Some(json!({
                     "noReply": true,
                     "parts": [{ "type": "text", "text": text }]
@@ -528,7 +528,7 @@ async fn session_queue_routes_inspect_pop_and_clear() {
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/queue", session.id),
+                &format!("/v2/sessions/{}/queue", session.id),
                 None,
             ))
             .await
@@ -543,7 +543,7 @@ async fn session_queue_routes_inspect_pop_and_clear() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/queue/pop", session.id),
+                &format!("/v2/sessions/{}/queue/pop", session.id),
                 None,
             ))
             .await
@@ -558,7 +558,7 @@ async fn session_queue_routes_inspect_pop_and_clear() {
         app.clone()
             .oneshot(request(
                 Method::DELETE,
-                &format!("/session/{}/queue", session.id),
+                &format!("/v2/sessions/{}/queue", session.id),
                 None,
             ))
             .await
@@ -618,7 +618,7 @@ async fn prompt_queue_survives_server_restart() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -680,7 +680,7 @@ async fn prompt_queue_survives_server_restart() {
 }
 
 #[tokio::test]
-async fn prompt_returns_conflict_while_session_is_running() {
+async fn prompt_steers_while_session_is_running() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-busy-{}",
         Id::ascending(IdKind::Event)
@@ -696,7 +696,7 @@ async fn prompt_returns_conflict_while_session_is_running() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -716,7 +716,7 @@ async fn prompt_returns_conflict_while_session_is_running() {
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/session/{}/message", session.id),
+            &format!("/v2/sessions/{}/prompt", session.id),
             Some(json!({
                 "parts": [{ "type": "text", "text": "should conflict" }]
             })),
@@ -724,19 +724,19 @@ async fn prompt_returns_conflict_while_session_is_running() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let messages: Vec<MessageWithParts> = response_json(
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let messages: Page<MessageWithParts> = response_json(
         app.clone()
             .oneshot(request(
                 Method::GET,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/messages", session.id),
                 None,
             ))
             .await
             .unwrap(),
     )
     .await;
-    assert!(messages.is_empty());
+    assert!(messages.items.is_empty());
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
@@ -759,7 +759,7 @@ async fn prompt_message_ids_are_idempotent_and_conflict_on_reuse() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -778,13 +778,31 @@ async fn prompt_message_ids_are_idempotent_and_conflict_on_reuse() {
             .clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session/{}/message", session.id),
+                &format!("/v2/sessions/{}/prompt", session.id),
                 Some(body.clone()),
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state
+                .inner
+                .store
+                .list_messages(session.id.as_str())
+                .await
+                .unwrap()
+                .len()
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(
         state
             .inner
@@ -799,7 +817,7 @@ async fn prompt_message_ids_are_idempotent_and_conflict_on_reuse() {
     let conflict = app
         .oneshot(request(
             Method::POST,
-            &format!("/session/{}/message", session.id),
+            &format!("/v2/sessions/{}/prompt", session.id),
             Some(json!({
                 "messageId": message_id,
                 "noReply": true,
@@ -836,7 +854,7 @@ async fn run_conflict_mid_drain_requeues_prompt_instead_of_dropping_it() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -974,7 +992,7 @@ async fn held_subtask_completion_delivers_when_parent_turn_ends() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -1095,7 +1113,7 @@ async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await
@@ -1225,7 +1243,7 @@ async fn queued_child_prompt_supersedes_older_wrapper_and_notifies_at_final_idle
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/session?directory={}", root.to_string_lossy()),
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
                 Some(json!({})),
             ))
             .await

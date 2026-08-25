@@ -1,7 +1,7 @@
 //! Portable agent-session transfer between hosts (Wave 3C of "work from
 //! anywhere").
 //!
-//! The agent-server persists each session as a handful of durable SQLite rows
+//! The agent-server persists each session as a handful of durable libSQL rows
 //! (see [`crate::state::SessionStore`]):
 //!
 //! * one `sessions` row — the [`SessionInfo`] (title, model, goal, the

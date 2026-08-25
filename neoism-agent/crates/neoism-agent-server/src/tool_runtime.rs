@@ -98,7 +98,9 @@ async fn execute_tool_call_with_env_and_cancel(
         log_tool_perf("mcp", directory, tool_name, input_bytes, &result, started);
         return Ok(result);
     }
+    let services = state.map(|state| state.services().clone()).unwrap_or_else(crate::standard_services);
     if let Some(result) = crate::custom_tool::execute(
+        &services,
         directory,
         tool_name,
         input.clone(),
@@ -120,7 +122,7 @@ async fn execute_tool_call_with_env_and_cancel(
         );
         return Ok(result);
     }
-    let formatter = crate::config::load(directory)
+    let formatter = crate::config::load(&services, directory)
         .ok()
         .and_then(|loaded| crate::config::formatter_value(&loaded.info));
     let result = tool::execute(
@@ -385,7 +387,7 @@ async fn execute_stateful_tool_call(
                 .await
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("session {session_id} not found"))?;
-            if !crate::plugins::enabled(&info.directory, "dev.neoism.goals") {
+            if !crate::plugins::enabled(state.services(), &info.directory, "dev.neoism.goals") {
                 return Err("Goal plugin is disabled for the workspace".to_string());
             }
             let Some(mut goal) = info.goal() else {
@@ -522,8 +524,8 @@ pub(crate) async fn session_subtask_depth(state: &AppState, session: &SessionInf
     depth
 }
 
-fn dangerously_skip_permissions_enabled(directory: &str) -> bool {
-    crate::config::load(directory)
+fn dangerously_skip_permissions_enabled(services: &neoism_agent_service_api::AgentServices, directory: &str) -> bool {
+    crate::config::load(services, directory)
         .map(|loaded| loaded.info.dangerously_skip_permissions)
         .unwrap_or(false)
 }
@@ -875,7 +877,7 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
     let workspace = state
         .inner
         .workspace_runtimes
-        .acquire(directory, &state.inner.plugins)
+        .acquire(directory, &state.inner.plugins, state.services())
         .await;
     let workspace_plugins = &workspace.plugins;
     let workspace_directory = workspace.root.to_string_lossy().into_owned();
@@ -908,7 +910,8 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
         .tool_execute_before(&ctx, &mut hooked_input)
         .map_err(|error| error.to_string())?;
     let mut env = BTreeMap::new();
-    let is_custom_tool = crate::custom_tool::list(directory)
+    let services = state.services().clone();
+    let is_custom_tool = crate::custom_tool::list(&services, directory)
         .iter()
         .any(|tool| tool.id == tool_name);
     if tool_name == "bash" || tool_name == "background_task" || is_custom_tool {
@@ -1039,7 +1042,7 @@ pub(crate) async fn execute_tool_call_with_permission_wait(
                 // parse as a permission-required error), so agent-level
                 // denies — e.g. `task` for sub-agents — keep denying even
                 // in skip-permissions mode.
-                if dangerously_skip_permissions_enabled(directory) {
+                if dangerously_skip_permissions_enabled(state.services(), directory) {
                     one_time_rules.push(PermissionRule {
                         permission,
                         pattern: target,

@@ -11,6 +11,7 @@ base64.workspace = true
 clap.workspace = true
 libc.workspace = true
 neoism-agent-core.workspace = true
+neoism-agent-service-api.workspace = true
 neoism-agent-server.workspace = true
 reqwest.workspace = true
 serde.workspace = true

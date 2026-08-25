@@ -23,10 +23,9 @@ use session_undo_tree::{
 };
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct RevertRequest {
-    #[serde(rename = "messageID", alias = "message_id")]
     pub message_id: Option<MessageId>,
-    #[serde(rename = "partID", alias = "part_id")]
     pub part_id: Option<neoism_agent_core::PartId>,
 }
 
@@ -46,7 +45,7 @@ pub(crate) async fn session_revert(
 ) -> Result<Json<SessionInfo>, ApiError> {
     let message_id = body
         .message_id
-        .ok_or_else(|| ApiError::bad_request("messageID is required"))?
+        .ok_or_else(|| ApiError::bad_request("messageId is required"))?
         .to_string();
     let part_id = body.part_id.map(|id| id.to_string());
     Ok(Json(

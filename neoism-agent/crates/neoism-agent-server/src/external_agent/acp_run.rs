@@ -104,7 +104,8 @@ pub(crate) async fn run_acp_prompt(
 ) -> Result<AcpRunResult, String> {
     let cwd = child.directory.clone();
     let (client, mut events) =
-        AcpClient::spawn(runtime.acp_config(&cwd)).map_err(|error| error.to_string())?;
+        AcpClient::spawn(runtime.acp_config(&cwd, state.services()))
+            .map_err(|error| error.to_string())?;
     let collector = Arc::new(tokio::sync::Mutex::new(AcpRunCollector::default()));
 
     let initialize = match client.initialize().await {

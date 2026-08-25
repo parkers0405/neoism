@@ -69,14 +69,15 @@ impl CustomTool {
     }
 }
 
-pub(crate) fn list(directory: &str) -> Vec<ToolListItem> {
-    load(directory)
+pub(crate) fn list(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<ToolListItem> {
+    load(services, directory)
         .into_iter()
         .map(|tool| tool.item())
         .collect()
 }
 
 pub(crate) async fn execute(
+    services: &neoism_agent_service_api::AgentServices,
     directory: &str,
     tool_id: &str,
     arguments: Value,
@@ -84,7 +85,7 @@ pub(crate) async fn execute(
     env: BTreeMap<String, String>,
     cancel: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<Option<ToolExecutionResult>> {
-    let Some(tool) = load(directory).into_iter().find(|tool| tool.id == tool_id) else {
+    let Some(tool) = load(services, directory).into_iter().find(|tool| tool.id == tool_id) else {
         return Ok(None);
     };
     let command = tool.definition.command.parts();
@@ -160,9 +161,9 @@ pub(crate) async fn execute(
     }))
 }
 
-fn load(directory: &str) -> Vec<CustomTool> {
+fn load(services: &neoism_agent_service_api::AgentServices, directory: &str) -> Vec<CustomTool> {
     let mut tools = Vec::new();
-    for root in crate::config::roots(directory) {
+    for root in crate::config::roots(services, directory) {
         for folder in ["tools", "tool"] {
             let dir = root.join(folder);
             let Ok(entries) = std::fs::read_dir(&dir) else {

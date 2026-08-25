@@ -1,5 +1,4 @@
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::Json;
 use neoism_agent_core::{
     event_type, EventPayload, PromptPart, PromptRequest, SessionStatus, UserModel,
@@ -15,7 +14,6 @@ use crate::{append_prompt, ensure_session};
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionQueueInfo {
-    #[serde(rename = "sessionID")]
     session_id: String,
     count: usize,
     running: bool,
@@ -37,7 +35,6 @@ struct SessionQueueItem {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionQueueMutation {
-    #[serde(rename = "sessionID")]
     session_id: String,
     removed: usize,
     queue: SessionQueueInfo,
@@ -95,39 +92,6 @@ pub(crate) async fn session_queue_pop(
         removed,
         queue: session_queue_info(&state, &session_id).await,
     }))
-}
-
-pub(crate) async fn prompt_async(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
-    Json(request): Json<PromptRequest>,
-) -> Result<StatusCode, ApiError> {
-    ensure_session(&state, &session_id).await?;
-    let event_request = request.clone();
-    let (start_worker, queue_len) =
-        enqueue_prompt_request(&state, &session_id, request).await?;
-    publish_prompt_queue_changed(
-        &state,
-        &session_id,
-        "enqueue",
-        Some(&event_request),
-        Some("queue"),
-        0,
-    )
-    .await;
-    publish_prompt_queue_status(&state, &session_id, queue_len).await;
-    if start_worker {
-        tokio::spawn(drain_prompt_queue(state, session_id));
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
-
-pub(crate) async fn enqueue_prompt_request(
-    state: &AppState,
-    session_id: &str,
-    request: PromptRequest,
-) -> Result<(bool, usize), ApiError> {
-    enqueue_prompt_request_with_delivery(state, session_id, request, "queue").await
 }
 
 pub(crate) async fn enqueue_prompt_request_with_delivery(
@@ -456,7 +420,7 @@ pub(crate) async fn drain_queued_prompts_into_active_run(
         if let Err(error) = append_prompt(state, session_id, request, false).await {
             state.publish(EventPayload::new(
                 event_type::SESSION_ERROR,
-                json!({ "sessionID": session_id, "error": { "name": "PromptError", "data": { "message": error.to_string() } } }),
+                json!({ "sessionID": session_id, "error": { "code": "prompt.failed", "message": error.to_string(), "retryable": false, "details": {} } }),
             ));
         }
     }
@@ -568,7 +532,7 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
                 }
                 state.publish(EventPayload::new(
                 event_type::SESSION_ERROR,
-                json!({ "sessionID": session_id, "error": { "name": "PromptError", "data": { "message": error.to_string() } } }),
+                json!({ "sessionID": session_id, "error": { "code": "prompt.failed", "message": error.to_string(), "retryable": false, "details": {} } }),
             ));
             }
         }

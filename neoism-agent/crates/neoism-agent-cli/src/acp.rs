@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use neoism_agent_core::{
-    event_type, AgentInfo, CommandInfo, CreateSessionRequest, EventPayload, MessageInfo,
-    MessageWithParts, ModelInfo, ModelRef, Part, PermissionRequestInfo, PromptRequest,
-    ProviderInfo, ProviderListResult, QuestionRequestInfo, SessionInfo, TodoInfo,
+    event_type, AgentInfo, CommandInfo, CreateSessionRequest, EventEnvelope, EventPayload,
+    MessageInfo, MessageWithParts, ModelInfo, ModelRef, Page, Part, PermissionRequestInfo,
+    PromptRequest, ProviderInfo, ProviderListResult, QuestionRequestInfo, SessionInfo, TodoInfo,
     ToolState,
 };
 use neoism_agent_server::ServerOptions;
@@ -94,11 +94,14 @@ async fn ensure_server(
         return Ok(());
     }
     tokio::spawn(async move {
-        let result = neoism_agent_server::listen(ServerOptions {
-            hostname,
-            port,
-            cors: Vec::new(),
-        })
+        let result = neoism_agent_server::listen(
+            ServerOptions {
+                hostname,
+                port,
+                cors: Vec::new(),
+            },
+            neoism_agent_server::standard_services(),
+        )
         .await;
         if let Err(error) = result {
             eprintln!("neoism-agent ACP server exited: {error:#}");
@@ -115,7 +118,7 @@ async fn ensure_server(
 
 async fn health(client: &reqwest::Client, server: &str) -> bool {
     client
-        .get(format!("{server}/global/health"))
+        .get(format!("{server}/v2/health"))
         .send()
         .await
         .map(|response| response.status().is_success())
@@ -235,7 +238,10 @@ impl AcpBridge {
                 permission_reply_from_acp_result(&result)
             };
             self.client
-                .post(format!("{}/permission/{permission_id}/reply", self.server))
+                .post(format!(
+                    "{}/v2/interactions/permissions/{permission_id}/reply",
+                    self.server
+                ))
                 .json(&json!({ "reply": reply }))
                 .send()
                 .await?
@@ -251,7 +257,10 @@ impl AcpBridge {
         if let Some(question_id) = question_id {
             if error.is_some() {
                 self.client
-                    .post(format!("{}/question/{question_id}/reject", self.server))
+                    .post(format!(
+                        "{}/v2/interactions/questions/{question_id}/reject",
+                        self.server
+                    ))
                     .send()
                     .await?
                     .error_for_status()?;
@@ -259,14 +268,20 @@ impl AcpBridge {
             }
             if let Some(answers) = question_answers_from_acp_result(&result) {
                 self.client
-                    .post(format!("{}/question/{question_id}/reply", self.server))
+                    .post(format!(
+                        "{}/v2/interactions/questions/{question_id}/reply",
+                        self.server
+                    ))
                     .json(&json!({ "answers": answers }))
                     .send()
                     .await?
                     .error_for_status()?;
             } else {
                 self.client
-                    .post(format!("{}/question/{question_id}/reject", self.server))
+                    .post(format!(
+                        "{}/v2/interactions/questions/{question_id}/reject",
+                        self.server
+                    ))
                     .send()
                     .await?
                     .error_for_status()?;
@@ -312,7 +327,7 @@ impl AcpBridge {
 
     async fn new_session(&mut self, params: Value) -> anyhow::Result<Value> {
         let cwd = cwd_from_params(&params).unwrap_or_else(|| self.default_cwd.clone());
-        let mut request = self.client.post(format!("{}/session", self.server));
+        let mut request = self.client.post(format!("{}/v2/sessions", self.server));
         request = request.query(&[("directory", cwd.as_str())]);
         let info: SessionInfo = request
             .json(&CreateSessionRequest {
@@ -338,14 +353,13 @@ impl AcpBridge {
     }
 
     async fn list_sessions(&self, params: Value) -> anyhow::Result<Value> {
-        let mut request = self.client.get(format!("{}/session", self.server));
+        let mut request = self.client.get(format!("{}/v2/sessions", self.server));
         let cwd = cwd_from_params(&params);
         if let Some(cwd) = cwd.as_deref() {
             request = request.query(&[("directory", cwd), ("roots", "true")]);
         }
-        let sessions: Vec<SessionInfo> =
-            request.send().await?.error_for_status()?.json().await?;
-        let entries = sessions
+        let page: Page<SessionInfo> = request.send().await?.error_for_status()?.json().await?;
+        let entries = page.items
             .into_iter()
             .map(|session| {
                 json!({
@@ -363,7 +377,7 @@ impl AcpBridge {
         let session_id = required_string_param(&params, "sessionId")?;
         let info: SessionInfo = self
             .client
-            .get(format!("{}/session/{}", self.server, session_id))
+            .get(format!("{}/v2/sessions/{}", self.server, session_id))
             .send()
             .await?
             .error_for_status()?
@@ -382,7 +396,11 @@ impl AcpBridge {
 
     async fn close_session(&mut self, params: Value) -> anyhow::Result<Value> {
         let session_id = required_string_param(&params, "sessionId")?;
-        self.abort_session(&session_id).await?;
+        self.client
+            .delete(format!("{}/v2/sessions/{session_id}", self.server))
+            .send()
+            .await?
+            .error_for_status()?;
         self.sessions.remove(&session_id);
         if let Some(task) = self.event_tasks.remove(&session_id) {
             task.abort();
@@ -400,7 +418,7 @@ impl AcpBridge {
         }
         let info: SessionInfo = self
             .client
-            .post(format!("{}/session/{session_id}/fork", self.server))
+            .post(format!("{}/v2/sessions/{session_id}/fork", self.server))
             .json(&body)
             .send()
             .await?
@@ -426,7 +444,7 @@ impl AcpBridge {
 
     async fn abort_session(&self, session_id: &str) -> anyhow::Result<()> {
         self.client
-            .post(format!("{}/session/{session_id}/abort", self.server))
+            .post(format!("{}/v2/sessions/{session_id}/abort", self.server))
             .send()
             .await?
             .error_for_status()?;
@@ -514,7 +532,7 @@ impl AcpBridge {
             }
             let info: SessionInfo = self
                 .client
-                .get(format!("{}/session/{}", self.server, session_id))
+                .get(format!("{}/v2/sessions/{}", self.server, session_id))
                 .send()
                 .await?
                 .error_for_status()?
@@ -554,7 +572,7 @@ impl AcpBridge {
     ) -> anyhow::Result<SessionInfo> {
         Ok(self
             .client
-            .patch(format!("{}/session/{session_id}", self.server))
+            .patch(format!("{}/v2/sessions/{session_id}", self.server))
             .json(&body)
             .send()
             .await?
@@ -566,7 +584,7 @@ impl AcpBridge {
     async fn fetch_session(&self, session_id: &str) -> anyhow::Result<SessionInfo> {
         Ok(self
             .client
-            .get(format!("{}/session/{session_id}", self.server))
+            .get(format!("{}/v2/sessions/{session_id}", self.server))
             .send()
             .await?
             .error_for_status()?
@@ -577,7 +595,7 @@ impl AcpBridge {
     async fn provider_list(&self) -> Option<ProviderListResult> {
         let response = self
             .client
-            .get(format!("{}/provider", self.server))
+            .get(format!("{}/v2/providers", self.server))
             .send()
             .await
             .ok()?
@@ -593,9 +611,18 @@ impl AcpBridge {
         let model = model_param(&params);
         let agent =
             string_param(&params, "modeId").or_else(|| string_param(&params, "agent"));
-        let response: MessageWithParts = self
-            .client
-            .post(format!("{}/session/{session_id}/message", self.server))
+        let previous_message_ids = self
+            .fetch_message_page(&session_id, None)
+            .await?
+            .items
+            .into_iter()
+            .map(|message| match message.info {
+                MessageInfo::User(info) => info.id.to_string(),
+                MessageInfo::Assistant(info) => info.id.to_string(),
+            })
+            .collect::<BTreeSet<_>>();
+        self.client
+            .post(format!("{}/v2/sessions/{session_id}/prompt", self.server))
             .json(&PromptRequest {
                 message_id: None,
                 model,
@@ -608,8 +635,9 @@ impl AcpBridge {
             })
             .send()
             .await?
-            .error_for_status()?
-            .json()
+            .error_for_status()?;
+        let response = self
+            .wait_for_assistant_message(&session_id, &previous_message_ids)
             .await?;
         self.enqueue_message_updates(&response);
         let usage = usage_from_message(&response);
@@ -637,14 +665,7 @@ impl AcpBridge {
         session_id: &str,
         limit: Option<usize>,
     ) -> anyhow::Result<()> {
-        let mut request = self
-            .client
-            .get(format!("{}/session/{session_id}/message", self.server));
-        if let Some(limit) = limit {
-            request = request.query(&[("limit", limit.to_string())]);
-        }
-        let messages: Vec<MessageWithParts> =
-            request.send().await?.error_for_status()?.json().await?;
+        let messages = self.fetch_message_page(session_id, limit).await?.items;
         for message in &messages {
             self.enqueue_message_updates(&message);
         }
@@ -665,6 +686,42 @@ impl AcpBridge {
             }
         }
         Ok(())
+    }
+
+    async fn fetch_message_page(
+        &self,
+        session_id: &str,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Page<MessageWithParts>> {
+        let mut request = self
+            .client
+            .get(format!("{}/v2/sessions/{session_id}/messages", self.server));
+        if let Some(limit) = limit {
+            request = request.query(&[("limit", limit.to_string())]);
+        }
+        Ok(request.send().await?.error_for_status()?.json().await?)
+    }
+
+    async fn wait_for_assistant_message(
+        &self,
+        session_id: &str,
+        previous_message_ids: &BTreeSet<String>,
+    ) -> anyhow::Result<MessageWithParts> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        loop {
+            let page = self.fetch_message_page(session_id, None).await?;
+            if let Some(message) = page.items.into_iter().rev().find(|message| {
+                matches!(&message.info, MessageInfo::Assistant(info)
+                    if info.time.completed.is_some()
+                        && !previous_message_ids.contains(&info.id.to_string()))
+            }) {
+                return Ok(message);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!("timed out waiting for session {session_id} to finish");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     fn ensure_event_subscription(&mut self, session_id: &str) {
@@ -707,7 +764,7 @@ impl AcpBridge {
     ) -> anyhow::Result<()> {
         let commands: Vec<CommandInfo> = self
             .client
-            .get(format!("{}/command", self.server))
+            .get(format!("{}/v2/commands", self.server))
             .query(&[("directory", cwd)])
             .send()
             .await?
@@ -721,7 +778,7 @@ impl AcpBridge {
 
     async fn config_options_for_cwd(&self, cwd: &str) -> Value {
         let providers = self.provider_list().await;
-        let mut agents_request = self.client.get(format!("{}/agent", self.server));
+        let mut agents_request = self.client.get(format!("{}/v2/agents", self.server));
         agents_request = agents_request.query(&[("directory", cwd)]);
         let agents = agents_request
             .send()
@@ -775,8 +832,9 @@ async fn run_acp_event_subscription(
     request_counter: Arc<AtomicU64>,
 ) {
     let mut delay = Duration::from_millis(250);
+    let mut live = AcpLiveState::default();
+    let mut last_sequence = None;
     loop {
-        let mut live = AcpLiveState::default();
         let result = run_acp_event_stream(
             &client,
             &server,
@@ -786,6 +844,7 @@ async fn run_acp_event_subscription(
             &pending_permissions,
             &pending_questions,
             &request_counter,
+            &mut last_sequence,
         )
         .await;
         if let Err(error) = result {
@@ -806,20 +865,27 @@ async fn run_acp_event_stream(
     pending_permissions: &Arc<StdMutex<BTreeMap<String, String>>>,
     pending_questions: &Arc<StdMutex<BTreeMap<String, String>>>,
     request_counter: &Arc<AtomicU64>,
+    last_sequence: &mut Option<u64>,
 ) -> anyhow::Result<()> {
-    let mut response = client
-        .get(format!("{server}/global/event"))
-        .query(&[("sessionID", session_id), ("limit", "0")])
-        .send()
-        .await?
-        .error_for_status()?;
+    let mut request = client
+        .get(format!("{server}/v2/events"))
+        .query(&[("sessionId", session_id), ("tail", "true")]);
+    if let Some(sequence) = *last_sequence {
+        request = request.header("Last-Event-ID", sequence.to_string());
+    }
+    let mut response = request.send().await?.error_for_status()?;
     let mut buffer = String::new();
     while let Some(chunk) = response.chunk().await? {
         buffer.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(frame) = take_sse_frame(&mut buffer) {
-            let Some(event) = parse_sse_event(&frame) else {
+            let Some(envelope) = parse_sse_event(&frame) else {
                 continue;
             };
+            if last_sequence.is_some_and(|sequence| envelope.sequence <= sequence) {
+                continue;
+            }
+            *last_sequence = Some(envelope.sequence);
+            let event = EventPayload::new(envelope.kind, envelope.data);
             for response in acp_live_outputs_for_event(
                 &event,
                 session_id,
@@ -845,7 +911,7 @@ fn take_sse_frame(buffer: &mut String) -> Option<String> {
     Some(frame)
 }
 
-fn parse_sse_event(frame: &str) -> Option<EventPayload<Value>> {
+fn parse_sse_event(frame: &str) -> Option<EventEnvelope<Value>> {
     let data = frame
         .lines()
         .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
@@ -1891,4 +1957,39 @@ fn usage_from_assistant_info(info: &Value) -> Value {
         "cachedReadTokens": cache_read,
         "cachedWriteTokens": cache_write
     })
+}
+
+#[cfg(test)]
+mod canonical_route_tests {
+    use super::parse_sse_event;
+
+    #[test]
+    fn acp_source_contains_no_deleted_http_routes() {
+        let source = include_str!("acp.rs");
+        for route in [
+            "session", "provider", "command", "agent", "global/event", "permission",
+            "question",
+        ] {
+            let legacy = format!("\"/{route}");
+            assert!(!source.contains(&legacy), "legacy ACP route remains: {legacy}");
+        }
+    }
+
+    #[test]
+    fn sse_parser_accepts_only_canonical_event_envelopes() {
+        let canonical = concat!(
+            "id: 42\n",
+            "event: message.updated\n",
+            "data: {\"id\":\"42\",\"sequence\":42,\"type\":\"message.updated\",",
+            "\"source\":\"neoism.core\",\"schemaVersion\":\"1.0.0\",",
+            "\"timestamp\":1,\"subject\":null,\"data\":{\"sessionID\":\"ses_1\"}}"
+        );
+        let event = parse_sse_event(canonical).expect("canonical envelope");
+        assert_eq!(event.sequence, 42);
+        assert_eq!(event.kind, "message.updated");
+        assert_eq!(event.data["sessionID"], "ses_1");
+
+        let legacy = "data: {\"id\":\"evt_1\",\"type\":\"message.updated\",\"properties\":{}}";
+        assert!(parse_sse_event(legacy).is_none());
+    }
 }

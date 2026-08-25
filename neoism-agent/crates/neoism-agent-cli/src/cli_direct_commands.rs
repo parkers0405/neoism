@@ -11,19 +11,13 @@ pub(super) async fn doctor(server: String, dir: Option<String>) -> anyhow::Resul
     let server = normalize_server(&server);
     let client = reqwest::Client::new();
     let health =
-        response_json(client.get(format!("{server}/global/health")).send().await?)
+        response_json(client.get(format!("{server}/v2/health")).send().await?)
             .await?;
-    let path = response_json(
-        request_with_dir(client.get(format!("{server}/path")), dir.as_deref())
-            .send()
-            .await?,
-    )
-    .await?;
     let providers =
-        response_json(client.get(format!("{server}/provider")).send().await?).await?;
+        response_json(client.get(format!("{server}/v2/providers")).send().await?).await?;
     let config_validation = response_json(
         request_with_dir(
-            client.get(format!("{server}/config/validate")),
+            client.get(format!("{server}/v2/config/validate")),
             dir.as_deref(),
         )
         .send()
@@ -37,7 +31,6 @@ pub(super) async fn doctor(server: String, dir: Option<String>) -> anyhow::Resul
     print_json(json!({
         "server": server,
         "health": health,
-        "path": path,
         "connectedProviders": connected,
         "configValidation": config_validation,
     }))
@@ -51,7 +44,7 @@ pub(super) async fn models(
     let server = normalize_server(&server);
     let value = response_json(
         reqwest::Client::new()
-            .get(format!("{server}/provider"))
+            .get(format!("{server}/v2/providers"))
             .send()
             .await?,
     )
@@ -115,7 +108,7 @@ pub(super) async fn run(
         None => {
             let mut request =
                 client
-                    .post(format!("{server}/session"))
+                    .post(format!("{server}/v2/sessions"))
                     .json(&CreateSessionRequest {
                         parent_id: None,
                         title: None,
@@ -156,7 +149,7 @@ pub(super) async fn run(
 
     let response = response_json(
         client
-            .post(format!("{server}/session/{session_id}/message"))
+            .post(format!("{server}/v2/sessions/{session_id}/prompt"))
             .json(&PromptRequest {
                 message_id: None,
                 model: prompt_model,
@@ -175,7 +168,7 @@ pub(super) async fn run(
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({ "sessionID": session_id, "message": response })
+            &json!({ "sessionId": session_id, "message": response })
         )?
     );
     Ok(())

@@ -19,11 +19,102 @@ use ignore::WalkBuilder;
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 use serde_json::json;
+use neoism_agent_service_api::{
+    FindFilesRequest, FindFilesResult, GrepWorkspaceRequest, GrepWorkspaceResult,
+    WorkspaceFileMatch, WorkspaceGrepMatch, WorkspaceSearchBounds, WorkspaceSearchMode,
+};
 
 use super::paths::truncate_line;
 use super::{ToolContext, ToolExecutionResult};
 
 const MAX_SEARCH_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+pub(super) fn find_files(
+    request: &FindFilesRequest,
+    fallback_reason: &str,
+) -> anyhow::Result<FindFilesResult> {
+    let context = ToolContext::new(&request.root).with_cancel(request.control.cancel.clone());
+    let result = glob(GlobRequest {
+        context: &context,
+        path: &request.root,
+        query: &request.query,
+        limit: request.limit,
+        offset: request.offset,
+        timeout_ms: request.control.timeout_ms,
+        fallback_reason: fallback_reason.to_string(),
+    })?;
+    let metadata = result.metadata.unwrap_or_default();
+    let items = metadata["items"].as_array().into_iter().flatten().map(|item| WorkspaceFileMatch {
+        path: item["path"].as_str().unwrap_or_default().to_string(),
+        score: item["score"].as_i64().unwrap_or_default() as i32,
+        git_status: item["gitStatus"].as_str().map(ToOwned::to_owned),
+        size: item["size"].as_u64().unwrap_or_default(),
+        modified: item["modified"].as_u64().unwrap_or_default(),
+    }).collect::<Vec<_>>();
+    let total_at_least = metadata["totalAtLeast"].as_u64().unwrap_or(items.len() as u64) as usize;
+    Ok(FindFilesResult {
+        items,
+        bounds: WorkspaceSearchBounds {
+            total: None,
+            total_at_least,
+            next_cursor: None,
+            truncated: metadata["truncated"].as_bool().unwrap_or(false),
+            timed_out: metadata["timedOut"].as_bool().unwrap_or(false),
+        },
+        engine: metadata["engine"].as_str().map(ToOwned::to_owned),
+        fallback_reason: Some(fallback_reason.to_string()),
+    })
+}
+
+pub(super) fn grep_workspace(
+    request: &GrepWorkspaceRequest,
+    fallback_reason: &str,
+) -> anyhow::Result<GrepWorkspaceResult> {
+    let context = ToolContext::new(&request.root).with_cancel(request.control.cancel.clone());
+    let mode = match request.mode {
+        WorkspaceSearchMode::Regex => GrepMode::Regex,
+        WorkspaceSearchMode::Fuzzy => GrepMode::Fuzzy,
+        WorkspaceSearchMode::Plain | WorkspaceSearchMode::Auto => GrepMode::PlainText,
+    };
+    let exclude = request.excludes.join(" ");
+    let result = grep(GrepRequest {
+        context: &context,
+        root: &request.root,
+        path: &request.path,
+        patterns: &request.patterns,
+        include: request.include.as_deref(),
+        exclude: &exclude,
+        context_lines: request.context_lines,
+        case_sensitive: request.case_sensitive,
+        mode,
+        limit: request.limit,
+        timeout_ms: request.control.timeout_ms,
+        fallback_reason: fallback_reason.to_string(),
+    })?;
+    let metadata = result.metadata.unwrap_or_default();
+    let items = metadata["items"].as_array().into_iter().flatten().map(|item| WorkspaceGrepMatch {
+        path: item["path"].as_str().unwrap_or_default().to_string(),
+        line: item["line"].as_u64().unwrap_or_default(),
+        text: item["text"].as_str().unwrap_or_default().to_string(),
+        definition: item["definition"].as_bool().unwrap_or(false),
+        fuzzy_score: item["fuzzyScore"].as_u64().map(|score| score.min(u16::MAX as u64) as u16),
+    }).collect::<Vec<_>>();
+    Ok(GrepWorkspaceResult {
+        items,
+        files_with_matches: metadata["filesWithMatches"].as_u64().unwrap_or_default() as usize,
+        total_files_searched: metadata["totalFilesSearched"].as_u64().unwrap_or_default() as usize,
+        bounds: WorkspaceSearchBounds {
+            total: None,
+            total_at_least: metadata["matches"].as_u64().unwrap_or_default() as usize,
+            next_cursor: metadata["nextFileOffset"].as_u64().filter(|cursor| *cursor != 0).map(|cursor| cursor as usize),
+            truncated: metadata["truncated"].as_bool().unwrap_or(false),
+            timed_out: metadata["timedOut"].as_bool().unwrap_or(false),
+        },
+        mode: metadata["mode"].as_str().unwrap_or("plain").to_string(),
+        engine: metadata["engine"].as_str().map(ToOwned::to_owned),
+        fallback_reason: Some(fallback_reason.to_string()),
+    })
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -183,6 +274,7 @@ pub(super) fn glob(request: GlobRequest<'_>) -> anyhow::Result<ToolExecutionResu
 
 pub(super) struct GrepRequest<'a> {
     pub(super) context: &'a ToolContext,
+    pub(super) root: &'a Path,
     pub(super) path: &'a Path,
     pub(super) patterns: &'a [String],
     pub(super) include: Option<&'a str>,
@@ -208,11 +300,7 @@ pub(super) fn grep(request: GrepRequest<'_>) -> anyhow::Result<ToolExecutionResu
             .filter(|item| !item.is_empty())
             .map(|item| item.trim_start_matches('!')),
     )?;
-    let root = if request.path.is_dir() {
-        request.path.to_path_buf()
-    } else {
-        request.path.parent().unwrap_or(request.path).to_path_buf()
-    };
+    let root = request.root.to_path_buf();
 
     let mut items = Vec::new();
     let mut files_with_matches = HashSet::new();
@@ -734,6 +822,7 @@ mod tests {
 
         let grep = grep(GrepRequest {
             context: &context,
+            root: &root,
             path: &root,
             patterns: &["official endpoint".to_string()],
             include: None,

@@ -151,7 +151,7 @@ impl FakeAgentServer {
         let state = FakeAgentState::default();
         let calls = state.calls.clone();
         let app = Router::new()
-            .route("/sessions/import", post(fake_import))
+            .route("/v2/sessions/import", post(fake_import))
             .with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -369,7 +369,7 @@ fn agent_endpoint_helpers_append_paths() {
     );
     assert_eq!(
         agent_import_endpoint("http://127.0.0.1:4096/"),
-        "http://127.0.0.1:4096/sessions/import"
+        "http://127.0.0.1:4096/v2/sessions/import"
     );
     assert_eq!(
         receive_agent_endpoint("http://h:1/"),

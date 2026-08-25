@@ -507,13 +507,13 @@ pub fn agent_server_url() -> String {
 /// `{agent_server}/sessions/export` — source agent-server endpoint promote
 /// calls to gather session bundles under the promoted workspace root.
 pub fn agent_export_endpoint(agent_server: &str) -> String {
-    format!("{}/sessions/export", agent_server.trim_end_matches('/'))
+    format!("{}/v2/sessions/export", agent_server.trim_end_matches('/'))
 }
 
 /// `{agent_server}/sessions/import` — target agent-server endpoint the target
 /// daemon forwards each received bundle to.
 pub fn agent_import_endpoint(agent_server: &str) -> String {
-    format!("{}/sessions/import", agent_server.trim_end_matches('/'))
+    format!("{}/v2/sessions/import", agent_server.trim_end_matches('/'))
 }
 
 /// Body `POST`ed to the source agent-server's `/sessions/export`. camelCase to
@@ -634,11 +634,11 @@ mod tests {
     fn agent_endpoints_append_path() {
         assert_eq!(
             agent_export_endpoint("http://127.0.0.1:4096"),
-            "http://127.0.0.1:4096/sessions/export"
+            "http://127.0.0.1:4096/v2/sessions/export"
         );
         assert_eq!(
             agent_import_endpoint("http://127.0.0.1:4096/"),
-            "http://127.0.0.1:4096/sessions/import"
+            "http://127.0.0.1:4096/v2/sessions/import"
         );
     }
 

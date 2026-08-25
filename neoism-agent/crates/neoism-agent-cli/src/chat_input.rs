@@ -30,7 +30,7 @@ pub(crate) async fn fetch_agent_choices(
     dir: Option<&str>,
 ) -> anyhow::Result<Vec<AgentChoice>> {
     let value = response_json(
-        request_with_dir(client.get(format!("{server}/agent")), dir)
+        request_with_dir(client.get(format!("{server}/v2/agents")), dir)
             .send()
             .await?,
     )

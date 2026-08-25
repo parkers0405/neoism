@@ -1,4 +1,4 @@
-//! Process-wide lifecycle management for `fff-search` file pickers.
+//! App-owned lifecycle management for `fff-search` file pickers.
 //!
 //! A picker owns several filesystem-watcher and indexing threads. Finder,
 //! file mentions, and agent tools all search the same roots, so keeping a
@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -39,23 +39,16 @@ struct RegistryState {
 }
 
 /// A bounded, thread-safe cache of live filesystem-search indexes.
-pub struct PickerRegistry {
+pub(crate) struct PickerRegistry {
     capacity: usize,
     state: Mutex<RegistryState>,
 }
 
 /// Keeps one canonical root resident while a UI surface is actively using it.
 /// The picker itself is still created lazily on the first query.
-pub struct PickerRootPin {
+struct PickerRootPin {
     root: PathBuf,
-    registry: &'static PickerRegistry,
-}
-
-impl PickerRootPin {
-    /// Whether this pin protects `root` (path aliases are canonicalized).
-    pub fn is_for(&self, root: &Path) -> bool {
-        self.root == root || self.root == canonical_root(root)
-    }
+    registry: Arc<PickerRegistry>,
 }
 
 impl Drop for PickerRootPin {
@@ -65,7 +58,7 @@ impl Drop for PickerRootPin {
 }
 
 impl PickerRegistry {
-    fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.clamp(1, MAX_CAPACITY),
             state: Mutex::new(RegistryState::default()),
@@ -145,11 +138,11 @@ impl PickerRegistry {
         drop(evicted);
     }
 
-    fn warm(&self, root: &Path) -> anyhow::Result<()> {
+    pub(crate) fn warm(&self, root: &Path) -> anyhow::Result<()> {
         self.picker(root).map(|_| ())
     }
 
-    fn with_picker<T>(
+    pub(crate) fn with_picker<T>(
         &self,
         root: &Path,
         operation: impl FnOnce(&FilePicker) -> T,
@@ -286,34 +279,94 @@ fn configured_capacity() -> usize {
         .clamp(1, MAX_CAPACITY)
 }
 
-fn global() -> &'static PickerRegistry {
-    static REGISTRY: std::sync::OnceLock<PickerRegistry> = std::sync::OnceLock::new();
-    REGISTRY.get_or_init(|| PickerRegistry::new(configured_capacity()))
+/// Default Agent workspace search implementation. Every injected instance owns
+/// its own bounded registry, watchers, recency clock, and root pins.
+#[derive(Clone)]
+pub struct FffWorkspaceSearchService {
+    registry: Arc<PickerRegistry>,
 }
 
-/// Start (or refresh the recency of) the shared live index for `root`.
-pub fn warm(root: &Path) -> anyhow::Result<()> {
-    global().warm(root)
-}
+impl FffWorkspaceSearchService {
+    pub fn new() -> Self {
+        Self { registry: Arc::new(PickerRegistry::new(configured_capacity())) }
+    }
 
-/// Keep `root` resident until the returned pin is dropped.
-///
-/// Pinning does not start an index by itself; this avoids doing filesystem
-/// work for an active workspace until Finder or mentions actually need it.
-pub fn pin(root: &Path) -> PickerRootPin {
-    let registry = global();
-    PickerRootPin {
-        root: registry.pin(root),
-        registry,
+    #[cfg(test)]
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self { registry: Arc::new(PickerRegistry::new(capacity)) }
+    }
+
+    pub(crate) fn registry(&self) -> &PickerRegistry {
+        &self.registry
+    }
+
+    pub fn pin(
+        &self,
+        root: &Path,
+    ) -> Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin> {
+        Arc::new(PickerRootPin {
+            root: self.registry.pin(root),
+            registry: self.registry.clone(),
+        })
+    }
+
+    pub fn with_picker<T>(
+        &self,
+        root: &Path,
+        operation: impl FnOnce(&FilePicker) -> T,
+    ) -> anyhow::Result<T> {
+        self.registry.with_picker(root, operation)
     }
 }
 
-/// Run a search against the shared live index for `root`.
-pub fn with_picker<T>(
-    root: &Path,
-    operation: impl FnOnce(&FilePicker) -> T,
-) -> anyhow::Result<T> {
-    global().with_picker(root, operation)
+impl Default for FffWorkspaceSearchService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl neoism_agent_service_api::WorkspaceSearchRootPin for PickerRootPin {
+    fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl neoism_agent_service_api::WorkspaceSearchService for FffWorkspaceSearchService {
+    fn warm(&self, root: &Path) -> Result<(), neoism_agent_service_api::ServiceError> {
+        self.registry.warm(root).map_err(search_error)
+    }
+
+    fn pin_root(
+        &self,
+        root: &Path,
+    ) -> Result<Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>, neoism_agent_service_api::ServiceError> {
+        Ok(self.pin(root))
+    }
+
+    fn find_files(
+        &self,
+        request: &neoism_agent_service_api::FindFilesRequest,
+    ) -> Result<neoism_agent_service_api::FindFilesResult, neoism_agent_service_api::ServiceError> {
+        crate::tool::fff::find_files(self.registry(), request).map_err(search_error)
+    }
+
+    fn grep(
+        &self,
+        request: &neoism_agent_service_api::GrepWorkspaceRequest,
+    ) -> Result<neoism_agent_service_api::GrepWorkspaceResult, neoism_agent_service_api::ServiceError> {
+        crate::tool::fff::grep_workspace(self.registry(), request).map_err(search_error)
+    }
+
+    fn search_directories(
+        &self,
+        request: &neoism_agent_service_api::DirectorySearchRequest,
+    ) -> Result<neoism_agent_service_api::DirectorySearchResult, neoism_agent_service_api::ServiceError> {
+        crate::tool::fff::search_directories(self.registry(), request).map_err(search_error)
+    }
+}
+
+fn search_error(error: anyhow::Error) -> neoism_agent_service_api::ServiceError {
+    neoism_agent_service_api::ServiceError::new(error.to_string())
 }
 
 #[cfg(test)]
@@ -384,6 +437,24 @@ mod tests {
         assert_eq!(registry.len(), 1);
         assert!(registry.contains(&second.0));
         drop(registry);
+    }
+
+    #[test]
+    fn injected_service_pin_lifetime_controls_eviction() {
+        use neoism_agent_service_api::WorkspaceSearchService;
+
+        let first = TestRoot::new("service-pinned");
+        let second = TestRoot::new("service-other");
+        let service = FffWorkspaceSearchService::with_capacity(1);
+        service.warm(&first.0).unwrap();
+        let pin = service.pin_root(&first.0).unwrap();
+        service.warm(&second.0).unwrap();
+        assert!(service.registry.contains(&first.0));
+        assert!(!service.registry.contains(&second.0));
+        drop(pin);
+        service.warm(&second.0).unwrap();
+        assert!(!service.registry.contains(&first.0));
+        assert!(service.registry.contains(&second.0));
     }
 
     #[test]

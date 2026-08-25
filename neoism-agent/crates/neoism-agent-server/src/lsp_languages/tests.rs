@@ -1,54 +1,5 @@
 use super::*;
-use neoism_extensions::{
-    load_mason_registry,
-    mason::{mason_cache_path, parse_mason_registry},
-    package_to_manifest,
-};
 use std::path::Path;
-
-const REPRESENTATIVE_MASON_LSP_ROWS: &str = r#"[
-    {
-        "name": "typescript-language-server",
-        "source": { "id": "pkg:npm/typescript-language-server@5.3.0" },
-        "bin": { "typescript-language-server": "npm:typescript-language-server" }
-    },
-    {
-        "name": "pyright",
-        "source": { "id": "pkg:npm/pyright@1.1.411" },
-        "bin": {
-            "pyright": "npm:pyright",
-            "pyright-langserver": "npm:pyright-langserver"
-        }
-    },
-    {
-        "name": "bash-language-server",
-        "source": { "id": "pkg:npm/bash-language-server@5.6.0" },
-        "bin": { "bash-language-server": "npm:bash-language-server" }
-    },
-    {
-        "name": "json-lsp",
-        "source": { "id": "pkg:npm/vscode-langservers-extracted@4.10.0" },
-        "bin": { "vscode-json-language-server": "npm:vscode-json-language-server" }
-    },
-    {
-        "name": "docker-language-server",
-        "source": {
-            "id": "pkg:github/docker/docker-language-server@v0.20.1",
-            "asset": [{
-                "target": "linux_x64_gnu",
-                "file": "docker-language-server-linux-amd64-{{version}}"
-            }]
-        },
-        "bin": { "docker-language-server": "{{source.asset.file}}" }
-    },
-    {
-        "name": "nil",
-        "source": {
-            "id": "pkg:cargo/nil@2025-06-13?repository_url=https://github.com/oxalica/nil"
-        },
-        "bin": { "nil": "cargo:nil" }
-    }
-]"#;
 
 #[test]
 fn filename_globs_are_anchored_and_case_insensitive() {
@@ -115,9 +66,7 @@ fn workspace_root_policy_is_declared_by_each_builtin() {
 }
 
 #[test]
-fn representative_catalog_rows_match_package_executable_argv_and_routes() {
-    let registry = parse_mason_registry(REPRESENTATIVE_MASON_LSP_ROWS.as_bytes())
-        .expect("representative Mason registry");
+fn representative_catalog_contracts_match_executable_argv_and_routes() {
     let expected = [
         (
             "typescript",
@@ -154,20 +103,6 @@ fn representative_catalog_rows_match_package_executable_argv_and_routes() {
         assert!(command[0].eq_ignore_ascii_case(executable));
         assert_eq!(&command[1..], args);
 
-        let package = registry
-            .iter()
-            .find(|package| package.name == package_id)
-            .expect("representative package");
-        assert!(package
-            .bin
-            .keys()
-            .any(|bin| bin.eq_ignore_ascii_case(executable)));
-        let manifest = package_to_manifest(package).expect("translatable package");
-        assert!(manifest
-            .run
-            .as_ref()
-            .and_then(|run| run.command.first())
-            .is_some_and(|command| command.eq_ignore_ascii_case(executable)));
     }
 
     let route_cases = [
@@ -213,57 +148,5 @@ fn stdio_command(spec: &LanguageSpec) -> Option<&'static [&'static str]> {
     match spec.transport {
         LspTransportSpec::Stdio { command } => Some(command),
         LspTransportSpec::Tcp { .. } => None,
-    }
-}
-
-/// Developer audit against the current cached Mason snapshot. CI does not
-/// need a network/cache; the representative regression above is stable.
-#[test]
-fn cached_mason_rows_satisfy_every_declared_catalog_contract_when_present() {
-    let path = mason_cache_path();
-    if !path.is_file() {
-        return;
-    }
-    let registry = load_mason_registry(&path).expect("cached Mason registry");
-    for adapter in LANGUAGE_SPECS {
-        for contract in adapter.catalog_packages {
-            let package = registry
-                .iter()
-                .find(|package| package.name == contract.package_id)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "adapter `{}` declares missing Mason package `{}`",
-                        adapter.id, contract.package_id
-                    )
-                });
-            assert!(
-                package
-                    .bin
-                    .keys()
-                    .any(|bin| { bin.eq_ignore_ascii_case(contract.executable) }),
-                "Mason package `{}` no longer exposes `{}` for adapter `{}`; bins={:?}",
-                contract.package_id,
-                contract.executable,
-                adapter.id,
-                package.bin.keys().collect::<Vec<_>>()
-            );
-
-            // Unsupported source kinds are intentionally left visible but
-            // non-installable. Any row we *can* translate must select the
-            // exact executable consumed by the adapter.
-            if let Ok(manifest) = package_to_manifest(package) {
-                let command = manifest
-                    .run
-                    .as_ref()
-                    .and_then(|run| run.command.first())
-                    .expect("translated LSP run command");
-                assert!(
-                    command.eq_ignore_ascii_case(contract.executable),
-                    "translated package `{}` selected `{command}`, expected `{}`",
-                    contract.package_id,
-                    contract.executable
-                );
-            }
-        }
     }
 }

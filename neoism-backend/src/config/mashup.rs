@@ -11,8 +11,7 @@
 //! ```
 //!
 //! JSON files speak the same JSONC dialect as config.json (comments +
-//! trailing commas). Legacy `.toml` spellings of each file still load,
-//! so packs shared before the JSON cutover keep working.
+//! trailing commas).
 //!
 //! This module only reads and resolves files — turning specs into an
 //! `IdeTheme` and applying slots lives in the frontend, which owns the
@@ -241,6 +240,79 @@ pub fn packs_dir() -> PathBuf {
     config_dir_path().join("packs")
 }
 
+/// Omarchy's stable state directory. The `theme` child is atomically
+/// replaced whenever `omarchy-theme-set` runs.
+#[cfg(target_os = "linux")]
+pub fn omarchy_current_dir() -> Option<PathBuf> {
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local/state")))?;
+    Some(state_home.join("omarchy/current"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn omarchy_current_dir() -> Option<PathBuf> {
+    None
+}
+
+fn omarchy_theme_spec(path: &Path) -> Option<IdeThemeSpec> {
+    let source = std::fs::read_to_string(path).ok()?;
+    let colors: BTreeMap<String, String> = match toml::from_str(&source) {
+        Ok(colors) => colors,
+        Err(err) => {
+            tracing::warn!(
+                target: "neoism::mashup",
+                "skipping Omarchy theme {}: {err}",
+                path.display()
+            );
+            return None;
+        }
+    };
+
+    let pick = |names: &[&str]| names.iter().find_map(|name| colors.get(*name)).cloned();
+    let mappings: &[(&str, &[&str])] = &[
+        ("bg", &["background"]),
+        ("fg", &["bright_foreground", "foreground"]),
+        ("surface", &["lighter_background", "dark_background"]),
+        ("hover", &["selection", "lighter_background"]),
+        ("border", &["muted"]),
+        ("muted", &["dark_foreground", "muted"]),
+        ("dim", &["light_foreground", "foreground"]),
+        ("accent", &["accent", "blue"]),
+        ("folder", &["accent", "blue"]),
+        ("black", &["darker_background", "background"]),
+        ("white", &["bright_foreground", "foreground"]),
+        ("red", &["red"]),
+        ("green", &["green"]),
+        ("yellow", &["yellow"]),
+        ("blue", &["blue", "accent"]),
+        ("magenta", &["magenta"]),
+        ("cyan", &["cyan"]),
+        ("comment", &["muted", "dark_foreground"]),
+        ("string", &["green"]),
+        ("number", &["orange", "bright_yellow", "yellow"]),
+        ("keyword", &["magenta"]),
+        ("statement", &["bright_magenta", "magenta"]),
+        ("func", &["bright_blue", "blue", "accent"]),
+        ("type", &["yellow"]),
+        ("property", &["cyan"]),
+        ("constructor", &["bright_cyan", "cyan"]),
+        ("special", &["bright_red", "red"]),
+    ];
+
+    Some(IdeThemeSpec {
+        name: "omarchy".to_string(),
+        description: "Follows the active Omarchy theme".to_string(),
+        extends: "pastel_dark".to_string(),
+        colors: mappings
+            .iter()
+            .filter_map(|(role, names)| {
+                pick(names).map(|value| ((*role).to_string(), value))
+            })
+            .collect(),
+    })
+}
+
 /// First existing spelling of a pack-relative file: `<stem>.json`
 /// then `<stem>.jsonc`.
 fn existing_variant(dir: &Path, stem: &str) -> Option<PathBuf> {
@@ -321,6 +393,15 @@ pub fn load_ide_theme_specs() -> Vec<IdeThemeSpec> {
         if let Some(spec) = parse_theme_file(&theme_path, &id) {
             push(spec);
         }
+    }
+
+    // Keep an explicitly installed `ide-themes/omarchy.json` authoritative,
+    // otherwise expose Omarchy's active semantic palette as a native theme.
+    if let Some(spec) = omarchy_current_dir()
+        .map(|dir| dir.join("theme/colors.toml"))
+        .and_then(|path| omarchy_theme_spec(&path))
+    {
+        push(spec);
     }
 
     specs
@@ -423,10 +504,10 @@ mod tests {
     #[test]
     fn theme_file_parses_with_defaults() {
         let dir = scratch_dir("theme");
-        let path = dir.join("phosphor.toml");
+        let path = dir.join("phosphor.json");
         std::fs::write(
             &path,
-            "description = \"Green CRT\"\n[colors]\nbg = \"#030f06\"\nfg = \"#33ff66\"\n",
+            r##"{"description":"Green CRT","colors":{"bg":"#030f06","fg":"#33ff66"}}"##,
         )
         .unwrap();
 
@@ -436,8 +517,8 @@ mod tests {
         assert_eq!(spec.extends, "pastel_dark");
         assert!(spec.colors.iter().any(|(k, v)| k == "bg" && v == "#030f06"));
 
-        // Broken TOML is skipped, not fatal.
-        std::fs::write(&path, "[colors\nbg = ").unwrap();
+        // Broken JSON is skipped, not fatal.
+        std::fs::write(&path, "{\"colors\":").unwrap();
         assert!(parse_theme_file(&path, "phosphor").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -466,13 +547,48 @@ mod tests {
     }
 
     #[test]
-    fn existing_variant_prefers_json_over_toml() {
+    fn existing_variant_prefers_json_over_jsonc() {
         let dir = scratch_dir("variant");
-        std::fs::write(dir.join("pack.toml"), "[pack]\n").unwrap();
+        std::fs::write(dir.join("pack.jsonc"), "{}").unwrap();
         std::fs::write(dir.join("pack.json"), "{}").unwrap();
         assert_eq!(existing_variant(&dir, "pack"), Some(dir.join("pack.json")));
         std::fs::remove_file(dir.join("pack.json")).unwrap();
-        assert_eq!(existing_variant(&dir, "pack"), Some(dir.join("pack.toml")));
+        assert_eq!(existing_variant(&dir, "pack"), Some(dir.join("pack.jsonc")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn omarchy_colors_map_to_ide_roles() {
+        let dir = scratch_dir("omarchy");
+        let path = dir.join("colors.toml");
+        std::fs::write(
+            &path,
+            r##"
+background = "#000000"
+foreground = "#eeeeee"
+bright_foreground = "#ffffff"
+lighter_background = "#181818"
+selection = "#242424"
+muted = "#777777"
+accent = "#89b4fa"
+red = "#f38ba8"
+green = "#a6e3a1"
+yellow = "#f9e2af"
+orange = "#fab387"
+blue = "#89b4fa"
+magenta = "#cba6f7"
+cyan = "#94e2d5"
+"##,
+        )
+        .unwrap();
+
+        let spec = omarchy_theme_spec(&path).unwrap();
+        let mapped: BTreeMap<_, _> = spec.colors.into_iter().collect();
+        assert_eq!(spec.name, "omarchy");
+        assert_eq!(mapped.get("bg").map(String::as_str), Some("#000000"));
+        assert_eq!(mapped.get("fg").map(String::as_str), Some("#ffffff"));
+        assert_eq!(mapped.get("number").map(String::as_str), Some("#fab387"));
+        assert_eq!(mapped.get("accent").map(String::as_str), Some("#89b4fa"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

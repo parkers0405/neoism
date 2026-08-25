@@ -25,7 +25,7 @@ impl TempWorkspace {
             .expect("system clock before unix epoch")
             .as_nanos();
         let path = env::temp_dir().join(format!("neoism-lsp-{name}-{nonce}"));
-        fs::create_dir_all(&path).expect("create temp workspace");
+        fs::create_dir_all(path.join(".agent")).expect("create temp workspace");
         Self { path }
     }
 
@@ -538,7 +538,7 @@ fn returns_empty_status_for_unrecognized_workspace() {
 fn status_includes_configured_lsp_servers() {
     let workspace = TempWorkspace::new("configured");
     fs::write(
-        workspace.path.join("neoism.json"),
+        workspace.path.join(".agent/agent.json"),
         r#"{
           "lsp": {
             "custom-rust": {
@@ -572,7 +572,7 @@ fn status_includes_configured_lsp_servers() {
 fn configured_status_supports_generic_tcp_endpoints_without_a_command() {
     let workspace = TempWorkspace::new("configured-tcp");
     fs::write(
-        workspace.path.join("neoism.json"),
+        workspace.path.join(".agent/agent.json"),
         r#"{
           "lsp": {
             "remote-gdscript": {
@@ -602,7 +602,7 @@ fn configured_stdio_adapter_adds_a_genuinely_new_language_route() {
     let workspace = TempWorkspace::new("dynamic-stdio-route");
     workspace.touch("src/example.quux");
     fs::write(
-        workspace.path.join("neoism.json"),
+        workspace.path.join(".agent/agent.json"),
         r#"{
           "lsp": {
             "quux-lsp": {
@@ -674,7 +674,7 @@ fn document_lifecycle_is_not_gated_by_diagnostics_capability() {
     let workspace = TempWorkspace::new("completion-only-lifecycle");
     workspace.touch("src/example.liveonly");
     fs::write(
-        workspace.path.join("neoism.json"),
+        workspace.path.join(".agent/agent.json"),
         r#"{
           "lsp": {
             "live-only-lsp": {
@@ -719,7 +719,7 @@ fn invalid_custom_route_is_actionable_and_never_falls_back_to_plaintext() {
     let workspace = TempWorkspace::new("invalid-plaintext-route");
     workspace.touch("broken.quux");
     fs::write(
-        workspace.path.join("neoism.json"),
+        workspace.path.join(".agent/agent.json"),
         r#"{
           "lsp": {
             "broken-quux": {
@@ -757,7 +757,7 @@ fn legacy_builtin_override_keeps_the_builtin_route_table() {
     let workspace = TempWorkspace::new("legacy-builtin-override");
     workspace.touch("src/lib.rs");
     fs::write(
-        workspace.path.join("neoism.json"),
+        workspace.path.join(".agent/agent.json"),
         r#"{
           "lsp": {
             "rust": {
@@ -784,20 +784,15 @@ fn legacy_builtin_override_keeps_the_builtin_route_table() {
 #[test]
 fn explicit_lsp_false_disables_builtins_and_cache_refreshes() {
     let workspace = TempWorkspace::new("lsp-disable-cache");
-    fs::write(workspace.path.join("neoism.json"), r#"{ "lsp": false }"#)
+    fs::write(workspace.path.join(".agent/agent.json"), r#"{ "lsp": false }"#)
         .expect("disable LSP");
     assert!(lsp_adapters::adapters_for_root(&workspace.path).is_empty());
 
-    fs::write(workspace.path.join("neoism.json"), r#"{ "lsp": true }"#)
+    fs::write(workspace.path.join(".agent/agent.json"), r#"{ "lsp": true }"#)
         .expect("enable LSP");
-    assert!(
-        lsp_adapters::adapters_for_root(&workspace.path).is_empty(),
-        "the short-lived cache should serve repeated calls in one editor poll"
-    );
-    thread::sleep(Duration::from_millis(300));
     assert!(lsp_adapters::adapters_for_root(&workspace.path)
         .iter()
-        .any(|adapter| adapter.id == "rust"));
+        .any(|adapter| adapter.id == "rust"), "snapshot identity invalidates stale adapter config immediately");
     lsp_adapters::invalidate_adapter_cache(&workspace.path);
 }
 
@@ -854,8 +849,42 @@ fn resolves_command_source_for_runtime_launches() {
     assert_eq!(explicit_source, LspCommandSource::Config);
 
     let (path_command, path_source) = resolve_lsp_command("sh", vec!["sh".to_string()]);
-    assert_eq!(path_command, vec!["sh".to_string()]);
+    assert!(Path::new(&path_command[0]).is_file());
     assert_eq!(path_source, LspCommandSource::Path);
+}
+
+#[test]
+fn lsp_resolution_uses_the_injected_executable_service() {
+    use neoism_agent_service_api::{
+        AgentServices, ExecutableError, ExecutableRequest, ExecutableResult,
+        ExecutableService, ExecutableSource,
+    };
+    use std::sync::Arc;
+
+    struct FakeExecutableService;
+    impl ExecutableService for FakeExecutableService {
+        fn resolve(
+            &self,
+            request: &ExecutableRequest,
+        ) -> Result<ExecutableResult, ExecutableError> {
+            assert_eq!(request.preferred_ids, ["python"]);
+            Ok(ExecutableResult {
+                path: PathBuf::from("/managed/pyright-langserver"),
+                source: ExecutableSource::Managed {
+                    provider: "test".to_string(),
+                },
+            })
+        }
+    }
+
+    let services = AgentServices::new(Arc::new(FakeExecutableService), crate::standard_workspace_search());
+    let (command, source) = resolve_lsp_command_with(
+        &services,
+        "python",
+        vec!["pyright-langserver".to_string(), "--stdio".to_string()],
+    );
+    assert_eq!(command[0], "/managed/pyright-langserver");
+    assert_eq!(source, LspCommandSource::Extension);
 }
 
 #[test]

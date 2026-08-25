@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{json, Value};
 
 use super::state::side_panel::SessionGoal;
 use super::state::{NeoismAgentPendingPermission, NeoismAgentUsage};
@@ -70,6 +71,21 @@ pub struct SseDecoder {
     data_lines: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalEventEnvelope {
+    id: String,
+    sequence: u64,
+    #[serde(rename = "type")]
+    kind: String,
+    source: String,
+    schema_version: String,
+    timestamp: i64,
+    #[serde(default)]
+    subject: Option<Value>,
+    data: Value,
+}
+
 impl SseDecoder {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Value> {
         let mut out = Vec::new();
@@ -94,8 +110,19 @@ impl SseDecoder {
             }
             let data = self.data_lines.join("\n");
             self.data_lines.clear();
-            if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                out.push(value);
+            if let Ok(envelope) = serde_json::from_str::<CanonicalEventEnvelope>(&data) {
+                out.push(json!({
+                    "type": envelope.kind,
+                    "properties": envelope.data,
+                    "_event": {
+                        "id": envelope.id,
+                        "sequence": envelope.sequence,
+                        "source": envelope.source,
+                        "schemaVersion": envelope.schema_version,
+                        "timestamp": envelope.timestamp,
+                        "subject": envelope.subject,
+                    }
+                }));
             }
             return;
         }
@@ -990,12 +1017,7 @@ pub fn permission_request_from_event(properties: &Value) -> NeoismAgentPendingPe
 pub fn session_error_message(properties: &Value) -> String {
     properties
         .get("error")
-        .and_then(|error| {
-            error
-                .get("data")
-                .and_then(|data| data.get("message"))
-                .or_else(|| error.get("message"))
-        })
+        .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
         .unwrap_or("session error")
         .to_string()
@@ -1008,13 +1030,7 @@ fn is_session_interruption(properties: &Value) -> bool {
         .and_then(Value::as_bool)
         .unwrap_or(false)
         || error
-            .get("data")
-            .and_then(|data| data.get("interrupted"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        || error
             .get("message")
-            .or_else(|| error.get("data").and_then(|data| data.get("message")))
             .and_then(Value::as_str)
             .is_some_and(|message| message.eq_ignore_ascii_case("session aborted"))
 }
@@ -1304,15 +1320,17 @@ mod tests {
     fn sse_decoder_collects_multiline_json_data() {
         let mut decoder = SseDecoder::default();
 
-        assert!(decoder.feed(br#"data: {"a":"#).is_empty());
+        assert!(decoder.feed(br#"data: {"id":"41","sequence":41,"type":"message.updated","source":"neoism.core","schemaVersion":"1.0.0","timestamp":1,"data":{"a":"#).is_empty());
         let events = decoder.feed(
-            br#"1}
+            br#"1}}
 
 "#,
         );
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0], json!({ "a": 1 }));
+        assert_eq!(events[0]["type"], "message.updated");
+        assert_eq!(events[0]["properties"], json!({ "a": 1 }));
+        assert_eq!(events[0]["_event"]["sequence"], 41);
     }
 
     #[test]
@@ -1562,7 +1580,7 @@ mod tests {
                 "type": "session.error",
                 "properties": {
                     "sessionId": "ses_root",
-                    "error": { "data": { "message": "provider exploded" } }
+                    "error": { "message": "provider exploded" }
                 }
             }),
             "ses_root",

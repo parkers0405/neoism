@@ -1335,6 +1335,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return result;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    neoism_agent_server::language_server::configure_services(
+        neoism_agent_neoism_adapter::neoism_services(),
+    );
+
     #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     configure_debug_service_isolation()?;
 

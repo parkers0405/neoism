@@ -51,11 +51,12 @@ pub(super) async fn remote_auth_status_async(
 }
 
 pub(crate) async fn auth_start(
+    services: &neoism_agent_service_api::AgentServices,
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<McpAuthStartResponse> {
-    let config = crate::config::load(directory)?.info.mcp;
+    let config = crate::config::load(services, directory)?.info.mcp;
     let remote = config
         .get(name)
         .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
@@ -113,13 +114,14 @@ pub(crate) async fn auth_start(
 }
 
 pub(crate) async fn auth_callback(
+    services: &neoism_agent_service_api::AgentServices,
     directory: &str,
     name: &str,
     code: &str,
     state: Option<&str>,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<McpStatus> {
-    let config = crate::config::load(directory)?.info.mcp;
+    let config = crate::config::load(services, directory)?.info.mcp;
     let remote = config
         .get(name)
         .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
@@ -198,11 +200,12 @@ pub(crate) async fn auth_callback(
 }
 
 pub(crate) fn authenticate_status(
+    services: &neoism_agent_service_api::AgentServices,
     directory: &str,
     name: &str,
     auth_store: &McpAuthStore,
 ) -> anyhow::Result<McpStatus> {
-    let config = crate::config::load(directory)?.info.mcp;
+    let config = crate::config::load(services, directory)?.info.mcp;
     let remote = config
         .get(name)
         .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;

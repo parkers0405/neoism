@@ -46,6 +46,34 @@ struct HostedToken {
 }
 
 pub(crate) fn authenticate(supplied: Option<&str>) -> Result<Option<CallerClaims>, String> {
+    if supplied.is_some_and(|token| {
+        token.starts_with(neoism_agent_service_api::daemon_credential::PREFIX)
+    }) {
+        let token = supplied.expect("checked above");
+        let key = std::env::var("NEOISM_DAEMON_TOKEN")
+            .map_err(|_| "daemon credential verifier is not configured".to_string())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "system clock is before Unix epoch".to_string())?
+            .as_secs() as i64;
+        let claims = neoism_agent_service_api::daemon_credential::verify(
+            token,
+            key.as_bytes(),
+            now,
+        )
+        .map_err(str::to_string)?;
+        return Ok(Some(CallerClaims {
+            tenant_id: claims.tenant_id,
+            directory_prefixes: claims.directory_prefixes,
+            hosted: claims.hosted,
+            max_sessions: None,
+            max_artifacts: None,
+            max_artifact_bytes: None,
+            artifact_retention_days: None,
+            requests_per_minute: None,
+            max_in_flight: None,
+        }));
+    }
     if let Ok(raw) = std::env::var("NEOISM_AGENT_AUTH_CONFIG") {
         let config: HostedAuthConfig = serde_json::from_str(&raw)
             .map_err(|error| format!("invalid NEOISM_AGENT_AUTH_CONFIG: {error}"))?;
@@ -165,6 +193,17 @@ pub(crate) fn session_tenant(session: &neoism_agent_core::SessionInfo) -> &str {
         .unwrap_or("local")
 }
 
+pub(crate) fn allows_session(
+    claims: &CallerClaims,
+    session: &neoism_agent_core::SessionInfo,
+) -> bool {
+    allows_session_scope(claims, session_tenant(session), &session.directory)
+}
+
+fn allows_session_scope(claims: &CallerClaims, tenant_id: &str, directory: &str) -> bool {
+    tenant_id == claims.tenant_id && allows_directory(claims, directory)
+}
+
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -212,5 +251,36 @@ mod tests {
         rate.requests_per_minute = Some(1);
         drop(begin_request(&rate).unwrap());
         assert!(begin_request(&rate).is_err());
+    }
+
+    #[test]
+    fn scoped_claims_deny_cross_directory_and_cross_tenant_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-agent-caller-scope-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Audit)
+        ));
+        let allowed = root.join("allowed");
+        let denied = root.join("denied");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&denied).unwrap();
+        let mut scoped = claims("tenant-a".into());
+        scoped.directory_prefixes = vec![allowed.to_string_lossy().into_owned()];
+
+        assert!(!allows_session_scope(
+            &scoped,
+            "tenant-a",
+            &denied.to_string_lossy(),
+        ));
+        assert!(!allows_session_scope(
+            &scoped,
+            "tenant-b",
+            &allowed.to_string_lossy(),
+        ));
+        assert!(allows_session_scope(
+            &scoped,
+            "tenant-a",
+            &allowed.to_string_lossy(),
+        ));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

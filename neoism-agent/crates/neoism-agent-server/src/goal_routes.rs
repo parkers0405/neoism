@@ -8,12 +8,11 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use neoism_agent_core::{event_type, EventPayload, GoalResearchNote, SessionGoal, SessionInfo};
+use neoism_agent_core::{event_type, EventPayload, SessionGoal, SessionInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::ApiError;
-use crate::firecrawl::{self, FirecrawlPage};
 use crate::state::AppState;
 use crate::{ensure_session, now_millis};
 
@@ -68,27 +67,18 @@ pub(crate) async fn session_goal_set(
     }
 
     let now = now_millis();
-    let mut goal = info.goal().unwrap_or_default();
-    if goal.created == 0 {
-        goal.created = now;
-    }
-    let text = request.text.trim().to_string();
-    // Restating the goal reopens it: a fresh user-stated objective is active
-    // again even if the agent had previously marked it complete or blocked.
-    if text != goal.text || goal.status != neoism_agent_core::GoalStatus::Active {
-        goal.status = neoism_agent_core::GoalStatus::Active;
-        goal.summary.clear();
-    }
-    goal.text = text;
-    goal.updated = now.max(goal.updated.saturating_add(1));
-    goal.paused = request.paused;
+    let mut goal = neoism_agent_builtins::plugin::goals::set(
+        info.goal(), &request.text, request.paused, now,
+    ).expect("non-empty goal text was checked above");
 
     // Optional firecrawl-backed research. Gated behind the API key: when the
     // key is missing we simply skip research rather than failing the request.
-    if !request.research_urls.is_empty() && firecrawl::firecrawl_enabled() {
+    if !request.research_urls.is_empty() && neoism_agent_builtins::plugin::goals::research_enabled() {
         for url in &request.research_urls {
-            match firecrawl::scrape_url(url).await {
-                Ok(page) => goal.research.push(research_note(page, now)),
+            match neoism_agent_builtins::plugin::goals::scrape_url(url).await {
+                Ok(page) => goal.research.push(
+                    neoism_agent_builtins::plugin::goals::research_note(page, now),
+                ),
                 Err(error) => {
                     tracing::warn!(
                         target: "neoism_agent::goal",
@@ -134,22 +124,21 @@ pub(crate) async fn session_goal_research(
 ) -> Result<Json<GoalResponse>, ApiError> {
     let mut info = ensure_session(&state, &session_id).await?;
     require_enabled(state.services(), &info)?;
-    if !firecrawl::firecrawl_enabled() {
+    if !neoism_agent_builtins::plugin::goals::research_enabled() {
         return Err(ApiError::bad_request(format!(
             "web research is disabled: set {} to enable firecrawl",
-            firecrawl::FIRECRAWL_API_KEY_ENV
+            neoism_agent_builtins::plugin::goals::FIRECRAWL_API_KEY_ENV
         )));
     }
     let mut goal = info.goal().ok_or_else(|| {
         ApiError::bad_request("no active goal; set one with /goal first")
     })?;
 
-    let page = firecrawl::scrape_url(&request.url)
+    let page = neoism_agent_builtins::plugin::goals::scrape_url(&request.url)
         .await
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let now = now_millis();
-    goal.research.push(research_note(page, now));
-    goal.updated = now.max(goal.updated.saturating_add(1));
+    goal = neoism_agent_builtins::plugin::goals::attach_research(goal, page, now);
     info.set_goal(&goal);
     persist(&state, &mut info).await?;
     Ok(Json(goal_response(&info)))
@@ -162,20 +151,6 @@ fn require_enabled(services: &neoism_agent_service_api::AgentServices, info: &Se
         Err(ApiError::not_found(
             "Goal plugin is disabled for the workspace",
         ))
-    }
-}
-
-fn research_note(page: FirecrawlPage, now: u64) -> GoalResearchNote {
-    let content = match page.title {
-        Some(title) if !title.trim().is_empty() => {
-            format!("# {title}\n{}", page.markdown)
-        }
-        _ => page.markdown,
-    };
-    GoalResearchNote {
-        source: page.url,
-        content,
-        captured: now,
     }
 }
 
@@ -195,6 +170,6 @@ async fn persist(state: &AppState, info: &mut SessionInfo) -> Result<(), ApiErro
 fn goal_response(info: &SessionInfo) -> GoalResponse {
     GoalResponse {
         goal: info.goal(),
-        research_enabled: firecrawl::firecrawl_enabled(),
+        research_enabled: neoism_agent_builtins::plugin::goals::research_enabled(),
     }
 }

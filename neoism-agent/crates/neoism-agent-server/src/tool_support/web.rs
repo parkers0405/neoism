@@ -9,7 +9,6 @@ use super::{ToolContext, ToolExecutionResult};
 
 const MAX_WEB_BODY_BYTES: usize = 200_000;
 const MAX_WEBFETCH_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
-const MAX_WEBSEARCH_RESPONSE_BYTES: usize = 256 * 1024;
 
 pub(super) async fn webfetch_tool(
     context: ToolContext,
@@ -77,36 +76,8 @@ pub(super) async fn webfetch_tool(
 
 pub(crate) async fn websearch(arguments: Value) -> anyhow::Result<ToolExecutionResult> {
     let query = required_string(&arguments, "query")?;
-    let endpoint = std::env::var("NEOISM_AGENT_WEBSEARCH_ENDPOINT")
-        .unwrap_or_else(|_| "https://duckduckgo.com/html/".to_string());
-    let response = web_client()?
-        .get(&endpoint)
-        .query(&[("q", query)])
-        .header(
-            "user-agent",
-            format!("neoism-agent/{}", env!("CARGO_PKG_VERSION")),
-        )
-        .send()
-        .await
-        .with_context(|| format!("failed to search web for {query}"))?;
-    if !response.status().is_success() {
-        anyhow::bail!("web search provider returned {}", response.status());
-    }
-    let bytes = collect_bounded_response(response, MAX_WEBSEARCH_RESPONSE_BYTES)
-        .await
-        .with_context(|| "failed to read web search response")?;
-    let (output, truncated) = render_web_body(&bytes);
-
-    Ok(ToolExecutionResult {
-        title: format!("Search {query}"),
-        output,
-        metadata: Some(json!({
-            "query": query,
-            "endpoint": endpoint,
-            "bytes": bytes.len(),
-            "truncated": truncated,
-        })),
-    })
+    let result = neoism_agent_builtins::plugin::websearch::search(query).await?;
+    Ok(ToolExecutionResult { title: result.title, output: result.output, metadata: result.metadata })
 }
 
 fn web_client() -> anyhow::Result<reqwest::Client> {

@@ -27,7 +27,6 @@ mod error;
 mod executable;
 mod external_acp;
 mod external_agent;
-mod firecrawl;
 mod global_routes;
 mod goal_routes;
 mod instruction;

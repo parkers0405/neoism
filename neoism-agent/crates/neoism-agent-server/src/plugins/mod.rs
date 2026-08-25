@@ -8,8 +8,6 @@ use neoism_agent_plugin_api::{
 
 pub(crate) mod subagents;
 
-const AGENTS_PLUGIN_ID: &str = "dev.neoism.agents";
-
 #[derive(Clone, Copy)]
 struct InternalPlugin {
     id: &'static str,
@@ -164,31 +162,6 @@ impl AgentPlugin for CustomToolsPlugin {
     }
 }
 
-struct AgentsPlugin(neoism_agent_service_api::AgentServices);
-
-impl AgentPlugin for AgentsPlugin {
-    fn manifest(&self) -> PluginManifest {
-        PluginManifest {
-            id: AGENTS_PLUGIN_ID.to_string(),
-            name: "Built-in agents".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            internal: true,
-            disableable: true,
-            capabilities: vec!["neoism.agents".to_string()],
-            requires: Vec::new(),
-            event_namespaces: vec!["agent".to_string()],
-            api_prefix: Some("/v2/agents".to_string()),
-            config: BTreeMap::new(),
-        }
-    }
-
-    fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        registrar.route("agents");
-        registrar.agent_source_runtime("workspace-agents", std::sync::Arc::new(WorkspaceAgents(self.0.clone())));
-        Ok(())
-    }
-}
-
 struct WorkspaceAgents(neoism_agent_service_api::AgentServices);
 
 impl AgentSource for WorkspaceAgents {
@@ -296,8 +269,10 @@ pub(crate) fn build_host(
             std::sync::Arc::new(ServerSkillsHost(state.clone())),
         )));
     }
-    if enabled_in(&config, AGENTS_PLUGIN_ID) {
-        plugins.push(Box::new(AgentsPlugin(services.clone())));
+    if enabled_in(&config, neoism_agent_builtins::plugin::agents::ID) {
+        plugins.push(Box::new(neoism_agent_builtins::plugin::AgentsPlugin::new(
+            std::sync::Arc::new(WorkspaceAgents(services.clone())),
+        )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::commands::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::CommandsPlugin::new(services.clone())));

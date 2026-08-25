@@ -10,7 +10,6 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
-use crate::app_routes::{agent_get, agent_list};
 use crate::artifact_routes::{
     artifact_content, artifact_create, artifact_delete, artifact_get, artifact_list,
 };
@@ -239,7 +238,6 @@ async fn plugin_route_dispatch(
 fn plugin_router(snapshot: &neoism_agent_plugin_api::RegistrySnapshot, state: AppState) -> Router {
     let route = |id: &str| snapshot.contributions.contains_key(&format!("Route:{id}"));
     let mut router = Router::new();
-    if route("agents") { router = router.route("/v2/agents", get(agent_list)).route("/v2/agents/:name", get(agent_get)); }
     if route("subagents") { router = router.route("/v2/plugins/dev.neoism.subagents/sessions/:session_id/tasks", get(crate::plugins::subagents::list_tasks)).route("/v2/plugins/dev.neoism.subagents/sessions/:session_id/stop", post(crate::plugins::subagents::stop_tasks)); }
     if route("workflows") { router = router.route("/v2/plugins/dev.neoism.workflows", get(workflow_list)).route("/v2/plugins/dev.neoism.workflows/:workflow_id", get(workflow_get)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/activate", post(workflow_activate)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/pause", post(workflow_pause)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/run", post(workflow_run_now)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/preview", get(workflow_preview)).route("/v2/plugins/dev.neoism.workflows/:workflow_id/runs", get(workflow_history)); }
     if route("lsp") { router = router.route("/v2/plugins/dev.neoism.lsp", get(lsp_status)).route("/v2/plugins/dev.neoism.lsp/hover", get(lsp_hover)).route("/v2/plugins/dev.neoism.lsp/signature-help", get(lsp_signature_help)).route("/v2/plugins/dev.neoism.lsp/inlay-hints", get(lsp_inlay_hints)).route("/v2/plugins/dev.neoism.lsp/document-highlights", get(lsp_document_highlights)).route("/v2/plugins/dev.neoism.lsp/definition", get(lsp_definition)).route("/v2/plugins/dev.neoism.lsp/references", get(lsp_references)).route("/v2/plugins/dev.neoism.lsp/implementation", get(lsp_implementation)).route("/v2/plugins/dev.neoism.lsp/prepare-call-hierarchy", get(lsp_prepare_call_hierarchy)).route("/v2/plugins/dev.neoism.lsp/incoming-calls", get(lsp_incoming_calls)).route("/v2/plugins/dev.neoism.lsp/outgoing-calls", get(lsp_outgoing_calls)).route("/v2/plugins/dev.neoism.lsp/diagnostics", get(lsp_diagnostics)).route("/v2/plugins/dev.neoism.lsp/document-symbols", get(lsp_document_symbols)).route("/v2/plugins/dev.neoism.lsp/formatting", get(lsp_formatting)).route("/v2/plugins/dev.neoism.lsp/code-actions", get(lsp_code_actions)).route("/v2/plugins/dev.neoism.lsp/touch", post(lsp_touch)).route("/v2/plugins/dev.neoism.lsp/shutdown", post(lsp_shutdown)); }

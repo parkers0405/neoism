@@ -475,7 +475,10 @@ async fn generate_model_compaction_summary(
     if cancel.load(Ordering::SeqCst) {
         return None;
     }
-    let stream = state.inner.providers.stream(request).ok()?;
+    let runtime = state.workspace_runtime(&info.directory).await;
+    let snapshot = runtime.snapshot();
+    let provider = snapshot.provider_services.values().next()?;
+    let stream = provider.stream(request).ok()?;
     let mut events = stream.events;
     let mut raw = String::new();
     loop {

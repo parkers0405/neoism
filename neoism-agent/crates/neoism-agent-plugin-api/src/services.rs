@@ -1,9 +1,13 @@
 //! Typed contribution points for Agent services.
 
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use neoism_agent_core::{AgentInfo, CommandInfo, SkillInfo};
+use futures_core::Stream;
+use neoism_agent_core::{
+    AgentInfo, CommandInfo, ProviderGenerationRequest, ProviderStreamEvent, SkillInfo,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -59,29 +63,22 @@ pub struct ProviderDescriptor {
     pub config_schema: Option<Value>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderRequest {
-    pub model: String,
-    pub messages: Value,
-    #[serde(default)]
-    pub options: BTreeMap<String, Value>,
-}
+pub type ProviderEventStream = Pin<
+    Box<dyn Stream<Item = Result<ProviderStreamEvent, crate::PluginRuntimeError>> + Send>,
+>;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderResponse {
-    pub message: Value,
-    #[serde(default)]
-    pub metadata: Value,
+pub struct ProviderStream {
+    pub provider_id: String,
+    pub model_id: String,
+    pub events: ProviderEventStream,
 }
 
 pub trait ProviderService: Send + Sync + 'static {
     fn descriptor(&self) -> ProviderDescriptor;
-    fn complete<'a>(
-        &'a self,
-        request: ProviderRequest,
-    ) -> PluginFuture<'a, ProviderResponse>;
+    fn stream(
+        &self,
+        request: ProviderGenerationRequest,
+    ) -> Result<ProviderStream, crate::PluginRuntimeError>;
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

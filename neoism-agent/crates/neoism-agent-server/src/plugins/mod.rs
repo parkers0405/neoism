@@ -185,6 +185,39 @@ impl neoism_agent_builtins::plugin::skills::SkillsHost for ServerSkillsHost {
 
 struct ServerGoalsHost(crate::state::AppState);
 
+struct ServerProviderService(crate::provider::ProviderRegistry);
+
+impl neoism_agent_plugin_api::ProviderService for ServerProviderService {
+    fn descriptor(&self) -> neoism_agent_plugin_api::ProviderDescriptor {
+        neoism_agent_plugin_api::ProviderDescriptor {
+            id: "runtime".into(),
+            name: "Configured providers".into(),
+            models: Vec::new(),
+            config_schema: None,
+        }
+    }
+
+    fn stream(
+        &self,
+        request: neoism_agent_core::ProviderGenerationRequest,
+    ) -> Result<neoism_agent_plugin_api::ProviderStream, PluginRuntimeError> {
+        use futures::StreamExt;
+        let stream = self
+            .0
+            .stream(request)
+            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+        Ok(neoism_agent_plugin_api::ProviderStream {
+            provider_id: stream.provider_id,
+            model_id: stream.model_id,
+            events: Box::pin(
+                stream
+                    .events
+                    .map(|event| event.map_err(|error| PluginRuntimeError::new(error.to_string()))),
+            ),
+        })
+    }
+}
+
 struct ServerArtifactsHost(crate::state::AppState);
 
 impl neoism_agent_builtins::plugin::artifacts::ArtifactsHost for ServerArtifactsHost {
@@ -283,6 +316,14 @@ pub(crate) fn build_host(
                 ServerInteractionsHost(state.clone()),
             )),
         ));
+    }
+    if enabled_in(&config, neoism_agent_builtins::plugin::providers::ID) {
+        plugins.push(Box::new(neoism_agent_builtins::plugin::ProvidersPlugin::new(
+            vec![(
+                "runtime".into(),
+                std::sync::Arc::new(ServerProviderService(state.inner.providers.clone())),
+            )],
+        )));
     }
     plugins.extend(INTERNAL_PLUGINS
             .iter()

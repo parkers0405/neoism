@@ -1,4 +1,5 @@
 pub mod config;
+pub mod custom_tools;
 
 pub mod commands;
 pub mod agents;
@@ -7,6 +8,7 @@ pub mod goals;
 pub mod interactions;
 pub mod lsp;
 pub mod mcp;
+pub mod notes_tools;
 pub mod providers;
 pub mod pty;
 pub mod semantic;
@@ -16,15 +18,18 @@ pub mod system_prompt;
 pub mod vcs;
 pub mod websearch;
 pub mod workflows;
+pub mod workspace_tools;
 
 pub use commands::CommandsPlugin;
 pub use agents::AgentsPlugin;
 pub use artifacts::ArtifactsPlugin;
 pub use config::ConfigPlugin;
+pub use custom_tools::CustomToolsPlugin;
 pub use goals::GoalsPlugin;
 pub use interactions::InteractionsPlugin;
 pub use lsp::LspPlugin;
 pub use mcp::McpPlugin;
+pub use notes_tools::NotesToolsPlugin;
 pub use providers::ProvidersPlugin;
 pub use pty::PtyPlugin;
 pub use semantic::SemanticPlugin;
@@ -34,3 +39,4 @@ pub use system_prompt::SystemPromptPlugin;
 pub use vcs::VcsPlugin;
 pub use websearch::WebsearchPlugin;
 pub use workflows::WorkflowsPlugin;
+pub use workspace_tools::WorkspaceToolsPlugin;

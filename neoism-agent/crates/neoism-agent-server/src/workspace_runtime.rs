@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
+use std::any::Any;
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -157,15 +158,42 @@ impl PluginGenerationSlot {
 /// Keeping these cells on the workspace runtime is important: application
 /// kernel construction must not start plugin workers or allocate process maps,
 /// and dropping/replacing a generation gives teardown one unambiguous owner.
-#[derive(Default)]
 pub(crate) struct WorkspaceLifecycle {
-    mcp: OnceLock<Arc<crate::mcp::McpRuntimeManager>>,
-    lsp: OnceLock<crate::lsp::LspRuntime>,
-    pty: OnceLock<Arc<crate::pty::PtyWorkspaceRuntime>>,
-    background: OnceLock<Arc<crate::background_job::BackgroundWorkspaceRuntime>>,
-    subagents: OnceLock<Arc<crate::plugins::subagents::SubagentWorkspaceRuntime>>,
-    semantic_client: OnceLock<Option<crate::semantic::EmbeddingsClient>>,
-    semantic: tokio::sync::Mutex<Option<crate::semantic::SemanticIndexerHandle>>,
+    states: StdMutex<HashMap<String, Arc<dyn Any + Send + Sync>>>,
+}
+
+impl Default for WorkspaceLifecycle {
+    fn default() -> Self {
+        Self { states: StdMutex::new(HashMap::new()) }
+    }
+}
+
+impl WorkspaceLifecycle {
+    fn state_with<T: Send + Sync + 'static>(&self, plugin_id: &str, create: impl FnOnce() -> T) -> Arc<T> {
+        let mut states = self.states.lock().expect("workspace plugin state lock poisoned");
+        let state = states.entry(plugin_id.to_string()).or_insert_with(|| Arc::new(create())).clone();
+        drop(states);
+        state.downcast::<T>().unwrap_or_else(|_| panic!("plugin state type mismatch for {plugin_id}"))
+    }
+
+    fn state<T: Default + Send + Sync + 'static>(&self, plugin_id: &str) -> Arc<T> {
+        self.state_with(plugin_id, T::default)
+    }
+
+    fn state_if_allocated<T: Send + Sync + 'static>(&self, plugin_id: &str) -> Option<Arc<T>> {
+        let state = self.states.lock().expect("workspace plugin state lock poisoned").get(plugin_id).cloned()?;
+        Some(state.downcast::<T>().unwrap_or_else(|_| panic!("plugin state type mismatch for {plugin_id}")))
+    }
+}
+
+#[derive(Default)]
+struct SemanticLifecycle {
+    client: StdMutex<Option<Option<crate::semantic::EmbeddingsClient>>>,
+    indexer: tokio::sync::Mutex<Option<crate::semantic::SemanticIndexerHandle>>,
+}
+
+#[derive(Default)]
+struct WorkflowLifecycle {
     workflow_enabled: std::sync::atomic::AtomicBool,
 }
 
@@ -183,76 +211,80 @@ impl WorkspaceRuntime {
     }
 
     pub(crate) fn mcp(&self) -> Arc<crate::mcp::McpRuntimeManager> {
-        self.lifecycle().mcp.get_or_init(Default::default).clone()
+        self.lifecycle().state(neoism_agent_builtins::plugin::mcp::ID)
     }
 
     #[cfg(test)]
     pub(crate) fn mcp_is_allocated(&self) -> bool {
-        self.lifecycle().mcp.get().is_some()
+        self.lifecycle().state_if_allocated::<crate::mcp::McpRuntimeManager>(neoism_agent_builtins::plugin::mcp::ID).is_some()
     }
 
     pub(crate) fn mcp_if_allocated(&self) -> Option<Arc<crate::mcp::McpRuntimeManager>> {
-        self.lifecycle().mcp.get().cloned()
+        self.lifecycle().state_if_allocated(neoism_agent_builtins::plugin::mcp::ID)
     }
 
     pub(crate) fn lsp(&self) -> crate::lsp::LspRuntime {
-        self.lifecycle().lsp.get_or_init(|| crate::lsp::LspRuntime::new(self.services.clone())).clone()
+        (*self.lifecycle().state_with(neoism_agent_builtins::plugin::lsp::ID, || crate::lsp::LspRuntime::new(self.services.clone()))).clone()
     }
 
     pub(crate) fn lsp_if_allocated(&self) -> Option<crate::lsp::LspRuntime> {
-        self.lifecycle().lsp.get().cloned()
+        self.lifecycle().state_if_allocated::<crate::lsp::LspRuntime>(neoism_agent_builtins::plugin::lsp::ID).map(|state| (*state).clone())
     }
 
     pub(crate) fn pty(&self) -> Arc<crate::pty::PtyWorkspaceRuntime> {
-        self.lifecycle().pty.get_or_init(Default::default).clone()
+        self.lifecycle().state(neoism_agent_builtins::plugin::pty::ID)
     }
 
     pub(crate) fn pty_if_allocated(&self) -> Option<Arc<crate::pty::PtyWorkspaceRuntime>> {
-        self.lifecycle().pty.get().cloned()
+        self.lifecycle().state_if_allocated(neoism_agent_builtins::plugin::pty::ID)
     }
 
     pub(crate) fn background(&self) -> Arc<crate::background_job::BackgroundWorkspaceRuntime> {
-        self.lifecycle().background.get_or_init(Default::default).clone()
+        self.lifecycle().state(neoism_agent_builtins::plugin::workspace_tools::ID)
     }
 
     pub(crate) fn background_if_allocated(&self) -> Option<Arc<crate::background_job::BackgroundWorkspaceRuntime>> {
-        self.lifecycle().background.get().cloned()
+        self.lifecycle().state_if_allocated(neoism_agent_builtins::plugin::workspace_tools::ID)
     }
 
     pub(crate) fn subagents(&self) -> Arc<crate::plugins::subagents::SubagentWorkspaceRuntime> {
-        self.lifecycle().subagents.get_or_init(Default::default).clone()
+        self.lifecycle().state(neoism_agent_builtins::plugin::subagents::ID)
     }
 
     pub(crate) fn subagents_if_allocated(&self) -> Option<Arc<crate::plugins::subagents::SubagentWorkspaceRuntime>> {
-        self.lifecycle().subagents.get().cloned()
+        self.lifecycle().state_if_allocated(neoism_agent_builtins::plugin::subagents::ID)
     }
 
     pub(crate) fn set_workflow_enabled(&self, enabled: bool) {
-        self.lifecycle().workflow_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
+        self.lifecycle().state::<WorkflowLifecycle>(neoism_agent_builtins::plugin::workflows::ID).workflow_enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(crate) async fn teardown(&self, state: &crate::state::AppState) {
         let lifecycle = self.lifecycle();
-        if let Some(mcp) = lifecycle.mcp.get() {
+        if let Some(mcp) = lifecycle.state_if_allocated::<crate::mcp::McpRuntimeManager>(neoism_agent_builtins::plugin::mcp::ID) {
             mcp.shutdown_workspace(self.root.to_string_lossy().as_ref()).await;
         }
-        if let Some(lsp) = lifecycle.lsp.get() {
+        if let Some(lsp) = lifecycle.state_if_allocated::<crate::lsp::LspRuntime>(neoism_agent_builtins::plugin::lsp::ID) {
             lsp.shutdown_root(&self.root);
         }
-        if let Some(pty) = lifecycle.pty.get() {
+        if let Some(pty) = lifecycle.state_if_allocated::<crate::pty::PtyWorkspaceRuntime>(neoism_agent_builtins::plugin::pty::ID) {
             pty.shutdown().await;
         }
-        if let Some(background) = lifecycle.background.get() {
+        if let Some(background) = lifecycle.state_if_allocated::<crate::background_job::BackgroundWorkspaceRuntime>(neoism_agent_builtins::plugin::workspace_tools::ID) {
             background.cancel_and_clear().await;
         }
-        if let Some(subagents) = lifecycle.subagents.get() {
+        if let Some(subagents) = lifecycle.state_if_allocated::<crate::plugins::subagents::SubagentWorkspaceRuntime>(neoism_agent_builtins::plugin::subagents::ID) {
             subagents.teardown(state, &self.root).await;
         }
-        if let Some(indexer) = lifecycle.semantic.lock().await.take() {
-            indexer.shutdown().await;
+        if let Some(semantic) = lifecycle.state_if_allocated::<SemanticLifecycle>(neoism_agent_builtins::plugin::semantic::ID) {
+            if let Some(indexer) = semantic.indexer.lock().await.take() {
+                indexer.shutdown().await;
+            }
         }
-        self.set_workflow_enabled(false);
-        crate::workflow::workspace_disabled(state, &self.root).await;
+        if let Some(workflow) = lifecycle.state_if_allocated::<WorkflowLifecycle>(neoism_agent_builtins::plugin::workflows::ID) {
+            workflow.workflow_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+            crate::workflow::workspace_disabled(state, &self.root).await;
+        }
     }
 
     pub(crate) async fn replace_generation(&self, state: &crate::state::AppState) {
@@ -261,16 +293,21 @@ impl WorkspaceRuntime {
     }
 
     pub(crate) async fn enable_semantic(&self, state: crate::state::AppState) {
-        let lifecycle = self.lifecycle();
-        let client = lifecycle.semantic_client.get_or_init(|| crate::semantic::EmbeddingsClient::from_env(&state.inner.auth_store)).clone();
-        let mut indexer = lifecycle.semantic.lock().await;
+        let semantic = self.lifecycle().state::<SemanticLifecycle>(neoism_agent_builtins::plugin::semantic::ID);
+        let client = {
+            let mut client = semantic.client.lock().expect("semantic client lock poisoned");
+            client.get_or_insert_with(|| crate::semantic::EmbeddingsClient::from_env(&state.inner.auth_store)).clone()
+        };
+        let mut indexer = semantic.indexer.lock().await;
         if indexer.is_none() {
             *indexer = crate::semantic::spawn_indexer(state, self.root.clone(), client);
         }
     }
 
     pub(crate) fn semantic_client(&self, state: &crate::state::AppState) -> Option<crate::semantic::EmbeddingsClient> {
-        self.lifecycle().semantic_client.get_or_init(|| crate::semantic::EmbeddingsClient::from_env(&state.inner.auth_store)).clone()
+        let semantic = self.lifecycle().state::<SemanticLifecycle>(neoism_agent_builtins::plugin::semantic::ID);
+        let mut client = semantic.client.lock().expect("semantic client lock poisoned");
+        client.get_or_insert_with(|| crate::semantic::EmbeddingsClient::from_env(&state.inner.auth_store)).clone()
     }
 }
 

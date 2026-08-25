@@ -538,12 +538,12 @@ impl AppState {
         if previous.is_some() {
             runtime.replace_generation(self).await;
         }
-        let workflow = enabled.contains("dev.neoism.workflows");
+        let workflow = enabled.contains(neoism_agent_builtins::plugin::workflows::ID);
         runtime.set_workflow_enabled(workflow);
         if workflow {
             crate::workflow::workspace_enabled(self, runtime.root.clone()).await;
         }
-        if enabled.contains("dev.neoism.semantic") {
+        if enabled.contains(neoism_agent_builtins::plugin::semantic::ID) {
             runtime.enable_semantic(self.clone()).await;
             if let Some(memory) = self.inner.services.memory.as_ref() {
                 memory.set_semantic_index(Some(Arc::new(crate::semantic::AgentSemanticMemoryIndex::new(
@@ -557,7 +557,7 @@ impl AppState {
 
     async fn reconcile_semantic_service(&self) {
         let enabled = self.inner.workspace_plugin_generations.lock().await.values()
-            .any(|(_, plugins)| plugins.contains("dev.neoism.semantic"));
+            .any(|(_, plugins)| plugins.contains(neoism_agent_builtins::plugin::semantic::ID));
         if !enabled {
             if let Some(memory) = self.inner.services.memory.as_ref() {
                 memory.set_semantic_index(None);

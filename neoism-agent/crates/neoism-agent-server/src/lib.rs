@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::Arc;
 
-mod agent;
 mod agent_tool_registry;
 mod artifact_routes;
 mod app_router;
@@ -94,8 +93,6 @@ pub(crate) mod windows_process;
 mod workflow;
 mod workspace_runtime;
 
-#[cfg(test)]
-use agent::AgentCatalog;
 pub(crate) use agent_tool_registry::{
     available_tools_for_directory, execute_mcp_gateway,
     provider_tools_for_agent,

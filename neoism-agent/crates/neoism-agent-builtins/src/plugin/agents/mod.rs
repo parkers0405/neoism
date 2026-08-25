@@ -2,20 +2,26 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use neoism_agent_plugin_api::{
-    AgentPlugin, AgentSource, ContributionMetadata, PluginFuture, PluginHostError,
+    AgentCatalog as ServiceAgentCatalog, AgentPlugin, AgentService, AgentSource,
+    AgentSourceSnapshot, ContributionMetadata, PluginFuture, PluginHostError,
     PluginManifest, PluginRegistrar, PluginRuntimeError, PluginScope, RouteContribution, RouteDescriptor,
-    RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope,
+    RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope, ServiceRequest,
 };
+
+mod catalog;
+mod native;
+
+pub use catalog::AgentCatalog;
 
 pub const ID: &str = "dev.neoism.agents";
 
 pub struct AgentsPlugin {
-    source: Arc<dyn AgentSource>,
+    services: neoism_agent_service_api::AgentServices,
 }
 
 impl AgentsPlugin {
-    pub fn new(source: Arc<dyn AgentSource>) -> Self {
-        Self { source }
+    pub fn new(services: neoism_agent_service_api::AgentServices) -> Self {
+        Self { services }
     }
 }
 
@@ -36,7 +42,9 @@ impl AgentPlugin for AgentsPlugin {
     }
 
     fn register(&self, registrar: &mut PluginRegistrar) -> Result<(), PluginHostError> {
-        registrar.agent_source_runtime("workspace-agents", self.source.clone());
+        let source = Arc::new(BuiltinAgentSource(self.services.clone()));
+        registrar.agent_source_runtime("workspace-agents", source.clone());
+        registrar.agent_service_runtime("workspace-agents", source.clone());
         for (id, suffix, action) in [
             ("v2.agents.list", "", AgentRouteAction::List),
             ("v2.agents.get", "/:name", AgentRouteAction::Get),
@@ -52,12 +60,35 @@ impl AgentPlugin for AgentsPlugin {
                 },
                 metadata: ContributionMetadata::new(id, ID, PluginScope::Workspace),
                 handler: Arc::new(AgentRoute {
-                    source: self.source.clone(),
+                    service: source.clone(),
                     action,
                 }),
             });
         }
         Ok(())
+    }
+}
+
+struct BuiltinAgentSource(neoism_agent_service_api::AgentServices);
+
+impl AgentSource for BuiltinAgentSource {
+    fn load(&self, directory: &str) -> Result<AgentSourceSnapshot, PluginRuntimeError> {
+        Ok(AgentCatalog::load(&self.0, directory)?.snapshot())
+    }
+}
+
+impl AgentService for BuiltinAgentSource {
+    fn list<'a>(&'a self, request: ServiceRequest) -> PluginFuture<'a, ServiceAgentCatalog> {
+        Box::pin(async move {
+            let catalog = AgentCatalog::load(
+                &self.0,
+                request.directory.as_deref().unwrap_or_default(),
+            )?;
+            Ok(ServiceAgentCatalog {
+                agents: catalog.list(),
+                default_agent: Some(catalog.default_agent().to_string()),
+            })
+        })
     }
 }
 
@@ -68,7 +99,7 @@ enum AgentRouteAction {
 }
 
 struct AgentRoute {
-    source: Arc<dyn AgentSource>,
+    service: Arc<dyn AgentService>,
     action: AgentRouteAction,
 }
 
@@ -76,9 +107,11 @@ impl RouteHandler for AgentRoute {
     fn handle<'a>(&'a self, request: RouteRequest) -> PluginFuture<'a, RouteResponse> {
         Box::pin(async move {
             let directory = request.workspace.unwrap_or_default();
-            let catalog = self
-                .source
-                .load(&directory.to_string_lossy())?;
+            let catalog = self.service.list(ServiceRequest {
+                workspace_id: None,
+                directory: Some(directory.to_string_lossy().into_owned()),
+                options: BTreeMap::new(),
+            }).await?;
             let body = match self.action {
                 AgentRouteAction::List => serde_json::to_value(catalog.agents)
                     .map_err(|error| PluginRuntimeError::new(error.to_string()))?,

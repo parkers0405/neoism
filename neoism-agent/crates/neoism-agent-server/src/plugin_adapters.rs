@@ -1,18 +1,6 @@
 use neoism_agent_plugin_api::{
-    AgentSource, AgentSourceSnapshot, PluginFuture, PluginRegistrar, PluginRuntimeError,
+    PluginFuture, PluginRegistrar, PluginRuntimeError,
 };
-
-pub(crate) struct Agents(pub(crate) neoism_agent_service_api::AgentServices);
-
-impl AgentSource for Agents {
-    fn load(&self, directory: &str) -> Result<AgentSourceSnapshot, PluginRuntimeError> {
-        let catalog = crate::agent::AgentCatalog::load(&self.0, directory).map_err(runtime_error)?;
-        Ok(AgentSourceSnapshot {
-            agents: catalog.list(),
-            default_agent: catalog.default_agent().to_string(),
-        })
-    }
-}
 
 pub(crate) struct Skills(pub(crate) crate::state::AppState);
 

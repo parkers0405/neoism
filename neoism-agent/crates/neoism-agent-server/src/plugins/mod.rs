@@ -99,7 +99,7 @@ pub(crate) fn build_host(
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::agents::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::AgentsPlugin::new(
-            std::sync::Arc::new(plugin_adapters::Agents(services.clone())),
+            services.clone(),
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::commands::ID) {
@@ -137,23 +137,18 @@ pub(crate) fn build_host(
     Ok(host)
 }
 
-pub(crate) async fn agent_catalog(
-    state: &crate::state::AppState,
+pub(crate) fn agent_catalog(
+    snapshot: &RegistrySnapshot,
     directory: &str,
-) -> anyhow::Result<crate::agent::AgentCatalog> {
-    let snapshot = state.plugin_snapshot(directory).await;
+) -> anyhow::Result<neoism_agent_plugin_api::AgentSourceSnapshot> {
     let source = snapshot
         .agent_sources
         .values()
         .next()
         .ok_or_else(|| anyhow::anyhow!("no agent source is registered"))?;
-    let agents = source
+    source
         .load(directory)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    Ok(crate::agent::AgentCatalog::from_runtime(
-        agents.agents,
-        agents.default_agent,
-    ))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 pub(crate) fn enabled(services: &neoism_agent_service_api::AgentServices, directory: &str, plugin_id: &str) -> bool {

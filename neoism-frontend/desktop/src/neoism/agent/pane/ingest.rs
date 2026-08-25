@@ -2307,6 +2307,25 @@ impl NeoismAgentPane {
                 return;
             }
         }
+        // A runtime notification can be persisted and broadcast after the
+        // provider has already started streaming the assistant response it
+        // triggered. Both carry ascending canonical message ids, so put a
+        // delayed row before any later message group instead of appending it
+        // through the middle of that live assistant turn.
+        if let Some(index) = chronological_live_insert_index(
+            &self.messages,
+            &self.live_part_parent_ids,
+            &message,
+        ) {
+            let is_reasoning = message.kind == NeoismAgentMessageKind::Reasoning;
+            self.messages.insert(index, message);
+            if is_reasoning {
+                self.move_previous_assistant_after_reasoning(index);
+            } else {
+                self.invalidate_timeline_layout();
+            }
+            return;
+        }
         if message.kind == NeoismAgentMessageKind::Reasoning {
             if self
                 .messages

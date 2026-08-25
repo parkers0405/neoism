@@ -2580,6 +2580,32 @@ fn delayed_reasoning_end_uses_its_assistant_message_group_order() {
 }
 
 #[test]
+fn delayed_subagent_completion_stays_before_its_live_assistant_response() {
+    let mut pane = NeoismAgentPane::default();
+    pane.remember_live_part_parent("answer", Some("msg_03a800b6c001assistant"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("## Second-pass verdict").with_id("answer"),
+    );
+
+    pane.upsert_part_message(
+        NeoismAgentMessage::system("Subagent", "Subagent finished.")
+            .with_id("msg_03a800995001completion"),
+    );
+    pane.remember_live_part_parent("thinking", Some("msg_03a800b6c001assistant"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::reasoning("Summarizing confirmed findings").with_id("thinking"),
+    );
+
+    assert_eq!(
+        pane.messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["msg_03a800995001completion", "thinking", "answer"]
+    );
+}
+
+#[test]
 fn updated_reasoning_part_does_not_pull_finished_answer_below_it() {
     // A non-empty answer that already streamed keeps its slot even
     // when its reasoning part updates afterwards.

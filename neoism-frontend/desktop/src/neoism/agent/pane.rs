@@ -1578,6 +1578,32 @@ fn session_message_identity(message: &NeoismAgentMessage) -> Option<String> {
     task_id_from_task_message(message).map(|task_id| format!("task:{task_id}"))
 }
 
+fn chronological_live_insert_index(
+    messages: &[NeoismAgentMessage],
+    parent_ids: &HashMap<String, String>,
+    incoming: &NeoismAgentMessage,
+) -> Option<usize> {
+    let incoming_id = canonical_live_message_id(incoming, parent_ids)?;
+    messages.iter().position(|existing| {
+        canonical_live_message_id(existing, parent_ids)
+            .is_some_and(|existing_id| existing_id > incoming_id)
+    })
+}
+
+fn canonical_live_message_id<'a>(
+    message: &'a NeoismAgentMessage,
+    parent_ids: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    if message.id.starts_with("msg_") {
+        Some(message.id.as_str())
+    } else {
+        parent_ids
+            .get(&message.id)
+            .map(String::as_str)
+            .filter(|id| id.starts_with("msg_"))
+    }
+}
+
 pub(super) fn upsert_cached_part_message(
     messages: &mut Vec<NeoismAgentMessage>,
     message: NeoismAgentMessage,

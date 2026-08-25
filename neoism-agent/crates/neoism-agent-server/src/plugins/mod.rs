@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use neoism_agent_core::{CapabilityInfo, PluginManifestInfo};
 use neoism_agent_plugin_api::{
-    AgentPlugin, AgentSource, AgentSourceSnapshot, PluginFuture, PluginHost, PluginHostError,
-    PluginManifest, PluginRegistrar, PluginRuntimeError, RegistrySnapshot,
+    AgentPlugin, PluginHost, PluginHostError, PluginManifest, PluginRegistrar, RegistrySnapshot,
 };
+use crate::plugin_adapters;
 
 pub(crate) mod subagents;
 
@@ -144,325 +144,6 @@ impl AgentPlugin for CustomToolsPlugin {
     }
 }
 
-struct WorkspaceAgents(neoism_agent_service_api::AgentServices);
-
-impl AgentSource for WorkspaceAgents {
-    fn load(&self, directory: &str) -> Result<AgentSourceSnapshot, PluginRuntimeError> {
-        let catalog = crate::agent::AgentCatalog::load(&self.0, directory)
-            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-        Ok(AgentSourceSnapshot {
-            agents: catalog.list(),
-            default_agent: catalog.default_agent().to_string(),
-        })
-    }
-}
-
-struct ServerSkillsHost(crate::state::AppState);
-
-impl neoism_agent_builtins::plugin::skills::SkillsHost for ServerSkillsHost {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) {
-        crate::tool::register_skill_tools(registrar, &self.0);
-    }
-}
-
-struct ServerGoalsHost(crate::state::AppState);
-struct ServerSemanticHost(crate::state::AppState);
-
-impl neoism_agent_builtins::plugin::semantic::SemanticHost for ServerSemanticHost {
-    fn search<'a>(
-        &'a self,
-        request: neoism_agent_plugin_api::RouteRequest,
-    ) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
-        Box::pin(async move {
-            use axum::extract::{Query, State};
-            let query = request.query.into_iter().fold(
-                serde_json::Map::new(),
-                |mut output, (key, values)| {
-                    output.insert(key, serde_json::json!(values.first().cloned().unwrap_or_default()));
-                    output
-                },
-            );
-            let query = serde_json::from_value(serde_json::Value::Object(query))
-                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-            let response = crate::semantic::semantic_search_route(State(self.0.clone()), Query(query))
-                .await
-                .map_err(plugin_api_error)?;
-            let body = serde_json::to_value(response.0)
-                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-            Ok(neoism_agent_plugin_api::RouteResponse::json(200, body))
-        })
-    }
-}
-struct ServerWorkflowsHost(crate::state::AppState);
-
-impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for ServerWorkflowsHost {
-    fn execute<'a>(
-        &'a self,
-        action: neoism_agent_builtins::plugin::workflows::WorkflowAction,
-        request: neoism_agent_plugin_api::RouteRequest,
-    ) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
-        Box::pin(async move {
-            use axum::extract::{Path, Query, State};
-            use neoism_agent_builtins::plugin::workflows::WorkflowAction;
-            let query = plugin_route_query(&request);
-            let state = State(self.0.clone());
-            let headers = axum::http::HeaderMap::new();
-            let workflow_id = request.path.get("workflow_id").cloned().unwrap_or_default();
-            let value = match action {
-                WorkflowAction::List => crate::workflow::workflow_list(
-                    state, Query(plugin_query(query)?), headers,
-                ).await.map_err(plugin_api_error)?.0,
-                WorkflowAction::Get => crate::workflow::workflow_get(
-                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
-                ).await.map_err(plugin_api_error)?.0,
-                WorkflowAction::Activate => crate::workflow::workflow_activate(
-                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
-                ).await.map_err(plugin_api_error)?.0,
-                WorkflowAction::Pause => crate::workflow::workflow_pause(
-                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
-                ).await.map_err(plugin_api_error)?.0,
-                WorkflowAction::Run => crate::workflow::workflow_run_now(
-                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
-                ).await.map_err(plugin_api_error)?.0,
-                WorkflowAction::Preview => crate::workflow::workflow_preview(
-                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
-                ).await.map_err(plugin_api_error)?.0,
-                WorkflowAction::History => crate::workflow::workflow_history(
-                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
-                ).await.map_err(plugin_api_error)?.0,
-            };
-            Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
-        })
-    }
-}
-
-fn plugin_route_query(request: &neoism_agent_plugin_api::RouteRequest) -> serde_json::Value {
-    let mut query = request.query.iter().fold(serde_json::Map::new(), |mut output, (key, values)| {
-        let value = values.first().cloned().unwrap_or_default();
-        let value = value.parse::<u64>().map_or_else(
-            |_| serde_json::Value::String(value),
-            |value| serde_json::json!(value),
-        );
-        output.insert(key.clone(), value);
-        output
-    });
-    if let Some(workspace) = &request.workspace {
-        query.insert("directory".into(), serde_json::json!(workspace));
-    }
-    serde_json::Value::Object(query)
-}
-
-fn plugin_query<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, PluginRuntimeError> {
-    serde_json::from_value(value).map_err(|error| PluginRuntimeError::new(error.to_string()))
-}
-struct ServerConfigAdmin(crate::state::AppState);
-
-impl neoism_agent_builtins::plugin::config::ConfigAdminHost for ServerConfigAdmin {
-    fn execute<'a>(
-        &'a self,
-        action: neoism_agent_builtins::plugin::config::ConfigAdminAction,
-        request: neoism_agent_plugin_api::RouteRequest,
-    ) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
-        Box::pin(async move {
-            use neoism_agent_builtins::plugin::config::ConfigAdminAction;
-            let directory = request.workspace.unwrap_or_default();
-            let directory = directory.to_string_lossy();
-            let body = match action {
-                ConfigAdminAction::Get => {
-                    let mut config = crate::config::load(self.0.services(), &directory)
-                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?
-                        .info;
-                    crate::config::inject_builtin_mcp(&mut config, self.0.services());
-                    serde_json::to_value(config)
-                }
-                ConfigAdminAction::Validate => serde_json::to_value(
-                    crate::config::validate(self.0.services(), &directory),
-                ),
-                ConfigAdminAction::Update => {
-                    let config: neoism_agent_core::AgentConfigDocument =
-                        serde_json::from_value(request.body)
-                            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-                    let snapshot = crate::config::snapshot(self.0.services(), &directory)
-                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-                    self.0.services().config.update(
-                        &neoism_agent_service_api::ConfigUpdateRequest {
-                            workspace: std::path::PathBuf::from(directory.as_ref()),
-                            source_id: snapshot.writable_target.source_id,
-                            update: neoism_agent_service_api::ConfigUpdate::ReplaceDocument {
-                                document: serde_json::to_value(&config)
-                                    .map_err(|error| PluginRuntimeError::new(error.to_string()))?,
-                            },
-                        },
-                    ).await.map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-                    serde_json::to_value(config)
-                }
-            }
-            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-            Ok(neoism_agent_plugin_api::RouteResponse::json(200, body))
-        })
-    }
-}
-
-struct ServerProviderService(crate::provider::ProviderRegistry);
-struct ServerProviderAdmin(crate::state::AppState);
-
-impl neoism_agent_plugin_api::ProviderService for ServerProviderService {
-    fn descriptor(&self) -> neoism_agent_plugin_api::ProviderDescriptor {
-        neoism_agent_plugin_api::ProviderDescriptor {
-            id: "runtime".into(),
-            name: "Configured providers".into(),
-            models: Vec::new(),
-            config_schema: None,
-        }
-    }
-
-    fn stream(
-        &self,
-        request: neoism_agent_core::ProviderGenerationRequest,
-    ) -> Result<neoism_agent_plugin_api::ProviderStream, PluginRuntimeError> {
-        use futures::StreamExt;
-        let stream = self
-            .0
-            .stream(request)
-            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-        Ok(neoism_agent_plugin_api::ProviderStream {
-            provider_id: stream.provider_id,
-            model_id: stream.model_id,
-            events: Box::pin(
-                stream
-                    .events
-                    .map(|event| event.map_err(|error| PluginRuntimeError::new(error.to_string()))),
-            ),
-        })
-    }
-}
-
-impl neoism_agent_builtins::plugin::providers::ProviderAdminHost for ServerProviderAdmin {
-    fn execute<'a>(
-        &'a self,
-        action: neoism_agent_builtins::plugin::providers::ProviderAdminAction,
-        provider_id: Option<&'a str>,
-        body: serde_json::Value,
-    ) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
-        Box::pin(async move {
-            use axum::extract::{Path, State};
-            use axum::Json;
-            use neoism_agent_builtins::plugin::providers::ProviderAdminAction;
-            let state = State(self.0.clone());
-            let provider_id = provider_id.unwrap_or_default().to_string();
-            let value = match action {
-                ProviderAdminAction::List => serde_json::to_value(
-                    crate::provider_routes::provider_list(state).await.map_err(plugin_api_error)?.0,
-                ),
-                ProviderAdminAction::Configured => serde_json::to_value(
-                    crate::provider_routes::config_providers(state).await.map_err(plugin_api_error)?.0,
-                ),
-                ProviderAdminAction::AuthMethods => serde_json::to_value(
-                    crate::provider_routes::provider_auth_methods(state).await.map_err(plugin_api_error)?.0,
-                ),
-                ProviderAdminAction::AuthGet => serde_json::to_value(
-                    crate::provider_routes::auth_get(state, Path(provider_id)).await.map_err(plugin_api_error)?.0,
-                ),
-                ProviderAdminAction::AuthSet => {
-                    let info = serde_json::from_value(body)
-                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-                    serde_json::to_value(
-                        crate::provider_routes::auth_set(state, Path(provider_id), Json(info)).await.map_err(plugin_api_error)?.0,
-                    )
-                }
-                ProviderAdminAction::AuthRemove => serde_json::to_value(
-                    crate::provider_routes::auth_remove(state, Path(provider_id)).await.map_err(plugin_api_error)?.0,
-                ),
-                ProviderAdminAction::OAuthAuthorize => {
-                    let request = serde_json::from_value(body)
-                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-                    serde_json::to_value(
-                        crate::provider_routes::provider_oauth_authorize(state, Path(provider_id), Json(request)).await.map_err(plugin_api_error)?.0,
-                    )
-                }
-                ProviderAdminAction::OAuthCallback => {
-                    let request = serde_json::from_value(body)
-                        .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-                    serde_json::to_value(
-                        crate::provider_routes::provider_oauth_callback(state, Path(provider_id), Json(request)).await.map_err(plugin_api_error)?.0,
-                    )
-                }
-            }
-            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-            Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
-        })
-    }
-}
-
-fn plugin_api_error(error: crate::error::ApiError) -> PluginRuntimeError {
-    PluginRuntimeError::new(error.to_string())
-}
-
-struct ServerArtifactsHost(crate::state::AppState);
-
-impl neoism_agent_builtins::plugin::artifacts::ArtifactsHost for ServerArtifactsHost {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) {
-        crate::tool::register_artifact_tools(registrar, &self.0);
-    }
-}
-
-struct ServerInteractionsHost(crate::state::AppState);
-
-impl neoism_agent_builtins::plugin::interactions::InteractionsHost for ServerInteractionsHost {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) {
-        crate::tool::register_interaction_tools(registrar, &self.0);
-    }
-}
-
-impl neoism_agent_builtins::plugin::goals::GoalsHost for ServerGoalsHost {
-    fn register_tools(&self, registrar: &mut PluginRegistrar) {
-        crate::tool::register_goal_tools(registrar, &self.0);
-    }
-
-    fn load<'a>(
-        &'a self,
-        session_id: &'a str,
-    ) -> PluginFuture<'a, Option<neoism_agent_core::SessionGoal>> {
-        Box::pin(async move {
-            crate::ensure_session(&self.0, session_id)
-                .await
-                .map(|session| session.goal())
-                .map_err(|error| PluginRuntimeError::new(error.to_string()))
-        })
-    }
-
-    fn save<'a>(
-        &'a self,
-        session_id: &'a str,
-        goal: Option<neoism_agent_core::SessionGoal>,
-    ) -> PluginFuture<'a, Option<neoism_agent_core::SessionGoal>> {
-        Box::pin(async move {
-            let mut session = crate::ensure_session(&self.0, session_id)
-                .await
-                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-            if let Some(goal) = &goal {
-                session.set_goal(goal);
-            } else {
-                session.clear_goal();
-            }
-            session.time.updated = crate::now_millis()
-                .max(session.time.updated.saturating_add(1))
-                .max(goal.as_ref().map(|goal| goal.updated).unwrap_or_default());
-            self.0
-                .inner
-                .store
-                .update_session(&session)
-                .await
-                .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
-            self.0.publish(neoism_agent_core::EventPayload::new(
-                neoism_agent_core::event_type::SESSION_UPDATED,
-                serde_json::json!({ "sessionID": session.id.to_string(), "info": session }),
-            ));
-            Ok(goal)
-        })
-    }
-}
-
 pub(crate) fn build_host(
     state: &crate::state::AppState,
     directory: &str,
@@ -475,7 +156,7 @@ pub(crate) fn build_host(
     let mut plugins = vec![
         Box::new(neoism_agent_builtins::plugin::ConfigPlugin::new(
             services.clone(),
-            std::sync::Arc::new(ServerConfigAdmin(state.clone())),
+            std::sync::Arc::new(plugin_adapters::ConfigAdmin(state.clone())),
         )) as Box<dyn AgentPlugin>,
     ];
     if enabled_in(
@@ -488,13 +169,13 @@ pub(crate) fn build_host(
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::artifacts::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::ArtifactsPlugin::new(
-            std::sync::Arc::new(ServerArtifactsHost(state.clone())),
+            std::sync::Arc::new(plugin_adapters::Artifacts(state.clone())),
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::interactions::ID) {
         plugins.push(Box::new(
             neoism_agent_builtins::plugin::InteractionsPlugin::new(std::sync::Arc::new(
-                ServerInteractionsHost(state.clone()),
+                plugin_adapters::Interactions(state.clone()),
             )),
         ));
     }
@@ -502,19 +183,19 @@ pub(crate) fn build_host(
         plugins.push(Box::new(neoism_agent_builtins::plugin::ProvidersPlugin::new(
             vec![(
                 "runtime".into(),
-                std::sync::Arc::new(ServerProviderService(state.inner.providers.clone())),
+                std::sync::Arc::new(plugin_adapters::Provider(state.inner.providers.clone())),
             )],
-            std::sync::Arc::new(ServerProviderAdmin(state.clone())),
+            std::sync::Arc::new(plugin_adapters::ProviderAdmin(state.clone())),
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::semantic::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::SemanticPlugin::new(
-            std::sync::Arc::new(ServerSemanticHost(state.clone())),
+            std::sync::Arc::new(plugin_adapters::Semantic(state.clone())),
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::workflows::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::WorkflowsPlugin::new(
-            std::sync::Arc::new(ServerWorkflowsHost(state.clone())),
+            std::sync::Arc::new(plugin_adapters::Workflows(state.clone())),
         )));
     }
     plugins.extend(INTERNAL_PLUGINS
@@ -527,12 +208,12 @@ pub(crate) fn build_host(
     if enabled_in(&config, neoism_agent_builtins::plugin::skills::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::SkillsPlugin::new(
             services.clone(),
-            std::sync::Arc::new(ServerSkillsHost(state.clone())),
+            std::sync::Arc::new(plugin_adapters::Skills(state.clone())),
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::agents::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::AgentsPlugin::new(
-            std::sync::Arc::new(WorkspaceAgents(services.clone())),
+            std::sync::Arc::new(plugin_adapters::Agents(services.clone())),
         )));
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::commands::ID) {
@@ -548,7 +229,7 @@ pub(crate) fn build_host(
     }
     if enabled_in(&config, neoism_agent_builtins::plugin::goals::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::GoalsPlugin::new(
-            std::sync::Arc::new(ServerGoalsHost(state.clone())),
+            std::sync::Arc::new(plugin_adapters::Goals(state.clone())),
         )));
     }
     if enabled_in(&config, "dev.neoism.tools.workspace") {

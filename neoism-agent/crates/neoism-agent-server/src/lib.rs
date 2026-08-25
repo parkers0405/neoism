@@ -12,7 +12,6 @@ mod agent;
 mod agent_tool_registry;
 mod artifact_routes;
 mod app_router;
-mod app_routes;
 pub mod auth_cli;
 mod auth_store;
 mod audit_routes;

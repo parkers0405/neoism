@@ -5,7 +5,7 @@ use neoism_agent_core::AgentConfigDocument;
 use neoism_agent_plugin_api::{
     AgentPlugin, ConfigDocument, ConfigService, ContributionMetadata, PluginFuture,
     PluginHostError, PluginManifest, PluginRegistrar, PluginRuntimeError, RouteContribution,
-    RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope,
+    PluginScope, RouteDescriptor, RouteHandler, RouteMethod, RouteRequest, RouteResponse, RouteScope,
     ServiceRequest,
 };
 use neoism_agent_service_api::{AgentServices, ConfigSnapshotRequest};
@@ -70,7 +70,7 @@ impl AgentPlugin for ConfigPlugin {
                     id: id.into(), method, path: path.into(), scope: RouteScope::Workspace,
                     request_schema: None, response_schema: None,
                 },
-                metadata: ContributionMetadata::default(),
+                metadata: ContributionMetadata::new(id, ID, PluginScope::Workspace),
                 handler: Arc::new(ConfigAdminRoute { admin: self.admin.clone(), action }),
             });
         }

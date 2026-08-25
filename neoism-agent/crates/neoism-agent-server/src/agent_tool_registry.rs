@@ -98,6 +98,15 @@ pub(crate) async fn available_tools_for_directory(
     let directory = workspace.directory;
     let snapshot = workspace.snapshot;
     let mut tools = Vec::new();
+    for tool in snapshot.runtime_tools.values() {
+        let definition = tool.definition();
+        tools.push(ToolListItem {
+            id: definition.id,
+            description: definition.description,
+            parameters: definition.parameters,
+            output_schema: Some(definition.output_schema),
+        });
+    }
     if state.services().notes.is_none() {
         tools.retain(|tool| tool.id != "notes");
     } else if let Some(notes) = state.services().notes.as_ref() {
@@ -107,15 +116,6 @@ pub(crate) async fn available_tools_for_directory(
                 operation["enum"] = json!(["create", "list", "read", "write", "search", "tasks", "taskToggle"]);
             }
         }
-    }
-    for tool in snapshot.runtime_tools.values() {
-        let definition = tool.definition();
-        tools.push(ToolListItem {
-            id: definition.id,
-            description: definition.description,
-            parameters: definition.parameters,
-            output_schema: Some(definition.output_schema),
-        });
     }
     tools.extend(
         crate::custom_tool::list(state.services(), &directory)

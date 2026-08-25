@@ -45,14 +45,6 @@ const INTERNAL_PLUGINS: &[InternalPlugin] = &[
         disableable: true,
     },
     InternalPlugin {
-        id: "dev.neoism.workflows",
-        name: "Workflows",
-        capability: "neoism.workflows",
-        event_namespace: "workflow",
-        contribution: "workflows",
-        disableable: true,
-    },
-    InternalPlugin {
         id: "dev.neoism.pty",
         name: "Pseudo terminals",
         capability: "neoism.pty",
@@ -116,7 +108,6 @@ impl AgentPlugin for BuiltinPlugin {
                 registrar.route("lsp");
                 crate::tool::register_lsp_tools(registrar, &self.state);
             }
-            "workflows" => registrar.route("workflows"),
             "pty" => registrar.route("pty"),
             "workspace-tools" => crate::tool::register_workspace_tools(registrar, &self.state),
             "notes-tools" => crate::tool::register_notes_tools(registrar, &self.state),
@@ -201,6 +192,68 @@ impl neoism_agent_builtins::plugin::semantic::SemanticHost for ServerSemanticHos
             Ok(neoism_agent_plugin_api::RouteResponse::json(200, body))
         })
     }
+}
+struct ServerWorkflowsHost(crate::state::AppState);
+
+impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for ServerWorkflowsHost {
+    fn execute<'a>(
+        &'a self,
+        action: neoism_agent_builtins::plugin::workflows::WorkflowAction,
+        request: neoism_agent_plugin_api::RouteRequest,
+    ) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
+        Box::pin(async move {
+            use axum::extract::{Path, Query, State};
+            use neoism_agent_builtins::plugin::workflows::WorkflowAction;
+            let query = plugin_route_query(&request);
+            let state = State(self.0.clone());
+            let headers = axum::http::HeaderMap::new();
+            let workflow_id = request.path.get("workflow_id").cloned().unwrap_or_default();
+            let value = match action {
+                WorkflowAction::List => crate::workflow::workflow_list(
+                    state, Query(plugin_query(query)?), headers,
+                ).await.map_err(plugin_api_error)?.0,
+                WorkflowAction::Get => crate::workflow::workflow_get(
+                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
+                ).await.map_err(plugin_api_error)?.0,
+                WorkflowAction::Activate => crate::workflow::workflow_activate(
+                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
+                ).await.map_err(plugin_api_error)?.0,
+                WorkflowAction::Pause => crate::workflow::workflow_pause(
+                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
+                ).await.map_err(plugin_api_error)?.0,
+                WorkflowAction::Run => crate::workflow::workflow_run_now(
+                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
+                ).await.map_err(plugin_api_error)?.0,
+                WorkflowAction::Preview => crate::workflow::workflow_preview(
+                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
+                ).await.map_err(plugin_api_error)?.0,
+                WorkflowAction::History => crate::workflow::workflow_history(
+                    state, Query(plugin_query(query)?), headers, Path(workflow_id),
+                ).await.map_err(plugin_api_error)?.0,
+            };
+            Ok(neoism_agent_plugin_api::RouteResponse::json(200, value))
+        })
+    }
+}
+
+fn plugin_route_query(request: &neoism_agent_plugin_api::RouteRequest) -> serde_json::Value {
+    let mut query = request.query.iter().fold(serde_json::Map::new(), |mut output, (key, values)| {
+        let value = values.first().cloned().unwrap_or_default();
+        let value = value.parse::<u64>().map_or_else(
+            |_| serde_json::Value::String(value),
+            |value| serde_json::json!(value),
+        );
+        output.insert(key.clone(), value);
+        output
+    });
+    if let Some(workspace) = &request.workspace {
+        query.insert("directory".into(), serde_json::json!(workspace));
+    }
+    serde_json::Value::Object(query)
+}
+
+fn plugin_query<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, PluginRuntimeError> {
+    serde_json::from_value(value).map_err(|error| PluginRuntimeError::new(error.to_string()))
 }
 struct ServerConfigAdmin(crate::state::AppState);
 
@@ -457,6 +510,11 @@ pub(crate) fn build_host(
     if enabled_in(&config, neoism_agent_builtins::plugin::semantic::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::SemanticPlugin::new(
             std::sync::Arc::new(ServerSemanticHost(state.clone())),
+        )));
+    }
+    if enabled_in(&config, neoism_agent_builtins::plugin::workflows::ID) {
+        plugins.push(Box::new(neoism_agent_builtins::plugin::WorkflowsPlugin::new(
+            std::sync::Arc::new(ServerWorkflowsHost(state.clone())),
         )));
     }
     plugins.extend(INTERNAL_PLUGINS

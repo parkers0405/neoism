@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use neoism_agent_plugin_api::{
     AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest,
-    PluginRegistrar, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
+    PluginRegistrar, PluginScope, RouteContribution, RouteDescriptor, RouteHandler, RouteMethod,
     RouteRequest, RouteResponse, RouteScope,
 };
 
@@ -40,7 +40,7 @@ impl AgentPlugin for SemanticPlugin {
                 path: format!("/v2/plugins/{ID}/search"), scope: RouteScope::Workspace,
                 request_schema: None, response_schema: None,
             },
-            metadata: ContributionMetadata::default(),
+            metadata: ContributionMetadata::new("v2.plugins.semantic.search", ID, PluginScope::Workspace),
             handler: Arc::new(SemanticRoute(self.host.clone())),
         });
         Ok(())

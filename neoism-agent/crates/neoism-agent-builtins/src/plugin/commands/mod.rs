@@ -6,7 +6,7 @@ use neoism_agent_core::CommandInfo;
 use neoism_agent_plugin_api::{
     AgentPlugin, CommandSource, PluginFuture, PluginHostError, PluginManifest,
     PluginRegistrar, PluginRuntimeError, RouteContribution, RouteHandler, RouteMethod,
-    ContributionMetadata, RouteDescriptor, RouteRequest, RouteResponse, RouteScope,
+    ContributionMetadata, PluginScope, RouteDescriptor, RouteRequest, RouteResponse, RouteScope,
 };
 use neoism_agent_service_api::AgentServices;
 
@@ -42,7 +42,7 @@ impl AgentPlugin for CommandsPlugin {
                 request_schema: None,
                 response_schema: None,
             },
-            metadata: ContributionMetadata::default(),
+            metadata: ContributionMetadata::new("v2.plugins.commands.list", ID, PluginScope::Workspace),
             handler: Arc::new(CommandsRoute(self.services.clone())),
         });
         registrar.command_source_runtime("workspace-commands", Arc::new(WorkspaceCommands(self.services.clone())));

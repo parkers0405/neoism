@@ -11,6 +11,7 @@ pub mod skills;
 pub mod system_prompt;
 pub mod vcs;
 pub mod websearch;
+pub mod workflows;
 
 pub use commands::CommandsPlugin;
 pub use agents::AgentsPlugin;
@@ -24,3 +25,4 @@ pub use skills::SkillsPlugin;
 pub use system_prompt::SystemPromptPlugin;
 pub use vcs::VcsPlugin;
 pub use websearch::WebsearchPlugin;
+pub use workflows::WorkflowsPlugin;

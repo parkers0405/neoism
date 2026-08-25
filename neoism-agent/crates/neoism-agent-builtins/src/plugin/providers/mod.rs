@@ -4,7 +4,7 @@ use std::sync::Arc;
 use neoism_agent_plugin_api::{
     AgentPlugin, ContributionMetadata, PluginFuture, PluginHostError, PluginManifest,
     PluginRegistrar, ProviderService, RouteContribution, RouteDescriptor, RouteHandler,
-    RouteMethod, RouteRequest, RouteResponse, RouteScope,
+    PluginScope, RouteMethod, RouteRequest, RouteResponse, RouteScope,
 };
 
 pub const ID: &str = "dev.neoism.providers";
@@ -83,7 +83,7 @@ impl AgentPlugin for ProvidersPlugin {
                     request_schema: None,
                     response_schema: None,
                 },
-                metadata: ContributionMetadata::default(),
+                metadata: ContributionMetadata::new(id, ID, PluginScope::Workspace),
                 handler: Arc::new(ProviderAdminRoute { admin: self.admin.clone(), action }),
             });
         }
